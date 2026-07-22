@@ -39,6 +39,7 @@ use crate::queue::{
     PromptProfile, PromptProfileLookup, ThreadTags,
 };
 use crate::relay::{ChannelInfo, RestClient};
+use crate::scope::ConversationScope;
 
 /// Window within which agent activity before a hard-cap death qualifies
 /// the turn as "recently active" (eligible for requeue instead of dead-letter).
@@ -50,7 +51,8 @@ const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
 /// Metadata stored per in-flight task for panic recovery.
 pub struct TaskMeta {
     pub agent_index: usize,
-    pub channel_id: Option<Uuid>,
+    /// Conversation scope of the in-flight prompt. `None` for heartbeats.
+    pub scope: Option<ConversationScope>,
     /// Identifies terminal events when the task panics before returning a result.
     pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
@@ -78,38 +80,43 @@ pub struct AgentModelCapabilities {
     pub available_models_raw: Option<serde_json::Value>,
 }
 
-/// Per-channel session IDs and turn counters.
+/// Per-conversation session IDs and turn counters.
+///
+/// Keyed by [`ConversationScope`]: unthreaded channel traffic and DMs use the
+/// channel-level scope; thread replies in regular channels get their own
+/// scope (and therefore their own session, turn counter, and cached prompt
+/// sections).
 ///
 /// Separated from `OwnedAgent` so the state machine is testable without
 /// spawning a real agent subprocess.
 #[derive(Default)]
 pub struct SessionState {
-    /// channel_id → session_id
-    pub sessions: HashMap<Uuid, String>,
+    /// conversation scope → session_id
+    pub sessions: HashMap<ConversationScope, String>,
     pub heartbeat_session: Option<String>,
-    /// Per-channel turn counters for proactive session rotation.
+    /// Per-conversation turn counters for proactive session rotation.
     /// Incremented on each successful prompt; reset when the session is rotated.
-    pub turn_counts: HashMap<Uuid, u32>,
+    pub turn_counts: HashMap<ConversationScope, u32>,
     /// Turn counter for the heartbeat session.
     pub heartbeat_turn_count: u32,
-    /// channel_id → rendered NIP-AE core prompt section, populated once at
-    /// session creation per Tyler's spec (no mid-session refresh).
-    pub core_sections: HashMap<Uuid, String>,
-    /// channel_id → rendered `[Channel Canvas]` metadata section.
+    /// conversation scope → rendered NIP-AE core prompt section, populated
+    /// once at session creation per Tyler's spec (no mid-session refresh).
+    pub core_sections: HashMap<ConversationScope, String>,
+    /// conversation scope → rendered `[Channel Canvas]` metadata section.
     ///
     /// Populated once before session creation (same lifecycle as `core_sections`).
     /// Absent when the channel has no canvas, the canvas content is blank, or the
     /// fetch fails — all fail open. Cleared on session invalidation alongside
     /// `core_sections` so the next session picks up any canvas change.
-    pub canvas_sections: HashMap<Uuid, String>,
+    pub canvas_sections: HashMap<ConversationScope, String>,
 }
 
 impl SessionState {
     /// Invalidate the session (and turn counter) for a specific prompt source.
     pub fn invalidate(&mut self, source: &PromptSource) {
         match source {
-            PromptSource::Channel(cid) => {
-                self.invalidate_channel(cid);
+            PromptSource::Conversation(scope) => {
+                self.invalidate_scope(scope);
             }
             PromptSource::Heartbeat => {
                 self.heartbeat_session = None;
@@ -118,13 +125,30 @@ impl SessionState {
         }
     }
 
-    /// Invalidate a single channel's session and turn counter.
-    /// Returns `true` if the channel had an active session.
+    /// Invalidate a single conversation's session and turn counter.
+    /// Returns `true` if the conversation had an active session.
+    pub fn invalidate_scope(&mut self, scope: &ConversationScope) -> bool {
+        self.turn_counts.remove(scope);
+        self.core_sections.remove(scope);
+        self.canvas_sections.remove(scope);
+        self.sessions.remove(scope).is_some()
+    }
+
+    /// Invalidate every conversation under `channel_id` — the channel-level
+    /// conversation and all of its thread conversations. Returns `true` if at
+    /// least one active session was removed.
+    ///
+    /// Used for channel-wide teardown (membership removal); scope-targeted
+    /// rotation goes through [`invalidate_scope`](Self::invalidate_scope).
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
-        self.turn_counts.remove(channel_id);
-        self.core_sections.remove(channel_id);
-        self.canvas_sections.remove(channel_id);
-        self.sessions.remove(channel_id).is_some()
+        self.turn_counts.retain(|s, _| s.channel_id != *channel_id);
+        self.core_sections
+            .retain(|s, _| s.channel_id != *channel_id);
+        self.canvas_sections
+            .retain(|s, _| s.channel_id != *channel_id);
+        let before = self.sessions.len();
+        self.sessions.retain(|s, _| s.channel_id != *channel_id);
+        self.sessions.len() != before
     }
 
     /// Invalidate all sessions and turn counters (e.g. after agent exit).
@@ -138,11 +162,11 @@ impl SessionState {
     }
 
     #[cfg(test)]
-    fn has_channel_state(&self, channel_id: &Uuid) -> bool {
-        self.sessions.contains_key(channel_id)
-            || self.turn_counts.contains_key(channel_id)
-            || self.core_sections.contains_key(channel_id)
-            || self.canvas_sections.contains_key(channel_id)
+    fn has_scope_state(&self, scope: &ConversationScope) -> bool {
+        self.sessions.contains_key(scope)
+            || self.turn_counts.contains_key(scope)
+            || self.core_sections.contains_key(scope)
+            || self.canvas_sections.contains_key(scope)
     }
 }
 
@@ -153,12 +177,17 @@ pub struct OwnedAgent {
     pub state: SessionState,
     /// Model catalog from first session/new. None until first session created.
     pub model_capabilities: Option<AgentModelCapabilities>,
-    /// Desired model ID (from `Config.model`). Applied after every `session_new_full()`.
+    /// Configured/default model for this process. This is immutable for the
+    /// lifetime of the agent and is the fallback whenever a claimed channel
+    /// has no runtime override.
+    pub baseline_model: Option<String>,
+    /// Effective model for the currently claimed conversation (or heartbeat).
+    /// Re-resolved from the channel override or [`baseline_model`](Self::baseline_model)
+    /// on every claim before a session can be created.
     pub desired_model: Option<String>,
-    /// Whether `desired_model` was set by a live `SwitchModel` control signal
-    /// (as opposed to being derived from config/persona at spawn). Used by the
-    /// desktop reader to distinguish a genuine runtime override from a stale
-    /// session whose persona model was edited. Reset on spawn/restart.
+    /// Whether the effective model came from a live channel override rather
+    /// than the configured baseline. Reset whenever the agent becomes idle or
+    /// is claimed for a channel without an override.
     pub model_overridden: bool,
     /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
     pub agent_name: String,
@@ -202,6 +231,27 @@ impl OwnedAgent {
             self.goose_system_prompt_supported,
         )
     }
+
+    fn use_baseline_model(&mut self) {
+        self.desired_model.clone_from(&self.baseline_model);
+        self.model_overridden = false;
+    }
+
+    fn use_channel_model(&mut self, desired_model: Option<&str>) {
+        match desired_model {
+            Some(model) => {
+                self.desired_model = Some(model.to_string());
+                self.model_overridden = true;
+            }
+            None => self.use_baseline_model(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ChannelDesiredModel {
+    model_id: String,
+    generation: u64,
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -215,6 +265,44 @@ pub struct AgentPool {
     result_rx: mpsc::UnboundedReceiver<PromptResult>,
     pub join_set: JoinSet<()>,
     task_map: HashMap<tokio::task::Id, TaskMeta>,
+    /// Stable conversation → agent-slot ownership. A scope's ACP session
+    /// history lives inside exactly one agent process, so once a scope is
+    /// dispatched to a slot, later turns for that scope must go back to the
+    /// SAME slot — even if that means waiting while it is checked out on
+    /// other work. Without this, a busy owner would let `try_claim` hand the
+    /// scope to another idle agent, silently forking the conversation into a
+    /// second divergent session.
+    ///
+    /// Lifecycle: recorded on claim; released when the owning agent returns
+    /// without a live session for the scope (rotation, invalidation, failed
+    /// create), when the scope/channel is explicitly invalidated, or when the
+    /// owning slot dies (respawn/panic — the process and its sessions are
+    /// gone, so re-owning elsewhere creates a fresh history, not a fork).
+    scope_owners: HashMap<ConversationScope, usize>,
+    /// Channel-level desired-model state from desktop `switch_model` control
+    /// frames. Applied to every idle session holder at switch time and
+    /// inherited by any agent later claiming a conversation under the
+    /// channel, so returning/newly claiming agents converge on the desired
+    /// model. Runtime-only — never persisted, gone on restart.
+    channel_desired_models: HashMap<Uuid, ChannelDesiredModel>,
+    /// Last channel-model generation reconciled into each agent slot. A
+    /// switched channel may have cached sessions inside a checked-out agent;
+    /// comparing generations when it returns guarantees those stale sessions
+    /// are invalidated before the slot is reused.
+    slot_channel_model_generations: HashMap<(usize, Uuid), u64>,
+    next_channel_model_generation: u64,
+}
+
+/// Outcome of [`AgentPool::try_claim`] for a conversation-scoped claim.
+pub enum ClaimOutcome {
+    /// An agent was claimed for the conversation (ownership recorded).
+    Claimed(Box<OwnedAgent>),
+    /// The conversation's owning agent is checked out on other work. The
+    /// caller must leave the conversation queued and retry after the owner
+    /// returns — claiming a different agent would fork the session history.
+    OwnerBusy,
+    /// No idle agent is available at all.
+    NoIdleAgent,
 }
 
 /// Result returned by a completed prompt task.
@@ -228,10 +316,11 @@ pub struct PromptResult {
     pub batch: Option<FlushBatch>,
 }
 
-/// Whether the prompt came from a channel event or a heartbeat.
+/// Whether the prompt came from a conversation (channel or thread) event or a
+/// heartbeat.
 #[derive(Debug)]
 pub enum PromptSource {
-    Channel(Uuid),
+    Conversation(ConversationScope),
     Heartbeat,
 }
 
@@ -450,8 +539,12 @@ pub struct PromptContext {
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
-    /// Channel metadata from discovery (name, type). Read-only after startup.
-    pub channel_info: std::collections::HashMap<Uuid, ChannelInfo>,
+    /// Channel metadata cache (name, type). Seeded from startup discovery and
+    /// updated at runtime. Dynamic channel subscriptions are gated on this
+    /// cache so their first delivered event already has correct DM/thread
+    /// scoping; per-prompt lazy fetches remain a defensive fallback. Guarded by
+    /// a std `RwLock` (never held across await points).
+    pub channel_info: std::sync::RwLock<std::collections::HashMap<Uuid, ChannelInfo>>,
     /// Max messages to include in thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
@@ -490,35 +583,109 @@ impl AgentPool {
             result_rx,
             join_set: JoinSet::new(),
             task_map: HashMap::new(),
+            scope_owners: HashMap::new(),
+            channel_desired_models: HashMap::new(),
+            slot_channel_model_generations: HashMap::new(),
+            next_channel_model_generation: 0,
         }
     }
 
-    /// Try to claim an idle agent for the given channel (or heartbeat if `None`).
-    ///
-    /// Pass 1: prefer an agent that already has a session for `channel_id`.
-    /// Pass 2: any idle agent.
-    ///
-    /// Returns `None` if all agents are checked out.
-    pub fn try_claim(&mut self, channel_id: Option<Uuid>) -> Option<OwnedAgent> {
-        // Pass 1: prefer agent with existing session for this channel.
-        if let Some(cid) = channel_id {
-            let idx = self.agents.iter().position(|slot| {
-                slot.as_ref()
-                    .map(|a| a.state.sessions.contains_key(&cid))
-                    .unwrap_or(false)
-            });
-            if let Some(i) = idx {
-                return self.agents[i].take();
+    /// Reconcile channel-model switches that occurred while `agent` was
+    /// checked out. Only sessions under switched channels are invalidated;
+    /// unrelated channel sessions remain intact.
+    fn reconcile_channel_model_generations(&mut self, agent: &mut OwnedAgent) {
+        for (channel_id, desired) in &self.channel_desired_models {
+            let key = (agent.index, *channel_id);
+            if self.slot_channel_model_generations.get(&key).copied() != Some(desired.generation) {
+                agent.state.invalidate_channel(channel_id);
+                self.slot_channel_model_generations
+                    .insert(key, desired.generation);
             }
         }
+    }
 
-        // Pass 2: first idle agent.
+    /// Drop ownership entries whose sessions were removed while reconciling
+    /// an idle/returning slot.
+    fn release_missing_ownerships(&mut self, agent: &OwnedAgent) {
+        let idx = agent.index;
+        self.scope_owners
+            .retain(|scope, owner| *owner != idx || agent.state.sessions.contains_key(scope));
+    }
+
+    /// Whether the given slot is currently checked out on an in-flight task.
+    fn slot_checked_out(&self, index: usize) -> bool {
+        self.task_map.values().any(|m| m.agent_index == index)
+    }
+
+    /// Try to claim an agent for the given conversation.
+    ///
+    /// Ownership is stable: if `scope` was previously dispatched to a slot,
+    /// only that slot may serve it again while its session history is alive.
+    ///
+    /// - Owner idle → claim the owner.
+    /// - Owner checked out on other work → [`ClaimOutcome::OwnerBusy`]; the
+    ///   caller must keep the scope queued until the owner returns.
+    /// - Owner slot dead (neither idle nor checked out — process died and its
+    ///   sessions with it) → re-own on any idle agent.
+    /// - Unowned scope → any idle agent, prefering one that already holds a
+    ///   session for the scope (covers ownership rebuilt from state after
+    ///   explicit map cleanup).
+    ///
+    /// On every claim, the effective model is resolved afresh: the target
+    /// channel override when present, otherwise the agent's configured
+    /// baseline. Pending switch generations are reconciled first so sessions
+    /// cached inside an agent that was checked out during a switch cannot be
+    /// reused under the old model.
+    pub fn try_claim_for_scope(&mut self, scope: ConversationScope) -> ClaimOutcome {
+        let claim_idx = match self.scope_owners.get(&scope).copied() {
+            Some(owner) if self.agents.get(owner).is_some_and(|s| s.is_some()) => Some(owner),
+            Some(owner) if self.slot_checked_out(owner) => return ClaimOutcome::OwnerBusy,
+            _ => {
+                // Unowned, or owner slot is dead: prefer an idle agent that
+                // already holds a session for this scope, else any idle agent.
+                self.agents
+                    .iter()
+                    .position(|slot| {
+                        slot.as_ref()
+                            .is_some_and(|a| a.state.sessions.contains_key(&scope))
+                    })
+                    .or_else(|| self.agents.iter().position(|slot| slot.is_some()))
+            }
+        };
+        let Some(idx) = claim_idx else {
+            return ClaimOutcome::NoIdleAgent;
+        };
+        let Some(mut agent) = self.agents[idx].take() else {
+            return ClaimOutcome::NoIdleAgent;
+        };
+        self.reconcile_channel_model_generations(&mut agent);
+        self.release_missing_ownerships(&agent);
+        self.scope_owners.insert(scope, idx);
+        let channel_model = self
+            .channel_desired_models
+            .get(&scope.channel_id)
+            .map(|desired| desired.model_id.clone());
+        agent.use_channel_model(channel_model.as_deref());
+        ClaimOutcome::Claimed(Box::new(agent))
+    }
+
+    /// Claim any idle agent for a heartbeat (no conversation ownership).
+    pub fn try_claim_for_heartbeat(&mut self) -> Option<OwnedAgent> {
         let idx = self.agents.iter().position(|slot| slot.is_some());
-        idx.map(|i| self.agents[i].take().unwrap())
+        let mut agent = idx.and_then(|i| self.agents[i].take())?;
+        self.reconcile_channel_model_generations(&mut agent);
+        self.release_missing_ownerships(&agent);
+        agent.use_baseline_model();
+        Some(agent)
     }
 
     /// Return an agent to its slot after a task completes.
-    pub fn return_agent(&mut self, agent: OwnedAgent) {
+    ///
+    /// Ownership cleanup happens here: any scope owned by this slot whose
+    /// session no longer exists on the agent (rotated, invalidated, or never
+    /// created) is released, so the next event for that scope may be served
+    /// by any agent — there is no history left to protect.
+    pub fn return_agent(&mut self, mut agent: OwnedAgent) {
         let idx = agent.index;
         if self.agents[idx].is_some() {
             // This is a bug: two tasks returned the same agent index. Log it
@@ -530,7 +697,22 @@ impl AgentPool {
                 "BUG: return_agent called for slot {idx} which is already occupied — overwriting"
             );
         }
+        self.reconcile_channel_model_generations(&mut agent);
+        self.release_missing_ownerships(&agent);
+        // An idle agent is not associated with any channel. Reset the
+        // ephemeral effective selection so no caller can mistake the last
+        // claimed channel's override for agent-global state.
+        agent.use_baseline_model();
         self.agents[idx] = Some(agent);
+    }
+
+    /// Release every conversation ownership held by `index`.
+    ///
+    /// Called when the slot's agent process is being replaced (respawn after
+    /// exit/timeout/transport error, or panic recovery) — its sessions died
+    /// with the process, so waiting scopes must be free to re-own elsewhere.
+    pub fn release_agent_ownerships(&mut self, index: usize) {
+        self.scope_owners.retain(|_, owner| *owner != index);
     }
 
     /// Whether any agent is currently idle (sitting in its slot).
@@ -538,12 +720,12 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
-    /// Whether any idle agent already has a session for `channel_id`.
+    /// Whether any idle agent already has a session for `scope`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
-    pub fn has_session_for(&self, channel_id: Uuid) -> bool {
+    pub fn has_session_for(&self, scope: ConversationScope) -> bool {
         self.agents.iter().any(|slot| {
             slot.as_ref()
-                .map(|a| a.state.sessions.contains_key(&channel_id))
+                .map(|a| a.state.sessions.contains_key(&scope))
                 .unwrap_or(false)
         })
     }
@@ -566,7 +748,7 @@ impl AgentPool {
     }
 
     /// Try to send a goose-native steer request to the in-flight task for
-    /// `channel_id`.
+    /// `scope`.
     ///
     /// Returns `Ok(())` if the request was accepted by the read loop's
     /// receiver (capacity-1 mpsc; one slot is the single in-flight steer
@@ -583,19 +765,19 @@ impl AgentPool {
     /// watcher, to close the result-vs-ack race.
     ///
     /// Returns `Err(SteerError::PromptCompleted)` if no task is in flight
-    /// for `channel_id` (the prompt completed between the mode-gate check
-    /// and this call, or the channel was never in flight). This is
+    /// for `scope` (the prompt completed between the mode-gate check
+    /// and this call, or the conversation was never in flight). This is
     /// semantically a soft no-op — the caller should release any withheld
     /// event and let normal dispatch handle delivery.
     pub fn send_steer(
         &mut self,
-        channel_id: Uuid,
+        scope: ConversationScope,
         request: SteerRequest,
     ) -> Result<(), SteerError> {
         let meta = self
             .task_map
             .values_mut()
-            .find(|m| m.channel_id == Some(channel_id))
+            .find(|m| m.scope == Some(scope))
             .ok_or(SteerError::PromptCompleted)?;
         let tx = meta
             .steer_tx
@@ -640,14 +822,15 @@ impl AgentPool {
         &mut self.agents
     }
 
-    /// Remove the session for `channel_id` from all idle agents.
+    /// Remove every session under `channel_id` (channel-level and thread
+    /// conversations alike) from all idle agents.
     ///
     /// Called when the agent is removed from a channel — stale sessions
     /// should not be reused. Checked-out agents (in-flight) are not
     /// modified; their sessions will fail naturally on the next prompt
     /// if the relay rejects the request.
     ///
-    /// Returns the number of sessions invalidated.
+    /// Returns the number of agents that had at least one session invalidated.
     pub fn invalidate_channel_sessions(&mut self, channel_id: Uuid) -> usize {
         let mut count = 0;
         for slot in &mut self.agents {
@@ -657,39 +840,83 @@ impl AgentPool {
                 }
             }
         }
+        // Explicit channel-wide invalidation ends every conversation under
+        // the channel: release ownerships so future traffic (e.g. after a
+        // re-add) can be served by any agent, and drop the channel's
+        // desired-model override.
+        self.scope_owners
+            .retain(|scope, _| scope.channel_id != channel_id);
+        self.channel_desired_models.remove(&channel_id);
+        self.slot_channel_model_generations
+            .retain(|(_, channel), _| *channel != channel_id);
         count
     }
 
-    /// Idle-path model switch: set `desired_model` on the idle agent for
-    /// `channel_id` and invalidate its session so the next turn re-creates the
-    /// session under the new model.
+    /// Remove the session for a single conversation `scope` from all idle
+    /// agents, leaving sibling conversations in the same channel untouched.
     ///
-    /// Pre-cancel guard: the desired model is validated against the agent's
-    /// cached catalog *before* the session is invalidated, so an unsupported
-    /// pick is rejected without disturbing the existing session.
+    /// Used by the idle `!rotate` path so rotating one thread (or the
+    /// channel-level conversation) never destroys unrelated thread sessions.
     ///
-    /// Returns [`IdleSwitchResult`] describing what happened. The model does not
-    /// take effect — and the panel does not reflect it — until the agent next
-    /// runs a turn (no live session exists to re-emit `session_config_captured`
-    /// from an idle agent). This lag is intentional: faking the emit would
-    /// surface an override the session has not actually applied.
-    pub fn switch_idle_agent_model(
+    /// Returns the number of sessions invalidated.
+    pub fn invalidate_scope_sessions(&mut self, scope: ConversationScope) -> usize {
+        let mut count = 0;
+        for slot in &mut self.agents {
+            if let Some(agent) = slot.as_mut() {
+                if agent.state.invalidate_scope(&scope) {
+                    count += 1;
+                }
+            }
+        }
+        // The conversation's history is gone — release ownership so the next
+        // event may be served by any agent with a fresh session.
+        self.scope_owners.remove(&scope);
+        count
+    }
+
+    /// Channel-level model switch (desktop `switch_model` control frame).
+    ///
+    /// Desktop model selection is **channel-level desired state**: a
+    /// channel's conversations (channel-level + threads) may be spread across
+    /// several agents, idle and active, so a single-agent switch would leave
+    /// stale sessions behind. This method:
+    ///
+    /// 1. Validates `model_id` against the first cached catalog (all slots
+    ///    run the same agent binary, so one catalog answers for all). No
+    ///    catalog cached anywhere → defer validation to apply time, as
+    ///    before.
+    /// 2. Records the desired model for the channel, so any agent that later
+    ///    claims a conversation under it inherits the model at claim time
+    ///    (see [`try_claim_for_scope`](Self::try_claim_for_scope)).
+    /// 3. Invalidates sessions under the channel on **every idle holder** and
+    ///    stamps its slot with this switch generation. Checked-out holders are
+    ///    reconciled when they return, including sessions for sibling scopes
+    ///    that were not themselves in flight.
+    ///
+    /// Active (checked-out) conversations are NOT handled here — the caller
+    /// signals each in-flight task under the channel with
+    /// `ControlSignal::SwitchModel`, whose in-task handler sets the model and
+    /// requeues the turn.
+    ///
+    /// Returns [`IdleSwitchResult`] describing what happened. The model does
+    /// not take effect — and the panel does not reflect it — until an agent
+    /// next runs a turn in the channel (no live session exists to re-emit
+    /// `session_config_captured` from an idle agent). This lag is
+    /// intentional: faking the emit would surface an override the session
+    /// has not actually applied.
+    pub fn set_channel_desired_model(
         &mut self,
         channel_id: Uuid,
         model_id: &str,
     ) -> IdleSwitchResult {
-        let Some(agent) = self
+        // Pre-cancel guard against the first cached catalog. None cached =
+        // no session ever created anywhere; defer validation to apply time.
+        if let Some(caps) = self
             .agents
-            .iter_mut()
+            .iter()
             .flatten()
-            .find(|a| a.state.sessions.contains_key(&channel_id))
-        else {
-            return IdleSwitchResult::NoIdleAgent;
-        };
-
-        // Pre-cancel guard against the cached catalog. None = catalog not yet
-        // populated (no session ever created); defer validation to apply time.
-        if let Some(caps) = agent.model_capabilities.as_ref() {
+            .find_map(|a| a.model_capabilities.as_ref())
+        {
             if !model_in_catalog(
                 &caps.config_options_raw,
                 caps.available_models_raw.as_ref(),
@@ -699,14 +926,54 @@ impl AgentPool {
             }
         }
 
-        agent.desired_model = Some(model_id.to_string());
-        agent.model_overridden = true;
-        agent.state.invalidate_channel(&channel_id);
-        IdleSwitchResult::Switched
+        let mut generation = self.next_channel_model_generation.wrapping_add(1);
+        if generation == 0 {
+            // Preserve the mismatch invariant even after the theoretical u64
+            // wrap: clearing slot stamps forces every live slot to reconcile.
+            self.slot_channel_model_generations.clear();
+            generation = 1;
+        }
+        self.next_channel_model_generation = generation;
+        self.channel_desired_models.insert(
+            channel_id,
+            ChannelDesiredModel {
+                model_id: model_id.to_string(),
+                generation,
+            },
+        );
+
+        let mut applied = 0;
+        let mut reconciled_idle_slots = HashSet::new();
+        for agent in self.agents.iter_mut().flatten() {
+            reconciled_idle_slots.insert(agent.index);
+            if agent.state.invalidate_channel(&channel_id) {
+                applied += 1;
+            }
+            self.slot_channel_model_generations
+                .insert((agent.index, channel_id), generation);
+        }
+        // Invalidation destroys the history that required sticky ownership.
+        // Release ownership only for idle slots reconciled above; checked-out
+        // holders retain ownership until their sessions are invalidated on
+        // return (or by their active SwitchModel signal).
+        self.scope_owners.retain(|scope, owner| {
+            scope.channel_id != channel_id || !reconciled_idle_slots.contains(owner)
+        });
+        if applied > 0 {
+            IdleSwitchResult::Switched
+        } else {
+            IdleSwitchResult::NoIdleAgent
+        }
+    }
+
+    /// Test-only visibility into conversation ownership.
+    #[cfg(test)]
+    pub fn scope_owner(&self, scope: &ConversationScope) -> Option<usize> {
+        self.scope_owners.get(scope).copied()
     }
 }
 
-/// Outcome of [`AgentPool::switch_idle_agent_model`].
+/// Outcome of [`AgentPool::set_channel_desired_model`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum IdleSwitchResult {
     /// `desired_model` set and the channel session invalidated.
@@ -1212,13 +1479,14 @@ pub async fn run_prompt_task(
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
     turn_id: String,
 ) {
-    // Is this a channel prompt or a heartbeat?
+    // Is this a conversation prompt or a heartbeat?
     let source = match &batch {
-        Some(b) => PromptSource::Channel(b.channel_id),
+        Some(b) => PromptSource::Conversation(b.scope),
         None => PromptSource::Heartbeat,
     };
+    // Observer frames stay channel-keyed: the desktop groups turns by channel.
     let observer_channel_id = match &source {
-        PromptSource::Channel(channel_id) => Some(*channel_id),
+        PromptSource::Conversation(scope) => Some(scope.channel_id),
         PromptSource::Heartbeat => None,
     };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
@@ -1236,7 +1504,7 @@ pub async fn run_prompt_task(
         "turn_started",
         serde_json::json!({
             "source": match &source {
-                PromptSource::Channel(_) => "channel",
+                PromptSource::Conversation(_) => "channel",
                 PromptSource::Heartbeat => "heartbeat",
             },
             "triggeringEventIds": triggering_event_ids,
@@ -1299,8 +1567,9 @@ pub async fn run_prompt_task(
     // we do it here and cache the rendered section in `state.core_sections`.
     //
     // Core is keyed by (agent_keys, owner) — both fixed for the process — so
-    // it is identical across channels; the per-channel cache just avoids a
-    // re-fetch on each new session and is cleared on session invalidation.
+    // it is identical across conversations; the per-conversation cache just
+    // avoids a re-fetch on each new session and is cleared on session
+    // invalidation.
     //
     // Failure modes (all fail open — no crash, no block):
     //   * no owner configured → skip (no NIP-AE namespace exists)
@@ -1317,11 +1586,11 @@ pub async fn run_prompt_task(
     //
     // Operator opt-out: `--no-memory` / `BUZZ_ACP_NO_MEMORY` skips the fetch.
     if ctx.memory_enabled {
-        if let (PromptSource::Channel(cid), Some(owner_pk)) =
+        if let (PromptSource::Conversation(scope), Some(owner_pk)) =
             (&source, ctx.agent_owner_pubkey.as_ref())
         {
-            let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-            if is_new_channel_session && !agent.state.core_sections.contains_key(cid) {
+            let is_new_session = !agent.state.sessions.contains_key(scope);
+            if is_new_session && !agent.state.core_sections.contains_key(scope) {
                 // Bounded — we'd rather start the session with no core hint
                 // than block session creation on a stalled relay.
                 const CORE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -1335,7 +1604,7 @@ pub async fn run_prompt_task(
                     Err(_) => {
                         tracing::warn!(
                             target: "engram::core",
-                            channel = %cid,
+                            scope = %scope,
                             timeout_ms = CORE_FETCH_TIMEOUT.as_millis() as u64,
                             "core fetch timed out — emitting no section"
                         );
@@ -1345,11 +1614,11 @@ pub async fn run_prompt_task(
                 if let Some(rendered) = section {
                     tracing::info!(
                         target: "engram::core",
-                        channel = %cid,
+                        scope = %scope,
                         section_len = rendered.len(),
                         "injected NIP-AE core section into system prompt"
                     );
-                    agent.state.core_sections.insert(*cid, rendered);
+                    agent.state.core_sections.insert(*scope, rendered);
                 }
             }
         }
@@ -1367,49 +1636,54 @@ pub async fn run_prompt_task(
     // commit it to `canvas_sections` only after session creation succeeds. This
     // prevents a stale revision A surviving a failed create and being re-used by
     // the next attempt after the canvas was cleared.
-    let mut pending_canvas: Option<(Uuid, String)> = None;
-    if let PromptSource::Channel(cid) = &source {
-        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
-        if is_new_channel_session && !agent.state.canvas_sections.contains_key(cid) {
-            // Resolve DM status: prefer the startup cache, lazy-fetch as fallback.
+    let mut pending_canvas: Option<(ConversationScope, String)> = None;
+    if let PromptSource::Conversation(scope) = &source {
+        let is_new_session = !agent.state.sessions.contains_key(scope);
+        if is_new_session && !agent.state.canvas_sections.contains_key(scope) {
+            // Resolve DM status: prefer the shared cache, lazy-fetch as
+            // fallback (caching the result for later scope derivation).
             // Unknown → treat as DM (fail-closed).
-            let is_dm = match ctx.channel_info.get(cid) {
+            let cid = scope.channel_id;
+            let is_dm = match cached_channel_info(&ctx, cid) {
                 Some(ci) => ci.channel_type == "dm",
-                None => fetch_channel_info(*cid, &ctx.rest_client)
-                    .await
-                    .map(|ci| ci.channel_type == "dm")
-                    .unwrap_or(true),
+                None => match fetch_channel_info(cid, &ctx.rest_client).await {
+                    Some(ci) => {
+                        cache_channel_info(&ctx, cid, &ci);
+                        ci.channel_type == "dm"
+                    }
+                    None => true,
+                },
             };
             if !is_dm {
-                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
-                    pending_canvas = Some((*cid, section));
+                if let Some(section) = fetch_canvas_section(cid, &ctx.rest_client).await {
+                    pending_canvas = Some((*scope, section));
                 }
             }
         }
     }
 
     // The core section to fold into the system prompt for this turn's session.
-    // Channel-scoped; heartbeats carry no owner core.
+    // Conversation-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Conversation(scope) => agent.state.core_sections.get(scope).cloned(),
         PromptSource::Heartbeat => None,
     };
 
-    // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
+    // The canvas metadata section — conversation-scoped, absent for heartbeats/DMs.
     // Prefer the committed cache; fall back to pending (for new sessions being created now).
     let agent_canvas: Option<String> = match &source {
-        PromptSource::Channel(cid) => agent
+        PromptSource::Conversation(scope) => agent
             .state
             .canvas_sections
-            .get(cid)
+            .get(scope)
             .cloned()
             .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
 
     let (session_id, is_new_session) = match &source {
-        PromptSource::Channel(cid) => {
-            if let Some(sid) = agent.state.sessions.get(cid) {
+        PromptSource::Conversation(scope) => {
+            if let Some(sid) = agent.state.sessions.get(scope) {
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
@@ -1424,12 +1698,12 @@ pub async fn run_prompt_task(
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
-                            "created session {sid} for channel {cid}"
+                            "created session {sid} for conversation {scope}"
                         );
-                        agent.state.sessions.insert(*cid, sid.clone());
+                        agent.state.sessions.insert(*scope, sid.clone());
                         // Commit canvas only after session creation succeeds (I3).
-                        if let Some((pending_cid, section)) = pending_canvas.take() {
-                            agent.state.canvas_sections.insert(pending_cid, section);
+                        if let Some((pending_scope, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_scope, section);
                         }
                         (sid, true)
                     }
@@ -1520,11 +1794,12 @@ pub async fn run_prompt_task(
     );
 
     if is_new_session {
-        if let (PromptSource::Channel(cid), Some(ref initial_msg)) = (&source, &ctx.initial_message)
+        if let (PromptSource::Conversation(scope), Some(ref initial_msg)) =
+            (&source, &ctx.initial_message)
         {
             tracing::info!(
                 target: "pool::session",
-                "sending initial_message to session {session_id} for channel {cid}"
+                "sending initial_message to session {session_id} for conversation {scope}"
             );
             // For agents with systemPrompt support (protocol_version >= 2),
             // base_prompt is delivered via the system role in session/new.
@@ -1564,7 +1839,7 @@ pub async fn run_prompt_task(
                 Ok(stop_reason) => {
                     tracing::info!(
                         target: "pool::session",
-                        "initial_message complete for channel {cid}: {stop_reason:?}"
+                        "initial_message complete for conversation {scope}: {stop_reason:?}"
                     );
                 }
                 Err(AcpError::AgentExited) => {
@@ -1582,7 +1857,7 @@ pub async fn run_prompt_task(
                 Err(AcpError::IdleTimeout(_)) => {
                     tracing::warn!(
                         target: "pool::session",
-                        "initial_message idle timeout ({}s) for channel {cid} — cancelling",
+                        "initial_message idle timeout ({}s) for conversation {scope} — cancelling",
                         ctx.idle_timeout.as_secs()
                     );
                     match agent
@@ -1627,7 +1902,7 @@ pub async fn run_prompt_task(
                     let recently_active = silence < RECENT_ACTIVITY_WINDOW;
                     tracing::error!(
                         target: "pool::session",
-                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
+                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for conversation {scope} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
@@ -1644,7 +1919,7 @@ pub async fn run_prompt_task(
                 Err(e) => {
                     tracing::error!(
                         target: "pool::session",
-                        "initial_message failed for channel {cid}: {e} — invalidating session"
+                        "initial_message failed for conversation {scope}: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
                     send_prompt_result(
@@ -1682,13 +1957,20 @@ pub async fn run_prompt_task(
         vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
-        // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = match ctx.channel_info.get(&b.channel_id) {
+        // Try the shared cache first; lazy-fetch via REST for dynamic
+        // channels, writing back on success so scope derivation self-heals.
+        let channel_info = match cached_channel_info(&ctx, b.channel_id()) {
             Some(ci) => Some(PromptChannelInfo {
                 name: ci.name.clone(),
                 channel_type: ci.channel_type.clone(),
             }),
-            None => fetch_channel_info(b.channel_id, &ctx.rest_client).await,
+            None => {
+                let fetched = fetch_channel_info(b.channel_id(), &ctx.rest_client).await;
+                if let Some(ref ci) = fetched {
+                    cache_channel_info(&ctx, b.channel_id(), ci);
+                }
+                fetched
+            }
         };
 
         let conversation_context = if ctx.context_message_limit > 0 {
@@ -1710,7 +1992,7 @@ pub async fn run_prompt_task(
         if let Some(ref cmd) = slash_command {
             tracing::info!(
                 target: "pool::prompt",
-                channel = %b.channel_id,
+                channel = %b.scope,
                 command = %cmd,
                 "slash-command pass-through"
             );
@@ -1948,8 +2230,8 @@ pub async fn run_prompt_task(
                 let limit = ctx.max_turns_per_session;
                 if limit > 0 {
                     match &source {
-                        PromptSource::Channel(cid) => {
-                            let count = agent.state.turn_counts.entry(*cid).or_insert(0);
+                        PromptSource::Conversation(scope) => {
+                            let count = agent.state.turn_counts.entry(*scope).or_insert(0);
                             *count += 1;
                             *count >= limit
                         }
@@ -2174,6 +2456,61 @@ where
     }
     tokio::time::sleep(CONTEXT_FETCH_RETRY_DELAY).await;
     f().await
+}
+
+/// Read a clone of the cached metadata for `channel_id`, if present.
+pub(crate) fn cached_channel_info(ctx: &PromptContext, channel_id: Uuid) -> Option<ChannelInfo> {
+    // Poison recovery: the map is plain data, safe to read after a panic.
+    let map = ctx
+        .channel_info
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.get(&channel_id).cloned()
+}
+
+/// Write fetched channel metadata back into the shared cache (first write
+/// wins) so later events — conversation-scope derivation, DM checks — see it
+/// without another relay round-trip.
+pub(crate) fn cache_channel_info(ctx: &PromptContext, channel_id: Uuid, info: &PromptChannelInfo) {
+    let mut map = ctx
+        .channel_info
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    map.entry(channel_id).or_insert_with(|| ChannelInfo {
+        name: info.name.clone(),
+        channel_type: info.channel_type.clone(),
+    });
+}
+
+/// Resolve and cache metadata for a dynamically joined channel.
+///
+/// Called by the membership-add resolver before opening event delivery, so a
+/// channel joined after startup gains correct DM/thread scoping on its first
+/// event. Returns `true` once metadata is cached; callers retry failures while
+/// the membership remains pending.
+pub(crate) async fn refresh_channel_info(ctx: &PromptContext, channel_id: Uuid) -> bool {
+    if cached_channel_info(ctx, channel_id).is_some() {
+        return true;
+    }
+    match fetch_channel_info(channel_id, &ctx.rest_client).await {
+        Some(info) => {
+            cache_channel_info(ctx, channel_id, &info);
+            tracing::info!(
+                channel_id = %channel_id,
+                channel_type = %info.channel_type,
+                "cached metadata for dynamically joined channel"
+            );
+            true
+        }
+        None => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                "could not resolve metadata for dynamically joined channel — \
+                 subscription remains closed until retry succeeds"
+            );
+            false
+        }
+    }
 }
 
 /// Lazy-fetch channel metadata for a channel not in the startup discovery cache.
@@ -2467,12 +2804,12 @@ async fn fetch_conversation_context(
     let last_event = batch.events.last()?;
     let tags = crate::queue::parse_thread_tags(&last_event.event);
     if let Some(root_id) = tags.root_event_id {
-        return fetch_thread_context(batch.channel_id, &root_id, limit, &ctx.rest_client).await;
+        return fetch_thread_context(batch.channel_id(), &root_id, limit, &ctx.rest_client).await;
     }
 
     // DM non-reply: fetch recent conversation history.
     if is_dm {
-        return fetch_dm_context(batch.channel_id, limit, &ctx.rest_client).await;
+        return fetch_dm_context(batch.channel_id(), limit, &ctx.rest_client).await;
     }
 
     None
@@ -3013,7 +3350,7 @@ fn classify_control_cancel_failure(
 /// Log a stop reason at the appropriate tracing level.
 fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     let label = match source {
-        PromptSource::Channel(cid) => format!("channel {cid}"),
+        PromptSource::Conversation(scope) => format!("conversation {scope}"),
         PromptSource::Heartbeat => "heartbeat".to_string(),
     };
     match stop_reason {
@@ -4074,7 +4411,7 @@ mod tests {
             .unwrap();
         let author_hex = event.pubkey.to_hex();
         let batch = FlushBatch {
-            channel_id: Uuid::new_v4(),
+            scope: ConversationScope::channel(Uuid::new_v4()),
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "@mention".into(),
@@ -4200,9 +4537,9 @@ mod tests {
         assert_eq!(pct_encode(" "), "%20");
     }
 
-    fn make_state() -> (SessionState, Uuid, Uuid) {
-        let ch_a = Uuid::new_v4();
-        let ch_b = Uuid::new_v4();
+    fn make_state() -> (SessionState, ConversationScope, ConversationScope) {
+        let ch_a = ConversationScope::channel(Uuid::new_v4());
+        let ch_b = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.sessions.insert(ch_a, "sess-a".into());
         s.sessions.insert(ch_b, "sess-b".into());
@@ -4221,14 +4558,14 @@ mod tests {
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Conversation(ch_a),
             &ControlSignal::Rotate,
         );
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
@@ -4242,7 +4579,7 @@ mod tests {
 
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Conversation(ch_a),
             &ControlSignal::Cancel,
         );
 
@@ -4255,12 +4592,12 @@ mod tests {
     #[test]
     fn test_invalidate_channel_clears_session_and_turn_count() {
         let (mut s, ch_a, ch_b) = make_state();
-        s.invalidate(&PromptSource::Channel(ch_a));
+        s.invalidate(&PromptSource::Conversation(ch_a));
 
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
@@ -4300,8 +4637,8 @@ mod tests {
     #[test]
     fn test_invalidate_nonexistent_channel_is_noop() {
         let (mut s, ch_a, ch_b) = make_state();
-        let ghost = Uuid::new_v4();
-        s.invalidate(&PromptSource::Channel(ghost));
+        let ghost = ConversationScope::channel(Uuid::new_v4());
+        s.invalidate(&PromptSource::Conversation(ghost));
 
         // Everything still intact.
         assert_eq!(s.sessions.len(), 2);
@@ -4322,13 +4659,13 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidate_channel_returns_true_when_session_existed() {
+    fn test_invalidate_scope_returns_true_when_session_existed() {
         let (mut s, ch_a, ch_b) = make_state();
-        assert!(s.invalidate_channel(&ch_a));
+        assert!(s.invalidate_scope(&ch_a));
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         // ch_b untouched
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
@@ -4339,10 +4676,10 @@ mod tests {
     }
 
     #[test]
-    fn test_invalidate_channel_returns_false_when_no_session() {
+    fn test_invalidate_scope_returns_false_when_no_session() {
         let (mut s, _ch_a, _ch_b) = make_state();
-        let ghost = Uuid::new_v4();
-        assert!(!s.invalidate_channel(&ghost));
+        let ghost = ConversationScope::channel(Uuid::new_v4());
+        assert!(!s.invalidate_scope(&ghost));
         // Nothing changed.
         assert_eq!(s.sessions.len(), 2);
         assert_eq!(s.turn_counts.len(), 2);
@@ -4353,14 +4690,14 @@ mod tests {
         // Simulates handle_prompt_result: channels removed while agent
         // was checked out should have both sessions and turn_counts stripped.
         let (mut s, ch_a, ch_b) = make_state();
-        let removed = vec![ch_a];
+        let removed = vec![ch_a.channel_id];
         for ch in &removed {
             s.invalidate_channel(ch);
         }
         assert!(!s.sessions.contains_key(&ch_a));
         assert!(!s.turn_counts.contains_key(&ch_a));
         assert!(!s.core_sections.contains_key(&ch_a));
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
         assert_eq!(s.core_sections.get(&ch_b).unwrap(), "core-b");
@@ -4376,11 +4713,11 @@ mod tests {
         // re-creates a fresh session that re-applies the new desired_model.
         apply_completed_before_control_signal(
             &mut s,
-            &PromptSource::Channel(ch_a),
+            &PromptSource::Conversation(ch_a),
             &ControlSignal::SwitchModel("gpt-5".into()),
         );
 
-        assert!(!s.has_channel_state(&ch_a));
+        assert!(!s.has_scope_state(&ch_a));
         // ch_b untouched — the switch is channel-scoped.
         assert_eq!(s.sessions.get(&ch_b).unwrap(), "sess-b");
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
@@ -4394,13 +4731,13 @@ mod tests {
     // `unwrap_or(CancelReason::Steer)` at the requeue site and preserve a
     // batch that should have been discarded.
 
-    fn one_event_batch(channel_id: Uuid) -> FlushBatch {
+    fn one_event_batch(scope: ConversationScope) -> FlushBatch {
         let keys = Keys::generate();
         let event = EventBuilder::new(Kind::Custom(9), "test")
             .sign_with_keys(&keys)
             .unwrap();
         FlushBatch {
-            channel_id,
+            scope,
             events: vec![crate::queue::BatchEvent {
                 event,
                 prompt_tag: "test".into(),
@@ -4427,8 +4764,7 @@ mod tests {
         ctx.dedup_mode = DedupMode::Queue;
 
         for (signal, expected_reason) in cases {
-            let channel_id = Uuid::new_v4();
-            let batch = one_event_batch(channel_id);
+            let batch = one_event_batch(ConversationScope::channel(Uuid::new_v4()));
             let result = requeue_cancelled_batch(&ctx, signal.clone(), Some(batch));
             match expected_reason {
                 Some(reason) => {
@@ -4580,8 +4916,7 @@ mod tests {
         ];
 
         for case in cases {
-            let channel_id = Uuid::new_v4();
-            let batch = one_event_batch(channel_id);
+            let batch = one_event_batch(ConversationScope::channel(Uuid::new_v4()));
             let failure = classify_control_cancel_failure(
                 &ctx,
                 (case.error)(),
@@ -4949,6 +5284,7 @@ mod tests {
             acp,
             state: SessionState::default(),
             model_capabilities: None,
+            baseline_model: None,
             desired_model: None,
             model_overridden: false,
             agent_name: "unknown".into(),
@@ -5007,6 +5343,7 @@ mod tests {
             acp,
             state: SessionState::default(),
             model_capabilities: None,
+            baseline_model: None,
             desired_model: None,
             model_overridden: false,
             agent_name: "unknown".into(),
@@ -5246,7 +5583,7 @@ mod tests {
                 keys: agent_keys.clone(),
                 auth_tag_json: None,
             },
-            channel_info: std::collections::HashMap::new(),
+            channel_info: std::sync::RwLock::new(std::collections::HashMap::new()),
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
@@ -5303,14 +5640,14 @@ mod tests {
     // ── canvas_sections cache invalidation ───────────────────────────────────
 
     #[test]
-    fn test_invalidate_channel_clears_canvas_section() {
-        let ch = Uuid::new_v4();
+    fn test_invalidate_scope_clears_canvas_section() {
+        let ch = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.sessions.insert(ch, "sess".into());
         s.canvas_sections
             .insert(ch, "[Channel Canvas]\nrev abc".into());
 
-        s.invalidate_channel(&ch);
+        s.invalidate_scope(&ch);
 
         assert!(!s.canvas_sections.contains_key(&ch));
         assert!(!s.sessions.contains_key(&ch));
@@ -5318,8 +5655,8 @@ mod tests {
 
     #[test]
     fn test_invalidate_all_clears_canvas_sections() {
-        let ch_a = Uuid::new_v4();
-        let ch_b = Uuid::new_v4();
+        let ch_a = ConversationScope::channel(Uuid::new_v4());
+        let ch_b = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
@@ -5333,26 +5670,26 @@ mod tests {
 
     #[test]
     fn test_invalidate_channel_leaves_other_channels_canvas_intact() {
-        let ch_a = Uuid::new_v4();
-        let ch_b = Uuid::new_v4();
+        let ch_a = ConversationScope::channel(Uuid::new_v4());
+        let ch_b = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.sessions.insert(ch_a, "sess-a".into());
         s.sessions.insert(ch_b, "sess-b".into());
         s.canvas_sections.insert(ch_a, "canvas-a".into());
         s.canvas_sections.insert(ch_b, "canvas-b".into());
 
-        s.invalidate_channel(&ch_a);
+        s.invalidate_channel(&ch_a.channel_id);
 
         assert!(!s.canvas_sections.contains_key(&ch_a));
         assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
     }
 
     #[test]
-    fn test_has_channel_state_true_when_only_canvas_section_present() {
-        let ch = Uuid::new_v4();
+    fn test_has_scope_state_true_when_only_canvas_section_present() {
+        let ch = ConversationScope::channel(Uuid::new_v4());
         let mut s = SessionState::default();
         s.canvas_sections.insert(ch, "canvas".into());
-        assert!(s.has_channel_state(&ch));
+        assert!(s.has_scope_state(&ch));
     }
 
     // ── canvas_section_from_query_response ───────────────────────────────────
@@ -5563,5 +5900,118 @@ mod tests {
             !section.contains("+00:00"),
             "timestamp must not use +00:00 offset"
         );
+    }
+}
+
+#[cfg(test)]
+mod thread_scope_session_tests {
+    use super::*;
+    use crate::scope::ConversationScope;
+    use nostr::EventId;
+    use uuid::Uuid;
+
+    fn thread_scope(channel_id: Uuid, root_byte: char) -> ConversationScope {
+        let root = EventId::from_hex(&root_byte.to_string().repeat(64)).expect("valid hex");
+        ConversationScope::thread(channel_id, root)
+    }
+
+    /// Two threads in one channel — and the channel-level conversation — hold
+    /// distinct session entries; replies in one thread reuse that thread's
+    /// session key.
+    #[test]
+    fn threads_and_channel_hold_distinct_sessions() {
+        let ch = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let thread_b = thread_scope(ch, 'b');
+        let channel = ConversationScope::channel(ch);
+
+        let mut s = SessionState::default();
+        s.sessions.insert(thread_a, "sess-thread-a".into());
+        s.sessions.insert(thread_b, "sess-thread-b".into());
+        s.sessions.insert(channel, "sess-channel".into());
+
+        // A reply in thread A resolves to thread A's session (reuse), not the
+        // channel session and not thread B's.
+        assert_eq!(s.sessions.get(&thread_a).unwrap(), "sess-thread-a");
+        assert_eq!(s.sessions.get(&thread_b).unwrap(), "sess-thread-b");
+        assert_eq!(s.sessions.get(&channel).unwrap(), "sess-channel");
+        assert_eq!(s.sessions.len(), 3);
+    }
+
+    /// Rotating one thread's scope leaves the sibling thread and the
+    /// channel-level conversation untouched.
+    #[test]
+    fn invalidate_scope_targets_only_that_thread() {
+        let ch = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let thread_b = thread_scope(ch, 'b');
+        let channel = ConversationScope::channel(ch);
+
+        let mut s = SessionState::default();
+        for (scope, sid) in [(thread_a, "a"), (thread_b, "b"), (channel, "c")] {
+            s.sessions.insert(scope, sid.into());
+            s.turn_counts.insert(scope, 2);
+            s.core_sections.insert(scope, "core".into());
+            s.canvas_sections.insert(scope, "canvas".into());
+        }
+
+        assert!(s.invalidate_scope(&thread_a));
+
+        assert!(!s.sessions.contains_key(&thread_a));
+        assert!(!s.turn_counts.contains_key(&thread_a));
+        assert!(!s.core_sections.contains_key(&thread_a));
+        assert!(!s.canvas_sections.contains_key(&thread_a));
+        assert_eq!(s.sessions.get(&thread_b).unwrap(), "b");
+        assert_eq!(s.sessions.get(&channel).unwrap(), "c");
+        assert_eq!(*s.turn_counts.get(&thread_b).unwrap(), 2);
+    }
+
+    /// Channel removal invalidates every conversation scope under that
+    /// channel — channel-level and all threads — and nothing else.
+    #[test]
+    fn invalidate_channel_sweeps_channel_and_thread_scopes() {
+        let ch = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let thread_b = thread_scope(ch, 'b');
+        let channel = ConversationScope::channel(ch);
+        let other_scope = ConversationScope::channel(other);
+        let other_thread = thread_scope(other, 'e');
+
+        let mut s = SessionState::default();
+        for scope in [thread_a, thread_b, channel, other_scope, other_thread] {
+            s.sessions.insert(scope, "sess".into());
+            s.turn_counts.insert(scope, 1);
+            s.core_sections.insert(scope, "core".into());
+            s.canvas_sections.insert(scope, "canvas".into());
+        }
+
+        assert!(s.invalidate_channel(&ch));
+
+        for scope in [thread_a, thread_b, channel] {
+            assert!(!s.has_scope_state(&scope), "{scope} must be swept");
+        }
+        for scope in [other_scope, other_thread] {
+            assert!(s.has_scope_state(&scope), "{scope} must survive");
+        }
+        // Idempotent: nothing left to remove.
+        assert!(!s.invalidate_channel(&ch));
+    }
+
+    /// Proactive rotation counters are per-conversation: turns in one thread
+    /// must not advance the rotation clock of siblings.
+    #[test]
+    fn turn_counts_are_per_conversation() {
+        let ch = Uuid::new_v4();
+        let thread_a = thread_scope(ch, 'a');
+        let channel = ConversationScope::channel(ch);
+
+        let mut s = SessionState::default();
+        *s.turn_counts.entry(thread_a).or_insert(0) += 1;
+        *s.turn_counts.entry(thread_a).or_insert(0) += 1;
+        *s.turn_counts.entry(channel).or_insert(0) += 1;
+
+        assert_eq!(*s.turn_counts.get(&thread_a).unwrap(), 2);
+        assert_eq!(*s.turn_counts.get(&channel).unwrap(), 1);
     }
 }

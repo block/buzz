@@ -142,10 +142,19 @@ The gate applies to **all** inbound events — @mentions, DMs, thread replies, a
 | Command | Effect |
 |---------|--------|
 | `!shutdown` | Gracefully exits the harness. |
-| `!cancel` | Cancels the current in-flight turn for that channel, if any. |
-| `!rotate` | Rotates the ACP session for that channel. If a turn is in-flight, it is cancelled and the channel session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event starts a fresh session. |
+| `!cancel` | Cancels the current in-flight turn for the conversation the command targets, if any. |
+| `!rotate` | Rotates the ACP session for the conversation the command targets. If a turn is in-flight for that conversation, it is cancelled and the session is invalidated when the task returns; otherwise the cached idle session is invalidated immediately. The next queued/received event in that conversation starts a fresh session. |
 
-Use `!cancel` to stop only the current turn; it is a no-op when the channel is idle. Use `!rotate` when you want the next turn in the channel to start from a fresh ACP session, even if the channel is currently idle.
+`!cancel` and `!rotate` are **conversation-scoped** (see [Session Scope](#session-scope)):
+send the command **as a reply inside a thread** to target that thread's session,
+or as a **bare (unthreaded) channel message** to target the channel-level
+conversation. A thread-scoped command never cancels or rotates sibling threads
+or the channel conversation, and a channel-level command never destroys thread
+sessions.
+
+Use `!cancel` to stop only the current turn; it is a no-op when the targeted
+conversation is idle. Use `!rotate` when you want the next turn in that
+conversation to start from a fresh ACP session, even if it is currently idle.
 
 Owner control commands must be kind:9 stream messages from the owner, must mention this agent with a `p` tag, and are consumed by the harness instead of being forwarded to the agent.
 
@@ -193,7 +202,55 @@ buzz-acp --agents 2 --heartbeat-interval 300 \
 
 ### Shared Identity
 
-All N agents authenticate as the **same Nostr bot identity** — users see one bot regardless of how many agents are running. The same channel is never processed by two agents simultaneously (the queue enforces this). Cross-channel message ordering is not guaranteed when N>1.
+All N agents authenticate as the **same Nostr bot identity** — users see one bot regardless of how many agents are running. The same conversation (see [Session Scope](#session-scope)) is never processed by two agents simultaneously (the queue enforces this); different conversations — including different threads in one channel — can run concurrently when N>1. Cross-conversation message ordering is not guaranteed when N>1.
+
+### Session Scope
+
+The harness keys ACP sessions (and queueing, steering, turn counters, and
+`!cancel`/`!rotate` targeting) by **conversation**, not just by channel:
+
+- **Unthreaded channel messages** share one channel-level conversation — one
+  continuous ACP session per channel, as before.
+- **Thread replies** in a regular channel are scoped by `(channel, thread
+  root)`: every thread gets its own isolated ACP session. Replies in the same
+  thread reuse that thread's session; separate threads in the same channel
+  never share or pollute each other's sessions, and can be in-flight
+  simultaneously.
+- **Forum posts** (kind 45001) are thread roots: a post scopes to its own
+  event ID, and comments on it (kind 45003) resolve to the same
+  conversation, so a forum post and its comment thread share one session
+  while separate posts in the same channel stay isolated.
+- **DMs** always use channel-level continuity — one session per DM
+  conversation, even for replies with thread tags.
+- **Channels joined after startup** resolve and cache their metadata before
+  the harness opens event delivery. Failed lookups retry while the membership
+  remains active. The first delivered event therefore scopes normally — DMs
+  channel-level, regular/forum channels per-thread — without an
+  event-before-metadata fallback that could split one conversation.
+
+For stream messages the thread root is the canonical NIP-10 `root` marker
+from the reply's `e` tags. Note a stream thread's root message is itself an
+unthreaded channel message — it runs in the channel-level conversation; the
+thread's own session begins with the first reply.
+
+**Stable agent ownership (N > 1):** a conversation's session history lives in
+exactly one agent process, so each conversation is pinned to the agent that
+serves it. If that agent is busy on other work when new events arrive, the
+conversation waits for it (fairness position preserved) instead of being
+forked onto another agent. Ownership is released when the session is rotated
+or invalidated, or when the owning agent process dies — the next turn then
+starts a fresh session on any agent.
+
+**Desktop model switching** is channel-level desired state: a `switch_model`
+control frame updates every idle agent holding sessions under the channel,
+signals every in-flight conversation under it, and is inherited by any agent
+that later picks up a conversation in that channel.
+
+When the agent is removed from a channel, every conversation under that
+channel — channel-level and all threads — is drained and its sessions are
+invalidated. This is agent conversation routing only: channel identity,
+subscriptions, and NIP-29 authorization remain keyed by the `h`-tag channel
+UUID.
 
 ### Heartbeat Semantics
 
@@ -242,12 +299,12 @@ Forum event kinds:
 
 1. **Startup** — Spawns N agent subprocesses (default 1), sends ACP `initialize` to each, connects to the relay with NIP-42 auth.
 2. **Channel discovery** — Queries the relay REST API for accessible channels, subscribes to each.
-3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per channel.
-4. **Prompting** — When events are pending and no prompt is in flight for that channel, drains all queued events for the oldest channel into a single batched prompt via ACP `session/prompt`.
+3. **Event loop** — Listens for @mention events (kind 9 with the agent's pubkey in a `#p` tag). Events queue per conversation (channel-level or thread — see [Session Scope](#session-scope)).
+4. **Prompting** — When events are pending and no prompt is in flight for that conversation, drains all queued events for the oldest conversation into a single batched prompt via ACP `session/prompt`. Events from different conversations are never batched together.
 5. **Agent response** — The agent processes the prompt and uses the Buzz CLI (`send_message`, `get_messages`, etc.) to interact with Buzz.
 6. **Recovery** — If the agent crashes, the harness respawns it. If the relay disconnects, the harness reconnects with a `since` filter to avoid missing events.
 
-Each channel has at most one prompt in flight. Multiple channels can be processed concurrently when agents > 1.
+Each conversation has at most one prompt in flight. Multiple conversations — including multiple threads within one channel — can be processed concurrently when agents > 1.
 
 > **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
 
