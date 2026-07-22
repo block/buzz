@@ -7,9 +7,12 @@ import { correlateReceipt, loadJson, renderDisabledLaunchAgent, renderWorker, va
 
 const here = dirname(fileURLToPath(import.meta.url));
 const manifest = loadJson(join(here, "workers.json"));
-const identityMap = loadJson(manifest.identityMap);
+// Unit tests must be runnable by upstream contributors without the private AEON
+// vault mount. The live validator continues to load manifest.identityMap (or an
+// explicit operator-supplied path) and therefore retains its fail-closed check.
+const identityMap = loadJson(join(here, "fixtures", "identity-map.json"));
 
-test("six-worker manifest matches the AEON identity map", () => {
+test("six-worker manifest matches the synthetic identity-map contract", () => {
   const result = validateManifest(manifest, identityMap);
   assert.equal(result.ok, true, result.errors.join("\n"));
   assert.equal(manifest.workers.length, 6);
