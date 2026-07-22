@@ -502,7 +502,7 @@ buzz users set-profile 2>&1; echo "exit: $?"
 # Exit 3: No auth configured
 env -u BUZZ_PRIVATE_KEY \
   cargo run -p buzz-cli -- channels list 2>&1; echo "exit: $?"
-# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key or set env var)"}
+# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key, --private-key-fd, or set env var)"}
 # exit: 3
 
 # Not-found returns null, not an error (exit 0)
@@ -522,10 +522,20 @@ Test authentication.
 BUZZ_PRIVATE_KEY="nsec1..." buzz channels list | jq .
 # Should succeed
 
+# Private key via fd (--private-key-fd)
+exec 3< <(printf '%s' "nsec1...")
+buzz --private-key-fd 3 channels list | jq .
+exec 3<&-
+# Should succeed
+
+# --private-key and --private-key-fd together → clap usage error
+buzz --private-key "nsec1..." --private-key-fd 3 channels list 2>&1; echo "exit: $?"
+# exit: 1 (clap conflicts_with error)
+
 # No auth → exit 3
 env -u BUZZ_PRIVATE_KEY \
   cargo run -p buzz-cli -- channels list 2>&1; echo "exit: $?"
-# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key or set env var)"}
+# stderr: {"error":"auth_error","message":"auth error: BUZZ_PRIVATE_KEY is required (use --private-key, --private-key-fd, or set env var)"}
 # exit: 3
 ```
 

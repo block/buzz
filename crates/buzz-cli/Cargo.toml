@@ -79,6 +79,10 @@ buzz-ws-client = { path = "../buzz-ws-client" }
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
+# Zeroizes the private key string in memory on drop — defense in depth for
+# --private-key / --private-key-fd secret handling
+zeroize = "1"
+
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"

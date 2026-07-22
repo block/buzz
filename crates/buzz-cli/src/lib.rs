@@ -56,8 +56,12 @@ Buzz CLI — interact with a Buzz relay
 
 Configuration (flags override env vars):
   BUZZ_RELAY_URL     Relay base URL        [default: http://localhost:3000]
-  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
+  BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required, unless --private-key-fd]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
+
+--private-key-fd <FD> is an alternative to --private-key/BUZZ_PRIVATE_KEY for
+handing off the private key via an inherited file descriptor (e.g. from a
+parent process/harness) instead of argv or the environment.
 
 The 'pack' subcommand runs locally and does not require a relay connection.
 
@@ -70,8 +74,16 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    #[arg(long, env = "BUZZ_PRIVATE_KEY", conflicts_with = "private_key_fd")]
     private_key: Option<String>,
+
+    /// File descriptor (>= 3) to read the Nostr private key from, as an
+    /// alternative to --private-key/BUZZ_PRIVATE_KEY. Intended for a parent
+    /// process/harness to hand off the key without it appearing in argv,
+    /// shell history, or the environment. Reads at most 256 bytes from
+    /// `/dev/fd/<FD>` (Linux/macOS only — no `/dev/fd` on Windows).
+    #[arg(long, value_parser = parse_private_key_fd)]
+    private_key_fd: Option<u32>,
 
     /// NIP-OA auth tag JSON (owner attestation). Injected into every signed event.
     #[arg(long, env = "BUZZ_AUTH_TAG")]
@@ -83,6 +95,92 @@ struct Cli {
 
     #[command(subcommand)]
     command: Cmd,
+}
+
+/// Lowest file descriptor accepted for `--private-key-fd`. Rejects
+/// stdin/stdout/stderr (0/1/2) so a caller can't accidentally point at a
+/// standard stream.
+const MIN_PRIVATE_KEY_FD: u32 = 3;
+
+/// Highest file descriptor accepted for `--private-key-fd`, matching a
+/// typical Linux soft fd-limit sanity bound.
+const MAX_PRIVATE_KEY_FD: u32 = 1024;
+
+/// Maximum number of bytes read from the private-key fd. One byte beyond
+/// this (257) is used as a sentinel to detect oversized input without
+/// buffering unbounded data.
+const PRIVATE_KEY_FD_MAX_LEN: usize = 256;
+
+/// clap `value_parser` for `--private-key-fd`: validates the fd is within
+/// `[MIN_PRIVATE_KEY_FD, MAX_PRIVATE_KEY_FD]` before it ever reaches `run()`.
+fn parse_private_key_fd(s: &str) -> Result<u32, String> {
+    let fd: u32 = s
+        .parse()
+        .map_err(|_| format!("invalid file descriptor '{s}': must be a non-negative integer"))?;
+    if !(MIN_PRIVATE_KEY_FD..=MAX_PRIVATE_KEY_FD).contains(&fd) {
+        return Err(format!(
+            "file descriptor {fd} out of range: must be between {MIN_PRIVATE_KEY_FD} and {MAX_PRIVATE_KEY_FD} (0/1/2 are reserved for stdio)"
+        ));
+    }
+    Ok(fd)
+}
+
+/// Reads the Nostr private key from an inherited file descriptor.
+///
+/// Opens `/dev/fd/<fd>` (Linux/macOS only — there is no `/dev/fd` on
+/// Windows) and reads at most [`PRIVATE_KEY_FD_MAX_LEN`] bytes. The trailing
+/// `\n` (and a preceding `\r`, if present) is stripped; no other trimming is
+/// performed so a malformed key is not silently altered. The returned string
+/// is wrapped in [`zeroize::Zeroizing`] so it is scrubbed from memory when
+/// dropped.
+fn read_key_from_fd(fd: u32) -> Result<zeroize::Zeroizing<String>, CliError> {
+    use std::io::Read;
+    use zeroize::Zeroize;
+
+    let mut file = std::fs::File::open(format!("/dev/fd/{fd}"))
+        .map_err(|_| CliError::Auth(format!("failed to read private key from fd {fd}")))?;
+
+    let mut buf = Vec::with_capacity(PRIVATE_KEY_FD_MAX_LEN + 1);
+    file.by_ref()
+        .take((PRIVATE_KEY_FD_MAX_LEN + 1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(|_| CliError::Auth(format!("failed to read private key from fd {fd}")))?;
+    drop(file);
+    // Wrap immediately so raw key bytes are zeroized on every exit path below
+    // (including early error returns), not just the success path.
+    let mut buf = zeroize::Zeroizing::new(buf);
+
+    if buf.len() > PRIVATE_KEY_FD_MAX_LEN {
+        return Err(CliError::Key(
+            "private key from fd exceeds maximum length".into(),
+        ));
+    }
+
+    // Strip a single trailing newline (and preceding \r), nothing more.
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        if buf.last() == Some(&b'\r') {
+            buf.pop();
+        }
+    }
+
+    if buf.is_empty() {
+        return Err(CliError::Key("private key from fd is empty".into()));
+    }
+
+    // Take the raw bytes out of `buf` (leaving an empty, harmless Vec behind
+    // for `buf`'s own Drop) so we can hand them to `String::from_utf8`
+    // without cloning. On the UTF-8 error path the invalid bytes are
+    // recovered from the error and explicitly zeroized before returning,
+    // since they never make it into the final `Zeroizing<String>`.
+    let raw = std::mem::take(&mut *buf);
+    let key = String::from_utf8(raw).map_err(|e| {
+        let mut invalid = e.into_bytes();
+        invalid.zeroize();
+        CliError::Key("private key from fd is not valid UTF-8".into())
+    })?;
+
+    Ok(zeroize::Zeroizing::new(key))
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -1728,11 +1826,36 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
-    let private_key_str = cli.private_key.ok_or_else(|| {
-        CliError::Auth("BUZZ_PRIVATE_KEY is required (use --private-key or set env var)".into())
-    })?;
-    let keys = Keys::parse(&private_key_str)
-        .map_err(|e| CliError::Key(format!("invalid BUZZ_PRIVATE_KEY: {e}")))?;
+    //
+    // clap's `conflicts_with` on `private_key`/`private_key_fd` guarantees at
+    // most one of these is populated (this also covers BUZZ_PRIVATE_KEY,
+    // since clap treats an env-resolved value as populating the same field
+    // as the flag) — so clap itself never reads BUZZ_PRIVATE_KEY into `cli`
+    // when fd mode is selected. That alone doesn't clear the var from the
+    // actual process environment though: if an operator has BUZZ_PRIVATE_KEY
+    // stale-set in their shell, it remains readable for this process's whole
+    // lifetime via /proc/<pid>/environ or ps/environ inspection by other
+    // local processes, even though buzz-cli itself never spawns subprocesses.
+    // Explicitly scrub it as defense-in-depth so fd-mode actually avoids env
+    // exposure end to end. `std::env::remove_var` is safe to call directly
+    // under edition 2021 (no `unsafe` needed).
+    if cli.private_key_fd.is_some() {
+        std::env::remove_var("BUZZ_PRIVATE_KEY");
+    }
+
+    let private_key_str: zeroize::Zeroizing<String> = if let Some(fd) = cli.private_key_fd {
+        read_key_from_fd(fd)?
+    } else {
+        let raw = cli.private_key.ok_or_else(|| {
+            CliError::Auth(
+                "BUZZ_PRIVATE_KEY is required (use --private-key, --private-key-fd, or set env var)"
+                    .into(),
+            )
+        })?;
+        zeroize::Zeroizing::new(raw)
+    };
+    let keys = Keys::parse(private_key_str.as_str())
+        .map_err(|e| CliError::Key(format!("invalid private key: {e}")))?;
 
     // NIP-OA: parse and verify the auth tag if provided.
     let (auth_tag, auth_tag_json) = match cli.auth_tag {
@@ -2016,5 +2139,168 @@ mod tests {
                 group_name, expected_count, actual_count
             );
         }
+    }
+
+    // ---- --private-key-fd ----
+
+    /// Opens a temp file preloaded with `contents`, rewinds it, and returns
+    /// both the `File` (which must be kept alive for the fd to stay valid)
+    /// and its raw fd number.
+    fn fd_with_contents(contents: &[u8]) -> (std::fs::File, u32) {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::AsRawFd;
+
+        let mut file = tempfile::tempfile().expect("create tempfile");
+        file.write_all(contents).expect("write tempfile");
+        file.seek(SeekFrom::Start(0)).expect("seek tempfile");
+        let fd = file.as_raw_fd() as u32;
+        (file, fd)
+    }
+
+    #[test]
+    fn read_key_from_fd_reads_valid_key() {
+        let synthetic_key = "0".repeat(64); // synthetic hex-shaped key, not a real secret
+        let (_file, fd) = fd_with_contents(synthetic_key.as_bytes());
+
+        let result = read_key_from_fd(fd).expect("expected key to be read");
+        assert_eq!(result.as_str(), synthetic_key);
+    }
+
+    #[test]
+    fn read_key_from_fd_strips_trailing_newline() {
+        let synthetic_key = "1".repeat(64);
+        let with_newline = format!("{synthetic_key}\n");
+        let (_file, fd) = fd_with_contents(with_newline.as_bytes());
+
+        let result = read_key_from_fd(fd).expect("expected key to be read");
+        assert_eq!(result.as_str(), synthetic_key);
+    }
+
+    #[test]
+    fn read_key_from_fd_strips_trailing_crlf() {
+        let synthetic_key = "2".repeat(64);
+        let with_crlf = format!("{synthetic_key}\r\n");
+        let (_file, fd) = fd_with_contents(with_crlf.as_bytes());
+
+        let result = read_key_from_fd(fd).expect("expected key to be read");
+        assert_eq!(result.as_str(), synthetic_key);
+    }
+
+    #[test]
+    fn read_key_from_fd_missing_fd_is_sanitized_auth_error() {
+        // A large fd number, almost certainly not open in this process.
+        let fd = MAX_PRIVATE_KEY_FD;
+        let err = read_key_from_fd(fd).expect_err("expected missing fd to error");
+        match err {
+            CliError::Auth(msg) => {
+                assert!(msg.contains(&fd.to_string()), "message: {msg}");
+                // No OS error internals (path context, errno text) leaked.
+                assert!(!msg.to_lowercase().contains("os error"), "message: {msg}");
+            }
+            other => panic!("expected Auth error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_key_from_fd_empty_is_key_error() {
+        let (_file, fd) = fd_with_contents(b"");
+        let err = read_key_from_fd(fd).expect_err("expected empty content to error");
+        match err {
+            CliError::Key(msg) => assert_eq!(msg, "private key from fd is empty"),
+            other => panic!("expected Key error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_key_from_fd_oversized_is_key_error() {
+        let oversized = "a".repeat(PRIVATE_KEY_FD_MAX_LEN + 1);
+        let (_file, fd) = fd_with_contents(oversized.as_bytes());
+        let err = read_key_from_fd(fd).expect_err("expected oversized content to error");
+        match err {
+            CliError::Key(msg) => {
+                assert_eq!(msg, "private key from fd exceeds maximum length");
+                assert!(!msg.contains(&oversized), "oversized content leaked: {msg}");
+            }
+            other => panic!("expected Key error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_key_from_fd_non_utf8_is_key_error() {
+        let invalid_utf8: &[u8] = &[0xff, 0xfe, 0xfd];
+        let (_file, fd) = fd_with_contents(invalid_utf8);
+        let err = read_key_from_fd(fd).expect_err("expected non-utf8 content to error");
+        match err {
+            CliError::Key(msg) => {
+                assert_eq!(msg, "private key from fd is not valid UTF-8");
+            }
+            other => panic!("expected Key error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_private_key_fd_rejects_stdio_fds() {
+        for fd in ["0", "1", "2"] {
+            assert!(
+                parse_private_key_fd(fd).is_err(),
+                "fd {fd} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_private_key_fd_rejects_out_of_range_and_non_numeric() {
+        assert!(parse_private_key_fd("-1").is_err());
+        assert!(parse_private_key_fd("not-a-number").is_err());
+        assert!(parse_private_key_fd("99999").is_err());
+    }
+
+    #[test]
+    fn parse_private_key_fd_accepts_valid_range() {
+        assert_eq!(parse_private_key_fd("3").unwrap(), 3);
+        assert_eq!(parse_private_key_fd("1024").unwrap(), 1024);
+        assert_eq!(parse_private_key_fd("42").unwrap(), 42);
+    }
+
+    #[test]
+    fn private_key_and_private_key_fd_conflict() {
+        let synthetic_key = "nsec1testonlysyntheticvaluexxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let result = Cli::try_parse_from([
+            "buzz",
+            "--private-key",
+            synthetic_key,
+            "--private-key-fd",
+            "3",
+            "channels",
+            "list",
+        ]);
+        assert!(
+            result.is_err(),
+            "expected clap to reject conflicting private-key flags"
+        );
+    }
+
+    #[test]
+    fn help_output_does_not_leak_key_material() {
+        // --help text should describe the flags without embedding any
+        // secret-shaped value.
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("--private-key-fd"));
+        assert!(help.contains("--private-key"));
+        // Sanity: no synthetic key value should ever appear in static help text.
+        assert!(!help.contains("nsec1testonlysynthetic"));
+    }
+
+    #[test]
+    fn errors_do_not_leak_key_material() {
+        // Non-UTF8 bytes stand in for "secret-shaped" content that must
+        // never surface in Debug/Display output of the resulting error.
+        let secret_marker: &[u8] = b"nsec1testonlysyntheticvalue\xff\xfe";
+        let (_file, fd) = fd_with_contents(secret_marker);
+        let err = read_key_from_fd(fd).expect_err("expected non-utf8 content to error");
+        let debug = format!("{err:?}");
+        let display = err.to_string();
+        assert!(!debug.contains("nsec1testonlysyntheticvalue"));
+        assert!(!display.contains("nsec1testonlysyntheticvalue"));
     }
 }
