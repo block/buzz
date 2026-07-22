@@ -19,6 +19,9 @@ path = "src/main.rs"
 # CLI argument parsing — derive macros + env var support (BUZZ_API_TOKEN auto-wired)
 clap = { version = "4", features = ["derive", "env"] }
 
+# Explicit rustls dep so the CLI can install the ring CryptoProvider at startup
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
 # HTTP client — async REST calls to the relay
 reqwest = { workspace = true, features = ["json"] }
 

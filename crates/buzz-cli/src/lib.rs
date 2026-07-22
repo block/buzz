@@ -25,6 +25,11 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    // Install the ring CryptoProvider for rustls. The workspace enables more
+    // than one rustls crypto backend, so rustls cannot auto-select a
+    // process-level provider and panics on the first TLS-capable connection
+    // without this.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
