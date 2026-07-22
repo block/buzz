@@ -336,7 +336,11 @@ pub struct RestClient {
 /// Durable reply evidence read back from the relay event log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnchoredReply {
+    /// Hex event ID of the verified agent-authored reply event.
     pub event_id: String,
+    /// Effective NIP-10 `reply` anchor used for relay readback. This can be the
+    /// thread root rather than the triggering request when a follow-up turn is
+    /// deliberately flattened onto its existing thread.
     pub reply_to: String,
 }
 

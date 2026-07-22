@@ -823,19 +823,24 @@ fn closed_receipt_payload(
     })
 }
 
+struct ReplyReadbackScope<'a> {
+    expected_reply_anchor: Option<&'a str>,
+    prior_reply_event_ids: Result<&'a HashSet<String>, &'a str>,
+}
+
 async fn observe_closed_turn_receipt(
     agent: &AcpClient,
     ctx: &PromptContext,
     channel_id: Uuid,
     request_event_ids: &[String],
-    expected_reply_anchor: Option<&str>,
+    readback_scope: ReplyReadbackScope<'_>,
     acp_session_id: &str,
     turn_id: &str,
 ) {
     let mut replies = Vec::new();
     if request_event_ids.len() == 1 {
         let Some(expected_reply_anchor) =
-            receipt_query_anchor(request_event_ids, expected_reply_anchor)
+            receipt_query_anchor(request_event_ids, readback_scope.expected_reply_anchor)
         else {
             agent.observe(
                 "turn_receipt",
@@ -851,6 +856,21 @@ async fn observe_closed_turn_receipt(
             );
             return;
         };
+        let prior_reply_event_ids = match readback_scope.prior_reply_event_ids {
+            Ok(ids) => ids,
+            Err(error) => {
+                agent.observe(
+                    "turn_receipt",
+                    serde_json::json!({
+                        "status": "failed",
+                        "reason": "reply_evidence_baseline_query_failed",
+                        "requestEventIds": request_event_ids,
+                        "error": error,
+                    }),
+                );
+                return;
+            }
+        };
         for attempt in 0..RECEIPT_REPLY_READBACK_ATTEMPTS {
             match ctx
                 .rest_client
@@ -862,6 +882,7 @@ async fn observe_closed_turn_receipt(
                 .await
             {
                 Ok(found) => {
+                    let found = replies_for_current_turn(found, prior_reply_event_ids);
                     merge_anchored_replies(&mut replies, found);
                     // Multiple distinct replies can never recover to a valid
                     // receipt, so fail early. A single reply must remain under
@@ -901,6 +922,33 @@ async fn observe_closed_turn_receipt(
             turn_id,
         ),
     );
+}
+
+fn replies_for_current_turn(
+    mut replies: Vec<crate::relay::AnchoredReply>,
+    prior_reply_event_ids: &HashSet<String>,
+) -> Vec<crate::relay::AnchoredReply> {
+    replies.retain(|reply| !prior_reply_event_ids.contains(&reply.event_id));
+    replies
+}
+
+async fn capture_prior_reply_event_ids(
+    ctx: &PromptContext,
+    source: &PromptSource,
+    request_event_ids: &[String],
+    expected_reply_anchor: Option<&str>,
+) -> Result<HashSet<String>, String> {
+    let PromptSource::Channel(channel_id) = source else {
+        return Ok(HashSet::new());
+    };
+    let Some(anchor) = receipt_query_anchor(request_event_ids, expected_reply_anchor) else {
+        return Ok(HashSet::new());
+    };
+    ctx.rest_client
+        .query_anchored_replies(*channel_id, ctx.agent_keys.public_key(), anchor)
+        .await
+        .map(|replies| replies.into_iter().map(|reply| reply.event_id).collect())
+        .map_err(|error| error.to_string())
 }
 
 fn receipt_query_anchor<'a>(
@@ -1948,6 +1996,23 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Snapshot replies that already exist at this turn's effective anchor.
+    // Thread-root follow-ups intentionally reuse a stable NIP-10 anchor, so
+    // anchor-only readback would otherwise count replies from earlier turns.
+    // The post-turn receipt subtracts this exact baseline and closes only over
+    // reply events first observed for the current turn.
+    let prior_reply_event_ids = if ctx.turn_receipts {
+        capture_prior_reply_event_ids(
+            &ctx,
+            &source,
+            &triggering_event_ids,
+            expected_reply_anchor.as_deref(),
+        )
+        .await
+    } else {
+        Ok(HashSet::new())
+    };
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
@@ -2100,7 +2165,12 @@ pub async fn run_prompt_task(
                                     &ctx,
                                     *channel_id,
                                     &triggering_event_ids,
-                                    expected_reply_anchor.as_deref(),
+                                    ReplyReadbackScope {
+                                        expected_reply_anchor: expected_reply_anchor.as_deref(),
+                                        prior_reply_event_ids: prior_reply_event_ids
+                                            .as_ref()
+                                            .map_err(String::as_str),
+                                    },
                                     &session_id,
                                     &turn_id,
                                 )
@@ -2147,7 +2217,12 @@ pub async fn run_prompt_task(
                         &ctx,
                         *channel_id,
                         &triggering_event_ids,
-                        expected_reply_anchor.as_deref(),
+                        ReplyReadbackScope {
+                            expected_reply_anchor: expected_reply_anchor.as_deref(),
+                            prior_reply_event_ids: prior_reply_event_ids
+                                .as_ref()
+                                .map_err(String::as_str),
+                        },
                         &session_id,
                         &turn_id,
                     )
@@ -4012,6 +4087,24 @@ mod tests {
             )["reason"],
             "receipt_requires_one_anchored_reply_found_multiple"
         );
+    }
+
+    #[test]
+    fn stable_thread_anchor_excludes_replies_from_prior_turns() {
+        let stable_root = "a".repeat(64);
+        let prior = crate::relay::AnchoredReply {
+            event_id: "b".repeat(64),
+            reply_to: stable_root.clone(),
+        };
+        let current = crate::relay::AnchoredReply {
+            event_id: "c".repeat(64),
+            reply_to: stable_root,
+        };
+        let prior_ids = HashSet::from([prior.event_id.clone()]);
+
+        let current_turn = replies_for_current_turn(vec![prior, current.clone()], &prior_ids);
+
+        assert_eq!(current_turn, vec![current]);
     }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
