@@ -534,7 +534,138 @@ async fn dispatch_persistent_event_inner(
         });
     }
 
+    // Offline-mention safety net (#1743): if a channel message @mentions an
+    // agent (bot member) that has no presence key, the fan-out above delivered
+    // nothing to it — it has no live subscription. Rather than let the mention
+    // silently vanish, emit a system notice into the channel so the sender and
+    // any human observer can see the target is offline. Spawned so it never
+    // adds latency to dispatch; best-effort (never blocks or fails the event).
+    if kind_u32 == buzz_core::kind::KIND_STREAM_MESSAGE {
+        if let Some(channel_id) = stored_event.channel_id {
+            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+            let mentioned: Vec<String> = stored_event
+                .event
+                .tags
+                .filter(nostr::TagKind::SingleLetter(p))
+                .filter_map(|t| t.content().map(|s| s.to_string()))
+                .collect();
+            if !mentioned.is_empty() {
+                let tenant = tenant.clone();
+                let state = Arc::clone(state);
+                tokio::spawn(async move {
+                    notify_offline_agent_mentions(&tenant, &state, channel_id, mentioned).await;
+                });
+            }
+        }
+    }
+
     matches.len()
+}
+
+/// Pure selection: given mentioned pubkey hexes, the set of bot-member hexes,
+/// and the presence map (hex -> status) returned by `get_presence_bulk`,
+/// return the bot hexes that are mentioned but have no presence key (offline).
+/// Extracted for unit testing the gating logic without DB/redis (#1743).
+fn select_offline_mentioned_bots(
+    mentioned_hex: &[String],
+    bot_hexes: &std::collections::HashSet<String>,
+    present: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    mentioned_hex
+        .iter()
+        .filter(|hex| bot_hexes.contains(*hex))
+        .filter(|hex| !present.contains_key(*hex))
+        .cloned()
+        .collect()
+}
+
+/// Emit a system notice for any @mentioned agent (bot member) that is offline
+/// when the mention is dispatched, so the mention is not silently lost (#1743).
+///
+/// Best-effort and side-effect-only: presence/DB lookups that fail are logged
+/// and skipped. Only agents that are (a) bot members of this community and
+/// (b) have no presence key are reported — human users and online agents are
+/// never flagged.
+async fn notify_offline_agent_mentions(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: uuid::Uuid,
+    mentioned_hex: Vec<String>,
+) {
+    use nostr::PublicKey;
+
+    // Restrict to agents: only bot members can be "offline" in a way the
+    // sender can't otherwise see. Human recipients read history on reconnect.
+    let bots = match state.db.get_bot_members(tenant.community()).await {
+        Ok(bots) => bots,
+        Err(e) => {
+            warn!(channel = %channel_id, error = %e, "offline-mention: bot lookup failed");
+            return;
+        }
+    };
+    if bots.is_empty() {
+        return;
+    }
+    // Map hex pubkey -> display name for bot members only.
+    let mut bot_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for b in &bots {
+        let hex = hex::encode(&b.pubkey);
+        let name = b
+            .display_name
+            .clone()
+            .unwrap_or_else(|| format!("agent {}", &hex[..hex.len().min(8)]));
+        bot_names.insert(hex, name);
+    }
+
+    // Only consider mentioned pubkeys that are bot members.
+    let mentioned_bots: Vec<(String, PublicKey)> = mentioned_hex
+        .iter()
+        .filter(|hex| bot_names.contains_key(*hex))
+        .filter_map(|hex| PublicKey::from_hex(hex).ok().map(|pk| (hex.clone(), pk)))
+        .collect();
+    if mentioned_bots.is_empty() {
+        return;
+    }
+
+    let pubkeys: Vec<PublicKey> = mentioned_bots.iter().map(|(_, pk)| *pk).collect();
+    let present = match state.pubsub.get_presence_bulk(tenant, &pubkeys).await {
+        Ok(map) => map,
+        Err(e) => {
+            warn!(channel = %channel_id, error = %e, "offline-mention: presence lookup failed");
+            return;
+        }
+    };
+
+    let bot_hex_set: std::collections::HashSet<String> =
+        mentioned_bots.iter().map(|(hex, _)| hex.clone()).collect();
+    let offline = select_offline_mentioned_bots(
+        &mentioned_bots
+            .iter()
+            .map(|(hex, _)| hex.clone())
+            .collect::<Vec<_>>(),
+        &bot_hex_set,
+        &present,
+    );
+    for hex in &offline {
+        let name = bot_names
+            .get(hex)
+            .cloned()
+            .unwrap_or_else(|| "agent".to_string());
+        let content = serde_json::json!({
+            "type": "agent_mention_undelivered",
+            "agent_pubkey": hex,
+            "agent_name": name,
+            "message": format!("{name} is offline and may not see this mention."),
+        });
+        if let Err(e) =
+            crate::handlers::side_effects::emit_system_message(tenant, state, channel_id, content)
+                .await
+        {
+            warn!(channel = %channel_id, error = %e, "offline-mention: system notice emit failed");
+        } else {
+            metrics::counter!("buzz_agent_mention_undelivered_total").increment(1);
+        }
+    }
 }
 
 async fn enqueue_event_created_audit(
@@ -2456,6 +2587,40 @@ mod tests {
                 "Inv_NonInterference: a connection bound to community A \
                  must not receive a community-B event. Got: {out:?}"
             );
+        }
+
+        #[test]
+        fn offline_mentioned_bots_selects_only_offline_bot_members() {
+            use std::collections::{HashMap, HashSet};
+
+            let alice = "aa".repeat(32);
+            let bob = "bb".repeat(32);
+            let human = "cc".repeat(32);
+
+            // alice + bob are bot members; human is not a bot.
+            let bots: HashSet<String> = [alice.clone(), bob.clone()].into_iter().collect();
+
+            // alice is online (present), bob is offline (absent).
+            let mut present: HashMap<String, String> = HashMap::new();
+            present.insert(alice.clone(), "online".to_string());
+
+            let mentioned = vec![alice.clone(), bob.clone(), human.clone()];
+            let offline = crate::handlers::event::select_offline_mentioned_bots(&mentioned, &bots, &present);
+
+            // Only bob: alice is online, human is not a bot member.
+            assert_eq!(offline, vec![bob]);
+        }
+
+        #[test]
+        fn offline_mentioned_bots_empty_when_all_online_or_non_bots() {
+            use std::collections::{HashMap, HashSet};
+            let alice = "aa".repeat(32);
+            let bots: HashSet<String> = [alice.clone()].into_iter().collect();
+            let mut present: HashMap<String, String> = HashMap::new();
+            present.insert(alice.clone(), "away".to_string());
+            // alice present (any status) => not flagged; unknown pubkey not a bot.
+            let mentioned = vec![alice, "dd".repeat(32)];
+            assert!(crate::handlers::event::select_offline_mentioned_bots(&mentioned, &bots, &present).is_empty());
         }
     }
 }
