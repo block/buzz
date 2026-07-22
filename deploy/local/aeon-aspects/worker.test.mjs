@@ -105,6 +105,17 @@ test("LaunchAgent rendering rejects unsafe or relative runtime paths", () => {
     () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { executablePath: "bin:/usr/bin" }),
     /entries must be absolute/,
   );
+  assert.throws(
+    () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { openclawStateDir: "/state" }),
+    /must be supplied together/,
+  );
+  assert.throws(
+    () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
+      openclawConfigPath: "",
+      openclawStateDir: "/state",
+    }),
+    /must be absolute/,
+  );
 });
 
 test("Fleet can bind the immutable Node runtime without changing disabled previews", () => {
@@ -115,11 +126,15 @@ test("Fleet can bind the immutable Node runtime without changing disabled previe
   );
   const rendered = renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
     executablePath: "/owned/service-runtime/bin:/usr/bin:/bin",
+    openclawConfigPath: "/owned/state/openclaw.json",
+    openclawStateDir: "/owned/state",
   });
   assert.match(
     rendered.plist,
     /<key>PATH<\/key><string>\/owned\/service-runtime\/bin:\/usr\/bin:\/bin<\/string>/,
   );
+  assert.match(rendered.plist, /<key>OPENCLAW_CONFIG_PATH<\/key><string>\/owned\/state\/openclaw.json<\/string>/);
+  assert.match(rendered.plist, /<key>OPENCLAW_STATE_DIR<\/key><string>\/owned\/state<\/string>/);
 });
 
 test("worker restart renders the identical require-existing Gateway binding", () => {

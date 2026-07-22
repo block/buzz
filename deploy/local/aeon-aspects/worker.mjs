@@ -116,9 +116,21 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const tokenFile = options.tokenFile ?? "/REQUIRES_FLEET/owned-token-file";
   const workingDirectory = options.workingDirectory ?? "/Volumes/AEON/Projects/buzz";
   const executablePath = options.executablePath ?? null;
-  for (const [label, value] of Object.entries({ buzzAcpPath, openclawPath, tokenFile, workingDirectory })) {
+  const openclawConfigPath = options.openclawConfigPath ?? null;
+  const openclawStateDir = options.openclawStateDir ?? null;
+  for (const [label, value] of Object.entries({
+    buzzAcpPath,
+    openclawPath,
+    tokenFile,
+    workingDirectory,
+    ...(openclawConfigPath !== null ? { openclawConfigPath } : {}),
+    ...(openclawStateDir !== null ? { openclawStateDir } : {}),
+  })) {
     if (!value.startsWith("/")) throw new Error(`${label} must be absolute`);
     assertArgSafe(value, label);
+  }
+  if ((openclawConfigPath === null) !== (openclawStateDir === null)) {
+    throw new Error("openclawConfigPath and openclawStateDir must be supplied together");
   }
   if (executablePath !== null) {
     if (!executablePath.split(":").every((entry) => entry.startsWith("/"))) {
@@ -136,8 +148,16 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const stdout = `/Volumes/AEON/Projects/buzz-data/logs/${aspect}.buzz-acp.log`;
   const stderr = `/Volumes/AEON/Projects/buzz-data/logs/${aspect}.buzz-acp.err.log`;
   const argsXml = argv.map((arg) => `    <string>${xml(arg)}</string>`).join("\n");
-  const environmentXml = executablePath
-    ? `\n  <key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>${xml(executablePath)}</string></dict>`
+  const environment = {
+    ...(executablePath ? { PATH: executablePath } : {}),
+    ...(openclawConfigPath ? { OPENCLAW_CONFIG_PATH: openclawConfigPath } : {}),
+    ...(openclawStateDir ? { OPENCLAW_STATE_DIR: openclawStateDir } : {}),
+  };
+  const environmentEntries = Object.entries(environment)
+    .map(([key, value]) => `<key>${key}</key><string>${xml(value)}</string>`)
+    .join("");
+  const environmentXml = environmentEntries
+    ? `\n  <key>EnvironmentVariables</key>\n  <dict>${environmentEntries}</dict>`
     : "";
   return {
     aspect,
