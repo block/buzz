@@ -41,6 +41,7 @@ import {
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
+import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import {
@@ -192,6 +193,11 @@ function CommunitySwitchGate() {
 
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
+
+  useEffect(() => {
+    setAvatarProfileSyncQueryClient(queryClient);
+    return () => setAvatarProfileSyncQueryClient(null);
+  }, [queryClient]);
 
   useEffect(() => {
     const e2eWindow = window as Window & {

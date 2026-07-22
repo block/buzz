@@ -475,7 +475,8 @@ class instances, cached promises) survive across remounts. Every community-scope
 singleton needs a reset function wired into `resetCommunityState()` in
 `desktop/src/features/communities/useCommunityInit.ts`.
 
-Current singletons that are reset on community switch:
+Current singletons that are reset on relay boundary changes (same-relay
+reconnects preserve pending avatar verification work):
 - `relayClient.disconnect()` — WebSocket teardown + promise rejection
 - `resetRateLimitGate()` — clears any active rate-limit window from the old relay
 - `clearAllDrafts()` — message draft cache

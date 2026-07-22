@@ -9,7 +9,7 @@ use crate::{
     events,
     models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
     nostr_convert,
-    relay::{query_relay, submit_event},
+    relay::{query_relay, query_relay_at, relay_http_base_url, submit_event, submit_event_at},
 };
 
 #[tauri::command]
@@ -92,6 +92,59 @@ pub async fn update_profile(
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
         .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state))))
+}
+
+#[tauri::command]
+pub async fn update_profile_at_relay(
+    relay_url: String,
+    expected_pubkey: String,
+    expected_avatar_url: Option<String>,
+    avatar_url: String,
+    state: State<'_, AppState>,
+) -> Result<ProfileInfo, String> {
+    let current_pubkey = current_pubkey_hex(&state)?;
+    if current_pubkey != expected_pubkey {
+        return Err("profile identity changed before avatar save".to_string());
+    }
+
+    let api_base_url = relay_http_base_url(&relay_url);
+    let filter = serde_json::json!({
+        "kinds": [0],
+        "authors": [expected_pubkey],
+        "limit": 1
+    });
+    let prior_events = query_relay_at(&state, &api_base_url, &[filter.clone()]).await?;
+    let current: Value = prior_events
+        .first()
+        .and_then(|event| serde_json::from_str::<Value>(&event.content).ok())
+        .unwrap_or(Value::Null);
+    let current_avatar_url = current
+        .get("picture")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    if normalized_avatar_url(current_avatar_url.as_deref())
+        != normalized_avatar_url(expected_avatar_url.as_deref())
+    {
+        return Err("profile avatar changed before deferred save".to_string());
+    }
+
+    let display_name = current.get("display_name").and_then(Value::as_str);
+    let name = current.get("name").and_then(Value::as_str);
+    let about = current.get("about").and_then(Value::as_str);
+    let nip05 = current.get("nip05").and_then(Value::as_str);
+    let builder = events::build_profile(display_name, name, Some(&avatar_url), about, nip05)?;
+    submit_event_at(builder, &state, &api_base_url).await?;
+
+    let events = query_relay_at(&state, &api_base_url, &[filter]).await?;
+    Ok(events
+        .first()
+        .map(nostr_convert::profile_info_from_event)
+        .transpose()?
+        .unwrap_or_else(|| empty_profile_info(&expected_pubkey)))
+}
+
+fn normalized_avatar_url(avatar_url: Option<&str>) -> Option<&str> {
+    avatar_url.map(str::trim).filter(|value| !value.is_empty())
 }
 
 #[tauri::command]

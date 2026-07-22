@@ -374,11 +374,12 @@ export function CommunityOnboardingFlow({
         presentationState &&
         presentationState !== "ready"
       ) {
-        saveAvatarWhenReady(
-          candidateAvatarUrl,
-          profile.pubkey,
-          profile.avatarUrl,
-        );
+        saveAvatarWhenReady({
+          avatarUrl: candidateAvatarUrl,
+          relayUrl: transaction.relayUrl,
+          expectedPubkey: profile.pubkey,
+          expectedAvatarUrl: profile.avatarUrl,
+        });
       }
       update({ stage: "team-intro", error: undefined });
     } catch (error) {

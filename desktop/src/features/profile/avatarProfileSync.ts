@@ -1,21 +1,27 @@
+import type { QueryClient } from "@tanstack/react-query";
+
 import {
   getAvatarPresentation,
   subscribeAvatarPresentations,
   type AvatarPresentation,
 } from "@/features/profile/avatarPresentationStore";
-import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
+import { refreshProfileCaches } from "@/features/profile/profileCacheSync";
+import { updateProfileAtRelay } from "@/shared/api/tauriProfiles";
 import type { Profile } from "@/shared/api/types";
+
+type PendingAvatarSave = {
+  avatarUrl: string;
+  relayUrl: string;
+  expectedPubkey: string;
+  expectedAvatarUrl: string | null;
+};
 
 type AvatarProfileSyncDependencies = {
   getPresentation: (avatarUrl: string) => AvatarPresentation | null;
-  getProfile: () => Promise<Profile>;
   subscribe: (listener: () => void) => () => void;
-  updateProfile: (input: { avatarUrl: string }) => Promise<unknown>;
+  saveProfile: (input: PendingAvatarSave) => Promise<Profile>;
+  refreshCaches: (profile: Profile, input: PendingAvatarSave) => Promise<void>;
 };
-
-function normalizedAvatarUrl(avatarUrl: string | null | undefined) {
-  return avatarUrl?.trim() || null;
-}
 
 export function createAvatarProfileSync(
   dependencies: AvatarProfileSyncDependencies,
@@ -29,22 +35,19 @@ export function createAvatarProfileSync(
     pendingSyncs.clear();
   };
 
-  const saveWhenReady = (
-    avatarUrl: string,
-    expectedPubkey: string,
-    expectedAvatarUrl: string | null,
-  ): void => {
-    const syncKey = `${expectedPubkey}:${avatarUrl}`;
+  const saveWhenReady = (input: PendingAvatarSave): void => {
+    const syncKey = `${input.relayUrl}:${input.expectedPubkey}:${input.avatarUrl}`;
     if (pendingSyncs.has(syncKey)) return;
 
-    const queuedGeneration = generation;
     let isSaving = false;
+    const queuedGeneration = generation;
     const stop = () => {
       pendingSyncs.get(syncKey)?.();
       pendingSyncs.delete(syncKey);
     };
     const saveIfReady = () => {
-      const presentation = dependencies.getPresentation(avatarUrl);
+      if (generation !== queuedGeneration) return;
+      const presentation = dependencies.getPresentation(input.avatarUrl);
       if (!presentation) {
         stop();
         return;
@@ -53,17 +56,10 @@ export function createAvatarProfileSync(
 
       isSaving = true;
       void dependencies
-        .getProfile()
+        .saveProfile(input)
         .then((profile) => {
-          if (
-            generation !== queuedGeneration ||
-            profile.pubkey !== expectedPubkey ||
-            normalizedAvatarUrl(profile.avatarUrl) !==
-              normalizedAvatarUrl(expectedAvatarUrl)
-          ) {
-            return;
-          }
-          return dependencies.updateProfile({ avatarUrl });
+          if (generation !== queuedGeneration) return;
+          return dependencies.refreshCaches(profile, input);
         })
         .catch(() => undefined)
         .finally(stop);
@@ -76,19 +72,26 @@ export function createAvatarProfileSync(
   return { reset, saveWhenReady };
 }
 
+let queryClient: QueryClient | null = null;
+
+export function setAvatarProfileSyncQueryClient(
+  client: QueryClient | null,
+): void {
+  queryClient = client;
+}
+
 const avatarProfileSync = createAvatarProfileSync({
   getPresentation: getAvatarPresentation,
-  getProfile,
   subscribe: subscribeAvatarPresentations,
-  updateProfile,
+  saveProfile: updateProfileAtRelay,
+  refreshCaches: async (profile, input) => {
+    if (!queryClient) return;
+    await refreshProfileCaches(queryClient, profile, input.relayUrl);
+  },
 });
 
-export function saveAvatarWhenReady(
-  avatarUrl: string,
-  expectedPubkey: string,
-  expectedAvatarUrl: string | null,
-): void {
-  avatarProfileSync.saveWhenReady(avatarUrl, expectedPubkey, expectedAvatarUrl);
+export function saveAvatarWhenReady(input: PendingAvatarSave): void {
+  avatarProfileSync.saveWhenReady(input);
 }
 
 export function resetAvatarProfileSync(): void {

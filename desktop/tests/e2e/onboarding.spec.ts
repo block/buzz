@@ -1717,7 +1717,11 @@ test("name-only community profile save preserves an existing avatar", async ({
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
@@ -1832,7 +1836,11 @@ test("pending avatar stays navigable, clears failures, and retries", async ({
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
@@ -1844,7 +1852,11 @@ test("pending avatar stays navigable, clears failures, and retries", async ({
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
@@ -1904,7 +1916,11 @@ test("a pending avatar never becomes durable if propagation fails after onboardi
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
@@ -1967,7 +1983,11 @@ test("a pending avatar becomes durable after onboarding unmounts once ready", as
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
@@ -1978,7 +1998,11 @@ test("a pending avatar becomes durable after onboarding unmounts once ready", as
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
@@ -2031,7 +2055,11 @@ test("a failed pending replacement leaves the confirmed avatar untouched", async
     .poll(() =>
       page.evaluate(() =>
         (window.__BUZZ_E2E_COMMAND_PAYLOADS__ ?? [])
-          .filter(({ command }) => command === "update_profile")
+          .filter(
+            ({ command }) =>
+              command === "update_profile" ||
+              command === "update_profile_at_relay",
+          )
           .map(({ payload }) => (payload as { avatarUrl?: string }).avatarUrl),
       ),
     )
