@@ -14,6 +14,28 @@ pub(super) async fn run_agent_models_command(
     persisted_model: Option<String>,
     merged_env: BTreeMap<String, String>,
 ) -> Result<AgentModelsResponse, String> {
+    run_agent_models_command_with_path(
+        resolved_acp,
+        agent_command,
+        agent_args,
+        persisted_model,
+        merged_env,
+        crate::managed_agents::readiness::cli_probe::augmented_path,
+    )
+    .await
+}
+
+async fn run_agent_models_command_with_path<PathProvider>(
+    resolved_acp: PathBuf,
+    agent_command: String,
+    agent_args: Vec<String>,
+    persisted_model: Option<String>,
+    merged_env: BTreeMap<String, String>,
+    path_provider: PathProvider,
+) -> Result<AgentModelsResponse, String>
+where
+    PathProvider: FnOnce() -> Option<String> + Send + 'static,
+{
     // Clone the env map for redaction below — `merged_env` is moved
     // into the spawn_blocking closure and we still need the values to
     // scrub any user-supplied secrets that the child surfaces in stderr.
@@ -30,9 +52,7 @@ pub(super) async fn run_agent_models_command(
         // Same PATH as runtime spawn / CLI probes: managed node + npm bins
         // ahead of the login-shell PATH so `#!/usr/bin/env node` ACP shims
         // resolve when Buzz is launched from a GUI (no interactive shell).
-        if let Some(path) =
-            crate::managed_agents::readiness::cli_probe::augmented_path()
-        {
+        if let Some(path) = path_provider() {
             cmd.env("PATH", path);
         }
         cmd.arg("models")
@@ -79,4 +99,64 @@ pub(super) async fn run_agent_models_command(
         .map_err(|e| format!("failed to parse model JSON: {e}"))?;
 
     Ok(normalize_agent_models(&raw, persisted_model))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn model_discovery_uses_augmented_path_for_node_adapter() {
+        use std::collections::BTreeMap;
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let interpreter_dir = temp.path().join("interpreter-bin");
+        fs::create_dir_all(&interpreter_dir).expect("interpreter dir");
+
+        let marker_path = temp.path().join("fake-node-ran");
+        let node_path = interpreter_dir.join("node");
+        fs::write(
+            &node_path,
+            format!(
+                "#!/bin/sh\nprintf 'fake node ran\\n' > '{}' || exit 1\nprintf '%s\\n' '{{\"agent\":{{\"name\":\"fake-agent\",\"version\":\"1.0\"}},\"unstable\":{{\"currentModelId\":\"fake-model\",\"availableModels\":[{{\"modelId\":\"fake-model\",\"name\":\"Fake Model\"}}]}}}}'\n",
+                marker_path.display()
+            ),
+        )
+        .expect("write fake node");
+        fs::set_permissions(&node_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake node");
+
+        let adapter_path = temp.path().join("codex-acp");
+        fs::write(&adapter_path, "#!/usr/bin/env node\n").expect("write adapter");
+        fs::set_permissions(&adapter_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod adapter");
+
+        let acp_path = temp.path().join("buzz-acp");
+        fs::write(&acp_path, "#!/bin/sh\nexec \"$BUZZ_ACP_AGENT_COMMAND\"\n")
+            .expect("write buzz-acp");
+        fs::set_permissions(&acp_path, fs::Permissions::from_mode(0o755)).expect("chmod buzz-acp");
+
+        let augmented_path = std::env::join_paths([interpreter_dir.as_path()])
+            .expect("join augmented PATH")
+            .to_string_lossy()
+            .into_owned();
+        let response = super::run_agent_models_command_with_path(
+            acp_path,
+            adapter_path.display().to_string(),
+            Vec::new(),
+            None,
+            BTreeMap::new(),
+            move || Some(augmented_path),
+        )
+        .await
+        .expect("discover models through fake node adapter");
+
+        assert!(marker_path.exists(), "the fake node interpreter should run");
+        assert_eq!(response.agent_name, "fake-agent");
+        assert_eq!(response.agent_version, "1.0");
+        assert_eq!(response.models.len(), 1);
+        assert_eq!(response.models[0].id, "fake-model");
+        assert_eq!(response.agent_default_model.as_deref(), Some("fake-model"));
+    }
 }
