@@ -322,7 +322,6 @@ export const ChannelPane = React.memo(function ChannelPane({
     isSending;
   const knownAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set<string>();
-
     for (const pubkey of agentPubkeys ?? []) {
       pubkeys.add(pubkey.toLowerCase());
     }
@@ -332,14 +331,12 @@ export const ChannelPane = React.memo(function ChannelPane({
     for (const agent of activityAgents) {
       pubkeys.add(agent.pubkey.toLowerCase());
     }
-
     return pubkeys;
   }, [activityAgents, agentPubkeys, agentSessionAgents]);
   const completeWelcomeComposerBanner = React.useCallback(() => {
     if (!activeChannelId || !isActiveWelcomeChannel) {
       return;
     }
-
     clearWelcomeComposerDismissTimer();
     completedWelcomeBannerChannelIdsRef.current.add(activeChannelId);
     setWelcomeComposerBannerState("complete");
@@ -748,11 +745,42 @@ export const ChannelPane = React.memo(function ChannelPane({
                     />
                   </div>
                 ) : null}
+                {hasComposerBotActivity || hasTypingActivity ? (
+                  <div
+                    className="min-h-8 overflow-visible bg-background px-5 pb-0 pt-1.5"
+                    data-testid="channel-composer-activity-row"
+                  >
+                    <div className="flex h-full w-full items-center gap-2 overflow-visible">
+                      {hasComposerBotActivity ? (
+                        <div className="flex min-w-0 flex-1 overflow-visible">
+                          <BotActivityComposerAction
+                            agents={activityAgents}
+                            channelId={activeChannel?.id ?? null}
+                            onOpenAgentSession={onOpenAgentSession}
+                            openAgentSessionPubkey={openAgentSessionPubkey}
+                            profiles={profiles}
+                            workingBotPubkeys={composerWorkingBotPubkeys}
+                            variant="inline"
+                          />
+                        </div>
+                      ) : null}
+                      {hasTypingActivity ? (
+                        <TypingIndicatorRow
+                          channel={activeChannel}
+                          className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
+                          currentPubkey={currentPubkey}
+                          profiles={profiles}
+                          typingPubkeys={typingPubkeys}
+                        />
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
                 <MessageComposer
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}
-                  containerClassName="px-5"
+                  containerClassName="px-5 pb-5"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
                   autoSubmitDraftKey={autoSendDraftKey}
@@ -787,35 +815,6 @@ export const ChannelPane = React.memo(function ChannelPane({
                   }
                   showTopBorder={false}
                 />
-                <div
-                  className="min-h-8 overflow-visible bg-background px-5 pb-1.5 pt-0"
-                  data-testid="channel-composer-activity-row"
-                >
-                  <div className="flex h-full w-full items-center gap-2 overflow-visible">
-                    {hasComposerBotActivity ? (
-                      <div className="flex min-w-0 flex-1 overflow-visible">
-                        <BotActivityComposerAction
-                          agents={activityAgents}
-                          channelId={activeChannel?.id ?? null}
-                          onOpenAgentSession={onOpenAgentSession}
-                          openAgentSessionPubkey={openAgentSessionPubkey}
-                          profiles={profiles}
-                          workingBotPubkeys={composerWorkingBotPubkeys}
-                          variant="inline"
-                        />
-                      </div>
-                    ) : null}
-                    {hasTypingActivity ? (
-                      <TypingIndicatorRow
-                        channel={activeChannel}
-                        className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                        currentPubkey={currentPubkey}
-                        profiles={profiles}
-                        typingPubkeys={typingPubkeys}
-                      />
-                    ) : null}
-                  </div>
-                </div>
               </div>
             </div>
           )}

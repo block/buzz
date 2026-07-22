@@ -823,6 +823,32 @@ export function MessageThreadPanel({
             hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
           }
         >
+          {toolbarExtraActions || threadTypingPubkeys.length > 0 ? (
+            <div
+              className={cn(
+                "min-h-8 bg-background pb-0 pt-1.5",
+                THREAD_PANEL_COMPOSER_GUTTER_CLASS,
+              )}
+            >
+              <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
+                {toolbarExtraActions ? (
+                  <div className="flex min-w-0 flex-1 overflow-visible">
+                    {toolbarExtraActions}
+                  </div>
+                ) : null}
+                {threadTypingPubkeys.length > 0 ? (
+                  <TypingIndicatorRow
+                    channel={channel}
+                    className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
+                    currentPubkey={currentPubkey}
+                    profiles={profiles}
+                    typingPubkeys={threadTypingPubkeys}
+                    variant="activity"
+                  />
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           <MessageComposer
             audienceContext={{
               type: "thread",
@@ -832,7 +858,7 @@ export function MessageThreadPanel({
             channelId={channelId}
             channelName={channelName}
             channelType={channel?.channelType ?? null}
-            containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
+            containerClassName={cn(THREAD_PANEL_COMPOSER_GUTTER_CLASS, "pb-5")}
             disabled={disabled || isSending || !channelId}
             draftKey={`thread:${threadHead.id}`}
             autoSubmitDraftKey={autoSendDraftKey}
@@ -851,30 +877,6 @@ export function MessageThreadPanel({
             typingParentEventId={threadHead.id}
             typingRootEventId={threadHead.rootId}
           />
-          <div
-            className={cn(
-              "min-h-8 bg-background pb-1.5 pt-0",
-              THREAD_PANEL_COMPOSER_GUTTER_CLASS,
-            )}
-          >
-            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
-              {toolbarExtraActions ? (
-                <div className="flex min-w-0 flex-1 overflow-visible">
-                  {toolbarExtraActions}
-                </div>
-              ) : null}
-              {threadTypingPubkeys.length > 0 ? (
-                <TypingIndicatorRow
-                  channel={channel}
-                  className="min-w-0 flex-1 py-0 pl-[calc(0.75rem+1px)] pr-0 sm:pl-[calc(1rem+1px)]"
-                  currentPubkey={currentPubkey}
-                  profiles={profiles}
-                  typingPubkeys={threadTypingPubkeys}
-                  variant="activity"
-                />
-              ) : null}
-            </div>
-          </div>
         </div>
       </div>
     </>
