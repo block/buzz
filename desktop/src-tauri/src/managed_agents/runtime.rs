@@ -1582,6 +1582,9 @@ pub fn spawn_agent_child(
     command.stdin(std::process::Stdio::null());
     command.stdout(std::process::Stdio::from(stdout));
     command.stderr(std::process::Stdio::from(stderr));
+    // Drop AppImage-bundled lib paths before applying the managed PATH so
+    // harness children (git/curl/node) link against the host (#2315).
+    crate::appimage_env::sanitize_appimage_env_for_child(&mut command);
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
