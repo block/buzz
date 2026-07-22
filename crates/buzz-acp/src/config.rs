@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use clap::ValueEnum;
-use nostr::Keys;
+use nostr::{Keys, PublicKey};
 use thiserror::Error;
 use url::Url;
 use uuid::Uuid;
@@ -1080,6 +1080,17 @@ impl Config {
                 "--turn-receipts requires a non-empty --expected-gateway-session-key".into(),
             ));
         }
+        if args.turn_receipts
+            && !receipt_owner_resolves(
+                &keys,
+                args.agent_owner.as_deref(),
+                std::env::var("BUZZ_AUTH_TAG").ok().as_deref(),
+            )
+        {
+            return Err(ConfigError::ConfigFile(
+                "--turn-receipts requires a valid --agent-owner or verified BUZZ_AUTH_TAG".into(),
+            ));
+        }
 
         let config = Config {
             keys,
@@ -1174,6 +1185,22 @@ impl Config {
             allowed_respond_to_detail,
         )
     }
+}
+
+fn receipt_owner_resolves(
+    keys: &Keys,
+    explicit_owner: Option<&str>,
+    auth_tag: Option<&str>,
+) -> bool {
+    let verified_auth_owner = auth_tag
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some_and(|value| buzz_sdk::nip_oa::verify_auth_tag(value, &keys.public_key()).is_ok());
+    let valid_explicit_owner = explicit_owner
+        .map(str::trim)
+        .filter(|value| value.len() == 64)
+        .is_some_and(|value| PublicKey::from_hex(value).is_ok());
+    verified_auth_owner || valid_explicit_owner
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1545,6 +1572,25 @@ mod tests {
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn receipt_owner_requires_verified_auth_or_valid_explicit_pubkey() {
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let owner = owner_keys.public_key().to_hex();
+        let auth_tag =
+            buzz_sdk::nip_oa::compute_auth_tag(&owner_keys, &agent_keys.public_key(), "")
+                .expect("test auth tag");
+
+        assert!(receipt_owner_resolves(&agent_keys, Some(&owner), None));
+        assert!(receipt_owner_resolves(&agent_keys, None, Some(&auth_tag)));
+        assert!(!receipt_owner_resolves(&agent_keys, None, None));
+        assert!(!receipt_owner_resolves(
+            &agent_keys,
+            Some("not-a-pubkey"),
+            Some("not-an-auth-tag")
+        ));
     }
 
     fn make_rule(

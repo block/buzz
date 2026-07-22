@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -7,9 +8,8 @@ import { correlateReceipt, loadJson, renderDisabledLaunchAgent, renderWorker, va
 
 const here = dirname(fileURLToPath(import.meta.url));
 const manifest = loadJson(join(here, "workers.json"));
-// Unit tests must be runnable by upstream contributors without the private AEON
-// vault mount. The live validator continues to load manifest.identityMap (or an
-// explicit operator-supplied path) and therefore retains its fail-closed check.
+// Source checks must be runnable by upstream contributors without the private
+// AEON vault mount. Operators can still supply an explicit identity-map path.
 const identityMap = loadJson(join(here, "fixtures", "identity-map.json"));
 
 test("six-worker manifest matches the synthetic identity-map contract", () => {
@@ -76,6 +76,20 @@ test("six deterministic LaunchAgent previews are disabled and secret-free", () =
     labels.add(first.label);
   }
   assert.equal(labels.size, 6);
+});
+
+test("no-argument LaunchAgent renderer uses the checked-in identity fixture", () => {
+  const output = execFileSync(process.execPath, [join(here, "render-launchagents.mjs")], {
+    cwd: here,
+    encoding: "utf8",
+  });
+  const rendered = JSON.parse(output);
+  assert.equal(rendered.schema, "aeon_disabled_launchagents_v1");
+  assert.equal(Object.keys(rendered.artifacts).length, 6);
+  for (const worker of manifest.workers) {
+    const expected = renderDisabledLaunchAgent(manifest, identityMap, worker.aspect);
+    assert.equal(rendered.artifacts[`${expected.label}.plist`], expected.plist);
+  }
 });
 
 test("LaunchAgent rendering rejects unsafe or relative runtime paths", () => {
