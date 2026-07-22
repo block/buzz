@@ -7,37 +7,37 @@
       "display_name": "Nexus",
       "pubkey_hex": "ca2bce90e858e12f399f7b4cd510b5fce74e4238352229ada47b8bdd1a7f3b97",
       "gateway_agent_id": "main",
-      "secret_ref": "/fixtures/keys/nexus.nsec"
+      "secret_ref": "/Volumes/AEON/Projects/buzz-data/keys/nexus.sk"
     },
     "mechanon": {
       "display_name": "Mechanon",
       "pubkey_hex": "44437bd6007641845f154bdb7698b1627745b0a1b1d9bdfcf4826fe82a37ca9d",
       "gateway_agent_id": "mechanon",
-      "secret_ref": "/fixtures/keys/mechanon.nsec"
+      "secret_ref": "/Volumes/AEON/Projects/buzz-data/keys/mechanon.sk"
     },
     "fontis": {
       "display_name": "Fontis",
       "pubkey_hex": "3672ca65abf6b12effaf57475ce31260a4bc96e6d3acf01b909f9c2a44542147",
       "gateway_agent_id": "fontis",
-      "secret_ref": "/fixtures/keys/fontis.nsec"
+      "secret_ref": "/Volumes/AEON/Projects/buzz-data/keys/fontis.sk"
     },
     "sapientis": {
       "display_name": "Sapientis",
       "pubkey_hex": "1b7ddc51e6e7d688cd1816047b3ec35e7460014bf146813a505fee851e8b0d89",
       "gateway_agent_id": "sapientis",
-      "secret_ref": "/fixtures/keys/sapientis.nsec"
+      "secret_ref": "/Volumes/AEON/Projects/buzz-data/keys/sapientis.sk"
     },
     "viatica": {
       "display_name": "Viatica",
       "pubkey_hex": "89a2f2679f83cd9033582f023a3b92e01ed2b5950587efae565045ae65bd03cc",
       "gateway_agent_id": "viatica",
-      "secret_ref": "/fixtures/keys/viatica.nsec"
+      "secret_ref": "/Volumes/AEON/Projects/buzz-data/keys/viatica.sk"
     },
     "voxis": {
       "display_name": "Voxis",
       "pubkey_hex": "e2b124c4728989a09d0f7df96cd2b1823635cc220ed9cdd4f97eaedc12a17fe4",
       "gateway_agent_id": "voxis",
-      "secret_ref": "/fixtures/keys/voxis.nsec"
+      "secret_ref": "/Volumes/AEON/Projects/buzz-data/keys/voxis.sk"
     }
   },
   "channels": {

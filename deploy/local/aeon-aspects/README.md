@@ -45,6 +45,11 @@ node deploy/local/aeon-aspects/validate.mjs
 node deploy/local/aeon-aspects/render-launchagents.mjs
 ```
 
+The no-argument validator uses the checked-in synthetic identity fixture so it
+is runnable in any OSS checkout. To validate the private deployment contract,
+pass its identity map explicitly (for example,
+`node deploy/local/aeon-aspects/validate.mjs /absolute/path/identity-map.json`).
+
 The checked-in `launchagents/` previews are real, deterministic launchd
 definitions with `RunAtLoad=false` and `KeepAlive=false`. They contain only
 owned private-key file paths and expected public keys, never key or token

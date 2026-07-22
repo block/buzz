@@ -7,7 +7,8 @@ import { loadJson, renderDisabledLaunchAgent, renderWorker, validateManifest } f
 const here = dirname(fileURLToPath(import.meta.url));
 const manifestPath = join(here, "workers.json");
 const manifest = loadJson(manifestPath);
-const identityMap = loadJson(process.argv[2] ?? manifest.identityMap);
+const identityMapPath = process.argv[2] ?? join(here, "fixtures", "identity-map.json");
+const identityMap = loadJson(identityMapPath);
 const validation = validateManifest(manifest, identityMap);
 const rendered = validation.ok ? manifest.workers.map((worker) => renderWorker(manifest, identityMap, worker.aspect)) : [];
 const launchAgents = [];

@@ -1262,6 +1262,12 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 rule.name
             )));
         }
+        if rule.admit_invited_ephemeral && !rule.require_exact_channel_tag {
+            return Err(ConfigError::ConfigFile(format!(
+                "rule '{}': admit_invited_ephemeral requires require_exact_channel_tag=true",
+                rule.name
+            )));
+        }
         // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
@@ -2293,6 +2299,31 @@ channels = "ALL"
 
         let err = load_rules(&path).unwrap_err();
         assert!(err.to_string().contains("must be \"all\" or a list"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_load_rules_invited_ephemeral_requires_exact_channel_tag() {
+        let dir = std::env::temp_dir().join("buzz-acp-test-invited-exact-h");
+        let path = dir.join("rules.toml");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            &path,
+            r#"
+[[rules]]
+name = "invited-huddle"
+channels = []
+require_mention = true
+admit_invited_ephemeral = true
+require_exact_channel_tag = false
+"#,
+        )
+        .unwrap();
+
+        let err = load_rules(&path).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires require_exact_channel_tag=true"));
         std::fs::remove_dir_all(&dir).ok();
     }
 
