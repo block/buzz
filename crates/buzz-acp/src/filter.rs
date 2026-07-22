@@ -154,6 +154,11 @@ pub struct MatchedRule {
     pub rule_index: usize,
     /// Prompt tag to use (rule's `prompt_tag` or its `name`).
     pub prompt_tag: String,
+    /// True when the winning rule required a mention that was absent and the
+    /// event was admitted only because its thread root is followed (#2270).
+    /// The caller applies the followed-thread author policy to exactly these
+    /// admissions — mention-based matches are never subject to it.
+    pub admitted_via_follow: bool,
 }
 
 /// Maximum expression length accepted by `evaluate_filter`.
@@ -387,6 +392,8 @@ pub async fn match_event(
     });
 
     for (index, rule) in rules.iter().enumerate() {
+        let mut admitted_via_follow = false;
+
         // 1. Channel scope check.
         if !rule.channels.matches(&channel_id) {
             continue;
@@ -406,8 +413,11 @@ pub async fn match_event(
                 s.first().map(|k| k.as_str()) == Some("p")
                     && s.get(1).map(|v| v.as_str()) == Some(agent_pubkey_hex)
             });
-            if !mentioned && followed_thread_root.is_none() {
-                continue;
+            if !mentioned {
+                if followed_thread_root.is_none() {
+                    continue;
+                }
+                admitted_via_follow = true;
             }
         }
 
@@ -466,6 +476,7 @@ pub async fn match_event(
         return Some(MatchedRule {
             rule_index: index,
             prompt_tag,
+            admitted_via_follow,
         });
     }
 
@@ -527,10 +538,32 @@ mod tests {
             .await
             .is_none());
 
-        // With the thread followed, the same unmentioned reply is admitted.
+        // With the thread followed, the same unmentioned reply is admitted —
+        // and flagged as a follow admission so the author policy can act.
         let followed: HashSet<String> = [root].into_iter().collect();
         let matched = match_event(&event, channel_id, &rules, "agent-pk", Some(&followed)).await;
-        assert!(matched.is_some());
+        assert!(matched.as_ref().is_some_and(|m| m.admitted_via_follow));
+    }
+
+    #[tokio::test]
+    async fn test_match_event_mention_admission_is_not_flagged_as_follow() {
+        let channel_id = any_channel();
+        let rules = vec![make_rule(
+            "mentions",
+            ChannelScope::All("all".into()),
+            vec![9],
+            true,
+            None,
+            None,
+        )];
+        // Explicitly mentioned event in a followed thread: admitted via the
+        // mention, so the follow flag must stay false (the author policy
+        // never applies to explicit mentions).
+        let root = "e".repeat(64);
+        let followed: HashSet<String> = [root].into_iter().collect();
+        let event = make_event_with_p_tag(9, "hey @agent", "agent-pk");
+        let matched = match_event(&event, channel_id, &rules, "agent-pk", Some(&followed)).await;
+        assert!(matched.as_ref().is_some_and(|m| !m.admitted_via_follow));
     }
 
     #[tokio::test]
