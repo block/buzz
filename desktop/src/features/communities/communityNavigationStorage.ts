@@ -1,6 +1,7 @@
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 
 const COMMUNITY_DESTINATIONS_KEY = "buzz-community-destinations";
+let pendingCommunityRestoreId: string | null = null;
 
 export type CommunityDestination =
   | { kind: "home" }
@@ -79,6 +80,9 @@ export function removeCommunityDestination(
   communityId: string,
   storage: Storage = localStorage,
 ): void {
+  if (pendingCommunityRestoreId === communityId) {
+    pendingCommunityRestoreId = null;
+  }
   const destinations = loadCommunityDestinations(storage);
   if (!(communityId in destinations)) {
     return;
@@ -91,4 +95,17 @@ export function clearCommunityDestinations(
   storage: Storage = localStorage,
 ): void {
   storage.removeItem(COMMUNITY_DESTINATIONS_KEY);
+  pendingCommunityRestoreId = null;
+}
+
+export function markPendingCommunityRestore(communityId: string): void {
+  pendingCommunityRestoreId = communityId;
+}
+
+export function consumePendingCommunityRestore(communityId: string): boolean {
+  if (pendingCommunityRestoreId !== communityId) {
+    return false;
+  }
+  pendingCommunityRestoreId = null;
+  return true;
 }

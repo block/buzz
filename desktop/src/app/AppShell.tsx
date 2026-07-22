@@ -8,6 +8,7 @@ import { AppShellOverlays } from "@/app/AppShellOverlays";
 import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
+import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
@@ -72,6 +73,7 @@ import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
+  consumePendingCommunityRestore,
   loadCommunityDestination,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
@@ -137,34 +139,15 @@ export function AppShell() {
     () => deriveShellRoute(location.pathname),
     [location.pathname],
   );
-  // Navigate Home before switching communities so the outgoing channel tree is
-  // unmounted before the relay changes. This ordering prevents ChannelScreen's
-  // read effect from advancing markers for the previous community. The saved
-  // destination is restored only after the target community has loaded.
-  const handleSwitchCommunity = React.useCallback(
-    async (id: string) => {
-      const activeCommunityId = communitiesHook.activeCommunity?.id;
-      if (!activeCommunityId || id === activeCommunityId) {
-        return;
-      }
-
-      saveCommunityDestination(
-        activeCommunityId,
-        selectedView === "channel" && selectedChannelId
-          ? { kind: "channel", channelId: selectedChannelId }
-          : { kind: "home" },
-      );
-      await goHome({ replace: true });
-      communitiesHook.switchCommunity(id);
-    },
-    [
-      goHome,
-      selectedChannelId,
-      selectedView,
-      communitiesHook.activeCommunity?.id,
-      communitiesHook.switchCommunity,
-    ],
-  );
+  const {
+    removeCommunity: handleRemoveCommunity,
+    switchCommunity: handleSwitchCommunity,
+  } = useCommunityNavigationTransitions({
+    communities: communitiesHook,
+    goHome,
+    selectedChannelId,
+    selectedView,
+  });
   // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
   const locationSearchSection = (location.search as { section?: unknown })
@@ -255,14 +238,21 @@ export function AppShell() {
   );
   const hasRestoredCommunityDestinationRef = React.useRef(false);
   React.useEffect(() => {
+    const activeCommunityId = communitiesHook.activeCommunity?.id;
     if (
       hasRestoredCommunityDestinationRef.current ||
-      !channelsQuery.isSuccess ||
-      !communitiesHook.activeCommunity
+      !channelsQuery.isFetchedAfterMount ||
+      !activeCommunityId
     ) {
       return;
     }
     hasRestoredCommunityDestinationRef.current = true;
+
+    // Restoration belongs to an explicit community transition. Cold boot and
+    // reconnect remounts must preserve the route the user explicitly opened.
+    if (!consumePendingCommunityRestore(activeCommunityId)) {
+      return;
+    }
 
     // A direct channel URL or browser-history destination is explicit. Only
     // replace the neutral Home route used by the community-switch teardown.
@@ -270,8 +260,7 @@ export function AppShell() {
       return;
     }
 
-    const communityId = communitiesHook.activeCommunity.id;
-    const destination = loadCommunityDestination(communityId);
+    const destination = loadCommunityDestination(activeCommunityId);
     if (!destination || destination.kind === "home") {
       return;
     }
@@ -284,13 +273,11 @@ export function AppShell() {
       return;
     }
 
-    saveCommunityDestination(communityId, { kind: "home" });
-    void goHome({ replace: true });
+    saveCommunityDestination(activeCommunityId, { kind: "home" });
   }, [
-    channelsQuery.isSuccess,
-    communitiesHook.activeCommunity,
+    channelsQuery.isFetchedAfterMount,
+    communitiesHook.activeCommunity?.id,
     goChannel,
-    goHome,
     selectedView,
     sidebarChannels,
   ]);
@@ -766,7 +753,7 @@ export function AppShell() {
                         communitiesHook.activeCommunity?.id ?? null
                       }
                       onAddCommunity={addCommunityDialog.openDialog}
-                      onRemoveCommunity={communitiesHook.removeCommunity}
+                      onRemoveCommunity={(id) => void handleRemoveCommunity(id)}
                       onReorderCommunities={communitiesHook.reorderCommunities}
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}
@@ -858,7 +845,9 @@ export function AppShell() {
                           onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
-                          onRemoveCommunity={communitiesHook.removeCommunity}
+                          onRemoveCommunity={(id) =>
+                            void handleRemoveCommunity(id)
+                          }
                           onSwitchCommunity={handleSwitchCommunity}
                           onCreateAgent={() => requestOpenCreateAgent()}
                           selfPresenceStatus={presenceSession.currentStatus}

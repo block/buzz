@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
+import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
@@ -37,6 +38,10 @@ import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  markPendingCommunityRestore,
+  saveCommunityDestination,
+} from "@/features/communities/communityNavigationStorage";
 import {
   onAddCommunityPrefillAvailable,
   requestAddCommunityPrefill,
@@ -323,13 +328,33 @@ function CommunityApp({
     sharedIdentity,
   );
 
-  const handleCommunityOnboardingConnect = useCallback(() => {
+  const transitionCommunity = useCallback(
+    async (targetCommunityId: string) => {
+      const activeCommunityId = activeCommunity?.id;
+      if (targetCommunityId === activeCommunityId) return;
+      if (activeCommunityId) {
+        const route = deriveShellRoute(router.state.location.pathname);
+        saveCommunityDestination(
+          activeCommunityId,
+          route.selectedView === "channel" && route.selectedChannelId
+            ? { kind: "channel", channelId: route.selectedChannelId }
+            : { kind: "home" },
+        );
+        await router.navigate({ to: "/", replace: true });
+        markPendingCommunityRestore(targetCommunityId);
+      }
+      switchCommunity(targetCommunityId);
+    },
+    [activeCommunity?.id, switchCommunity],
+  );
+
+  const handleCommunityOnboardingConnect = useCallback(async () => {
     const transaction = communityOnboarding.transaction;
     if (transaction?.stage !== "connecting") return;
     if (connectingTransactionRef.current === transaction.id) return;
     connectingTransactionRef.current = transaction.id;
     if (transaction.communityId) {
-      switchCommunity(transaction.communityId);
+      await transitionCommunity(transaction.communityId);
       return;
     }
     const previousCommunityId = activeCommunity?.id;
@@ -351,7 +376,7 @@ function CommunityApp({
       addedCommunity: !relayAlreadyExists,
       error: undefined,
     });
-    switchCommunity(id);
+    await transitionCommunity(id);
     reconnectCommunity();
   }, [
     activeCommunity?.id,
@@ -360,17 +385,17 @@ function CommunityApp({
     communityOnboarding,
     currentPubkey,
     reconnectCommunity,
-    switchCommunity,
+    transitionCommunity,
   ]);
 
-  const handleCommunityOnboardingCancel = useCallback(() => {
+  const handleCommunityOnboardingCancel = useCallback(async () => {
     const transaction = communityOnboarding.transaction;
     communityOnboarding.clear();
 
     if (!transaction?.communityId) return;
     if (!transaction.addedCommunity) {
       if (transaction.previousCommunityId) {
-        switchCommunity(transaction.previousCommunityId);
+        await transitionCommunity(transaction.previousCommunityId);
       }
       return;
     }
@@ -381,16 +406,16 @@ function CommunityApp({
       clearCommunities();
       return;
     }
-    removeCommunity(transaction.communityId);
     if (transaction.previousCommunityId) {
-      switchCommunity(transaction.previousCommunityId);
+      await transitionCommunity(transaction.previousCommunityId);
     }
+    removeCommunity(transaction.communityId);
   }, [
     clearCommunities,
     communities.length,
     communityOnboarding,
     removeCommunity,
-    switchCommunity,
+    transitionCommunity,
   ]);
 
   const bootSplashPhase = useBootSplashHold();
