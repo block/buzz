@@ -41,7 +41,10 @@ impl TrustedInboundEventEnvelope {
     /// failed signature verification produces no trusted metadata.
     pub(crate) fn from_prompt_batch(batch: Option<&crate::queue::FlushBatch>) -> Option<Self> {
         let batch = batch?;
-        if !batch.cancelled_events.is_empty() || batch.events.len() != 1 {
+        if batch.cancel_reason.is_some()
+            || !batch.cancelled_events.is_empty()
+            || batch.events.len() != 1
+        {
             return None;
         }
         let event = &batch.events[0].event;
@@ -2451,6 +2454,16 @@ mod tests {
         let mut cancelled = signed_batch(channel_id, vec![]);
         cancelled.cancelled_events.push(cancelled.events[0].clone());
         assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled)).is_none());
+
+        // Queue fallback re-dispatches cancelled events in the regular event
+        // slot while preserving the cancellation reason. That shape must not
+        // regain trusted inbound authority merely because cancelled_events is
+        // empty after the move.
+        let mut cancelled_fallback = signed_batch(channel_id, vec![]);
+        cancelled_fallback.cancel_reason = Some(crate::queue::CancelReason::Steer);
+        assert!(
+            TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled_fallback)).is_none()
+        );
 
         assert!(TrustedInboundEventEnvelope::from_prompt_batch(None).is_none());
     }
