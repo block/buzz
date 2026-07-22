@@ -394,13 +394,14 @@ fn resolve_bash(_path_env: &str) -> Result<(PathBuf, String), String> {
 ///      WITHOUT the System32 exclusion — the operator explicitly chose this shell,
 ///      and cmd.exe/powershell.exe live in System32 legitimately.
 ///   2. `GIT_BASH` env override — legacy escape hatch (kept for back-compat).
-///   3. `bash.exe` on PATH, excluding System32 so we never resolve WSL's launcher.
-///   4. `git.exe` on PATH → its sibling `..\\bin\\bash.exe`. Git for Windows's
+///   3. `git.exe` on PATH → its sibling `..\\bin\\bash.exe`. Git for Windows's
 ///      recommended "Git from the command line" option adds `Git\\cmd` to PATH,
 ///      not `Git\\bin`, so this is the normal post-install route.
-///   5. Standard `ProgramFiles`, `ProgramFiles(x86)`, and `LocalAppData` paths
+///   4. Standard `ProgramFiles`, `ProgramFiles(x86)`, and `LocalAppData` paths
 ///      when the child inherited their parent environment.
-///   6. Git for Windows's machine then user registry `InstallPath`.
+///   5. Git for Windows's machine then user registry `InstallPath`.
+///   6. `bash.exe` on PATH, excluding System32 (WSL) and WindowsApps (App
+///      Execution Alias → WSL; hangs #2328).
 ///
 /// Returns `(resolved_path, display_name)`. The display name is derived from the
 /// resolved path, guaranteeing the dialect hint and the spawned shell agree.
@@ -428,11 +429,6 @@ fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
         }
     }
 
-    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from);
-    if let Some(p) = scan_path_for_bash(path_env, system_root.as_deref()) {
-        return Ok((p, "bash".to_string()));
-    }
-
     if let Some(git) = scan_path_for_command(Path::new("git.exe"), path_env, None) {
         if let Some(bash) = bash_from_git(&git) {
             return Ok((bash, "bash".to_string()));
@@ -445,6 +441,11 @@ fn resolve_bash(path_env: &str) -> Result<(PathBuf, String), String> {
 
     if let Some(bash) = git_bash_from_registry() {
         return Ok((bash, "bash".to_string()));
+    }
+
+    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from);
+    if let Some(p) = scan_path_for_bash(path_env, system_root.as_deref()) {
+        return Ok((p, "bash".to_string()));
     }
 
     Err(
@@ -585,8 +586,8 @@ fn is_under_dir(dir: &Path, root: &Path) -> bool {
 
 /// Scan the child's PATH for `bash.exe`, skipping the Windows system directory
 /// (`system_root`, normally `%SystemRoot%`) so we never resolve WSL's
-/// `System32\bash.exe`. PATH is parsed with `std::env::split_paths` (never a
-/// hand-split on ';') so it matches exactly what the spawned child would see.
+/// `System32\bash.exe`, and skipping `…\Microsoft\WindowsApps` (App Execution
+/// Alias bash → WSL hang, #2328). PATH is parsed with `std::env::split_paths`.
 #[cfg(windows)]
 fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
     scan_path_for_command(Path::new("bash.exe"), path_env, system_root)
@@ -594,7 +595,8 @@ fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<Path
 
 /// Scan `path_env` for `name` (or `name.exe` on Windows if `name` has no
 /// extension), skipping any directory under `system_root` to avoid resolving
-/// WSL helpers. Returns the first absolute path found.
+/// WSL helpers. For `bash.exe`, also skip WindowsApps. Returns the first
+/// absolute path found.
 #[cfg(windows)]
 fn scan_path_for_command(
     name: &Path,
@@ -602,11 +604,17 @@ fn scan_path_for_command(
     system_root: Option<&Path>,
 ) -> Option<PathBuf> {
     let needs_exe = name.extension().is_none();
+    let skip_windows_apps = name
+        .file_name()
+        .is_some_and(|n| n.eq_ignore_ascii_case("bash.exe") || n.eq_ignore_ascii_case("bash"));
     for dir in std::env::split_paths(path_env) {
         if let Some(root) = system_root {
             if is_under_dir(&dir, root) {
                 continue;
             }
+        }
+        if skip_windows_apps && path_looks_like_windows_apps(&dir) {
+            continue;
         }
         // Try as-is first.
         let candidate = dir.join(name);
@@ -623,6 +631,18 @@ fn scan_path_for_command(
         }
     }
     None
+}
+
+/// True for `…\Microsoft\WindowsApps` (App Execution Alias dir), any casing.
+#[cfg(windows)]
+fn path_looks_like_windows_apps(dir: &Path) -> bool {
+    let parts: Vec<_> = dir
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    parts.windows(2).any(|w| {
+        w[0].eq_ignore_ascii_case("Microsoft") && w[1].eq_ignore_ascii_case("WindowsApps")
+    })
 }
 
 #[cfg(unix)]
