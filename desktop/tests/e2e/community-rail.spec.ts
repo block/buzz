@@ -116,6 +116,66 @@ test.describe("community rail", () => {
       .toBe(COMMUNITY_B.id);
   });
 
+  test("restores the last Home or channel destination per community", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const generalUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+
+    await page.getByTestId("channel-random").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const randomUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(randomUrl);
+
+    await page.getByRole("button", { name: "Inbox" }).click();
+    await expect(page).toHaveURL(/#\/$/);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+  });
+
+  test("clears a remembered channel that is unavailable", async ({ page }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "missing-channel" },
+        }),
+      );
+    }, COMMUNITY_A.id);
+
+    await page.goto("/");
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          if (!raw) return null;
+          return JSON.parse(raw)[communityId];
+        }, COMMUNITY_A.id),
+      )
+      .toEqual({ kind: "home" });
+  });
+
   test("shows the quiet switch gate, not the boot splash, while switching", async ({
     page,
   }) => {

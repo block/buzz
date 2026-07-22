@@ -20,6 +20,10 @@ import { removeSelfProfileCachesForRelay } from "@/features/profile/lib/selfProf
 import { removeChannelSnapshotForRelay } from "@/features/channels/channelSnapshot";
 import { removeMessageSnapshotsForRelay } from "@/features/messages/lib/messageSnapshot";
 import { clearSavedCommunitySnapshot } from "@/features/agents/activeAgentTurnsStore";
+import {
+  clearCommunityDestinations,
+  removeCommunityDestination,
+} from "./communityNavigationStorage";
 
 export type UpdateCommunityResult =
   | { kind: "updated"; requiresReinit: boolean }
@@ -194,6 +198,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
 
   const clearCommunities = useCallback(() => {
     clearCommunityStorage();
+    clearCommunityDestinations();
     setCommunitiesState([]);
     setActiveId(null);
   }, []);
@@ -211,6 +216,7 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
           removeChannelSnapshotForRelay(removed.relayUrl);
           removeMessageSnapshotsForRelay(removed.relayUrl);
           clearSavedCommunitySnapshot(id);
+          removeCommunityDestination(id);
         }
       }
 

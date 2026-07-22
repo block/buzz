@@ -71,6 +71,10 @@ import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  loadCommunityDestination,
+  saveCommunityDestination,
+} from "@/features/communities/communityNavigationStorage";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
@@ -129,29 +133,37 @@ export function AppShell() {
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
-  // Navigate home before switching communities so the outgoing channel URL is
-  // cleared. Without this, ChannelScreen's read effect continues firing
-  // markChannelRead({ topLevelOnly: true }) for the previous community's
-  // channel, advancing its NIP-RS markers and causing the rail badge to vanish
-  // on the next 30s poll (A→B→A→B disappearance bug).
-  // Guard: skip goHome() when re-selecting the already-active community so
-  // the current channel is not unexpectedly cleared.
+  const { selectedChannelId, selectedView } = React.useMemo(
+    () => deriveShellRoute(location.pathname),
+    [location.pathname],
+  );
+  // Navigate Home before switching communities so the outgoing channel tree is
+  // unmounted before the relay changes. This ordering prevents ChannelScreen's
+  // read effect from advancing markers for the previous community. The saved
+  // destination is restored only after the target community has loaded.
   const handleSwitchCommunity = React.useCallback(
-    (id: string) => {
-      if (id !== communitiesHook.activeCommunity?.id) {
-        void goHome();
+    async (id: string) => {
+      const activeCommunityId = communitiesHook.activeCommunity?.id;
+      if (!activeCommunityId || id === activeCommunityId) {
+        return;
       }
+
+      saveCommunityDestination(
+        activeCommunityId,
+        selectedView === "channel" && selectedChannelId
+          ? { kind: "channel", channelId: selectedChannelId }
+          : { kind: "home" },
+      );
+      await goHome({ replace: true });
       communitiesHook.switchCommunity(id);
     },
     [
       goHome,
+      selectedChannelId,
+      selectedView,
       communitiesHook.activeCommunity?.id,
       communitiesHook.switchCommunity,
     ],
-  );
-  const { selectedChannelId, selectedView } = React.useMemo(
-    () => deriveShellRoute(location.pathname),
-    [location.pathname],
   );
   // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
@@ -241,6 +253,47 @@ export function AppShell() {
     () => memberChannels.filter((channel) => channel.archivedAt === null),
     [memberChannels],
   );
+  const hasRestoredCommunityDestinationRef = React.useRef(false);
+  React.useEffect(() => {
+    if (
+      hasRestoredCommunityDestinationRef.current ||
+      !channelsQuery.isSuccess ||
+      !communitiesHook.activeCommunity
+    ) {
+      return;
+    }
+    hasRestoredCommunityDestinationRef.current = true;
+
+    // A direct channel URL or browser-history destination is explicit. Only
+    // replace the neutral Home route used by the community-switch teardown.
+    if (selectedView !== "home") {
+      return;
+    }
+
+    const communityId = communitiesHook.activeCommunity.id;
+    const destination = loadCommunityDestination(communityId);
+    if (!destination || destination.kind === "home") {
+      return;
+    }
+
+    const channelIsAvailable = sidebarChannels.some(
+      (channel) => channel.id === destination.channelId,
+    );
+    if (channelIsAvailable) {
+      void goChannel(destination.channelId, { replace: true });
+      return;
+    }
+
+    saveCommunityDestination(communityId, { kind: "home" });
+    void goHome({ replace: true });
+  }, [
+    channelsQuery.isSuccess,
+    communitiesHook.activeCommunity,
+    goChannel,
+    goHome,
+    selectedView,
+    sidebarChannels,
+  ]);
   const activeChannel = React.useMemo(
     () =>
       selectedChannelId
