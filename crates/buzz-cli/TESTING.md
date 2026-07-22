@@ -616,3 +616,4 @@ buzz channels delete --channel "$FORUM_ID" | jq .
 | 59 | `notes get` | ☐ | By name, by naddr, --content-only, cross-author, ambiguous → exit 1 |
 | 60 | `notes ls` | ☐ | Own, --author all, --tag, --limit |
 | 61 | `notes rm` | ☐ | Delete→get 404, double-delete idempotent, missing slug → NotFound |
+| 62 | `capabilities` | ☐ | Local, no relay, no private key; versioned JSON security-capability report |

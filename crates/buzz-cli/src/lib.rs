@@ -64,6 +64,8 @@ handing off the private key via an inherited file descriptor (e.g. from a
 parent process/harness) instead of argv or the environment.
 
 The 'pack' subcommand runs locally and does not require a relay connection.
+The 'capabilities' subcommand runs locally, reads no private key/env vars,
+and prints a versioned JSON report of the CLI's security-relevant behavior.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
@@ -391,6 +393,9 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+    /// Report security-relevant CLI capabilities as versioned JSON (local,
+    /// no relay connection or private key needed)
+    Capabilities,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1883,6 +1888,14 @@ pub enum ModerationCmd {
 }
 
 async fn run(cli: Cli) -> Result<(), CliError> {
+    // `capabilities` is local-only and must run before any private-key
+    // parsing, env var reads, or relay/client construction — it exists
+    // specifically so a caller can introspect the CLI's security contract
+    // without needing a key or a relay.
+    if let Cmd::Capabilities = cli.command {
+        return commands::capabilities::cmd_capabilities();
+    }
+
     let relay_url = client::normalize_relay_url(&cli.relay);
 
     // Pack commands are local-only — no relay connection needed.
@@ -1959,6 +1972,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
         Cmd::Pack(_) => unreachable!("handled above"),
+        Cmd::Capabilities => unreachable!("handled above"),
     }
 }
 
@@ -1978,6 +1992,7 @@ mod tests {
         let expected_groups: Vec<&str> = vec![
             "agents",
             "canvas",
+            "capabilities",
             "channels",
             "dms",
             "emoji",

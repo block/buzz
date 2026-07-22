@@ -163,6 +163,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `capabilities` | | Report security capabilities as versioned JSON (local, no relay, no private key) |
 | `mem` | `ls` | List non-tombstoned memories |
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |
