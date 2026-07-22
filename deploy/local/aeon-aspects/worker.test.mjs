@@ -101,6 +101,25 @@ test("LaunchAgent rendering rejects unsafe or relative runtime paths", () => {
     () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { openclawPath: "/bad,command" }),
     /forbidden delimiter/,
   );
+  assert.throws(
+    () => renderDisabledLaunchAgent(manifest, identityMap, "nexus", { executablePath: "bin:/usr/bin" }),
+    /entries must be absolute/,
+  );
+});
+
+test("Fleet can bind the immutable Node runtime without changing disabled previews", () => {
+  const defaultRendered = renderDisabledLaunchAgent(manifest, identityMap, "nexus");
+  assert.equal(
+    defaultRendered.plist,
+    fs.readFileSync(join(here, "launchagents", "org.aeon.buzz-acp.nexus.plist"), "utf8"),
+  );
+  const rendered = renderDisabledLaunchAgent(manifest, identityMap, "nexus", {
+    executablePath: "/owned/service-runtime/bin:/usr/bin:/bin",
+  });
+  assert.match(
+    rendered.plist,
+    /<key>PATH<\/key><string>\/owned\/service-runtime\/bin:\/usr\/bin:\/bin<\/string>/,
+  );
 });
 
 test("worker restart renders the identical require-existing Gateway binding", () => {

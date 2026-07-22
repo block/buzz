@@ -115,9 +115,16 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const openclawPath = options.openclawPath ?? "/REQUIRES_FLEET/immutable-openclaw/bin/openclaw";
   const tokenFile = options.tokenFile ?? "/REQUIRES_FLEET/owned-token-file";
   const workingDirectory = options.workingDirectory ?? "/Volumes/AEON/Projects/buzz";
+  const executablePath = options.executablePath ?? null;
   for (const [label, value] of Object.entries({ buzzAcpPath, openclawPath, tokenFile, workingDirectory })) {
     if (!value.startsWith("/")) throw new Error(`${label} must be absolute`);
     assertArgSafe(value, label);
+  }
+  if (executablePath !== null) {
+    if (!executablePath.split(":").every((entry) => entry.startsWith("/"))) {
+      throw new Error("executablePath entries must be absolute");
+    }
+    assertArgSafe(executablePath, "executablePath");
   }
   const rendered = renderWorker(manifest, identityMap, aspect, tokenFile);
   const agentCommandIndex = rendered.args.indexOf("--agent-command") + 1;
@@ -129,6 +136,9 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   const stdout = `/Volumes/AEON/Projects/buzz-data/logs/${aspect}.buzz-acp.log`;
   const stderr = `/Volumes/AEON/Projects/buzz-data/logs/${aspect}.buzz-acp.err.log`;
   const argsXml = argv.map((arg) => `    <string>${xml(arg)}</string>`).join("\n");
+  const environmentXml = executablePath
+    ? `\n  <key>EnvironmentVariables</key>\n  <dict><key>PATH</key><string>${xml(executablePath)}</string></dict>`
+    : "";
   return {
     aspect,
     label: rendered.label,
@@ -150,7 +160,7 @@ export function renderDisabledLaunchAgent(manifest, identityMap, aspect, options
   <array>
 ${argsXml}
   </array>
-  <key>WorkingDirectory</key><string>${xml(workingDirectory)}</string>
+  <key>WorkingDirectory</key><string>${xml(workingDirectory)}</string>${environmentXml}
   <key>RunAtLoad</key><false/>
   <key>KeepAlive</key><false/>
   <key>ProcessType</key><string>Background</string>
