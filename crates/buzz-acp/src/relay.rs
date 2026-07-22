@@ -157,7 +157,7 @@ impl ChannelInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct MetadataCandidate {
     created_at: u64,
     event_id: String,
@@ -166,6 +166,7 @@ struct MetadataCandidate {
     archived: bool,
     ttl_seconds: Option<u64>,
     ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    malformed: bool,
 }
 
 impl MetadataCandidate {
@@ -190,90 +191,130 @@ fn merge_discovered_channels(
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
     let mut meta_map: HashMap<Uuid, MetadataCandidate> = HashMap::new();
-    let mut malformed_channels = HashSet::new();
+    let mut unorderable_channels = HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
             let tags = match ev.get("tags").and_then(|t| t.as_array()) {
                 Some(t) => t,
                 None => continue,
             };
-            let mut d_val = None;
             let mut name = None;
             let mut is_hidden = false;
             let mut is_private = false;
             let mut is_archived = false;
             let mut ttl_seconds = None;
             let mut ttl_deadline = None;
+            let mut seen_singletons = HashSet::new();
+            let mut referenced_channels = HashSet::new();
+            let mut malformed = false;
             for tag in tags {
-                if let Some(arr) = tag.as_array() {
-                    match arr.first().and_then(|v| v.as_str()) {
-                        Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
-                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                        Some("hidden") => is_hidden = true,
-                        Some("private") => is_private = true,
-                        Some("archived") => {
-                            is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
+                let Some(arr) = tag.as_array() else {
+                    continue;
+                };
+                let Some(kind) = arr.first().and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if matches!(
+                    kind,
+                    "d" | "name" | "hidden" | "private" | "archived" | "ttl" | "ttl_deadline"
+                ) && !seen_singletons.insert(kind)
+                {
+                    malformed = true;
+                }
+                match kind {
+                    "d" => {
+                        let value = arr.get(1).and_then(|v| v.as_str());
+                        malformed |= arr.len() != 2 || value.is_none_or(str::is_empty);
+                        if let Some(value) = value {
+                            if let Ok(uuid) = value.parse::<Uuid>() {
+                                referenced_channels.insert(uuid);
+                            } else {
+                                malformed = true;
+                            }
                         }
-                        Some("ttl") => {
-                            ttl_seconds = arr
-                                .get(1)
-                                .and_then(|v| v.as_str())
-                                .and_then(|value| value.parse::<u64>().ok())
-                                .filter(|ttl| *ttl > 0)
-                        }
-                        Some("ttl_deadline") => {
-                            ttl_deadline = arr
-                                .get(1)
-                                .and_then(|v| v.as_str())
-                                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                                .map(|deadline| deadline.with_timezone(&chrono::Utc))
-                        }
-                        _ => {}
                     }
+                    "name" => {
+                        name = arr.get(1).and_then(|v| v.as_str());
+                        malformed |= arr.len() != 2 || name.is_none();
+                    }
+                    "hidden" => {
+                        malformed |=
+                            arr.len() > 2 || arr.get(1).is_some_and(|v| v.as_str() != Some(""));
+                        is_hidden = true;
+                    }
+                    "private" => {
+                        malformed |=
+                            arr.len() > 2 || arr.get(1).is_some_and(|v| v.as_str() != Some(""));
+                        is_private = true;
+                    }
+                    "archived" => {
+                        let value = arr.get(1).and_then(|v| v.as_str());
+                        malformed |= arr.len() != 2 || !matches!(value, Some("true" | "false"));
+                        is_archived = value == Some("true");
+                    }
+                    "ttl" => {
+                        ttl_seconds = arr
+                            .get(1)
+                            .and_then(|v| v.as_str())
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|ttl| *ttl > 0);
+                        malformed |= arr.len() != 2 || ttl_seconds.is_none();
+                    }
+                    "ttl_deadline" => {
+                        ttl_deadline = arr
+                            .get(1)
+                            .and_then(|v| v.as_str())
+                            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                            .map(|deadline| deadline.with_timezone(&chrono::Utc));
+                        malformed |= arr.len() != 2 || ttl_deadline.is_none();
+                    }
+                    _ => {}
                 }
             }
-            if let Some(d) = d_val {
-                if let Ok(uuid) = d.parse::<Uuid>() {
-                    let Some(created_at) = ev.get("created_at").and_then(|value| value.as_u64())
-                    else {
-                        warn!(channel_id = %uuid, "channel metadata missing created_at — failing channel metadata closed");
-                        malformed_channels.insert(uuid);
-                        continue;
-                    };
-                    let Some(event_id) =
-                        ev.get("id").and_then(|value| value.as_str()).filter(|id| {
-                            id.len() == 64
-                                && id.chars().all(|character| character.is_ascii_hexdigit())
-                        })
-                    else {
-                        warn!(channel_id = %uuid, "channel metadata missing valid event id — failing channel metadata closed");
-                        malformed_channels.insert(uuid);
-                        continue;
-                    };
-                    let ch_name = name.unwrap_or("unknown").to_string();
-                    // DMs have the "hidden" tag; private channels have "private".
-                    let ch_type = if is_hidden {
-                        "dm".to_string()
-                    } else if is_private {
-                        "private".to_string()
-                    } else {
-                        "stream".to_string()
-                    };
-                    let candidate = MetadataCandidate {
-                        created_at,
-                        event_id: event_id.to_ascii_lowercase(),
-                        name: ch_name,
-                        channel_type: ch_type,
-                        archived: is_archived,
-                        ttl_seconds,
-                        ttl_deadline,
-                    };
-                    let replace = meta_map
-                        .get(&uuid)
-                        .is_none_or(|current| candidate.is_newer_than(current));
-                    if replace {
-                        meta_map.insert(uuid, candidate);
-                    }
+            if referenced_channels.is_empty() {
+                continue;
+            }
+            let Some(created_at) = ev.get("created_at").and_then(|value| value.as_u64()) else {
+                for uuid in referenced_channels {
+                    warn!(channel_id = %uuid, "channel metadata missing created_at — failing channel metadata closed");
+                    unorderable_channels.insert(uuid);
+                }
+                continue;
+            };
+            let Some(event_id) = ev.get("id").and_then(|value| value.as_str()).filter(|id| {
+                id.len() == 64 && id.chars().all(|character| character.is_ascii_hexdigit())
+            }) else {
+                for uuid in referenced_channels {
+                    warn!(channel_id = %uuid, "channel metadata missing valid event id — failing channel metadata closed");
+                    unorderable_channels.insert(uuid);
+                }
+                continue;
+            };
+            let ch_name = name.unwrap_or("unknown").to_string();
+            // DMs have the "hidden" tag; private channels have "private".
+            let ch_type = if is_hidden {
+                "dm".to_string()
+            } else if is_private {
+                "private".to_string()
+            } else {
+                "stream".to_string()
+            };
+            let candidate = MetadataCandidate {
+                created_at,
+                event_id: event_id.to_ascii_lowercase(),
+                name: ch_name,
+                channel_type: ch_type,
+                archived: is_archived,
+                ttl_seconds,
+                ttl_deadline,
+                malformed,
+            };
+            for uuid in referenced_channels {
+                let replace = meta_map
+                    .get(&uuid)
+                    .is_none_or(|current| candidate.is_newer_than(current));
+                if replace {
+                    meta_map.insert(uuid, candidate.clone());
                 }
             }
         }
@@ -281,10 +322,14 @@ fn merge_discovered_channels(
 
     let mut map = HashMap::with_capacity(channel_uuids.len());
     for uuid in channel_uuids {
-        if malformed_channels.contains(&uuid) {
+        if unorderable_channels.contains(&uuid) {
             continue;
         }
         match meta_map.remove(&uuid) {
+            Some(candidate) if candidate.malformed => {
+                warn!(channel_id = %uuid, "canonical channel metadata has ambiguous or malformed singleton tags — failing channel metadata closed");
+                continue;
+            }
             Some(candidate) if candidate.archived => continue,
             Some(candidate) => {
                 map.insert(
@@ -4381,7 +4426,10 @@ mod tests {
         let map = merge_discovered_channels(vec![missing, expired, malformed], &meta);
         assert!(!map[&missing].is_ephemeral());
         assert!(!map[&expired].is_ephemeral());
-        assert!(!map[&malformed].is_ephemeral());
+        assert!(
+            !map.contains_key(&malformed),
+            "a malformed deadline fails the channel metadata closed"
+        );
     }
 
     #[test]
@@ -4507,8 +4555,183 @@ mod tests {
         ]);
 
         let map = merge_discovered_channels(vec![zero, invalid], &meta);
-        assert!(!map[&zero].is_ephemeral());
-        assert!(!map[&invalid].is_ephemeral());
+        assert!(!map.contains_key(&zero));
+        assert!(!map.contains_key(&invalid));
+    }
+
+    #[test]
+    fn merge_discovered_channels_rejects_duplicate_or_malformed_singletons() {
+        let duplicate_ttl = Uuid::new_v4();
+        let contradictory_archive = Uuid::new_v4();
+        let malformed_private = Uuid::new_v4();
+        let duplicate_d = Uuid::new_v4();
+        let other_d = Uuid::new_v4();
+
+        let mut duplicate_ttl_event = meta_event(
+            duplicate_ttl,
+            "duplicate ttl",
+            &[
+                "private",
+                "",
+                "ttl",
+                "3600",
+                "ttl_deadline",
+                "2999-01-01T00:00:00Z",
+            ],
+        );
+        duplicate_ttl_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["ttl", "7200"]));
+
+        let mut contradictory_archive_event = meta_event(
+            contradictory_archive,
+            "archive conflict",
+            &["archived", "false"],
+        );
+        contradictory_archive_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["archived", "true"]));
+
+        let mut malformed_private_event = meta_event(malformed_private, "bad private", &[]);
+        malformed_private_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["private", "true"]));
+
+        let mut duplicate_d_event = meta_event(duplicate_d, "duplicate d", &[]);
+        duplicate_d_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["d", other_d.to_string()]));
+
+        let map = merge_discovered_channels(
+            vec![
+                duplicate_ttl,
+                contradictory_archive,
+                malformed_private,
+                duplicate_d,
+                other_d,
+            ],
+            &serde_json::json!([
+                duplicate_ttl_event,
+                contradictory_archive_event,
+                malformed_private_event,
+                duplicate_d_event,
+            ]),
+        );
+        for channel in [
+            duplicate_ttl,
+            contradictory_archive,
+            malformed_private,
+            duplicate_d,
+            other_d,
+        ] {
+            assert!(
+                !map.contains_key(&channel),
+                "ambiguous singleton metadata must fail {channel} closed"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_discovered_channels_validates_only_the_canonical_latest_candidate() {
+        let recovered = Uuid::new_v4();
+        let poisoned = Uuid::new_v4();
+        let valid_latest = meta_event_at(recovered, "recovered", &["private", ""], 200, 'b');
+        let valid_stale = meta_event_at(poisoned, "stale", &["private", ""], 100, 'a');
+        let mut malformed_stale = meta_event_at(recovered, "bad stale", &[], 100, 'a');
+        malformed_stale["tags"].as_array_mut().unwrap().extend([
+            serde_json::json!(["ttl", "1"]),
+            serde_json::json!(["ttl", "2"]),
+        ]);
+        let mut malformed_latest = meta_event_at(poisoned, "bad latest", &[], 200, 'b');
+        malformed_latest["tags"].as_array_mut().unwrap().extend([
+            serde_json::json!(["archived", "false"]),
+            serde_json::json!(["archived", "true"]),
+        ]);
+
+        for events in [
+            serde_json::json!([
+                malformed_stale.clone(),
+                valid_latest.clone(),
+                valid_stale.clone(),
+                malformed_latest.clone(),
+            ]),
+            serde_json::json!([malformed_latest, valid_stale, valid_latest, malformed_stale]),
+        ] {
+            let map = merge_discovered_channels(vec![recovered, poisoned], &events);
+            assert_eq!(map[&recovered].name, "recovered");
+            assert!(!map.contains_key(&poisoned));
+        }
+    }
+
+    #[test]
+    fn merge_discovered_channels_covers_all_singleton_shapes() {
+        let duplicate_name = Uuid::new_v4();
+        let malformed_hidden = Uuid::new_v4();
+        let duplicate_deadline = Uuid::new_v4();
+        let invalid_archived = Uuid::new_v4();
+        let canonical_private = Uuid::new_v4();
+        let canonical_hidden = Uuid::new_v4();
+
+        let mut events = vec![];
+        for (channel, extra_tag) in [
+            (duplicate_name, serde_json::json!(["name", "again"])),
+            (malformed_hidden, serde_json::json!(["hidden", "true"])),
+            (
+                duplicate_deadline,
+                serde_json::json!(["ttl_deadline", "2998-01-01T00:00:00Z"]),
+            ),
+            (invalid_archived, serde_json::json!(["archived", "yes"])),
+        ] {
+            let mut event = meta_event(channel, "base", &["ttl_deadline", "2999-01-01T00:00:00Z"]);
+            event["tags"].as_array_mut().unwrap().push(extra_tag);
+            events.push(event);
+        }
+        events.push(serde_json::json!({
+            "id": "e".repeat(64),
+            "created_at": 100,
+            "tags": [
+                ["d", canonical_private.to_string()],
+                ["name", "private marker"],
+                ["private"],
+                ["ttl", "3600"],
+                ["ttl_deadline", "2999-01-01T00:00:00Z"]
+            ]
+        }));
+        events.push(serde_json::json!({
+            "id": "f".repeat(64),
+            "created_at": 100,
+            "tags": [
+                ["d", canonical_hidden.to_string()],
+                ["name", "hidden marker"],
+                ["hidden"]
+            ]
+        }));
+
+        let map = merge_discovered_channels(
+            vec![
+                duplicate_name,
+                malformed_hidden,
+                duplicate_deadline,
+                invalid_archived,
+                canonical_private,
+                canonical_hidden,
+            ],
+            &serde_json::Value::Array(events),
+        );
+        for channel in [
+            duplicate_name,
+            malformed_hidden,
+            duplicate_deadline,
+            invalid_archived,
+        ] {
+            assert!(!map.contains_key(&channel));
+        }
+        assert!(map[&canonical_private].is_ephemeral());
+        assert_eq!(map[&canonical_hidden].channel_type, "dm");
     }
 
     #[test]
