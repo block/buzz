@@ -11,6 +11,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 mod paths;
+mod provision_agent;
 mod read_file;
 mod rg;
 mod shell;
@@ -150,6 +151,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         "tree" => std::process::exit(tree::run(std::env::args().skip(1).collect())),
         "git-credential-nostr" => std::process::exit(git_credential_nostr::run()),
         "git-sign-nostr" => std::process::exit(git_sign_nostr::run()),
+        "buzz-provision-agent" => std::process::exit(provision_agent::run()),
         _ => {}
     }
 

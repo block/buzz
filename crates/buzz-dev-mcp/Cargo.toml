@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 buzz-cli = { path = "../buzz-cli" }
+buzz-sdk = { workspace = true }
 git-credential-nostr = { path = "../git-credential-nostr" }
 git-sign-nostr = { path = "../git-sign-nostr" }
 nostr = { workspace = true }

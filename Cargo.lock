@@ -965,6 +965,7 @@ dependencies = [
  "base64",
  "buzz-cli",
  "buzz-core",
+ "buzz-sdk",
  "git-credential-nostr",
  "git-sign-nostr",
  "ignore",
