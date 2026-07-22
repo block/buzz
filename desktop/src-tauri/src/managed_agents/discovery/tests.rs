@@ -73,6 +73,24 @@ fn normalizes_claude_and_codex_args_to_empty() {
 }
 
 #[test]
+fn normalizes_opencode_and_cursor_args_to_acp() {
+    assert_eq!(normalize_agent_args("opencode", Vec::new()), vec!["acp"]);
+    assert_eq!(normalize_agent_args("agent", vec!["".into()]), vec!["acp"]);
+    assert_eq!(normalize_agent_args("cursor-agent", Vec::new()), vec!["acp"]);
+}
+
+#[test]
+fn opencode_and_cursor_are_known_native_acp_runtimes() {
+    let opencode = super::known_acp_runtime_exact("opencode").expect("OpenCode runtime");
+    assert_eq!(opencode.commands, ["opencode"]);
+    assert_eq!(normalize_agent_args(opencode.commands[0], Vec::new()), vec!["acp"]);
+
+    let cursor = super::known_acp_runtime_exact("cursor").expect("Cursor runtime");
+    assert_eq!(cursor.commands, ["agent", "cursor-agent"]);
+    assert_eq!(normalize_agent_args(cursor.commands[0], Vec::new()), vec!["acp"]);
+}
+
+#[test]
 fn resolves_buzz_agent_avatar() {
     assert_eq!(
         managed_agent_avatar_url("buzz-agent"),

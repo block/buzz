@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **Goose**, **Codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), **Claude Code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)), **OpenCode**, and **Cursor Agent**.
 
 ## Prerequisites
 
@@ -88,6 +88,36 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with OpenCode
+
+[OpenCode](https://opencode.ai/docs/acp/) includes a native ACP server.
+
+```bash
+# Install OpenCode if needed
+curl -fsSL https://opencode.ai/install | bash
+
+# buzz-acp recognizes OpenCode and supplies the required `acp` argument.
+export BUZZ_ACP_AGENT_COMMAND="opencode"
+buzz-acp
+```
+
+## Running with Cursor Agent
+
+[Cursor Agent](https://cursor.com/docs/cli/acp) also includes a native ACP server.
+
+```bash
+# Install Cursor Agent if needed
+curl https://cursor.com/install -fsS | bash
+
+# `agent` is Cursor's ACP command. `cursor-agent` is accepted as an alias.
+export BUZZ_ACP_AGENT_COMMAND="agent"
+buzz-acp
+```
+
+For both runtimes, an empty `BUZZ_ACP_AGENT_ARGS` is normalized to `acp`. If
+you set it for runtime-specific arguments, keep `acp` first (for example,
+`BUZZ_ACP_AGENT_ARGS="acp,--pure"`).
 
 ## Configuration
 

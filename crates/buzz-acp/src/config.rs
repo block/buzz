@@ -610,7 +610,9 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // These runtimes expose their ACP servers behind an explicit `acp`
+        // subcommand. Keep this list in sync with desktop discovery.
+        "goose" | "opencode" | "agent" | "cursor-agent" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1427,9 +1429,18 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_goose_args_to_acp() {
+    fn normalizes_acp_subcommand_runtimes_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+        assert_eq!(normalize_agent_args("opencode", Vec::new()), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("/Users/me/.local/bin/agent", vec!["".into()]),
+            vec!["acp"]
+        );
+        assert_eq!(
+            normalize_agent_args("cursor-agent", Vec::new()),
+            vec!["acp"]
+        );
     }
 
     #[test]
