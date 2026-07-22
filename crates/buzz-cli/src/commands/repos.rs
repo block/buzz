@@ -346,6 +346,62 @@ async fn cmd_protect_remove(
     submit_repo_update(client, builder).await
 }
 
+/// Build the NIP-09 deletion event (kind:5) for a repo announcement coordinate.
+///
+/// Carries **only** an `a` tag (`30617:<pubkey>:<repo-id>`) and no `e` tag so
+/// the relay takes the addressable soft-delete path (same contract as `notes rm`).
+pub fn build_rm_event(coord: &nostr::nips::nip01::Coordinate) -> Result<EventBuilder, CliError> {
+    let a_tag = Tag::parse(["a", &coord.to_string()]).map_err(tag_error)?;
+    Ok(EventBuilder::new(nostr::Kind::EventDeletion, "").tags(vec![a_tag]))
+}
+
+fn repo_coord_for(
+    author: &nostr::PublicKey,
+    repo_id: &str,
+) -> nostr::nips::nip01::Coordinate {
+    nostr::nips::nip01::Coordinate::new(
+        nostr::Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16),
+        *author,
+    )
+    .identifier(repo_id.to_string())
+}
+
+pub async fn cmd_rm(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
+    validate_repo_id(repo_id)?;
+    let me = client.keys().public_key();
+    if fetch_own_repo_announcement(client, repo_id).await?.is_none() {
+        return Err(CliError::NotFound(format!(
+            "no repository {repo_id:?} found for you ({}); nothing to delete",
+            me.to_hex()
+        )));
+    }
+
+    let coord = repo_coord_for(&me, repo_id);
+    let builder = build_rm_event(&coord)?;
+    let event = client.sign_event(builder)?;
+    let event_id = event.id;
+    let raw = client.submit_event(event).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("relay response is not JSON: {e} ({raw})")))?;
+    let accepted = parsed
+        .get("accepted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    if !accepted {
+        return Err(CliError::Other(format!(
+            "relay rejected deletion: {message}"
+        )));
+    }
+
+    println!(
+        "deleted    {KIND_GIT_REPO_ANNOUNCEMENT}:{}:{repo_id}",
+        me.to_hex()
+    );
+    println!("deletion   {}", event_id.to_hex());
+    Ok(())
+}
+
 pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), CliError> {
     use crate::{ReposCmd, ReposProtectCmd};
     match cmd {
@@ -370,6 +426,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::Rm { id } => cmd_rm(client, &id).await,
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {
@@ -403,9 +460,10 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
-        build_protection_tag, build_updated_repo_announcement, protection_rules_json,
-        validate_write_response, ProtectionChange,
+        build_protection_tag, build_rm_event, build_updated_repo_announcement, protection_rules_json,
+        repo_coord_for, validate_write_response, ProtectionChange,
     };
+    use buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT;
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
         EventBuilder::new(Kind::Custom(30617), content)
@@ -639,6 +697,39 @@ mod tests {
                 "accepted": true,
                 "message": "saved",
             })
+        );
+    }
+
+    #[test]
+    fn rm_event_is_kind5_with_a_tag_only() {
+        let keys = nostr::Keys::generate();
+        let coord = repo_coord_for(&keys.public_key(), "demo-repo");
+        let event = build_rm_event(&coord)
+            .unwrap()
+            .sign_with_keys(&keys)
+            .unwrap();
+
+        assert_eq!(event.kind, nostr::Kind::EventDeletion);
+
+        let a_tags: Vec<&str> = event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(String::as_str) == Some("a"))
+            .filter_map(|t| t.as_slice().get(1).map(String::as_str))
+            .collect();
+        assert_eq!(
+            a_tags,
+            vec![format!(
+                "{KIND_GIT_REPO_ANNOUNCEMENT}:{}:demo-repo",
+                keys.public_key().to_hex()
+            )]
+        );
+        assert!(
+            !event
+                .tags
+                .iter()
+                .any(|t| t.as_slice().first().map(String::as_str) == Some("e")),
+            "rm deletion must not carry an `e` tag"
         );
     }
 }
