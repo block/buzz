@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.23
+
+- fix(desktop): strip GIF metadata extensions before upload ([#2425](https://github.com/block/buzz/pull/2425)) ([`47d7eb698`](https://github.com/block/buzz/commit/47d7eb6982900920bcdbe7a2f5013baca37daeeb))
+- feat(desktop): gate sign-out behind key backup + typed confirmation ([#2424](https://github.com/block/buzz/pull/2424)) ([`fd967c6ea`](https://github.com/block/buzz/commit/fd967c6ea46d7454fe1adf79aacd2fc6385c4585))
+- feat(desktop+acp): spawn a harness per (agent, community) pair at GUI startup — warm sockets, lazy LLM pool ([#2122](https://github.com/block/buzz/pull/2122)) ([`61cc738ee`](https://github.com/block/buzz/commit/61cc738ee8991e92563136de4b77e54cb9756420))
+- Show team count separately in channel template rows ([#2404](https://github.com/block/buzz/pull/2404)) ([`6d04d279a`](https://github.com/block/buzz/commit/6d04d279ae60eaa774276b9e28e94df855fd93b3))
+- fix(onboarding): skip community profile setup for existing relay members ([#2300](https://github.com/block/buzz/pull/2300)) ([`25f631870`](https://github.com/block/buzz/commit/25f631870eb66ea696dfe325c6c5da2ca1cff4b1))
+- Unify sidebar chrome across themes ([#2380](https://github.com/block/buzz/pull/2380)) ([`f8fd055b9`](https://github.com/block/buzz/commit/f8fd055b9fc259046ba5e3091982f79f3205af80))
+- fix(desktop): refresh cached channel member names ([#2258](https://github.com/block/buzz/pull/2258)) ([`5a3b8176a`](https://github.com/block/buzz/commit/5a3b8176aac5f4bced452ac8920477c5e059b828))
+
+
 ## v0.4.22
 
 - Keep avatar preview visible during upload ([#2237](https://github.com/block/buzz/pull/2237)) ([`f609fcee0`](https://github.com/block/buzz/commit/f609fcee02cd3de9cde2aa4f94fc054d1865a58a))
