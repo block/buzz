@@ -3109,7 +3109,7 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
-    let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
+    let emit_turn_error = |error_msg: &str, error_code: Option<i64>, error_data: Option<&str>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
@@ -3117,6 +3117,9 @@ fn handle_prompt_result(
             });
             if let Some(code) = error_code {
                 payload["code"] = serde_json::json!(code);
+            }
+            if let Some(data) = error_data {
+                payload["data"] = serde_json::json!(data);
             }
             observer.emit(
                 "turn_error",
@@ -3160,7 +3163,7 @@ fn handle_prompt_result(
                 }
                 _ => "Agent session timed out due to inactivity".to_string(),
             };
-            emit_turn_error(&death_message, None);
+            emit_turn_error(&death_message, None, None);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -3200,7 +3203,7 @@ fn handle_prompt_result(
             let death_message = format!(
                 "Agent did not stop within {grace:?} after cancellation; the agent process is being replaced."
             );
-            emit_turn_error(&death_message, None);
+            emit_turn_error(&death_message, None, None);
 
             let index = result.agent.index;
             let slot_history = &mut crash_history[index];
@@ -3252,9 +3255,9 @@ fn handle_prompt_result(
                     | acp::AcpError::Timeout(_)
                     | acp::AcpError::Protocol(_)
             );
-            let error_code = match &e {
-                acp::AcpError::AgentError { code, .. } => Some(*code),
-                _ => None,
+            let (error_code, error_data) = match e {
+                acp::AcpError::AgentError { code, data, .. } => (Some(*code), data.as_deref()),
+                _ => (None, None),
             };
             if is_transport_error {
                 tracing::warn!(
@@ -3265,7 +3268,7 @@ fn handle_prompt_result(
                     error = %e,
                     "transport/protocol error — respawning agent"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(&e.to_string(), error_code, error_data);
 
                 let index = result.agent.index;
                 let slot_history = &mut crash_history[index];
@@ -3291,7 +3294,7 @@ fn handle_prompt_result(
                     error = %e,
                     "agent_returned (application error — pipe intact)"
                 );
-                emit_turn_error(&e.to_string(), error_code);
+                emit_turn_error(&e.to_string(), error_code, error_data);
                 pool.return_agent(result.agent);
             }
         }
@@ -4855,9 +4858,9 @@ mod error_outcome_emission_tests {
         }
     }
 
-    /// Drive one error outcome through `handle_prompt_result` and return how
-    /// many `turn_error` events it emitted to the observer feed.
-    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+    /// Drive one error outcome through `handle_prompt_result` and return the
+    /// `turn_error` events it emitted to the observer feed.
+    async fn turn_error_events_for(outcome: PromptOutcome) -> Vec<observer::ObserverEvent> {
         let agent = dummy_agent(0).await;
         let mut pool = AgentPool::from_slots(vec![None]);
 
@@ -4924,7 +4927,11 @@ mod error_outcome_emission_tests {
                 .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
             "turn_error must retain the completed turn id"
         );
-        turn_errors.len()
+        turn_errors
+    }
+
+    async fn turn_errors_emitted_for(outcome: PromptOutcome) -> usize {
+        turn_error_events_for(outcome).await.len()
     }
 
     #[tokio::test]
@@ -5756,6 +5763,26 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn agent_error_detail_reaches_turn_error_payload() {
+        let error = AcpError::AgentError {
+            code: -32603,
+            message: "Internal error".into(),
+            data: Some(r#"{"details":"unknown option '--tools'"}"#.into()),
+        };
+        let events = turn_error_events_for(PromptOutcome::Error(error)).await;
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["code"], -32603);
+        assert_eq!(
+            events[0].payload["error"],
+            "Agent reported error (code -32603): Internal error"
+        );
+        assert!(events[0].payload["data"]
+            .as_str()
+            .is_some_and(|message| message.contains("unknown option '--tools'")));
     }
 }
 
