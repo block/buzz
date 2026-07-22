@@ -1463,7 +1463,16 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
     let trusted_inbound_envelope = if ctx.trusted_inbound_envelope {
-        TrustedInboundEventEnvelope::from_prompt_batch(batch.as_ref())
+        match TrustedInboundEventEnvelope::try_from_prompt_batch(batch.as_ref()) {
+            Ok(envelope) => Some(envelope),
+            Err(reason) => {
+                tracing::warn!(
+                    refusal_code = reason,
+                    "trusted inbound event envelope refused"
+                );
+                None
+            }
+        }
     } else {
         None
     };

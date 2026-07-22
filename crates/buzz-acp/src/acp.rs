@@ -39,17 +39,30 @@ impl TrustedInboundEventEnvelope {
     /// Build an envelope only for an unambiguous single-event batch whose
     /// signed `h` tag exactly matches the subscribed channel. Any ambiguity or
     /// failed signature verification produces no trusted metadata.
+    #[cfg(test)]
     pub(crate) fn from_prompt_batch(batch: Option<&crate::queue::FlushBatch>) -> Option<Self> {
-        let batch = batch?;
-        if batch.cancel_reason.is_some()
-            || !batch.cancelled_events.is_empty()
-            || batch.events.len() != 1
-        {
-            return None;
+        Self::try_from_prompt_batch(batch).ok()
+    }
+
+    /// Return a stable, secret-free refusal code when trusted metadata cannot
+    /// be derived. The worker logs this at the admission boundary so a missing
+    /// envelope cannot masquerade as an agent/tool-policy failure.
+    pub(crate) fn try_from_prompt_batch(
+        batch: Option<&crate::queue::FlushBatch>,
+    ) -> Result<Self, &'static str> {
+        let batch = batch.ok_or("missing_batch")?;
+        if batch.cancel_reason.is_some() {
+            return Err("cancelled_batch");
+        }
+        if !batch.cancelled_events.is_empty() {
+            return Err("cancelled_events_present");
+        }
+        if batch.events.len() != 1 {
+            return Err("ambiguous_event_count");
         }
         let event = &batch.events[0].event;
         if event.verify().is_err() {
-            return None;
+            return Err("invalid_signature");
         }
         let tags: Vec<Vec<String>> = event
             .tags
@@ -64,9 +77,9 @@ impl TrustedInboundEventEnvelope {
         if h_tags.len() != 1
             || h_tags[0].get(1).map(String::as_str) != Some(expected_channel.as_str())
         {
-            return None;
+            return Err("invalid_channel_binding");
         }
-        Some(Self {
+        Ok(Self {
             schema_version: 1,
             event_id: event.id.to_hex(),
             author_pubkey: event.pubkey.to_hex(),
@@ -2489,6 +2502,10 @@ mod tests {
         raw["content"] = serde_json::Value::String("tampered".into());
         tampered.events[0].event = serde_json::from_value(raw).expect("parse tampered event");
         assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&tampered)).is_none());
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&tampered)).err(),
+            Some("invalid_signature")
+        );
 
         let second_h = nostr::Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag");
         let duplicate_room = signed_batch(channel_id, vec![second_h]);
@@ -2507,10 +2524,18 @@ mod tests {
         let mut multi = signed_batch(channel_id, vec![]);
         multi.events.push(multi.events[0].clone());
         assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&multi)).is_none());
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&multi)).err(),
+            Some("ambiguous_event_count")
+        );
 
         let mut cancelled = signed_batch(channel_id, vec![]);
         cancelled.cancelled_events.push(cancelled.events[0].clone());
         assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled)).is_none());
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&cancelled)).err(),
+            Some("cancelled_events_present")
+        );
 
         // Queue fallback re-dispatches cancelled events in the regular event
         // slot while preserving the cancellation reason. That shape must not
@@ -2520,6 +2545,10 @@ mod tests {
         cancelled_fallback.cancel_reason = Some(crate::queue::CancelReason::Steer);
         assert!(
             TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled_fallback)).is_none()
+        );
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&cancelled_fallback)).err(),
+            Some("cancelled_batch")
         );
 
         assert!(TrustedInboundEventEnvelope::from_prompt_batch(None).is_none());
