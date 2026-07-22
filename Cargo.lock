@@ -896,6 +896,7 @@ dependencies = [
  "dirs",
  "hex",
  "infer",
+ "nix 0.31.3",
  "nostr",
  "rand 0.10.1",
  "reqwest 0.13.4",

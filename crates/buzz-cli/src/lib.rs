@@ -130,6 +130,28 @@ fn parse_private_key_fd(s: &str) -> Result<u32, String> {
     Ok(fd)
 }
 
+/// Closes a raw file descriptor when dropped.
+///
+/// Used to close the *original* fd handed to `--private-key-fd` once
+/// [`read_key_from_fd`] is done with it. `std::fs::File::open("/dev/fd/<fd>")`
+/// returns a duplicate descriptor, so `File`'s own `Drop` never touches the
+/// original — this guard is the only thing that closes it, so there is no
+/// double-close: the two descriptors are distinct kernel fd table entries
+/// closed independently. `nix::unistd::close` takes a plain [`RawFd`] (no
+/// `unsafe`, no reconstructing ownership via `FromRawFd`) and is safe to call
+/// here because this guard is the fd's sole owner for the scope of the
+/// function.
+struct FdCloseGuard(std::os::fd::RawFd);
+
+impl Drop for FdCloseGuard {
+    fn drop(&mut self) {
+        // Best-effort: the fd is being discarded either way, and the error
+        // (if any) carries no key material — nothing actionable to do with
+        // it here.
+        let _ = nix::unistd::close(self.0);
+    }
+}
+
 /// Reads the Nostr private key from an inherited file descriptor.
 ///
 /// Opens `/dev/fd/<fd>` (Linux/macOS only — there is no `/dev/fd` on
@@ -138,22 +160,47 @@ fn parse_private_key_fd(s: &str) -> Result<u32, String> {
 /// performed so a malformed key is not silently altered. The returned string
 /// is wrapped in [`zeroize::Zeroizing`] so it is scrubbed from memory when
 /// dropped.
+///
+/// Opening `/dev/fd/<fd>` gives back a *duplicate* of the inherited
+/// descriptor — dropping the resulting `File` only closes that duplicate, it
+/// does not close `fd` itself. `fd` is therefore closed explicitly via
+/// [`nix::unistd::close`] on every return path (success, oversized/empty/
+/// non-UTF-8 key errors, and I/O failure) so the original descriptor never
+/// leaks for the rest of the process's lifetime.
 fn read_key_from_fd(fd: u32) -> Result<zeroize::Zeroizing<String>, CliError> {
+    use std::os::fd::RawFd;
+
+    let raw_fd = fd as RawFd;
+    // Closed unconditionally when this function returns (success or any
+    // error path below), since `_fd_guard`'s `Drop` runs regardless.
+    let _fd_guard = FdCloseGuard(raw_fd);
+
+    let file = std::fs::File::open(format!("/dev/fd/{fd}"))
+        .map_err(|_| CliError::Auth(format!("failed to read private key from fd {fd}")))?;
+
+    read_key_from_reader(file, fd)
+}
+
+/// Core read/validate/parse logic shared by [`read_key_from_fd`], factored
+/// out so it can be exercised in tests against a synthetic [`std::io::Read`]
+/// that fails mid-read — something a real fd can't easily simulate.
+/// `fd` is used only for error-message context, not for any I/O here.
+fn read_key_from_reader<R: std::io::Read>(
+    mut reader: R,
+    fd: u32,
+) -> Result<zeroize::Zeroizing<String>, CliError> {
     use std::io::Read;
     use zeroize::Zeroize;
 
-    let mut file = std::fs::File::open(format!("/dev/fd/{fd}"))
-        .map_err(|_| CliError::Auth(format!("failed to read private key from fd {fd}")))?;
-
-    let mut buf = Vec::with_capacity(PRIVATE_KEY_FD_MAX_LEN + 1);
-    file.by_ref()
+    // Read into a `Zeroizing` buffer from the start so a partial read
+    // followed by an I/O error still gets its bytes scrubbed — an ordinary
+    // `Vec` would drop those bytes unzeroized on the error path.
+    let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(PRIVATE_KEY_FD_MAX_LEN + 1));
+    reader
+        .by_ref()
         .take((PRIVATE_KEY_FD_MAX_LEN + 1) as u64)
         .read_to_end(&mut buf)
         .map_err(|_| CliError::Auth(format!("failed to read private key from fd {fd}")))?;
-    drop(file);
-    // Wrap immediately so raw key bytes are zeroized on every exit path below
-    // (including early error returns), not just the success path.
-    let mut buf = zeroize::Zeroizing::new(buf);
 
     if buf.len() > PRIVATE_KEY_FD_MAX_LEN {
         return Err(CliError::Key(
@@ -1832,22 +1879,11 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     //
-    // clap's `conflicts_with` on `private_key`/`private_key_fd` guarantees at
-    // most one of these is populated (this also covers BUZZ_PRIVATE_KEY,
-    // since clap treats an env-resolved value as populating the same field
-    // as the flag) — so clap itself never reads BUZZ_PRIVATE_KEY into `cli`
-    // when fd mode is selected. That alone doesn't clear the var from the
-    // actual process environment though: if an operator has BUZZ_PRIVATE_KEY
-    // stale-set in their shell, it remains readable for this process's whole
-    // lifetime via /proc/<pid>/environ or ps/environ inspection by other
-    // local processes, even though buzz-cli itself never spawns subprocesses.
-    // Explicitly scrub it as defense-in-depth so fd-mode actually avoids env
-    // exposure end to end. `std::env::remove_var` is safe to call directly
-    // under edition 2021 (no `unsafe` needed).
-    if cli.private_key_fd.is_some() {
-        std::env::remove_var("BUZZ_PRIVATE_KEY");
-    }
-
+    // clap's `conflicts_with` on `private_key`/`private_key_fd` rejects any
+    // invocation that sets both before `run()` is ever called (this also
+    // covers BUZZ_PRIVATE_KEY, since clap treats an env-resolved value as
+    // populating the same field as the flag), so there is no stale
+    // BUZZ_PRIVATE_KEY to scrub here.
     let private_key_str: zeroize::Zeroizing<String> = if let Some(fd) = cli.private_key_fd {
         read_key_from_fd(fd)?
     } else {
@@ -1861,6 +1897,10 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     };
     let keys = Keys::parse(private_key_str.as_str())
         .map_err(|e| CliError::Key(format!("invalid private key: {e}")))?;
+    // The encoded key string has served its purpose once `Keys::parse`
+    // succeeds — drop it immediately rather than letting it live across the
+    // rest of this async command (auth-tag verification, relay I/O, dispatch).
+    drop(private_key_str);
 
     // NIP-OA: parse and verify the auth tag if provided.
     let (auth_tag, auth_tag_json) = match cli.auth_tag {
@@ -2148,24 +2188,38 @@ mod tests {
 
     // ---- --private-key-fd ----
 
-    /// Opens a temp file preloaded with `contents`, rewinds it, and returns
-    /// both the `File` (which must be kept alive for the fd to stay valid)
-    /// and its raw fd number.
-    fn fd_with_contents(contents: &[u8]) -> (std::fs::File, u32) {
+    /// Writes `contents` to a temp file, rewinds it, and returns a raw fd
+    /// that fully transfers ownership to the caller via `into_raw_fd` — no
+    /// `File` value survives to close it a second time. This mirrors the real
+    /// scenario `read_key_from_fd` is built for: a fd handed off exclusively
+    /// by a parent process, with nothing else in this process holding it.
+    /// Keeping a `File` alive alongside the fd (as a prior version of this
+    /// helper did) would double-close the descriptor once `read_key_from_fd`
+    /// itself closes it — exactly the reuse hazard the fd-close fix guards
+    /// against.
+    fn fd_with_contents(contents: &[u8]) -> u32 {
         use std::io::{Seek, SeekFrom, Write};
-        use std::os::fd::AsRawFd;
+        use std::os::fd::IntoRawFd;
 
         let mut file = tempfile::tempfile().expect("create tempfile");
         file.write_all(contents).expect("write tempfile");
         file.seek(SeekFrom::Start(0)).expect("seek tempfile");
-        let fd = file.as_raw_fd() as u32;
-        (file, fd)
+        file.into_raw_fd() as u32
+    }
+
+    /// True if `fd` is closed. Probing a raw fd's validity without `unsafe`
+    /// (no `BorrowedFd::borrow_raw`, no reconstructing an `OwnedFd` via
+    /// `FromRawFd`) means we can't hand it to `nix::fcntl::fcntl` (which
+    /// requires `AsFd`). Instead, mirror what `read_key_from_fd` itself does:
+    /// attempt to open `/dev/fd/<fd>`. A closed fd has no entry to open.
+    fn fd_is_closed(fd: u32) -> bool {
+        std::fs::File::open(format!("/dev/fd/{fd}")).is_err()
     }
 
     #[test]
     fn read_key_from_fd_reads_valid_key() {
         let synthetic_key = "0".repeat(64); // synthetic hex-shaped key, not a real secret
-        let (_file, fd) = fd_with_contents(synthetic_key.as_bytes());
+        let fd = fd_with_contents(synthetic_key.as_bytes());
 
         let result = read_key_from_fd(fd).expect("expected key to be read");
         assert_eq!(result.as_str(), synthetic_key);
@@ -2175,7 +2229,7 @@ mod tests {
     fn read_key_from_fd_strips_trailing_newline() {
         let synthetic_key = "1".repeat(64);
         let with_newline = format!("{synthetic_key}\n");
-        let (_file, fd) = fd_with_contents(with_newline.as_bytes());
+        let fd = fd_with_contents(with_newline.as_bytes());
 
         let result = read_key_from_fd(fd).expect("expected key to be read");
         assert_eq!(result.as_str(), synthetic_key);
@@ -2185,7 +2239,7 @@ mod tests {
     fn read_key_from_fd_strips_trailing_crlf() {
         let synthetic_key = "2".repeat(64);
         let with_crlf = format!("{synthetic_key}\r\n");
-        let (_file, fd) = fd_with_contents(with_crlf.as_bytes());
+        let fd = fd_with_contents(with_crlf.as_bytes());
 
         let result = read_key_from_fd(fd).expect("expected key to be read");
         assert_eq!(result.as_str(), synthetic_key);
@@ -2208,7 +2262,7 @@ mod tests {
 
     #[test]
     fn read_key_from_fd_empty_is_key_error() {
-        let (_file, fd) = fd_with_contents(b"");
+        let fd = fd_with_contents(b"");
         let err = read_key_from_fd(fd).expect_err("expected empty content to error");
         match err {
             CliError::Key(msg) => assert_eq!(msg, "private key from fd is empty"),
@@ -2219,7 +2273,7 @@ mod tests {
     #[test]
     fn read_key_from_fd_oversized_is_key_error() {
         let oversized = "a".repeat(PRIVATE_KEY_FD_MAX_LEN + 1);
-        let (_file, fd) = fd_with_contents(oversized.as_bytes());
+        let fd = fd_with_contents(oversized.as_bytes());
         let err = read_key_from_fd(fd).expect_err("expected oversized content to error");
         match err {
             CliError::Key(msg) => {
@@ -2233,13 +2287,93 @@ mod tests {
     #[test]
     fn read_key_from_fd_non_utf8_is_key_error() {
         let invalid_utf8: &[u8] = &[0xff, 0xfe, 0xfd];
-        let (_file, fd) = fd_with_contents(invalid_utf8);
+        let fd = fd_with_contents(invalid_utf8);
         let err = read_key_from_fd(fd).expect_err("expected non-utf8 content to error");
         match err {
             CliError::Key(msg) => {
                 assert_eq!(msg, "private key from fd is not valid UTF-8");
             }
             other => panic!("expected Key error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_key_from_fd_closes_original_fd_on_success() {
+        let synthetic_key = "3".repeat(64);
+        // `fd_with_contents` transfers sole ownership of the fd via
+        // `into_raw_fd` — nothing else in this process can close it, so an
+        // EBADF probe afterward can only be explained by `read_key_from_fd`
+        // itself having closed the original descriptor (not just the
+        // `/dev/fd/<fd>` duplicate it opens internally).
+        let fd = fd_with_contents(synthetic_key.as_bytes());
+
+        read_key_from_fd(fd).expect("expected key to be read");
+
+        assert!(
+            fd_is_closed(fd),
+            "expected original fd {fd} to be closed (EBADF) after read_key_from_fd returns"
+        );
+    }
+
+    #[test]
+    fn read_key_from_fd_closes_original_fd_on_error() {
+        // Oversized content still errors, but the original fd must be closed
+        // on this path just as reliably as on success.
+        let oversized = "a".repeat(PRIVATE_KEY_FD_MAX_LEN + 1);
+        let fd = fd_with_contents(oversized.as_bytes());
+
+        read_key_from_fd(fd).expect_err("expected oversized content to error");
+
+        assert!(
+            fd_is_closed(fd),
+            "expected original fd {fd} to be closed (EBADF) after an error path"
+        );
+    }
+
+    /// A `Read` impl that yields one chunk of bytes, then fails — simulating
+    /// a fd that becomes unreadable partway through, without needing a real
+    /// fd or any network/process setup.
+    struct FlakyReader {
+        chunk: &'static [u8],
+        served: bool,
+    }
+
+    impl std::io::Read for FlakyReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.served {
+                return Err(std::io::Error::other("synthetic read failure"));
+            }
+            self.served = true;
+            let n = self.chunk.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.chunk[..n]);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn read_key_from_reader_partial_read_then_error_is_sanitized() {
+        // Exercises the guarded (`Zeroizing`-first) buffer path on a partial
+        // read that never reaches a valid key: the reader hands back some
+        // secret-shaped bytes, then fails before EOF. The buffer must have
+        // been `Zeroizing` from before that first successful chunk landed —
+        // otherwise those bytes would sit in a plain `Vec` with no scrub on
+        // the error return below.
+        let reader = FlakyReader {
+            chunk: b"nsec1partialsecretbytesxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            served: false,
+        };
+
+        let err = read_key_from_reader(reader, 7).expect_err("expected read failure to propagate");
+        match err {
+            CliError::Auth(msg) => {
+                assert!(msg.contains('7'), "message: {msg}");
+                assert!(
+                    !msg.contains("nsec1partialsecretbytes"),
+                    "partial content leaked: {msg}"
+                );
+                assert!(!msg.to_lowercase().contains("os error"), "message: {msg}");
+            }
+            other => panic!("expected Auth error, got {other:?}"),
         }
     }
 
@@ -2301,7 +2435,7 @@ mod tests {
         // Non-UTF8 bytes stand in for "secret-shaped" content that must
         // never surface in Debug/Display output of the resulting error.
         let secret_marker: &[u8] = b"nsec1testonlysyntheticvalue\xff\xfe";
-        let (_file, fd) = fd_with_contents(secret_marker);
+        let fd = fd_with_contents(secret_marker);
         let err = read_key_from_fd(fd).expect_err("expected non-utf8 content to error");
         let debug = format!("{err:?}");
         let display = err.to_string();
