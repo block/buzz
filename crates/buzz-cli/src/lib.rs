@@ -74,7 +74,12 @@ struct Cli {
     relay: String,
 
     /// Nostr private key (hex or nsec). This is the CLI's identity.
-    #[arg(long, env = "BUZZ_PRIVATE_KEY", conflicts_with = "private_key_fd")]
+    #[arg(
+        long,
+        env = "BUZZ_PRIVATE_KEY",
+        hide_env_values = true,
+        conflicts_with = "private_key_fd"
+    )]
     private_key: Option<String>,
 
     /// File descriptor (>= 3) to read the Nostr private key from, as an
