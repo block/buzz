@@ -170,7 +170,9 @@ test("add-community deep link opens one editable prefill and acknowledges the qu
 
   await page.getByTestId("sidebar-profile-avatar-button").click();
   await page.getByTestId("community-switcher").click();
-  await page.getByRole("menuitem", { name: "Add Community" }).click();
+  await page
+    .getByRole("menuitem", { name: "Connect an existing community" })
+    .click();
   await expect(relayInput).toHaveValue("");
   await expect(nameInput).toHaveValue("");
 

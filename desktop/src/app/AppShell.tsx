@@ -546,6 +546,11 @@ export function AppShell() {
     [goSettings],
   );
 
+  const handleCreateHostedCommunity = React.useCallback(
+    () => handleOpenSettings("hosted-communities"),
+    [handleOpenSettings],
+  );
+
   const handleCloseSettings = React.useCallback(
     () => closeSettings(),
     [closeSettings],
@@ -713,6 +718,7 @@ export function AppShell() {
                         communitiesHook.activeCommunity?.id ?? null
                       }
                       onAddCommunity={addCommunityDialog.openDialog}
+                      onCreateHostedCommunity={handleCreateHostedCommunity}
                       onRemoveCommunity={communitiesHook.removeCommunity}
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}

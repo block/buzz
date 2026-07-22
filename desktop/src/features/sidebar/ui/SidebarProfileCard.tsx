@@ -12,6 +12,7 @@ import { ProfilePopover } from "@/features/profile/ui/ProfilePopover";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Community } from "@/features/communities/types";
 import { CommunitySwitcher } from "@/features/communities/ui/CommunitySwitcher";
+import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 
@@ -19,7 +20,7 @@ type SidebarProfileCardProps = {
   activeCommunity: Community | null;
   isPresencePending?: boolean;
   onOpenAddCommunity: () => void;
-  onOpenSettings: (section?: "profile" | "appearance") => void;
+  onOpenSettings: (section?: SettingsSection) => void;
   onRemoveCommunity: (id: string) => void;
   onSendFeedback?: () => void;
   onSetPresenceStatus?: (status: PresenceStatus) => void;
@@ -76,6 +77,10 @@ export function SidebarProfileCard({
     [toggleProfilePopover],
   );
   const hasStatus = Boolean(selfUserStatus?.text || selfUserStatus?.emoji);
+  const handleCreateHostedCommunity = React.useCallback(
+    () => onOpenSettings("hosted-communities"),
+    [onOpenSettings],
+  );
   const communityLabel = activeCommunity?.name ?? "No community";
   const readonlyCommunityLabel = (
     <span
@@ -160,6 +165,7 @@ export function SidebarProfileCard({
               <CommunitySwitcher
                 activeCommunity={activeCommunity}
                 onAddCommunity={onOpenAddCommunity}
+                onCreateHostedCommunity={handleCreateHostedCommunity}
                 onRemoveCommunity={onRemoveCommunity}
                 onSwitchCommunity={onSwitchCommunity}
                 onUpdateCommunity={onUpdateCommunity}

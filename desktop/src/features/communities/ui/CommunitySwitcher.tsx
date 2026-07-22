@@ -2,6 +2,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Cloud,
   MoreHorizontal,
   Plus,
   WifiOff,
@@ -47,6 +48,7 @@ type CommunitySwitcherProps = {
   variant?: "sidebar" | "profile" | "profile-menu";
   onSwitchCommunity: (id: string) => void;
   onAddCommunity: () => void;
+  onCreateHostedCommunity: () => void;
   onUpdateCommunity: (
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
@@ -89,6 +91,7 @@ export function CommunitySwitcher({
   variant = "sidebar",
   onSwitchCommunity,
   onAddCommunity,
+  onCreateHostedCommunity,
   onUpdateCommunity,
   onRemoveCommunity,
 }: CommunitySwitcherProps) {
@@ -267,13 +270,25 @@ export function CommunitySwitcher({
               className="flex min-h-9 w-full items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
               onClick={() => {
                 setDropdownOpen(false);
+                onCreateHostedCommunity();
+              }}
+              role="menuitem"
+              type="button"
+            >
+              <Cloud className="h-4 w-4" />
+              <span>Create a hosted community</span>
+            </button>
+            <button
+              className="flex min-h-9 w-full items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
+              onClick={() => {
+                setDropdownOpen(false);
                 onAddCommunity();
               }}
               role="menuitem"
               type="button"
             >
               <Plus className="h-4 w-4" />
-              <span>Add Community</span>
+              <span>Connect an existing community</span>
             </button>
           </div>
         </PopoverContent>
@@ -352,9 +367,13 @@ export function CommunitySwitcher({
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onCreateHostedCommunity}>
+          <Cloud className="h-4 w-4" />
+          <span>Create a hosted community</span>
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={onAddCommunity}>
           <Plus className="h-4 w-4" />
-          <span>Add Community</span>
+          <span>Connect an existing community</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
