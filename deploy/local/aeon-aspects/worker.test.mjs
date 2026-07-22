@@ -35,6 +35,7 @@ test("every rendered worker is disabled and binds an existing fixed session", ()
     assert.match(argv, /--multiple-event-handling queue/);
     assert.match(argv, /--relay-observer/);
     assert.match(argv, /--trusted-inbound-envelope/);
+    assert.match(argv, /--no-agent-publisher-credentials/);
     assert.match(argv, /--permission-mode bypass-permissions/);
     assert.match(argv, /--heartbeat-interval 0/);
     assert.match(argv, /--turn-liveness-secs 10/);
@@ -72,6 +73,7 @@ test("six deterministic LaunchAgent previews are disabled and secret-free", () =
     assert.match(first.plist, /\/REQUIRES_FLEET\/immutable-openclaw\/bin\/openclaw/);
     assert.match(first.plist, /\/REQUIRES_FLEET\/owned-token-file/);
     assert.doesNotMatch(first.plist, /nsec1|BUZZ_PRIVATE_KEY=/);
+    assert.match(first.plist, /--no-agent-publisher-credentials/);
     assert.deepEqual(first.rollback, ["launchctl", "bootout", `gui/<uid>/${first.label}`]);
     labels.add(first.label);
   }

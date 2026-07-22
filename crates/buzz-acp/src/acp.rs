@@ -480,6 +480,7 @@ impl AcpClient {
         args: &[String],
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
+        forward_buzz_publisher_credentials: bool,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
@@ -519,12 +520,22 @@ impl AcpClient {
         // entry falls through to the standard operator-wins treatment below.
         let codex_merge_active = codex_config_value.is_some();
 
+        // The harness can retain its relay/signer authority while the managed
+        // agent remains unable to publish directly. env_remove also closes the
+        // parent-process inheritance path when credentials configured the harness.
+        if !forward_buzz_publisher_credentials {
+            cmd.env_remove("BUZZ_RELAY_URL");
+            cmd.env_remove("BUZZ_PRIVATE_KEY");
+        }
+
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if harness_bound_agent_env(key) || std::env::var(key).is_err() {
+            if (forward_buzz_publisher_credentials && harness_bound_agent_env(key))
+                || (!harness_bound_agent_env(key) && std::env::var(key).is_err())
+            {
                 cmd.env(key, value);
             }
         }
@@ -2134,6 +2145,38 @@ mod tests {
         assert!(!harness_bound_agent_env("CODEX_CONFIG"));
     }
 
+    #[tokio::test]
+    async fn isolated_child_cannot_read_explicit_publisher_credentials() {
+        let script = r#"
+            if test -n "$BUZZ_RELAY_URL" || test -n "$BUZZ_PRIVATE_KEY"; then
+                exit 23
+            fi
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+        "#;
+        let publisher_env = vec![
+            (
+                "BUZZ_RELAY_URL".to_string(),
+                "ws://relay.invalid".to_string(),
+            ),
+            ("BUZZ_PRIVATE_KEY".to_string(), "secret".to_string()),
+        ];
+        let mut client = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &publisher_env,
+            false,
+            false,
+        )
+        .await
+        .expect("spawn isolated child");
+
+        client
+            .initialize()
+            .await
+            .expect("child initializes only when publisher credentials are absent");
+    }
+
     fn signed_batch(
         channel_id: uuid::Uuid,
         extra_tags: Vec<nostr::Tag>,
@@ -2840,7 +2883,7 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false, true)
             .await
             .expect("failed to spawn test script")
     }
@@ -3296,7 +3339,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        AcpClient::spawn("cat", &[], &[], false, true)
             .await
             .expect("spawn cat as inert client")
     }

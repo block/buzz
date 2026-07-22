@@ -36,6 +36,7 @@
     <string>queue</string>
     <string>--relay-observer</string>
     <string>--trusted-inbound-envelope</string>
+    <string>--no-agent-publisher-credentials</string>
     <string>--permission-mode</string>
     <string>bypass-permissions</string>
     <string>--heartbeat-interval</string>

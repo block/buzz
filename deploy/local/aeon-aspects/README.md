@@ -21,6 +21,10 @@ envelope carries the signed event ID, author, kind, exact channel ID, and exact
 tag arrays outside the model-visible prompt. It is omitted for invalid,
 multi-event, cancelled/merged, or room-ambiguous batches; OpenClaw must preserve
 this trusted per-turn context before the Nexus reply tool can be enabled.
+`--no-agent-publisher-credentials` keeps the validated Buzz relay and signer
+inside `buzz-acp`; the spawned ACP agent receives neither `BUZZ_RELAY_URL` nor
+`BUZZ_PRIVATE_KEY`. This makes the trusted reply tool the only outbound
+publisher authority for AEON managed workers.
 
 Room admission uses two config rules per worker:
 

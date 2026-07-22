@@ -558,6 +558,15 @@ pub struct CliArgs {
         default_value_t = false
     )]
     pub trusted_inbound_envelope: bool,
+
+    /// Keep Buzz publisher credentials inside the harness instead of forwarding
+    /// them to the managed ACP subprocess.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_NO_AGENT_PUBLISHER_CREDENTIALS",
+        default_value_t = false
+    )]
+    pub no_agent_publisher_credentials: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -634,6 +643,8 @@ pub struct Config {
     pub expected_gateway_session_key: Option<String>,
     /// Whether to attach a verified, non-model inbound event envelope to ACP prompts.
     pub trusted_inbound_envelope: bool,
+    /// Whether the managed ACP subprocess may receive Buzz publisher credentials.
+    pub forward_agent_publisher_credentials: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -1140,6 +1151,7 @@ impl Config {
             turn_receipts: args.turn_receipts,
             expected_gateway_session_key: args.expected_gateway_session_key,
             trusted_inbound_envelope: args.trusted_inbound_envelope,
+            forward_agent_publisher_credentials: !args.no_agent_publisher_credentials,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1164,7 +1176,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} agent_publisher_credentials={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1185,6 +1197,11 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            if self.forward_agent_publisher_credentials {
+                "forwarded"
+            } else {
+                "harness-only"
+            },
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1199,6 +1216,9 @@ impl Config {
     pub fn agent_spawn_env(&self) -> Vec<(String, String)> {
         let mut env = self.persona_env_vars.clone();
         env.retain(|(key, _)| !matches!(key.as_str(), "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY"));
+        if !self.forward_agent_publisher_credentials {
+            return env;
+        }
         env.push(("BUZZ_RELAY_URL".into(), self.relay_url.clone()));
         env.push((
             "BUZZ_PRIVATE_KEY".into(),
@@ -1589,6 +1609,7 @@ mod tests {
             turn_receipts: false,
             expected_gateway_session_key: None,
             trusted_inbound_envelope: false,
+            forward_agent_publisher_credentials: true,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -1650,6 +1671,29 @@ mod tests {
             Some(expected_secret.as_str())
         );
         assert!(env.contains(&("SAFE_PERSONA_SETTING".into(), "kept".into())));
+    }
+
+    #[test]
+    fn isolated_agent_env_retains_harness_identity_but_omits_publisher_credentials() {
+        let mut config = test_config(SubscribeMode::All);
+        let harness_relay = config.relay_url.clone();
+        let harness_pubkey = config.keys.public_key().to_hex();
+        config.forward_agent_publisher_credentials = false;
+        config.persona_env_vars = vec![
+            ("BUZZ_RELAY_URL".into(), "ws://wrong.invalid".into()),
+            ("BUZZ_PRIVATE_KEY".into(), "wrong-secret".into()),
+            ("SAFE_PERSONA_SETTING".into(), "kept".into()),
+        ];
+
+        let env = config.agent_spawn_env();
+        assert!(!env.iter().any(|(key, _)| key == "BUZZ_RELAY_URL"));
+        assert!(!env.iter().any(|(key, _)| key == "BUZZ_PRIVATE_KEY"));
+        assert!(env.contains(&("SAFE_PERSONA_SETTING".into(), "kept".into())));
+        assert_eq!(config.relay_url, harness_relay);
+        assert_eq!(config.keys.public_key().to_hex(), harness_pubkey);
+        assert!(config
+            .summary()
+            .contains("agent_publisher_credentials=harness-only"));
     }
 
     fn make_rule(
@@ -2212,6 +2256,7 @@ mod tests {
                 "queue",
                 "--relay-observer",
                 "--trusted-inbound-envelope",
+                "--no-agent-publisher-credentials",
                 "--permission-mode",
                 "bypass-permissions",
                 "--heartbeat-interval",
@@ -2235,6 +2280,7 @@ mod tests {
             assert!(cli.no_base_prompt);
             assert!(cli.turn_receipts);
             assert!(cli.trusted_inbound_envelope);
+            assert!(cli.no_agent_publisher_credentials);
             assert_eq!(cli.permission_mode, PermissionMode::BypassPermissions);
             assert_eq!(cli.heartbeat_interval, 0);
             assert_eq!(cli.turn_liveness_secs, 10);
@@ -2906,6 +2952,7 @@ require_exact_channel_tag = false
         // Dedup default must remain `queue` so steering's requirement is met.
         assert!(matches!(args.dedup, DedupMode::Queue));
         assert!(!args.trusted_inbound_envelope);
+        assert!(!args.no_agent_publisher_credentials);
     }
 
     #[test]

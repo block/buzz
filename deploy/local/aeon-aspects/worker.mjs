@@ -82,7 +82,7 @@ export function renderWorker(manifest, identityMap, aspect, tokenFile = "${AEON_
       "--agent-args", ["acp", "--session", worker.sessionKey, "--require-existing", "--token-file", tokenFile, "--url", manifest.gateway.url, "--provenance", manifest.gateway.provenance, "--no-prefix-cwd"].join(","),
       "--agents", "1", "--subscribe", "config", "--config", configPath,
       "--respond-to", "owner-only", "--allowed-respond-to", "owner-only",
-      "--no-memory", "--no-base-prompt", "--dedup", "queue", "--multiple-event-handling", "queue", "--relay-observer", "--trusted-inbound-envelope",
+      "--no-memory", "--no-base-prompt", "--dedup", "queue", "--multiple-event-handling", "queue", "--relay-observer", "--trusted-inbound-envelope", "--no-agent-publisher-credentials",
       "--permission-mode", manifest.posture.permissionMode,
       "--heartbeat-interval", String(manifest.posture.heartbeatIntervalSecs),
       "--turn-liveness-secs", String(manifest.posture.turnLivenessSecs),
