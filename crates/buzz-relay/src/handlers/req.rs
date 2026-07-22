@@ -838,19 +838,13 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
         })
 }
 
-/// Extract a channel UUID from a single filter's `#h` tag.
+/// Extract a channel UUID when a single filter targets exactly one channel.
+///
+/// Multiple distinct `#h` values cannot be represented by the single-channel
+/// SQL predicate, so they fall back to the accessible-channel query and Nostr
+/// post-filtering.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
-    for (tag_key, tag_values) in filter.generic_tags.iter() {
-        let key = tag_key.to_string();
-        if key == "h" {
-            for val in tag_values {
-                if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
-                }
-            }
-        }
-    }
-    None
+    extract_channel_id_from_filters(std::slice::from_ref(filter))
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1405,6 +1399,18 @@ mod tests {
         let channel_id = uuid::Uuid::new_v4();
         let filters = vec![filter_with_channel(channel_id)];
         assert_eq!(extract_channel_id_from_filters(&filters), Some(channel_id));
+    }
+
+    #[test]
+    fn test_extract_channel_id_from_filter_multiple_channels_is_not_pushed_down() {
+        let channel_a = uuid::Uuid::new_v4();
+        let channel_b = uuid::Uuid::new_v4();
+        let filter = Filter::new().custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            [channel_a.to_string(), channel_b.to_string()],
+        );
+
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
     }
 
     #[test]
