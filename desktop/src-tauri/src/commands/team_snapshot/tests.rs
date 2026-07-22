@@ -724,3 +724,17 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
     assert!(!teams_path.exists());
     assert_eq!(errors.len(), 1, "only the teams-write error");
 }
+
+#[test]
+fn explicit_import_backend_is_applied() {
+    let backend = BackendKind::Provider {
+        id: "test".to_string(),
+        config: serde_json::json!({"name": "imported"}),
+    };
+    assert_eq!(import_backend_or_local(Some(backend.clone())), backend);
+}
+
+#[test]
+fn absent_import_backend_defaults_local() {
+    assert_eq!(import_backend_or_local(None), BackendKind::Local);
+}

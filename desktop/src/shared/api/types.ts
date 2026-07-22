@@ -704,6 +704,8 @@ export type RuntimeConfigSurface = {
 
 export type UpdateManagedAgentInput = {
   pubkey: string;
+  /** Absent = don't touch. Present = switch the execution backend. */
+  backend?: ManagedAgentBackend;
   name?: string;
   model?: string | null;
   provider?: string | null;

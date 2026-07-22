@@ -10,7 +10,11 @@ use uuid::Uuid;
 
 use crate::{
     app_state::AppState,
-    commands::{export_util::save_bytes_with_dialog, personas::resolve_snapshot_import_behavior},
+    commands::{
+        agents::{build_deploy_payload, deploy_to_provider},
+        export_util::save_bytes_with_dialog,
+        personas::resolve_snapshot_import_behavior,
+    },
     managed_agents::team_snapshot::{
         build_team_snapshot, decode_team_snapshot_json, decode_team_snapshot_png,
         encode_team_snapshot_json, encode_team_snapshot_png, TeamSnapshot,
@@ -18,7 +22,7 @@ use crate::{
     managed_agents::{
         agent_snapshot::{build_snapshot, AgentSnapshot, AgentSnapshotMemoryEntry, MemoryLevel},
         load_managed_agents, load_personas, load_teams, load_teams_readonly, save_managed_agents,
-        save_personas, save_teams, AgentDefinition, ManagedAgentRecord, TeamRecord,
+        save_personas, save_teams, AgentDefinition, BackendKind, ManagedAgentRecord, TeamRecord,
     },
     relay::{effective_agent_relay_url, relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -218,6 +222,9 @@ pub struct TeamSnapshotImportConfirm {
     pub file_bytes: Vec<u8>,
     /// Applied uniformly to every member in v1.
     pub keep_allowlist: bool,
+    /// Applied uniformly to every imported member. Absent preserves local.
+    #[serde(default)]
+    pub backend: Option<BackendKind>,
 }
 
 /// Per-member outcome reported after a confirmed team snapshot import.
@@ -248,6 +255,10 @@ pub struct TeamSnapshotImportResult {
 pub struct EncodedTeamSnapshotPayload {
     pub file_bytes: Vec<u8>,
     pub file_name: String,
+}
+
+fn import_backend_or_local(backend: Option<BackendKind>) -> BackendKind {
+    backend.unwrap_or_default()
 }
 
 /// Per-member minted key material, assembled before entering the store lock.
@@ -502,6 +513,11 @@ pub async fn confirm_team_snapshot_import(
 ) -> Result<TeamSnapshotImportResult, String> {
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_team_snapshot_from_bytes(&input.file_bytes)?;
+    let import_backend = import_backend_or_local(input.backend);
+    if let BackendKind::Provider { config, id } = &import_backend {
+        crate::managed_agents::validate_provider_config(config)?;
+        crate::managed_agents::resolve_provider_binary(id)?;
+    }
     let now = now_iso();
 
     // Resolve behavioral defaults for every member before any key generation.
@@ -575,9 +591,15 @@ pub async fn confirm_team_snapshot_import(
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
-            backend: crate::managed_agents::BackendKind::Local,
+            backend: import_backend.clone(),
             backend_agent_id: None,
-            provider_binary_path: None,
+            provider_binary_path: if let BackendKind::Provider { ref id, .. } = import_backend {
+                crate::managed_agents::resolve_provider_binary(id)
+                    .ok()
+                    .map(|path| path.display().to_string())
+            } else {
+                None
+            },
             team_id: Some(imported_team.id.clone()),
             persona_team_dir: None,
             persona_name_in_team: None,
@@ -750,7 +772,7 @@ pub async fn confirm_team_snapshot_import(
         imported_team
     };
 
-    // ── Phase 4 & 5: profile sync + memory restore (async, outside lock) ────
+    // ── Phase 4-6: profile sync, provider deploy, memory restore ──────────
     let relay_ws = relay_ws_url_with_override(&state);
     let mut member_results: Vec<TeamSnapshotImportMemberResult> = Vec::with_capacity(minted.len());
 
@@ -769,7 +791,24 @@ pub async fn confirm_team_snapshot_import(
         .await
         .err();
 
-        // Phase 5: memory restore (best-effort).
+        // Phase 5: provider deploy for remote imports (best-effort).
+        if let BackendKind::Provider { id, config } = &m.record.backend {
+            let agent_json = {
+                let _store_guard = state
+                    .managed_agents_store_lock
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let records = load_managed_agents(&app)?;
+                let record = records
+                    .iter()
+                    .find(|record| record.pubkey == m.pubkey)
+                    .ok_or_else(|| format!("agent {} not found", m.pubkey))?;
+                build_deploy_payload(&app, &state, record)?
+            };
+            let _ = deploy_to_provider(&app, &state, &m.pubkey, id, config, agent_json, None).await;
+        }
+
+        // Phase 6: memory restore (best-effort).
         let memory_total = snap_member.memory.entries.len();
         let mut memory_written = 0usize;
         let mut memory_errors: Vec<String> = Vec::new();

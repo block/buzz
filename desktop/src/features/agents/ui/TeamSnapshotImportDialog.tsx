@@ -5,6 +5,7 @@ import type {
   TeamSnapshotImportPreview,
   TeamSnapshotImportResult,
 } from "@/shared/api/tauriTeams";
+import type { ManagedAgentBackend } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
   Dialog,
@@ -18,6 +19,14 @@ import {
   deriveImportPhase,
   getProfileSyncFailures,
 } from "./teamSnapshotImport.lib";
+import { WhereToRunSection } from "./WhereToRunSection";
+import {
+  backendIntentToManagedAgentBackend,
+  canSubmitWhereToRun,
+  emptyWhereToRunDraft,
+  resolveBackendIntent,
+  type WhereToRunDraft,
+} from "./whereToRunIntent";
 
 type TeamSnapshotImportDialogProps = {
   open: boolean;
@@ -29,8 +38,8 @@ type TeamSnapshotImportDialogProps = {
   result: TeamSnapshotImportResult | null;
   /** Error from the confirm mutation, if any. */
   confirmError: string | null;
-  /** Called with keepAllowlist when user clicks Import. */
-  onConfirm: (keepAllowlist: boolean) => void;
+  /** Called with keepAllowlist and backend when user clicks Import. */
+  onConfirm: (keepAllowlist: boolean, backend: ManagedAgentBackend) => void;
   onOpenChange: (open: boolean) => void;
 };
 
@@ -46,11 +55,13 @@ export function TeamSnapshotImportDialog({
   onOpenChange,
 }: TeamSnapshotImportDialogProps) {
   const [keepAllowlist, setKeepAllowlist] = React.useState(false);
+  const [runDraft, setRunDraft] = React.useState(emptyWhereToRunDraft);
 
-  // Reset choice whenever the dialog opens with new data.
+  // Reset choices whenever the dialog opens with new data.
   React.useEffect(() => {
     if (open) {
       setKeepAllowlist(false);
+      setRunDraft(emptyWhereToRunDraft);
     }
   }, [open]);
 
@@ -74,8 +85,15 @@ export function TeamSnapshotImportDialog({
                 <>
                   <Button
                     data-testid="team-snapshot-import-confirm"
-                    disabled={isConfirming}
-                    onClick={() => onConfirm(keepAllowlist)}
+                    disabled={isConfirming || !canSubmitWhereToRun(runDraft)}
+                    onClick={() =>
+                      onConfirm(
+                        keepAllowlist,
+                        backendIntentToManagedAgentBackend(
+                          resolveBackendIntent(runDraft),
+                        ),
+                      )
+                    }
                     size="sm"
                     type="button"
                     variant="default"
@@ -113,6 +131,9 @@ export function TeamSnapshotImportDialog({
               preview={preview}
               keepAllowlist={keepAllowlist}
               onKeepAllowlistChange={setKeepAllowlist}
+              runDraft={runDraft}
+              onRunDraftChange={setRunDraft}
+              isConfirming={isConfirming}
             />
             {confirmError ? (
               <div
@@ -142,10 +163,16 @@ function PreviewBody({
   preview,
   keepAllowlist,
   onKeepAllowlistChange,
+  runDraft,
+  onRunDraftChange,
+  isConfirming,
 }: {
   preview: TeamSnapshotImportPreview;
   keepAllowlist: boolean;
   onKeepAllowlistChange: (v: boolean) => void;
+  runDraft: WhereToRunDraft;
+  onRunDraftChange: (draft: WhereToRunDraft) => void;
+  isConfirming: boolean;
 }) {
   return (
     <div className="space-y-4 py-1">
@@ -188,6 +215,12 @@ function PreviewBody({
           </div>
         </div>
       ) : null}
+
+      <WhereToRunSection
+        draft={runDraft}
+        isPending={isConfirming}
+        onDraftChange={onRunDraftChange}
+      />
 
       {/* Allowlist section */}
       {preview.hasSourceAllowlist ? (
