@@ -1,4 +1,4 @@
-import { CheckCheck, Link2, Plus, Settings2 } from "lucide-react";
+import { CheckCheck, Cloud, Link2, Plus, Settings2 } from "lucide-react";
 import * as React from "react";
 
 import type { Community } from "@/features/communities/types";
@@ -16,6 +16,12 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/shared/ui/context-menu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
@@ -28,6 +34,7 @@ type CommunityRailProps = {
   activeCommunityId: string | null;
   onSwitchCommunity: (id: string) => void;
   onAddCommunity: () => void;
+  onCreateHostedCommunity: () => void;
   onUpdateCommunity: (
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
@@ -167,6 +174,7 @@ export function CommunityRail({
   activeCommunityId,
   onSwitchCommunity,
   onAddCommunity,
+  onCreateHostedCommunity,
   onUpdateCommunity,
   onRemoveCommunity,
 }: CommunityRailProps) {
@@ -247,20 +255,33 @@ export function CommunityRail({
           community={community}
         />
       ))}
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            aria-label="Add community"
-            className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
-            data-testid="community-rail-add"
-            onClick={onAddCommunity}
-            type="button"
-          >
+      <DropdownMenu modal={false}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <button
+                aria-label="Add community"
+                className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sidebar-accent/60 text-sidebar-foreground/70 outline-hidden transition-all hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground focus:outline-none focus-visible:outline-none"
+                data-testid="community-rail-add"
+                type="button"
+              >
+                <Plus className="h-4 w-4" />
+              </button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="right">Add community</TooltipContent>
+        </Tooltip>
+        <DropdownMenuContent align="start" side="right" sideOffset={6}>
+          <DropdownMenuItem onSelect={onCreateHostedCommunity}>
+            <Cloud className="h-4 w-4" />
+            Create a hosted community
+          </DropdownMenuItem>
+          <DropdownMenuItem onSelect={onAddCommunity}>
             <Plus className="h-4 w-4" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">Add community</TooltipContent>
-      </Tooltip>
+            Connect an existing community
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
       <EditCommunityDialog
         canRemove={communities.length > 1}
         onOpenChange={(open) => {

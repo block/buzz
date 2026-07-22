@@ -48,6 +48,67 @@ test("global back and forward move across channel routes", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("random");
 });
 
+test("community switcher routes hosted creation to hosted settings", async ({
+  page,
+}) => {
+  await page.goto("/");
+
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await page.getByTestId("community-switcher").click();
+
+  await expect(
+    page.getByRole("menuitem", { name: "Connect an existing community" }),
+  ).toBeVisible();
+  await page
+    .getByRole("menuitem", { name: "Create a hosted community" })
+    .click();
+
+  await expect(page).toHaveURL(/#\/settings\?section=hosted-communities/);
+  await expect(
+    page.getByTestId("settings-panel-hosted-communities"),
+  ).toBeVisible();
+  await expect(page.getByTestId("hosted-communities-settings")).toBeVisible();
+});
+
+test("community rail routes hosted creation to hosted settings", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify([
+        {
+          id: "rail-community-a",
+          name: "Alpha",
+          relayUrl: "ws://localhost:3000",
+          addedAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          id: "rail-community-b",
+          name: "Bravo",
+          relayUrl: "ws://localhost:3001",
+          addedAt: "2026-01-02T00:00:00.000Z",
+        },
+      ]),
+    );
+    window.localStorage.setItem("buzz-active-community-id", "rail-community-a");
+  });
+  await page.goto("/");
+
+  await page.getByTestId("community-rail-add").click();
+  await expect(
+    page.getByRole("menuitem", { name: "Connect an existing community" }),
+  ).toBeVisible();
+  await page
+    .getByRole("menuitem", { name: "Create a hosted community" })
+    .click();
+
+  await expect(page).toHaveURL(/#\/settings\?section=hosted-communities/);
+  await expect(
+    page.getByTestId("settings-panel-hosted-communities"),
+  ).toBeVisible();
+});
+
 // FIXME: the forum post "Back to posts" header renders under the fixed top
 // chrome drag region, which intercepts the click. Pre-existing breakage —
 // this spec file was never registered in playwright.config.ts until now.

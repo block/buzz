@@ -80,7 +80,9 @@ test("automatically shows relay join requirements near the relay URL", async ({
   await page.goto("/");
 
   await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add Community", { exact: true }).click();
+  await page
+    .getByText("Connect an existing community", { exact: true })
+    .click();
   await page.getByLabel("Relay URL").fill("wss://policy.example.com");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
