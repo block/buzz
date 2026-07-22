@@ -28,13 +28,13 @@ fn gif_sub_blocks_end(body: &[u8], mut i: usize) -> Option<usize> {
 /// `validate_gif_metadata_free`), and encoders like Photoshop and Giphy emit
 /// them routinely, so uploads fail unless the client drops them first.
 ///
-/// Everything the relay accepts — header, colour tables, graphic-control
-/// extensions, image descriptors and frame data, standard looping extensions —
-/// is copied verbatim, so animation timing, disposal, and pixel data stay
-/// byte-identical. Trailing bytes after the trailer (another relay reject) are
-/// truncated. Returns `None` when the payload isn't structurally parseable as
-/// GIF; the caller then uploads the original bytes and the relay's validator
-/// remains the authority.
+/// Everything the relay accepts — header, colour tables, image descriptors and
+/// frame data, standard looping extensions, and graphic-control extensions for
+/// retained images — is copied verbatim, so animation timing, disposal, and
+/// pixel data stay byte-identical. Trailing bytes after the trailer (another
+/// relay reject) are truncated. Returns `None` when the payload isn't
+/// structurally parseable as GIF; the caller then uploads the original bytes
+/// and the relay's validator remains the authority.
 pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
     if !(body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a")) || body.len() < 13 {
         return None;
@@ -49,6 +49,10 @@ pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
 
     let mut out = Vec::with_capacity(body.len());
     out.extend_from_slice(&body[..i]);
+    // A GCE applies to the next graphic-rendering block, which can be either an
+    // image descriptor or a plain-text extension. Remember emitted GCE ranges
+    // so stripping plain text can also strip the rendering state it consumed.
+    let mut pending_gces = Vec::new();
 
     loop {
         match *body.get(i)? {
@@ -67,6 +71,7 @@ pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
                 end = end.checked_add(1).filter(|&e| e <= body.len())?;
                 end = gif_sub_blocks_end(body, end)?;
                 out.extend_from_slice(&body[i..end]);
+                pending_gces.clear();
                 i = end;
             }
             0x21 => {
@@ -81,7 +86,9 @@ pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
                             return None;
                         }
                         i += 6;
+                        let out_start = out.len();
                         out.extend_from_slice(&body[start..i]);
+                        pending_gces.push((out_start, out.len()));
                     }
                     // Application extension: keep only the standard looping
                     // extensions; anything else (XMP, Photoshop, Giphy…) is a
@@ -97,10 +104,20 @@ pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
                             out.extend_from_slice(&body[start..i]);
                         }
                     }
-                    // Comment (0xFE), plain-text (0x01), and unknown
-                    // extensions: pure metadata channels, dropped. Their
-                    // bodies are all length-prefixed sub-block sequences
-                    // (plain-text's 12-byte header is itself a sub-block).
+                    // Plain text is a graphic-rendering block, so it consumes
+                    // any preceding GCE. Remove that rendering state along with
+                    // the forbidden metadata block rather than letting it alter
+                    // the next retained image.
+                    0x01 => {
+                        i = gif_sub_blocks_end(body, i)?;
+                        for &(gce_start, gce_end) in pending_gces.iter().rev() {
+                            out.drain(gce_start..gce_end);
+                        }
+                        pending_gces.clear();
+                    }
+                    // Comments and unknown extensions are metadata channels but
+                    // not graphic-rendering blocks, so they do not consume a
+                    // pending GCE. Their bodies are length-prefixed sub-blocks.
                     _ => {
                         i = gif_sub_blocks_end(body, i)?;
                     }
@@ -163,6 +180,21 @@ mod tests {
         ext
     }
 
+    /// Plain Text Extension with the required 12-byte header and one text block.
+    fn gif_plain_text_ext() -> Vec<u8> {
+        let mut ext = vec![0x21, 0x01, 12];
+        ext.extend_from_slice(&[
+            0, 0, // text grid left
+            0, 0, // text grid top
+            2, 0, // text grid width
+            2, 0, // text grid height
+            1, 1, // cell width and height
+            1, 0, // foreground and background colour indexes
+        ]);
+        ext.extend_from_slice(&[1, b'x', 0]);
+        ext
+    }
+
     #[test]
     fn test_strip_gif_metadata_removes_comment_and_foreign_app_extensions() {
         let clean = minimal_gif();
@@ -174,6 +206,19 @@ mod tests {
 
         let stripped = strip_gif_metadata(&dirty).unwrap();
         assert_eq!(stripped, clean);
+    }
+
+    #[test]
+    fn test_strip_gif_metadata_removes_gce_consumed_by_plain_text() {
+        let clean = minimal_gif();
+        let mut dirty = clean[..19].to_vec();
+        // This GCE belongs to the following Plain Text Extension, not to the
+        // image later in the stream. Both must disappear during sanitization.
+        dirty.extend_from_slice(&[0x21, 0xf9, 4, 0x09, 0x1e, 0x00, 0x01, 0x00]);
+        dirty.extend_from_slice(&gif_plain_text_ext());
+        dirty.extend_from_slice(&clean[19..]);
+
+        assert_eq!(strip_gif_metadata(&dirty).unwrap(), clean);
     }
 
     #[test]
