@@ -206,6 +206,34 @@ pub async fn mesh_start_node(
     Ok(status)
 }
 
+/// Fast liveness probe of the local mesh OpenAI ingress (`:9337`).
+///
+/// Unlike [`wait_for_mesh_inference`], this does not run a full chat completion
+/// or retry for two minutes — it issues a single short-timeout `GET /v1/models`
+/// (the same call the issue used to confirm the ingress was dead) and reports
+/// reachability. Used to detect a `mesh_llm_runtime = Some` handle that points
+/// at an exited/wedged runtime so we can drop it and re-arm instead of waiting
+/// on a dead endpoint (#2062).
+async fn mesh_ingress_is_live() -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    client
+        .get(format!(
+            "{}/models",
+            crate::managed_agents::RELAY_MESH_API_BASE_URL
+        ))
+        .bearer_auth(crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER)
+        .send()
+        .await
+        .map(|response| response.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Mesh can bind its HTTP ingress and advertise a model shortly before the
 /// router has installed a usable target. Probe the exact chat path agents use
 /// so startup cannot race that gap (`single target None unavailable`).
@@ -490,9 +518,28 @@ pub(crate) async fn ensure_relay_mesh_for_record(
     };
     // A local serve/client runtime already owns the OpenAI ingress and its
     // router can resolve both `auto` and explicit remote models. Do not require
-    // a separate relay-advertised target in that case.
+    // a separate relay-advertised target in that case — BUT only trust it when
+    // the ingress is actually alive. A runtime that exited/wedged after launch
+    // leaves `mesh_llm_runtime = Some` pointing at a dead `:9337` ingress, so a
+    // blind `wait_for_mesh_inference` would just time out and the agent would
+    // stay silent (#2062). Probe first; if the ingress is dead, drop the stale
+    // runtime and fall through to re-arm it.
     if state.mesh_llm_runtime.lock().await.is_some() {
-        return wait_for_mesh_inference(&model_id).await;
+        if mesh_ingress_is_live().await {
+            return wait_for_mesh_inference(&model_id).await;
+        }
+        tracing::warn!(
+            "Buzz shared compute ingress is down while a runtime handle is present; \
+             dropping the stale runtime and re-arming (#2062)"
+        );
+        let stale = state.mesh_llm_runtime.lock().await.take();
+        if let Some(stale) = stale {
+            // Best-effort: a wedged runtime may fail/slow to stop; never block
+            // re-arm on it (the zombie-guard motivation in #2062).
+            if let Err(error) = stale.stop().await {
+                tracing::warn!("stale mesh runtime stop failed during re-arm: {error}");
+            }
+        }
     }
     let target = match resolve_mesh_bootstrap_target(&state, &model_id).await {
         Ok(Some(target)) => target,
