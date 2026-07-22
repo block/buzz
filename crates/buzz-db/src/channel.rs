@@ -1064,9 +1064,8 @@ pub async fn update_channel(
     }
 
     if let Some(name) = updates.name.as_mut() {
-        let prefix_len = name.len() - buzz_core::channel::canonical_channel_name(name).len();
-        name.drain(..prefix_len);
-        if name.trim().is_empty() {
+        *name = buzz_core::channel::canonical_channel_name(name).to_owned();
+        if name.is_empty() {
             return Err(DbError::InvalidData("channel name is required".into()));
         }
     }

@@ -2396,14 +2396,15 @@ mod tests {
 
     #[test]
     fn update_channel_strips_all_leading_hashes_from_name() {
-        let ev = sign(build_update_channel(uuid(), Some("###new-name"), None, None, None).unwrap());
+        let ev =
+            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
         assert!(has_tag(&ev, "name", "new-name"));
     }
 
     #[test]
     fn update_channel_rejects_hash_only_name() {
         assert!(matches!(
-            build_update_channel(uuid(), Some("###"), None, None, None),
+            build_update_channel(uuid(), Some("  ###  "), None, None, None),
             Err(SdkError::InvalidTag(_))
         ));
     }
@@ -2503,7 +2504,7 @@ mod tests {
         let ev = sign(
             build_create_channel(
                 uuid(),
-                "###dev",
+                "  ###dev  ",
                 None::<Visibility>,
                 None::<ChannelKind>,
                 None,
@@ -2519,7 +2520,7 @@ mod tests {
         assert!(matches!(
             build_create_channel(
                 uuid(),
-                "###",
+                "  ###  ",
                 None::<Visibility>,
                 None::<ChannelKind>,
                 None,
