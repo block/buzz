@@ -326,10 +326,15 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         .unwrap_or_default()
         .as_secs();
 
-    let mut relay =
-        HarnessRelay::connect(&config.relay_url, &config.keys, &pubkey_hex, relay_auth_tag)
-            .await
-            .map_err(|e| anyhow::anyhow!("setup-mode relay connect error: {e}"))?;
+    let mut relay = HarnessRelay::connect(
+        &config.relay_url,
+        &config.keys,
+        &pubkey_hex,
+        relay_auth_tag,
+        false,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("setup-mode relay connect error: {e}"))?;
 
     if let Err(e) = relay.set_startup_watermark(startup_watermark).await {
         tracing::warn!("setup-mode: failed to set startup watermark: {e}");
