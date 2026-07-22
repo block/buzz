@@ -66,6 +66,14 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/main.desktop"
+      },
+      "rpm": {
+        "desktopTemplate": "linux/main.desktop"
+      }
+    },
     "macOS": {
       "infoPlist": "Info.plist",
       "entitlements": "Entitlements.plist",
