@@ -451,16 +451,34 @@ pub fn resolve_step_templates(
     }
 }
 
+/// Suspend metadata carried out of the run loop when a `RequestApproval`
+/// step suspends execution (WF-08): everything the engine needs to persist
+/// the approval record and announce it — the raw token, the requesting step,
+/// the resolved approver, and the human-facing message.
+#[derive(Debug, Clone)]
+pub struct PendingApproval {
+    /// Raw approval token. The DB layer hashes it at persist time; it is
+    /// carried raw here so the kind:46010 announcement can deliver it to
+    /// approvers (who hash it back into the grant's `d` tag).
+    pub token: String,
+    /// The step that requested approval.
+    pub step_id: String,
+    /// Approver spec in grant-check form: `"any"` or a 64-char hex pubkey.
+    pub approver_spec: String,
+    /// Template-resolved, human-facing approval message.
+    pub message: String,
+    /// Approval window in seconds (from `timeout:`, default 24h).
+    pub timeout_secs: u64,
+}
+
 /// Result of dispatching a single step action.
 #[derive(Debug)]
 pub enum StepResult {
     /// Step completed normally. Output is stored in `step_outputs`.
     Completed(JsonValue),
-    /// Step requests suspension (approval gate). Execution must pause.
-    Suspended {
-        /// Token used to resume or reject this approval gate.
-        approval_token: String,
-    },
+    /// Step requests suspension (approval gate). Execution must pause and the
+    /// caller must persist the approval so a later grant can resume the run.
+    Suspended(PendingApproval),
     /// Step was skipped due to `if:` condition being false.
     Skipped,
 }
@@ -653,6 +671,14 @@ pub async fn dispatch_action(
             timeout,
         } => {
             let timeout_str = timeout.as_deref().unwrap_or("24h");
+            let timeout_secs = parse_duration_secs(timeout_str)?;
+            // Resolve the approver before any state is persisted: the relay's
+            // grant authorization (`check_approver_spec`) accepts only "any"
+            // or a hex pubkey, so an unresolvable spec would mint an approval
+            // no grant can ever satisfy. Fail the step loudly instead of
+            // suspending into a dead end.
+            let approver_spec =
+                resolve_approver_spec(from).map_err(WorkflowError::InvalidDefinition)?;
             info!(
                 run_id = %run_id, step = step_id,
                 "RequestApproval from={from} timeout={timeout_str}: {message}"
@@ -660,12 +686,13 @@ pub async fn dispatch_action(
 
             let token = generate_approval_token(run_id, step_id);
 
-            // TODO (WF-08): create approval record in DB, emit kind:46010.
-            // For now, return Suspended with the token so the caller can persist state.
-
-            Ok(StepResult::Suspended {
-                approval_token: token,
-            })
+            Ok(StepResult::Suspended(PendingApproval {
+                token,
+                step_id: step_id.to_string(),
+                approver_spec,
+                message: message.clone(),
+                timeout_secs,
+            }))
         }
 
         Delay { duration } => {
@@ -697,6 +724,36 @@ pub async fn dispatch_action(
 /// sufficient and avoids the predictability of time-based entropy.
 fn generate_approval_token(_run_id: Uuid, _step_id: &str) -> String {
     Uuid::new_v4().to_string()
+}
+
+/// Resolve a `request_approval.from` spec into the form the relay's grant
+/// authorization (`check_approver_spec`) understands: `"any"` or a lowercase
+/// 64-char hex pubkey.
+///
+/// Accepted inputs: `""`/`"any"` (case-insensitive), a hex pubkey, an
+/// `npub1…` bech32 pubkey, or any of those with a leading `@`. Display-name
+/// mentions (e.g. `@release-manager`) cannot be resolved here — the engine
+/// has no name directory at suspend time — and are rejected so the run fails
+/// visibly instead of minting an approval nobody can ever grant.
+pub(crate) fn resolve_approver_spec(from: &str) -> Result<String, String> {
+    let spec = from.trim();
+    if spec.is_empty() || spec.eq_ignore_ascii_case("any") {
+        return Ok("any".to_string());
+    }
+    let bare = spec.strip_prefix('@').unwrap_or(spec);
+    if bare.len() == 64 && bare.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(bare.to_ascii_lowercase());
+    }
+    if bare.starts_with("npub1") {
+        use nostr::prelude::FromBech32;
+        if let Ok(pk) = nostr::PublicKey::from_bech32(bare) {
+            return Ok(pk.to_hex());
+        }
+    }
+    Err(format!(
+        "request_approval.from '{from}' cannot be resolved to an approver — \
+         use \"any\", a 64-char hex pubkey, or an npub1… key"
+    ))
 }
 
 /// Parse a duration string like "5m", "1h", "30s" into seconds.
@@ -939,7 +996,7 @@ async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, W
 pub struct ExecutionResult {
     /// Set when execution suspended at a `RequestApproval` step.
     /// `None` means the run completed normally.
-    pub approval_token: Option<String>,
+    pub approval: Option<PendingApproval>,
     /// Index of the step that suspended (or the total step count on completion).
     pub step_index: usize,
     /// Accumulated step outputs at the point of suspension or completion.
@@ -1180,15 +1237,15 @@ async fn execute_steps(
                 }));
                 step_outputs.insert(step.id.clone(), output);
             }
-            StepResult::Suspended { approval_token } => {
+            StepResult::Suspended(pending) => {
                 info!(
                     run_id = %run_id, step = %step.id,
                     "Step suspended — awaiting approval (token: <redacted>)"
                 );
-                // Return the token and current state so the caller can persist the
-                // approval record and update the run's execution trace.
+                // Return the pending approval and current state so the caller
+                // can persist the approval record and update the run status.
                 return Ok(ExecutionResult {
-                    approval_token: Some(approval_token),
+                    approval: Some(pending),
                     step_index: i,
                     step_outputs,
                     trace,
@@ -1206,7 +1263,7 @@ async fn execute_steps(
 
     info!(run_id = %run_id, "Workflow run completed");
     Ok(ExecutionResult {
-        approval_token: None,
+        approval: None,
         step_index: def.steps.len(),
         step_outputs,
         trace,
@@ -1830,5 +1887,50 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    #[test]
+    fn approver_spec_any_and_empty_resolve_to_any() {
+        assert_eq!(resolve_approver_spec("").unwrap(), "any");
+        assert_eq!(resolve_approver_spec("  ").unwrap(), "any");
+        assert_eq!(resolve_approver_spec("any").unwrap(), "any");
+        assert_eq!(resolve_approver_spec("ANY").unwrap(), "any");
+    }
+
+    #[test]
+    fn approver_spec_hex_pubkey_resolves_lowercased() {
+        let hex_upper: String = "AB".repeat(32);
+        let hex_lower = hex_upper.to_ascii_lowercase();
+        assert_eq!(resolve_approver_spec(&hex_upper).unwrap(), hex_lower);
+        // Leading @ is stripped.
+        assert_eq!(
+            resolve_approver_spec(&format!("@{hex_upper}")).unwrap(),
+            hex_lower
+        );
+    }
+
+    #[test]
+    fn approver_spec_npub_resolves_to_hex() {
+        use nostr::prelude::ToBech32;
+        let keys = nostr::Keys::generate();
+        let npub = keys.public_key().to_bech32().expect("bech32 encode");
+        let expected = keys.public_key().to_hex();
+        assert_eq!(resolve_approver_spec(&npub).unwrap(), expected);
+        assert_eq!(
+            resolve_approver_spec(&format!("@{npub}")).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn approver_spec_display_names_fail_closed() {
+        // Display-name mentions can't be resolved to a pubkey at suspend
+        // time; an approval minted for them could never be granted
+        // (check_approver_spec accepts only "any"/hex), so they must error.
+        assert!(resolve_approver_spec("@release-manager").is_err());
+        assert!(resolve_approver_spec("release-manager").is_err());
+        // Truncated hex and malformed npub fail too.
+        assert!(resolve_approver_spec(&"ab".repeat(16)).is_err());
+        assert!(resolve_approver_spec("npub1notarealkey").is_err());
     }
 }
