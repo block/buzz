@@ -258,6 +258,9 @@ fn default_config_is_all_none_empty() {
     assert!(config.env_vars.is_empty());
     assert!(config.provider.is_none());
     assert!(config.model.is_none());
+    assert!(config.preferred_runtime.is_none());
+    assert!(config.preferred_agent_command.is_none());
+    assert!(config.preferred_agent_args.is_none());
 }
 
 #[test]
@@ -267,10 +270,47 @@ fn roundtrip_serialization() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4".to_string()),
         preferred_runtime: Some("claude".to_string()),
+        preferred_agent_command: None,
+        preferred_agent_args: None,
     };
     let json = serde_json::to_string(&config).expect("serialize");
     let back: GlobalAgentConfig = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(config, back);
+}
+
+#[test]
+fn custom_runtime_requires_command() {
+    let missing = GlobalAgentConfig {
+        preferred_runtime: Some("custom".to_string()),
+        preferred_agent_command: None,
+        ..Default::default()
+    };
+    let err = validate_global_config(&missing).unwrap_err();
+    assert!(
+        err.contains("preferred_agent_command"),
+        "expected custom-command error, got: {err}"
+    );
+
+    let ok = GlobalAgentConfig {
+        preferred_runtime: Some("custom".to_string()),
+        preferred_agent_command: Some("agent".to_string()),
+        preferred_agent_args: Some(vec!["acp".to_string()]),
+        ..Default::default()
+    };
+    assert!(validate_global_config(&ok).is_ok());
+}
+
+#[test]
+fn normalize_clears_custom_command_when_runtime_is_catalog() {
+    let mut config = GlobalAgentConfig {
+        preferred_runtime: Some("claude".to_string()),
+        preferred_agent_command: Some("agent".to_string()),
+        preferred_agent_args: Some(vec!["acp".to_string()]),
+        ..Default::default()
+    };
+    normalize_global_config_fields(&mut config);
+    assert!(config.preferred_agent_command.is_none());
+    assert!(config.preferred_agent_args.is_none());
 }
 
 #[test]
@@ -584,6 +624,8 @@ fn populated_global_config_round_trips() {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-5".to_string()),
         preferred_runtime: None,
+        preferred_agent_command: None,
+        preferred_agent_args: None,
     };
     let json = serde_json::to_string(&original).expect("serialization must not fail");
     let decoded: GlobalAgentConfig =

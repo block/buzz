@@ -341,6 +341,8 @@ type E2eConfig = {
       provider: string | null;
       model: string | null;
       preferred_runtime?: string | null;
+      preferred_agent_command?: string | null;
+      preferred_agent_args?: string[] | null;
     };
     /** Baked build env returned by the display and key-name Tauri commands. */
     bakedBuildEnv?: Array<{
@@ -6947,6 +6949,8 @@ let mockGlobalAgentConfig: {
   provider: string | null;
   model: string | null;
   preferred_runtime?: string | null;
+  preferred_agent_command?: string | null;
+  preferred_agent_args?: string[] | null;
 } | null = null;
 
 // Per-page get_nsec call counter for sequenced error testing.
@@ -10106,6 +10110,8 @@ export function maybeInstallE2eTauriMocks() {
             provider: null,
             model: null,
             preferred_runtime: null,
+            preferred_agent_command: null,
+            preferred_agent_args: null,
           }
         );
       }
@@ -10120,6 +10126,8 @@ export function maybeInstallE2eTauriMocks() {
               provider: string | null;
               model: string | null;
               preferred_runtime: string | null;
+              preferred_agent_command: string | null;
+              preferred_agent_args: string[] | null;
             };
           }
         ).config;

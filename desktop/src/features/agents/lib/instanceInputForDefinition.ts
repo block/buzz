@@ -3,7 +3,9 @@ import type {
   AcpRuntimeCatalogEntry,
   AgentPersona,
   CreateManagedAgentInput,
+  GlobalAgentConfig,
 } from "@/shared/api/types";
+import { buildCustomAcpRuntime } from "./customHarness";
 import {
   getDefaultPersonaRuntime,
   resolvePersonaRuntime,
@@ -45,12 +47,21 @@ export async function availableRuntimesForStart(
 export function resolveStartRuntimeForDefinition(
   persona: AgentPersona,
   runtimes: readonly AcpRuntime[],
-  preferredRuntimeId?: string | null,
+  preferred?: Pick<
+    GlobalAgentConfig,
+    "preferred_runtime" | "preferred_agent_command" | "preferred_agent_args"
+  > | null,
 ): { runtime: AcpRuntime; warnings: string[] } {
-  // Use the buzz-agent-first preference (buzz-agent → goose → first available)
-  // so a freshly installed goose never beats the bundled buzz-agent sidecar
-  // for runtime-less personas (item 13 regression guard).
-  const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
+  // Prefer an explicit BYO command when the global preference is custom,
+  // otherwise use the buzz-agent-first catalog preference.
+  const preferredRuntimeId = preferred?.preferred_runtime ?? null;
+  const defaultRuntime =
+    preferredRuntimeId === "custom"
+      ? (buildCustomAcpRuntime(
+          preferred?.preferred_agent_command ?? "",
+          preferred?.preferred_agent_args ?? [],
+        ) ?? getDefaultPersonaRuntime(runtimes, null))
+      : getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
   const { runtime, warnings, isOverridden }: ResolvePersonaRuntimeResult =
     resolvePersonaRuntime(persona.runtime, runtimes, defaultRuntime);
 

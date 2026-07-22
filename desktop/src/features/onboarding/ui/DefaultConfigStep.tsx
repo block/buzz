@@ -7,6 +7,14 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
+import {
+  CUSTOM_RUNTIME_ID,
+  CUSTOM_RUNTIME_LABEL,
+  buildCustomAcpRuntime,
+  formatAgentArgsInput,
+  isCustomRuntimeId,
+  parseAgentArgsInput,
+} from "@/features/agents/lib/customHarness";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
@@ -18,6 +26,7 @@ import type {
   GlobalAgentConfig,
 } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
+import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
 import { OnboardingFooter } from "./OnboardingFooter";
@@ -39,6 +48,7 @@ type DefaultConfigStepProps = {
 
 function formatHarnessLabel(runtime: AcpRuntimeCatalogEntry | undefined) {
   if (!runtime) return "Select a harness";
+  if (isCustomRuntimeId(runtime.id)) return CUSTOM_RUNTIME_LABEL;
   return runtime.id === "buzz-agent" ? "Buzz" : runtime.label;
 }
 
@@ -110,6 +120,7 @@ function AgentDefaultsSection({
     };
   }, []);
 
+  const customReady = readyRuntimeIds.includes(CUSTOM_RUNTIME_ID);
   const effectiveReadyRuntimeIds = React.useMemo(
     () =>
       readyRuntimeIds.length > 0
@@ -125,13 +136,56 @@ function AgentDefaultsSection({
   );
   // Setup already confirmed readiness. Re-filter only for onboarding
   // visibility here; a transient auth recheck must not invalidate that handoff.
-  const readyRuntimes = React.useMemo(
+  const readyCatalogRuntimes = React.useMemo(
     () =>
       getVisibleOnboardingRuntimes(runtimesQuery.data ?? []).filter((runtime) =>
         readyRuntimeIdSet.has(runtime.id),
       ),
     [readyRuntimeIdSet, runtimesQuery.data],
   );
+  const customRuntime = React.useMemo(
+    () =>
+      customReady || isCustomRuntimeId(config.preferred_runtime)
+        ? buildCustomAcpRuntime(
+            config.preferred_agent_command ?? "",
+            config.preferred_agent_args ?? [],
+          )
+        : null,
+    [
+      config.preferred_agent_args,
+      config.preferred_agent_command,
+      config.preferred_runtime,
+      customReady,
+    ],
+  );
+  const readyRuntimes = React.useMemo(() => {
+    const items: AcpRuntimeCatalogEntry[] = [...readyCatalogRuntimes];
+    if (customRuntime) {
+      items.push(customRuntime);
+    } else if (customReady) {
+      items.push({
+        id: CUSTOM_RUNTIME_ID,
+        label: CUSTOM_RUNTIME_LABEL,
+        avatarUrl: "",
+        availability: "available",
+        command: null,
+        binaryPath: null,
+        defaultArgs: [],
+        mcpCommand: null,
+        modelEnvVar: null,
+        providerEnvVar: null,
+        thinkingEnvVar: null,
+        installHint: "",
+        installInstructionsUrl: "https://agentclientprotocol.com/",
+        canAutoInstall: false,
+        underlyingCliPath: null,
+        nodeRequired: false,
+        authStatus: { status: "not_applicable" },
+        loginHint: null,
+      });
+    }
+    return items;
+  }, [customReady, customRuntime, readyCatalogRuntimes]);
   const selectedRuntime = React.useMemo(
     () =>
       readyRuntimes.find((runtime) => runtime.id === config.preferred_runtime),
@@ -139,6 +193,7 @@ function AgentDefaultsSection({
   );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
   const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
+  const isCustomSelected = isCustomRuntimeId(selectedRuntimeId);
 
   const configSurfaceError =
     runtimesQuery.isError ||
@@ -165,6 +220,32 @@ function AgentDefaultsSection({
     [config],
   );
 
+  const handleCustomCommandChange = React.useCallback(
+    (command: string) => {
+      const next: GlobalAgentConfig = {
+        ...config,
+        preferred_agent_command: command,
+        preferred_runtime: CUSTOM_RUNTIME_ID,
+      };
+      setConfig(next);
+      coalescerRef.current?.enqueue(next);
+    },
+    [config],
+  );
+
+  const handleCustomArgsChange = React.useCallback(
+    (value: string) => {
+      const next: GlobalAgentConfig = {
+        ...config,
+        preferred_agent_args: parseAgentArgsInput(value),
+        preferred_runtime: CUSTOM_RUNTIME_ID,
+      };
+      setConfig(next);
+      coalescerRef.current?.enqueue(next);
+    },
+    [config],
+  );
+
   React.useEffect(() => {
     if (configSurfaceLoading || selectedRuntimeId) return;
     if (readyRuntimes.length !== 1) return;
@@ -180,12 +261,22 @@ function AgentDefaultsSection({
     () => coalescerRef.current?.flush() ?? Promise.resolve(),
     [],
   );
+  const customCommandReady =
+    !isCustomSelected ||
+    (config.preferred_agent_command ?? "").trim().length > 0;
   React.useEffect(() => {
     onPersistenceStateChange({
-      canComplete: selectedRuntimeId.length > 0 && !isSaving,
+      canComplete:
+        selectedRuntimeId.length > 0 && customCommandReady && !isSaving,
       flush: flushPersistence,
     });
-  }, [flushPersistence, isSaving, onPersistenceStateChange, selectedRuntimeId]);
+  }, [
+    customCommandReady,
+    flushPersistence,
+    isSaving,
+    onPersistenceStateChange,
+    selectedRuntimeId,
+  ]);
 
   return (
     <section className="w-full space-y-4 text-left text-sm">
@@ -219,27 +310,80 @@ function AgentDefaultsSection({
             />
           </div>
 
-          <AgentConfigFields
-            bakedEnv={bakedEnv}
-            selectedRuntime={selectedRuntime}
-            config={config}
-            isCustomModelEditing={isCustomModelEditing}
-            isCustomProvider={isCustomProvider}
-            onConfigChange={(next) => {
-              // Always apply optimistically so the UI never reverts mid-save,
-              // then enqueue the persist — the coalescer serialises multiple
-              // rapid edits into a single trailing request.
-              setConfig(next);
-              coalescerRef.current?.enqueue(next);
-            }}
-            onCustomModelEditingChange={setIsCustomModelEditing}
-            onIsCustomProviderChange={setIsCustomProvider}
-            placeholderClassName="text-foreground/70"
-            selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
-            disclosure="onboarding-essential"
-            unstyled
-            useCustomSelect
-          />
+          {isCustomSelected ? (
+            <div className="space-y-4">
+              <div className="space-y-1.5">
+                <label
+                  className="pl-3 text-sm font-medium"
+                  htmlFor="global-agent-custom-command"
+                >
+                  Agent command
+                </label>
+                <Input
+                  autoCorrect="off"
+                  className="h-12 rounded-2xl border-foreground/15 bg-white px-4 text-sm shadow-none"
+                  data-testid="global-agent-custom-command"
+                  id="global-agent-custom-command"
+                  onChange={(event) =>
+                    handleCustomCommandChange(event.target.value)
+                  }
+                  placeholder="agent"
+                  spellCheck={false}
+                  value={config.preferred_agent_command ?? ""}
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label
+                  className="pl-3 text-sm font-medium"
+                  htmlFor="global-agent-custom-args"
+                >
+                  Agent args
+                  <span className="ml-1 text-xs font-normal text-muted-foreground">
+                    Optional
+                  </span>
+                </label>
+                <Input
+                  autoCorrect="off"
+                  className="h-12 rounded-2xl border-foreground/15 bg-white px-4 text-sm shadow-none"
+                  data-testid="global-agent-custom-args"
+                  id="global-agent-custom-args"
+                  onChange={(event) =>
+                    handleCustomArgsChange(event.target.value)
+                  }
+                  placeholder="acp"
+                  spellCheck={false}
+                  value={formatAgentArgsInput(config.preferred_agent_args)}
+                />
+                <p className="pl-3 text-xs text-muted-foreground">
+                  Comma-separated. Example:{" "}
+                  <code className="font-mono">acp</code> for Cursor, or leave
+                  blank for zero-arg adapters.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <AgentConfigFields
+              bakedEnv={bakedEnv}
+              selectedRuntime={selectedRuntime}
+              config={config}
+              isCustomModelEditing={isCustomModelEditing}
+              isCustomProvider={isCustomProvider}
+              onConfigChange={(next) => {
+                // Always apply optimistically so the UI never reverts mid-save,
+                // then enqueue the persist — the coalescer serialises multiple
+                // rapid edits into a single trailing request.
+                setConfig(next);
+                coalescerRef.current?.enqueue(next);
+              }}
+              onCustomModelEditingChange={setIsCustomModelEditing}
+              onIsCustomProviderChange={setIsCustomProvider}
+              placeholderClassName="text-foreground/70"
+              selectClassName="h-12 rounded-2xl border-foreground/15 bg-white px-4 py-2 text-sm shadow-none hover:bg-white/95"
+              disclosure="onboarding-essential"
+              unstyled
+              useCustomSelect
+            />
+          )}
         </div>
       )}
     </section>

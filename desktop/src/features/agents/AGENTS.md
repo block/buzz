@@ -62,12 +62,17 @@ with a TypeScript lookup table or an id comparison in a component.
    via `synthesizeEmptyDiscoveryStatus()` and is intentionally **not cached**
    so that closing → reopening the dialog re-runs discovery after the user
    installs or signs into the CLI (`isCacheableDiscoveryResponse()`).
-7. **Onboarding setup detects readiness; it does not select defaults.** The
-   setup page derives visible and ready harnesses from the runtime catalog and
-   only offers install or sign-in actions. The following defaults page is the
-   sole onboarding surface that chooses and persists `preferred_runtime`.
-   `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
-   touching this flow or the shared renderer.
+7. **Onboarding setup detects readiness; it does not select catalog defaults.**
+   The setup page derives visible and ready harnesses from the runtime catalog
+   and offers install or sign-in actions for Claude Code / Codex. It also
+   offers **Bring your own harness** (`preferred_runtime: "custom"` +
+   `preferred_agent_command` / `preferred_agent_args`) so users can continue
+   without those CLIs. The following defaults page is the sole onboarding
+   surface that chooses and persists a catalog `preferred_runtime` (or revises
+   the BYO command). `custom` is a sentinel outside `KnownAcpRuntime` — it has
+   no catalog capability facts; components must not invent provider/model UI
+   for it. `onboarding-agent-defaults.spec.ts` is the acceptance gate for
+   anything touching this flow or the shared renderer.
 
 ## The tests that enforce this
 

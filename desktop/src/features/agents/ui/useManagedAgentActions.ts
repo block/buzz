@@ -195,7 +195,7 @@ export function useManagedAgentActions() {
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         persona,
         runtimes,
-        globalConfig.preferred_runtime,
+        globalConfig,
       );
       const input = await buildInstanceInputForDefinition(persona, runtime);
 

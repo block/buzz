@@ -39,11 +39,11 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
+  resolvePreferredHarness,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -167,8 +167,8 @@ export function AgentDefinitionDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ open });
   const defaultRuntime = React.useMemo(
-    () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
-    [globalConfig.preferred_runtime, runtimes],
+    () => resolvePreferredHarness(runtimes, globalConfig),
+    [globalConfig, runtimes],
   );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(

@@ -421,7 +421,7 @@ export function UserProfilePanel({
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         personaToStart,
         runtimes,
-        globalConfig.preferred_runtime,
+        globalConfig,
       );
 
       for (const warning of warnings) {
@@ -442,6 +442,8 @@ export function UserProfilePanel({
       availableRuntimesQuery,
       createAgentMutation.mutateAsync,
       globalConfig.preferred_runtime,
+      globalConfig.preferred_agent_command,
+      globalConfig.preferred_agent_args,
       managedAgentsQuery.refetch,
       relayAgentsQuery.refetch,
     ],

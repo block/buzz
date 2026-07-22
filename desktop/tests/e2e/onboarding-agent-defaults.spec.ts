@@ -81,7 +81,56 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
   await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toHaveCount(
     0,
   );
-  await expect(page.getByRole("checkbox")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-runtime-custom")).toBeVisible();
+  await expect(
+    page.getByTestId("onboarding-runtime-custom-toggle"),
+  ).not.toBeChecked();
+});
+
+test("bring-your-own harness enables Next without Claude or Codex", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "not_installed", { status: "logged_out" }),
+        runtime("codex", "not_installed", { status: "logged_out" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await expect(page.getByTestId("onboarding-setup-next")).toBeDisabled();
+  await page.getByTestId("onboarding-runtime-custom-toggle").check();
+  await expect(page.getByTestId("onboarding-setup-next")).toBeDisabled();
+  await page.getByTestId("onboarding-custom-command").fill("agent");
+  await page.getByTestId("onboarding-custom-args").fill("acp");
+  await expect(page.getByTestId("onboarding-setup-next")).toBeEnabled();
+  await page.getByTestId("onboarding-setup-next").click();
+
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Custom command",
+  );
+  expect(await readSavedRuntime(page)).toBe("custom");
+  const saved = await page.evaluate(async () => {
+    return await (
+      window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload: unknown,
+        ) => Promise<{
+          preferred_agent_command?: string | null;
+          preferred_agent_args?: string[] | null;
+        }>;
+      }
+    ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null);
+  });
+  expect(saved?.preferred_agent_command).toBe("agent");
+  expect(saved?.preferred_agent_args).toEqual(["acp"]);
 });
 
 test("ready state is detected and enables Next without persisting a default", async ({

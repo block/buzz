@@ -17,6 +17,15 @@ import { Card } from "@/shared/ui/card";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
+import { Input } from "@/shared/ui/input";
+import {
+  CUSTOM_RUNTIME_ID,
+  parseAgentArgsInput,
+} from "@/features/agents/lib/customHarness";
+import {
+  getGlobalAgentConfig,
+  setGlobalAgentConfig,
+} from "@/shared/api/tauriGlobalAgentConfig";
 import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
@@ -547,12 +556,119 @@ function RuntimeProvidersLoadingState() {
   );
 }
 
+function BringYourOwnHarnessCard({
+  args,
+  command,
+  onArgsChange,
+  onCommandChange,
+  onSelectedChange,
+  selected,
+}: {
+  args: string;
+  command: string;
+  onArgsChange: (value: string) => void;
+  onCommandChange: (value: string) => void;
+  onSelectedChange: (selected: boolean) => void;
+  selected: boolean;
+}) {
+  const commandReady = command.trim().length > 0;
+  const ready = selected && commandReady;
+
+  return (
+    <Card
+      className={cn(
+        "w-full max-w-[592px] select-none items-stretch px-5 py-5 text-left",
+        ready && "ring-1 ring-[var(--buzz-welcome-chartreuse)]/50",
+      )}
+      data-ready={ready ? "true" : "false"}
+      data-testid="onboarding-runtime-custom"
+      variant="textured"
+    >
+      <label className="flex cursor-pointer items-start gap-3">
+        <input
+          checked={selected}
+          className="mt-1"
+          data-testid="onboarding-runtime-custom-toggle"
+          onChange={(event) => onSelectedChange(event.target.checked)}
+          type="checkbox"
+        />
+        <span className="min-w-0 flex-1 space-y-1">
+          <span className="block text-sm font-medium text-foreground">
+            Bring your own harness
+          </span>
+          <span className="block text-xs leading-5 text-muted-foreground">
+            Any ACP-speaking command works — Cursor{" "}
+            <code className="font-mono text-2xs">agent acp</code>, yoak,
+            OpenCode, or your own adapter.
+          </span>
+        </span>
+      </label>
+
+      {selected ? (
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <div className="space-y-1.5 sm:col-span-1">
+            <label
+              className="text-xs font-medium text-foreground"
+              htmlFor="onboarding-custom-command"
+            >
+              Command
+            </label>
+            <Input
+              autoCorrect="off"
+              className="h-10 rounded-xl border-foreground/15 bg-white"
+              data-testid="onboarding-custom-command"
+              id="onboarding-custom-command"
+              onChange={(event) => onCommandChange(event.target.value)}
+              placeholder="agent"
+              spellCheck={false}
+              value={command}
+            />
+          </div>
+          <div className="space-y-1.5 sm:col-span-1">
+            <label
+              className="text-xs font-medium text-foreground"
+              htmlFor="onboarding-custom-args"
+            >
+              Args
+              <span className="ml-1 font-normal text-muted-foreground">
+                Optional
+              </span>
+            </label>
+            <Input
+              autoCorrect="off"
+              className="h-10 rounded-xl border-foreground/15 bg-white"
+              data-testid="onboarding-custom-args"
+              id="onboarding-custom-args"
+              onChange={(event) => onArgsChange(event.target.value)}
+              placeholder="acp"
+              spellCheck={false}
+              value={args}
+            />
+          </div>
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
 function RuntimeProvidersSection({
+  byoArgs,
+  byoCommand,
+  byoSelected,
   installResults,
+  onByoArgsChange,
+  onByoCommandChange,
+  onByoSelectedChange,
   onInstallResultsChange,
   runtimeProviders,
 }: {
+  byoArgs: string;
+  byoCommand: string;
+  byoSelected: boolean;
   installResults: InstallResultsState;
+  onByoArgsChange: (value: string) => void;
+  onByoCommandChange: (value: string) => void;
+  onByoSelectedChange: (selected: boolean) => void;
   onInstallResultsChange: React.Dispatch<
     React.SetStateAction<InstallResultsState>
   >;
@@ -596,8 +712,8 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          Install or sign in to Claude Code or Codex, or bring your own ACP
+          harness (Cursor, yoak, OpenCode, and any other stdio ACP server).
         </p>
       </div>
 
@@ -624,10 +740,19 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No bundled harnesses were detected yet. Install Claude Code or
+            Codex, or bring your own ACP command below.
           </p>
         )}
+
+        <BringYourOwnHarnessCard
+          args={byoArgs}
+          command={byoCommand}
+          onArgsChange={onByoArgsChange}
+          onCommandChange={onByoCommandChange}
+          selected={byoSelected}
+          onSelectedChange={onByoSelectedChange}
+        />
 
         {errorMessage ? (
           <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
@@ -648,12 +773,26 @@ function SetupStepContent({
   const { runtimeProviders } = state;
   const [installResults, setInstallResults] =
     React.useState<InstallResultsState>({});
-  const readyRuntimeIds = React.useMemo(
+  const [byoSelected, setByoSelected] = React.useState(false);
+  const [byoCommand, setByoCommand] = React.useState("");
+  const [byoArgs, setByoArgs] = React.useState("acp");
+  const [isAdvancing, setIsAdvancing] = React.useState(false);
+  const [advanceError, setAdvanceError] = React.useState<string | null>(null);
+
+  const catalogReadyIds = React.useMemo(
     () =>
       getReadyOnboardingRuntimes(runtimeProviders.items).map(
         (runtime) => runtime.id,
       ),
     [runtimeProviders.items],
+  );
+  const byoIsReady = byoSelected && byoCommand.trim().length > 0;
+  const readyRuntimeIds = React.useMemo(
+    () =>
+      byoIsReady
+        ? [...catalogReadyIds, CUSTOM_RUNTIME_ID]
+        : catalogReadyIds,
+    [byoIsReady, catalogReadyIds],
   );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
   // The key prevents catalog object refreshes from creating an effect loop
@@ -663,6 +802,34 @@ function SetupStepContent({
     onReadyRuntimeIdsChange(readyRuntimeIds);
   }, [onReadyRuntimeIdsChange, readyRuntimeIdsKey]);
 
+  const canAdvance = readyRuntimeIds.length > 0 && !isAdvancing;
+
+  async function handleNext() {
+    setAdvanceError(null);
+    setIsAdvancing(true);
+    try {
+      if (byoIsReady) {
+        const existing = await getGlobalAgentConfig().catch(() => null);
+        await setGlobalAgentConfig({
+          env_vars: existing?.env_vars ?? {},
+          model: existing?.model ?? null,
+          preferred_agent_args: parseAgentArgsInput(byoArgs),
+          preferred_agent_command: byoCommand.trim(),
+          preferred_runtime: CUSTOM_RUNTIME_ID,
+          provider: existing?.provider ?? null,
+        });
+      }
+      actions.next(readyRuntimeIds);
+    } catch (cause) {
+      setAdvanceError(
+        cause instanceof Error
+          ? cause.message
+          : "Couldn't save your custom harness.",
+      );
+      setIsAdvancing(false);
+    }
+  }
+
   return (
     <OnboardingSlideTransition
       className="flex min-h-full w-full flex-col items-center"
@@ -671,20 +838,32 @@ function SetupStepContent({
       transitionKey={`setup-${direction}`}
     >
       <RuntimeProvidersSection
+        byoArgs={byoArgs}
+        byoCommand={byoCommand}
+        byoSelected={byoSelected}
         installResults={installResults}
+        onByoArgsChange={setByoArgs}
+        onByoCommandChange={setByoCommand}
+        onByoSelectedChange={setByoSelected}
         onInstallResultsChange={setInstallResults}
         runtimeProviders={runtimeProviders}
       />
+
+      {advanceError ? (
+        <p className="mb-4 max-w-[560px] text-sm text-destructive" role="alert">
+          {advanceError}
+        </p>
+      ) : null}
 
       <OnboardingFooter>
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
-          onClick={() => actions.next(readyRuntimeIds)}
+          disabled={!canAdvance}
+          onClick={() => void handleNext()}
           type="button"
         >
-          Next
+          {isAdvancing ? "Saving…" : "Next"}
         </Button>
 
         <Button

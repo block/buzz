@@ -16,6 +16,7 @@ import type {
   AcpRuntime,
   AgentPersona,
   CreateManagedAgentInput,
+  GlobalAgentConfig,
   ManagedAgent,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -210,13 +211,16 @@ export async function buildWelcomeStarterCreateInput(
   starter: WelcomeTeamStarterDefinition,
   persona: AgentPersona,
   runtimes: readonly AcpRuntime[],
-  preferredRuntimeId: string | null,
+  preferred: Pick<
+    GlobalAgentConfig,
+    "preferred_runtime" | "preferred_agent_command" | "preferred_agent_args"
+  > | null,
   relayUrl?: string | null,
 ): Promise<CreateManagedAgentInput> {
   const { runtime } = resolveStartRuntimeForDefinition(
     persona,
     runtimes,
-    preferredRuntimeId,
+    preferred,
   );
   return {
     ...(await buildInstanceInputForDefinition(persona, runtime)),
@@ -293,7 +297,7 @@ async function provisionWelcomeTeam(
       starter,
       persona,
       runtimes,
-      globalConfig.preferred_runtime,
+      globalConfig,
       relayUrl,
     );
     const existing = pickWelcomeTeamStarterAgentForRelay(

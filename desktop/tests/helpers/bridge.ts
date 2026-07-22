@@ -380,6 +380,8 @@ type MockBridgeOptions = {
     provider: string | null;
     model: string | null;
     preferred_runtime?: string | null;
+    preferred_agent_command?: string | null;
+    preferred_agent_args?: string[] | null;
   };
   bakedBuildEnv?: Array<{
     key: string;
