@@ -325,6 +325,28 @@ test("item-13: goose-only available — persona with no runtime resolves goose",
   assert.deepEqual(warnings, []);
 });
 
+test("runtime-less starts exclude disabled runtimes at the shared resolver", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: undefined }),
+    [gooseRuntime, buzzAgentRuntime],
+    "buzz-agent",
+    ["buzz-agent"],
+  );
+  assert.equal(runtime.id, "goose");
+  assert.deepEqual(warnings, []);
+});
+
+test("explicit definitions can still start on a hidden runtime", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: "buzz-agent" }),
+    [gooseRuntime, buzzAgentRuntime],
+    null,
+    ["buzz-agent"],
+  );
+  assert.equal(runtime.id, "buzz-agent");
+  assert.deepEqual(warnings, []);
+});
+
 test("item-13: no runtimes available — refuses with actionable error", () => {
   assert.throws(
     () => resolveStartRuntimeForDefinition(persona({ runtime: undefined }), []),

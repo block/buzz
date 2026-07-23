@@ -10,6 +10,10 @@ import {
   type ResolvePersonaRuntimeResult,
 } from "./resolvePersonaRuntime";
 import {
+  getDisabledAcpRuntimeIdsSnapshot,
+  runtimesForImplicitAcpSelection,
+} from "./runtimeVisibilityPreference";
+import {
   resolveManagedAgentAvatarUrl,
   type UploadMediaBytes,
 } from "../ui/managedAgentAvatar";
@@ -46,13 +50,22 @@ export function resolveStartRuntimeForDefinition(
   persona: AgentPersona,
   runtimes: readonly AcpRuntime[],
   preferredRuntimeId?: string | null,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
 ): { runtime: AcpRuntime; warnings: string[] } {
+  const selectableRuntimes = runtimesForImplicitAcpSelection(
+    runtimes,
+    disabledRuntimeIds,
+    persona.runtime,
+  );
   // Use the buzz-agent-first preference (buzz-agent → goose → first available)
   // so a freshly installed goose never beats the bundled buzz-agent sidecar
   // for runtime-less personas (item 13 regression guard).
-  const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
+  const defaultRuntime = getDefaultPersonaRuntime(
+    selectableRuntimes,
+    preferredRuntimeId,
+  );
   const { runtime, warnings, isOverridden }: ResolvePersonaRuntimeResult =
-    resolvePersonaRuntime(persona.runtime, runtimes, defaultRuntime);
+    resolvePersonaRuntime(persona.runtime, selectableRuntimes, defaultRuntime);
 
   if (!runtime) {
     throw new Error("No available runtime found for this agent.");

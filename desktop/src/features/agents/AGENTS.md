@@ -90,9 +90,11 @@ with a TypeScript lookup table or an id comparison in a component.
    editor persists its visible fallback on the next save. Its dependent
    provider/model defaults are also ignored for new implicit fallback agents,
    without changing the persisted configuration used by existing agents.
-   Runtime-less agent starts and team deploys must filter through the same
-   visible-runtime set; definitions already pinned to a hidden runtime remain
-   runnable.
+   `resolveStartRuntimeForDefinition` is the shared boundary that filters every
+   runtime-less start through the device's visible-runtime set; call it instead
+   of duplicating default selection in a start surface. Team deploys use the
+   same visible-runtime set. Definitions already pinned to a hidden runtime
+   remain runnable.
 
 ## The tests that enforce this
 

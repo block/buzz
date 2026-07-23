@@ -143,7 +143,7 @@ export function maskDisabledAcpRuntimePreference<
   };
 }
 
-function getDisabledRuntimeIdsSnapshot(): readonly string[] {
+export function getDisabledAcpRuntimeIdsSnapshot(): readonly string[] {
   const storage = getLocalStorage();
   if (!storage) return EMPTY_DISABLED_RUNTIME_IDS;
 
@@ -191,7 +191,7 @@ export function setAcpRuntimeEnabled(
   const storage = getLocalStorage();
   if (!storage) return false;
 
-  const current = getDisabledRuntimeIdsSnapshot();
+  const current = getDisabledAcpRuntimeIdsSnapshot();
   const next = nextDisabledAcpRuntimeIds(current, runtimeId, enabled);
   if (next === current) return true;
 
@@ -211,7 +211,7 @@ export function setAcpRuntimeEnabled(
 export function useDisabledAcpRuntimeIds(): readonly string[] {
   return React.useSyncExternalStore(
     subscribeToRuntimeVisibility,
-    getDisabledRuntimeIdsSnapshot,
+    getDisabledAcpRuntimeIdsSnapshot,
     () => EMPTY_DISABLED_RUNTIME_IDS,
   );
 }
