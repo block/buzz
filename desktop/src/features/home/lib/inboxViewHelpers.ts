@@ -2,6 +2,7 @@ import {
   formatInboxFullTimestamp,
   type InboxContextMessage,
   type InboxFilter,
+  type InboxItem,
 } from "@/features/home/lib/inbox";
 import {
   getChannelIdFromTags,
@@ -19,6 +20,19 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 function hasThreadReplyTags(tags: string[][]) {
   const thread = getThreadReference(tags);
   return thread.parentId !== null && !isBroadcastReply(tags);
+}
+
+export function findInboxItemByEventId(
+  items: readonly InboxItem[],
+  eventId: string,
+): InboxItem | null {
+  const direct = items.find((item) => item.id === eventId);
+  if (direct) return direct;
+  return (
+    items.find((item) =>
+      item.groupItems.some((groupItem) => groupItem.id === eventId),
+    ) ?? null
+  );
 }
 
 export function matchesInboxFilter(

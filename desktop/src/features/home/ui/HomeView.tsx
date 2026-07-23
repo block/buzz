@@ -10,14 +10,15 @@ import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagement
 import {
   type InboxFilter,
   type InboxContextMessage,
-  type InboxItem,
   type InboxReply,
   buildInboxItems,
   formatInboxFullTimestamp,
   getInboxConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
+import { useInboxEditMessage } from "@/features/home/useInboxEditMessage";
 import {
+  findInboxItemByEventId,
   getReactionTargetId,
   matchesInboxFilter,
   toInboxContextMessage,
@@ -81,27 +82,6 @@ const INBOX_SEARCH_KEYS = [
   "profileTab",
   "profileView",
 ] as const;
-
-/**
- * Finds the InboxItem whose stable conversation contains the given event ID.
- * Checks `item.id` (the current representative/latest event) first, then
- * falls back to `item.groupItems` so that a deep-linked or URL-anchored event
- * that is no longer the representative still resolves to its row.
- */
-function findItemByEventId(
-  items: readonly InboxItem[],
-  eventId: string,
-): InboxItem | null {
-  // Fast path: representative event matches (the common case).
-  const direct = items.find((item) => item.id === eventId);
-  if (direct) return direct;
-  // Slow path: event is a non-representative group member (e.g. original
-  // mention that was later superseded by a newer reply as the representative).
-  return (
-    items.find((item) => item.groupItems.some((gi) => gi.id === eventId)) ??
-    null
-  );
-}
 
 type HomeViewProps = {
   feed?: HomeFeedResponse;
@@ -190,6 +170,7 @@ export function HomeView({
   );
   const { goChannel } = useAppNavigation();
   const openDmMutation = useOpenDmMutation();
+  const openDm = openDmMutation.mutateAsync;
   // handleUserSelectItem: explicit selection — only patches the URL.
   // No local setSelectedEventId call; the URL patch triggers a TanStack Router
   // navigation which updates urlSelectedItemId, which becomes selectedEventId
@@ -240,10 +221,10 @@ export function HomeView({
   const [isSendingReply, setIsSendingReply] = React.useState(false);
   const handleOpenDm = React.useCallback(
     async (pubkeys: string[]) => {
-      const dm = await openDmMutation.mutateAsync({ pubkeys });
+      const dm = await openDm({ pubkeys });
       await goChannel(dm.id);
     },
-    [goChannel, openDmMutation],
+    [goChannel, openDm],
   );
   const { activeReminderEventIds, openReminder } = useRemindLater();
   const [localRepliesByItemId, setLocalRepliesByItemId] = React.useState<
@@ -321,6 +302,10 @@ export function HomeView({
   const threadContext = useInboxThreadContext(
     threadContextFeedItem,
     channelMessages,
+  );
+  const { editMessage, isEditingMessage } = useInboxEditMessage(
+    selectedChannel,
+    threadContext.refreshStructuralEvents,
   );
 
   const feedProfilePubkeys = React.useMemo(
@@ -403,7 +388,7 @@ export function HomeView({
   const selectedItemFromAll = React.useMemo(
     () =>
       selectedEventId
-        ? (findItemByEventId(inboxItems, selectedEventId) ?? null)
+        ? (findInboxItemByEventId(inboxItems, selectedEventId) ?? null)
         : null,
     [inboxItems, selectedEventId],
   );
@@ -440,7 +425,7 @@ export function HomeView({
   const selectedItem = React.useMemo(() => {
     if (!selectedEventId) return null;
     // Primary: find by event anchor in the filtered view.
-    const fromFiltered = findItemByEventId(filteredItems, selectedEventId);
+    const fromFiltered = findInboxItemByEventId(filteredItems, selectedEventId);
     if (fromFiltered) return fromFiltered;
     // Secondary: event anchor is in an unfiltered row (e.g., dismissed item).
     if (selectedItemFromAll) return selectedItemFromAll;
@@ -491,7 +476,11 @@ export function HomeView({
       ? (feedProfiles?.[currentPubkey.toLowerCase()]?.avatarUrl ?? null)
       : null;
     const timelineMessages = formatTimelineMessages(
-      [...threadContext.events, ...reactionEvents],
+      [
+        ...threadContext.events,
+        ...threadContext.structuralEvents,
+        ...reactionEvents,
+      ],
       selectedChannel,
       currentPubkey,
       currentUserAvatarUrl,
@@ -522,6 +511,7 @@ export function HomeView({
     selectedItem,
     threadContext.events,
     threadContext.reactionEvents,
+    threadContext.structuralEvents,
   ]);
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
@@ -808,6 +798,7 @@ export function HomeView({
               currentPubkey={currentPubkey}
               disabledReplyReason={disabledReplyReason}
               isDeletingMessage={isDeletingMessage}
+              isEditingMessage={isEditingMessage}
               isSendingReply={isSendingReply}
               isSinglePanelView={isSinglePanelDetailView}
               isThreadContextLoading={threadContext.isLoading}
@@ -845,6 +836,7 @@ export function HomeView({
                 handleCloseProfilePanel();
                 setManagedChannelId(channelId);
               }}
+              onEditSave={editMessage}
               onOpenContext={onOpenContext}
               onSendReply={async ({
                 content,
@@ -899,7 +891,7 @@ export function HomeView({
                     id: result.eventId,
                     parentId: result.parentEventId,
                     rootId: result.rootEventId,
-                    tags: emojiTags,
+                    tags: [...imetaTags, ...emojiTags, ...mentionTags],
                     timeLabel: formatTime(result.createdAt),
                   };
                   setLocalRepliesByItemId((current) => ({

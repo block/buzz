@@ -219,6 +219,8 @@ type E2eConfig = {
     applyCommunityDelayMs?: number;
     openDmDelayMs?: number;
     sendMessageDelayMs?: number;
+    /** Hold mock send live echoes until the E2E release seam is invoked. */
+    deferSendMessageLiveEcho?: boolean;
     /** Close the first channel-window live REQ; its retry is accepted. */
     closeChannelLiveSubscriptionOnce?: boolean;
     /** Reject successive kind-9 sends with these messages, then resume. */
@@ -924,6 +926,8 @@ declare global {
       command: string;
       payload: unknown;
     }>;
+    /** Release mock send events that were stored but withheld from live subscribers. */
+    __BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__?: () => number;
     __BUZZ_E2E_WEBVIEW_ZOOM__?: number;
     __BUZZ_E2E_HAS_MOCK_LIVE_SUBSCRIPTION__?: (input: {
       channelName: string;
@@ -2693,6 +2697,10 @@ const mockChannels: MockChannel[] = [
 ];
 
 const mockMessages = new Map<string, RelayEvent[]>();
+const deferredSendMessageLiveEchoes: Array<{
+  channelId: string;
+  event: RelayEvent;
+}> = [];
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
@@ -3724,6 +3732,18 @@ function emitMockLiveEvent(channelId: string, event: RelayEvent) {
       }
     }
   }
+}
+
+function emitOrDeferMockSendMessageLiveEcho(
+  channelId: string,
+  event: RelayEvent,
+  config: E2eConfig | undefined,
+) {
+  if (config?.mock?.deferSendMessageLiveEcho) {
+    deferredSendMessageLiveEchoes.push({ channelId, event });
+    return;
+  }
+  emitMockLiveEvent(channelId, event);
 }
 
 function emitMockGlobalEvent(event: RelayEvent) {
@@ -7982,6 +8002,7 @@ async function handleSendChannelMessage(
     mentionPubkeys?: string[];
     mediaTags?: string[][] | null;
     emojiTags?: string[][] | null;
+    mentionTags?: string[][] | null;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSendChannelMessageResponse> {
@@ -8001,8 +8022,10 @@ async function handleSendChannelMessage(
   // relay echoes them back on the stored event too, so mirror that here so the
   // emoji renderer keeps resolving `:shortcode:` after the round-trip.
   const emojiTags = args.emojiTags ?? [];
-  // Both kinds end up on the stored event's tag set, just like the real relay.
-  const extraTags = [...mediaTags, ...emojiTags];
+  // Reference-only mentions are already part of the outbound event. Preserve
+  // them in the mock event too so local echoes match the complete sent tag set.
+  const mentionTags = args.mentionTags ?? [];
+  const extraTags = [...mediaTags, ...emojiTags, ...mentionTags];
   const identity = getIdentity(config);
   if (!identity) {
     const createdAt = Math.floor(Date.now() / 1000);
@@ -8018,7 +8041,7 @@ async function handleSendChannelMessage(
         ...extraTags,
       ]);
       recordMockMessage(args.channelId, event);
-      emitMockLiveEvent(args.channelId, event);
+      emitOrDeferMockSendMessageLiveEcho(args.channelId, event, config);
 
       return {
         event_id: event.id,
@@ -8081,7 +8104,7 @@ async function handleSendChannelMessage(
     };
 
     recordMockMessage(args.channelId, event);
-    emitMockLiveEvent(args.channelId, event);
+    emitOrDeferMockSendMessageLiveEcho(args.channelId, event, config);
 
     return {
       event_id: event.id,
@@ -8857,6 +8880,7 @@ export function maybeInstallE2eTauriMocks() {
   }
 
   mockClosedChannelLiveSubscription = false;
+  deferredSendMessageLiveEchoes.length = 0;
   mockGlobalAgentConfig = config.mock?.globalAgentConfig
     ? { ...config.mock.globalAgentConfig }
     : null;
@@ -9058,6 +9082,13 @@ export function maybeInstallE2eTauriMocks() {
     const socketIds = [...mockSockets.keys()];
     for (const socketId of socketIds) disconnectMockSocket(socketId);
     return socketIds.length;
+  };
+  window.__BUZZ_E2E_RELEASE_SEND_MESSAGE_LIVE_ECHO__ = () => {
+    const queued = deferredSendMessageLiveEchoes.splice(0);
+    for (const { channelId, event } of queued) {
+      emitMockLiveEvent(channelId, event);
+    }
+    return queued.length;
   };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.

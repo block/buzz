@@ -4,6 +4,7 @@ import test from "node:test";
 import { formatTimelineMessages } from "../../messages/lib/formatTimelineMessages.ts";
 import { getConfigNudgeAuthorPubkey } from "../../messages/ui/configNudgeAuthPubkey.ts";
 import {
+  findInboxItemByEventId,
   getContextMessageDepth,
   getReactionTargetId,
   isInboxThreadContextEvent,
@@ -11,6 +12,18 @@ import {
   toInboxContextMessage,
   toTimelineMessage,
 } from "./inboxViewHelpers.ts";
+
+// --- findInboxItemByEventId ---
+
+test("findInboxItemByEventId finds representative and grouped event ids", () => {
+  const representative = { id: "latest", groupItems: [{ id: "older" }] };
+  const other = { id: "other", groupItems: [] };
+  const items = [representative, other];
+
+  assert.equal(findInboxItemByEventId(items, "latest"), representative);
+  assert.equal(findInboxItemByEventId(items, "older"), representative);
+  assert.equal(findInboxItemByEventId(items, "missing"), null);
+});
 
 // --- matchesInboxFilter ---
 

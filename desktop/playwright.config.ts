@@ -92,6 +92,7 @@ export default defineConfig({
         "**/reaction-order.spec.ts",
         "**/reaction-names.spec.ts",
         "**/inbox-reactions.spec.ts",
+        "**/inbox-edit.spec.ts",
         "**/send-channel-binding.spec.ts",
         "**/project-commit-detail.spec.ts",
         "**/project-pr-review.spec.ts",
