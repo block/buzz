@@ -227,6 +227,17 @@ test("isAgentIdentityInManagedList: keeps people and only current managed agent 
   );
 });
 
+test("isAgentIdentityInManagedList: keeps remote agents explicitly allowed by the caller", () => {
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { isAgent: true, pubkey: PUB_B.toUpperCase() },
+      new Set([PUB_A]),
+      new Set([PUB_B]),
+    ),
+    true,
+  );
+});
+
 test("shouldHideAgentFromMentions: never hides non-agents", () => {
   assert.equal(
     shouldHideAgentFromMentions({

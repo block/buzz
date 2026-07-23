@@ -240,6 +240,10 @@ export function useMentions(
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
   );
+  const allowedAgentIdentityPubkeys = React.useMemo(
+    () => new Set([...memberPubkeys, ...mentionableAgentPubkeys]),
+    [memberPubkeys, mentionableAgentPubkeys],
+  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
 
@@ -248,7 +252,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          allowedAgentIdentityPubkeys,
+        )
+      ) {
         return;
       }
       if (
@@ -414,6 +424,7 @@ export function useMentions(
   }, [
     activePersonaById,
     activePersonas,
+    allowedAgentIdentityPubkeys,
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
