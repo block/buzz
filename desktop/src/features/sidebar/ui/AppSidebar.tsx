@@ -21,6 +21,7 @@ import {
 } from "@/features/sidebar/lib/channelSortPreference";
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
+import { isInteractiveSidebarTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 import {
   CreateSectionDialog,
@@ -162,6 +163,7 @@ type AppSidebarProps = {
   selfUserStatus?: UserStatus;
   isPresencePending?: boolean;
   onNewMessage: () => void;
+  onBackgroundClick?: () => void;
   isCreateChannelOpen?: boolean;
   onCreateChannelOpenChange?: (open: boolean) => void;
   mutedChannelIds?: ReadonlySet<string>;
@@ -179,6 +181,7 @@ export function AppSidebar({
   currentPubkey,
   fallbackDisplayName,
   homeBadgeCount,
+  onBackgroundClick,
   isAddCommunityOpen,
   isLoading,
   isCreatingChannel,
@@ -550,6 +553,11 @@ export function AppSidebar({
       className="!border-r-0"
       collapsible="offcanvas"
       data-testid="app-sidebar"
+      onClick={(event) => {
+        if (!isInteractiveSidebarTarget(event.target)) {
+          onBackgroundClick?.();
+        }
+      }}
       variant="sidebar"
     >
       <div

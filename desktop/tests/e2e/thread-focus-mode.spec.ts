@@ -187,13 +187,19 @@ test("focus and split preserve reading context and interaction ownership", async
   });
   const anchorId = await topVisibleMessageId(body);
 
-  await page
-    .getByRole("button", { name: "Show thread beside channel" })
-    .click();
+  const focusModeToggle = page.getByRole("button", {
+    name: "Show thread beside channel",
+  });
+  await focusModeToggle.hover();
+  await expect(
+    page.getByRole("tooltip", { name: "Show thread beside channel" }),
+  ).toBeVisible();
+  await focusModeToggle.click();
   await expect(drawer).toHaveCount(0);
   await expect(channel).not.toHaveAttribute("inert", "");
   await expectChannelHeaderUnobscured(page);
-  await expect(page.getByTestId("thread-view-mode-toggle")).toBeFocused();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByTestId("thread-view-mode-toggle")).not.toBeFocused();
   await expect(
     body.locator(`[data-message-id="${anchorId}"]`),
   ).toBeInViewport();
@@ -201,7 +207,15 @@ test("focus and split preserve reading context and interaction ownership", async
     body.locator(`[data-message-id="${anchorId}"]`),
   ).not.toHaveAttribute("data-highlighted", "true");
 
-  await page.getByRole("button", { name: "Expand thread" }).click();
+  // Sidebar background dismissal belongs to the overlay presentation only.
+  await page
+    .getByTestId("app-sidebar-scroll-anchor")
+    .evaluate((element) => (element as HTMLElement).click());
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+  const splitModeToggle = page.getByRole("button", { name: "Expand thread" });
+  await splitModeToggle.focus();
+  await splitModeToggle.press("Enter");
   await expect(drawer).toBeVisible();
   await expect(channel).toHaveAttribute("inert", "");
   await expect(page.getByTestId("thread-view-mode-toggle")).toBeFocused();
@@ -224,6 +238,13 @@ test("focus and split preserve reading context and interaction ownership", async
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
   await expect(channel).not.toHaveAttribute("inert", "");
+
+  await summary.click();
+  await expect(drawer).toBeVisible();
+  await page
+    .getByTestId("app-sidebar-scroll-anchor")
+    .evaluate((element) => (element as HTMLElement).click());
+  await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
 
   await summary.click();
   await expect(drawer).toBeVisible();
