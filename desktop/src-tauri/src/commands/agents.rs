@@ -1083,6 +1083,7 @@ pub async fn start_managed_agent(
 
         let reconcile = ProfileReconcileData {
             private_key_nsec: record.private_key_nsec.clone(),
+            backend: record.backend.clone(),
             name: record.name.clone(),
             relay_url: record.relay_url.clone(),
             avatar_url: record.avatar_url.clone(),
@@ -1325,7 +1326,7 @@ pub(crate) use deploy::resolve_deploy_model_provider;
 #[path = "agents_profile.rs"]
 mod profile;
 #[cfg(test)]
-use profile::{profile_needs_sync, resolve_legacy_avatar};
+use profile::{profile_needs_sync, resolve_legacy_avatar, validate_profile_reconcile_relay_with};
 pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
 
 #[cfg(test)]

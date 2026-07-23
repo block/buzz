@@ -87,7 +87,8 @@ const overrides = new Map([
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
   // Consolidation removed the legacy persona-card import/export codecs.
-  ["src-tauri/src/commands/personas/mod.rs", 984],
+  // internal-local-relay-lockdown round 5: preflight linked-agent profile updates.
+  ["src-tauri/src/commands/personas/mod.rs", 1018],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was

@@ -288,6 +288,20 @@ pub async fn preview_agent_snapshot_import(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
+pub(super) fn validate_snapshot_import_relay_with<F>(
+    workspace_relay_url: &str,
+    validate: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&crate::managed_agents::BackendKind, &str, &str) -> Result<(), String>,
+{
+    validate(
+        &crate::managed_agents::BackendKind::Local,
+        "",
+        workspace_relay_url,
+    )
+}
+
 // ── `confirm_agent_snapshot_import` ──────────────────────────────────────────
 
 /// Import a `buzz-agent-snapshot v1` file as a brand-new agent.
@@ -320,6 +334,13 @@ pub async fn confirm_agent_snapshot_import(
     if display_name.is_empty() {
         return Err("Snapshot display name is empty.".to_string());
     }
+
+    // Snapshot imports always mint a local agent with an empty relay pin. Reject
+    // a disallowed effective workspace relay before key generation or store I/O.
+    let workspace_relay_url = relay_ws_url_with_override(&state);
+    validate_snapshot_import_relay_with(&workspace_relay_url, |backend, pin, workspace| {
+        crate::managed_agents::validate_effective_local_agent_relay(backend, pin, workspace)
+    })?;
 
     // ── Resolve behavioral defaults ──────────────────────────────────────────
     let minted = resolve_snapshot_import_behavior(
