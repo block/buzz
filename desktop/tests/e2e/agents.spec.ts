@@ -1407,9 +1407,10 @@ This deliberately long fenced-code example must not establish the minimum width 
     catalogToggle.boundingBox(),
     publishCatalogUpdatesButton.boundingBox(),
   ]);
-  expect(publishCatalogUpdatesButtonBox?.x ?? 0).toBeGreaterThan(
-    (catalogToggleBox?.x ?? 0) + (catalogToggleBox?.width ?? 0),
-  );
+  expect(
+    (publishCatalogUpdatesButtonBox?.x ?? 0) +
+      (publishCatalogUpdatesButtonBox?.width ?? 0),
+  ).toBeLessThan(catalogToggleBox?.x ?? 0);
   await publishCatalogUpdatesButton.click();
   await expect(publishCatalogUpdatesButton).toHaveCount(0);
   await expect(catalogToggle).toHaveAttribute("aria-checked", "true");

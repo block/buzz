@@ -772,13 +772,6 @@ export function PersonaShareDialog({
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">
-              <Switch
-                checked={isCatalogVisible}
-                data-testid="persona-share-show-in-catalog"
-                disabled={isPending}
-                id={switchId}
-                onCheckedChange={onCatalogVisibilityChange}
-              />
               {isCatalogVisible && hasCatalogUpdates ? (
                 <Button
                   data-testid="persona-share-publish-catalog-updates"
@@ -790,6 +783,13 @@ export function PersonaShareDialog({
                   Publish updates
                 </Button>
               ) : null}
+              <Switch
+                checked={isCatalogVisible}
+                data-testid="persona-share-show-in-catalog"
+                disabled={isPending}
+                id={switchId}
+                onCheckedChange={onCatalogVisibilityChange}
+              />
             </div>
           </section>
         )
