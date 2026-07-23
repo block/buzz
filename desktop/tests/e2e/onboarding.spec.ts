@@ -621,7 +621,32 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
 });
 
-test("first-community choices route join, create, owner, and member intents", async ({
+test("non-local runtime override keeps community selection without release flag", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://override.example.com",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expect(
+    page.getByRole("button", { name: /Join a community/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("buzz-communities")))
+    .toBeNull();
+});
+
+test("non-local default auto-connects when the release flag is enabled", async ({
   page,
 }) => {
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
@@ -633,6 +658,47 @@ test("first-community choices route join, create, owner, and member intents", as
   }, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, {
     relayWsUrl: "wss://default.example.com",
+    autoConnectDefaultRelay: true,
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expectIncompleteOnboarding(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = window.localStorage.getItem("buzz-communities");
+        const communities = raw
+          ? (JSON.parse(raw) as Array<{ id: string; relayUrl: string }>)
+          : [];
+        return {
+          activeMatchesCommunity:
+            communities.length === 1 &&
+            window.localStorage.getItem("buzz-active-community-id") ===
+              communities[0]?.id,
+          relayUrl: communities[0]?.relayUrl ?? null,
+        };
+      }),
+    )
+    .toEqual({
+      activeMatchesCommunity: true,
+      relayUrl: "wss://default.example.com",
+    });
+});
+
+test("first-community choices route join, create, owner, and member intents", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "ws://localhost:3000",
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
@@ -718,7 +784,7 @@ test("first-community owner can connect an existing hosted community", async ({
       ],
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -776,7 +842,7 @@ test("first-community owner can create and connect a hosted community", async ({
     page,
     {},
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -850,7 +916,7 @@ test("hosted community address line stays within the card for a long name", asyn
     page,
     {},
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -921,7 +987,7 @@ test("first-community reports a created community without a relay address", asyn
       },
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -952,7 +1018,7 @@ test("first-community X cancels a pending sign-in", async ({ page }) => {
     page,
     { builderlabLoginDelayMs: 5_000 },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -994,7 +1060,7 @@ test("first-community owner can replace a mismatched account identity", async ({
       builderlabIdentity: { pubkey_hex: "f".repeat(64) },
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -1044,7 +1110,7 @@ test("first-community explains when the local identity belongs to another accoun
       builderlabBindError: { code: "pubkey_already_bound" },
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -1085,7 +1151,7 @@ test("back clears Builderlab auth before returning to first-community choices", 
       builderlabIdentity: { pubkey_hex: BLANK_TYLER_IDENTITY.pubkey },
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -1173,7 +1239,7 @@ test("first-community direct join reaches profile", async ({ page }) => {
     );
   }, BLANK_TYLER_IDENTITY.pubkey);
   await installMockBridge(page, undefined, {
-    relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+    relayWsUrl: "ws://localhost:3000",
     skipOnboardingSeed: true,
     skipCommunitySeed: true,
   });
@@ -1228,7 +1294,7 @@ test("first-community direct join cancel returns to request access", async ({
     page,
     { applyCommunityDelayMs: 5_000 },
     {
-      relayWsUrl: "wss://onboarding.communities.buzz.xyz",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
       skipCommunitySeed: true,
     },
@@ -1359,7 +1425,7 @@ test("connected first-community profile step offers equal-width Next and Back co
           id: "txn-profile-step",
           source: "first-community",
           stage: "profile",
-          relayUrl: "wss://default.example.com",
+          relayUrl: "ws://localhost:3000",
           communityName: "Default",
           communityId: "e2e-default-community",
           addedCommunity: true,
@@ -1407,7 +1473,7 @@ test("connected first-community profile step offers equal-width Next and Back co
       ],
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
     },
   );
