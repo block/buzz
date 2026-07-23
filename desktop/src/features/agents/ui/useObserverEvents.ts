@@ -280,10 +280,10 @@ export function useLoadArchivedObserverEvents(
       return;
     }
 
-    // Snapshot the channelId at the start of this request. After the async
-    // Tauri read resolves we compare against ps.activeChannelId; if they
-    // differ, a channel switch happened mid-flight and we discard the result
-    // rather than corrupting the new channel's cursor/exhaustion state.
+    // Snapshot the channelId at the start of this request. Every shared-state
+    // write below re-checks requestChannelId === ps.activeChannelId first — if
+    // they differ, a channel switch happened while we were awaiting async I/O
+    // and we discard results rather than corrupting the new channel's state.
     const requestChannelId = channelId;
 
     // Await backfill completion before reading the channel index. This
@@ -300,6 +300,10 @@ export function useLoadArchivedObserverEvents(
       return;
     }
 
+    // Acquire the fetch lock under this request's channel token. The finally
+    // block only releases the lock if the token still matches — so a stale
+    // in-flight request from channel A cannot clear the lock that channel B
+    // acquired after the switch.
     ps.isFetching = true;
     try {
       const before = ps.cursor ?? undefined;
@@ -329,6 +333,14 @@ export function useLoadArchivedObserverEvents(
         await ingestArchivedObserverEvents(events);
       }
 
+      // Re-check token after ingestArchivedObserverEvents: ingestion decrypts
+      // each frame asynchronously and may take time. If a channel switch
+      // occurred during that await, discard all remaining shared-state writes
+      // — exhaustion and React mirror — for the new channel.
+      if (requestChannelId !== ps.activeChannelId) {
+        return;
+      }
+
       // A short page means the archive is exhausted for this channel.
       if (events.length < ARCHIVED_EVENTS_PAGE_SIZE) {
         setHasOlderArchived(false);
@@ -337,7 +349,13 @@ export function useLoadArchivedObserverEvents(
     } catch (error) {
       console.error("[useLoadArchivedObserverEvents] fetch failed:", error);
     } finally {
-      ps.isFetching = false;
+      // Only release the fetch lock if this request still owns it. If the
+      // channel switched while we were in flight, ps.activeChannelId no longer
+      // matches our requestChannelId — releasing the lock here would steal B's
+      // in-flight read lock and allow concurrent fetches for B.
+      if (requestChannelId === ps.activeChannelId) {
+        ps.isFetching = false;
+      }
     }
   }, [enabled, identityPubkey, hasSubscription, channelId]);
 
