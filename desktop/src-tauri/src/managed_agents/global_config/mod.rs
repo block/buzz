@@ -232,19 +232,17 @@ pub(crate) fn global_model_provider_for_record<'a>(
         return global_values;
     }
 
-    let Some(selected_runtime) = record
-        .agent_command_override
+    let Some(preferred_runtime) = global
+        .preferred_runtime
         .as_deref()
         .and_then(crate::managed_agents::known_acp_runtime)
     else {
         return global_values;
     };
-    let preferred_runtime = global
-        .preferred_runtime
-        .as_deref()
-        .and_then(crate::managed_agents::known_acp_runtime);
+    let selected_command = crate::managed_agents::record_agent_command(record, personas);
+    let selected_runtime = crate::managed_agents::known_acp_runtime(&selected_command);
 
-    if preferred_runtime.is_some_and(|preferred| std::ptr::eq(preferred, selected_runtime)) {
+    if selected_runtime.is_some_and(|selected| std::ptr::eq(preferred_runtime, selected)) {
         global_values
     } else {
         (None, None)

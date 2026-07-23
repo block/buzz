@@ -142,3 +142,16 @@ export function collectRuntimeWarnings(
   }
   return warnings;
 }
+
+/** Whether every definition can resolve with the supplied optional fallback. */
+export function canResolveAllPersonaRuntimes(
+  personas: readonly { runtime: string | null }[],
+  runtimes: readonly AcpRuntime[],
+  fallbackRuntime: AcpRuntime | null,
+): boolean {
+  return personas.every(
+    (persona) =>
+      resolvePersonaRuntime(persona.runtime, runtimes, fallbackRuntime)
+        .runtime !== null,
+  );
+}

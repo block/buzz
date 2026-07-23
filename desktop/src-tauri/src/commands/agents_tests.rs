@@ -210,6 +210,25 @@ fn deploy_resolver_ignores_defaults_from_a_different_implicit_runtime() {
 }
 
 #[test]
+fn deploy_resolver_ignores_mismatched_defaults_without_a_stored_override() {
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.agent_command = "buzz-agent".to_string();
+    record.agent_command_override = None;
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-provider".to_string()),
+        preferred_runtime: Some("goose".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_deploy_model_provider(&record, &personas, &global),
+        (None, None)
+    );
+}
+
+#[test]
 fn normalize_relay_mesh_rejects_empty_model_ref() {
     let config = RelayMeshConfig {
         model_ref: "  \t ".to_string(),

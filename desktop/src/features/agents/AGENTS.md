@@ -93,8 +93,9 @@ with a TypeScript lookup table or an id comparison in a component.
    `resolveStartRuntimeForDefinition` is the shared boundary that filters every
    runtime-less start through the device's visible-runtime set; call it instead
    of duplicating default selection in a start surface. Team deploys use the
-   same visible-runtime set. Definitions already pinned to a hidden runtime
-   remain runnable.
+   same visible-runtime set only for members that need an implicit fallback, so
+   a fully pinned team remains deployable even when every installed runtime is
+   hidden. Definitions already pinned to a hidden runtime remain runnable.
 
 ## The tests that enforce this
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canResolveAllPersonaRuntimes,
   collectRuntimeWarnings,
   resolvePersonaRuntime,
 } from "./resolvePersonaRuntime.ts";
@@ -176,4 +177,26 @@ test("collectRuntimeWarnings — override=false behaves identically to no overri
 
 test("collectRuntimeWarnings — empty personas array always returns empty", () => {
   assert.deepEqual(collectRuntimeWarnings([], runtimes, goose, true), []);
+});
+
+test("team resolution allows explicit runtimes without a fallback", () => {
+  assert.equal(
+    canResolveAllPersonaRuntimes(
+      [{ runtime: "goose" }, { runtime: "claude" }],
+      runtimes,
+      null,
+    ),
+    true,
+  );
+});
+
+test("team resolution requires a fallback for runtime-less definitions", () => {
+  assert.equal(
+    canResolveAllPersonaRuntimes([{ runtime: null }], runtimes, null),
+    false,
+  );
+  assert.equal(
+    canResolveAllPersonaRuntimes([{ runtime: null }], runtimes, goose),
+    true,
+  );
 });
