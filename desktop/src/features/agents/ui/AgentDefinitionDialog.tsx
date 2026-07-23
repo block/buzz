@@ -83,6 +83,7 @@ import {
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
+import { useSelectableAcpRuntimes } from "../lib/runtimeVisibilityPreference";
 
 type AgentDefinitionDialogProps = {
   open: boolean;
@@ -150,10 +151,8 @@ export function AgentDefinitionDialog({
   // the seeded runtime from the submit payload for builtin definitions whose
   // canonical runtime is null — the sync would revert it anyway.
   const isRuntimeAutoSeededRef = React.useRef(false);
-  // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
+  // Seed once per open so choosing "No preference" cannot snap the dropdown
+  // back to the default.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -166,9 +165,10 @@ export function AgentDefinitionDialog({
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ open });
-  const defaultRuntime = React.useMemo(
-    () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
-    [globalConfig.preferred_runtime, runtimes],
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimes);
+  const defaultRuntime = getDefaultPersonaRuntime(
+    selectableRuntimes,
+    globalConfig.preferred_runtime,
   );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
@@ -553,8 +553,8 @@ export function AgentDefinitionDialog({
     llmProviderFieldVisible && isCustomProviderEditing;
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
   const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimes),
-    [runtimes],
+    () => sortPersonaRuntimes(selectableRuntimes),
+    [selectableRuntimes],
   );
   const blankRuntimeOptionLabel = runtimesLoading
     ? "Loading harnesses..."

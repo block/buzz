@@ -32,6 +32,7 @@ import {
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
 import { Button } from "@/shared/ui/button";
+import { useSelectableAcpRuntimes } from "@/features/agents/lib/runtimeVisibilityPreference";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -113,9 +114,10 @@ export function AgentDefaultsEditor({
   }, []);
 
   const runtimesQuery = useAcpRuntimesQuery();
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimesQuery.data ?? []);
   const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimesQuery.data ?? []),
-    [runtimesQuery.data],
+    () => sortPersonaRuntimes(selectableRuntimes),
+    [selectableRuntimes],
   );
   // A missing/stale preference displays the same effective fallback the backend
   // would use; it is persisted only after the user edits and saves this form.
