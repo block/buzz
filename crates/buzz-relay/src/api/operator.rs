@@ -489,10 +489,21 @@ pub async fn community_availability(
         .await
         .map_err(|e| internal_error(&format!("check community availability: {e}")))?;
 
+    // A host can also be reserved as an alias of some other community (never
+    // as its own — the create path can't collide with its own alias). Check
+    // this even when `existing` is `Some` so the response is well-formed
+    // either way; the create/alias-add paths are the source of truth for
+    // which reservation wins.
+    let alias_taken = state
+        .db
+        .community_host_alias_exists(&normalized_host)
+        .await
+        .map_err(|e| internal_error(&format!("check community host alias reservation: {e}")))?;
+
     Ok(Json(serde_json::json!({
         "host": query.host,
         "normalized_host": normalized_host,
-        "available": existing.is_none(),
+        "available": existing.is_none() && !alias_taken,
         "community_id": existing.map(|record| record.id.to_string()),
     })))
 }
@@ -800,6 +811,62 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let json = read_json(response).await;
         assert_eq!(json.get("available").and_then(Value::as_bool), Some(true));
+    }
+
+    /// A host reserved only via `community_host_aliases` (never
+    /// `communities.host` itself) must report `available: false` — otherwise
+    /// a caller sees "available", then the create path's alias-collision
+    /// trigger turns the create into an internal error instead of the normal
+    /// "host taken" response.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn alias_reserved_host_is_not_available() {
+        let operator = Keys::generate();
+        let Some(state) = operator_test_state(std::slice::from_ref(&operator)).await else {
+            return;
+        };
+
+        let primary_host = format!("alias-owner-{}.example", Uuid::new_v4().simple());
+        let owner_pubkey = "1111111111111111111111111111111111111111111111111111111111111a";
+        let created = state
+            .db
+            .create_community_with_owner(&primary_host, owner_pubkey)
+            .await
+            .expect("create owning community");
+        let buzz_db::CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+
+        let alias_host = format!("alias-target-{}.example", Uuid::new_v4().simple());
+        state
+            .db
+            .add_community_host_alias(&alias_host, created.id)
+            .await
+            .expect("add alias");
+
+        let query = format!("host={alias_host}");
+        let url = format!("http://{INGRESS_HOST}/operator/communities/availability?{query}");
+        let auth = nip98_auth_header(&operator, &url, "GET", None);
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/operator/communities/availability?{query}"))
+                    .header(header::HOST, INGRESS_HOST)
+                    .header(header::AUTHORIZATION, auth)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        assert_eq!(
+            json.get("available").and_then(Value::as_bool),
+            Some(false),
+            "alias-reserved host must not report available; got {json:?}"
+        );
     }
 
     #[tokio::test]

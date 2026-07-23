@@ -33,8 +33,23 @@ CREATE INDEX idx_community_host_aliases_community_id ON community_host_aliases (
 -- claim an existing alias host. Cross-table checks can't be expressed as a
 -- CHECK constraint, hence triggers (mirrors `channels_community_id_immutable`
 -- in migration 0001).
+--
+-- Both triggers take a `pg_advisory_xact_lock` on the SAME key — derived only
+-- from `lower(host)`, not the table — before their `EXISTS` read. Without it,
+-- a community-create and an alias-add for the same host can run concurrently:
+-- each runs its `EXISTS` check against the other's not-yet-committed row (MVCC
+-- under READ COMMITTED does not see it), both pass, and both commit, leaving
+-- the same host claimed on both sides — `lookup_community_by_host_or_alias`
+-- would then silently prefer the primary row and the alias would never be
+-- reachable, defeating the one-host-one-community invariant. The lock
+-- serializes the two paths: the loser blocks until the winner's transaction
+-- ends, then re-runs its `EXISTS` check under a fresh statement snapshot that
+-- sees the winner's committed row (or absence of one). Lock key domain
+-- 'buzz_host_claim:' is distinct from 'buzz_channel_ttl:' (migration 0024) and
+-- 'buzz_push_gate:' (migration 0023).
 CREATE FUNCTION community_host_aliases_no_primary_collision() RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('buzz_host_claim:' || lower(NEW.host), 0));
     IF EXISTS (SELECT 1 FROM communities WHERE lower(host) = lower(NEW.host)) THEN
         RAISE EXCEPTION 'host % is already a community primary host', NEW.host
             USING ERRCODE = 'unique_violation';
@@ -49,6 +64,7 @@ CREATE TRIGGER trg_community_host_aliases_no_primary_collision
 
 CREATE FUNCTION communities_no_alias_collision() RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('buzz_host_claim:' || lower(NEW.host), 0));
     IF EXISTS (SELECT 1 FROM community_host_aliases WHERE lower(host) = lower(NEW.host)) THEN
         RAISE EXCEPTION 'host % is already a community host alias', NEW.host
             USING ERRCODE = 'unique_violation';
