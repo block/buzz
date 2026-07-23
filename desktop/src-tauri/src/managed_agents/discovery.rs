@@ -905,6 +905,18 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 
+    if let Some(outcome) = cli_probe::native_credentials_probe(binary_path, probe_args) {
+        return match outcome {
+            cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
+            cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
+            cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
+                AuthStatus::ConfigInvalid {
+                    diagnostic: stderr_excerpt,
+                }
+            }
+        };
+    }
+
     let augmented_path = cli_probe::augmented_path();
 
     let mut command = std::process::Command::new(binary_path);
