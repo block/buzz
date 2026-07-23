@@ -89,6 +89,40 @@ buzz-acp
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
+## Running with Hermes Agent
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) includes a native ACP
+server that uses the same personal configuration, credentials, memory, skills, and
+tools as the Hermes CLI.
+
+```bash
+# Install Hermes, configure the personal agent, and add its optional ACP extra.
+# See https://hermes-agent.nousresearch.com/docs/user-guide/features/acp/
+# hermes acp --check
+
+export BUZZ_ACP_AGENT_COMMAND="hermes"
+export BUZZ_ACP_AGENT_ARGS="acp"          # empty also normalises to acp
+export HERMES_HOME="$HOME/.hermes"        # or a named profile home
+export BUZZ_ACP_NO_MEMORY="true"          # must be the string true (not 1)
+# Keep a single worker per profile home (Desktop: parallelism=1).
+
+buzz-acp
+```
+
+If `hermes-acp` is on `PATH`, it can be launched directly with empty agent
+arguments instead. Desktop discovers both entrypoints as the first-class
+**Hermes Agent** runtime.
+
+For full profile tools over ACP (not the coding-only default toolset), set on
+the Hermes home:
+
+```yaml
+acp:
+  tool_policy: profile
+```
+
+Owner-only Rocky attachment notes: [docs/hermes-agent-rocky.md](../../docs/hermes-agent-rocky.md).
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).

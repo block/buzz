@@ -106,6 +106,38 @@ fn goose_has_no_mcp_hooks() {
 }
 
 #[test]
+fn hermes_uses_its_native_tools_and_personal_config() {
+    use crate::managed_agents::{hermes_readiness_probe_args, normalize_agent_args};
+
+    let runtime = known_acp_runtime("hermes").expect("should resolve");
+    assert_eq!(runtime.id, "hermes");
+    assert_eq!(runtime.commands, &["hermes", "hermes-acp"]);
+    assert!(!runtime.mcp_hooks);
+    assert_eq!(runtime.mcp_command, None);
+    assert_eq!(runtime.config_file_path, Some("~/.hermes/config.yaml"));
+    assert_eq!(runtime.auth_probe_args, None);
+    assert_eq!(
+        normalize_agent_args(runtime.commands[0], Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        hermes_readiness_probe_args("hermes"),
+        Some(&["hermes", "acp", "--check"][..])
+    );
+    assert_eq!(
+        hermes_readiness_probe_args("hermes-acp"),
+        Some(&["hermes-acp", "--check"][..])
+    );
+}
+
+#[test]
+fn hermes_process_names_are_owned_runtime_candidates() {
+    assert!(super::name_matches_known_binary("hermes"));
+    assert!(super::name_matches_known_binary("hermes-acp"));
+    assert!(super::name_matches_known_binary("hermes_acp"));
+}
+
+#[test]
 fn unknown_command_returns_none() {
     assert!(known_acp_runtime("custom-agent").is_none());
 }
@@ -557,26 +589,31 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
-fn name_matches_interpreter_accepts_node() {
-    // `node` IS a known script interpreter and must be recognized.
+fn name_matches_interpreter_accepts_exact_known_names() {
+    // Script interpreters are candidates only when the separate
+    // BUZZ_MANAGED_AGENT marker check proves ownership.
     assert!(super::name_matches_interpreter("node"));
+    assert!(super::name_matches_interpreter("python"));
+    assert!(super::name_matches_interpreter("python3"));
 }
 
 #[test]
 fn name_matches_interpreter_rejects_unknown() {
     // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
-    assert!(!super::name_matches_interpreter("python3"));
     assert!(!super::name_matches_interpreter("deno"));
     assert!(!super::name_matches_interpreter("bun"));
 }
 
 #[test]
-fn name_matches_interpreter_rejects_node_prefix() {
-    // A name that starts with "node" but is longer must not match —
+fn name_matches_interpreter_rejects_interpreter_prefixes() {
+    // A name that starts with a known interpreter but is longer must not match —
     // exact equality is required to avoid false positives.
     assert!(!super::name_matches_interpreter("node_modules"));
     assert!(!super::name_matches_interpreter("nodejs"));
     assert!(!super::name_matches_interpreter("node-gyp"));
+    assert!(!super::name_matches_interpreter("python3.12"));
+    assert!(!super::name_matches_interpreter("python3-config"));
+    assert!(!super::name_matches_interpreter("pythonw"));
 }
 
 #[test]
