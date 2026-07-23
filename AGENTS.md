@@ -90,8 +90,10 @@ See CONTRIBUTING.md for full setup details and dependency requirements.
 
 ## Quality Gates
 
-Run `just ci` before every PR — it runs `fmt` + `clippy` + desktop lint +
-unit tests + builds. Clippy passing does not mean fmt passes; run both.
+Run `just ci` before every PR — it runs `check` (fmt + lints across Rust,
+desktop, Tauri, web, and mobile), unit tests (Rust, desktop, Tauri, mobile),
+and the desktop and web builds. Clippy passing does not mean fmt passes; run
+both.
 
 Run `just test` for integration tests if you touched `buzz-relay`,
 `buzz-db`, or `buzz-auth` — these require a running Postgres and Redis.
