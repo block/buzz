@@ -318,11 +318,13 @@ pub async fn provision_community(
     // Legacy convergence mode remains available to deployment operators and
     // startup tooling. Clients provisioning on behalf of end users must use
     // create_only so an existing owner can never be rotated by a create race.
-    let record = state
-        .db
-        .ensure_configured_community(&request.host)
-        .await
-        .map_err(|e| format!("failed to create community: {e}"))?;
+    let record = match state.db.ensure_configured_community(&request.host).await {
+        Ok(record) => record,
+        Err(buzz_db::DbError::HostAliasCollision(_)) => {
+            return Err("community already exists".to_string());
+        }
+        Err(e) => return Err(format!("failed to create community: {e}")),
+    };
 
     if let Some(owner_hex) = &initial_owner {
         state

@@ -45,6 +45,12 @@ pub enum DbError {
     #[error("invalid data: {0}")]
     InvalidData(String),
 
+    /// The requested host is already reserved as a `community_host_aliases`
+    /// row for a different community, so it cannot become a primary
+    /// `communities.host` too.
+    #[error("host is already reserved as a community host alias: {0}")]
+    HostAliasCollision(String),
+
     /// A stored timestamp value could not be interpreted.
     #[error("invalid timestamp: {0}")]
     InvalidTimestamp(i64),
