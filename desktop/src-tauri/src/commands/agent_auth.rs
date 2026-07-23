@@ -194,6 +194,12 @@ fn run_buzz_acp_auth_command_with_paths<const N: usize>(
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     command
         .output()
@@ -226,11 +232,19 @@ fn run_claude_subscription_login(runtime_id: &str, method: &AcpAuthMethod) -> Re
     let (command, args) = argv
         .split_first()
         .ok_or_else(|| "Claude login command is empty".to_string())?;
-    let status = Command::new(command)
+    let mut login = Command::new(command);
+    login
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        login.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = login
         .status()
         .map_err(|error| format!("failed to run Claude login: {error}"))?;
     if !status.success() {

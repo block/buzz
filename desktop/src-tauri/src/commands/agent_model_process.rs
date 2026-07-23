@@ -49,6 +49,12 @@ pub(super) async fn run_agent_models_command(
             cmd.env(k, v);
         }
         crate::managed_agents::configure_runtime_cli(&mut cmd, known_acp_runtime(&agent_command));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()

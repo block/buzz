@@ -55,12 +55,18 @@ fn run_with_timeout(
     argv: &[String],
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, String> {
-    let mut child = std::process::Command::new(&argv[0])
+    let mut command = std::process::Command::new(&argv[0]);
+    command
         .args(&argv[1..])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = command.spawn().map_err(|e| format!("spawn failed: {e}"))?;
 
     let deadline = std::time::Instant::now() + timeout;
     loop {

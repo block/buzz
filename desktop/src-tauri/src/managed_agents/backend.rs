@@ -30,10 +30,16 @@ pub fn invoke_provider(
     if let Some(home) = super::default_agent_workdir() {
         cmd.current_dir(home);
     }
-    let mut child = cmd
-        .stdin(std::process::Stdio::piped())
+    cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn {}: {e}", binary.display()))?;
 

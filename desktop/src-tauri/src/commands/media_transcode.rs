@@ -24,6 +24,12 @@ fn ffmpeg_command(path: &std::path::Path) -> std::process::Command {
     for (name, value) in required_windows_env {
         command.env(name, value);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     command
 }
 
@@ -576,7 +582,8 @@ mod tests {
         };
         let source =
             std::env::temp_dir().join(format!("buzz-metadata-test-{}.mp4", uuid::Uuid::new_v4()));
-        let generated = std::process::Command::new(&ffmpeg)
+        let mut generate = std::process::Command::new(&ffmpeg);
+        generate
             .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("testsrc2=size=64x64:rate=1")
             .args([
@@ -589,9 +596,14 @@ mod tests {
                 "-metadata:s:v:0",
                 "title=private camera stream",
             ])
-            .arg(&source)
-            .output()
-            .expect("run ffmpeg fixture generation");
+            .arg(&source);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            generate.creation_flags(CREATE_NO_WINDOW);
+        }
+        let generated = generate.output().expect("run ffmpeg fixture generation");
         if !generated.status.success() {
             eprintln!("skipping metadata round-trip: ffmpeg cannot encode H.264");
             let _ = std::fs::remove_file(&source);
@@ -623,12 +635,19 @@ mod tests {
         // Generate a small HEIC test image from a synthetic color source.
         let heic_path =
             std::env::temp_dir().join(format!("buzz-test-{}.heic", uuid::Uuid::new_v4()));
-        let gen = std::process::Command::new(&ffmpeg)
+        let mut generate = std::process::Command::new(&ffmpeg);
+        generate
             .args(["-y", "-loglevel", "error", "-f", "lavfi", "-i"])
             .arg("color=c=red:s=64x64:d=1")
             .args(["-frames:v", "1"])
-            .arg(&heic_path)
-            .output();
+            .arg(&heic_path);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            generate.creation_flags(CREATE_NO_WINDOW);
+        }
+        let gen = generate.output();
 
         let gen = match gen {
             Ok(o) if o.status.success() && heic_path.exists() => o,
