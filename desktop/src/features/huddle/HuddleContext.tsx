@@ -4,6 +4,7 @@ import * as React from "react";
 
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { useAudioDevices } from "./lib/useAudioDevices";
+import { formatHuddleActionError } from "./lib/huddleError";
 import { useTtsSubscription } from "./lib/useTtsSubscription";
 
 /**
@@ -457,7 +458,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         const w = workletRef.current;
         workletRef.current = null;
         await cleanupFailedStart(w, true);
-        setHuddleError(msg);
+        setHuddleError(formatHuddleActionError(e, "start"));
         console.error("Failed to start huddle:", e);
         throw e;
       } finally {
@@ -503,7 +504,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
         const w = workletRef.current;
         workletRef.current = null;
         await cleanupFailedStart(w, false);
-        setHuddleError(msg);
+        setHuddleError(formatHuddleActionError(e, "join"));
         console.error("Failed to join huddle:", e);
         throw e;
       } finally {
