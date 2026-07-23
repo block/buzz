@@ -5,7 +5,7 @@ import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
 } from "@/features/agents/hooks";
-import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { useImplicitGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
 import {
   emptyResolvedTeamPersonas,
@@ -54,7 +54,7 @@ export function AddTeamToChannelDialog({
   onOpenChange,
   onDeployed,
 }: AddTeamToChannelDialogProps) {
-  const { globalConfig } = useGlobalAgentConfig();
+  const { globalConfig } = useImplicitGlobalAgentConfig();
   const channelsQuery = useChannelsQuery();
   const providersQuery = useAvailableAcpRuntimes();
   const [channelId, setChannelId] = React.useState("");

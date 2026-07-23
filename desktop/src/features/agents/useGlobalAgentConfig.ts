@@ -33,7 +33,6 @@ export function useGlobalAgentConfig(): {
   globalConfig: GlobalAgentConfig;
   isLoading: boolean;
 } {
-  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
   const { data, isPending } = useQuery({
     queryKey: globalAgentConfigQueryKey,
     queryFn: getGlobalAgentConfig,
@@ -43,17 +42,33 @@ export function useGlobalAgentConfig(): {
     // Never show a stale empty flash while a background refetch runs.
     placeholderData: EMPTY_CONFIG,
   });
-  const globalConfig = React.useMemo(
-    () =>
-      maskDisabledAcpRuntimePreference(
-        data ?? EMPTY_CONFIG,
-        disabledRuntimeIds,
-      ),
-    [data, disabledRuntimeIds],
+
+  return {
+    globalConfig: data ?? EMPTY_CONFIG,
+    isLoading: isPending,
+  };
+}
+
+/**
+ * Load global defaults for a new implicit runtime choice.
+ *
+ * Existing agent edit surfaces must use useGlobalAgentConfig so a hidden
+ * harness can still inherit its persisted provider and model. Start paths use
+ * this hook to ignore a hidden preferred harness and its dependent defaults.
+ */
+export function useImplicitGlobalAgentConfig(): {
+  globalConfig: GlobalAgentConfig;
+  isLoading: boolean;
+} {
+  const { globalConfig, isLoading } = useGlobalAgentConfig();
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
+  const implicitGlobalConfig = React.useMemo(
+    () => maskDisabledAcpRuntimePreference(globalConfig, disabledRuntimeIds),
+    [disabledRuntimeIds, globalConfig],
   );
 
   return {
-    globalConfig,
-    isLoading: isPending,
+    globalConfig: implicitGlobalConfig,
+    isLoading,
   };
 }

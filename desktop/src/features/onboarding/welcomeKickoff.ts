@@ -5,7 +5,7 @@ import {
   useAcpRuntimesQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
-import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { useImplicitGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
 import { resolveAgentReadiness } from "@/features/onboarding/ui/agentReadiness";
@@ -493,7 +493,8 @@ export function useWelcomeKickoff(
   const { activeCommunity } = useCommunities();
   const runtimesQuery = useAcpRuntimesQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
-  const { globalConfig, isLoading: configLoading } = useGlobalAgentConfig();
+  const { globalConfig, isLoading: configLoading } =
+    useImplicitGlobalAgentConfig();
   const channelId = activeChannel?.id ?? null;
   const isActiveWelcome = isWelcomeChannel(activeChannel);
   const focusedWelcomeChannelRef = React.useRef<string | null>(null);
