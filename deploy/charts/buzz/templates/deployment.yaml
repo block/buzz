@@ -150,6 +150,7 @@ spec:
             - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | quote }} }
             - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | quote }} }
             - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
+            - { name: BUZZ_GIT_CONFORMANCE_PROBE, value: {{ .Values.git.conformanceProbe | quote }} }
 
             # ── S3 (non-secret) ──────────────────────────────────────
             {{- $s3Endpoint := include "buzz.s3Endpoint" . }}
