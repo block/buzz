@@ -53,15 +53,25 @@ with a TypeScript lookup table or an id comparison in a component.
 6. **One canonical behavior, disclosure presets for visibility.** Behavior
    flags were deliberately killed in #2148 (`CANONICAL_CONFIG_BEHAVIORS`).
    Surface differences are expressed via the `disclosure` preset, not new
-   boolean props.  **Exception:** `onboarding-essential` hides happy-path
-   helper copy (provider/model descriptions) but a non-null model-discovery
-   status always bypasses the preset and renders the status line — enforced
-   via `shouldShowModelStatusMessage()` (`AgentConfigFields.tsx`).
+   boolean props.  **Exception (#2246, extended #2261):** `onboarding-essential`
+   hides happy-path helper copy (provider/model descriptions) but
+   `shouldShowModelStatusMessage(showDescriptions, status, loadingMessage)`
+   surfaces the status line when `status !== null` **or** the slow-phase
+   under-field note is non-null (`loadingMessage`). Early loading (control
+   only) does not force the under-field line. Quiet happy path stays hidden
+   in onboarding.
    Additionally, a successful discovery response that yields no usable options
-   (`supportsSwitching:false` or empty model list) synthesizes a warning status
-   via `synthesizeEmptyDiscoveryStatus()` and is intentionally **not cached**
-   so that closing → reopening the dialog re-runs discovery after the user
-   installs or signs into the CLI (`isCacheableDiscoveryResponse()`).
+   (`supportsSwitching:false` or empty model list) synthesizes a **retryable**
+   warning via `synthesizeEmptyDiscoveryStatus()` and is intentionally **not
+   cached** so Retry / close→reopen re-runs discovery after the user installs
+   or signs into the CLI (`isCacheableDiscoveryResponse()`). Timeouts and
+   path failures also set `retryable: true` and wire `retryModelDiscovery()`
+   (clears the in-memory cache key and re-probes). Loading UX: the control
+   always shows short `MODEL_DISCOVERY_LOADING_SHORT`. The long under-field
+   note (`formatModelDiscoveryLoadingMessage`) is **null until**
+   `MODEL_DISCOVERY_SLOW_MS` (10s), then appears only under the field via
+   `ModelDiscoveryStatusLine` (never in the pill). One-shot timeout, not a
+   polling ticker.
 7. **Onboarding setup detects readiness; it does not select defaults.** The
    setup page derives visible and ready harnesses from the runtime catalog and
    only offers install or sign-in actions. The following defaults page is the
@@ -74,11 +84,13 @@ with a TypeScript lookup table or an id comparison in a component.
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
   policy. Update when the capability model changes.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
-  presets + `shouldShowModelStatusMessage` status-bypass rule. If this fails,
-  you probably reintroduced a per-surface flag or broke the status-bypass.
+  presets + `shouldShowModelStatusMessage` status/loading bypass. If this
+  fails, you probably reintroduced a per-surface flag or broke the bypass.
 - `ui/usePersonaModelDiscovery.test.mjs` — `synthesizeEmptyDiscoveryStatus`,
-  `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`. If the
-  "reopen to retry" copy becomes inert again, these tests will catch it.
+  `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`, retryable
+  empty status. If empty catalogs get cached or lose Retry, these fail.
+- `ui/personaModelDiscoveryStatus.test.mjs` — timeout / PATH / credential
+  status mapping + progressive loading copy.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, navigation, and
   persistence races.

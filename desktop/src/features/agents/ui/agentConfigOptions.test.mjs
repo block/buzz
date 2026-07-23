@@ -244,5 +244,12 @@ test("formatModelDiscoveryErrorStatus returns a non-null status for runtime unav
     );
     assert.ok(typeof status?.message === "string", "status has a message");
     assert.ok(typeof status?.tone === "string", "status has a tone");
+    // No discoverAgentModels call is possible until availability flips —
+    // Retry must not be offered (would no-op).
+    assert.equal(
+      status?.retryable,
+      undefined,
+      `availability=${availability} must not be retryable`,
+    );
   }
 });

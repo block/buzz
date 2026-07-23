@@ -496,7 +496,9 @@ export function AgentDefinitionDialog({
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
+    modelDiscoveryLoadingMessage,
     modelDiscoveryStatus,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -596,11 +598,13 @@ export function AgentDefinitionDialog({
       })),
     { label: "Custom provider...", value: CUSTOM_PROVIDER_DROPDOWN_VALUE },
   ];
+  const controlShowsModelLoading =
+    modelDiscoveryLoading && discoveredModelOptions === null;
   const modelDropdownOptions: PersonaDropdownOption[] =
     buildModelDropdownOptions({
       allowCustom: !isRelayMesh,
       globalModel: undefined,
-      loading: modelDiscoveryLoading && discoveredModelOptions === null,
+      loading: controlShowsModelLoading,
       loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
       options: modelOptions,
     })
@@ -612,6 +616,11 @@ export function AgentDefinitionDialog({
           ? { ...option, label: "Automatic" }
           : option,
       );
+  // Force short loading sentinel on the control while probing (same as
+  // AgentModelField / instance edit — closed trigger must not look stuck).
+  const modelControlValue = controlShowsModelLoading
+    ? MODEL_DISCOVERY_LOADING_VALUE
+    : modelSelectValue;
   const previewLabel = displayName.trim() || "Agent name";
   const previewAvatarUrl = avatarUrl.trim() || null;
   const runtimeWarning =
@@ -937,10 +946,13 @@ export function AgentDefinitionDialog({
                   disabled={isPending}
                   isExplicitModelRequired={isExplicitModelRequired}
                   model={model}
+                  modelDiscoveryLoading={modelDiscoveryLoading}
+                  modelDiscoveryLoadingMessage={modelDiscoveryLoadingMessage}
                   modelDiscoveryStatus={modelDiscoveryStatus}
                   modelDropdownOptions={modelDropdownOptions}
-                  modelSelectValue={modelSelectValue}
+                  modelSelectValue={modelControlValue}
                   onCustomModelChange={setModel}
+                  onRetryModelDiscovery={retryModelDiscovery}
                   showSharedComputeAutoHint={
                     isRelayMesh &&
                     modelSelectValue === AUTO_MODEL_DROPDOWN_VALUE

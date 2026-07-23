@@ -126,6 +126,9 @@ test("synthesizeEmptyDiscoveryStatus_emptyModels_producesWarningStatus", () => {
   assert.equal(status?.tone, "warning");
   assert.match(status?.message ?? "", /Claude Code/);
   assert.match(status?.message ?? "", /reported no models/);
+  // #2261: empty catalog is retryable (Retry control), not "reopen only".
+  assert.equal(status?.retryable, true);
+  assert.match(status?.message ?? "", /retry/i);
 });
 
 test("synthesizeEmptyDiscoveryStatus_supportsSwitchingFalse_producesWarningStatus", () => {

@@ -113,16 +113,23 @@ export function resolveDisclosure(disclosure: "full" | "onboarding-essential") {
 /**
  * Determines whether the status line beneath the Model field should render.
  *
- * Discovery warnings bypass the `onboarding-essential` preset so that a
- * first-run failure is never silently invisible.  On the happy path
- * (`status === null`) the status line stays hidden in onboarding, keeping
- * the page clean.
+ * Discovery warnings and the **slow-phase** loading note bypass the
+ * `onboarding-essential` preset so first-run failures / long Codex cold
+ * starts are never invisible. Early loading (control shows "Loading
+ * models…") does not force the under-field line — only
+ * `loadingMessage !== null` or a non-null status does. Quiet happy path
+ * stays hidden in onboarding.
+ *
+ * @param loadingMessage - progressive under-field copy; null until slow phase
  */
 export function shouldShowModelStatusMessage(
   showDescriptions: boolean,
   status: { message: string; tone: string } | null,
+  loadingMessage: string | null = null,
 ): boolean {
-  return showDescriptions || status !== null;
+  return (
+    showDescriptions || status !== null || (loadingMessage?.trim() ?? "") !== ""
+  );
 }
 
 export type AgentConfigFieldsProps = {
@@ -276,7 +283,9 @@ export function AgentConfigFields({
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
+    modelDiscoveryLoadingMessage,
     modelDiscoveryStatus,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: config.env_vars,
     isCustomProviderEditing: isCustomProvider,
@@ -685,11 +694,17 @@ export function AgentConfigFields({
           modelDiscoveryLoading={
             dependentFieldsDisabled ? false : modelDiscoveryLoading
           }
+          modelDiscoveryLoadingMessage={
+            dependentFieldsDisabled ? null : modelDiscoveryLoadingMessage
+          }
           modelDiscoveryStatus={
             dependentFieldsDisabled ? null : modelDiscoveryStatus
           }
           onIsCustomModelEditingChange={onCustomModelEditingChange}
           onModelChange={handleModelChange}
+          onRetryModelDiscovery={
+            dependentFieldsDisabled ? undefined : retryModelDiscovery
+          }
           placeholderClassName={placeholderClassName}
           placeholder="Select a model"
           provider={providerForDiscovery}
@@ -700,6 +715,7 @@ export function AgentConfigFields({
           showStatusMessage={shouldShowModelStatusMessage(
             showDescriptions,
             modelDiscoveryStatus,
+            dependentFieldsDisabled ? null : modelDiscoveryLoadingMessage,
           )}
           testId="global-agent-model"
           useCustomSelect={useCustomSelect}

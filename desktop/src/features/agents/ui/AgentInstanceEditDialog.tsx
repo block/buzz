@@ -80,6 +80,7 @@ import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
+import { ModelDiscoveryStatusLine } from "./ModelDiscoveryStatusLine";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
@@ -408,7 +409,9 @@ export function AgentInstanceEditDialog({
   const {
     discoveredModelOptions,
     modelDiscoveryLoading,
+    modelDiscoveryLoadingMessage,
     modelDiscoveryStatus,
+    retryModelDiscovery,
   } = usePersonaModelDiscovery({
     envVars: envVarsForDiscovery,
     isCustomProviderEditing,
@@ -780,14 +783,22 @@ export function AgentInstanceEditDialog({
     model,
     provider: providerForDiscovery,
   });
+  // Match AgentModelField: while probing with no catalog yet, force the
+  // control onto the short loading sentinel so the closed trigger does not
+  // keep showing a stale default/previous model with no loading cue (#2261).
+  const controlShowsModelLoading =
+    modelDiscoveryLoading && discoveredModelOptions === null;
   const modelDropdownOptions = buildModelDropdownOptions({
     allowCustom: !isRelayMesh,
     globalModel: isRelayMesh ? undefined : inheritedModelDefault.value,
     globalModelLabel: isRelayMesh ? undefined : inheritedModelLabel,
-    loading: modelDiscoveryLoading && discoveredModelOptions === null,
+    loading: controlShowsModelLoading,
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
   });
+  const modelControlValue = controlShowsModelLoading
+    ? MODEL_DISCOVERY_LOADING_VALUE
+    : modelSelectValue;
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
@@ -1050,7 +1061,7 @@ export function AgentInstanceEditDialog({
                 onValueChange={handleModelDropdownChange}
                 options={modelDropdownOptions}
                 placeholder="Default model"
-                value={modelSelectValue}
+                value={modelControlValue}
               />
               {showCustomModelInput ? (
                 <div
@@ -1074,15 +1085,22 @@ export function AgentInstanceEditDialog({
                   />
                 </div>
               ) : null}
-              <p className="text-xs text-muted-foreground">
-                {modelDiscoveryLoading
-                  ? "Loading models..."
-                  : modelDiscoveryStatus !== null
-                    ? modelDiscoveryStatus.message
-                    : discoveredModelOptions !== null
-                      ? "Saved changes take effect on the next start."
-                      : "Select a provider above to see available models."}
-              </p>
+              {modelDiscoveryLoadingMessage ||
+              modelDiscoveryStatus !== null ? (
+                <ModelDiscoveryStatusLine
+                  disabled={updateMutation.isPending}
+                  loading={modelDiscoveryLoading}
+                  loadingMessage={modelDiscoveryLoadingMessage}
+                  onRetry={retryModelDiscovery}
+                  status={modelDiscoveryStatus}
+                />
+              ) : modelDiscoveryLoading ? null : (
+                <p className="text-xs text-muted-foreground">
+                  {discoveredModelOptions !== null
+                    ? "Saved changes take effect on the next start."
+                    : "Select a provider above to see available models."}
+                </p>
+              )}
             </div>
 
             <AgentAiDefaultsNotice
