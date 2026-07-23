@@ -560,6 +560,46 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
 });
 
+test("non-local default auto-connects the first community", async ({
+  page,
+}) => {
+  await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
+  await page.addInitScript((pubkey) => {
+    window.localStorage.setItem(
+      `buzz-machine-onboarding-complete.v2:${pubkey}`,
+      "true",
+    );
+  }, BLANK_TYLER_IDENTITY.pubkey);
+  await installMockBridge(page, undefined, {
+    relayWsUrl: "wss://default.example.com",
+    skipOnboardingSeed: true,
+    skipCommunitySeed: true,
+  });
+  await page.goto("/");
+
+  await expectIncompleteOnboarding(page);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = window.localStorage.getItem("buzz-communities");
+        const communities = raw
+          ? (JSON.parse(raw) as Array<{ id: string; relayUrl: string }>)
+          : [];
+        return {
+          activeMatchesCommunity:
+            communities.length === 1 &&
+            window.localStorage.getItem("buzz-active-community-id") ===
+              communities[0]?.id,
+          relayUrl: communities[0]?.relayUrl ?? null,
+        };
+      }),
+    )
+    .toEqual({
+      activeMatchesCommunity: true,
+      relayUrl: "wss://default.example.com",
+    });
+});
+
 test("first-community choices route join, create, owner, and member intents", async ({
   page,
 }) => {
@@ -1298,7 +1338,7 @@ test("connected first-community profile step offers equal-width Next and Back co
           id: "txn-profile-step",
           source: "first-community",
           stage: "profile",
-          relayUrl: "wss://default.example.com",
+          relayUrl: "ws://localhost:3000",
           communityName: "Default",
           communityId: "e2e-default-community",
           addedCommunity: true,
@@ -1346,7 +1386,7 @@ test("connected first-community profile step offers equal-width Next and Back co
       ],
     },
     {
-      relayWsUrl: "wss://default.example.com",
+      relayWsUrl: "ws://localhost:3000",
       skipOnboardingSeed: true,
     },
   );
