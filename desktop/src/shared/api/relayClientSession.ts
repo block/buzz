@@ -48,6 +48,12 @@ import {
 } from "@/shared/api/relayReconnectPolicy";
 import { RelayStallWatchdog } from "@/shared/api/relayStallWatchdog";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
+import {
+  noteFrameTooLargeLimit,
+  sendRelayTextFrame,
+  sendRelayTextFrameWithReconnectRetry,
+} from "@/shared/api/relayClientTransport";
+import { isOversizedFrameError } from "@/shared/api/relayFrameLimit";
 import { buildThreadReferenceTags } from "@/features/messages/lib/threading";
 const RECONNECT_BASE_DELAY_MS = 1_000,
   RECONNECT_MAX_DELAY_MS = 30_000,
@@ -101,6 +107,8 @@ export class RelayClient {
   private connectionGeneration = 0;
   private stabilityTimer: number | null = null;
   private visibleChannelId: string | null = null;
+  /** Server-advertised maximum frame size in bytes; null until first NOTICE. */
+  private maxFrameBytes: number | null = null;
 
   /**
    * Sticky terminal flag. Set when `resetConnection` is called with
@@ -158,6 +166,7 @@ export class RelayClient {
     this.notifyReconnectListeners = false;
     this.terminal = false;
     this.visibleChannelId = null;
+    this.maxFrameBytes = null;
     this.connectionStateEmitter.set("idle");
 
     if (this.wsId !== null) {
@@ -644,17 +653,7 @@ export class RelayClient {
   }
 
   private async sendRaw(payload: unknown[]) {
-    if (this.wsId === null) {
-      throw new Error("Relay socket is not connected.");
-    }
-
-    await invoke("plugin:websocket|send", {
-      id: this.wsId,
-      message: {
-        type: "Text",
-        data: JSON.stringify(payload),
-      },
-    });
+    await sendRelayTextFrame(this.wsId, payload, this.maxFrameBytes);
   }
 
   private normalizeRelayError(error: unknown, fallbackMessage: string) {
@@ -666,6 +665,11 @@ export class RelayClient {
     fallbackMessage: string,
   ): Error {
     const normalizedError = this.normalizeRelayError(error, fallbackMessage);
+    // Oversized frames are a permanent client-side error — resetting the
+    // connection would just trigger the same rejection on reconnect.
+    if (isOversizedFrameError(normalizedError)) {
+      return normalizedError;
+    }
     this.resetConnection(normalizedError);
     return normalizedError;
   }
@@ -674,24 +678,13 @@ export class RelayClient {
     payload: unknown[],
     fallbackMessage: string,
   ) {
-    try {
-      await this.sendRaw(payload);
-    } catch (error) {
-      const normalizedError = this.recoverFromSocketFailure(
-        error,
-        fallbackMessage,
-      );
-
-      try {
-        await this.ensureConnected();
-        await this.sendRaw(payload);
-      } catch (retryError) {
-        throw this.recoverFromSocketFailure(
-          retryError,
-          normalizedError.message,
-        );
-      }
-    }
+    await sendRelayTextFrameWithReconnectRetry({
+      payload,
+      fallbackMessage,
+      sendRaw: (p) => this.sendRaw(p),
+      recoverFromSocketFailure: (e, m) => this.recoverFromSocketFailure(e, m),
+      ensureConnected: () => this.ensureConnected(),
+    });
   }
 
   private async closeSubscription(subId: string) {
@@ -730,6 +723,13 @@ export class RelayClient {
           error,
           sendErrorMessage,
         );
+
+        // Oversized frames are permanently rejected — never reconnect-retry.
+        if (isOversizedFrameError(normalizedError)) {
+          window.clearTimeout(timeout);
+          reject(normalizedError);
+          return;
+        }
 
         try {
           await this.ensureConnected();
@@ -838,6 +838,13 @@ export class RelayClient {
       // back off until the window expires.
       if (notice.startsWith("rate-limited:")) {
         activateRateLimit(parseRateLimitHint(notice));
+      }
+      // Frame-size limit advertised by the relay — tighten our budget so
+      // future frames are pre-checked before sending.
+      const newMax = noteFrameTooLargeLimit(notice, this.maxFrameBytes);
+      if (newMax !== null) {
+        this.maxFrameBytes = newMax;
+        console.warn(`[relay] Frame size limit updated to ${newMax} bytes`);
       }
     }
   }

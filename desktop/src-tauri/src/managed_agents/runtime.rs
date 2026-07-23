@@ -14,6 +14,9 @@ use crate::{
     util::now_iso,
 };
 
+mod configure_cli;
+pub(crate) use configure_cli::configure_runtime_cli;
+
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
 
@@ -1591,20 +1594,6 @@ pub(crate) fn build_respond_to_env(
     Ok((set, remove))
 }
 
-pub(crate) fn configure_runtime_cli(
-    command: &mut std::process::Command,
-    runtime: Option<&KnownAcpRuntime>,
-) {
-    let Some(runtime) = runtime else {
-        return;
-    };
-    if runtime.id != "claude" {
-        return;
-    }
-    if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
-        command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
-    }
-}
 
 /// Spawn an agent process without holding any locks on records or runtimes.
 /// Returns the child process and log path on success. The caller is responsible

@@ -66,4 +66,22 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Add a reaction to a message on behalf of a workflow owner.
+    ///
+    /// - `community_id`: the community that owns the workflow run
+    /// - `message_id`: hex event ID of the target message
+    /// - `emoji`: reaction emoji (empty → "+"; must be ≤ 64 chars)
+    /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
+    ///   the `p` attribution tag; the relay keypair signs the kind:7 event)
+    ///
+    /// Returns the event ID hex string on success. Duplicate reactions are
+    /// treated as idempotent and return the original message_id.
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        emoji: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
 }

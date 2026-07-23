@@ -618,6 +618,37 @@ fn codex_spawn_does_not_set_a_claude_executable() {
         .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
 }
 
+/// On Windows, a `.cmd` shim must NOT set CLAUDE_CODE_EXECUTABLE because
+/// `CreateProcess` cannot exec batch scripts directly (EINVAL).
+#[cfg(windows)]
+#[test]
+fn cmd_shim_does_not_set_claude_code_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    let shim = temp.path().join("claude.cmd");
+    std::fs::write(&shim, "@echo off\r\necho shim\r\n").expect("write shim");
+
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+
+    assert!(
+        !command
+            .get_envs()
+            .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"),
+        ".cmd shim must not set CLAUDE_CODE_EXECUTABLE"
+    );
+}
+
 // ── PGID-based orphan sweep tests ───────────────────────────────────────
 
 /// Validates the kernel invariant that the orphan sweep PGID fix relies on:
