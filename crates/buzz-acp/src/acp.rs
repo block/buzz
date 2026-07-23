@@ -95,8 +95,11 @@ pub enum AcpError {
     #[error("Agent did not stop within {0:?} after cancellation")]
     CancelDrainTimeout(std::time::Duration),
 
-    #[error("Request timeout — agent did not respond within {0:?}")]
-    Timeout(std::time::Duration),
+    #[error("Request timeout — agent did not respond to {method} within {timeout:?}")]
+    Timeout {
+        method: String,
+        timeout: std::time::Duration,
+    },
 
     #[error("Write timeout — agent stopped reading stdin (blocked for {0:?})")]
     WriteTimeout(std::time::Duration),
@@ -997,12 +1000,20 @@ impl AcpClient {
         // inside timeout(), so we sequence them with early-return on timeout.
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
-            Err(_) => return Err(AcpError::Timeout(timeout)),
+            Err(_) => {
+                return Err(AcpError::Timeout {
+                    method: method.to_string(),
+                    timeout,
+                })
+            }
         }
 
         match tokio::time::timeout(timeout, self.read_until_response(id)).await {
             Ok(result) => result,
-            Err(_) => Err(AcpError::Timeout(timeout)),
+            Err(_) => Err(AcpError::Timeout {
+                method: method.to_string(),
+                timeout,
+            }),
         }
     }
 
