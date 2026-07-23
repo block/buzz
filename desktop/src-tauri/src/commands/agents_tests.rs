@@ -269,6 +269,24 @@ fn profile(name: Option<&str>, picture: Option<&str>) -> crate::relay::AgentProf
 }
 
 #[test]
+fn profile_query_preserves_owner_auth_for_pre_nip_oa_agents() {
+    assert!(!profile::profile_query_uses_agent_keys(None));
+    assert!(profile::profile_query_uses_agent_keys(Some("auth-tag")));
+}
+
+#[test]
+fn explicit_profile_relay_preserves_loopback_authority() {
+    let relay = validate_profile_relay(" WS://localhost:3000/ ").unwrap();
+    assert_eq!(relay, "ws://localhost:3000");
+}
+
+#[test]
+fn explicit_profile_relay_rejects_invalid_target() {
+    assert!(validate_profile_relay("not a relay").is_err());
+    assert!(validate_profile_relay("https://relay.example").is_err());
+}
+
+#[test]
 fn profile_needs_sync_when_missing() {
     assert!(profile_needs_sync(None, "Duncan", Some("https://x/a.png")));
 }
