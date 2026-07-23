@@ -3,6 +3,7 @@ import * as React from "react";
 import type { deriveShellRoute } from "@/app/AppShell.helpers";
 import type { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import {
+  loadCommunityDestination,
   markPendingCommunityRestore,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
@@ -48,6 +49,14 @@ export function useCommunityNavigationTransitions({
       saveActiveDestination();
       await goHome({ replace: true });
       markPendingCommunityRestore(id);
+      const destination = loadCommunityDestination(id);
+      if (destination?.kind === "channel") {
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `#/channels/${encodeURIComponent(destination.channelId)}`,
+        );
+      }
       communities.switchCommunity(id);
     },
     [communities, goHome, saveActiveDestination],
@@ -67,6 +76,14 @@ export function useCommunityNavigationTransitions({
       saveActiveDestination();
       await goHome({ replace: true });
       markPendingCommunityRestore(fallback.id);
+      const destination = loadCommunityDestination(fallback.id);
+      if (destination?.kind === "channel") {
+        window.history.replaceState(
+          window.history.state,
+          "",
+          `#/channels/${encodeURIComponent(destination.channelId)}`,
+        );
+      }
       communities.removeCommunity(id);
     },
     [communities, goHome, saveActiveDestination],

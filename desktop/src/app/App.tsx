@@ -39,6 +39,7 @@ import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
 import {
+  loadCommunityDestination,
   markPendingCommunityRestore,
   saveCommunityDestination,
 } from "@/features/communities/communityNavigationStorage";
@@ -342,6 +343,14 @@ function CommunityApp({
         );
         await router.navigate({ to: "/", replace: true });
         markPendingCommunityRestore(targetCommunityId);
+        const destination = loadCommunityDestination(targetCommunityId);
+        if (destination?.kind === "channel") {
+          window.history.replaceState(
+            window.history.state,
+            "",
+            `#/channels/${encodeURIComponent(destination.channelId)}`,
+          );
+        }
       }
       switchCommunity(targetCommunityId);
     },

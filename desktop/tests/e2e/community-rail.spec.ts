@@ -148,6 +148,40 @@ test.describe("community rail", () => {
     await expect(page).toHaveURL(/#\/$/);
   });
 
+  test("enters a remembered channel before live validation completes", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & {
+        __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
+      };
+      if (!testWindow.__BUZZ_E2E__) {
+        throw new Error("missing E2E config");
+      }
+      testWindow.__BUZZ_E2E__.mock = {
+        ...testWindow.__BUZZ_E2E__.mock,
+        channelsReadDelayMs: 800,
+      };
+    });
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).toHaveURL(/#\/channels\/general$/, { timeout: 700 });
+    await expect(page.getByRole("button", { name: "Inbox" })).toBeVisible();
+  });
+
   test("clears a remembered channel that is unavailable after switching", async ({
     page,
   }) => {

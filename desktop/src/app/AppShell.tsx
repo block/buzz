@@ -254,12 +254,6 @@ export function AppShell() {
       return;
     }
 
-    // A direct channel URL or browser-history destination is explicit. Only
-    // replace the neutral Home route used by the community-switch teardown.
-    if (selectedView !== "home") {
-      return;
-    }
-
     const destination = loadCommunityDestination(activeCommunityId);
     if (!destination || destination.kind === "home") {
       return;
@@ -268,16 +262,23 @@ export function AppShell() {
     const channelIsAvailable = sidebarChannels.some(
       (channel) => channel.id === destination.channelId,
     );
-    if (channelIsAvailable) {
-      void goChannel(destination.channelId, { replace: true });
+    if (!channelIsAvailable) {
+      saveCommunityDestination(activeCommunityId, { kind: "home" });
+      void goHome({ replace: true });
       return;
     }
 
-    saveCommunityDestination(activeCommunityId, { kind: "home" });
+    // The normal switch path writes the remembered channel into the hash before
+    // the target community mounts, so no intermediate Inbox frame is painted.
+    // Older transition callers may still arrive at neutral Home; repair those.
+    if (selectedView === "home") {
+      void goChannel(destination.channelId, { replace: true });
+    }
   }, [
     channelsQuery.isFetchedAfterMount,
     communitiesHook.activeCommunity?.id,
     goChannel,
+    goHome,
     selectedView,
     sidebarChannels,
   ]);
