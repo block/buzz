@@ -541,7 +541,30 @@ pub fn build_profile(
     about: Option<&str>,
     nip05: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
-    let mut map = serde_json::Map::new();
+    build_profile_with_existing(
+        &serde_json::Map::new(),
+        display_name,
+        name,
+        picture,
+        about,
+        nip05,
+    )
+}
+
+/// Build a NIP-01 profile metadata event while preserving unmodeled fields
+/// from an existing kind:0 snapshot.
+///
+/// Kind 0 is replaceable, so updates must merge into the complete current
+/// object or fields introduced by other clients and future NIPs are deleted.
+pub fn build_profile_with_existing(
+    existing: &serde_json::Map<String, serde_json::Value>,
+    display_name: Option<&str>,
+    name: Option<&str>,
+    picture: Option<&str>,
+    about: Option<&str>,
+    nip05: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let mut map = existing.clone();
     if let Some(v) = display_name {
         map.insert("display_name".into(), serde_json::Value::String(v.into()));
     }
@@ -2332,6 +2355,32 @@ mod tests {
         let ev = sign(build_profile(None, None, None, None, None).unwrap());
         let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
         assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn profile_update_preserves_unmodeled_fields() {
+        let existing = serde_json::json!({
+            "display_name": "Old name",
+            "bot": true,
+            "website": "https://example.com",
+            "lud16": "alice@example.com"
+        });
+        let ev = sign(
+            build_profile_with_existing(
+                existing.as_object().unwrap(),
+                Some("New name"),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let value: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        assert_eq!(value["display_name"], "New name");
+        assert_eq!(value["bot"], true);
+        assert_eq!(value["website"], "https://example.com");
+        assert_eq!(value["lud16"], "alice@example.com");
     }
 
     #[test]

@@ -462,15 +462,16 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
 
 // ── Profile ──────────────────────────────────────────────────────────────────
 
-/// Kind 0 — NIP-01 profile metadata (full snapshot).
-pub fn build_profile(
+/// Build a kind:0 profile snapshot while retaining fields Buzz does not model.
+pub fn build_profile_with_existing(
+    existing: &serde_json::Map<String, serde_json::Value>,
     display_name: Option<&str>,
     name: Option<&str>,
     picture: Option<&str>,
     about: Option<&str>,
     nip05: Option<&str>,
 ) -> Result<EventBuilder, String> {
-    let mut map = serde_json::Map::new();
+    let mut map = existing.clone();
     if let Some(v) = display_name {
         map.insert("display_name".into(), serde_json::Value::String(v.into()));
     }
