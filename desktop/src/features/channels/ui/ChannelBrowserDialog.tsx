@@ -9,7 +9,10 @@ import {
 } from "lucide-react";
 
 import type { Channel } from "@/shared/api/types";
-import { canonicalChannelName } from "@/features/channels/lib/canonicalChannelName";
+import {
+  canonicalChannelName,
+  channelNamesMatch,
+} from "@/features/channels/lib/canonicalChannelName";
 import { scoreChannelMatch } from "@/features/channels/lib/channelSearchScore";
 import {
   type ChannelSortMode,
@@ -246,7 +249,7 @@ export function ChannelBrowserDialog({
       channels.some(
         (channel) =>
           channel.channelType !== "dm" &&
-          channel.name.toLowerCase() === normalizedQuery &&
+          channelNamesMatch(channel.name, normalizedQuery) &&
           (channelTypeFilter
             ? channel.channelType === channelTypeFilter
             : true),

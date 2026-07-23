@@ -5,3 +5,10 @@
 export function canonicalChannelName(name: string): string {
   return name.replace(/^[#\s]+/u, "").trimEnd();
 }
+
+export function channelNamesMatch(left: string, right: string): boolean {
+  return (
+    canonicalChannelName(left).toLowerCase() ===
+    canonicalChannelName(right).toLowerCase()
+  );
+}
