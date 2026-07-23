@@ -85,9 +85,14 @@ CREATE UNIQUE INDEX idx_community_host_aliases_host ON community_host_aliases (l
 CREATE INDEX idx_community_host_aliases_community_id ON community_host_aliases (community_id);
 
 -- Guard both directions so an alias can never collide with a primary
--- communities.host, regardless of insertion order.
+-- communities.host, regardless of insertion order. Both triggers take a
+-- pg_advisory_xact_lock keyed only on lower(host) (not the table) before
+-- their EXISTS read, so a concurrent community-create and alias-add for the
+-- same host serialize instead of both passing against each other's
+-- not-yet-committed row (see migration 0025).
 CREATE FUNCTION community_host_aliases_no_primary_collision() RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('buzz_host_claim:' || lower(NEW.host), 0));
     IF EXISTS (SELECT 1 FROM communities WHERE lower(host) = lower(NEW.host)) THEN
         RAISE EXCEPTION 'host % is already a community primary host', NEW.host
             USING ERRCODE = 'unique_violation';
@@ -102,6 +107,7 @@ CREATE TRIGGER trg_community_host_aliases_no_primary_collision
 
 CREATE FUNCTION communities_no_alias_collision() RETURNS TRIGGER AS $$
 BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('buzz_host_claim:' || lower(NEW.host), 0));
     IF EXISTS (SELECT 1 FROM community_host_aliases WHERE lower(host) = lower(NEW.host)) THEN
         RAISE EXCEPTION 'host % is already a community host alias', NEW.host
             USING ERRCODE = 'unique_violation';

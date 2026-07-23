@@ -776,6 +776,30 @@ impl Db {
         .transpose()
     }
 
+    /// Returns whether `normalized_host` is reserved as a host alias for any
+    /// community, regardless of that community's archived state.
+    ///
+    /// Operator-plane counterpart to [`lookup_community_by_host_for_management`]:
+    /// a host stays reserved as an alias even if the community it points to is
+    /// archived (the alias-collision trigger from migration 0025 checks
+    /// `communities` unconditionally too), so an availability check that only
+    /// consulted the fallback-aware, archived-filtering
+    /// [`lookup_community_by_host_or_alias`] would report an alias-reserved
+    /// host as available and let a create attempt fail on the trigger instead
+    /// of the normal "host taken" response.
+    ///
+    /// [`lookup_community_by_host_for_management`]: Self::lookup_community_by_host_for_management
+    /// [`lookup_community_by_host_or_alias`]: Self::lookup_community_by_host_or_alias
+    pub async fn community_host_alias_exists(&self, normalized_host: &str) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_host_aliases WHERE lower(host) = lower($1))",
+        )
+        .bind(normalized_host)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
     /// Adds a host alias resolving to `community_id`.
     ///
     /// Checks upfront for a collision with any community's primary host so
