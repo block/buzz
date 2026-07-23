@@ -28,12 +28,13 @@ import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   formatRuntimeOptionLabel,
   getDefaultLlmModelLabel,
   getDefaultPersonaRuntime,
+  getPersonaHiddenProviderIds,
   getPersonaProviderOptions,
+  getProviderApiKeyEnvVar,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -76,7 +77,6 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -797,13 +797,12 @@ export function AgentInstanceEditDialog({
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
-  const hideProviderIds = React.useMemo(
-    () =>
-      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const hideProviderIds = getPersonaHiddenProviderIds({
+    bakedEnvKeys: bakedEnvKeys ?? [],
+    selectableRuntimes,
+    currentRuntimeId: selectedRuntimeId,
+    preserveCurrentRuntime: true,
+  });
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",

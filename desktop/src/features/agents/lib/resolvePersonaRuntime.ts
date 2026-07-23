@@ -149,11 +149,7 @@ function resolveVisibleDefaultRuntime(
     runtimes,
     disabledRuntimeIds,
   );
-  return (
-    visibleRuntimes.find((runtime) => runtime.id === defaultRuntime.id) ??
-    visibleRuntimes[0] ??
-    null
-  );
+  return getDefaultPersonaRuntime(visibleRuntimes, defaultRuntime.id);
 }
 
 /**

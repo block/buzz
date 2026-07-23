@@ -8,9 +8,10 @@ import {
 } from "./resolvePersonaRuntime.ts";
 
 function makeRuntime(id, label = `${id} label`) {
-  return { id, label, command: id, avatarUrl: "" };
+  return { id, label, command: id, avatarUrl: "", availability: "available" };
 }
 
+const buzzAgent = makeRuntime("buzz-agent", "Buzz Agent");
 const goose = makeRuntime("goose", "Goose");
 const claude = makeRuntime("claude", "Claude");
 const runtimes = [goose, claude];
@@ -40,6 +41,17 @@ test("resolvePersonaRuntime — hidden defaults are skipped for runtime-less per
     warnings: [],
     isOverridden: false,
   });
+});
+
+test("resolvePersonaRuntime — hidden defaults preserve product fallback order", () => {
+  const result = resolvePersonaRuntime(
+    null,
+    [goose, claude, buzzAgent],
+    goose,
+    false,
+    ["goose"],
+  );
+  assert.equal(result.runtime, buzzAgent);
 });
 
 test("resolvePersonaRuntime — explicitly pinned hidden runtimes remain available", () => {

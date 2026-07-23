@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   getDefaultPersonaRuntime,
+  getPersonaHiddenProviderIds,
   getPersonaModelOptions,
   getPersonaProviderOptions,
   reconcilePreferredRuntimeFallback,
@@ -73,6 +74,32 @@ test("getPersonaProviderOptions appends (current) tail for an unknown saved prov
   const tail = options.at(-1);
   assert.equal(tail?.id, "my-custom-llm");
   assert.equal(tail?.label, "my-custom-llm (current)");
+});
+
+test("hidden Buzz Agent suppresses shared compute for new selections", () => {
+  const hidden = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [makeRuntime("goose")],
+    currentRuntimeId: "goose",
+    preserveCurrentRuntime: false,
+  });
+  const ids = getPersonaProviderOptions("", "goose", "", hidden).map(
+    (option) => option.id,
+  );
+  assert.ok(!ids.includes("relay-mesh"));
+});
+
+test("an existing hidden Buzz Agent keeps its shared compute provider", () => {
+  const hidden = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [makeRuntime("goose")],
+    currentRuntimeId: "buzz-agent",
+    preserveCurrentRuntime: true,
+  });
+  const ids = getPersonaProviderOptions("", "buzz-agent", "", hidden).map(
+    (option) => option.id,
+  );
+  assert.ok(ids.includes("relay-mesh"));
 });
 
 // ── getDefaultPersonaRuntime — buzz-agent first ───────────────────────────────

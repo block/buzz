@@ -14,14 +14,33 @@ export { getDefaultPersonaRuntime } from "../lib/resolvePersonaRuntime";
  * offering it for new selections would create a regression path.
  * OSS builds pass an empty `Set` so v1 remains visible.
  *
- * All three dialog sites that show a provider picker import this constant —
- * `AgentDefinitionDialog`, `AgentInstanceEditDialog`, and
- * `AgentDefaultsSettingsCard` — making it the single source of truth for
- * which provider ids to suppress on Block builds.
+ * Provider pickers consume this directly or through
+ * `getPersonaHiddenProviderIds`, keeping one source of truth for Block builds.
  */
 export const BLOCK_BUILD_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set([
   "databricks",
 ]);
+
+export function getPersonaHiddenProviderIds({
+  bakedEnvKeys,
+  selectableRuntimes,
+  currentRuntimeId,
+  preserveCurrentRuntime,
+}: {
+  bakedEnvKeys: readonly string[];
+  selectableRuntimes: readonly Pick<AcpRuntimeCatalogEntry, "id">[];
+  currentRuntimeId: string;
+  preserveCurrentRuntime: boolean;
+}): ReadonlySet<string> {
+  const hidden = bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")
+    ? new Set(BLOCK_BUILD_HIDDEN_PROVIDER_IDS)
+    : new Set<string>();
+  const buzzAgentSelectable =
+    selectableRuntimes.some((runtime) => runtime.id === "buzz-agent") ||
+    (preserveCurrentRuntime && currentRuntimeId.trim() === "buzz-agent");
+  if (!buzzAgentSelectable) hidden.add("relay-mesh");
+  return hidden;
+}
 
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
