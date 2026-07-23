@@ -384,7 +384,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
-fn hermes_readiness_probe_args(command: &str) -> Option<&'static [&'static str]> {
+pub(crate) fn hermes_readiness_probe_args(command: &str) -> Option<&'static [&'static str]> {
     match normalize_command_identity(command).as_str() {
         "hermes" => Some(&["hermes", "acp", "--check"]),
         "hermes-acp" => Some(&["hermes-acp", "--check"]),

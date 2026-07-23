@@ -1,4 +1,4 @@
-use crate::managed_agents::known_acp_runtime;
+use crate::managed_agents::{hermes_readiness_probe_args, known_acp_runtime, normalize_agent_args};
 
 // ── buffer_contains_identifier tests ────────────────────────────────────
 
@@ -107,11 +107,25 @@ fn goose_has_no_mcp_hooks() {
 
 #[test]
 fn hermes_uses_its_native_tools_and_personal_config() {
-    let runtime = known_acp_runtime("hermes-acp").expect("should resolve");
+    let runtime = known_acp_runtime("hermes").expect("should resolve");
     assert_eq!(runtime.id, "hermes");
+    assert_eq!(runtime.commands, &["hermes", "hermes-acp"]);
     assert!(!runtime.mcp_hooks);
     assert_eq!(runtime.mcp_command, None);
     assert_eq!(runtime.config_file_path, Some("~/.hermes/config.yaml"));
+    assert_eq!(runtime.auth_probe_args, None);
+    assert_eq!(
+        normalize_agent_args(runtime.commands[0], Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        hermes_readiness_probe_args("hermes"),
+        Some(&["hermes", "acp", "--check"][..])
+    );
+    assert_eq!(
+        hermes_readiness_probe_args("hermes-acp"),
+        Some(&["hermes-acp", "--check"][..])
+    );
 }
 
 #[test]
