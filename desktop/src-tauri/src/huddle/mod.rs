@@ -99,9 +99,10 @@ fn validate_huddle_agent_enrollment(
     state: &AppState,
     pubkeys: &[String],
 ) -> Result<(), String> {
-    let records = crate::managed_agents::load_managed_agents(app)?;
     let relay_url = crate::relay::relay_ws_url_with_override(state);
-    crate::managed_agents::validate_local_agent_members(&records, pubkeys, &relay_url)
+    crate::managed_agents::validate_local_agent_members_from_store(pubkeys, &relay_url, || {
+        crate::managed_agents::load_managed_agents(app)
+    })
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────

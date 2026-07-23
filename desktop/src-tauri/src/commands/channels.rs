@@ -790,8 +790,9 @@ pub async fn add_channel_members(
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
     let relay_url = crate::relay::relay_ws_url_with_override(&state);
-    let local_agents = crate::managed_agents::load_managed_agents(&app)?;
-    crate::managed_agents::validate_local_agent_members(&local_agents, &pubkeys, &relay_url)?;
+    crate::managed_agents::validate_local_agent_members_from_store(&pubkeys, &relay_url, || {
+        crate::managed_agents::load_managed_agents(&app)
+    })?;
     let role_str = match role.as_deref() {
         Some("admin") => Some("admin"),
         Some("bot") => Some("bot"),

@@ -89,6 +89,39 @@ pub(crate) fn validate_managed_agent_relay_pin(record: &ManagedAgentRecord) -> R
     validate_local_agent_relay(&record.backend, &record.relay_url)
 }
 
+/// Load and validate local members only when the internal-build policy applies.
+/// OSS builds must not make ordinary membership depend on managed-agent store health.
+pub(crate) fn validate_local_agent_members_from_store<F>(
+    pubkeys: &[String],
+    relay_url: &str,
+    load: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<Vec<ManagedAgentRecord>, String>,
+{
+    validate_local_agent_members_from_store_with_policy(
+        pubkeys,
+        relay_url,
+        super::internal_build(),
+        load,
+    )
+}
+
+fn validate_local_agent_members_from_store_with_policy<F>(
+    pubkeys: &[String],
+    relay_url: &str,
+    internal: bool,
+    load: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<Vec<ManagedAgentRecord>, String>,
+{
+    if !internal {
+        return Ok(());
+    }
+    validate_local_agent_members(&load()?, pubkeys, relay_url)
+}
+
 /// Reject attachment of locally managed agents to a disallowed effective relay.
 /// Unknown pubkeys and provider-backed records are outside this policy.
 pub(crate) fn validate_local_agent_members(
@@ -216,6 +249,33 @@ mod tests {
         )
         .is_ok());
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn oss_member_enrollment_does_not_load_the_agent_store() {
+        let loads = std::cell::Cell::new(0);
+        assert!(validate_local_agent_members_from_store_with_policy(
+            &["human".into()],
+            "not-even-a-relay",
+            false,
+            || {
+                loads.set(loads.get() + 1);
+                Err("broken store".into())
+            },
+        )
+        .is_ok());
+        assert_eq!(loads.get(), 0);
+    }
+
+    #[test]
+    fn internal_member_enrollment_fails_loudly_on_broken_store() {
+        assert!(validate_local_agent_members_from_store_with_policy(
+            &["human".into()],
+            "wss://buzz.block.builderlab.xyz",
+            true,
+            || Err("broken store".into()),
+        )
+        .is_err());
     }
 
     #[test]

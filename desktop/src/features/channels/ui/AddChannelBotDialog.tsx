@@ -11,6 +11,7 @@ import {
 import { getActivePersonas } from "@/features/agents/lib/catalog";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
 import { useInChannelPersonaIds } from "@/features/channels/ui/useInChannelPersonaIds";
@@ -64,7 +65,11 @@ export function AddChannelBotDialog({
   onOpenChange,
 }: AddChannelBotDialogProps) {
   const personasQuery = usePersonasQuery();
-  const localRelayPolicy = useLocalAgentRelayAllowedQuery({ enabled: open });
+  const { activeCommunity } = useCommunities();
+  const localRelayPolicy = useLocalAgentRelayAllowedQuery(
+    activeCommunity?.id ?? null,
+    { enabled: open },
+  );
   const teamsQuery = useTeamsQuery();
   const inChannelPersonaIds = useInChannelPersonaIds(
     channelId,

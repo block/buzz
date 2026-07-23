@@ -1541,6 +1541,7 @@ test("internal build blocks local agents on a non-allowlisted community", async 
   await page.getByTestId("channel-intro-action-create-agent").click();
 
   await expect(page.getByTestId("local-agent-relay-blocked")).toBeVisible();
+  await page.getByRole("button", { name: "Fizz" }).click();
   await expect(page.getByRole("button", { name: "Add agent" })).toBeDisabled();
 });
 

@@ -319,22 +319,33 @@ where
     Ok(())
 }
 
+fn load_managed_agent_save_baseline_with<F>(
+    load: F,
+) -> Result<(Vec<ManagedAgentRecord>, Vec<ManagedAgentRecord>), String>
+where
+    F: FnOnce() -> Result<Vec<ManagedAgentRecord>, String>,
+{
+    let stored = load()?;
+    let definitions = stored
+        .iter()
+        .filter(|record| record.pubkey.is_empty())
+        .cloned()
+        .collect();
+    let instances = stored
+        .into_iter()
+        .filter(|record| !record.pubkey.is_empty())
+        .collect();
+    Ok((definitions, instances))
+}
+
 /// Save the keyed agent *instances*, preserving the key-less definitions that
 /// share the unified store: callers pass exactly the records they loaded via
 /// [`load_managed_agents`], and this re-reads the definition half from disk
 /// before the wholesale rewrite so a definition is never dropped by an
 /// instance-side save (and vice versa via [`save_agent_definitions`]).
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
-    let stored = load_agent_store(app).unwrap_or_default();
-    let definitions = stored
-        .iter()
-        .filter(|record| record.pubkey.is_empty())
-        .cloned()
-        .collect();
-    let previous_instances: Vec<_> = stored
-        .into_iter()
-        .filter(|record| !record.pubkey.is_empty())
-        .collect();
+    let (definitions, previous_instances) =
+        load_managed_agent_save_baseline_with(|| load_agent_store(app))?;
     validate_changed_relay_pins_with(records, &previous_instances, |record| {
         super::validate_managed_agent_relay_pin(record)
     })?;
@@ -836,9 +847,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{
-        agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
-        retain_managed_agent_instances, validate_changed_relay_pins_with, KeyMigration, KeyStore,
-        KeyringProbe, ManagedAgentRecord,
+        agent_keyring_name, hydrate_keys_with, load_managed_agent_save_baseline_with,
+        migrate_inline_key, persist_agent_keys_with, retain_managed_agent_instances,
+        validate_changed_relay_pins_with, KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
     };
 
     /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -966,6 +977,27 @@ mod tests {
             }}"#
         ))
         .expect("sample record")
+    }
+
+    #[test]
+    fn save_baseline_propagates_store_errors_without_rewriting_from_empty() {
+        let result = load_managed_agent_save_baseline_with(|| Err("broken store".into()));
+        assert_eq!(result.unwrap_err(), "broken store");
+    }
+
+    #[test]
+    fn save_baseline_preserves_definitions_and_instances() {
+        let instance = record_with_key("nsec1realkey");
+        let mut definition = instance.clone();
+        definition.pubkey.clear();
+
+        let (definitions, instances) = load_managed_agent_save_baseline_with(|| {
+            Ok(vec![definition.clone(), instance.clone()])
+        })
+        .expect("baseline");
+
+        assert_eq!(definitions, vec![definition]);
+        assert_eq!(instances, vec![instance]);
     }
 
     #[test]
