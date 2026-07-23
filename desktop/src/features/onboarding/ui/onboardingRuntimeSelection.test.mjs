@@ -12,9 +12,10 @@ function runtime(id, availability, status) {
   return { id, availability, authStatus: { status } };
 }
 
-test("only Claude Code and Codex are visible in onboarding", () => {
+test("Claude Code, Codex, and Cursor are visible in onboarding", () => {
   assert.equal(runtimeIsVisibleInOnboarding("claude"), true);
   assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("cursor"), true);
   assert.equal(runtimeIsVisibleInOnboarding("goose"), false);
   assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), false);
   assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
@@ -23,6 +24,7 @@ test("only Claude Code and Codex are visible in onboarding", () => {
 test("visible onboarding runtimes use the product order", () => {
   const runtimes = [
     runtime("buzz-agent", "available", "not_applicable"),
+    runtime("cursor", "available", "logged_in"),
     runtime("codex", "available", "logged_in"),
     runtime("goose", "available", "not_applicable"),
     runtime("claude", "available", "logged_in"),
@@ -30,7 +32,7 @@ test("visible onboarding runtimes use the product order", () => {
 
   assert.deepEqual(
     getVisibleOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude", "codex"],
+    ["claude", "codex", "cursor"],
   );
 });
 

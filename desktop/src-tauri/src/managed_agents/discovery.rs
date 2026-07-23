@@ -13,10 +13,11 @@ mod runtime_metadata;
 
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
-const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
-const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const BUZZ_AGENT_AVATAR_URL: &str =
+pub(crate) const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
+pub(crate) const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
+pub(crate) const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+pub(crate) const CURSOR_AVATAR_URL: &str = "https://www.cursor.com/favicon.ico";
+pub(crate) const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
@@ -38,6 +39,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
             paths.extend([
                 home.join(".local/share/mise/shims"),
                 home.join(".local/bin"),
+                home.join(".cursor/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
             ]);
@@ -156,6 +158,42 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+
+    // Cursor Agent CLI speaks ACP natively (`agent acp` / `cursor-agent acp`) —
+    // no separate *-acp npm adapter (same class as Goose). Auth: `agent login`
+    // or CURSOR_API_KEY. Headless extension methods (ask_question / create_plan)
+    // need a separate buzz-acp client policy; not part of this registry entry.
+    KnownAcpRuntime {
+        id: "cursor",
+        label: "Cursor",
+        commands: &["agent", "cursor-agent"],
+        aliases: &["cursor"],
+        avatar_url: CURSOR_AVATAR_URL,
+        mcp_command: Some("buzz-dev-mcp"),
+        mcp_hooks: false,
+        underlying_cli: Some("agent"),
+        cli_install_commands: &["curl -fsSL https://cursor.com/install | bash"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://cursor.com/install?win32=true | iex\""],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://cursor.com/docs/cli/acp",
+        cli_install_hint: "Install the Cursor Agent CLI via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".cursor/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.cursor/cli-config.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `agent login` to authenticate (or set CURSOR_API_KEY)."),
+        auth_probe_args: Some(&["agent", "status"]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -342,7 +380,8 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // goose + Cursor speak ACP as a subcommand (`goose acp`, `agent acp`).
+        "goose" | "agent" | "cursor-agent" | "cursor" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
