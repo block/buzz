@@ -531,33 +531,63 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
+/// Merge profile field updates over an existing kind:0 content object.
+///
+/// `current_content` is the JSON `content` of the profile as currently
+/// published (pass `None` when no profile exists). Fields supplied as `Some`
+/// overwrite the current value; every other key — including fields this SDK
+/// does not model, such as `bot` (NIP-24), `website`, `banner`, or `lud16` —
+/// is carried forward untouched. Unparseable or non-object current content is
+/// treated as absent.
+///
+/// kind:0 is replaceable: relays keep only the newest event per author, so a
+/// rebuilt content object *is* the whole profile. Building from anything less
+/// than the current content silently deletes fields.
+pub fn merge_profile_content(
+    current_content: Option<&str>,
+    display_name: Option<&str>,
+    name: Option<&str>,
+    picture: Option<&str>,
+    about: Option<&str>,
+    nip05: Option<&str>,
+) -> String {
+    let mut map = current_content
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| match v {
+            serde_json::Value::Object(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or_default();
+    for (key, value) in [
+        ("display_name", display_name),
+        ("name", name),
+        ("picture", picture),
+        ("about", about),
+        ("nip05", nip05),
+    ] {
+        if let Some(v) = value {
+            map.insert(key.into(), serde_json::Value::String(v.into()));
+        }
+    }
+    serde_json::Value::Object(map).to_string()
+}
+
 /// Build a NIP-01 profile metadata event (kind 0).
 ///
-/// Only present (Some) fields are included in the JSON object.
+/// kind:0 is replaceable, so the built event replaces the author's *entire*
+/// profile. Callers must read-merge-write: pass the currently-published
+/// content as `current_content` so fields outside the parameters below
+/// survive the rebuild (see [`merge_profile_content`] for the merge rules).
+/// Pass `None` only when publishing a brand-new profile.
 pub fn build_profile(
+    current_content: Option<&str>,
     display_name: Option<&str>,
     name: Option<&str>,
     picture: Option<&str>,
     about: Option<&str>,
     nip05: Option<&str>,
 ) -> Result<EventBuilder, SdkError> {
-    let mut map = serde_json::Map::new();
-    if let Some(v) = display_name {
-        map.insert("display_name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = name {
-        map.insert("name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = picture {
-        map.insert("picture".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = about {
-        map.insert("about".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = nip05 {
-        map.insert("nip05".into(), serde_json::Value::String(v.into()));
-    }
-    let content = serde_json::Value::Object(map).to_string();
+    let content = merge_profile_content(current_content, display_name, name, picture, about, nip05);
     Ok(EventBuilder::new(Kind::Custom(0), content).tags([]))
 }
 
@@ -2313,6 +2343,7 @@ mod tests {
     fn profile_all_fields() {
         let ev = sign(
             build_profile(
+                None,
                 Some("Alice"),
                 Some("alice"),
                 Some("https://example.com/pic.jpg"),
@@ -2330,7 +2361,7 @@ mod tests {
 
     #[test]
     fn profile_some_fields() {
-        let ev = sign(build_profile(Some("Bob"), None, None, None, None).unwrap());
+        let ev = sign(build_profile(None, Some("Bob"), None, None, None, None).unwrap());
         let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
         assert_eq!(v["display_name"], "Bob");
         assert!(
@@ -2342,9 +2373,64 @@ mod tests {
 
     #[test]
     fn profile_no_fields() {
-        let ev = sign(build_profile(None, None, None, None, None).unwrap());
+        let ev = sign(build_profile(None, None, None, None, None, None).unwrap());
         let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
         assert!(v.as_object().unwrap().is_empty());
+    }
+
+    /// Regression test for #2534: a no-op update (setting `nip05` to the value
+    /// it already has) must not delete any field of the published profile —
+    /// including keys the SDK does not model (`bot`, `website`, `banner`,
+    /// `lud16`) and non-string values.
+    #[test]
+    fn profile_merge_preserves_unknown_keys() {
+        let current = r#"{"name":"dennis","display_name":"Dennis","about":"ops","picture":"https://example.com/d.png","nip05":"dennis@nave.pub","bot":true,"website":"https://nave.pub","banner":"https://example.com/b.png","lud16":"dennis@wallet.example","ext":{"nested":1}}"#;
+        let ev = sign(
+            build_profile(
+                Some(current),
+                None,
+                None,
+                None,
+                None,
+                Some("dennis@nave.pub"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 0);
+        let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        assert_eq!(v["bot"], true, "bot flag must survive a profile update");
+        assert_eq!(v["website"], "https://nave.pub");
+        assert_eq!(v["banner"], "https://example.com/b.png");
+        assert_eq!(v["lud16"], "dennis@wallet.example");
+        assert_eq!(v["ext"]["nested"], 1);
+        assert_eq!(v["name"], "dennis");
+        assert_eq!(v["display_name"], "Dennis");
+        assert_eq!(v["about"], "ops");
+        assert_eq!(v["picture"], "https://example.com/d.png");
+        assert_eq!(v["nip05"], "dennis@nave.pub");
+        assert_eq!(v.as_object().unwrap().len(), 10, "no fields gained or lost");
+    }
+
+    /// Supplied fields overwrite; unsupplied known fields carry forward.
+    #[test]
+    fn profile_merge_overwrites_only_supplied_keys() {
+        let current = r#"{"display_name":"Old","name":"old","bot":true}"#;
+        let ev = sign(build_profile(Some(current), Some("New"), None, None, None, None).unwrap());
+        let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+        assert_eq!(v["display_name"], "New");
+        assert_eq!(v["name"], "old", "unsupplied known key must carry forward");
+        assert_eq!(v["bot"], true);
+    }
+
+    /// Unparseable or non-object current content behaves like no profile.
+    #[test]
+    fn profile_merge_treats_invalid_current_as_absent() {
+        for bad in ["not json", "[1,2]", "\"just a string\"", ""] {
+            let ev = sign(build_profile(Some(bad), Some("Alice"), None, None, None, None).unwrap());
+            let v: serde_json::Value = serde_json::from_str(&ev.content).unwrap();
+            assert_eq!(v.as_object().unwrap().len(), 1, "input: {bad:?}");
+            assert_eq!(v["display_name"], "Alice");
+        }
     }
 
     #[test]

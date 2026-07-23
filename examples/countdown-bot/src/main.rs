@@ -153,7 +153,10 @@ fn build_auth_event(config: &Config, challenge: &str) -> Result<Event> {
 }
 
 async fn publish_profile(ws: &mut Ws, config: &Config) -> Result<()> {
+    // No current content: the bot owns this profile and publishes the full
+    // snapshot it wants on every connect.
     let builder = buzz_sdk::builders::build_profile(
+        None,
         Some(BOT_DISPLAY_NAME),
         Some(BOT_NAME),
         Some(BOT_ICON_DATA_URL),

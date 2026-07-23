@@ -400,11 +400,21 @@ pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, S
 /// same wire format.
 fn build_profile_event(
     agent_keys: &nostr::Keys,
+    current_content: Option<&str>,
     display_name: &str,
     avatar_url: Option<&str>,
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
-    let builder = crate::events::build_profile(Some(display_name), None, avatar_url, None, None)?;
+    // kind:0 is replaceable — merge over the currently-published content so
+    // fields this sync does not model (about, nip05, bot, website, …) survive.
+    let builder = crate::events::build_profile(
+        current_content,
+        Some(display_name),
+        None,
+        avatar_url,
+        None,
+        None,
+    )?;
 
     let builder = if let Some(tag_json) = auth_tag_json {
         // Bridge nostr 0.37 PublicKey → nostr 0.36 PublicKey via hex encoding.
@@ -446,8 +456,27 @@ pub async fn sync_managed_agent_profile(
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
+
+    // Read-merge-write: kind:0 is replaceable, so the event built here
+    // replaces the agent's entire profile. Fetch the current content first
+    // and merge display_name/avatar over it. If the read fails, abort rather
+    // than publish a blind two-field profile — a write without the current
+    // content is a deletion, not a sync (#2534).
+    let current_content =
+        query_agent_profile_content(state, relay_url, agent_keys, auth_tag).await?;
+
+    // The read above was its own HTTP send; re-check the admission gate so the
+    // write send is individually gated, per the relay_admission contract.
+    crate::relay_admission::wait_for_rate_limit().await;
+
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
+    let event = build_profile_event(
+        agent_keys,
+        current_content.as_deref(),
+        display_name,
+        avatar_url,
+        auth_tag,
+    )?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
 
@@ -476,6 +505,31 @@ pub async fn sync_managed_agent_profile(
     }
 
     Ok(())
+}
+
+/// Fetch the raw kind:0 content for the agent identified by `agent_keys` from
+/// the given relay, authenticated as the agent itself (mirroring the auth the
+/// subsequent profile write uses). Returns `None` when no profile exists.
+async fn query_agent_profile_content(
+    state: &AppState,
+    relay_url: &str,
+    agent_keys: &nostr::Keys,
+    auth_tag: Option<&str>,
+) -> Result<Option<String>, String> {
+    let filter = serde_json::json!({
+        "authors": [agent_keys.public_key().to_hex()],
+        "kinds": [0],
+        "limit": 1
+    });
+    let events = query_relay_at_with_keys(
+        state,
+        &relay_http_base_url(relay_url),
+        &[filter],
+        agent_keys,
+        auth_tag,
+    )
+    .await?;
+    Ok(events.into_iter().next().map(|event| event.content))
 }
 
 // ── Agent profile query ─────────────────────────────────────────────────────
@@ -971,7 +1025,7 @@ mod tests {
     fn profile_event_with_valid_auth_tag() {
         let agent_keys = nostr::Keys::generate();
         let tag_json = make_valid_auth_tag(&agent_keys);
-        let event = build_profile_event(&agent_keys, "TestBot", None, Some(&tag_json))
+        let event = build_profile_event(&agent_keys, None, "TestBot", None, Some(&tag_json))
             .expect("should succeed with a valid auth tag");
 
         // Exactly one "auth" tag must be present.
@@ -989,7 +1043,7 @@ mod tests {
     #[test]
     fn profile_event_without_auth_tag() {
         let agent_keys = nostr::Keys::generate();
-        let event = build_profile_event(&agent_keys, "TestBot", None, None)
+        let event = build_profile_event(&agent_keys, None, "TestBot", None, None)
             .expect("should succeed without an auth tag");
 
         // No "auth" tags should be present.
@@ -1008,11 +1062,37 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         // Structurally valid JSON array but with a bogus signature — verification must fail.
         let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-        let result = build_profile_event(&agent_keys, "TestBot", None, Some(&bad_json));
+        let result = build_profile_event(&agent_keys, None, "TestBot", None, Some(&bad_json));
         assert!(result.is_err(), "should reject an invalid auth tag");
         assert!(
             result.unwrap_err().contains("verification failed"),
             "error message should mention verification failure"
         );
+    }
+
+    /// Regression test for #2534: the managed-agent sync models only
+    /// display_name and picture, but the event it publishes replaces the whole
+    /// kind:0. Every unmodelled field of the current profile must survive.
+    #[test]
+    fn profile_event_preserves_unmodelled_fields() {
+        let agent_keys = nostr::Keys::generate();
+        let current = r#"{"display_name":"Old","about":"agent ops","nip05":"bot@nave.pub","bot":true,"website":"https://nave.pub"}"#;
+        let event = build_profile_event(
+            &agent_keys,
+            Some(current),
+            "TestBot",
+            Some("https://example.com/a.png"),
+            None,
+        )
+        .expect("should succeed with current content");
+
+        let v: serde_json::Value =
+            serde_json::from_str(&event.content).expect("content should be JSON");
+        assert_eq!(v["display_name"], "TestBot", "supplied field overwrites");
+        assert_eq!(v["picture"], "https://example.com/a.png");
+        assert_eq!(v["about"], "agent ops");
+        assert_eq!(v["nip05"], "bot@nave.pub");
+        assert_eq!(v["bot"], true, "bot flag must survive the sync");
+        assert_eq!(v["website"], "https://nave.pub");
     }
 }

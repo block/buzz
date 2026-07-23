@@ -56,28 +56,19 @@ pub async fn update_profile(
     )
     .await?;
 
-    // Pull the current content as a JSON object so we can merge with
-    // the caller's overrides.
-    let current: Value = prior_events
-        .first()
-        .and_then(|ev| serde_json::from_str::<Value>(&ev.content).ok())
-        .unwrap_or(Value::Null);
+    // Merge the caller's overrides onto the current published content so
+    // fields this command does not model (`bot`, `website`, `banner`,
+    // `lud16`, …) survive the rebuild.
+    let current_content = prior_events.first().map(|ev| ev.content.as_str());
 
-    let dn = display_name
-        .as_deref()
-        .or_else(|| current.get("display_name").and_then(Value::as_str));
-    let name = current.get("name").and_then(Value::as_str);
-    let picture = avatar_url
-        .as_deref()
-        .or_else(|| current.get("picture").and_then(Value::as_str));
-    let ab = about
-        .as_deref()
-        .or_else(|| current.get("about").and_then(Value::as_str));
-    let nip05 = nip05_handle
-        .as_deref()
-        .or_else(|| current.get("nip05").and_then(Value::as_str));
-
-    let builder = events::build_profile(dn, name, picture, ab, nip05)?;
+    let builder = events::build_profile(
+        current_content,
+        display_name.as_deref(),
+        None, // `name` — not exposed here; the merge carries it forward
+        avatar_url.as_deref(),
+        about.as_deref(),
+        nip05_handle.as_deref(),
+    )?;
     submit_event(builder, &state).await?;
 
     // Re-fetch to return canonical profile.
