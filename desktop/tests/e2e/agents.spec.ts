@@ -817,6 +817,7 @@ test("custom personas share with people and keep export separate", async ({
   const linkIcon = page.getByTestId("persona-share-link-icon");
   const linkCopy = page.getByTestId("persona-share-link-copy");
   const linkDivider = page.getByTestId("persona-share-link-divider");
+  const catalogDivider = page.getByTestId("persona-share-catalog-divider");
   const staticLinkAccess = page.getByTestId("persona-share-link-access");
   await waitForAnimations(page);
   const [
@@ -825,6 +826,7 @@ test("custom personas share with people and keep export separate", async ({
     linkIconBox,
     linkCopyBox,
     linkDividerBox,
+    catalogDividerBox,
     staticLinkAccessBox,
   ] = await Promise.all([
     linkRow.boundingBox(),
@@ -832,6 +834,7 @@ test("custom personas share with people and keep export separate", async ({
     linkIcon.boundingBox(),
     linkCopy.boundingBox(),
     linkDivider.boundingBox(),
+    catalogDivider.boundingBox(),
     staticLinkAccess.boundingBox(),
   ]);
   const sendDescriptionBox = await sendDescription.boundingBox();
@@ -864,17 +867,11 @@ test("custom personas share with people and keep export separate", async ({
           (staticLinkAccessBox?.height ?? 0) / 2),
     ),
   ).toBeLessThanOrEqual(1);
-  const shareMainCardForLinkSpacing = page.getByTestId(
-    "persona-share-main-card",
-  );
-  const shareMainCardForLinkSpacingBox =
-    await shareMainCardForLinkSpacing.boundingBox();
   const gapAboveCopyLink =
     (initialCopyLinkButtonBox?.y ?? 0) -
     ((linkDividerBox?.y ?? 0) + (linkDividerBox?.height ?? 0));
   const gapBelowCopyLink =
-    (shareMainCardForLinkSpacingBox?.y ?? 0) +
-    (shareMainCardForLinkSpacingBox?.height ?? 0) -
+    (catalogDividerBox?.y ?? 0) -
     ((initialCopyLinkButtonBox?.y ?? 0) +
       (initialCopyLinkButtonBox?.height ?? 0));
   expect(Math.abs(gapAboveCopyLink - gapBelowCopyLink)).toBeLessThanOrEqual(1);
@@ -910,23 +907,15 @@ test("custom personas share with people and keep export separate", async ({
   await expect(shareDialog.getByText("File format")).toHaveCount(0);
   const shareMainCard = page.getByTestId("persona-share-main-card");
   const exportAgentRow = page.getByTestId("persona-share-export");
-  const catalogSection = page.getByTestId("persona-share-catalog");
-  const catalogToggle = page.getByTestId("persona-share-show-in-catalog");
   await expect(exportAgentRow).toHaveText("Export agent");
-  await expect(catalogSection).toContainText("Share to catalog");
-  await expect(catalogSection).toContainText(
-    "Let anyone in this community find and use a copy of this agent.",
-  );
-  await expect(catalogToggle).toHaveAttribute("aria-checked", "false");
   await expect(shareMainCard.getByTestId("persona-share-export")).toHaveCount(
     0,
   );
   await waitForAnimations(page);
   const shareMainCardBox = await shareMainCard.boundingBox();
   const exportAgentRowBox = await exportAgentRow.boundingBox();
-  const catalogSectionBox = await catalogSection.boundingBox();
   const shareCardGap =
-    (catalogSectionBox?.y ?? 0) -
+    (exportAgentRowBox?.y ?? 0) -
     ((shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0));
   expect(shareCardGap).toBeGreaterThanOrEqual(12);
   expect(shareCardGap).toBeLessThan(16);
@@ -949,7 +938,7 @@ test("custom personas share with people and keep export separate", async ({
   expect(exportAgentRowShadow).not.toBe("none");
   await expect(exportAgentRow).toHaveCSS("position", "relative");
   expect(exportAgentRowBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0) + 12,
+    (shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0) + 12,
   );
   await expect(page.getByTestId("agent-snapshot-export-dialog")).toHaveCount(0);
 
@@ -1329,8 +1318,33 @@ This deliberately long fenced-code example must not establish the minimum width 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   const catalogToggle = page.getByTestId("persona-share-show-in-catalog");
+  const shareDialog = page.getByTestId("persona-share-dialog");
+  const shareMainCard = shareDialog.getByTestId("persona-share-main-card");
+  const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
+  const catalogSection = shareDialog.getByTestId("persona-share-catalog");
   const publishCatalogUpdatesButton = page.getByTestId(
     "persona-share-publish-catalog-updates",
+  );
+  await expect(
+    shareMainCard.getByTestId("persona-share-catalog"),
+  ).toBeVisible();
+  await expect(catalogSection).toContainText("Share to catalog");
+  await expect(catalogSection).toContainText(
+    "Let anyone in this community find and use a copy of this agent.",
+  );
+  const [copyLinkButtonBox, catalogSectionBox, shareMainCardBox] =
+    await Promise.all([
+      copyLinkButton.boundingBox(),
+      catalogSection.boundingBox(),
+      shareMainCard.boundingBox(),
+    ]);
+  expect(catalogSectionBox?.y ?? 0).toBeGreaterThan(
+    (copyLinkButtonBox?.y ?? 0) + (copyLinkButtonBox?.height ?? 0),
+  );
+  expect(
+    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0),
+  ).toBeLessThanOrEqual(
+    (shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0),
   );
   await expect(catalogToggle).toHaveAttribute("aria-checked", "false");
   await expect(publishCatalogUpdatesButton).toHaveCount(0);

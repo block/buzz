@@ -66,7 +66,7 @@ type PersonaShareDialogProps = {
 };
 
 type SnapshotShareDialogProps = {
-  beforeExport?: React.ReactNode;
+  afterLink?: React.ReactNode;
   displayName: string;
   encodeSnapshot: (
     memoryLevel: SnapshotMemoryLevel,
@@ -238,7 +238,7 @@ function ShareLevelControl({
 }
 
 export function SnapshotShareDialog({
-  beforeExport,
+  afterLink,
   displayName,
   encodeSnapshot,
   hasMemoryOptions,
@@ -696,10 +696,18 @@ export function SnapshotShareDialog({
                   </motion.button>
                 </Button>
               </div>
+              {afterLink ? (
+                <>
+                  <Separator
+                    className="my-4 bg-input/40"
+                    data-testid={`${testIdPrefix}-catalog-divider`}
+                  />
+                  {afterLink}
+                </>
+              ) : null}
             </section>
           </div>
         </div>
-        {beforeExport}
         <button
           className="relative flex min-h-14 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 text-left text-sm font-medium shadow-2xl outline-hidden transition-colors hover:bg-muted focus-visible:bg-muted disabled:cursor-default disabled:opacity-100"
           data-testid={`${testIdPrefix}-export`}
@@ -756,13 +764,15 @@ export function PersonaShareDialog({
 
   return (
     <SnapshotShareDialog
-      beforeExport={
+      afterLink={
         persona.isBuiltIn ? null : (
           <section
-            className="relative flex min-h-16 w-full items-center gap-3 rounded-2xl bg-background px-5 py-4 shadow-2xl"
+            className="flex min-h-16 w-full items-center gap-3"
             data-testid="persona-share-catalog"
           >
-            <BookUser className="h-4 w-4 shrink-0 text-muted-foreground" />
+            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              <BookUser className="h-4 w-4" />
+            </span>
             <div className="min-w-0 flex-1">
               <label className="text-sm font-medium" htmlFor={switchId}>
                 Share to catalog
