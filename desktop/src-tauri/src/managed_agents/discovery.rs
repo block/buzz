@@ -176,7 +176,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands: &["curl -fsSL https://cursor.com/install | bash"],
         cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://cursor.com/install?win32=true | iex\""],
         adapter_install_commands: &[],
-        install_instructions_url: "https://cursor.com/docs/cli/acp",
+        install_instructions_url: "https://cursor.com/docs/cli",
         cli_install_hint: "Install the Cursor Agent CLI via the official install script.",
         adapter_install_hint: "",
         skill_dir: Some(".cursor/skills"),
