@@ -86,6 +86,9 @@ with a TypeScript lookup table or an id comparison in a component.
    and Advanced only after a provider is configured. Harnesses whose runtime
    metadata has no provider field skip that gate. Reveals animate their height
    through Motion and become immediate when reduced motion is requested.
+   Once the Advanced toggle is visible, its expanded state is exclusively
+   user-controlled: provider, harness, and required-env changes must never
+   open it automatically in defaults, create, or edit flows.
 
 ## The tests that enforce this
 

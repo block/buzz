@@ -207,9 +207,7 @@ export function AgentDefinitionDialog({
     setBehaviorDraft(nextBehaviorDraft);
     setNamePoolText(nextNamePoolText);
     setEnvVars(nextEnvVars);
-    // Item 5: collapsed by default in edit mode — only expand if a non-default
-    // behavior value demands attention. Having env vars or a name pool is not
-    // sufficient reason to auto-open.
+    // Advanced always starts collapsed and only changes from its toggle.
     setShowAdvancedFields(false);
     setIsAvatarUploadPending(false);
     isRuntimeAutoSeededRef.current = false;
@@ -338,8 +336,9 @@ export function AgentDefinitionDialog({
   // locked rows in the env vars editor.
   // File-layer config for the selected runtime (e.g. goose config.yaml).
   // Used to silence requirements already satisfied there.
-  const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
-    useRuntimeFileConfigQuery(runtime, { enabled: open });
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
+    enabled: open,
+  });
   function handleAiConfigurationModeChange(nextMode: AgentAiConfigurationMode) {
     setAiConfigurationMode(nextMode);
     setIsCustomProviderEditing(false);
@@ -358,9 +357,7 @@ export function AgentDefinitionDialog({
     setProvider(nextPair.provider);
     setModel(nextPair.model);
   }
-  const { data: bakedEnvKeys, isLoading: bakedLoading } =
-    useBakedBuildEnvKeysQuery({ enabled: open });
-  const credentialSettled = !fileConfigLoading && !bakedLoading;
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
   const localModeGate = React.useMemo(
     () =>
       computeLocalModeGate({
@@ -405,11 +402,8 @@ export function AgentDefinitionDialog({
     envVars,
     fileSatisfiedEnvKeys: localModeGate.fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
-    open,
     provider: effectiveProvider,
     requiredEnvKeys,
-    satisfactionSettled: credentialSettled,
-    setShowAdvancedFields,
   });
   const {
     advancedRequiredEnvKeys,

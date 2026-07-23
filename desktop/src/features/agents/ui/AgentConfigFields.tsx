@@ -383,16 +383,9 @@ export function AgentConfigFields({
   const healOnMount =
     fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
   const userEditedProviderRef = React.useRef(false);
-  // Env vars live under a collapsed Advanced section (matching the create
-  // flow). Auto-open when a required key is missing so the field the user
-  // must fill is never hidden behind the toggle.
+  // Advanced visibility is user-controlled. Provider changes can add required
+  // rows, but must not open this section without an explicit toggle click.
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  const requiredAdvancedKeyMissing = advancedRequiredEnvKeys.some(
-    (key) => !(config.env_vars[key] ?? "").trim(),
-  );
-  React.useEffect(() => {
-    if (requiredAdvancedKeyMissing) setAdvancedOpen(true);
-  }, [requiredAdvancedKeyMissing]);
   // Read inside effects via ref so biome's exhaustive-deps stays honest:
   // refs are stable, and healOnMount is captured at declaration.
   const mayMutateDependentFieldsRef = React.useRef(false);

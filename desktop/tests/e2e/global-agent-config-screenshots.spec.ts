@@ -284,6 +284,19 @@ test.describe("global agent config screenshots", () => {
     await page.getByRole("dialog").screenshot({
       path: `${SHOTS}/02-create-custom-agent-configuration.png`,
     });
+
+    const advanced = page.getByRole("button", {
+      name: "Advanced",
+      exact: true,
+    });
+    await selectDropdownOption(
+      page,
+      page.locator("#persona-llm-provider"),
+      "Databricks v2",
+    );
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
   });
 
   test("03-global-env-satisfies-required-key", async ({ page }) => {
@@ -478,6 +491,14 @@ test.describe("global agent config screenshots", () => {
     await defaultsDialog.screenshot({
       path: `${SHOTS}/04-global-defaults-dialog-flat.png`,
     });
+    const advanced = defaultsDialog.getByTestId("global-agent-advanced-toggle");
+    await provider.click();
+    await page
+      .getByTestId("global-agent-provider-option-databricks_v2")
+      .click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
     await defaultsDialog
       .getByRole("button", {
         name: "Close",
