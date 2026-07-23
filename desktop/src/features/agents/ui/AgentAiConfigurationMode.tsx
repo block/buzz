@@ -105,13 +105,6 @@ export function AgentAiConfigurationModeField({
           </TabsTrigger>
         </TabsList>
       </Tabs>
-      {mode === "custom" ? (
-        <p className="text-xs text-muted-foreground">
-          {needsProviderSelection
-            ? "Provider and model changes apply only to this agent."
-            : "Model changes apply only to this agent."}
-        </p>
-      ) : null}
     </div>
   );
 }

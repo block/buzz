@@ -250,6 +250,6 @@ test.describe("agent provider dropdown screenshots", () => {
     await expect(
       dialog.getByRole("combobox", { name: /model/i }),
     ).toBeVisible();
-    await expect(dialog.getByText("Model changes apply only")).toBeVisible();
+    await expect(dialog.getByText("Model changes apply only")).toHaveCount(0);
   });
 });
