@@ -26,29 +26,7 @@ async fn nip98_request(
     audience: &str,
     body_source: &str,
 ) -> Result<(), CliError> {
-    if method != "POST" {
-        return Err(CliError::Usage(
-            "nip98-request currently permits only POST".into(),
-        ));
-    }
-    if body_source != "-" {
-        return Err(CliError::Usage(
-            "nip98-request body must be read from stdin with --body -".into(),
-        ));
-    }
-
-    let parsed =
-        url::Url::parse(url).map_err(|e| CliError::Usage(format!("invalid request URL: {e}")))?;
-    if parsed.scheme() != "https" {
-        return Err(CliError::Usage(
-            "nip98-request requires an https URL".into(),
-        ));
-    }
-    if parsed.fragment().is_some() || parsed.username() != "" || parsed.password().is_some() {
-        return Err(CliError::Usage(
-            "nip98-request URL cannot contain credentials or a fragment".into(),
-        ));
-    }
+    let parsed = validate_request(method, url, body_source)?;
 
     let mut input = std::io::stdin().take((MAX_REQUEST_BODY_BYTES + 1) as u64);
     let mut body = Vec::new();
@@ -100,4 +78,58 @@ async fn nip98_request(
         })
     );
     Ok(())
+}
+
+fn validate_request(method: &str, url: &str, body_source: &str) -> Result<url::Url, CliError> {
+    if method != "POST" {
+        return Err(CliError::Usage(
+            "nip98-request currently permits only POST".into(),
+        ));
+    }
+    if body_source != "-" {
+        return Err(CliError::Usage(
+            "nip98-request body must be read from stdin with --body -".into(),
+        ));
+    }
+
+    let parsed =
+        url::Url::parse(url).map_err(|e| CliError::Usage(format!("invalid request URL: {e}")))?;
+    if parsed.scheme() != "https" {
+        return Err(CliError::Usage(
+            "nip98-request requires an https URL".into(),
+        ));
+    }
+    if parsed.fragment().is_some() || parsed.username() != "" || parsed.password().is_some() {
+        return Err(CliError::Usage(
+            "nip98-request URL cannot contain credentials or a fragment".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_bounded_https_post_from_stdin() {
+        let parsed = validate_request("POST", "https://broker.example/health", "-").unwrap();
+        assert_eq!(parsed.as_str(), "https://broker.example/health");
+    }
+
+    #[test]
+    fn rejects_unsafe_request_shapes() {
+        for (method, url, body) in [
+            ("GET", "https://broker.example/health", "-"),
+            ("POST", "http://broker.example/health", "-"),
+            ("POST", "https://user@broker.example/health", "-"),
+            ("POST", "https://broker.example/health#fragment", "-"),
+            ("POST", "https://broker.example/health", "request.json"),
+        ] {
+            assert!(
+                validate_request(method, url, body).is_err(),
+                "request must be rejected: {method} {url} {body}"
+            );
+        }
+    }
 }

@@ -507,6 +507,47 @@ mod media_download_tests {
     }
 
     #[test]
+    fn nip98_request_binds_url_method_payload_audience_and_nonce() {
+        let keys = Keys::generate();
+        let body = br#"{"action":"health.inspect"}"#;
+        let header = sign_nip98_request(
+            &keys,
+            "POST",
+            "https://broker.example/health/inspect",
+            Some(body),
+            Some("example-broker"),
+            "test-nonce",
+        )
+        .unwrap();
+        let encoded = header.strip_prefix("Nostr ").unwrap();
+        let json = B64.decode(encoded).unwrap();
+        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
+        event.verify().unwrap();
+        assert_eq!(event.kind, Kind::Custom(27235));
+
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["u", "https://broker.example/health/inspect"]));
+        assert!(tags.iter().any(|tag| tag.as_slice() == ["method", "POST"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["aud", "example-broker"]));
+        assert!(tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["nonce", "test-nonce"]));
+        assert!(tags.iter().any(|tag| {
+            tag.first().map(String::as_str) == Some("payload")
+                && tag.get(1).map(String::as_str)
+                    == Some(hex::encode(Sha256::digest(body)).as_str())
+        }));
+    }
+
+    #[test]
     fn legacy_upload_retry_statuses_are_narrow() {
         assert!(should_retry_legacy_upload(reqwest::StatusCode::NOT_FOUND));
         assert!(should_retry_legacy_upload(
