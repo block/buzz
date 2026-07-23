@@ -2,6 +2,7 @@ import type { RelayEvent } from "@/shared/api/types";
 import type { PendingEvent } from "@/shared/api/relayClientShared";
 import { waitForRateLimit } from "@/shared/api/relayRateLimitGate";
 import { PUBLISH_TIMEOUT_MS } from "@/shared/api/relayClientTimings";
+import { isOversizedFrameError } from "@/shared/api/relayFrameLimit";
 
 type PublishSession = {
   generation: () => number;
@@ -65,6 +66,12 @@ export async function publishSessionEvent(
         // Expected socket recovery must not reject the operation being retried.
         session.pendingEvents.delete(event.id);
         const sendError = session.recoverSocketFailure(error, sendErrorMessage);
+        if (isOversizedFrameError(sendError)) {
+          window.clearTimeout(timeout);
+          session.pendingEvents.delete(event.id);
+          reject(sendError);
+          return;
+        }
         session.pendingEvents.set(event.id, pendingEvent);
         let retryGeneration: number | null = null;
 
