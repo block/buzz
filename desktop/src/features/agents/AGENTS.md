@@ -68,20 +68,34 @@ with a TypeScript lookup table or an id comparison in a component.
    sole onboarding surface that chooses and persists `preferred_runtime`.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
+8. **Omit the Model control only after a confirmed successful empty
+   discovery on an optional-model harness.** When the field model marks model
+   as `acpNative` (Claude Code / Codex), `shouldRenderModelControl` hides the
+   picker while discovery is in flight and after IPC resolves with no usable
+   options (`modelDiscoverySuccessfulEmpty` / `isSuccessfulEmptyDiscovery`).
+   A thrown or unavailable discovery keeps the control so #2246 failure UI can
+   render, and must not heal/clear persisted model or effort. Full disclosure
+   still shows the control when Custom model is available. Required-model
+   harnesses always keep the field. Gate: `defaults hides model when optional
+   harness has empty discovery` (and the failed-discovery counterpart) in
+   `onboarding-agent-defaults.spec.ts`.
 
 ## The tests that enforce this
 
 - `lib/agentConfigCore.test.mjs` — field model per harness × scope, clearing
   policy. Update when the capability model changes.
 - `ui/agentConfigFieldsContract.test.mjs` — canonical behaviors + disclosure
-  presets + `shouldShowModelStatusMessage` status-bypass rule. If this fails,
-  you probably reintroduced a per-surface flag or broke the status-bypass.
+  presets + `shouldShowModelStatusMessage` status-bypass +
+  `shouldRenderModelControl` (successful-empty omit vs failure keep). If this
+  fails, you probably reintroduced a per-surface flag or conflated empty with
+  failed discovery.
 - `ui/usePersonaModelDiscovery.test.mjs` — `synthesizeEmptyDiscoveryStatus`,
-  `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`. If the
-  "reopen to retry" copy becomes inert again, these tests will catch it.
+  `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`,
+  `isSuccessfulEmptyDiscovery`. If the "reopen to retry" copy becomes inert
+  again, these tests will catch it.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
-  acceptance coverage for readiness, failure states, defaults, navigation, and
-  persistence races.
+  acceptance coverage for readiness, failure states, defaults, navigation,
+  successful-empty vs failed optional-model discovery, and persistence races.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 
 ## Keep this file true
