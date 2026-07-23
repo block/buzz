@@ -433,6 +433,22 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
+  test("create with a missing name has no footer message", async ({ page }) => {
+    await installMockBridge(page);
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+    await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+  });
+
   // Shot 05: Create gate ENABLED — global provider = anthropic provides a
   // default, so the empty per-agent provider is resolved → submit enabled.
   test("05-create-enabled-with-global-provider", async ({ page }) => {
@@ -679,12 +695,10 @@ test.describe("global agent config screenshots", () => {
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
-    // … and the reason must be the Customize-pair provider gate, not the
-    // global-defaults gate (which would say "Settings → AI defaults").
-    const reason = page.getByTestId("persona-dialog-submit-reason");
-    await expect(reason).toBeVisible({ timeout: 10_000 });
-    await expect(reason).toContainText("Select a provider");
-    await expect(reason).not.toContainText("Settings → AI defaults");
+    // Disabled-state guidance belongs with the fields, not in the modal footer.
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
 
     await waitForAnimations(page);
 

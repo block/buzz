@@ -31,7 +31,6 @@ import {
   emptyPersonaBehaviorDraft,
   personaBehaviorDraftValid,
 } from "./personaBehaviorDraft";
-import { personaSubmitBlock } from "./personaSubmitBlock";
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
@@ -464,30 +463,6 @@ export function AgentDefinitionDialog({
     customAiPairSatisfied &&
     !isAvatarUploadPending;
 
-  // Derive the single, deterministic reason the action is disabled from the
-  // same gate outputs that feed canSubmit — no policy is recomputed here.
-  // Precedence mirrors canSubmit's term order. In create mode, incomplete
-  // global defaults are explained next to the defaults themselves instead of
-  // being repeated in the footer.
-  const submitBlockReason = personaSubmitBlock({
-    isPending,
-    isAvatarUploadPending,
-    displayNameEmpty: displayName.trim().length === 0,
-    isCreateMode,
-    runtimeChosen: runtime.trim().length > 0,
-    runtimeAvailable: selectedRuntimeIsAvailable,
-    createBackendBlocked: createSubmitBlocked,
-    allowlistEmpty: !personaBehaviorDraftValid(behaviorDraft),
-    aiConfigurationMode,
-    localModeSatisfied,
-    localModeMissingFields: localModeGate.missingNormalizedFields,
-    localModeMissingEnvKeys: localModeGate.missingEnvKeys,
-    customAiPairSatisfied,
-    runtimeNeedsProviderSelection: runtimeCanChooseLlmProvider,
-    customProviderEmpty: provider.trim().length === 0,
-    customModelEmpty: model.trim().length === 0,
-  });
-
   // Merge global env as the base layer so credential keys satisfied via global
   // config are available to model discovery — same rationale as in AgentInstanceEditDialog.
   const envVarsForDiscovery = React.useMemo(
@@ -738,40 +713,27 @@ export function AgentDefinitionDialog({
         headerClassName="pb-2"
         title={title}
         footer={
-          <div className="flex w-full items-center justify-between gap-3">
-            <div className="flex min-h-9 items-center">
-              {submitBlockReason ? (
-                <p
-                  className="text-2xs text-muted-foreground"
-                  data-testid="persona-dialog-submit-reason"
-                >
-                  {submitBlockReason}
-                </p>
-              ) : null}
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Button
-                disabled={isPending || isAvatarUploadPending}
-                onClick={() => handleOpenChange(false)}
-                type="button"
-                variant="outline"
-              >
-                Cancel
-              </Button>
-              <Button
-                data-testid="persona-dialog-submit"
-                disabled={!canSubmit}
-                form="persona-dialog-form"
-                type="submit"
-              >
-                {isPending
-                  ? "Saving..."
-                  : isAvatarUploadPending
-                    ? "Uploading..."
-                    : submitLabel}
-              </Button>
-            </div>
+          <div className="flex w-full items-center justify-end gap-2">
+            <Button
+              disabled={isPending || isAvatarUploadPending}
+              onClick={() => handleOpenChange(false)}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+            <Button
+              data-testid="persona-dialog-submit"
+              disabled={!canSubmit}
+              form="persona-dialog-form"
+              type="submit"
+            >
+              {isPending
+                ? "Saving..."
+                : isAvatarUploadPending
+                  ? "Uploading..."
+                  : submitLabel}
+            </Button>
           </div>
         }
       >
