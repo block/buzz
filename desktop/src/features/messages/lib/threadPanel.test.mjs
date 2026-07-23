@@ -67,6 +67,49 @@ test("buildMainTimelineEntries includes broadcast replies", () => {
   );
 });
 
+test("buildMainTimelineEntries flattenReplies renders reply-tagged events inline without summaries", () => {
+  const root = message({ id: "root", createdAt: 1 });
+  const reply = message({
+    id: "reply",
+    createdAt: 2,
+    parentId: "root",
+    rootId: "root",
+    depth: 1,
+    tags: [["e", "root", "", "reply"]],
+  });
+  const summaries = new Map([
+    [
+      "root",
+      {
+        replyCount: 1,
+        descendantCount: 1,
+        lastReplyAt: 2,
+        participantPubkeys: ["author"],
+      },
+    ],
+  ]);
+
+  const entries = buildMainTimelineEntries(
+    [root, reply],
+    new Set(),
+    summaries,
+    undefined,
+    { flattenReplies: true },
+  );
+
+  assert.deepEqual(
+    entries.map((entry) => [
+      entry.message.id,
+      entry.message.depth,
+      entry.summary,
+    ]),
+    [
+      ["root", 0, null],
+      ["reply", 0, null],
+    ],
+  );
+});
+
 test("buildMainTimelineEntries keeps huddle thread replies out of the parent timeline summary", () => {
   const huddleRoot = message({
     id: "huddle-root",
