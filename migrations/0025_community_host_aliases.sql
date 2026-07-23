@@ -6,9 +6,9 @@
 -- request's own host stays authoritative for NIP-98 `u`-URL / NIP-42 `relay`
 -- checks.
 --
--- Motivating case: in-cluster clients (e.g. Blox workstations) reach the
--- relay through a cluster-local Service DNS name that the Envoy mesh routes
--- by Host header, distinct from the community's externally-facing host. An
+-- Motivating case: in-cluster clients reach the relay through a
+-- cluster-local Service DNS name that a service mesh routes by Host header,
+-- distinct from the community's externally-facing host. An
 -- alias lets that cluster-local host resolve to the same community without
 -- renaming the community's canonical host, which would rebind
 -- `TenantContext::host()` and break existing NIP-98/NIP-42 checks for

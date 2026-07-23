@@ -120,7 +120,7 @@ enum AliasCommand {
     /// already aliased to a different community.
     Add {
         /// Additional hostname that should resolve to this community, e.g.
-        /// `sprout-relay.sprout.svc.cluster.local:3000`.
+        /// `relay.example.svc.cluster.local:3000`.
         host: String,
     },
     /// Remove a host alias from this deployment's community.
