@@ -246,7 +246,10 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !mentionableAgentPubkeys.has(pubkey) &&
+        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+      ) {
         return;
       }
       if (
