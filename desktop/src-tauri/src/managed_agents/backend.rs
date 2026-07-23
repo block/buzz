@@ -30,6 +30,7 @@ pub fn invoke_provider(
     if let Some(home) = super::default_agent_workdir() {
         cmd.current_dir(home);
     }
+    crate::util::configure_no_window(&mut cmd);
     let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

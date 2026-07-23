@@ -61,6 +61,7 @@ pub(crate) fn login_probe(
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
+    crate::util::configure_no_window(&mut command);
 
     match command.output() {
         Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,

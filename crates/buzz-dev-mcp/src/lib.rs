@@ -184,3 +184,30 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     service.waiting().await?;
     Ok(())
 }
+
+/// Suppress the console window that Windows otherwise allocates for every
+/// console-subsystem child process spawned from a non-console parent.
+/// No-op on non-Windows platforms.
+pub(crate) fn configure_no_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Suppress the console window for async (`tokio::process::Command`) spawns.
+/// Equivalent to `configure_no_window` but accepts a tokio command.
+/// No-op on non-Windows platforms.
+pub(crate) fn configure_no_window_async(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}

@@ -12,7 +12,7 @@ git -C "$tmp" config user.email test@example.com
 echo first >"$tmp/file"
 git -C "$tmp" add file
 git -C "$tmp" commit -qm first
-git -C "$tmp" tag v1.2.3
+git -C "$tmp" tag -m "desktop release" v1.2.3
 
 (
   cd "$tmp"
@@ -37,7 +37,7 @@ if (
   exit 1
 fi
 
-git -C "$tmp" tag relay-v2.0.0
+git -C "$tmp" tag -m "relay release" relay-v2.0.0
 (
   cd "$tmp"
   GITHUB_REF=refs/tags/relay-v2.0.0 "$verify" relay-v 2.0.0

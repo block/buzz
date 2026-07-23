@@ -674,14 +674,6 @@ get-next-patch-version:
 get-next-relay-patch-version:
     @python3 -c "v='$(just get-current-relay-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
 
-# Read the current mobile version from pubspec.yaml (strips the +build suffix)
-get-current-mobile-version:
-    @grep -m1 '^version: ' mobile/pubspec.yaml | sed -E 's/version: ([^+]*).*/\1/'
-
-# Compute next mobile patch version (e.g., 0.3.0 → 0.3.1)
-get-next-mobile-patch-version:
-    @python3 -c "v='$(just get-current-mobile-version)'.split('.'); print(f'{v[0]}.{v[1]}.{int(v[2])+1}')"
-
 # Update version in desktop package manifests and regenerate lockfiles
 bump-desktop-version version:
     #!/usr/bin/env bash
@@ -721,16 +713,6 @@ bump-relay-version version:
     cargo update -p buzz-relay
     echo "Bumped buzz-relay to {{ version }} and regenerated Cargo.lock"
 
-# Bump the mobile pubspec version and regenerate the lockfile
-bump-mobile-version version:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # pubspec carries a `version: X.Y.Z+build`; preserve the `+build` convention
-    # (a literal `+1`, matching the desktop lane's prior behavior).
-    perl -i -pe 's/^version: .*/version: {{ version }}+1/' mobile/pubspec.yaml
-    (unset GIT_DIR GIT_WORK_TREE; cd mobile && flutter pub get)
-    echo "Bumped mobile to {{ version }} and regenerated pubspec.lock"
-
 # Open or update the desktop release PR (signed desktop app)
 release-desktop *ARGS:
     #!/usr/bin/env bash
@@ -755,22 +737,8 @@ release-relay *ARGS:
     fi
     just _release-pr relay "$VERSION"
 
-# Open or update the mobile release PR (Buzz mobile app)
-release-mobile *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ARG="{{ ARGS }}"
-    if [[ -z "$ARG" || "$ARG" == "patch" ]]; then
-        VERSION=$(just get-next-mobile-patch-version)
-    else
-        VERSION="$ARG"
-    fi
-    just _release-pr mobile "$VERSION"
-
-# Shared release-PR engine. One body, three lanes — the only lane-specific steps
-# are the version-bump command and the file/tag/changelog identifiers selected
-# in the `case` below. Everything else (git preflight, branch reset, changelog
-# generation, commit, push, PR open/edit) is identical across lanes.
+# Shared release-PR engine for desktop and relay. Mobile publishes immutable
+# candidate tags directly from remote main instead of using metadata-only PRs.
 _release-pr lane version:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -801,16 +769,6 @@ _release-pr lane version:
             ADD_FILES=(crates/buzz-relay/Cargo.toml Cargo.lock crates/buzz-relay/CHANGELOG.md)
             LOG_PATHS=(crates/buzz-relay/ crates/buzz-core/ crates/buzz-db/ crates/buzz-auth/ crates/buzz-pubsub/ crates/buzz-search/ crates/buzz-audit/ crates/buzz-media/ crates/buzz-sdk/ crates/buzz-workflow/ crates/buzz-conformance/ migrations/)
             ARTIFACT="Buzz Relay" ;;
-        mobile)
-            BRANCH_PREFIX="mobile-release"
-            TAG_FETCH='mobile-v*'
-            TAG_MATCH='mobile-v[0-9]*'
-            TAG_EXCLUDE='mobile-v*-*'
-            TAG_PREFIX="mobile-v"
-            CHANGELOG="mobile/CHANGELOG.md"
-            ADD_FILES=(mobile/pubspec.yaml mobile/pubspec.lock mobile/CHANGELOG.md)
-            LOG_PATHS=(mobile/)
-            ARTIFACT="Buzz Mobile" ;;
         *)
             echo "Error: unknown release lane '{{ lane }}'"
             exit 1 ;;
@@ -851,7 +809,6 @@ _release-pr lane version:
     case "{{ lane }}" in
         desktop) just bump-desktop-version "$VERSION" ;;
         relay)   just bump-relay-version "$VERSION" ;;
-        mobile)  just bump-mobile-version "$VERSION" ;;
     esac
     # Generate the changelog from commits since this lane's last release tag.
     LAST_TAG=$(git describe --tags --abbrev=0 --match "$TAG_MATCH" --exclude "$TAG_EXCLUDE" 2>/dev/null || echo "")
