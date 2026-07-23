@@ -76,6 +76,11 @@ dirs = "6"
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
 
+# Workspace builds pull both rustls crypto providers (ring via relay crates,
+# aws-lc-rs via reqwest). Install ring at CLI entry so wss:// publish paths
+# (agents draft-create, …) don't panic — see #2308 / #2329 / #2457.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
