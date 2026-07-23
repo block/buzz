@@ -21,7 +21,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use serde::{Deserialize, Serialize};
+use buzz_voice_pkg::models::{
+    ModelPackSpec, MANIFEST_FILENAME, STT_LICENSE_FILE_NAME, STT_MODEL_DIR_NAME, STT_MODEL_PACK,
+    TTS_LICENSE_FILE_NAME, TTS_MODEL_PACK,
+};
+pub use buzz_voice_pkg::models::{ModelStatus, VoiceModelStatus};
+#[cfg(test)]
+use buzz_voice_pkg::models::{TTS_EXPECTED_FILES, TTS_MODEL_DIR_NAME, TTS_MODEL_VERSION};
 use sha2::{Digest, Sha256};
 
 // ── Integrity verification ────────────────────────────────────────────────────
@@ -85,26 +91,6 @@ const TTS_FILE_HASHES: &[(&str, &str)] = &[
 // If the on-disk manifest doesn't match the compiled-in version, the model is
 // considered stale and re-downloaded. Increment when upgrading model files.
 
-/// Model manifest version for the STT model. Increment when upgrading model files.
-/// Bumped from "1" → "2" alongside the migration from Moonshine Tiny to
-/// Parakeet TDT-CTC 110M — the model directory name also changed, so this
-/// is technically belt-and-suspenders, but it keeps the manifest semantics
-/// honest (each version tag identifies one specific set of model bytes).
-const STT_MODEL_VERSION: &str = "2";
-
-/// Model manifest version for Pocket TTS. Increment when upgrading model files.
-/// Bumped "1" → "2" when the bundled reference voice changed from KevinAHM's
-/// anonymous 16 kHz sample to Mary (VCTK p333, 32 kHz, ai-coustics-enhanced)
-/// from kyutai/tts-voices. The hash mismatch on `reference_sample.wav` would
-/// fail readiness on its own, but the manifest bump makes the re-download
-/// reason explicit and skips the failing-then-re-fetching transient state.
-/// Bumped "2" → "3" for the int8 → fp32 model swap (see `POCKET_HF_BASE`):
-/// existing int8 installs must re-download the suffixless fp32 sessions.
-const TTS_MODEL_VERSION: &str = "3";
-
-/// Filename for the version manifest written alongside model files.
-const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
-
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// Maximum expected STT archive size (200 MB — actual is ~100 MB).
@@ -127,23 +113,12 @@ const STT_DOWNLOAD_URL: &str =
 /// Subdirectory name produced by `tar xjf` on the archive.
 const STT_ARCHIVE_SUBDIR: &str = "sherpa-onnx-nemo-parakeet_tdt_ctc_110m-en-36000-int8";
 
-/// Final directory name under `~/.buzz/models/`.
-const STT_MODEL_DIR_NAME: &str = "parakeet-tdt-ctc-110m-en";
-
-/// All files that must be present for the model to be considered ready.
-///
-/// Includes the attribution sidecar written by Buzz during install. The
-/// upstream archive does not ship a license file, so readiness should require
-/// the local CC-BY-4.0 attribution to travel with the cached model bytes.
-const STT_EXPECTED_FILES: &[&str] = &["model.int8.onnx", "tokens.txt", STT_LICENSE_FILE_NAME];
-
 /// CC-BY-4.0 §3(a)(1) attribution block written next to the STT model files
 /// after install. Travels with the bytes — if a user copies the model
 /// directory, the attribution comes with it. Mirrored in About/Credits.
 ///
 /// Covers all five §3(a)(1) bullets: creator, copyright notice, license
 /// notice, warranty disclaimer reference, and URI to the source material.
-const STT_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
 const STT_LICENSE_TEXT: &str = "\
 NVIDIA Parakeet TDT-CTC 110M (English)
 © NVIDIA Corporation.
@@ -161,12 +136,6 @@ license text for full warranty disclaimer.
 ";
 
 // ── Pocket TTS model ──────────────────────────────────────────────────────────
-
-/// Final directory name under `~/.buzz/models/`.
-const TTS_MODEL_DIR_NAME: &str = "pocket-tts";
-
-/// Attribution sidecar written next to the Pocket TTS model files.
-const TTS_LICENSE_FILE_NAME: &str = "MODEL_LICENSE.txt";
 
 /// CC-BY-4.0 §3(a)(1) attribution block for Pocket TTS, its ONNX packaging,
 /// and the bundled reference voice WAV.
@@ -200,43 +169,6 @@ renamed only by placement in the local model directory.
 Provided \"AS IS\", without warranty of any kind, express or implied. See the
 license text for full warranty disclaimer.
 ";
-
-/// All files that must be present for Pocket TTS to be considered ready.
-const TTS_EXPECTED_FILES: &[&str] = &[
-    "decoder.onnx",
-    "encoder.onnx",
-    "lm_flow.onnx",
-    "lm_main.onnx",
-    "text_conditioner.onnx",
-    "vocab.json",
-    "token_scores.json",
-    "LICENSE",
-    "reference_sample.wav",
-    TTS_LICENSE_FILE_NAME,
-];
-
-// ── Status types ──────────────────────────────────────────────────────────────
-
-/// Download/readiness status for a single model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelStatus {
-    NotDownloaded,
-    Downloading { progress_percent: u8 },
-    Ready,
-    Error(String),
-}
-
-/// Combined status for all voice models (returned to the frontend).
-///
-/// `stt` is the speech-to-text model status (currently Parakeet TDT-CTC 110M;
-/// historically Moonshine Tiny). The field name describes the role, not the
-/// specific model, so future model swaps don't ripple into the API surface.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VoiceModelStatus {
-    pub stt: ModelStatus,
-    pub tts: ModelStatus,
-}
 
 // ── Safe archive extraction ───────────────────────────────────────────────────
 
@@ -401,43 +333,30 @@ where
 /// Per-model state + config. `ModelManager` owns two of these (stt, tts).
 #[derive(Clone)]
 struct ModelSlot {
-    dir_name: &'static str,                  // subdir under ~/.buzz/models/
-    expected_files: &'static [&'static str], // files required for "ready"
-    version: &'static str,                   // manifest version; increment to force re-download
+    spec: ModelPackSpec,
     status: Arc<Mutex<ModelStatus>>,
     just_ready: Arc<AtomicBool>, // fires once when download completes
 }
 
 impl ModelSlot {
-    fn new(
-        dir_name: &'static str,
-        expected_files: &'static [&'static str],
-        version: &'static str,
-    ) -> Self {
+    fn new(spec: ModelPackSpec) -> Self {
         Self {
-            dir_name,
-            expected_files,
-            version,
+            spec,
             status: Arc::new(Mutex::new(ModelStatus::NotDownloaded)),
             just_ready: Arc::new(AtomicBool::new(false)),
         }
     }
 
     fn model_dir(&self, models_dir: &Path) -> PathBuf {
-        models_dir.join(self.dir_name)
+        self.spec.model_dir(models_dir)
     }
 
     fn is_ready(&self, models_dir: &Path) -> bool {
-        let dir = self.model_dir(models_dir);
-        std::fs::read_to_string(dir.join(MANIFEST_FILENAME))
-            .map(|v| v.trim() == self.version)
-            .unwrap_or(false)
-            && self.expected_files.iter().all(|f| dir.join(f).is_file())
+        self.spec.is_ready(models_dir)
     }
 
     fn dir_if_ready(&self, models_dir: &Path) -> Option<PathBuf> {
-        self.is_ready(models_dir)
-            .then(|| self.model_dir(models_dir))
+        self.spec.dir_if_ready(models_dir)
     }
 
     fn status(&self) -> ModelStatus {
@@ -499,6 +418,7 @@ impl ModelSlot {
         temp_cleanup: Option<&Path>,
     ) -> Result<(), String> {
         let missing: Vec<&str> = self
+            .spec
             .expected_files
             .iter()
             .filter(|&&f| !source_dir.join(f).is_file())
@@ -529,7 +449,7 @@ impl ModelSlot {
             return Err(format!("install new model: {e}"));
         }
 
-        std::fs::write(final_dir.join(MANIFEST_FILENAME), self.version)
+        std::fs::write(final_dir.join(MANIFEST_FILENAME), self.spec.version)
             .map_err(|e| format!("write model manifest: {e}"))?;
         let _ = tokio::fs::remove_dir_all(&backup_dir).await;
         if let Some(extra) = temp_cleanup {
@@ -563,8 +483,8 @@ impl ModelManager {
         let models_dir = dirs::home_dir()?.join(".buzz").join("models");
         Some(Self {
             models_dir,
-            stt: ModelSlot::new(STT_MODEL_DIR_NAME, STT_EXPECTED_FILES, STT_MODEL_VERSION),
-            tts: ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION),
+            stt: ModelSlot::new(STT_MODEL_PACK),
+            tts: ModelSlot::new(TTS_MODEL_PACK),
         })
     }
 
@@ -937,7 +857,7 @@ mod tests {
     #[test]
     fn tts_readiness_requires_license_sidecar() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let slot = ModelSlot::new(TTS_MODEL_DIR_NAME, TTS_EXPECTED_FILES, TTS_MODEL_VERSION);
+        let slot = ModelSlot::new(TTS_MODEL_PACK);
         let model_dir = temp.path().join(TTS_MODEL_DIR_NAME);
         std::fs::create_dir_all(&model_dir).expect("create model dir");
 
