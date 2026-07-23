@@ -165,3 +165,220 @@ pub fn build_auth_event(
         .sign_with_keys(keys)
         .map_err(|e| WsClientError::EventBuilder(e.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nostr::Kind;
+    use serde_json::json;
+
+    fn test_keys() -> Keys {
+        Keys::generate()
+    }
+
+    /// Build a real signed Nostr event so EVENT frames carry a valid payload.
+    fn make_signed_event(keys: &Keys) -> Event {
+        EventBuilder::new(Kind::TextNote, "test")
+            .sign_with_keys(keys)
+            .expect("signing should succeed")
+    }
+
+    #[test]
+    fn event_frame_parses_subscription_and_payload() {
+        let keys = test_keys();
+        let event = make_signed_event(&keys);
+        let expected_id = event.id;
+        let frame = json!(["EVENT", "sub-1", event]).to_string();
+
+        match parse_relay_message(&frame).expect("parse EVENT frame") {
+            RelayMessage::Event {
+                subscription_id,
+                event,
+            } => {
+                assert_eq!(subscription_id, "sub-1");
+                assert_eq!(event.id, expected_id);
+            }
+            other => panic!("expected Event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn event_frame_without_payload_is_rejected() {
+        let result = parse_relay_message(r#"["EVENT","sub-1"]"#);
+        assert!(matches!(result, Err(WsClientError::UnexpectedMessage(_))));
+    }
+
+    #[test]
+    fn event_frame_with_malformed_payload_is_json_error() {
+        let result = parse_relay_message(r#"["EVENT","sub-1",{"garbage":true}]"#);
+        assert!(matches!(result, Err(WsClientError::Json(_))));
+    }
+
+    #[test]
+    fn ok_frame_parses_all_fields() {
+        match parse_relay_message(r#"["OK","abc123",true,"duplicate: already stored"]"#)
+            .expect("parse OK frame")
+        {
+            RelayMessage::Ok(ok) => {
+                assert_eq!(ok.event_id, "abc123");
+                assert!(ok.accepted);
+                assert_eq!(ok.message, "duplicate: already stored");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ok_frame_without_flags_defaults_to_rejected_with_empty_message() {
+        match parse_relay_message(r#"["OK","abc123"]"#).expect("parse short OK frame") {
+            RelayMessage::Ok(ok) => {
+                assert_eq!(ok.event_id, "abc123");
+                assert!(!ok.accepted);
+                assert_eq!(ok.message, "");
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eose_frame_parses_subscription() {
+        match parse_relay_message(r#"["EOSE","sub-1"]"#).expect("parse EOSE frame") {
+            RelayMessage::Eose { subscription_id } => assert_eq!(subscription_id, "sub-1"),
+            other => panic!("expected Eose, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eose_frame_without_subscription_is_rejected() {
+        let result = parse_relay_message(r#"["EOSE"]"#);
+        assert!(matches!(result, Err(WsClientError::UnexpectedMessage(_))));
+    }
+
+    #[test]
+    fn closed_frame_parses_reason() {
+        match parse_relay_message(r#"["CLOSED","sub-1","error: shutting down"]"#)
+            .expect("parse CLOSED frame")
+        {
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } => {
+                assert_eq!(subscription_id, "sub-1");
+                assert_eq!(message, "error: shutting down");
+            }
+            other => panic!("expected Closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closed_frame_without_reason_defaults_to_empty() {
+        match parse_relay_message(r#"["CLOSED","sub-1"]"#).expect("parse short CLOSED frame") {
+            RelayMessage::Closed { message, .. } => assert_eq!(message, ""),
+            other => panic!("expected Closed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notice_frame_parses_message() {
+        match parse_relay_message(r#"["NOTICE","rate limited"]"#).expect("parse NOTICE frame") {
+            RelayMessage::Notice { message } => assert_eq!(message, "rate limited"),
+            other => panic!("expected Notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_frame_parses_challenge() {
+        match parse_relay_message(r#"["AUTH","challenge-string"]"#).expect("parse AUTH frame") {
+            RelayMessage::Auth { challenge } => assert_eq!(challenge, "challenge-string"),
+            other => panic!("expected Auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_frame_without_challenge_is_rejected() {
+        let result = parse_relay_message(r#"["AUTH"]"#);
+        assert!(matches!(result, Err(WsClientError::UnexpectedMessage(_))));
+    }
+
+    #[test]
+    fn unknown_message_type_is_rejected() {
+        match parse_relay_message(r#"["REQ","sub-1",{}]"#) {
+            Err(WsClientError::UnexpectedMessage(msg)) => {
+                assert!(msg.contains("unknown message type: REQ"));
+            }
+            other => panic!("expected UnexpectedMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_json_input_is_json_error() {
+        let result = parse_relay_message("not json at all");
+        assert!(matches!(result, Err(WsClientError::Json(_))));
+    }
+
+    #[test]
+    fn json_object_input_is_json_error() {
+        let result = parse_relay_message(r#"{"type":"EVENT"}"#);
+        assert!(matches!(result, Err(WsClientError::Json(_))));
+    }
+
+    #[test]
+    fn empty_array_is_rejected() {
+        let result = parse_relay_message("[]");
+        assert!(matches!(result, Err(WsClientError::UnexpectedMessage(_))));
+    }
+
+    #[test]
+    fn non_string_message_type_is_rejected() {
+        let result = parse_relay_message("[42]");
+        assert!(matches!(result, Err(WsClientError::UnexpectedMessage(_))));
+    }
+
+    #[test]
+    fn auth_event_is_signed_authentication_kind_with_nip42_tags() {
+        let keys = test_keys();
+        let event = build_auth_event("test-challenge", "wss://relay.example.com", &keys, None)
+            .expect("build auth event");
+
+        assert_eq!(event.kind, Kind::Authentication);
+        event.verify().expect("valid signature");
+
+        let value = serde_json::to_value(&event).expect("serialize auth event");
+        let tags = value["tags"].as_array().expect("tags array");
+        assert!(
+            tags.contains(&json!(["challenge", "test-challenge"])),
+            "missing challenge tag in {tags:?}"
+        );
+        assert!(
+            tags.iter().any(|t| t[0] == "relay"),
+            "missing relay tag in {tags:?}"
+        );
+    }
+
+    #[test]
+    fn auth_event_includes_optional_auth_tag() {
+        let keys = test_keys();
+        let auth_tag = Tag::parse(["auth", "token-123"]).expect("parse auth tag");
+        let event = build_auth_event(
+            "test-challenge",
+            "wss://relay.example.com",
+            &keys,
+            Some(&auth_tag),
+        )
+        .expect("build auth event");
+
+        let value = serde_json::to_value(&event).expect("serialize auth event");
+        let tags = value["tags"].as_array().expect("tags array");
+        assert!(
+            tags.contains(&json!(["auth", "token-123"])),
+            "missing auth tag in {tags:?}"
+        );
+    }
+
+    #[test]
+    fn auth_event_rejects_invalid_relay_url() {
+        let keys = test_keys();
+        let result = build_auth_event("test-challenge", "not a url", &keys, None);
+        assert!(matches!(result, Err(WsClientError::Url(_))));
+    }
+}
