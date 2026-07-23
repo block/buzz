@@ -9,6 +9,7 @@ import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAu
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
 import { MessageAgentOwner } from "@/features/messages/ui/MessageAgentOwner";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
+import { UnreadDivider } from "@/features/messages/ui/UnreadDivider";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
@@ -36,6 +37,7 @@ type InboxMessageRowProps = {
     emoji: string,
     remove: boolean,
   ) => Promise<void>;
+  showUnreadBoundary?: boolean;
 };
 
 export function InboxMessageRow({
@@ -48,6 +50,7 @@ export function InboxMessageRow({
   message,
   onSelectReplyTarget,
   onToggleReaction,
+  showUnreadBoundary = false,
 }: InboxMessageRowProps) {
   const timelineMessage = React.useMemo(
     () => toTimelineMessage(message),
@@ -89,6 +92,7 @@ export function InboxMessageRow({
 
   return (
     <div className="relative px-2">
+      {showUnreadBoundary ? <UnreadDivider /> : null}
       {message.isSelected ? (
         <div
           aria-hidden="true"

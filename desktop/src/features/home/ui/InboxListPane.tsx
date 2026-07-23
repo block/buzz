@@ -1,11 +1,11 @@
 import {
   Bell,
-  ChevronDown,
   Clock,
   Ellipsis,
   ExternalLink,
   FileText,
   MailOpen,
+  Star,
 } from "lucide-react";
 import * as React from "react";
 
@@ -16,6 +16,11 @@ import {
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
 import { buildActivityListRows } from "@/features/home/lib/activityListRows";
+import type {
+  ActivityCustomView,
+  ActivityViewId,
+} from "@/features/home/lib/activityViewPreferences";
+import { ActivityFilterMenu } from "@/features/home/ui/ActivityFilterMenu";
 import {
   DraftsPanel,
   getDraftPreview,
@@ -23,6 +28,7 @@ import {
 } from "@/features/messages/ui/DraftsPanel";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import type { Reminder } from "@/features/reminders/lib/reminderTypes";
+import { isDue } from "@/features/reminders/lib/reminderFilters";
 import {
   RemindersPanel,
   useReminderSources,
@@ -42,43 +48,12 @@ import {
   MENTION_CHIP_BASE_CLASSES,
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger,
-} from "@/shared/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Separator } from "@/shared/ui/separator";
 import { Switch } from "@/shared/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { VirtualizedList } from "@/shared/ui/VirtualizedList";
-
-const FILTER_OPTIONS: Array<{ label: string; value: InboxFilter }> = [
-  { value: "all", label: "All" },
-  { value: "mention", label: "Mentions" },
-  { value: "thread", label: "Threads" },
-  { value: "needs_action", label: "Needs Action" },
-  { value: "activity", label: "Activity" },
-  { value: "agent_activity", label: "Agents" },
-  { value: "reminders", label: "Reminders" },
-  { value: "drafts", label: "Drafts" },
-];
-
-const ACTIVITY_FILTER_OPTIONS: Array<{
-  label: string;
-  value: InboxFilter;
-}> = [
-  { value: "all", label: "All" },
-  { value: "mention", label: "Mentions" },
-  { value: "thread", label: "Threads" },
-  { value: "needs_action", label: "Needs action" },
-  { value: "agent_activity", label: "Agents" },
-  { value: "reminders", label: "Reminders" },
-  { value: "drafts", label: "Drafts" },
-];
 
 const ACTIVITY_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   all: "No activity yet",
@@ -89,6 +64,7 @@ const ACTIVITY_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   agent_activity: "No agent updates found",
   reminders: "No reminders",
   drafts: "No drafts",
+  custom: "No custom activity found",
 };
 
 const ACTIVITY_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
@@ -100,6 +76,7 @@ const ACTIVITY_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   agent_activity: "No unread agent updates",
   reminders: "No unread reminders",
   drafts: "No unread drafts",
+  custom: "No unread custom activity",
 };
 
 const INBOX_HEADER_ICON_BUTTON_CLASS =
@@ -164,6 +141,7 @@ function PersonalItemRow({
   location,
   onClick,
   preview,
+  selected,
   status,
 }: {
   id: string;
@@ -171,6 +149,7 @@ function PersonalItemRow({
   location: InboxTypeLabel | null;
   onClick: () => void;
   preview: string;
+  selected: boolean;
   status: string;
 }) {
   const isDraft = kind === "drafts";
@@ -178,7 +157,11 @@ function PersonalItemRow({
 
   return (
     <button
-      className="flex w-full items-center gap-3 border-b border-border/45 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-hidden"
+      aria-current={selected ? "true" : undefined}
+      className={cn(
+        "flex w-full items-center gap-3 border-b border-border/45 px-4 py-3 text-left transition-colors hover:bg-muted/40 focus-visible:bg-muted/40 focus-visible:outline-hidden",
+        selected && "bg-muted/40",
+      )}
       data-testid={`home-all-${kind}-${id}`}
       onClick={onClick}
       type="button"
@@ -213,11 +196,15 @@ type InboxListPaneProps = {
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
+  customView: ActivityCustomView;
+  defaultView: ActivityViewId;
   draftItems: DraftViewItem[];
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
   onFilterChange: (filter: InboxFilter) => void;
+  onCustomViewChange: (value: ActivityCustomView) => void;
+  onDefaultViewChange: (value: ActivityViewId) => void;
   onDeleteDraft: (draftKey: string) => void;
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
@@ -242,11 +229,15 @@ export function InboxListPane({
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
+  customView,
+  defaultView,
   draftItems,
   doneSet,
   filter,
   items,
   onFilterChange,
+  onCustomViewChange,
+  onDefaultViewChange,
   onDeleteDraft,
   onMarkRead,
   onMarkUnread,
@@ -265,28 +256,36 @@ export function InboxListPane({
   selectedReminderId,
   unreadOnly,
 }: InboxListPaneProps) {
-  const filterOptions = activityEnabled
-    ? ACTIVITY_FILTER_OPTIONS
-    : FILTER_OPTIONS;
-  const activeFilter = filterOptions.find((option) => option.value === filter);
-  const viewLabel = activityEnabled ? "activity" : "inbox";
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
-  const inboxStatusLabel =
-    dueReminderCount > 0
-      ? `${dueReminderCount} due reminder${dueReminderCount === 1 ? "" : "s"}`
-      : activeDraftCount > 0
-        ? `${activeDraftCount} active draft${activeDraftCount === 1 ? "" : "s"}`
-        : null;
+  const currentActivityView = activityEnabled
+    ? (filter as ActivityViewId)
+    : null;
+  const isMixedActivityView =
+    activityEnabled && (filter === "all" || filter === "custom");
+  const includeDrafts = filter === "all" || customView.drafts;
+  const includeDueReminders = filter === "all" || customView.dueReminders;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const activityRows = React.useMemo(
     () =>
       buildActivityListRows({
-        drafts: unreadOnly ? [] : draftItems,
+        drafts: unreadOnly || !includeDrafts ? [] : draftItems,
         items,
-        reminders: unreadOnly ? [] : reminders,
+        reminders:
+          unreadOnly || !includeDueReminders
+            ? []
+            : reminders.filter((reminder) =>
+                isDue(reminder, Math.floor(Date.now() / 1_000)),
+              ),
       }),
-    [draftItems, items, reminders, unreadOnly],
+    [
+      draftItems,
+      includeDrafts,
+      includeDueReminders,
+      items,
+      reminders,
+      unreadOnly,
+    ],
   );
   const reminderSources = useReminderSources(reminders);
   const unreadVisibleItemCount = React.useMemo(
@@ -410,6 +409,11 @@ export function InboxListPane({
                       aria-hidden="true"
                       className="h-1.5 w-1.5 rounded-full bg-primary"
                     />
+                  ) : null}
+                  {item.unreadCount > 1 ? (
+                    <span data-testid="home-inbox-unread-count">
+                      {item.unreadCount} unread
+                    </span>
                   ) : null}
                   {item.timestampLabel}
                 </span>
@@ -546,6 +550,20 @@ export function InboxListPane({
                   </button>
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-60 p-2">
+                  {currentActivityView ? (
+                    <>
+                      <button
+                        className="flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
+                        disabled={currentActivityView === defaultView}
+                        onClick={() => onDefaultViewChange(currentActivityView)}
+                        type="button"
+                      >
+                        <Star className="h-4 w-4 text-muted-foreground" />
+                        <span>Set as default</span>
+                      </button>
+                      <Separator className="my-1 bg-muted" />
+                    </>
+                  ) : null}
                   <div
                     className={cn(
                       "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
@@ -585,75 +603,17 @@ export function InboxListPane({
               </Popover>
             </div>
             <div className="order-1 flex shrink-0 items-center justify-start">
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    aria-label={`Filter ${viewLabel}: ${activeFilter?.label ?? "All"}${inboxStatusLabel ? `. ${inboxStatusLabel}` : ""}`}
-                    className={cn(
-                      INBOX_HEADER_ICON_BUTTON_CLASS,
-                      "relative -ml-2 w-auto gap-1 px-2 text-sm font-medium text-foreground",
-                    )}
-                    data-testid="inbox-filter-trigger"
-                    type="button"
-                  >
-                    <span>{activeFilter?.label ?? "All"}</span>
-                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                    {!activityEnabled && dueReminderCount > 0 ? (
-                      <span
-                        aria-hidden="true"
-                        className="absolute right-1.5 top-0 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
-                        data-testid="inbox-reminder-badge"
-                      />
-                    ) : !activityEnabled && activeDraftCount > 0 ? (
-                      <span
-                        aria-hidden="true"
-                        className="absolute right-1.5 top-0 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
-                        data-testid="inbox-draft-badge"
-                      />
-                    ) : null}
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-48">
-                  <DropdownMenuRadioGroup
-                    onValueChange={(value) =>
-                      onFilterChange(value as InboxFilter)
-                    }
-                    value={filter}
-                  >
-                    {filterOptions.map((option) => (
-                      <DropdownMenuRadioItem
-                        key={option.value}
-                        value={option.value}
-                      >
-                        <span className="flex flex-1 items-center justify-between gap-2">
-                          {option.label}
-                          {option.value === "reminders" &&
-                          (activityEnabled
-                            ? reminders.length
-                            : dueReminderCount) > 0 ? (
-                            <span
-                              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
-                              data-testid="inbox-reminder-badge-option"
-                            >
-                              {activityEnabled
-                                ? reminders.length
-                                : dueReminderCount}
-                            </span>
-                          ) : option.value === "drafts" &&
-                            activeDraftCount > 0 ? (
-                            <span
-                              className="inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
-                              data-testid="inbox-draft-badge-option"
-                            >
-                              {activeDraftCount}
-                            </span>
-                          ) : null}
-                        </span>
-                      </DropdownMenuRadioItem>
-                    ))}
-                  </DropdownMenuRadioGroup>
-                </DropdownMenuContent>
-              </DropdownMenu>
+              <ActivityFilterMenu
+                activityEnabled={activityEnabled}
+                activeDraftCount={activeDraftCount}
+                customView={customView}
+                defaultView={defaultView}
+                dueReminderCount={dueReminderCount}
+                filter={filter}
+                onCustomViewChange={onCustomViewChange}
+                onFilterChange={onFilterChange}
+                reminderCount={reminders.length}
+              />
             </div>
           </div>
         </div>
@@ -692,7 +652,7 @@ export function InboxListPane({
           data-testid="home-inbox-list"
           ref={scrollRef}
         >
-          {activityEnabled && filter === "all" && activityRows.length > 0 ? (
+          {isMixedActivityView && activityRows.length > 0 ? (
             <VirtualizedList
               estimateSize={96}
               getItemKey={(row) => row.key}
@@ -718,13 +678,13 @@ export function InboxListPane({
                       }
                       onClick={() => {
                         onSelectReminder(row.reminder.id);
-                        onFilterChange("reminders");
                       }}
                       preview={
                         row.reminder.content.target?.preview ||
                         row.reminder.content.note ||
                         "Reminder"
                       }
+                      selected={selectedReminderId === row.reminder.id}
                       status={formatReminderStatus(row.reminder.notBefore)}
                     />
                   );
@@ -747,9 +707,9 @@ export function InboxListPane({
                     }
                     onClick={() => {
                       onSelectDraft(entry.key);
-                      onFilterChange("drafts");
                     }}
                     preview={getDraftPreview(entry.draft)}
+                    selected={selectedDraftKey === entry.key}
                     status="Draft saved"
                   />
                 );

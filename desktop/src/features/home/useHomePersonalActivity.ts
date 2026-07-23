@@ -9,6 +9,7 @@ import { groupReminders } from "@/features/reminders/lib/reminderFilters";
 
 type UseHomePersonalActivityOptions = {
   activityEnabled: boolean;
+  allowMixedSelection: boolean;
   currentPubkey?: string;
   isDrafts: boolean;
   isNarrowHomeViewport: boolean;
@@ -18,6 +19,7 @@ type UseHomePersonalActivityOptions = {
 
 export function useHomePersonalActivity({
   activityEnabled,
+  allowMixedSelection,
   currentPubkey,
   isDrafts,
   isNarrowHomeViewport,
@@ -41,26 +43,39 @@ export function useHomePersonalActivity({
     null;
 
   React.useEffect(() => {
-    if (!activityEnabled || !isReminders) {
+    const selectionEnabled =
+      activityEnabled && (isReminders || allowMixedSelection);
+    if (!selectionEnabled) {
       selectReminder(null);
       return;
     }
+    if (
+      selectedReminderId !== null &&
+      !pendingReminders.some((reminder) => reminder.id === selectedReminderId)
+    ) {
+      selectReminder(null);
+      return;
+    }
+    if (!isReminders) return;
     if (viewportWidthPx === 0 || selectedReminder !== null) return;
     selectReminder(
       isNarrowHomeViewport ? null : (pendingReminders[0]?.id ?? null),
     );
   }, [
     activityEnabled,
+    allowMixedSelection,
     isNarrowHomeViewport,
     isReminders,
     pendingReminders,
+    selectedReminderId,
     selectedReminder,
     viewportWidthPx,
   ]);
 
   const drafts = useHomeDrafts({
-    isDrafts,
+    autoSelect: isDrafts,
     isNarrowHomeViewport,
+    selectionEnabled: activityEnabled && (isDrafts || allowMixedSelection),
     viewportWidthPx,
   });
 

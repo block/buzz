@@ -7,7 +7,10 @@ import {
   filterActivityInboxItems,
   getContextMessageDepth,
   getReactionTargetId,
+  hasInboxThreadContext,
   isInboxThreadContextEvent,
+  matchesActivityAllView,
+  matchesActivityCustomView,
   matchesInboxFilter,
   toInboxContextMessage,
   toTimelineMessage,
@@ -22,11 +25,122 @@ test("Activity uses the dedicated reminder list instead of feed reminder rows", 
   assert.deepEqual(filterActivityInboxItems(items, true), [message]);
 });
 
+test("hasInboxThreadContext finds replies in the grouped row or loaded context", () => {
+  const root = { tags: [["h", "channel"]] };
+  const reply = {
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "reply"],
+    ],
+  };
+
+  assert.equal(
+    hasInboxThreadContext({ item: root, groupItems: [root, reply] }),
+    true,
+  );
+  assert.equal(
+    hasInboxThreadContext({ item: root, groupItems: [root] }, [reply]),
+    true,
+  );
+});
+
+test("hasInboxThreadContext keeps standalone and broadcast activity unthreaded", () => {
+  const root = { tags: [["h", "channel"]] };
+  const broadcastReply = {
+    tags: [
+      ["h", "channel"],
+      ["e", "root", "", "reply"],
+      ["broadcast", "1"],
+    ],
+  };
+
+  assert.equal(
+    hasInboxThreadContext({ item: root, groupItems: [root] }),
+    false,
+  );
+  assert.equal(
+    hasInboxThreadContext({
+      item: broadcastReply,
+      groupItems: [broadcastReply],
+    }),
+    false,
+  );
+});
+
 // --- matchesInboxFilter ---
 
 test("matchesInboxFilter returns true for the 'all' filter regardless of categories", () => {
   assert.equal(matchesInboxFilter({ categories: [] }, "all"), true);
   assert.equal(matchesInboxFilter({ categories: ["mentions"] }, "all"), true);
+});
+
+test("Activity All excludes generic top-level channel traffic", () => {
+  const owned = new Set(["owned-agent"]);
+  assert.equal(
+    matchesActivityAllView(
+      {
+        categories: ["activity"],
+        item: {
+          channelType: "stream",
+          pubkey: "human",
+          tags: [["h", "channel"]],
+        },
+      },
+      owned,
+    ),
+    false,
+  );
+});
+
+test("Activity All includes each personally relevant message source", () => {
+  const owned = new Set(["owned-agent"]);
+  const cases = [
+    {
+      categories: ["activity"],
+      item: { channelType: "dm", pubkey: "human", tags: [] },
+    },
+    {
+      categories: ["mention"],
+      item: { channelType: "stream", pubkey: "human", tags: [] },
+    },
+    {
+      categories: ["needs_action"],
+      item: { channelType: "stream", pubkey: "human", tags: [] },
+    },
+    {
+      categories: ["activity"],
+      item: {
+        channelType: "stream",
+        pubkey: "human",
+        tags: [["e", "root", "", "reply"]],
+      },
+    },
+    {
+      categories: ["activity"],
+      item: { channelType: "stream", pubkey: "OWNED-AGENT", tags: [] },
+    },
+  ];
+
+  for (const item of cases) {
+    assert.equal(matchesActivityAllView(item, owned), true);
+  }
+});
+
+test("Activity All excludes generic updates from agents the user does not own", () => {
+  assert.equal(
+    matchesActivityAllView(
+      {
+        categories: ["agent_activity"],
+        item: {
+          channelType: "stream",
+          pubkey: "somebody-elses-agent",
+          tags: [],
+        },
+      },
+      new Set(["owned-agent"]),
+    ),
+    false,
+  );
 });
 
 test("matchesInboxFilter matches when the category is present", () => {
@@ -140,6 +254,62 @@ test("matchesInboxFilter matches thread rows by thread tags", () => {
       },
       "thread",
     ),
+    false,
+  );
+});
+
+test("matchesActivityCustomView uses union matching across selected sources", () => {
+  const item = {
+    categories: ["mention"],
+    item: {
+      id: "dm",
+      pubkey: "person",
+      channelType: "dm",
+      tags: [],
+    },
+  };
+  const custom = {
+    dms: false,
+    mentions: true,
+    threads: false,
+    needsAction: false,
+    agentReplies: false,
+    dueReminders: false,
+    drafts: false,
+  };
+
+  assert.equal(matchesActivityCustomView(item, custom, new Set()), true);
+  assert.equal(
+    matchesActivityCustomView(
+      { ...item, categories: [] },
+      { ...custom, dms: true },
+      new Set(),
+    ),
+    true,
+  );
+});
+
+test("matchesActivityCustomView only includes replies from owned agents", () => {
+  const item = {
+    categories: ["activity"],
+    item: { id: "reply", pubkey: "OWNED", channelType: "channel", tags: [] },
+  };
+  const custom = {
+    dms: false,
+    mentions: false,
+    threads: false,
+    needsAction: false,
+    agentReplies: true,
+    dueReminders: false,
+    drafts: false,
+  };
+
+  assert.equal(
+    matchesActivityCustomView(item, custom, new Set(["owned"])),
+    true,
+  );
+  assert.equal(
+    matchesActivityCustomView(item, custom, new Set(["other"])),
     false,
   );
 });

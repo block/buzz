@@ -8,6 +8,7 @@ import {
   openCreateChannelDialog,
   openNewMessagePage,
 } from "../helpers/bridge";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
 const GENERAL_CHANNEL_ID = "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50";
 const AGENTS_CHANNEL_ID = "94a444a4-c0a3-5966-ab05-530c6ddc2301";
@@ -22,6 +23,21 @@ const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 type MockFeedWindow = Window & {
+  __BUZZ_E2E_EMIT_MOCK_MESSAGE__?: (input: {
+    channelName: string;
+    content: string;
+    createdAt?: number;
+    id?: string;
+    parentEventId?: string;
+    pubkey?: string;
+  }) => {
+    content: string;
+    created_at: number;
+    id: string;
+    kind: number;
+    pubkey: string;
+    tags: string[][];
+  };
   __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
     agentPubkey: string;
     channelId: string;
@@ -32,6 +48,7 @@ type MockFeedWindow = Window & {
     category: "mention" | "needs_action" | "activity" | "agent_activity";
     channel_id: string | null;
     channel_name: string;
+    channel_type?: string | null;
     content: string;
     created_at: number;
     id: string;
@@ -2553,15 +2570,187 @@ async function seedHomeInboxMention(
   await page.getByTestId(`home-inbox-item-${itemId}`).click();
 }
 
-test("home inbox channel label navigates to the channel message", async ({
+test("Activity saves a Custom mix and community default", async ({ page }) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...overrides, activity: true }),
+    );
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+  await page.goto("/");
+
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitem", { name: "Edit Custom view" }).click();
+  const dialog = page.getByRole("dialog", { name: "Custom view" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("checkbox", { name: "Agent replies" }).uncheck();
+  await dialog.getByRole("button", { name: "Save" }).click();
+
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Custom" }).click();
+  await expect(page.getByTestId("inbox-filter-trigger")).toContainText(
+    "Custom",
+  );
+  await expect(page.getByRole("menuitemradio", { name: "Custom" })).toHaveCount(
+    0,
+  );
+  await page.getByTestId("inbox-options-trigger").click();
+  const setDefault = page.getByRole("button", {
+    name: "Set as default",
+  });
+  await expect(setDefault).toBeVisible();
+  await setDefault.click();
+
+  await page.reload();
+  await expect(page.getByTestId("inbox-filter-trigger")).toContainText(
+    "Custom",
+  );
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitem", { name: "Edit Custom view" }).click();
+  await expect(
+    page
+      .getByRole("dialog", { name: "Custom view" })
+      .getByRole("checkbox", { name: "Agent replies" }),
+  ).not.toBeChecked();
+});
+
+test("Activity All excludes generic channel traffic", async ({ page }) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...overrides, activity: true }),
+    );
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+  await page.goto("/");
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function";
+  });
+
+  await page.evaluate(
+    ({ channelId, currentPubkey, senderPubkey }) => {
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) throw new Error("Mock feed helper is not installed.");
+      const now = Math.floor(Date.now() / 1000);
+      pushFeedItem({
+        category: "activity",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "Ordinary channel traffic",
+        created_at: now,
+        id: "activity-generic-channel-message",
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [["h", channelId]],
+      });
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "A message that needs my attention",
+        created_at: now + 1,
+        id: "activity-personal-mention",
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  await expect(
+    page.getByTestId("home-inbox-item-activity-personal-mention"),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("home-inbox-item-activity-generic-channel-message"),
+  ).toHaveCount(0);
+});
+
+test("Activity All keeps its filter when opening a due reminder", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...overrides, activity: true }),
+    );
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox")).toBeVisible();
+
+  const reminderId = "activity-stable-reminder";
+  await page.evaluate(
+    async ({ channelId, id, pubkey }) => {
+      const now = Math.floor(Date.now() / 1000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id,
+          pubkey,
+          created_at: now - 300,
+          kind: 30300,
+          tags: [
+            ["d", id],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: "mock-general-alice",
+              channelId,
+              preview: "Review the Activity behavior",
+              authorPubkey: pubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      id: reminderId,
+      pubkey: MOCK_IDENTITY_PUBKEY,
+    },
+  );
+
+  const reminderRow = page.getByTestId(`home-all-reminders-${reminderId}`);
+  await expect(reminderRow).toBeVisible();
+  await reminderRow.click();
+
+  await expect(page.getByTestId("inbox-filter-trigger")).toContainText("All");
+  await expect(page.getByTestId("home-reminder-detail")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+});
+
+test("home inbox source action navigates to the channel message", async ({
   page,
 }) => {
   await seedHomeInboxMention(page, "mock-feed-home-channel-navigate");
 
-  await page
-    .getByTestId("home-inbox-detail")
-    .getByRole("button", { exact: true, name: "general" })
-    .click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByRole("heading")).toHaveText("Message in #general");
+  await detail.getByRole("button", { name: "Open in channel" }).click();
 
   await expect(page).toHaveURL(
     new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
@@ -2582,10 +2771,10 @@ test("home inbox thread reply mention carries threadRootId to the channel", asyn
     ["p", TEST_IDENTITIES.tyler.pubkey],
   ]);
 
-  await page
-    .getByTestId("home-inbox-detail")
-    .getByRole("button", { exact: true, name: "general" })
-    .click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByRole("heading")).toHaveText("Thread in #general");
+  await expect(detail.getByTestId("message-unread-divider")).toBeVisible();
+  await detail.getByRole("button", { name: "Open full thread" }).click();
 
   await expect(page).toHaveURL(
     new RegExp(`#/channels/${GENERAL_CHANNEL_ID}\\?`),
@@ -2594,6 +2783,191 @@ test("home inbox thread reply mention carries threadRootId to the channel", asyn
   await expect(page).toHaveURL(new RegExp(`threadRootId=${rootEventId}`));
   await expect(page.getByTestId("message-timeline")).toBeVisible();
   await expect(page.getByTestId("home-inbox-list")).toHaveCount(0);
+});
+
+test("Activity keeps the unread boundary for replies from multiple agents", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...overrides, activity: true }),
+    );
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  const replyIds = [
+    "activity-agent-reply-first",
+    "activity-agent-reply-second",
+    "activity-agent-reply-third",
+  ];
+  await page.evaluate(
+    ({ agentPubkeys, channelId, currentPubkey, ids }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      const createdAt = Math.floor(Date.now() / 1000) + 60;
+      const root = emitMessage({
+        channelName: "general",
+        content: "Agent collaboration thread",
+        createdAt: createdAt - 10,
+        id: "activity-agent-thread-root",
+        pubkey: currentPubkey,
+      });
+      const contents = [
+        "First unread agent reply",
+        "Second unread agent reply",
+        "Third unread agent reply",
+      ];
+
+      contents.forEach((content, index) => {
+        const event = emitMessage({
+          channelName: "general",
+          content,
+          createdAt: createdAt + index,
+          id: ids[index],
+          parentEventId: root.id,
+          pubkey: agentPubkeys[index % agentPubkeys.length],
+        });
+        pushFeedItem({
+          category: "activity",
+          channel_id: channelId,
+          channel_name: "general",
+          channel_type: "stream",
+          content: event.content,
+          created_at: event.created_at,
+          id: event.id,
+          kind: event.kind,
+          pubkey: event.pubkey,
+          tags: event.tags,
+        });
+      });
+    },
+    {
+      agentPubkeys: [
+        TEST_IDENTITIES.alice.pubkey,
+        TEST_IDENTITIES.charlie.pubkey,
+      ],
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      ids: replyIds,
+    },
+  );
+
+  const firstUnreadRow = page.getByTestId(`home-inbox-item-${replyIds[0]}`);
+  await expect(firstUnreadRow).toBeVisible();
+  await firstUnreadRow.click();
+
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail).toContainText("Agent collaboration thread");
+  await expect(detail).toContainText("First unread agent reply");
+  await expect(detail).toContainText("Second unread agent reply");
+  await expect(detail).toContainText("Third unread agent reply");
+  await expect(detail.getByTestId("message-unread-divider")).toBeVisible();
+  await expect(page.getByTestId("home-inbox-selected-message")).toContainText(
+    "First unread agent reply",
+  );
+});
+
+test("home inbox groups consecutive DMs and opens the full conversation", async ({
+  page,
+}) => {
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  const dmIds = [
+    "activity-dm-first",
+    "activity-dm-second",
+    "activity-dm-third",
+  ];
+
+  await page.goto("/");
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return (
+      typeof win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function" &&
+      typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function"
+    );
+  });
+
+  await page.evaluate(
+    ({ channelId, createdAt, ids, senderPubkey }) => {
+      const win = window as MockFeedWindow;
+      const emitMessage = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      const pushFeedItem = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!emitMessage || !pushFeedItem) {
+        throw new Error("Mock bridge helpers are not installed.");
+      }
+
+      ["First unread DM", "Second unread DM", "Third unread DM"].forEach(
+        (content, index) => {
+          const event = emitMessage({
+            channelName: "alice-tyler",
+            content,
+            createdAt: createdAt + index,
+            id: ids[index],
+            pubkey: senderPubkey,
+          });
+          pushFeedItem({
+            category: "activity",
+            channel_id: channelId,
+            channel_name: "alice-tyler",
+            channel_type: null,
+            content: event.content,
+            created_at: event.created_at,
+            id: event.id,
+            kind: event.kind,
+            pubkey: event.pubkey,
+            tags: event.tags,
+          });
+        },
+      );
+    },
+    {
+      channelId: dmChannelId,
+      createdAt: Math.floor(Date.now() / 1000),
+      ids: dmIds,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const firstDmRow = page.getByTestId(`home-inbox-item-${dmIds[0]}`);
+  await expect(firstDmRow).toBeVisible();
+  await expect(page.getByTestId(`home-inbox-item-${dmIds[1]}`)).toHaveCount(0);
+  await expect(page.getByTestId(`home-inbox-item-${dmIds[2]}`)).toHaveCount(0);
+  await expect(firstDmRow.getByTestId("home-inbox-unread-count")).toHaveText(
+    "3 unread",
+  );
+
+  await firstDmRow.click();
+  const detail = page.getByTestId("home-inbox-detail");
+  await expect(detail.getByRole("heading")).toHaveText("DM with alice");
+  await expect(detail).toContainText("First unread DM");
+  await expect(detail).toContainText("Second unread DM");
+  await expect(detail).toContainText("Third unread DM");
+  await expect(page.getByTestId("home-inbox-selected-message")).toContainText(
+    "First unread DM",
+  );
+  const unreadBoundary = page.getByTestId("message-unread-divider");
+  await expect(unreadBoundary).toBeVisible();
+  await expect(unreadBoundary).toContainText("New");
+  await expect(
+    detail.getByRole("button", { name: "Open conversation" }),
+  ).toBeVisible();
 });
 
 test("home inbox manage affordance opens management without leaving home", async ({
