@@ -177,6 +177,7 @@ pub async fn run(
     cmd.stderr(Stdio::piped());
     cmd.kill_on_drop(true);
     set_process_group(&mut cmd);
+    crate::configure_no_window_async(&mut cmd);
 
     let started = Instant::now();
     let mut child = match cmd.spawn() {

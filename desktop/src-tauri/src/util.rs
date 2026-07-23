@@ -399,3 +399,25 @@ mod tests {
         assert_eq!(bak_count, 0, "broken symlinks must not produce backups");
     }
 }
+
+/// Suppress the console window that Windows otherwise allocates for every
+/// console-subsystem child process spawned from a GUI (non-console) parent.
+///
+/// On Windows, a GUI application (no console window of its own) that spawns a
+/// child console-subsystem binary gets a fresh, briefly-visible console window
+/// per child unless `CREATE_NO_WINDOW` is set.  Setting it is a pure no-op on
+/// non-Windows platforms, so callers can call this unconditionally.
+///
+/// **Exclusions**: any command that explicitly wants a visible terminal (e.g.
+/// `launch_visible_terminal` which uses `CREATE_NEW_CONSOLE`) must NOT call
+/// this helper — it would conflict with the explicit console-creation flag.
+pub(crate) fn configure_no_window(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}

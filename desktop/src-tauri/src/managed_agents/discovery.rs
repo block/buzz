@@ -677,7 +677,10 @@ fn login_shell_candidates() -> Vec<PathBuf> {
 /// Returns trimmed stdout if the command succeeds with non-empty output.
 fn run_in_login_shell(args: &[&str]) -> Option<String> {
     for shell in login_shell_candidates() {
-        let Ok(output) = Command::new(&shell).args(args).output() else {
+        let mut cmd = Command::new(&shell);
+        cmd.args(args);
+        crate::util::configure_no_window(&mut cmd);
+        let Ok(output) = cmd.output() else {
             continue;
         };
         if !output.status.success() {
@@ -916,6 +919,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    crate::util::configure_no_window(&mut command);
 
     let mut child = match command.spawn() {
         Ok(c) => c,
@@ -1079,6 +1083,7 @@ pub(crate) fn probe_codex_acp_major_version_with_path(
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }
+    crate::util::configure_no_window(&mut command);
     let mut child = command
         .stdout(tmp.try_clone().ok()?)
         .stderr(std::process::Stdio::null())
