@@ -243,6 +243,7 @@ export function AgentDefaultsEditor({
       onIsCustomProviderChange={setIsCustomProvider}
       onValidityChange={setConfigIsValid}
       placeholderClassName={flatLayout ? "text-muted-foreground/55" : undefined}
+      key={selectedRuntime.id}
       selectClassName={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
       unstyled={flatLayout}
       useCustomSelect
