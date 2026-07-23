@@ -350,7 +350,7 @@ export function useChannelPaneHandlers({
 
   const handleToggleReaction = React.useCallback(
     async (
-      message: Pick<TimelineMessage, "id" | "rootId">,
+      message: Pick<TimelineMessage, "id" | "rootId" | "pubkey">,
       emoji: string,
       remove: boolean,
     ) => {
@@ -358,6 +358,7 @@ export function useChannelPaneHandlers({
         emoji,
         eventId: message.id,
         remove,
+        targetPubkey: message.pubkey,
       });
       if (!remove) {
         recordThreadInteraction(message.rootId ?? message.id);

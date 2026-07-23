@@ -6,6 +6,32 @@ use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
 
+/// Look up the author of a reaction's target event.
+///
+/// NIP-25 requires the reaction to carry the target author's `p` tag, and the
+/// CLI is only given an event id — so resolve the author from the relay. The
+/// relay rejects reactions whose target it cannot find, so a target that does
+/// not resolve here would have been rejected on submit anyway; failing at this
+/// point just produces a clearer message.
+async fn fetch_reaction_target_author(
+    client: &BuzzClient,
+    event_id: &str,
+) -> Result<nostr::PublicKey, CliError> {
+    let raw = client
+        .query(&serde_json::json!({ "ids": [event_id], "limit": 1 }))
+        .await?;
+    let events: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Other(format!("failed to parse target event query: {e}")))?;
+    let author = events
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|ev| ev.get("pubkey"))
+        .and_then(|pk| pk.as_str())
+        .ok_or_else(|| CliError::Other(format!("reaction target event {event_id} not found")))?;
+    nostr::PublicKey::parse(author)
+        .map_err(|e| CliError::Other(format!("target event has an invalid pubkey: {e}")))
+}
+
 pub async fn cmd_add_reaction(
     client: &BuzzClient,
     event_id: &str,
@@ -15,12 +41,13 @@ pub async fn cmd_add_reaction(
     validate_hex64(event_id)?;
     let target_eid =
         EventId::parse(event_id).map_err(|e| CliError::Usage(format!("invalid event ID: {e}")))?;
+    let target_author = fetch_reaction_target_author(client, event_id).await?;
 
     let builder = if let Some(url) = emoji_url {
-        buzz_sdk::build_custom_emoji_reaction(target_eid, emoji, url)
+        buzz_sdk::build_custom_emoji_reaction(target_eid, target_author, emoji, url)
             .map_err(|e| CliError::Other(format!("build_custom_emoji_reaction failed: {e}")))?
     } else {
-        buzz_sdk::build_reaction(target_eid, emoji)
+        buzz_sdk::build_reaction(target_eid, target_author, emoji)
             .map_err(|e| CliError::Other(format!("build_reaction failed: {e}")))?
     };
 

@@ -900,6 +900,7 @@ export function HomeView({
                         emoji,
                         eventId: message.id,
                         remove,
+                        targetPubkey: message.pubkey,
                       });
                       if (!remove) {
                         recordThreadInteraction(
