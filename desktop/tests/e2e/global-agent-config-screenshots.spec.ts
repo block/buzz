@@ -417,9 +417,24 @@ test.describe("global agent config screenshots", () => {
     );
 
     await setDefaults.click();
-    await expect(page.getByTestId("agent-ai-defaults-dialog")).toBeVisible();
-    await page
-      .getByTestId("agent-ai-defaults-dialog")
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    await expect(defaultsDialog).toBeVisible();
+    await expect(
+      defaultsDialog.getByTestId("global-agent-config-fields"),
+    ).not.toHaveClass(/bg-muted\/20/);
+    const harnessBox = await defaultsDialog
+      .getByTestId("global-agent-default-harness")
+      .boundingBox();
+    const providerBox = await defaultsDialog
+      .getByTestId("global-agent-provider")
+      .boundingBox();
+    expect(harnessBox?.x).toBe(providerBox?.x);
+    expect(harnessBox?.width).toBe(providerBox?.width);
+    await waitForAnimations(page);
+    await defaultsDialog.screenshot({
+      path: `${SHOTS}/04-global-defaults-dialog-flat.png`,
+    });
+    await defaultsDialog
       .getByRole("button", {
         name: "Close",
       })

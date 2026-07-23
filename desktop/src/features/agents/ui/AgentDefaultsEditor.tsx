@@ -31,6 +31,7 @@ import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -40,6 +41,7 @@ export type GlobalAgentConfigSaveResult = Awaited<
 >;
 
 type AgentDefaultsEditorProps = {
+  layout?: "flat" | "grouped";
   onDirtyChange?: (dirty: boolean) => void;
   onSaveSuccess?: (result: GlobalAgentConfigSaveResult) => void;
   onSavingChange?: (saving: boolean) => void;
@@ -47,11 +49,13 @@ type AgentDefaultsEditorProps = {
 };
 
 export function AgentDefaultsEditor({
+  layout = "grouped",
   onDirtyChange,
   onSaveSuccess,
   onSavingChange,
   secondaryAction,
 }: AgentDefaultsEditorProps) {
+  const flatLayout = layout === "flat";
   const [config, setConfig] =
     React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
   const configRef = React.useRef(config);
@@ -203,7 +207,7 @@ export function AgentDefaultsEditor({
   }
 
   return (
-    <div className="min-w-0 space-y-4">
+    <div className={cn("min-w-0", flatLayout ? "space-y-7" : "space-y-4")}>
       {configSurfaceLoading ? (
         <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
           <Loader className="size-4 animate-spin" />
@@ -216,9 +220,12 @@ export function AgentDefaultsEditor({
         </div>
       ) : (
         <>
-          <div className="space-y-1.5">
+          <div className={flatLayout ? "space-y-4" : "space-y-1.5"}>
             <label
-              className="text-sm font-medium text-foreground"
+              className={cn(
+                "text-sm font-medium text-foreground",
+                flatLayout && "pl-3",
+              )}
               htmlFor="global-agent-default-harness"
             >
               Default harness
@@ -242,6 +249,7 @@ export function AgentDefaultsEditor({
             onCustomModelEditingChange={setIsCustomModelEditing}
             onIsCustomProviderChange={setIsCustomProvider}
             onValidityChange={setConfigIsValid}
+            unstyled={flatLayout}
             useCustomSelect
           />
         </>
