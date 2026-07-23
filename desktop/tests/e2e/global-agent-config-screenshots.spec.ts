@@ -494,8 +494,19 @@ test.describe("global agent config screenshots", () => {
       .getByTestId("global-agent-provider-option-databricks_v2")
       .click();
     await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    const saveDefaults = defaultsDialog.getByRole("button", {
+      name: "Save defaults",
+    });
+    await expect(
+      defaultsDialog.getByTestId("global-agent-advanced-required-badge"),
+    ).toHaveText("Required");
+    await expect(saveDefaults).toBeDisabled();
     await advanced.click();
     await expect(advanced).toHaveAttribute("aria-expanded", "true");
+    await defaultsDialog
+      .getByLabel("Value for DATABRICKS_HOST")
+      .fill("https://databricks.example.test");
+    await expect(saveDefaults).toBeEnabled();
     await defaultsDialog
       .getByRole("button", {
         name: "Close",

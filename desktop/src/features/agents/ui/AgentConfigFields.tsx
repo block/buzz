@@ -292,9 +292,6 @@ export function AgentConfigFields({
     modelIsOptional ||
     (config.model?.trim().length ?? 0) > 0 ||
     fallbackModel !== null;
-  React.useEffect(() => {
-    onValidityChange?.(selectedRuntimeId.length > 0 && modelIsValid);
-  }, [modelIsValid, onValidityChange, selectedRuntimeId]);
   const bakedEffort = React.useMemo(
     () =>
       bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
@@ -347,6 +344,21 @@ export function AgentConfigFields({
     apiKeyEnvVar !== null &&
     apiKeyValue.length === 0 &&
     bakedEnvKeys.includes(apiKeyEnvVar);
+  const advancedCredentialMissing = advancedRequiredEnvKeys.some(
+    (key) => (config.env_vars[key] ?? "").trim().length === 0,
+  );
+  const apiKeyMissing =
+    apiKeyEnvVar !== null &&
+    !apiKeyInherited &&
+    apiKeyValue.trim().length === 0;
+  const configIsValid =
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    !advancedCredentialMissing &&
+    !apiKeyMissing;
+  React.useEffect(() => {
+    onValidityChange?.(configIsValid);
+  }, [configIsValid, onValidityChange]);
 
   const {
     discoveredModelOptions,
@@ -867,6 +879,15 @@ export function AgentConfigFields({
             type="button"
           >
             <span>Advanced</span>
+            {advancedCredentialMissing ? (
+              <span
+                aria-hidden="true"
+                className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive"
+                data-testid="global-agent-advanced-required-badge"
+              >
+                Required
+              </span>
+            ) : null}
             <ChevronDown
               className={cn(
                 "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
