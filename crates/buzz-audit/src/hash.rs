@@ -1,3 +1,4 @@
+use chrono::{DateTime, SubsecRound, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::entry::AuditEntry;
@@ -7,11 +8,29 @@ use crate::error::AuditError;
 /// entry. Stored as `prev_hash = NULL`; hashed as all-zero bytes.
 pub const GENESIS_HASH: [u8; 32] = [0u8; 32];
 
+/// Reduce a timestamp to the precision the audit store round-trips.
+///
+/// `audit_log.created_at` is `TIMESTAMPTZ`, which Postgres keeps at microsecond
+/// resolution. [`compute_hash`] covers `created_at.to_rfc3339()`, and that
+/// string's sub-second digit count follows the value (chrono emits 0, 3, 6 or 9
+/// digits), so a timestamp carrying nanoseconds hashes to a digest that can
+/// never be recomputed from the stored row — the entry is written with one
+/// preimage and verified against another.
+///
+/// Every `created_at` must therefore pass through here *before* it is hashed
+/// and stored, so the in-memory entry and the row are byte-identical.
+pub fn to_storage_precision(created_at: DateTime<Utc>) -> DateTime<Utc> {
+    created_at.trunc_subsecs(6)
+}
+
 /// SHA-256 over the entry's identity, chain, and context fields.
 ///
 /// Field order is fixed — changing it invalidates all existing chains. The
 /// `community_id` is hashed first so chain identity carries the tenant: an entry
 /// cannot be lifted out of one community's chain and re-verified inside another.
+///
+/// `created_at` must already be at [`to_storage_precision`] — see that function
+/// for why sub-microsecond digits break verification.
 ///
 /// `detail` is serialized via [`canonical_json`] (sorted keys) so the hash is
 /// stable across machines and Rust versions. A serialization failure is a hard
@@ -111,11 +130,64 @@ mod tests {
         }
     }
 
+    /// A wall-clock instant carrying sub-microsecond digits, like `Utc::now()`
+    /// returns on Linux (`clock_gettime`, nanosecond resolution).
+    fn nanosecond_instant() -> chrono::DateTime<Utc> {
+        chrono::DateTime::from_timestamp_nanos(1_700_000_000_123_456_789)
+    }
+
+    /// What Postgres hands back for a `TIMESTAMPTZ`: microsecond resolution.
+    fn after_database_round_trip(ts: chrono::DateTime<Utc>) -> chrono::DateTime<Utc> {
+        ts.trunc_subsecs(6)
+    }
+
     #[test]
     fn deterministic() {
         let entry = sample_entry();
         assert_eq!(compute_hash(&entry).unwrap(), compute_hash(&entry).unwrap());
         assert_eq!(compute_hash(&entry).unwrap().len(), 32);
+    }
+
+    #[test]
+    fn storage_precision_drops_sub_microsecond_digits() {
+        let stored = to_storage_precision(nanosecond_instant());
+        assert_eq!(stored.timestamp_subsec_nanos(), 123_456_000);
+        // Idempotent, so a stored value re-read from Postgres is unchanged.
+        assert_eq!(stored, after_database_round_trip(stored));
+    }
+
+    #[test]
+    fn nanosecond_timestamps_cannot_survive_a_database_round_trip() {
+        // The trap `to_storage_precision` exists to close. `compute_hash`
+        // covers an RFC-3339 string whose sub-second digit count follows the
+        // value, so hashing a nanosecond `created_at` produces a digest that
+        // cannot be recomputed once Postgres has truncated it to microseconds:
+        // every entry would then fail `verify_chain` with `HashMismatch`.
+        let ns = nanosecond_instant();
+        let mut written = sample_entry();
+        written.created_at = ns;
+        let mut read_back = sample_entry();
+        read_back.created_at = after_database_round_trip(ns);
+
+        assert_ne!(
+            compute_hash(&written).unwrap(),
+            compute_hash(&read_back).unwrap()
+        );
+    }
+
+    #[test]
+    fn storage_precision_timestamps_survive_a_database_round_trip() {
+        // The invariant the write path must hold: hash what will be stored, so
+        // recomputing from the row reproduces the digest.
+        let mut written = sample_entry();
+        written.created_at = to_storage_precision(nanosecond_instant());
+        let mut read_back = written.clone();
+        read_back.created_at = after_database_round_trip(read_back.created_at);
+
+        assert_eq!(
+            compute_hash(&written).unwrap(),
+            compute_hash(&read_back).unwrap()
+        );
     }
 
     #[test]
