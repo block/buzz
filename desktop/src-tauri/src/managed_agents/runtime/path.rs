@@ -1,5 +1,6 @@
 //! PATH augmentation for launched managed-agent child processes.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 /// Assemble the augmented `PATH` for a launched managed-agent child process.
@@ -11,6 +12,8 @@ use std::path::PathBuf;
 ///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
 ///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
 ///   6. user's login-shell `PATH` — runtimes like node/python from other managers
+///      (on Windows, where login-shell PATH is intentionally unavailable, the
+///      process `PATH` is appended instead so system Node remains findable)
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -23,6 +26,20 @@ pub(in crate::managed_agents) fn build_augmented_path(
     exe_parent: Option<PathBuf>,
     shell_path: Option<String>,
     nvm_bin: Option<PathBuf>,
+) -> Option<String> {
+    #[cfg(windows)]
+    let process_path = std::env::var_os("PATH");
+    #[cfg(not(windows))]
+    let process_path = None;
+    build_augmented_path_inner(home, exe_parent, shell_path, nvm_bin, process_path)
+}
+
+fn build_augmented_path_inner(
+    home: Option<PathBuf>,
+    exe_parent: Option<PathBuf>,
+    shell_path: Option<String>,
+    nvm_bin: Option<PathBuf>,
+    process_path: Option<OsString>,
 ) -> Option<String> {
     let mut parts: Vec<PathBuf> = Vec::new();
     let home_added = home.is_some();
@@ -48,6 +65,12 @@ pub(in crate::managed_agents) fn build_augmented_path(
     }
     if let Some(shell_path) = shell_path {
         parts.extend(std::env::split_paths(&shell_path));
+    } else if let Some(process_path) = process_path {
+        // Windows: login_shell_path() returns None so native children inherit
+        // the real Windows PATH. When we still build an augmented PATH (e.g.
+        // ~/.local/bin + exe parent), append the process PATH or system Node
+        // disappears under the override.
+        parts.extend(std::env::split_paths(&process_path));
     }
     if parts.is_empty() {
         return None;
@@ -60,7 +83,8 @@ pub(in crate::managed_agents) fn build_augmented_path(
 
 #[cfg(test)]
 mod tests {
-    use super::build_augmented_path;
+    use super::{build_augmented_path, build_augmented_path_inner};
+    use std::ffi::OsString;
     use std::path::PathBuf;
 
     #[cfg(unix)]
@@ -133,5 +157,66 @@ mod tests {
         let result = result.expect("path");
         assert!(result.starts_with("/home/user/.local/bin:"), "{result}");
         assert!(result.ends_with(":/usr/local/bin"), "{result}");
+    }
+
+    #[test]
+    fn process_path_appended_when_shell_path_missing() {
+        // Windows regression (#2327): with no login-shell PATH, managed dirs
+        // alone must not replace the process PATH — system Node lives there.
+        let process_path = std::env::join_paths([
+            PathBuf::from("/opt/nodejs"),
+            PathBuf::from("/usr/bin"),
+        ])
+        .expect("join process path");
+        let result = build_augmented_path_inner(
+            Some(PathBuf::from("/home/agent")),
+            Some(PathBuf::from("/opt/Buzz")),
+            None,
+            None,
+            Some(process_path),
+        );
+        let result = result.expect("path");
+        assert!(
+            result.contains(
+                &PathBuf::from("/home/agent")
+                    .join(".local")
+                    .join("bin")
+                    .to_string_lossy()
+                    .into_owned()
+            ),
+            "{result}"
+        );
+        assert!(
+            result.contains(
+                PathBuf::from("/opt/nodejs")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "process PATH must be retained: {result}"
+        );
+        let nodejs = PathBuf::from("/opt/nodejs").to_string_lossy().into_owned();
+        let usr_bin = PathBuf::from("/usr/bin").to_string_lossy().into_owned();
+        let node_pos = result.find(&nodejs).expect("nodejs");
+        let usr_pos = result.find(&usr_bin).expect("usr_bin");
+        assert!(node_pos < usr_pos, "{result}");
+    }
+
+    #[test]
+    fn shell_path_preferred_over_process_path() {
+        let shell = std::env::join_paths([
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/usr/bin"),
+        ])
+        .expect("join shell")
+        .to_string_lossy()
+        .into_owned();
+        let result = build_augmented_path_inner(
+            None,
+            None,
+            Some(shell.clone()),
+            None,
+            Some(OsString::from("/should/not/appear")),
+        );
+        assert_eq!(result.as_deref(), Some(shell.as_str()));
     }
 }
