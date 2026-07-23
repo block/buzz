@@ -82,6 +82,7 @@ import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
+import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -442,7 +443,6 @@ export function AgentInstanceEditDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
-
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
     if (
@@ -1121,6 +1121,11 @@ export function AgentInstanceEditDialog({
                 type="button"
               >
                 <span>Advanced</span>
+                <AdvancedRequiredBadge
+                  envVars={inheritedSubmission.envVars}
+                  requiredEnvKeys={advancedRequiredEnvKeys}
+                  testId="edit-agent-advanced-required-badge"
+                />
                 <ChevronDown
                   className={cn(
                     "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",

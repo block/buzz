@@ -253,6 +253,45 @@ test.describe("global agent config screenshots", () => {
     expect(saved).toMatchObject({ preferred_runtime: "codex" });
   });
 
+  test("defaults honor credentials set in the harness config file", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: "goose-claude-4-6-opus",
+        env_vars: {},
+      },
+      runtimeFileConfigs: {
+        goose: {
+          provider: "databricks_v2",
+          model: "goose-claude-4-6-opus",
+          satisfiedEnvKeys: ["DATABRICKS_HOST"],
+        },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const advanced = page.getByTestId("global-agent-advanced-toggle");
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("global-agent-advanced-required-badge"),
+    ).toHaveCount(0);
+
+    await page.getByTestId("global-agent-model").click();
+    await page.getByTestId("global-agent-model-option-gpt-5.5").click();
+    await expect(
+      page.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+
+    await advanced.click();
+    await expect(page.getByTestId("env-vars-file-satisfied-key")).toHaveText(
+      "DATABRICKS_HOST",
+    );
+  });
+
   test("02-create-global-provider-shows-top-level-api-key", async ({
     page,
   }) => {

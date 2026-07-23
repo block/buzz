@@ -20,7 +20,10 @@ import {
 import type { GlobalAgentConfig } from "@/shared/api/types";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
-import { useAcpRuntimesQuery } from "@/features/agents/hooks";
+import {
+  useAcpRuntimesQuery,
+  useRuntimeFileConfigQuery,
+} from "@/features/agents/hooks";
 import {
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
@@ -156,6 +159,9 @@ export function AgentDefaultsEditor({
         : { ...config, preferred_runtime: selectedRuntime.id },
     [config, selectedRuntime],
   );
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    selectedRuntime?.id ?? "",
+  );
   const harnessOptions = React.useMemo(
     () =>
       sortedRuntimes.map((runtime) => ({
@@ -243,6 +249,7 @@ export function AgentDefaultsEditor({
       onIsCustomProviderChange={setIsCustomProvider}
       onValidityChange={setConfigIsValid}
       placeholderClassName={flatLayout ? "text-muted-foreground/55" : undefined}
+      runtimeFileConfig={runtimeFileConfig}
       key={selectedRuntime.id}
       selectClassName={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
       unstyled={flatLayout}

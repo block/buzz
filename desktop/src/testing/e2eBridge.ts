@@ -49,6 +49,7 @@ import type {
 import type {
   RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
+  RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -351,6 +352,8 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
     };
+    /** File-layer config returned by runtime id. */
+    runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
     bakedBuildEnv?: Array<{
       key: string;
@@ -10269,9 +10272,10 @@ export function maybeInstallE2eTauriMocks() {
         return buildMockConfigSurface(configArgs.pubkey);
       }
       case "get_runtime_file_config": {
-        // No harness config file in the E2E environment — return null so
-        // dialogs fall back to normal required-field evaluation.
-        return null;
+        const runtimeId = (payload as { runtimeId?: string } | null | undefined)
+          ?.runtimeId;
+        if (!runtimeId) return null;
+        return config.mock?.runtimeFileConfigs?.[runtimeId] ?? null;
       }
       case "get_global_agent_config": {
         // Return the mutable persisted mock value, seeded from the test config.

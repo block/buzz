@@ -9,7 +9,10 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import type { BakedEnvEntry } from "@/shared/api/tauri";
+import type {
+  BakedEnvEntry,
+  RuntimeFileConfigSubset,
+} from "@/shared/api/tauri";
 import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
@@ -32,7 +35,6 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
-  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
 import {
@@ -51,8 +53,9 @@ import {
   useEffortAutoClear,
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
+import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
+import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
 
-/** Sentinel value for an unconfigured global agent config. */
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
@@ -198,6 +201,7 @@ export type AgentConfigFieldsProps = {
   onCustomModelEditingChange: (value: boolean) => void;
   onIsCustomProviderChange: (value: boolean) => void;
   onValidityChange?: (valid: boolean) => void;
+  runtimeFileConfig?: RuntimeFileConfigSubset | null;
   placeholderClassName?: string;
   selectClassName?: string;
   /**
@@ -233,6 +237,7 @@ export function AgentConfigFields({
   onCustomModelEditingChange,
   onIsCustomProviderChange,
   onValidityChange,
+  runtimeFileConfig,
   placeholderClassName,
   selectClassName,
   disclosure = "full",
@@ -326,36 +331,28 @@ export function AgentConfigFields({
   )
     ? selectedRuntimeId
     : "buzz-agent";
-  const requiredEnvKeys = requiredCredentialEnvKeys(
-    credentialRuntimeId,
-    credentialProvider,
-  );
-  const apiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
-  const advancedRequiredEnvKeys = requiredEnvKeys.filter(
-    (key) =>
-      key !== apiKeyEnvVar && !bakedEnv.some((entry) => entry.key === key),
-  );
-  const apiKeyValue = apiKeyEnvVar ? (config.env_vars[apiKeyEnvVar] ?? "") : "";
   const bakedEnvKeys = React.useMemo(
     () => bakedEnv.map((entry) => entry.key),
     [bakedEnv],
   );
-  const apiKeyInherited =
-    apiKeyEnvVar !== null &&
-    apiKeyValue.length === 0 &&
-    bakedEnvKeys.includes(apiKeyEnvVar);
-  const advancedCredentialMissing = advancedRequiredEnvKeys.some(
-    (key) => (config.env_vars[key] ?? "").trim().length === 0,
-  );
-  const apiKeyMissing =
-    apiKeyEnvVar !== null &&
-    !apiKeyInherited &&
-    apiKeyValue.trim().length === 0;
+  const {
+    advancedCredentialMissing,
+    advancedFileSatisfiedEnvKeys,
+    advancedRequiredEnvKeys,
+    apiKeyEnvVar,
+    apiKeyFileSatisfied,
+    apiKeyInherited,
+    apiKeyValue,
+    credentialsValid,
+  } = getGlobalAgentCredentialState({
+    bakedEnvKeys,
+    envVars: config.env_vars,
+    provider: credentialProvider,
+    runtimeFileConfig,
+    runtimeId: credentialRuntimeId,
+  });
   const configIsValid =
-    selectedRuntimeId.length > 0 &&
-    modelIsValid &&
-    !advancedCredentialMissing &&
-    !apiKeyMissing;
+    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
   React.useEffect(() => {
     onValidityChange?.(configIsValid);
   }, [configIsValid, onValidityChange]);
@@ -750,7 +747,11 @@ export function AgentConfigFields({
         <div className={blockClassName}>
           <PersonaProviderApiKeyField
             disabled={false}
-            inheritedLabel="Provided by this build"
+            inheritedLabel={
+              apiKeyFileSatisfied
+                ? "Set in runtime config"
+                : "Provided by this build"
+            }
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
             label={
@@ -879,15 +880,10 @@ export function AgentConfigFields({
             type="button"
           >
             <span>Advanced</span>
-            {advancedCredentialMissing ? (
-              <span
-                aria-hidden="true"
-                className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive"
-                data-testid="global-agent-advanced-required-badge"
-              >
-                Required
-              </span>
-            ) : null}
+            <AdvancedRequiredBadge
+              show={advancedCredentialMissing}
+              testId="global-agent-advanced-required-badge"
+            />
             <ChevronDown
               className={cn(
                 "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
@@ -912,6 +908,7 @@ export function AgentConfigFields({
                   }
                 >
                   <EnvVarsEditor
+                    fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
                     hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
                     inheritedRows={bakedGenericRows}
                     inheritedRowsLabel="build"
@@ -929,6 +926,7 @@ export function AgentConfigFields({
             </AnimatePresence>
           ) : advancedOpen ? (
             <EnvVarsEditor
+              fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
               hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
               inheritedRows={bakedGenericRows}
               inheritedRowsLabel="build"
