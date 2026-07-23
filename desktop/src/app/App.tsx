@@ -41,6 +41,7 @@ import {
   onAddCommunityPrefillAvailable,
   requestAddCommunityPrefill,
 } from "@/features/communities/addCommunityPrefill";
+import { findCommunityByRelayUrl } from "@/features/communities/communityStorage";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
@@ -333,9 +334,19 @@ function CommunityApp({
       return;
     }
     const previousCommunityId = activeCommunity?.id;
-    const relayAlreadyExists = communities.some(
-      (community) => community.relayUrl === transaction.relayUrl,
+    const existingCommunity = findCommunityByRelayUrl(
+      communities,
+      transaction.relayUrl,
     );
+    if (existingCommunity) {
+      switchCommunity(existingCommunity.id);
+      reconnectCommunity();
+      if (currentPubkey) {
+        markCommunityOnboardingComplete(currentPubkey, transaction.relayUrl);
+      }
+      communityOnboarding.clear();
+      return;
+    }
     const id = addCommunity({
       id: crypto.randomUUID(),
       name: transaction.communityName,
@@ -348,7 +359,7 @@ function CommunityApp({
     communityOnboarding.update({
       communityId: id,
       previousCommunityId,
-      addedCommunity: !relayAlreadyExists,
+      addedCommunity: true,
       error: undefined,
     });
     switchCommunity(id);
@@ -540,7 +551,8 @@ function CommunityApp({
 }
 
 function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
-  const { activeCommunity } = useCommunities();
+  const { activeCommunity, communities, switchCommunity, reconnectCommunity } =
+    useCommunities();
   const communityOnboarding = useCommunityOnboarding();
   const machine = useMachineOnboardingState({
     activeCommunityPubkey: activeCommunity
@@ -576,6 +588,24 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
     [activeCommunity, communityOnboarding.start],
   );
 
+  const switchToCommunityRelay = useCallback(
+    (relayUrl: string) => {
+      const existing = findCommunityByRelayUrl(communities, relayUrl);
+      if (!existing) return false;
+
+      communityOnboarding.clear();
+      switchCommunity(existing.id);
+      reconnectCommunity();
+      return true;
+    },
+    [
+      communities,
+      communityOnboarding.clear,
+      reconnectCommunity,
+      switchCommunity,
+    ],
+  );
+
   // Deep links are captured here — above the machine-onboarding gate — not in
   // CommunityApp. The Rust side queues them; draining into the persisted
   // community-onboarding transaction immediately means an invite opened on a
@@ -584,13 +614,14 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   useEffect(() => {
     const unlisten = listenForDeepLinks({
       startCommunityOnboarding: communityOnboarding.start,
+      switchToCommunityRelay,
       openAddCommunity,
       onAddCommunityAvailable: onAddCommunityPrefillAvailable,
     });
     return () => {
       void unlisten.then((fn) => fn());
     };
-  }, [communityOnboarding.start, openAddCommunity]);
+  }, [communityOnboarding.start, openAddCommunity, switchToCommunityRelay]);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;

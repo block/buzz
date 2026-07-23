@@ -11,6 +11,7 @@ import type { ReactNode } from "react";
 import type { Community } from "./types";
 import {
   clearCommunityStorage,
+  canonicalCommunityRelayUrl,
   loadActiveCommunityId,
   loadCommunities,
   saveActiveCommunityId,
@@ -43,12 +44,18 @@ export function resolveCommunityUpdateResult(
   const current = communities.find((w) => w.id === id);
   if (!current) return { kind: "not-found" };
 
-  if (
-    updates.relayUrl !== undefined &&
-    updates.relayUrl !== current.relayUrl &&
-    communities.some((w) => w.id !== id && w.relayUrl === updates.relayUrl)
-  ) {
-    return { kind: "duplicate-relay" };
+  if (updates.relayUrl !== undefined && updates.relayUrl !== current.relayUrl) {
+    const nextRelayUrl = updates.relayUrl;
+    if (
+      communities.some(
+        (w) =>
+          w.id !== id &&
+          canonicalCommunityRelayUrl(w.relayUrl) ===
+            canonicalCommunityRelayUrl(nextRelayUrl),
+      )
+    ) {
+      return { kind: "duplicate-relay" };
+    }
   }
 
   const hasChange =
@@ -165,12 +172,15 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
   );
 
   const addCommunity = useCallback((community: Community): string => {
+    const canonical = canonicalCommunityRelayUrl(community.relayUrl);
     const existing = communitiesRef.current.find(
-      (w) => w.relayUrl === community.relayUrl,
+      (w) => canonicalCommunityRelayUrl(w.relayUrl) === canonical,
     );
     const resolvedId = existing?.id ?? community.id;
     setCommunitiesState((prev) => {
-      const dup = prev.find((w) => w.relayUrl === community.relayUrl);
+      const dup = prev.find(
+        (w) => canonicalCommunityRelayUrl(w.relayUrl) === canonical,
+      );
       let next: Community[];
       if (dup) {
         next = prev.map((w) =>

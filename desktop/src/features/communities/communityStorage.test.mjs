@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canonicalCommunityRelayUrl,
   clearCommunityStorage,
+  findCommunityByRelayUrl,
   initFirstCommunity,
   migrateLegacyCommunityStorage,
   shouldAutoConnectDefaultRelay,
@@ -101,4 +103,67 @@ test("clearCommunityStorage removes new and legacy state", () => {
   migrateLegacyCommunityStorage(storage);
 
   assert.equal(storage.length, 0);
+});
+
+test("canonicalCommunityRelayUrl normalizes case and trailing slashes", () => {
+  assert.equal(
+    canonicalCommunityRelayUrl("WSS://Buzz.Block.Builderlab.xyz/"),
+    "wss://buzz.block.builderlab.xyz",
+  );
+  assert.equal(
+    canonicalCommunityRelayUrl("wss://buzz.block.builderlab.xyz"),
+    "wss://buzz.block.builderlab.xyz",
+  );
+});
+
+test("canonicalCommunityRelayUrl normalizes loopback host spellings", () => {
+  assert.equal(
+    canonicalCommunityRelayUrl("ws://localhost:3000"),
+    "ws://127.0.0.1:3000",
+  );
+  assert.equal(
+    canonicalCommunityRelayUrl("ws://127.0.0.1:3000"),
+    "ws://127.0.0.1:3000",
+  );
+});
+
+test("findCommunityByRelayUrl matches stored communities canonically", () => {
+  const communities = [
+    {
+      id: "builderlab",
+      name: "Builderlab",
+      relayUrl: "wss://Buzz.Block.Builderlab.xyz/",
+      addedAt: "2026-07-23T00:00:00.000Z",
+    },
+    {
+      id: "other",
+      name: "Other",
+      relayUrl: "wss://other.example",
+      addedAt: "2026-07-23T00:00:00.000Z",
+    },
+  ];
+
+  assert.equal(
+    findCommunityByRelayUrl(communities, "wss://buzz.block.builderlab.xyz")?.id,
+    "builderlab",
+  );
+  assert.equal(
+    findCommunityByRelayUrl(communities, "wss://missing.example"),
+    undefined,
+  );
+});
+
+test("findCommunityByRelayUrl matches localhost against 127.0.0.1", () => {
+  const communities = [
+    {
+      id: "local",
+      name: "Local Dev",
+      relayUrl: "ws://127.0.0.1:3000",
+      addedAt: "2026-07-23T00:00:00.000Z",
+    },
+  ];
+  assert.equal(
+    findCommunityByRelayUrl(communities, "ws://localhost:3000")?.id,
+    "local",
+  );
 });
