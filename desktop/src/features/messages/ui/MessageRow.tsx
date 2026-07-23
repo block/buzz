@@ -1,4 +1,5 @@
 import * as React from "react";
+import { AlertTriangle } from "lucide-react";
 
 import {
   depthGuideActionsEqual,
@@ -383,12 +384,8 @@ export const MessageRow = React.memo(
     const guideBleedRem = isThreadReplyLayout ? 0.25 : 0;
     const avatarButtonRadiusClass = "rounded-full";
 
-    const respondToDotColor =
-      message.respondTo === "anyone"
-        ? "bg-emerald-500"
-        : message.respondTo === "allowlist"
-          ? "bg-amber-500"
-          : null;
+    const showRespondToIndicator =
+      message.respondTo === "anyone" || message.respondTo === "allowlist";
 
     const avatarNode = (
       <div className="relative shrink-0">
@@ -399,18 +396,31 @@ export const MessageRow = React.memo(
           displayName={message.author}
           testId="message-avatar"
         />
-        {respondToDotColor && !isThreadReplyLayout ? (
+        {showRespondToIndicator && !isThreadReplyLayout ? (
           <span
             className={cn(
               "absolute -bottom-0.5 -right-0.5 flex h-3 w-3 items-center justify-center rounded-full bg-background",
             )}
+            role="img"
+            aria-label={
+              message.respondTo === "anyone"
+                ? "Anyone can send instructions to this agent"
+                : "Selected people can send instructions to this agent"
+            }
             title={
               message.respondTo === "anyone"
-                ? "Responds to anyone"
-                : "Responds to allowlist"
+                ? "Anyone can send instructions to this agent"
+                : "Selected people can send instructions to this agent"
             }
           >
-            <span className={cn("h-2 w-2 rounded-full", respondToDotColor)} />
+            {message.respondTo === "anyone" ? (
+              <AlertTriangle
+                aria-hidden="true"
+                className="h-2.5 w-2.5 fill-background text-amber-500"
+              />
+            ) : (
+              <span className="h-2 w-2 rounded-full bg-blue-500" />
+            )}
           </span>
         ) : null}
       </div>

@@ -56,7 +56,7 @@ const AGENT_INFO_LABELS = new Set([
 const AGENT_SETTINGS_LABELS = new Set([
   "Runtime",
   "Agent profile",
-  "Respond to",
+  "Who can send instructions",
   "ACP command",
   "MCP command",
   "Start on launch",
@@ -246,9 +246,13 @@ export function buildOwnerFields({
   const fields: ProfileField[] = [];
   const respondTo = managedAgent?.respondTo ?? relayAgent?.respondTo ?? null;
   const respondToDisplayValue = respondTo
-    ? respondTo === "owner-only" && ownerDisplayName
+    ? respondTo === "owner-only"
       ? ownerDisplayName
-      : respondTo.replace(/-/g, " ")
+        ? `Only ${ownerDisplayName} (owner)`
+        : "Only the owner"
+      : respondTo === "allowlist"
+        ? "Selected people"
+        : "Anyone"
     : null;
 
   const ownerClickable = Boolean(onOpenProfile && ownerProfilePubkey);
@@ -386,7 +390,7 @@ export function buildOwnerFields({
     fields.push({
       displayValue: respondToDisplayValue,
       icon: Ear,
-      label: "Respond to",
+      label: "Who can send instructions",
       testId: "user-profile-respond-to",
     });
   }

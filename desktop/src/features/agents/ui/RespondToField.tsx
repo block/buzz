@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, Search, X } from "lucide-react";
+import { AlertTriangle, ChevronDown, Search, X } from "lucide-react";
 import {
   mergeAllowlist,
   parsePubkeyInput,
@@ -20,10 +20,10 @@ import type { PersonaDropdownOption } from "./agentConfigOptions";
  * Inbound author gate UI for create/edit agent dialogs.
  *
  * Dropdown:
- *   - Owner only  (default; matches `buzz-acp --respond-to=owner-only`)
- *   - Anyone      (`--respond-to=anyone` — fully open bot)
- *   - Allowlist   (`--respond-to=allowlist`, plus the chip list as
- *                  `--respond-to-allowlist`)
+ *   - Only me        (default; maps to `buzz-acp --respond-to=owner-only`)
+ *   - Anyone         (`--respond-to=anyone` — fully open agent)
+ *   - Selected people (`--respond-to=allowlist`, plus the selected pubkeys as
+ *                     `--respond-to-allowlist`)
  *
  * `nobody` is intentionally not surfaced — it pairs with a heartbeat-only
  * setup that has no meaningful GUI use case.
@@ -53,7 +53,7 @@ function formatSearchUserSecondary(user: UserSearchResult) {
 const RESPOND_TO_OPTIONS: PersonaDropdownOption[] = [
   { label: "Only me (default)", value: "owner-only" },
   { label: "Anyone", value: "anyone" },
-  { label: "Allowlist", value: "allowlist" },
+  { label: "Selected people", value: "allowlist" },
 ];
 
 export function CreateAgentRespondToField({
@@ -142,7 +142,7 @@ export function CreateAgentRespondToField({
         }
         htmlFor="agent-respond-to"
       >
-        Who can talk to this agent
+        Who can send instructions
       </label>
       {isPersonaVariant ? (
         <PersonaDropdownField
@@ -162,18 +162,33 @@ export function CreateAgentRespondToField({
           onChange={(e) => onModeChange(e.target.value as RespondToMode)}
           value={mode}
         >
-          <option value="owner-only">Owner only (default)</option>
+          <option value="owner-only">Only me (default)</option>
           <option value="anyone">Anyone</option>
-          <option value="allowlist">Allowlist</option>
+          <option value="allowlist">Selected people</option>
         </select>
       )}
-      {!isPersonaVariant ? (
+      {mode === "anyone" ? (
+        <div
+          className="flex items-start gap-2 rounded-xl border border-warning/30 bg-warning-bg px-3 py-2.5"
+          data-testid="agent-access-warning"
+        >
+          <AlertTriangle
+            aria-hidden="true"
+            className="mt-0.5 h-4 w-4 shrink-0 text-warning"
+          />
+          <p aria-live="polite" className="text-xs leading-5 text-warning">
+            Anyone can send instructions to this agent. It may use files,
+            accounts, and tools it can access on the computer or server where it
+            runs.
+          </p>
+        </div>
+      ) : (
         <p className="text-xs text-muted-foreground">
-          Controls which Nostr authors the agent listens to (@mentions, DMs,
-          thread replies). The agent&apos;s owner can always shut it down with
-          <span className="font-mono"> !shutdown</span>.
+          {mode === "allowlist"
+            ? "Only you and the people you choose can send instructions."
+            : "Only you can send instructions."}
         </p>
-      ) : null}
+      )}
       {mode === "allowlist" ? (
         <AllowlistPicker
           allowlist={allowlist}
@@ -269,7 +284,7 @@ function AllowlistPicker({
     >
       {!isPersona ? (
         <div className="flex items-center justify-between gap-2">
-          <span className="text-sm font-medium">Allowed pubkeys</span>
+          <span className="text-sm font-medium">Selected people</span>
           <span className="rounded-full bg-background px-2 py-1 text-2xs font-medium leading-none text-muted-foreground">
             {allowlist.length} selected
           </span>
@@ -277,13 +292,13 @@ function AllowlistPicker({
       ) : null}
       {!isPersona && ownerPubkey ? (
         <p className="text-xs text-muted-foreground">
-          Owner (
-          <PubKey pubkey={ownerPubkey} />) is always implicitly allowed by the
-          harness — no need to add it here.
+          You (
+          <PubKey pubkey={ownerPubkey} />) can always use this agent. You
+          don&apos;t need to add yourself.
         </p>
       ) : !isPersona ? (
         <p className="text-xs text-muted-foreground">
-          The agent&apos;s owner is always implicitly allowed.
+          You can always use this agent.
         </p>
       ) : null}
       <div className="rounded-lg border border-border/80 bg-background">
@@ -452,7 +467,7 @@ function AllowlistPicker({
                   onClick={onAddFromPaste}
                   type="button"
                 >
-                  Add to allowlist
+                  Add people
                 </button>
               </div>
             </div>
