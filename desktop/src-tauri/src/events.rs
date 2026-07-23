@@ -404,10 +404,10 @@ pub fn build_forum_comment(
 ///
 /// `mentions` carries the pubkeys of mentions that are *newly added* by this
 /// edit (the caller diffs the edited body against the original). Only those get
-/// a `p` tag so the newly-mentioned party is notified/woken, while a typo-fix
-/// edit that leaves the mention set unchanged emits no `p` tags and never
-/// re-wakes anyone. This mirrors the send path's `mention_tags` (dedup +
-/// lowercase); the receiver overlays these onto the original event's audience.
+/// a `p` tag (wake/notify) **and** a matching `mention` reference tag (explicit
+/// @mention signal — same as the send path's `MENTION_REFERENCE_TAG`), while a
+/// typo-fix edit that leaves the mention set unchanged emits neither and never
+/// re-wakes anyone. The receiver overlays these onto the original event's audience.
 pub fn build_message_edit(
     channel_id: Uuid,
     target_event_id: EventId,
@@ -421,7 +421,19 @@ pub fn build_message_edit(
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
-    tags.extend(mention_tags(mentions)?);
+    let p_tags = mention_tags(mentions)?;
+    tags.extend(p_tags.clone());
+    // Parity with send: explicit `mention` refs so relay offline-notice (#1743)
+    // and desktop resolve-mention can treat edit-added @mentions like send.
+    let mention_refs: Vec<Vec<String>> = p_tags
+        .iter()
+        .filter_map(|t| {
+            let s = t.as_slice();
+            let pk = s.get(1)?.clone();
+            Some(vec!["mention".to_string(), pk])
+        })
+        .collect();
+    mention_reference_tags(&mention_refs, &mut tags)?;
     imeta_tags(media_tags, &mut tags)?;
     emoji_tags(custom_emoji_tags, &mut tags)?;
     Ok(EventBuilder::new(Kind::Custom(40003), content).tags(tags))
@@ -964,6 +976,11 @@ mod tests {
         assert_eq!(tags[1][0], "e");
         // The `p` tag rides right after the `e` tag (insertion order).
         assert_eq!(tags[2], vec!["p".to_string(), ALICE_HEX.to_string()]);
+        // Send-path parity: explicit mention ref for newly added @mentions (#2540).
+        assert!(
+            tags.iter().any(|t| t.as_slice() == ["mention", ALICE_HEX]),
+            "edit-added mention must emit mention ref tag, got {tags:?}"
+        );
     }
 
     #[test]
