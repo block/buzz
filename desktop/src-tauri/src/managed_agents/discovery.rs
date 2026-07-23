@@ -677,7 +677,15 @@ fn login_shell_candidates() -> Vec<PathBuf> {
 /// Returns trimmed stdout if the command succeeds with non-empty output.
 fn run_in_login_shell(args: &[&str]) -> Option<String> {
     for shell in login_shell_candidates() {
-        let Ok(output) = Command::new(&shell).args(args).output() else {
+        let mut command = Command::new(&shell);
+        command.args(args);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let Ok(output) = command.output() else {
             continue;
         };
         if !output.status.success() {
@@ -916,6 +924,12 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child = match command.spawn() {
         Ok(c) => c,
@@ -1078,6 +1092,12 @@ pub(crate) fn probe_codex_acp_major_version_with_path(
     command.arg("--version");
     if let Some(path) = augmented_path {
         command.env("PATH", path);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
     }
     let mut child = command
         .stdout(tmp.try_clone().ok()?)

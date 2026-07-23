@@ -93,12 +93,19 @@ fn managed_node_runtime_ready() -> bool {
     if !node.is_file() {
         return false;
     }
-    let output = std::process::Command::new(&node)
+    let mut command = std::process::Command::new(&node);
+    command
         .arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = command.output();
     output
         .ok()
         .filter(|output| output.status.success())

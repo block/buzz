@@ -119,6 +119,12 @@ mod tests {
         let mut cmd = std::process::Command::new("env");
         cmd.env_clear();
         build_buzz_agent_provider_defaults(&mut cmd);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         let output = cmd.output().expect("env should run");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
@@ -229,6 +235,12 @@ mod tests {
         cmd.env("BUZZ_AGENT_PROVIDER", "databricks");
         // Simulate what runtime_metadata_env_vars writes from the record (comes after).
         cmd.env("BUZZ_AGENT_PROVIDER", "anthropic");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
         let output = cmd.output().expect("env should run");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
