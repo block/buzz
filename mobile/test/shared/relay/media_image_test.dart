@@ -66,7 +66,7 @@ void main() {
       expect(refreshed['Authorization'], isNot(first['Authorization']));
     });
 
-    test('sends identification only for relay media URLs', () {
+    test('sends both identification headers only for relay media URLs', () {
       const clientHeaders = ClientHeaders(
         appVersion: '1.0',
         buzzClient: 'test-client',
@@ -77,11 +77,29 @@ void main() {
         clientHeaders: clientHeaders,
       );
 
-      expect(
-        auth.headersFor(_mediaUrl),
-        containsPair('Buzz-Client', 'test-client'),
+      final headers = auth.headersFor(_mediaUrl);
+      expect(headers['Buzz-Client'], 'test-client');
+      expect(headers['User-Agent'], 'test-agent');
+      expect(headers['Authorization'], startsWith('Nostr '));
+    });
+
+    test('sends only User-Agent to third-party media hosts', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
       );
-      expect(auth.headersFor('https://elsewhere.com/media/abc.png'), isEmpty);
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      final headers = auth.headersFor(
+        'https://cdn.cloudflare.example/attachments/abc.png',
+      );
+      expect(headers, {'User-Agent': 'test-agent'});
+      expect(headers, isNot(contains('Buzz-Client')));
+      expect(headers, isNot(contains('Authorization')));
     });
 
     test('sends identification without a signing key', () {

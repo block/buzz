@@ -1,11 +1,6 @@
 //! Advisory parsing for the mobile `Buzz-Client` structured field.
 
-use std::convert::Infallible;
-
-use axum::{
-    extract::OptionalFromRequestParts,
-    http::{request::Parts, HeaderMap},
-};
+use axum::http::HeaderMap;
 use sfv::{BareItem, Dictionary, ListEntry, Parser};
 
 /// Parsed, untrusted metadata supplied by a Buzz client.
@@ -22,6 +17,8 @@ pub struct ClientInfo {
     pub platform: String,
     /// User-visible application version.
     pub app_version: String,
+    /// Bounded, normalized label derived from the application version.
+    metric_app_version: String,
     /// Platform build identifier, constrained to decimal digits.
     pub app_build: String,
     /// Coarse public operating-system version.
@@ -65,10 +62,10 @@ impl ClientInfo {
         }
 
         let app_version = string(&dictionary, "app-version")?;
+        let metric_app_version = normalize_app_version(&app_version)?;
         let app_build = string(&dictionary, "app-build")?;
         let os_version = string(&dictionary, "os-version")?;
-        if app_version.is_empty()
-            || app_build.is_empty()
+        if app_build.is_empty()
             || !app_build.bytes().all(|byte| byte.is_ascii_digit())
             || os_version.is_empty()
         {
@@ -87,6 +84,7 @@ impl ClientInfo {
             app,
             platform,
             app_version,
+            metric_app_version,
             app_build,
             os_version,
             os_api,
@@ -96,27 +94,43 @@ impl ClientInfo {
     /// Record a low-cardinality observation for a parsed client.
     pub fn record_observation(&self) {
         metrics::counter!(
-            "buzz_client_requests_total",
+            "buzz_client_connections_total",
             "app" => self.app.clone(),
             "platform" => self.platform.clone(),
-            "app_version" => self.app_version.clone(),
+            "app_version" => self.metric_app_version.clone(),
         )
         .increment(1);
     }
 }
 
-impl<S> OptionalFromRequestParts<S> for ClientInfo
-where
-    S: Send + Sync,
-{
-    type Rejection = Infallible;
+const MAX_APP_VERSION_COMPONENT_LENGTH: usize = 5;
 
-    async fn from_request_parts(
-        parts: &mut Parts,
-        _state: &S,
-    ) -> Result<Option<Self>, Self::Rejection> {
-        Ok(Self::from_headers(&parts.headers))
+fn normalize_app_version(app_version: &str) -> Result<String, ()> {
+    let mut components = app_version.split('.');
+    let Some(major) = components.next() else {
+        return Err(());
+    };
+    let Some(minor) = components.next() else {
+        return Err(());
+    };
+    let patch = components.next();
+    if components.next().is_some() {
+        return Err(());
     }
+
+    if ![Some(major), Some(minor), patch]
+        .into_iter()
+        .flatten()
+        .all(|component| {
+            !component.is_empty()
+                && component.len() <= MAX_APP_VERSION_COMPONENT_LENGTH
+                && component.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return Err(());
+    }
+
+    Ok(format!("{major}.{minor}"))
 }
 
 fn bare_item<'a>(dictionary: &'a Dictionary, key: &str) -> Result<&'a BareItem, ()> {
@@ -164,20 +178,36 @@ mod tests {
 
     use super::*;
 
-    fn parse_failures(recorder: &DebuggingRecorder) -> u64 {
+    fn metric_counter(
+        recorder: &DebuggingRecorder,
+        name: &str,
+    ) -> Vec<(Vec<(String, String)>, u64)> {
         recorder
             .snapshotter()
             .snapshot()
             .into_vec()
             .into_iter()
-            .find_map(|(key, _, _, value)| {
-                (key.key().name() == "buzz_client_header_parse_failures_total").then_some(value)
+            .filter_map(|(key, _, _, value)| {
+                (key.key().name() == name).then(|| {
+                    let labels = key
+                        .key()
+                        .labels()
+                        .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                        .collect();
+                    let DebugValue::Counter(value) = value else {
+                        panic!("{name} must be a counter");
+                    };
+                    (labels, value)
+                })
             })
-            .map(|value| match value {
-                DebugValue::Counter(value) => value,
-                _ => panic!("parse failures must be a counter"),
-            })
-            .unwrap_or_default()
+            .collect()
+    }
+
+    fn parse_failures(recorder: &DebuggingRecorder) -> u64 {
+        metric_counter(recorder, "buzz_client_header_parse_failures_total")
+            .into_iter()
+            .map(|(_, value)| value)
+            .sum()
     }
 
     #[test]
@@ -193,6 +223,7 @@ mod tests {
                 app: "buzz-mobile".to_owned(),
                 platform: "ios".to_owned(),
                 app_version: "0.4.5".to_owned(),
+                metric_app_version: "0.4".to_owned(),
                 app_build: "6".to_owned(),
                 os_version: "18.5".to_owned(),
                 os_api: None,
@@ -204,6 +235,25 @@ mod tests {
         )
         .expect("valid Android header");
         assert_eq!(android.os_api, Some(35));
+    }
+
+    #[test]
+    fn observations_bucket_versions_to_major_minor() {
+        let client = ClientInfo::parse(
+            r#"v=1, app=buzz-mobile, platform=ios, app-version="12.34.56", app-build="6", os-version="18.5""#,
+        )
+        .expect("valid iOS header");
+        let recorder = DebuggingRecorder::new();
+
+        metrics::with_local_recorder(&recorder, || client.record_observation());
+
+        let counters = metric_counter(&recorder, "buzz_client_connections_total");
+        assert_eq!(counters.len(), 1);
+        let (labels, value) = &counters[0];
+        assert_eq!(*value, 1);
+        assert!(labels.contains(&("app".to_owned(), "buzz-mobile".to_owned())));
+        assert!(labels.contains(&("platform".to_owned(), "ios".to_owned())));
+        assert!(labels.contains(&("app_version".to_owned(), "12.34".to_owned())));
     }
 
     #[test]
@@ -222,6 +272,9 @@ mod tests {
             r#"v=2, app=buzz-mobile, platform=ios, app-version="1", app-build="1", os-version="18""#,
             r#"v=1, app=buzz-mobile, platform=android, app-version="1", app-build="1", os-version="15""#,
             r#"v=1, app=buzz-mobile, platform=ios, app-version="1", app-build="1.beta", os-version="18""#,
+            r#"v=1, app=buzz-mobile, platform=ios, app-version="random-connection-value", app-build="1", os-version="18""#,
+            r#"v=1, app=buzz-mobile, platform=ios, app-version="1.2.3.4", app-build="1", os-version="18""#,
+            r#"v=1, app=buzz-mobile, platform=ios, app-version="123456.2", app-build="1", os-version="18""#,
         ] {
             let recorder = DebuggingRecorder::new();
             let mut headers = HeaderMap::new();

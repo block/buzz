@@ -14,12 +14,13 @@ const _mediaGetAuthLifetimeSeconds = 600;
 /// request signed just before the boundary still lands well within validity.
 const _mediaGetAuthRefreshMarginSeconds = 60;
 
-/// Builds BUD-01 Blossom `t=get` auth headers for relay-host media URLs.
+/// Builds BUD-01 Blossom auth for relay-hosted media requests, alongside
+/// outbound client identification headers.
 ///
-/// Returns only first-party client-identification headers when no signing key
-/// is available. Returns an empty map for non-relay URLs, so callers can safely
-/// use this on arbitrary profile/custom-emoji URLs without leaking Buzz
-/// metadata or credentials to third-party hosts.
+/// The coarse `User-Agent` is returned for any valid remote HTTP(S) URL.
+/// `Buzz-Client` and `Authorization` remain restricted to same-origin relay
+/// media paths, so arbitrary profile and custom-emoji hosts receive neither
+/// structured metadata nor credentials.
 ///
 /// The signed header is memoized until [_mediaGetAuthRefreshMarginSeconds]
 /// before expiry: repeated calls return the byte-identical map instead of
@@ -46,11 +47,6 @@ class MediaGetAuthService {
        _now = now ?? DateTime.now;
 
   Map<String, String> headersFor(String url) {
-    final uri = Uri.tryParse(url);
-    final relayUri = Uri.tryParse(_baseUrl);
-    if (uri == null || relayUri == null) return const {};
-    if (!_isRelayMediaUrl(uri, relayUri)) return const {};
-
     final clientHeaders = _clientHeaders;
     final identificationHeaders = clientHeaders == null
         ? const <String, String>{}
@@ -59,6 +55,11 @@ class MediaGetAuthService {
             targetUrl: url,
             relayUrl: _baseUrl,
           );
+    final uri = Uri.tryParse(url);
+    final relayUri = Uri.tryParse(_baseUrl);
+    if (uri == null || relayUri == null) return const {};
+    if (!_isRelayMediaUrl(uri, relayUri)) return identificationHeaders;
+
     final nsec = _nsec;
     if (nsec == null || nsec.isEmpty) return identificationHeaders;
 

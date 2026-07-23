@@ -15,12 +15,20 @@ class ClientHeaders {
   final String buzzClient;
   final String userAgent;
 
+  /// An inert value used when advisory identification cannot be loaded.
+  static const empty = ClientHeaders(
+    appVersion: '',
+    buzzClient: '',
+    userAgent: '',
+  );
+
   const ClientHeaders({
     required this.appVersion,
     required this.buzzClient,
     required this.userAgent,
   });
 
+  /// Both headers when they are fully initialized.
   Map<String, String> get values {
     if (buzzClient.isEmpty && userAgent.isEmpty) return const {};
     if (buzzClient.isEmpty || userAgent.isEmpty) {
@@ -30,6 +38,15 @@ class ClientHeaders {
       _buzzClientHeaderName: buzzClient,
       _userAgentHeaderName: userAgent,
     });
+  }
+
+  /// The coarse header safe to send to arbitrary HTTP and WebSocket origins.
+  Map<String, String> get userAgentValue {
+    if (buzzClient.isEmpty && userAgent.isEmpty) return const {};
+    if (buzzClient.isEmpty || userAgent.isEmpty) {
+      throw StateError('Buzz client headers must be initialized together');
+    }
+    return Map.unmodifiable({_userAgentHeaderName: userAgent});
   }
 }
 
@@ -53,6 +70,9 @@ class ClientHeaderMetadata {
 
 /// Builds the canonical structured `Buzz-Client` and display-only `User-Agent`.
 ClientHeaders buildClientHeaders(ClientHeaderMetadata metadata) {
+  if (!_isValidAppVersion(metadata.appVersion)) {
+    throw FormatException('App version must be numeric major.minor[.patch]');
+  }
   if (metadata.platform != 'ios' && metadata.platform != 'android') {
     throw ArgumentError.value(
       metadata.platform,
@@ -91,6 +111,20 @@ ClientHeaders buildClientHeaders(ClientHeaderMetadata metadata) {
         'Buzz/${_userAgentProduct(metadata.appVersion)} '
         '(${metadata.platform}; build ${_userAgentComment(metadata.appBuild)})',
   );
+}
+
+bool _isValidAppVersion(String version) {
+  final components = version.split('.');
+  return components.length >= 2 &&
+      components.length <= 3 &&
+      components.every(
+        (component) =>
+            component.isNotEmpty &&
+            component.length <= 5 &&
+            component.codeUnits.every(
+              (codeUnit) => codeUnit >= 0x30 && codeUnit <= 0x39,
+            ),
+      );
 }
 
 String _structuredString(String value) {
@@ -175,14 +209,8 @@ Future<ClientHeaders> loadClientHeaders() async {
 ///
 /// Tests and component previews do not execute [main], so the provider has an
 /// inert value until the app-level override installs real platform metadata.
-const _uninitializedClientHeaders = ClientHeaders(
-  appVersion: '',
-  buzzClient: '',
-  userAgent: '',
-);
-
 final clientHeadersProvider = Provider<ClientHeaders>(
-  (ref) => _uninitializedClientHeaders,
+  (ref) => ClientHeaders.empty,
 );
 
 String _coarseOsVersion(String version) {
@@ -225,18 +253,27 @@ bool isFirstPartyBuzzUrl(
   return false;
 }
 
+/// Returns outbound identification headers for [targetUrl].
+///
+/// The coarse `User-Agent` is safe to send to arbitrary HTTP and WebSocket
+/// origins. The structured `Buzz-Client` metadata is included only for a
+/// recognized first-party Buzz origin.
 Map<String, String> clientHeadersForUrl({
   required ClientHeaders headers,
   required String targetUrl,
   String? relayUrl,
   bool allowLocalDevelopment = kDebugMode,
 }) {
+  final target = Uri.tryParse(targetUrl);
+  if (target == null || target.host.isEmpty || !_isHttpOrWebSocket(target)) {
+    return const {};
+  }
   if (!isFirstPartyBuzzUrl(
     targetUrl,
     relayUrl: relayUrl,
     allowLocalDevelopment: allowLocalDevelopment,
   )) {
-    return const {};
+    return headers.userAgentValue;
   }
   return headers.values;
 }

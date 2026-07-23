@@ -197,7 +197,9 @@ class PairingNotifier extends Notifier<PairingState> {
         qr.sourcePubkey,
       );
 
-      // 4. Connect to relay with ephemeral keys.
+      // 4. Connect to the relay with ephemeral keys. The pairing payload has
+      // not been authenticated yet, so do not trust its relay URL as a
+      // configured origin for structured client metadata.
       final socket = _socketFactory(
         wsUrl: relayWsUrl,
         ephemeralPrivkey: _ephemeralPrivkey!,
@@ -615,6 +617,8 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
+    // The credential payload is still untrusted, so only globally recognized
+    // Buzz origins may receive structured client metadata during this probe.
     final socket = RelaySocket(
       wsUrl: wsUrl,
       nsec: nsec,

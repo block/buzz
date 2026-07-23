@@ -10,10 +10,13 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // Pre-load preferences so the first frame uses the saved theme/accent.
-  final (prefs, clientHeaders) = await (
-    SharedPreferences.getInstance(),
-    loadClientHeaders(),
-  ).wait;
+  final prefs = await SharedPreferences.getInstance();
+  var clientHeaders = ClientHeaders.empty;
+  try {
+    clientHeaders = await loadClientHeaders();
+  } catch (error) {
+    debugPrint('Could not load optional Buzz client headers: $error');
+  }
 
   runApp(
     ProviderScope(

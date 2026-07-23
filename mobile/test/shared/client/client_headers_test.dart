@@ -41,23 +41,37 @@ void main() {
       expect(headers.userAgent, 'Buzz/0.4.5 (android; build 6)');
     });
 
-    test('does not emit partially initialized header pairs', () {
-      expect(
-        const ClientHeaders(
-          appVersion: '',
-          buzzClient: '',
-          userAgent: '',
-        ).values,
-        isEmpty,
+    test('exposes an inert empty header value', () {
+      expect(ClientHeaders.empty.appVersion, isEmpty);
+      expect(ClientHeaders.empty.values, isEmpty);
+      expect(ClientHeaders.empty.userAgentValue, isEmpty);
+    });
+
+    test('partially initialized values fail loudly for every header view', () {
+      const partial = ClientHeaders(
+        appVersion: '1',
+        buzzClient: 'client',
+        userAgent: '',
       );
-      expect(
-        () => const ClientHeaders(
-          appVersion: '1',
-          buzzClient: 'client',
-          userAgent: '',
-        ).values,
-        throwsStateError,
-      );
+      expect(() => partial.values, throwsStateError);
+      expect(() => partial.userAgentValue, throwsStateError);
+    });
+
+    test('rejects app versions outside the relay metric contract', () {
+      for (final version in ['', '1', '1.2.3.4', '1.2-beta', '123456.2']) {
+        expect(
+          () => buildClientHeaders(
+            ClientHeaderMetadata(
+              platform: 'ios',
+              appVersion: version,
+              appBuild: '1',
+              osVersion: '18.0',
+            ),
+          ),
+          throwsFormatException,
+          reason: version,
+        );
+      }
     });
 
     test('rejects non-decimal app builds', () {
@@ -140,14 +154,29 @@ void main() {
       }
     });
 
-    test('rejects lookalikes, third-party hosts, and insecure hosted URLs', () {
+    test('sends only User-Agent to other HTTP and WebSocket servers', () {
       for (final url in [
-        'wss://communities.buzz.xyz.evil.example',
-        'wss://evil.example',
+        'https://cdn.cloudflare.example/attachment.png',
+        'wss://relay.other.example/socket',
+        'https://communities.buzz.xyz.evil.example/media/file',
         'ws://pairing.buzz.xyz',
-        'https://acme.communities.buzz.xyz.evil.example',
         'wss://relay.example:444/socket',
       ]) {
+        expect(
+          clientHeadersForUrl(
+            headers: headers,
+            targetUrl: url,
+            relayUrl: 'https://relay.example',
+            allowLocalDevelopment: false,
+          ),
+          {'User-Agent': 'agent'},
+          reason: url,
+        );
+      }
+    });
+
+    test('does not send headers to malformed or non-network URLs', () {
+      for (final url in ['', 'not a URL', 'file:///tmp/media.png']) {
         expect(
           clientHeadersForUrl(
             headers: headers,
