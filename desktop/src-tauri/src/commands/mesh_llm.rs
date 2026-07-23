@@ -246,24 +246,55 @@ pub(crate) async fn mesh_ingress_is_live_at(api_base_url: &str) -> bool {
 /// runtime (best-effort stop) so a subsequent ensure/bootstrap can re-arm.
 ///
 /// Returns `true` when a stale handle was evicted (caller should re-arm).
+/// Bounded budget for a best-effort stop of a stale runtime. Matches the 3s
+/// ingress-probe budget: if the embedded runtime is *itself* the wedged
+/// component, `stop()` can hang forever, which would defeat the whole
+/// "never block re-arm" intent (Brad #2304 #1). On timeout we log and drop the
+/// handle anyway so the watchdog keeps making progress.
+const STALE_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 pub(crate) async fn drop_stale_mesh_runtime_if_ingress_dead(
     state: &AppState,
 ) -> bool {
-    if state.mesh_llm_runtime.lock().await.is_none() {
-        return false;
-    }
+    // Capture the identity of the runtime we are about to judge *before* the
+    // ingress probe `.await`. A concurrent stop/start can swap the handle while
+    // the probe is in flight; if it does, we must not evict the fresh
+    // replacement (Brad #2304 #2).
+    let candidate_id = match state.mesh_llm_runtime.lock().await.as_ref() {
+        Some(runtime) => runtime.id(),
+        None => return false,
+    };
     if mesh_ingress_is_live().await {
         return false;
     }
+    let stale = {
+        let mut guard = state.mesh_llm_runtime.lock().await;
+        match guard.as_ref() {
+            // Same handle still installed → safe to evict.
+            Some(runtime) if runtime.id() == candidate_id => guard.take(),
+            // A different runtime was swapped in during the probe, or the
+            // handle was cleared. Leave the current (fresh) runtime alone.
+            _ => return false,
+        }
+    };
+    let Some(stale) = stale else {
+        return false;
+    };
     eprintln!(
         "buzz-mesh: Buzz shared compute ingress is down while a runtime handle is present; dropping the stale runtime for re-arm (#2062)"
     );
-    let stale = state.mesh_llm_runtime.lock().await.take();
-    if let Some(stale) = stale {
-        // Best-effort: a wedged runtime may fail/slow to stop; never block
-        // re-arm on it (the zombie-guard motivation in #2062).
-        if let Err(error) = stale.stop().await {
+    // Best-effort, bounded: a wedged runtime may fail/hang on stop; never block
+    // re-arm on it (the zombie-guard motivation in #2062, Brad #2304 #1).
+    match tokio::time::timeout(STALE_STOP_TIMEOUT, stale.stop()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
             eprintln!("stale mesh runtime stop failed during re-arm: {error}");
+        }
+        Err(_) => {
+            eprintln!(
+                "stale mesh runtime stop timed out after {}s during re-arm; dropping handle anyway (#2304)",
+                STALE_STOP_TIMEOUT.as_secs()
+            );
         }
     }
     true
@@ -291,10 +322,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
     if !evicted && !had_handle {
         // No handle — only act if we have relay-mesh agents that need the client.
         let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
-        let needs = records.iter().any(|r| {
-            r.backend == crate::managed_agents::BackendKind::Local
-                && crate::managed_agents::relay_mesh_model_id(r).is_some()
-        });
+        let needs = records.iter().any(is_running_relay_mesh_agent);
         if !needs {
             return Ok(());
         }
@@ -303,10 +331,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
     let records = crate::managed_agents::load_managed_agents(app).unwrap_or_default();
     let mesh_records: Vec<_> = records
         .into_iter()
-        .filter(|r| {
-            r.backend == crate::managed_agents::BackendKind::Local
-                && crate::managed_agents::relay_mesh_model_id(r).is_some()
-        })
+        .filter(is_running_relay_mesh_agent)
         .collect();
     if mesh_records.is_empty() {
         return Ok(());
@@ -333,6 +358,25 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
     match first_error {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// A record is a live consumer of the shared-compute ingress only when it is a
+/// local relay-mesh agent whose process is actually running. Stopped agents,
+/// manually-stopped records, and non-local backends do not need the ingress, so
+/// re-arming them would resurrect runtimes the user deliberately stopped
+/// (Brad #2304 #3). We use the persisted `runtime_pid` + liveness check as the
+/// "should be running" signal rather than the display `status` string.
+fn is_running_relay_mesh_agent(record: &crate::managed_agents::ManagedAgentRecord) -> bool {
+    if record.backend != crate::managed_agents::BackendKind::Local {
+        return false;
+    }
+    if crate::managed_agents::relay_mesh_model_id(record).is_none() {
+        return false;
+    }
+    match record.runtime_pid {
+        Some(pid) => crate::managed_agents::process_is_running(pid),
+        None => false,
     }
 }
 
@@ -982,6 +1026,78 @@ mod tests {
         // probe should also be false (or true if a leftover mesh is up — either is
         // a bool, not panic).
         let _ = mesh_ingress_is_live().await;
+    }
+
+    /// Build a local relay-mesh record (Brad #2304 #3 filter tests). The mesh
+    /// preset env is the legacy discriminator `relay_mesh_model_id` detects.
+    fn mesh_record(pubkey: &str, runtime_pid: Option<u32>) -> crate::managed_agents::ManagedAgentRecord {
+        let mut rec = crate::managed_agents::AgentDefinition {
+            id: pubkey.to_string(),
+            display_name: pubkey.to_string(),
+            avatar_url: None,
+            system_prompt: String::new(),
+            runtime: None,
+            model: None,
+            provider: None,
+            name_pool: Vec::new(),
+            is_builtin: false,
+            is_active: true,
+            source_team: None,
+            source_team_persona_slug: None,
+            env_vars: std::collections::BTreeMap::from([
+                ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+                (
+                    "OPENAI_COMPAT_BASE_URL".to_string(),
+                    "http://127.0.0.1:9337/v1/".to_string(),
+                ),
+                ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+                (
+                    "OPENAI_COMPAT_API_KEY".to_string(),
+                    crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
+                ),
+            ]),
+            respond_to: None,
+            respond_to_allowlist: Vec::new(),
+            parallelism: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+        .into_agent_record();
+        rec.pubkey = pubkey.to_string();
+        rec.backend = crate::managed_agents::BackendKind::Local;
+        rec.runtime_pid = runtime_pid;
+        rec
+    }
+
+    /// Brad #2304 #3: a stopped relay-mesh record (no live `runtime_pid`) must
+    /// NOT be treated as an ingress consumer, or re-arm would resurrect a
+    /// runtime the user deliberately stopped.
+    #[test]
+    fn stopped_relay_mesh_agent_is_not_a_rearm_target() {
+        // No pid at all → not running.
+        assert!(!is_running_relay_mesh_agent(&mesh_record("a", None)));
+        // A pid that is not a live process → not running.
+        // PID 1 is always alive but is not ours; use a very high unlikely pid.
+        let dead = mesh_record("b", Some(4_000_000_000));
+        assert!(!is_running_relay_mesh_agent(&dead));
+    }
+
+    /// A live local relay-mesh agent (own process running) IS a re-arm target.
+    #[test]
+    fn running_relay_mesh_agent_is_a_rearm_target() {
+        let pid = std::process::id();
+        assert!(is_running_relay_mesh_agent(&mesh_record("live", Some(pid))));
+    }
+
+    /// A running process that is NOT relay-mesh (no mesh preset) is ignored
+    /// even if alive — only ingress consumers get re-armed.
+    #[test]
+    fn running_non_mesh_agent_is_not_a_rearm_target() {
+        let mut rec = mesh_record("plain", Some(std::process::id()));
+        rec.env_vars.clear();
+        rec.provider = None;
+        rec.relay_mesh = None;
+        assert!(!is_running_relay_mesh_agent(&rec));
     }
 
     /// Failure copy for watchdog / last_error must be actionable (#2062 silent no-reply).

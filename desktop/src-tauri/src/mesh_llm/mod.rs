@@ -286,7 +286,16 @@ pub fn stopped_status() -> MeshNodeStatus {
     }
 }
 
+/// Monotonic id source so callers can compare runtime *identity* across an
+/// `.await` point. The re-arm watchdog must not evict a fresh replacement that
+/// a concurrent stop/start swapped in while the ingress probe was in flight
+/// (Brad #2304 race), so it captures the id before probing and only evicts if
+/// the same handle is still installed on lock reacquire.
+static MESH_RUNTIME_ID_SEQ: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 pub struct DesktopMeshRuntime {
+    id: u64,
     handle: EmbeddedNodeHandle,
     mode: MeshNodeMode,
     model_id: Option<String>,
@@ -442,12 +451,20 @@ impl DesktopMeshRuntime {
         };
 
         Ok(Self {
+            id: MESH_RUNTIME_ID_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             handle,
             mode: request.mode,
             model_id,
             model_name,
             start_request: request,
         })
+    }
+
+    /// Process-unique identity for this runtime instance. Used by the re-arm
+    /// watchdog to detect a concurrent handle swap across the ingress probe
+    /// `.await` so it never evicts a fresh replacement runtime (Brad #2304).
+    pub fn id(&self) -> u64 {
+        self.id
     }
 
     /// The request this node was started with (roster drift detection).
