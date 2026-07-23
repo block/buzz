@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  canEditCommunityProfile,
   loadRelayMembershipLookup,
   shouldWarnMissingMembershipSnapshot,
 } from "./relayMembers.ts";
@@ -33,6 +34,50 @@ test("membership relays request their membership snapshot", async () => {
   assert.equal(lookup.snapshotFound, true);
   assert.equal(lookup.membershipRequired, true);
   assert.equal(lookup.membership?.role, "admin");
+});
+
+test("community profile editing is visible on open relays", () => {
+  assert.equal(
+    canEditCommunityProfile({
+      snapshotFound: false,
+      membershipRequired: false,
+      membership: null,
+    }),
+    true,
+  );
+});
+
+test("community profile editing is visible to closed-relay admins and owners", () => {
+  for (const role of ["admin", "owner"]) {
+    assert.equal(
+      canEditCommunityProfile({
+        snapshotFound: true,
+        membershipRequired: true,
+        membership: { pubkey: "a".repeat(64), role },
+      }),
+      true,
+    );
+  }
+});
+
+test("community profile editing stays hidden while loading and from closed-relay non-admins", () => {
+  assert.equal(canEditCommunityProfile(undefined), false);
+  assert.equal(
+    canEditCommunityProfile({
+      snapshotFound: true,
+      membershipRequired: true,
+      membership: { pubkey: "a".repeat(64), role: "member" },
+    }),
+    false,
+  );
+  assert.equal(
+    canEditCommunityProfile({
+      snapshotFound: true,
+      membershipRequired: true,
+      membership: null,
+    }),
+    false,
+  );
 });
 
 test("missing snapshot warns when the relay requires membership", () => {
