@@ -30,3 +30,67 @@ export function resolveSelectedActivityAgent<T extends { pubkey: string }>({
     null
   );
 }
+
+/**
+ * Latest activity timestamp (ms) for the composer preview's "Last live" pill.
+ *
+ * Reads the same sources the preview panel renders — the live transcript
+ * window AND the channel-scoped archive — so the pill can never claim
+ * "No activity yet" while archived rows are visible underneath. Falls back
+ * to the active-turn anchor when a turn is running but no items exist yet.
+ */
+export function deriveLastLiveAt({
+  activeTurns,
+  archivedEvents,
+  channelId,
+  transcript,
+}: {
+  activeTurns: readonly { anchorAt: number; channelId: string }[];
+  archivedEvents: readonly { timestamp: string }[];
+  channelId: string | null;
+  transcript: readonly {
+    channelId?: string | null;
+    timestamp: string;
+  }[];
+}): number | null {
+  let latest: number | null = null;
+  const record = (timestamp: number) => {
+    if (latest === null || timestamp > latest) {
+      latest = timestamp;
+    }
+  };
+
+  for (let index = transcript.length - 1; index >= 0; index -= 1) {
+    const item = transcript[index];
+    if (!item || (channelId && item.channelId !== channelId)) {
+      continue;
+    }
+    const millis = Date.parse(item.timestamp);
+    if (!Number.isNaN(millis)) {
+      record(millis);
+      break;
+    }
+  }
+
+  // Archived events are already channel-scoped by the store, sorted ascending.
+  for (let index = archivedEvents.length - 1; index >= 0; index -= 1) {
+    const event = archivedEvents[index];
+    if (!event) {
+      continue;
+    }
+    const millis = Date.parse(event.timestamp);
+    if (!Number.isNaN(millis)) {
+      record(millis);
+      break;
+    }
+  }
+
+  const channelTurn = channelId
+    ? activeTurns.find((turn) => turn.channelId === channelId)
+    : activeTurns[0];
+  if (channelTurn) {
+    record(channelTurn.anchorAt);
+  }
+
+  return latest;
+}

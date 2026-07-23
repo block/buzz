@@ -1,16 +1,18 @@
 import * as React from "react";
 
 import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
-import { scopeByChannel } from "@/features/agents/ui/agentSessionPanelLayout";
-import { isMeaningfulItem } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
-import { useAgentTranscript } from "@/features/agents/ui/useObserverEvents";
+import {
+  useAgentTranscript,
+  useArchivedChannelEvents,
+} from "@/features/agents/ui/useObserverEvents";
 import { formatLastLiveLabel } from "@/features/profile/lib/lastLiveLabel";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { cn } from "@/shared/lib/cn";
 import { useNow } from "@/shared/lib/useNow";
 import { Button } from "@/shared/ui/button";
 import type { BotActivityAgent } from "./BotActivityBar";
+import { deriveLastLiveAt } from "./composerLiveActivity";
 
 /**
  * Single-agent live activity preview for the composer "agents working"
@@ -22,8 +24,10 @@ import type { BotActivityAgent } from "./BotActivityBar";
  * merging, scrolling, and idle handling stay owned by that surface.
  *
  * The whole preview is ONE click target: an overlay button opens the agent's
- * full activity view, and transcript rows underneath are made inert. This
- * avoids nesting interactive transcript controls inside a clickable shell.
+ * full activity view. The panel subtree is wrapped in a native `inert`
+ * container so its rows (which can include keyboard-focusable message links)
+ * are removed from pointer, keyboard-tab, AND assistive-tech interaction —
+ * CSS pointer-events alone would leave them tabbable behind the overlay.
  */
 export function ComposerLiveActivityFeed({
   agent,
@@ -40,26 +44,12 @@ export function ComposerLiveActivityFeed({
 }) {
   const activeTurns = useActiveAgentTurns(agent.pubkey);
   const transcript = useAgentTranscript(true, agent.pubkey);
-  const lastLiveAt = React.useMemo(() => {
-    const scoped = scopeByChannel(transcript, channelId).filter(
-      isMeaningfulItem,
-    );
-    for (let index = scoped.length - 1; index >= 0; index -= 1) {
-      const item = scoped[index];
-      if (!item) {
-        continue;
-      }
-      const millis = Date.parse(item.timestamp);
-      if (!Number.isNaN(millis)) {
-        return millis;
-      }
-    }
-
-    const channelTurn = channelId
-      ? activeTurns.find((turn) => turn.channelId === channelId)
-      : activeTurns[0];
-    return channelTurn?.anchorAt ?? null;
-  }, [activeTurns, channelId, transcript]);
+  const archivedEvents = useArchivedChannelEvents(agent.pubkey, channelId);
+  const lastLiveAt = React.useMemo(
+    () =>
+      deriveLastLiveAt({ activeTurns, archivedEvents, channelId, transcript }),
+    [activeTurns, archivedEvents, channelId, transcript],
+  );
 
   const now = useNow(15_000);
   const lastLiveLabel = formatLastLiveLabel(lastLiveAt, now);
@@ -92,21 +82,27 @@ export function ComposerLiveActivityFeed({
       >
         {lastLiveLabel}
       </Button>
-      <ManagedAgentSessionPanel
-        agent={{ ...agent, avatarUrl }}
-        autoTail={true}
-        channelId={channelId}
-        className="relative z-0 h-full min-h-0 border-0 bg-transparent px-3 text-xs shadow-none **:data-message-id:pointer-events-none"
-        emptyDescription="Live activity will appear here."
-        emptyState="loading"
-        panelPadding={false}
-        profiles={profiles}
-        rawLayout="responsive"
-        showHeader={false}
-        showRaw={false}
-        transcriptContentClassName="py-2"
-        transcriptVariant="compactPreview"
-      />
+      <div
+        className="h-full min-h-0"
+        data-testid="composer-live-activity-inert"
+        inert={true}
+      >
+        <ManagedAgentSessionPanel
+          agent={{ ...agent, avatarUrl }}
+          autoTail={true}
+          channelId={channelId}
+          className="relative z-0 h-full min-h-0 border-0 bg-transparent px-3 text-xs shadow-none"
+          emptyDescription="Live activity will appear here."
+          emptyState="loading"
+          panelPadding={false}
+          profiles={profiles}
+          rawLayout="responsive"
+          showHeader={false}
+          showRaw={false}
+          transcriptContentClassName="py-2"
+          transcriptVariant="compactPreview"
+        />
+      </div>
     </div>
   );
 }
