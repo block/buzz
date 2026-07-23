@@ -2,6 +2,13 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  applyExternalAgentPresentations,
+  externalAgentPresentationScope,
+  useExternalAgentPresentations,
+} from "@/features/agents/externalAgentPresentation";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import {
   connectAcpRuntime,
   discoverAcpAuthMethods,
 } from "@/shared/api/tauriAgentAuth";
@@ -68,6 +75,7 @@ import type {
   CreateManagedAgentInput,
   CreatePersonaInput,
   ManagedAgent,
+  RelayAgent,
   UpdateManagedAgentInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -291,10 +299,23 @@ export function useManagedAgentPrereqsQuery(
 }
 
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
+  const identityQuery = useIdentityQuery();
+  const { activeCommunity } = useCommunities();
+  const presentationScope = externalAgentPresentationScope({
+    identityPubkey: identityQuery.data?.pubkey,
+    relayUrl: activeCommunity?.relayUrl,
+  });
+  const presentations = useExternalAgentPresentations(presentationScope);
+
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
-    staleTime: 30_000,
+    select: React.useCallback(
+      (agents: RelayAgent[]) =>
+        applyExternalAgentPresentations(agents, presentations),
+      [presentations],
+    ),
+    staleTime: 15_000,
     // Relay agent profiles (kind:10100) are near-static and the backing
     // `list_relay_agents` command is an unfiltered relay query for the whole
     // profile set — mounted on ~13 always-live surfaces (channel screen,
@@ -302,9 +323,13 @@ export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
     // re-pulls the full set app-wide. This poll is also the ONLY refresh path:
     // the `agents-data-changed` event fires only for local persona/team/managed
     // reconcile (kinds PERSONA/TEAM/MANAGED_AGENT), never for kind:10100. So we
-    // keep polling but at a relaxed cadence and pause it while backgrounded.
-    refetchInterval: 5 * 60_000,
+    // External agents publish this profile from another process, so there is
+    // no local Tauri event to invalidate the cache. Poll often enough for a
+    // newly started agent to appear without requiring an app restart, and
+    // always refresh when the user returns to Buzz.
+    refetchInterval: 30_000,
     refetchIntervalInBackground: false,
+    refetchOnWindowFocus: "always",
     enabled: options?.enabled,
   });
 }

@@ -324,9 +324,9 @@ export function MembersSidebar({
       addCandidate({
         pubkey: agent.pubkey,
         displayName: agent.name,
-        avatarUrl: null,
+        avatarUrl: agent.avatarUrl,
         nip05Handle: null,
-        ownerPubkey: null,
+        ownerPubkey: agent.ownerPubkey,
         isAgent: true,
       });
     }

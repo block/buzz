@@ -266,11 +266,25 @@ export function UserProfilePanel({
   const unfollowMutation = useUnfollowMutation(currentPubkey);
   const { canOpenAgentActivity, openAgentActivity } = useOpenAgentActivity();
   const { goChannel } = useAppNavigation();
-  const profile = resolvePanelProfile({
+  const relayAgent = relayAgentsQuery.data?.find(
+    (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
+  );
+  const baseProfile = resolvePanelProfile({
     managedAgent,
     persona: resolvedPersona,
     profile: profileQuery.data,
   });
+  const profile = relayAgent
+    ? {
+        pubkey: effectivePubkey ?? relayAgent.pubkey,
+        displayName: relayAgent.name || baseProfile?.displayName || null,
+        avatarUrl: relayAgent.avatarUrl ?? baseProfile?.avatarUrl ?? null,
+        about: baseProfile?.about ?? null,
+        nip05Handle: baseProfile?.nip05Handle ?? null,
+        ownerPubkey: relayAgent.ownerPubkey ?? baseProfile?.ownerPubkey ?? null,
+        hasProfileEvent: baseProfile?.hasProfileEvent ?? false,
+      }
+    : baseProfile;
   const ownerPubkey = profile?.ownerPubkey ?? null;
   const ownerProfileQuery = useUserProfileQuery(ownerPubkey ?? undefined);
   const presenceStatus = pubkeyLower
@@ -280,9 +294,6 @@ export function UserProfilePanel({
     ? userStatusQuery.data?.[pubkeyLower]
     : undefined;
 
-  const relayAgent = relayAgentsQuery.data?.find(
-    (agent) => agent.pubkey.toLowerCase() === pubkeyLower,
-  );
   const managedAgentLogQuery = useManagedAgentLogQuery(
     (view === "diagnostics" || view === "logs") &&
       managedAgent?.backend.type === "local"

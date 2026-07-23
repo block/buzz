@@ -177,6 +177,10 @@ impl ManagedAgentRecord {
 pub struct RelayAgentInfo {
     pub pubkey: String,
     pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub owner_pubkey: Option<String>,
     pub agent_type: String,
     pub channels: Vec<String>,
     #[serde(default)]

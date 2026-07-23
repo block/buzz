@@ -55,13 +55,13 @@ fn tags_named<'a>(event: &'a Event, name: &'a str) -> impl Iterator<Item = &'a [
     })
 }
 
-/// Return the owner pubkey from a valid NIP-OA owner tag on a kind:0 profile.
+/// Return the owner pubkey from a valid NIP-OA owner tag on an agent-authored
+/// event.
 ///
-/// NIP-OA marks an agent identity by having the owner sign an `auth` tag for
-/// the agent pubkey. We verify the tag against the profile event author, not
-/// against the owner, so a forged or stale marker does not turn a person into
-/// an agent in mention search.
-pub(crate) fn profile_valid_oa_owner_pubkey(event: &Event) -> Option<String> {
+/// The owner signs an `auth` tag for the agent pubkey. We verify the tag
+/// against the event author, not against a self-claimed content field, so a
+/// forged or stale marker cannot establish ownership.
+fn valid_oa_owner_pubkey(event: &Event) -> Option<String> {
     let target_hex = event.pubkey.to_hex();
     let Ok(target_pubkey) = nostr::PublicKey::from_hex(&target_hex) else {
         return None;
@@ -81,6 +81,10 @@ pub(crate) fn profile_valid_oa_owner_pubkey(event: &Event) -> Option<String> {
     }
 
     None
+}
+
+pub(crate) fn profile_valid_oa_owner_pubkey(event: &Event) -> Option<String> {
+    valid_oa_owner_pubkey(event)
 }
 
 pub(crate) fn profile_has_valid_oa_owner(event: &Event) -> bool {
@@ -448,12 +452,25 @@ pub fn agents_from_events(events: &[Event]) -> Value {
         .map(|ev| {
             let mut v: Value = serde_json::from_str(&ev.content).unwrap_or_else(|_| json!({}));
             let pubkey = ev.pubkey.to_hex();
+            let verified_owner_pubkey = valid_oa_owner_pubkey(ev);
             // Full npub fallback — truncated prefixes are grindable (see pubkey-display).
             let npub = ev.pubkey.to_bech32().unwrap_or_else(|_| pubkey.clone());
             // Always overwrite the pubkey with the event author — it's the
             // authoritative source even if the content claims otherwise.
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("pubkey".to_string(), json!(pubkey.clone()));
+                // Never trust the self-claimed directory JSON for ownership.
+                // NIP-OA binds the owner signature to this event author's
+                // pubkey, so only the verified auth tag may populate this
+                // security-sensitive field.
+                match verified_owner_pubkey {
+                    Some(owner_pubkey) => {
+                        obj.insert("owner_pubkey".to_string(), json!(owner_pubkey));
+                    }
+                    None => {
+                        obj.remove("owner_pubkey");
+                    }
+                }
                 let fallback_name = obj
                     .get("display_name")
                     .and_then(Value::as_str)
@@ -465,6 +482,14 @@ pub fn agents_from_events(events: &[Event]) -> Value {
                 }
                 if !obj.get("agent_type").is_some_and(Value::is_string) {
                     obj.insert("agent_type".to_string(), json!("agent"));
+                }
+                if !obj.get("avatar_url").is_some_and(Value::is_string) {
+                    let avatar_url = obj
+                        .get("picture")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_string);
+                    obj.insert("avatar_url".to_string(), json!(avatar_url));
                 }
                 if !obj.get("channels").is_some_and(Value::is_array) {
                     obj.insert("channels".to_string(), json!([]));
@@ -482,6 +507,7 @@ pub fn agents_from_events(events: &[Event]) -> Value {
                 v = json!({
                     "pubkey": pubkey,
                     "name": npub,
+                    "avatar_url": null,
                     "agent_type": "agent",
                     "channels": [],
                     "channel_ids": [],
@@ -597,6 +623,11 @@ mod tests {
 
     /// Build a kind:0 profile with a valid NIP-OA auth tag.
     fn oa_profile_event(content: &str) -> (Event, String) {
+        oa_event(Kind::Metadata, content)
+    }
+
+    /// Build an event with a valid NIP-OA auth tag for its author.
+    fn oa_event(kind: Kind, content: &str) -> (Event, String) {
         let agent_keys = Keys::generate();
         let owner_keys = Keys::generate();
         let agent_pubkey = agent_keys.public_key();
@@ -605,7 +636,7 @@ mod tests {
         let tag_values: Vec<String> = serde_json::from_str(&tag_json).expect("parse auth tag json");
         let auth_tag = Tag::parse(tag_values).expect("parse auth tag");
 
-        let event = EventBuilder::new(Kind::Metadata, content)
+        let event = EventBuilder::new(kind, content)
             .tags(vec![auth_tag])
             .sign_with_keys(&agent_keys)
             .expect("sign");
@@ -896,6 +927,34 @@ mod tests {
     }
 
     #[test]
+    fn agents_derives_owner_from_valid_nip_oa_auth_tag() {
+        let (e, owner_pubkey) = oa_event(
+            Kind::from_u16(10100),
+            r#"{"name":"Alice","owner_pubkey":"forged"}"#,
+        );
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let arr = v.get("agents").and_then(Value::as_array).unwrap();
+
+        assert_eq!(
+            arr[0].get("owner_pubkey").and_then(Value::as_str),
+            Some(owner_pubkey.as_str())
+        );
+    }
+
+    #[test]
+    fn agents_rejects_self_claimed_owner_without_valid_nip_oa_auth_tag() {
+        let e = ev(
+            10100,
+            r#"{"name":"Mallory","owner_pubkey":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+            vec![],
+        );
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let arr = v.get("agents").and_then(Value::as_array).unwrap();
+
+        assert!(arr[0].get("owner_pubkey").is_none());
+    }
+
+    #[test]
     fn agents_handles_invalid_content() {
         let e = ev(10100, "not-json", vec![]);
         let v = agents_from_events(std::slice::from_ref(&e));
@@ -910,7 +969,7 @@ mod tests {
     fn agents_default_sparse_agent_profiles_for_directory_parse() {
         let e = ev(
             10100,
-            r#"{"channel_add_policy":"owner-only","display_name":"Scout"}"#,
+            r#"{"channel_add_policy":"owner-only","display_name":"Scout","picture":"https://example.com/scout.png"}"#,
             vec![],
         );
         let v = agents_from_events(std::slice::from_ref(&e));
@@ -921,6 +980,10 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].pubkey, e.pubkey.to_hex());
         assert_eq!(parsed[0].name, "Scout");
+        assert_eq!(
+            parsed[0].avatar_url.as_deref(),
+            Some("https://example.com/scout.png")
+        );
         assert_eq!(parsed[0].agent_type, "agent");
         assert_eq!(parsed[0].channels, Vec::<String>::new());
         assert_eq!(parsed[0].capabilities, Vec::<String>::new());

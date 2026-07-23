@@ -106,6 +106,22 @@ fn goose_has_no_mcp_hooks() {
 }
 
 #[test]
+fn hermes_uses_its_native_tools_and_personal_config() {
+    let runtime = known_acp_runtime("hermes-acp").expect("should resolve");
+    assert_eq!(runtime.id, "hermes");
+    assert!(!runtime.mcp_hooks);
+    assert_eq!(runtime.mcp_command, None);
+    assert_eq!(runtime.config_file_path, Some("~/.hermes/config.yaml"));
+}
+
+#[test]
+fn hermes_process_names_are_owned_runtime_candidates() {
+    assert!(super::name_matches_known_binary("hermes"));
+    assert!(super::name_matches_known_binary("hermes-acp"));
+    assert!(super::name_matches_known_binary("hermes_acp"));
+}
+
+#[test]
 fn unknown_command_returns_none() {
     assert!(known_acp_runtime("custom-agent").is_none());
 }

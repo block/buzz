@@ -369,9 +369,9 @@ function EmptyObserverState() {
   return (
     <div className="mt-4 flex min-h-48 flex-col items-center justify-center px-6 py-8 text-center">
       <TerminalSquare className="mx-auto h-4 w-4 text-muted-foreground" />
-      <p className="mt-3 text-sm font-medium">Observer not attached</p>
+      <p className="mt-3 text-sm font-medium">No observer activity yet</p>
       <p className="mt-1 text-sm text-muted-foreground">
-        The live feed is available for local agents started after this update.
+        Activity appears here when this agent starts its next observed turn.
       </p>
     </div>
   );

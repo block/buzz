@@ -175,9 +175,9 @@ export function useNewMessageRecipients({
         {
           pubkey: agent.pubkey,
           displayName: agent.name,
-          avatarUrl: null,
+          avatarUrl: agent.avatarUrl,
           nip05Handle: null,
-          ownerPubkey: null,
+          ownerPubkey: agent.ownerPubkey,
           isAgent: true,
         },
         { includeSelected: deferredSearchQuery.length > 0 },

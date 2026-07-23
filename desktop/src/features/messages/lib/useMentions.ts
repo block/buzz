@@ -179,6 +179,16 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
+  const relayAgentAvatarsByPubkey = React.useMemo(
+    () =>
+      new Map(
+        (relayAgentsQuery.data ?? []).map((agent) => [
+          normalizePubkey(agent.pubkey),
+          agent.avatarUrl,
+        ]),
+      ),
+    [relayAgentsQuery.data],
+  );
   const directoryAgentPubkeys = React.useMemo(
     () =>
       new Set(
@@ -246,7 +256,10 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !mentionableAgentPubkeys.has(pubkey) &&
+        !isAgentIdentityInManagedList(candidate, managedAgentPubkeys)
+      ) {
         return;
       }
       if (
@@ -311,7 +324,8 @@ export function useMentions(
           profile?.displayName?.trim() ||
           profile?.nip05Handle?.trim() ||
           null,
-        avatarUrl: profile?.avatarUrl ?? null,
+        avatarUrl:
+          relayAgentAvatarsByPubkey.get(pubkey) ?? profile?.avatarUrl ?? null,
         isMember: true,
         personaId:
           managedAgentPersonaIdsByPubkey.get(pubkey) ?? linkedPersonaId,
@@ -337,11 +351,12 @@ export function useMentions(
         kind: "identity",
         pubkey,
         displayName: agent.name,
+        avatarUrl: agent.avatarUrl,
         isMember: false,
         personaId:
           managedAgentPersonaIdsByPubkey.get(pubkey) ??
           (activePersonaById.has(pubkey) ? pubkey : undefined),
-        ownerPubkey: null,
+        ownerPubkey: agent.ownerPubkey,
         isAgent: true,
       });
     }
@@ -427,6 +442,7 @@ export function useMentions(
     mentionableAgentPubkeys,
     personaNameByPubkey,
     profiles,
+    relayAgentAvatarsByPubkey,
     relayAgentNamesByPubkey,
     relayAgentsQuery.data,
   ]);

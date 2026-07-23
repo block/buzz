@@ -52,7 +52,12 @@ test("relayAgentIsSharedWithUser: accepts shared anyone agents and rejects unsha
 
   assert.equal(
     relayAgentIsSharedWithUser(
-      { respondTo: "anyone", respondToAllowlist: [], channelIds: ["general"] },
+      {
+        ownerPubkey: null,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
       sharedChannelIds,
     ),
     true,
@@ -60,6 +65,7 @@ test("relayAgentIsSharedWithUser: accepts shared anyone agents and rejects unsha
   assert.equal(
     relayAgentIsSharedWithUser(
       {
+        ownerPubkey: null,
         respondTo: "owner-only",
         respondToAllowlist: [],
         channelIds: ["general"],
@@ -70,7 +76,12 @@ test("relayAgentIsSharedWithUser: accepts shared anyone agents and rejects unsha
   );
   assert.equal(
     relayAgentIsSharedWithUser(
-      { respondTo: "anyone", respondToAllowlist: [], channelIds: ["other"] },
+      {
+        ownerPubkey: null,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["other"],
+      },
       sharedChannelIds,
     ),
     false,
@@ -83,6 +94,7 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
   assert.equal(
     relayAgentIsSharedWithUser(
       {
+        ownerPubkey: null,
         respondTo: "allowlist",
         respondToAllowlist: [OTHER_OWNER_PUBKEY, CURRENT_PUBKEY.toUpperCase()],
         channelIds: ["other"],
@@ -95,11 +107,41 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
   assert.equal(
     relayAgentIsSharedWithUser(
       {
+        ownerPubkey: null,
         respondTo: "allowlist",
         respondToAllowlist: [OTHER_OWNER_PUBKEY],
         channelIds: ["general"],
       },
       sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("relayAgentIsSharedWithUser: accepts owner-only agents for their owner", () => {
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        ownerPubkey: CURRENT_PUBKEY.toUpperCase(),
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+        channelIds: [],
+      },
+      new Set(),
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        ownerPubkey: OTHER_OWNER_PUBKEY,
+        respondTo: "owner-only",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      new Set(["general"]),
       CURRENT_PUBKEY,
     ),
     false,
@@ -113,18 +155,21 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
     relayAgents: [
       {
         pubkey: PUB_B,
+        ownerPubkey: null,
         respondTo: "anyone",
         respondToAllowlist: [],
         channelIds: ["general"],
       },
       {
         pubkey: PUB_C,
+        ownerPubkey: null,
         respondTo: "allowlist",
         respondToAllowlist: [CURRENT_PUBKEY],
         channelIds: ["other"],
       },
       {
         pubkey: PUB_D,
+        ownerPubkey: null,
         respondTo: "anyone",
         respondToAllowlist: [],
         channelIds: ["other"],

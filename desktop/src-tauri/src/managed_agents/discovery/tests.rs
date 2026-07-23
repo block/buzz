@@ -8,7 +8,7 @@ use super::{
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
     refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    GOOSE_AVATAR_URL, HERMES_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -36,6 +36,14 @@ fn resolves_known_avatar_for_command_paths_and_aliases() {
     assert_eq!(
         managed_agent_avatar_url("/usr/local/bin/claude-code-acp"),
         Some(CLAUDE_CODE_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/home/alice/.local/bin/hermes-acp"),
+        Some(HERMES_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("hermes"),
+        Some(HERMES_AVATAR_URL.to_string())
     );
 }
 
@@ -68,6 +76,18 @@ fn normalizes_claude_and_codex_args_to_empty() {
     );
     assert_eq!(
         normalize_agent_args("codex-acp", vec!["acp".into()]),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn normalizes_hermes_entrypoints() {
+    assert_eq!(
+        normalize_agent_args("hermes", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("hermes-acp", vec!["acp".into()]),
         Vec::<String>::new()
     );
 }
