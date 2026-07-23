@@ -155,9 +155,9 @@ pub(crate) fn sanitize_filename(name: &str) -> String {
 
 /// Return true when a PNG/WebP payload declares animation.
 ///
-/// Animated payloads are left byte-identical here so frame timing, looping,
-/// and disposal semantics are preserved. The relay's structural validator is
-/// still the authority that rejects any metadata-bearing animation.
+/// Animated payloads use structural sanitizers so frame timing, looping, and
+/// disposal semantics are preserved without flattening the image. The relay's
+/// validator remains the final authority for the sanitized container.
 fn is_animated_image(body: &[u8], mime: &str) -> bool {
     match mime {
         "image/png" if body.starts_with(b"\x89PNG\r\n\x1a\n") => {
@@ -228,7 +228,40 @@ pub(crate) fn sanitize_image_for_upload(body: Vec<u8>, mime: &str) -> Result<Vec
     };
 
     if is_animated_image(&body, mime) {
-        return Ok(body);
+        let oriented_format = match mime {
+            "image/png" if super::media_animated::animated_png_uses_exif_orientation(&body) => {
+                Some("PNG")
+            }
+            "image/webp" if super::media_animated::animated_webp_uses_exif_orientation(&body) => {
+                Some("WebP")
+            }
+            _ => None,
+        };
+        if let Some(format) = oriented_format {
+            return Err(format!(
+                "animated {format} with EXIF orientation cannot be uploaded without changing its appearance"
+            ));
+        }
+        let color_profile_format = match mime {
+            "image/png" if super::media_animated::animated_png_uses_icc_profile(&body) => {
+                Some("PNG")
+            }
+            "image/webp" if super::media_animated::animated_webp_uses_icc_profile(&body) => {
+                Some("WebP")
+            }
+            _ => None,
+        };
+        if let Some(format) = color_profile_format {
+            return Err(format!(
+                "animated {format} with an ICC profile cannot be uploaded without changing its colors"
+            ));
+        }
+        let stripped = match mime {
+            "image/png" => super::media_animated::strip_animated_png_metadata(&body),
+            "image/webp" => super::media_animated::strip_animated_webp_metadata(&body),
+            _ => None,
+        };
+        return Ok(stripped.unwrap_or(body));
     }
 
     use image::ImageDecoder;
@@ -900,18 +933,12 @@ mod tests {
         apng.extend_from_slice(&[0; 8]);
         apng.extend_from_slice(&[0; 4]);
         assert!(is_animated_image(&apng, "image/png"));
-        assert_eq!(
-            sanitize_image_for_upload(apng.clone(), "image/png").unwrap(),
-            apng
-        );
+        assert!(sanitize_image_for_upload(apng, "image/png").is_ok());
 
         let mut webp = b"RIFF\x0c\0\0\0WEBPANIM".to_vec();
         webp.extend_from_slice(&0u32.to_le_bytes());
         assert!(is_animated_image(&webp, "image/webp"));
-        assert_eq!(
-            sanitize_image_for_upload(webp.clone(), "image/webp").unwrap(),
-            webp
-        );
+        assert!(sanitize_image_for_upload(webp, "image/webp").is_ok());
     }
 
     #[test]

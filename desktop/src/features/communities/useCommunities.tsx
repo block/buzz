@@ -72,6 +72,42 @@ export function resolveCommunityUpdateResult(
   return { kind: "updated", requiresReinit: backendFieldsChanged };
 }
 
+/**
+ * Permute `communities` so that its order matches `orderedIds`.
+ *
+ * - Communities whose id appears in `orderedIds` are placed first, in the
+ *   order given by `orderedIds`.
+ * - Communities not mentioned in `orderedIds` (e.g. added after the drag
+ *   completed) are appended at the end in their original relative order.
+ *
+ * Pure and side-effect-free — extracted so it can be unit-tested without
+ * a DOM or React.
+ */
+export function applyCommunitiesOrder(
+  communities: Community[],
+  orderedIds: string[],
+): Community[] {
+  const byId = new Map(communities.map((c) => [c.id, c]));
+  const seen = new Set<string>();
+  const reordered: Community[] = [];
+
+  for (const id of orderedIds) {
+    const c = byId.get(id);
+    if (c && !seen.has(id)) {
+      reordered.push(c);
+      seen.add(id);
+    }
+  }
+
+  for (const c of communities) {
+    if (!seen.has(c.id)) {
+      reordered.push(c);
+    }
+  }
+
+  return reordered;
+}
+
 export type UseCommunitiesReturn = {
   communities: Community[];
   activeCommunity: Community | null;
@@ -90,6 +126,8 @@ export type UseCommunitiesReturn = {
       Pick<Community, "name" | "relayUrl" | "token" | "pubkey" | "reposDir">
     >,
   ) => UpdateCommunityResult;
+  /** Persist a new display order for the rail. IDs not in orderedIds keep their relative position at the end. */
+  reorderCommunities: (orderedIds: string[]) => void;
 };
 
 const CommunitiesContext = createContext<UseCommunitiesReturn | null>(null);
@@ -242,6 +280,14 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     [activeId],
   );
 
+  const reorderCommunities = useCallback((orderedIds: string[]) => {
+    setCommunitiesState((prev) => {
+      const next = applyCommunitiesOrder(prev, orderedIds);
+      saveCommunities(next);
+      return next;
+    });
+  }, []);
+
   return {
     communities,
     activeCommunity,
@@ -252,5 +298,6 @@ function useCommunitiesInternal(): UseCommunitiesReturn {
     switchCommunity,
     reconnectCommunity,
     updateCommunity,
+    reorderCommunities,
   };
 }
