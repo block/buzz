@@ -39,7 +39,7 @@ just relay &                         # relay on :3000
 PGPASSWORD=buzz_dev psql -h localhost -U buzz -d buzz -c \
   "INSERT INTO pubkey_allowlist (pubkey) VALUES (decode('<64-char-hex-pubkey>', 'hex'))"
 
-# 5. Connect any NIP-29 + NIP-42 client to ws://localhost:3000
+# 4. Connect any NIP-29 + NIP-42 client to ws://localhost:3000
 ```
 
 ### What Works
@@ -354,3 +354,7 @@ but only admins/owners can set it. Full spec:
 ---
 
 ## Further Reading
+
+- [nostr-protocol/nips](https://github.com/nostr-protocol/nips) — the upstream NIP specifications (NIP-01, NIP-29, NIP-42, and the other NIPs referenced throughout this guide).
+- [`docs/nips/`](docs/nips/) — Buzz's own NIP extension documents.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — event kinds, wire protocol, and relay internals.
