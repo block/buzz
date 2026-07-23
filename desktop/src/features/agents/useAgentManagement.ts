@@ -88,6 +88,8 @@ export function useAgentManagement() {
   >([]);
   const pendingDraftCount = useAgentManagementDraftCount();
   const reviewRequestVersion = useAgentManagementReviewRequestVersion();
+  const previousPendingDraftCount = React.useRef(pendingDraftCount);
+  const previousReviewRequestVersion = React.useRef(reviewRequestVersion);
   const request = activeDraft?.request ?? null;
   const sourceAgentPubkey = activeDraft?.agentPubkey ?? null;
 
@@ -293,6 +295,9 @@ export function useAgentManagement() {
     const requestId = activeDraft?.request.requestId;
     if (removeFromStore && requestId) {
       removeAgentManagementDraft(requestId);
+      setActiveDraft(peekPendingAgentManagementDraft() ?? null);
+      setError(null);
+      return;
     }
     setActiveDraft(null);
     setError(null);
@@ -303,11 +308,17 @@ export function useAgentManagement() {
   }
 
   function dismiss() {
-    clearActiveDraft(true);
+    clearActiveDraft(false);
   }
 
   React.useEffect(() => {
-    if (pendingDraftCount === 0 && reviewRequestVersion === 0) return;
+    const countIncreased =
+      pendingDraftCount > previousPendingDraftCount.current;
+    const reviewRequested =
+      reviewRequestVersion !== previousReviewRequestVersion.current;
+    previousPendingDraftCount.current = pendingDraftCount;
+    previousReviewRequestVersion.current = reviewRequestVersion;
+    if (!countIncreased && !reviewRequested) return;
     showNextPendingDraft();
   }, [pendingDraftCount, reviewRequestVersion, showNextPendingDraft]);
 
