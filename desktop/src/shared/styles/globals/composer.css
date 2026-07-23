@@ -42,6 +42,13 @@
   min-height: 1lh;
   font-size: var(--text-sm);
   line-height: var(--text-sm--line-height);
+  /* The composer shell above uses backdrop-filter (backdrop-blur). On WebKit
+     (WKWebView, the macOS Tauri webview) a contenteditable nested under a
+     backdrop-filter ancestor does not invalidate the previous caret rect, so
+     after Enter the old caret leaves a "ghost" at its prior position. Promoting
+     the editor onto its own compositing layer forces the stale caret rect to
+     clear on every selection change. Integer translateZ(0) keeps text crisp. */
+  transform: translateZ(0);
 }
 
 .rich-text-composer .tiptap p {
