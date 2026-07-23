@@ -160,14 +160,26 @@ export function initFirstCommunity(
     pubkey,
     addedAt: new Date().toISOString(),
   };
-  const didSaveCommunities = saveCommunities([community]);
-  const didSaveActiveCommunity =
-    didSaveCommunities && saveActiveCommunityId(community.id);
+  const previousActiveCommunityId = localStorage.getItem(ACTIVE_COMMUNITY_KEY);
+  const didSaveActiveCommunity = saveActiveCommunityId(community.id);
+  if (!didSaveActiveCommunity) {
+    return null;
+  }
 
-  // The quota-recovery helper reports failure instead of throwing. Do not let
-  // callers reload unless both writes landed; otherwise first launch can loop.
-  if (!didSaveCommunities || !didSaveActiveCommunity) {
-    clearCommunityStorage();
+  if (!saveCommunities([community])) {
+    // A failed setItem leaves the existing communities value untouched. Roll
+    // back only the active-ID write so inconsistent pre-existing data is never
+    // destroyed while recovering from a quota failure.
+    try {
+      if (previousActiveCommunityId === null) {
+        localStorage.removeItem(ACTIVE_COMMUNITY_KEY);
+      } else {
+        localStorage.setItem(ACTIVE_COMMUNITY_KEY, previousActiveCommunityId);
+      }
+    } catch {
+      // Best effort: persistence is already unavailable, and callers will stay
+      // on setup instead of reloading.
+    }
     return null;
   }
 
