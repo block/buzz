@@ -100,6 +100,10 @@ grok login   # or export XAI_API_KEY=...
 export BUZZ_ACP_AGENT_COMMAND="grok"
 export BUZZ_ACP_AGENT_ARGS="agent --always-approve stdio"
 
+> **Maintainer note:** Grok installs may also put a bare `agent` shim on PATH.
+> Buzz registers **`grok` + args**, never a second runtime keyed as nested `agent`.
+> Cursor uses `cursor-agent` for the same reason (shared shim name).
+
 buzz-acp
 ```
 

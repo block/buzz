@@ -97,6 +97,23 @@ fn normalizes_grok_args_to_agent_stdio() {
 }
 
 #[test]
+fn grok_does_not_claim_bare_agent_path_shim() {
+    // Differentiation vs Cursor: Grok registry is `grok` + args only.
+    // Bare `agent` must NOT resolve to the grok catalog entry.
+    let grok = super::known_acp_runtime_exact("grok").expect("grok runtime");
+    assert!(
+        !grok.commands.iter().any(|c| *c == "agent"),
+        "grok.commands must not include bare agent (Cursor owns that disambiguation)"
+    );
+    assert!(
+        super::known_acp_runtime("agent").map(|r| r.id) != Some("grok"),
+        "basename agent must not bind Grok Build"
+    );
+    assert_eq!(super::known_acp_runtime("grok").map(|r| r.id), Some("grok"));
+}
+
+
+#[test]
 fn resolves_grok_avatar() {
     assert_eq!(
         managed_agent_avatar_url("grok"),

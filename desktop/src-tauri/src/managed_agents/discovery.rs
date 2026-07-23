@@ -164,6 +164,12 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     // no separate *-acp npm adapter (same class as Goose / Cursor).
     // Auth: `grok login` or XAI_API_KEY. For managed/headless agents we default
     // `--always-approve` so tool calls do not block on a TTY prompt.
+    //
+    // PATH collision note for maintainers: the install may also drop an
+    // `agent` shim under ~/.local/bin. Registry discovery intentionally uses
+    // ONLY the `grok` binary (+ `agent` / `stdio` ARGS). Bare `agent` must
+    // never appear in `commands` here — Cursor's entry owns that name and
+    // disambiguates via path heuristics (see cursor-acp PR / is_cursor_agent_binary).
     KnownAcpRuntime {
         id: "grok",
         label: "Grok Build",
