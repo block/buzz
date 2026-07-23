@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ACP_RUNTIME_VISIBILITY_STORAGE_KEY,
   filterEnabledAcpRuntimes,
+  maskDisabledAcpRuntimePreference,
   nextDisabledAcpRuntimeIds,
   parseDisabledAcpRuntimeIds,
   readDisabledAcpRuntimeIds,
@@ -50,4 +51,19 @@ test("stored runtime visibility is read from the versioned device key", () => {
   };
 
   assert.deepEqual(readDisabledAcpRuntimeIds(storage), ["claude"]);
+});
+
+test("a disabled saved runtime is removed from the effective preference", () => {
+  const config = {
+    env_vars: {},
+    provider: null,
+    model: null,
+    preferred_runtime: "Goose",
+  };
+
+  assert.deepEqual(maskDisabledAcpRuntimePreference(config, ["goose"]), {
+    ...config,
+    preferred_runtime: null,
+  });
+  assert.equal(maskDisabledAcpRuntimePreference(config, ["claude"]), config);
 });

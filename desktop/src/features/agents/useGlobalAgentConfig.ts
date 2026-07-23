@@ -9,8 +9,14 @@
  * On fetch error the query falls back to EMPTY_CONFIG (safe — the absence of
  * a global config is never an error state for callers).
  */
+import * as React from "react";
+
 import { useQuery } from "@tanstack/react-query";
 
+import {
+  maskDisabledAcpRuntimePreference,
+  useDisabledAcpRuntimeIds,
+} from "@/features/agents/lib/runtimeVisibilityPreference";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
 
@@ -27,6 +33,7 @@ export function useGlobalAgentConfig(): {
   globalConfig: GlobalAgentConfig;
   isLoading: boolean;
 } {
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
   const { data, isPending } = useQuery({
     queryKey: globalAgentConfigQueryKey,
     queryFn: getGlobalAgentConfig,
@@ -36,9 +43,17 @@ export function useGlobalAgentConfig(): {
     // Never show a stale empty flash while a background refetch runs.
     placeholderData: EMPTY_CONFIG,
   });
+  const globalConfig = React.useMemo(
+    () =>
+      maskDisabledAcpRuntimePreference(
+        data ?? EMPTY_CONFIG,
+        disabledRuntimeIds,
+      ),
+    [data, disabledRuntimeIds],
+  );
 
   return {
-    globalConfig: data ?? EMPTY_CONFIG,
+    globalConfig,
     isLoading: isPending,
   };
 }

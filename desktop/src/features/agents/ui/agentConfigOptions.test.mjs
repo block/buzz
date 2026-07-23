@@ -5,6 +5,7 @@ import {
   getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  reconcilePreferredRuntimeFallback,
   resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
@@ -187,6 +188,23 @@ test("resetConfigForHarnessChange does not carry relay mesh to Goose", () => {
   };
 
   assert.equal(resetConfigForHarnessChange(config, "goose").provider, null);
+});
+
+test("reconcilePreferredRuntimeFallback updates a hidden saved default", () => {
+  const config = {
+    env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high", SHARED: "kept" },
+    provider: "anthropic",
+    model: "claude-opus",
+    preferred_runtime: "goose",
+  };
+
+  assert.deepEqual(reconcilePreferredRuntimeFallback(config, "buzz-agent"), {
+    env_vars: { SHARED: "kept" },
+    provider: "anthropic",
+    model: null,
+    preferred_runtime: "buzz-agent",
+  });
+  assert.equal(reconcilePreferredRuntimeFallback(config, "goose"), config);
 });
 
 // ── getPersonaModelOptions — codex/claude do not use global provider ──────────

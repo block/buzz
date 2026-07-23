@@ -198,6 +198,25 @@ export function resetConfigForHarnessChange(
   };
 }
 
+/**
+ * Align a stale or hidden saved preference with the fallback shown by a
+ * runtime selector, clearing values that are not portable across harnesses.
+ */
+export function reconcilePreferredRuntimeFallback(
+  config: GlobalAgentConfig,
+  fallbackRuntimeId: string | null,
+): GlobalAgentConfig {
+  if (
+    !config.preferred_runtime ||
+    !fallbackRuntimeId ||
+    config.preferred_runtime === fallbackRuntimeId
+  ) {
+    return config;
+  }
+
+  return resetConfigForHarnessChange(config, fallbackRuntimeId);
+}
+
 function effectiveModelProviderForOptions(
   runtimeId: string,
   providerId: string | null | undefined,

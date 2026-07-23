@@ -95,6 +95,28 @@ export function filterEnabledAcpRuntimes<T extends { id: string }>(
   );
 }
 
+/**
+ * Prevent a disabled runtime from remaining the effective global preference.
+ *
+ * The persisted config is left untouched until the user next saves defaults;
+ * consumers immediately fall back through the normal runtime selection path.
+ */
+export function maskDisabledAcpRuntimePreference<
+  T extends { preferred_runtime: string | null },
+>(config: T, disabledRuntimeIds: readonly string[]): T {
+  const preferredRuntime = config.preferred_runtime;
+  if (
+    !preferredRuntime ||
+    !disabledRuntimeIds
+      .map(normalizeRuntimeId)
+      .includes(normalizeRuntimeId(preferredRuntime))
+  ) {
+    return config;
+  }
+
+  return { ...config, preferred_runtime: null };
+}
+
 function getDisabledRuntimeIdsSnapshot(): readonly string[] {
   const storage = getLocalStorage();
   if (!storage) return EMPTY_DISABLED_RUNTIME_IDS;

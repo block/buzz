@@ -227,6 +227,12 @@ test.describe("Doctor panel state screenshots", () => {
         CLAUDE_AVAILABLE_LOGGED_IN,
         BUZZ_AGENT_AVAILABLE,
       ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: "anthropic",
+        model: "claude-opus",
+        preferred_runtime: "goose",
+      },
     });
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -237,6 +243,27 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(gooseToggle).toBeEnabled();
     await gooseToggle.click();
     await expect(gooseToggle).not.toBeChecked();
+
+    const defaultHarness = page.getByTestId("global-agent-default-harness");
+    await expect(defaultHarness).toHaveText("Buzz Agent");
+    const provider = page.getByTestId("global-agent-provider");
+    await provider.click();
+    await page.getByTestId("global-agent-provider-option-openai").click();
+    await page.getByRole("button", { name: "Save defaults" }).click();
+    const savedConfig = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(savedConfig).toMatchObject({
+      provider: "openai",
+      preferred_runtime: "buzz-agent",
+    });
 
     await page.getByRole("button", { name: "Back to app" }).click();
     await page.getByTestId("open-agents-view").click();

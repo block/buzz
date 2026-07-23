@@ -23,6 +23,7 @@ import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
+  reconcilePreferredRuntimeFallback,
   resetConfigForHarnessChange,
   sortPersonaRuntimes,
 } from "@/features/agents/ui/agentConfigOptions";
@@ -131,6 +132,11 @@ export function AgentDefaultsEditor({
       sortedRuntimes[0],
     [config.preferred_runtime, sortedRuntimes],
   );
+  const effectiveConfig = React.useMemo(
+    () =>
+      reconcilePreferredRuntimeFallback(config, selectedRuntime?.id ?? null),
+    [config, selectedRuntime],
+  );
   const harnessOptions = React.useMemo(
     () =>
       sortedRuntimes.map((runtime) => ({
@@ -154,7 +160,7 @@ export function AgentDefaultsEditor({
   }
 
   function handleHarnessChange(runtimeId: string) {
-    handleConfigChange(resetConfigForHarnessChange(config, runtimeId));
+    handleConfigChange(resetConfigForHarnessChange(effectiveConfig, runtimeId));
     setIsCustomModelEditing(false);
     setIsCustomProvider(false);
   }
@@ -162,7 +168,11 @@ export function AgentDefaultsEditor({
   async function handleSave() {
     // Snapshot the config being submitted so we can detect edits that arrive
     // during the IPC round-trip and avoid clobbering the user's newer input.
-    const submittedConfig = config;
+    const draftAtSubmit = configRef.current;
+    const submittedConfig = reconcilePreferredRuntimeFallback(
+      draftAtSubmit,
+      selectedRuntime?.id ?? null,
+    );
     onSavingChange?.(true);
     setSaveState("saving");
     setSaveError(null);
@@ -172,7 +182,7 @@ export function AgentDefaultsEditor({
       // IPC window. If the user edited, keep their newer value and leave dirty=true
       // so they can save again. setDirty(false) runs inside the updater so both
       // state updates batch into the same render (React 18 automatic batching).
-      const savedCurrentDraft = configRef.current === submittedConfig;
+      const savedCurrentDraft = configRef.current === draftAtSubmit;
       setConfig((current) => {
         if (!savedCurrentDraft) {
           // Mid-flight edit detected — do not overwrite newer user input.
@@ -237,7 +247,7 @@ export function AgentDefaultsEditor({
           <AgentConfigFields
             bakedEnv={bakedEnv}
             selectedRuntime={selectedRuntime}
-            config={config}
+            config={effectiveConfig}
             isCustomModelEditing={isCustomModelEditing}
             isCustomProvider={isCustomProvider}
             onConfigChange={handleConfigChange}
