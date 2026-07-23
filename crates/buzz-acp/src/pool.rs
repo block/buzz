@@ -2189,7 +2189,10 @@ where
 /// Uses `CONTEXT_FETCH_TIMEOUT` with one retry on failure. Returns `None` on
 /// persistent failure (graceful degradation — prompt will lack channel name and
 /// DM detection).
-async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<PromptChannelInfo> {
+pub(crate) async fn fetch_channel_info(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<PromptChannelInfo> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let d_tag = SingleLetterTag::lowercase(Alphabet::D);

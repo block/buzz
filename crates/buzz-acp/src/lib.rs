@@ -220,13 +220,32 @@ async fn is_owner_or_sibling(
 /// Coarse security policy applied before subscription rules. Both `OwnerOnly`
 /// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
 /// additionally accepts the explicit external pubkey list.
+///
+/// # DM hardening (`is_dm`)
+///
+/// Clients auto-p-tag every DM participant, so in a DM *any* participant's
+/// message looks like a mention and would fire a turn. Combined with
+/// agent-initiated DMs (the agent can be asked to DM a third party), that
+/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
+/// lands in a DM with the agent can prompt it. To close that hole, when
+/// `is_dm` is true only the owner and cryptographically verified same-owner
+/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
+/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
+/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
+    is_dm: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
+    if is_dm {
+        return match respond_to {
+            RespondTo::Nobody => false,
+            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        };
+    }
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
@@ -234,6 +253,47 @@ async fn author_allowed(
         RespondTo::Allowlist => {
             allowlist.contains(author)
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
+        }
+    }
+}
+
+/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+///
+/// Resolution order:
+/// 1. Startup discovery metadata (`startup_info`) — covers channels known at
+///    process start.
+/// 2. Per-loop resolution cache (`cache`) — covers channels resolved since.
+/// 3. Lazy REST fetch of the channel's kind:39000 metadata — covers channels
+///    the agent was added to *after* startup (the exploit path: an
+///    agent-initiated DM is exactly such a channel).
+///
+/// Fail-closed: if the fetch fails or times out, the channel is treated as a
+/// DM for this event and the result is NOT cached, so a later event retries
+/// the fetch instead of pinning a mis-classification.
+pub(crate) async fn is_dm_channel(
+    channel_id: Uuid,
+    startup_info: &HashMap<Uuid, relay::ChannelInfo>,
+    cache: &mut HashMap<Uuid, bool>,
+    rest_client: &relay::RestClient,
+) -> bool {
+    if let Some(ci) = startup_info.get(&channel_id) {
+        return ci.channel_type == "dm";
+    }
+    if let Some(&cached) = cache.get(&channel_id) {
+        return cached;
+    }
+    match pool::fetch_channel_info(channel_id, rest_client).await {
+        Some(ci) => {
+            let is_dm = ci.channel_type == "dm";
+            cache.insert(channel_id, is_dm);
+            is_dm
+        }
+        None => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                "channel type unresolved — treating as DM for author gate (fail closed)"
+            );
+            true
         }
     }
 }
@@ -1609,6 +1669,10 @@ async fn tokio_main() -> Result<()> {
     // second are both processed. The seen_membership_ids set handles exact
     // replays that share the same timestamp.
     let mut membership_newest_ts: HashMap<Uuid, u64> = HashMap::new();
+    // Resolved channel-type cache for the inbound author gate's DM check.
+    // Covers channels joined after startup (not in ctx.channel_info). Only
+    // successful lookups are cached — failures fail closed per-event and retry.
+    let mut dm_channel_cache: HashMap<Uuid, bool> = HashMap::new();
     // Two-generation dedup for membership event replays (bounded, no amnesia).
     // Rotates at 1000 entries instead of clearing the entire set at 2000.
     let mut seen_membership_current: HashSet<String> = HashSet::new();
@@ -2097,10 +2161,21 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
+                                // DM hardening: resolve channel type (fail-closed
+                                // to DM) so allowlist/anyone modes cannot be
+                                // exercised by non-owner authors inside DMs.
+                                let is_dm = is_dm_channel(
+                                    buzz_event.channel_id,
+                                    &ctx.channel_info,
+                                    &mut dm_channel_cache,
+                                    &ctx.rest_client,
+                                )
+                                .await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
+                                    is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -2110,6 +2185,7 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
+                                        is_dm,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
@@ -4293,6 +4369,7 @@ mod author_gate_tests {
         let cache = OwnerCache::new(Some(OWNER.into()));
         cache.cache_sibling(SIBLING.into(), true);
         cache.cache_sibling(STRANGER.into(), false);
+        cache.cache_sibling(EXTERNAL.into(), false);
         cache
     }
 
@@ -4305,6 +4382,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 SIBLING,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4322,6 +4400,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4339,6 +4418,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 STRANGER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4356,6 +4436,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 OWNER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4376,6 +4457,7 @@ mod author_gate_tests {
                 &RespondTo::OwnerOnly,
                 &HashSet::new(),
                 STRANGER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -4393,6 +4475,7 @@ mod author_gate_tests {
                     &RespondTo::OwnerOnly,
                     &HashSet::new(),
                     who,
+                    false,
                     &cache,
                     &dummy_rest_client()
                 )
@@ -4400,6 +4483,153 @@ mod author_gate_tests {
                 "under default OwnerOnly, the {label} must be admitted so steering can fire"
             );
         }
+    }
+
+    // ── DM hardening ──────────────────────────────────────────────────────
+    //
+    // In a DM, clients auto-p-tag every participant, and an agent can be
+    // asked to open a DM with a third party. The gate must therefore ignore
+    // the allowlist and `anyone` mode inside DMs: only owner + verified
+    // siblings fire turns.
+
+    #[tokio::test]
+    async fn test_dm_rejects_allowlisted_external_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_rejects_stranger_under_anyone() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::Anyone,
+                &HashSet::new(),
+                STRANGER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=anyone must still drop non-owner authors inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_admits_owner_and_sibling_in_every_responding_mode() {
+        let cache = cache_with_sibling();
+        for mode in [
+            RespondTo::OwnerOnly,
+            RespondTo::Allowlist,
+            RespondTo::Anyone,
+        ] {
+            for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+                assert!(
+                    author_allowed(
+                        &mode,
+                        &HashSet::new(),
+                        who,
+                        true,
+                        &cache,
+                        &dummy_rest_client()
+                    )
+                    .await,
+                    "in a DM under {mode}, the {label} must still be admitted"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dm_nobody_rejects_even_owner() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::Nobody,
+                &HashSet::new(),
+                OWNER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=nobody must drop everything, DMs included"
+        );
+    }
+
+    // ── is_dm_channel resolution ──────────────────────────────────────────
+
+    fn startup_info(id: Uuid, channel_type: &str) -> HashMap<Uuid, relay::ChannelInfo> {
+        HashMap::from([(
+            id,
+            relay::ChannelInfo {
+                name: "test".into(),
+                channel_type: channel_type.into(),
+            },
+        )])
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_uses_startup_metadata() {
+        let id = Uuid::new_v4();
+        let mut cache = HashMap::new();
+        assert!(
+            is_dm_channel(
+                id,
+                &startup_info(id, "dm"),
+                &mut cache,
+                &dummy_rest_client()
+            )
+            .await
+        );
+        assert!(
+            !is_dm_channel(
+                id,
+                &startup_info(id, "stream"),
+                &mut cache,
+                &dummy_rest_client()
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_uses_resolution_cache() {
+        let id = Uuid::new_v4();
+        let empty = HashMap::new();
+        let mut cache = HashMap::from([(id, false)]);
+        assert!(
+            !is_dm_channel(id, &empty, &mut cache, &dummy_rest_client()).await,
+            "a cached non-DM resolution must be honored without a fetch"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_fails_closed_and_does_not_cache_failure() {
+        // dummy_rest_client points at localhost:0 — the lazy fetch fails.
+        let id = Uuid::new_v4();
+        let empty = HashMap::new();
+        let mut cache = HashMap::new();
+        assert!(
+            is_dm_channel(id, &empty, &mut cache, &dummy_rest_client()).await,
+            "an unresolvable channel type must be treated as a DM (fail closed)"
+        );
+        assert!(
+            !cache.contains_key(&id),
+            "a failed resolution must not be cached — later events must retry"
+        );
     }
 }
 

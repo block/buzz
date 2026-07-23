@@ -385,6 +385,9 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
 
     // Deduplicate by event-id so reconnect replay cannot double-nudge.
     let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
+    // Resolved channel-type cache for the DM author-gate check (see normal mode).
+    let mut dm_channel_cache: std::collections::HashMap<Uuid, bool> =
+        std::collections::HashMap::new();
 
     loop {
         let Some(buzz_event) = relay.next_event().await else {
@@ -424,12 +427,21 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Apply the same author gate as normal mode so the nudge only goes
-        // to authors the real agent would have answered.
+        // to authors the real agent would have answered. Same DM hardening:
+        // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
         let author_hex = buzz_event.event.pubkey.to_hex();
+        let is_dm = crate::is_dm_channel(
+            buzz_event.channel_id,
+            &channel_info_map,
+            &mut dm_channel_cache,
+            &rest_client,
+        )
+        .await;
         let allowed = author_allowed(
             &config.respond_to,
             &config.respond_to_allowlist,
             &author_hex,
+            is_dm,
             &owner_cache,
             &rest_client,
         )
