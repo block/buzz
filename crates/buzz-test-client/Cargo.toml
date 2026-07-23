@@ -41,3 +41,7 @@ buzz-sdk = { workspace = true }
 [[bin]]
 name = "buzz-test-cli"
 path = "src/main.rs"
+
+[[bin]]
+name = "stub-acp-agent"
+path = "tests/bin/stub_acp_agent.rs"
