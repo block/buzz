@@ -945,10 +945,12 @@ dependencies = [
 name = "buzz-db"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "buzz-core",
  "chrono",
  "hex",
  "nostr",
+ "rand 0.10.1",
  "serde",
  "serde_json",
  "sha2 0.11.0",

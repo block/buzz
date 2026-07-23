@@ -54,6 +54,11 @@ pub const DEFAULT_INVITE_TTL_SECS: u64 = 72 * 60 * 60;
 /// Maximum invite lifetime a mint request may ask for: 30 days.
 pub const MAX_INVITE_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 
+/// Prefix that distinguishes v2 opaque database-backed invite codes from v1
+/// HMAC-signed tokens. Routing on claim checks this prefix exactly — a `v2.`
+/// code is never fallen back to the v1 verifier.
+pub const V2_PREFIX: &str = "v2.";
+
 /// Maximum accepted code length (defense against absurd inputs before any
 /// parsing work happens). A real code is ~200 bytes.
 const MAX_CODE_LEN: usize = 1024;

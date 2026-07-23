@@ -47,6 +47,11 @@ pub struct MintInviteRequest {
     /// [`invite_token::MAX_INVITE_TTL_SECS`]; defaults to 72 h.
     #[serde(default)]
     pub ttl_secs: Option<u64>,
+    /// Maximum number of uses before the invite is exhausted. `None` (omitted
+    /// or `null`) means unlimited — preserves current behavior. When present,
+    /// must be an integer from 1 through [`buzz_db::relay_invite::MAX_INVITE_USES`].
+    #[serde(default)]
+    pub max_uses: Option<i32>,
 }
 
 /// Body for `POST /api/invites/claim`.
@@ -260,9 +265,28 @@ pub async fn mint_invite(
         })?
     };
 
-    let key = invite_token::derive_invite_key(&state.relay_keypair);
     let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
-    let (code, expires_at) = invite_token::mint_invite(&key, tenant.community(), ttl);
+
+    // Validate max_uses strictly: reject zero, negatives, and over-cap values
+    // with 400. Do not silently clamp.
+    if let Some(mu) = request.max_uses {
+        if !(1..=buzz_db::relay_invite::MAX_INVITE_USES).contains(&mu) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "max_uses must be between 1 and {}",
+                    buzz_db::relay_invite::MAX_INVITE_USES
+                ),
+            ));
+        }
+    }
+
+    // Mint a v2 opaque, database-backed invite.
+    let invite = state
+        .db
+        .mint_relay_invite(tenant.community(), &sender_hex, ttl, request.max_uses)
+        .await
+        .map_err(|e| internal_error(&format!("invite mint: {e}")))?;
 
     // Same TLS-posture logic as nip98_expected_url: wss deployments get an
     // https landing page URL, ws dev/test deployments get http.
@@ -275,19 +299,30 @@ pub async fn mint_invite(
     tracing::info!(
         community = %tenant.community(),
         minted_by = %sender_hex,
-        expires_at,
+        invite_id = %invite.invite_id,
+        expires_at = %invite.expires_at,
+        max_uses = ?invite.max_uses,
         "relay invite minted"
     );
 
+    // expires_at as unix seconds for the response contract.
+    let expires_at_unix = invite.expires_at.timestamp() as u64;
+
     Ok(Json(serde_json::json!({
-        "code": code,
-        "expires_at": expires_at,
-        "url": format!("{scheme}://{}/invite/{}", tenant.host(), code),
+        "code": invite.code,
+        "expires_at": expires_at_unix,
+        "max_uses": invite.max_uses,
+        "uses_remaining": invite.uses_remaining,
+        "url": format!("{scheme}://{}/invite/{}", tenant.host(), invite.code),
     })))
 }
 
 /// Claim an invite code — `POST /api/invites/claim`, NIP-98 signed by the
 /// *joining* pubkey. Exempt from the relay-membership gate by design.
+///
+/// Routing is by exact prefix: `v2.` codes go to the database-backed
+/// redemption path; every other code goes to the v1 HMAC verifier. A `v2.`
+/// code is never fallen back to v1 verification.
 pub async fn claim_invite(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -305,7 +340,85 @@ pub async fn claim_invite(
     let request: ClaimInviteRequest = serde_json::from_slice(&body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid claim JSON: {e}")))?;
 
+    let claimer_hex = pubkey.to_hex();
     let key = invite_token::derive_invite_key(&state.relay_keypair);
+
+    // --- v2 database-backed path ---
+    //
+    // Route by exact prefix: v2. codes use the durable invite table. No
+    // fallback to v1 HMAC verification for malformed v2 input.
+    if request.code.starts_with(invite_token::V2_PREFIX) {
+        // Join-policy receipt verification, same mechanism as v1: the receipt
+        // is bound to the code string by SHA-256, so it works for v2 codes.
+        if let Some(policy) = &state.config.join_policy {
+            let receipt = request
+                .policy_receipt
+                .as_deref()
+                .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+            invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
+                .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        }
+
+        let token_hash = buzz_db::relay_invite::hash_invite_code(&request.code);
+        let outcome = state
+            .db
+            .claim_relay_invite(
+                tenant.community(),
+                &token_hash,
+                &claimer_hex,
+                state
+                    .config
+                    .join_policy
+                    .as_ref()
+                    .map(|policy| policy.version.as_str()),
+            )
+            .await
+            .map_err(|e| internal_error(&format!("v2 invite claim: {e}")))?;
+
+        return match outcome {
+            buzz_db::relay_invite::ClaimOutcome::Joined { .. } => {
+                tracing::info!(
+                    community = %tenant.community(),
+                    member = %claimer_hex,
+                    "relay member added via v2 invite"
+                );
+                // NIP-43 side effects only on Joined, never on other outcomes.
+                if let Err(e) = publish_nip43_member_added(&tenant, &state, &claimer_hex).await {
+                    tracing::warn!(
+                        "failed to publish NIP-43 member-added delta after v2 claim: {e}"
+                    );
+                }
+                if let Err(e) = publish_nip43_membership_list(&tenant, &state).await {
+                    tracing::warn!("failed to publish NIP-43 membership list after v2 claim: {e}");
+                }
+                Ok(Json(serde_json::json!({
+                    "status": "joined",
+                    "community_id": tenant.community().to_string(),
+                    "host": tenant.host(),
+                    "role": "member",
+                })))
+            }
+            buzz_db::relay_invite::ClaimOutcome::AlreadyMember { .. } => {
+                Ok(Json(serde_json::json!({
+                    "status": "already_member",
+                    "community_id": tenant.community().to_string(),
+                    "host": tenant.host(),
+                    "role": "member",
+                })))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Expired => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_expired"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Exhausted => {
+                Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
+            }
+            buzz_db::relay_invite::ClaimOutcome::Invalid => {
+                Err(api_error(StatusCode::BAD_REQUEST, "invite_invalid"))
+            }
+        };
+    }
+
+    // --- v1 HMAC path (stateless tokens, drain window) ---
     let payload = invite_token::verify_invite(&key, tenant.community(), &request.code).map_err(
         |e| match e {
             // Expired is post-MAC: revealing it helps the UX without helping a forger.
@@ -317,7 +430,6 @@ pub async fn claim_invite(
         },
     )?;
 
-    let claimer_hex = pubkey.to_hex();
     if let Some(policy) = &state.config.join_policy {
         let receipt = request
             .policy_receipt

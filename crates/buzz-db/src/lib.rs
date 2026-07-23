@@ -39,6 +39,8 @@ pub mod product_feedback;
 pub mod push;
 /// Reaction persistence.
 pub mod reaction;
+/// Use-limited relay invite persistence (v2 opaque tokens).
+pub mod relay_invite;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
 /// Replica freshness fence for keyset-cursor read routing.
@@ -3043,6 +3045,43 @@ impl Db {
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
+    }
+
+    /// Mints a v2 use-limited relay invite. The plaintext code is returned
+    /// exactly once; only its SHA-256 hash is persisted.
+    ///
+    /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
+    /// `ttl_secs` is clamped to `[60, 30 days]`.
+    pub async fn mint_relay_invite(
+        &self,
+        community: CommunityId,
+        created_by: &str,
+        ttl_secs: u64,
+        max_uses: Option<i32>,
+    ) -> Result<relay_invite::MintedInvite> {
+        relay_invite::mint_relay_invite(&self.pool, community, created_by, ttl_secs, max_uses).await
+    }
+
+    /// Atomically claims a v2 relay invite. The full redemption (membership
+    /// insert, policy evidence, use_count increment) runs in one PostgreSQL
+    /// transaction with `FOR UPDATE` on the invite row.
+    ///
+    /// `token_hash` is the SHA-256 of the presented v2 code (32 bytes).
+    pub async fn claim_relay_invite(
+        &self,
+        community: CommunityId,
+        token_hash: &[u8],
+        claimer_pubkey: &str,
+        policy_version: Option<&str>,
+    ) -> Result<relay_invite::ClaimOutcome> {
+        relay_invite::claim_relay_invite(
+            &self.pool,
+            community,
+            token_hash,
+            claimer_pubkey,
+            policy_version,
+        )
+        .await
     }
 
     /// Sidecar an accepted product-feedback event, idempotent by event id.
