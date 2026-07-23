@@ -89,11 +89,13 @@ fail_if_local_redis_blocks_compose() {
   if docker ps --format '{{.Names}}' | grep -qx 'buzz-redis'; then
     return
   fi
+  # Match the compose host publish port (see docker-compose.yml / #2479).
+  local redis_host_port="${BUZZ_REDIS_HOST_PORT:-6379}"
   local redis_pids
-  redis_pids=$(lsof -nP -iTCP:6379 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
+  redis_pids=$(lsof -nP -iTCP:"${redis_host_port}" -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
 ' ' ' || true)
   if [[ -n "${redis_pids}" ]]; then
-    error "Local Redis is already listening on port 6379 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
+    error "Local Redis is already listening on port ${redis_host_port} (pid(s): ${redis_pids}). Stop it, or set BUZZ_REDIS_HOST_PORT / REDIS_URL to a free host port before running setup."
     exit 1
   fi
 }
