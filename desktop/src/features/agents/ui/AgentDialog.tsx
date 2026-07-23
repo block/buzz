@@ -69,7 +69,7 @@ type AgentDialogDefinitionEditProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     options: AgentDefinitionSubmitOptions,
   ) => Promise<unknown>;
-  showPublishUpdatesOption?: boolean;
+  publishCatalogUpdatesOnSave?: boolean;
 };
 
 type AgentDialogProps =

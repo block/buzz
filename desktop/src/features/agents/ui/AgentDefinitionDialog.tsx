@@ -98,8 +98,8 @@ type AgentDefinitionDialogProps = {
     input: CreatePersonaInput | UpdatePersonaInput,
     options: AgentDefinitionSubmitOptions,
   ) => Promise<unknown>;
-  /** Offers publishing alongside Save after a shared agent has been edited. */
-  showPublishUpdatesOption?: boolean;
+  /** Publishes saved changes when the edited agent is shared in the catalog. */
+  publishCatalogUpdatesOnSave?: boolean;
   /** Rendered below the form fields in create mode only ("Where to run"). */
   createRunSection?: React.ReactNode;
   /** Extra create-mode submit gate (e.g. incomplete provider config). */
@@ -127,7 +127,7 @@ export function AgentDefinitionDialog({
   runtimesLoading = false,
   onOpenChange,
   onSubmit,
-  showPublishUpdatesOption = false,
+  publishCatalogUpdatesOnSave = false,
   createRunSection,
   createSubmitBlocked = false,
 }: AgentDefinitionDialogProps) {
@@ -166,8 +166,6 @@ export function AgentDefinitionDialog({
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const [hasUserChanges, setHasUserChanges] = React.useState(false);
-  const [publishUpdatesChecked, setPublishUpdatesChecked] =
-    React.useState(false);
   const {
     globalConfig,
     inheritedDefaults: {
@@ -224,7 +222,6 @@ export function AgentDefinitionDialog({
     setShowAdvancedFields(false);
     setIsAvatarUploadPending(false);
     setHasUserChanges(false);
-    setPublishUpdatesChecked(false);
     isRuntimeAutoSeededRef.current = false;
     hasSeededForOpenRef.current = false;
   }, [initialValues, open]);
@@ -271,7 +268,6 @@ export function AgentDefinitionDialog({
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
       setHasUserChanges(false);
-      setPublishUpdatesChecked(false);
       // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
       // [initialValues, open] effect resets both when the dialog re-opens.
     }
@@ -329,8 +325,7 @@ export function AgentDefinitionDialog({
           ...baseInput,
         },
         {
-          publishCatalogUpdates:
-            showPublishUpdatesOption && hasUserChanges && publishUpdatesChecked,
+          publishCatalogUpdates: publishCatalogUpdatesOnSave && hasUserChanges,
         },
       );
       return;
@@ -736,9 +731,9 @@ export function AgentDefinitionDialog({
             isAvatarUploadPending={isAvatarUploadPending}
             isPending={isPending}
             onCancel={() => handleOpenChange(false)}
-            onPublishUpdatesCheckedChange={setPublishUpdatesChecked}
-            publishUpdatesChecked={publishUpdatesChecked}
-            showPublishUpdates={showPublishUpdatesOption && hasUserChanges}
+            publishesCatalogUpdates={
+              publishCatalogUpdatesOnSave && hasUserChanges
+            }
             submitBlockReason={displayName.trim() ? submitBlockReason : null}
             submitLabel={submitLabel}
           />

@@ -1399,28 +1399,47 @@ This deliberately long fenced-code example must not establish the minimum width 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Edit" }).click();
   const editDialog = page.getByTestId("persona-dialog");
-  const publishUpdatesCheckbox = editDialog.getByTestId(
-    "persona-dialog-publish-updates",
+  const catalogPublishNotice = editDialog.getByTestId(
+    "persona-dialog-catalog-publish-notice",
   );
-  await expect(publishUpdatesCheckbox).toHaveCount(0);
+  await expect(catalogPublishNotice).toHaveCount(0);
+  await expect(
+    editDialog.getByRole("button", { name: "Save and publish" }),
+  ).toHaveCount(0);
+  await expect(
+    editDialog.getByRole("button", { name: "Save changes" }),
+  ).toBeVisible();
   await editDialog
     .getByLabel("Agent instructions")
     .fill("Review the latest catalog changes.");
-  await expect(publishUpdatesCheckbox).toBeVisible();
-  await expect(publishUpdatesCheckbox).toHaveAttribute(
-    "data-state",
-    "unchecked",
+  await expect(catalogPublishNotice).toHaveText(
+    "This agent is in the community catalog. Your changes will be published when you save.",
   );
-  const [cancelButtonBox, publishUpdatesCheckboxBox] = await Promise.all([
-    editDialog.getByRole("button", { name: "Cancel" }).boundingBox(),
-    publishUpdatesCheckbox.boundingBox(),
-  ]);
-  expect(
-    (publishUpdatesCheckboxBox?.x ?? 0) +
-      (publishUpdatesCheckboxBox?.width ?? 0),
-  ).toBeLessThan(cancelButtonBox?.x ?? 0);
-  await editDialog.getByRole("button", { name: "Save changes" }).click();
+  await expect(
+    editDialog.getByRole("button", { name: "Save changes" }),
+  ).toHaveCount(0);
+  await editDialog.getByRole("button", { name: "Save and publish" }).click();
   await expect(editDialog).toHaveCount(0);
+
+  await page.getByLabel("Open actions for Catalog Analyst").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await expect(catalogAccess).toHaveText("Agent only");
+  await expect(publishCatalogUpdatesButton).toHaveCount(0);
+  await page
+    .getByTestId("persona-share-dialog")
+    .getByRole("button", { name: "Close" })
+    .click();
+
+  await page.evaluate((id) => {
+    const storageKey = "buzz-persona-catalog-published-versions-v1";
+    const publishedVersions = JSON.parse(
+      localStorage.getItem(storageKey) ?? "{}",
+    ) as Record<string, string>;
+    publishedVersions[id] = "stale";
+    localStorage.setItem(storageKey, JSON.stringify(publishedVersions));
+  }, personaId);
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
@@ -1441,17 +1460,6 @@ This deliberately long fenced-code example must not establish the minimum width 
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })
     .click();
-
-  await page.getByLabel("Open actions for Catalog Analyst").click();
-  await page.getByRole("menuitem", { name: "Edit" }).click();
-  await editDialog
-    .getByLabel("Agent instructions")
-    .fill("Review and publish the latest catalog changes.");
-  await expect(publishUpdatesCheckbox).toBeVisible();
-  await publishUpdatesCheckbox.click();
-  await expect(publishUpdatesCheckbox).toHaveAttribute("data-state", "checked");
-  await editDialog.getByRole("button", { name: "Save changes" }).click();
-  await expect(editDialog).toHaveCount(0);
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();

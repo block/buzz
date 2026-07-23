@@ -332,7 +332,7 @@ export function AgentsView() {
             )
           }
           open={personas.personaDialogState !== null}
-          showPublishUpdatesOption={
+          publishCatalogUpdatesOnSave={
             "id" in personas.personaDialogState.initialValues &&
             personas.sharedCatalogPersonaIdSet.has(
               personas.personaDialogState.initialValues.id,
