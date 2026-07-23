@@ -25,6 +25,10 @@ reqwest = { workspace = true, features = ["json"] }
 # Async runtime — tokio macros + multi-thread for reqwest
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
+# TLS crypto provider — required before reqwest or WebSocket clients create
+# rustls configurations. Both ring and aws-lc-rs are present transitively.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
 # Serialization — JSON body building and response passthrough
 serde = { workspace = true }
 serde_json = { workspace = true }
