@@ -267,6 +267,11 @@ test.describe("global agent config screenshots", () => {
     await openCreateDialog(page);
     await customizeAgentAi(page);
 
+    await expect(
+      page
+        .getByTestId("agent-custom-configuration-section")
+        .locator("#persona-runtime"),
+    ).toBeVisible();
     await expect(page.getByLabel("Anthropic API Key")).toBeVisible({
       timeout: 10_000,
     });
@@ -274,6 +279,11 @@ test.describe("global agent config screenshots", () => {
       page.getByRole("button", { name: "Advanced", exact: true }),
     ).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByTestId("env-vars-required-key")).not.toBeVisible();
+
+    await waitForAnimations(page);
+    await page.getByRole("dialog").screenshot({
+      path: `${SHOTS}/02-create-custom-agent-configuration.png`,
+    });
   });
 
   test("03-global-env-satisfies-required-key", async ({ page }) => {
@@ -419,6 +429,20 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
+    const defaultsSection = page.getByTestId(
+      "agent-defaults-configuration-section",
+    );
+    await expect(defaultsSection.locator("#persona-runtime")).toHaveCount(0);
+    await expect(
+      defaultsSection.getByTestId("agent-ai-defaults-notice"),
+    ).toBeVisible();
+    await expect(
+      defaultsSection.getByText("Harness", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaultsSection.getByText("Buzz Agent", { exact: true }),
+    ).toBeVisible();
+
     // Global provider satisfies the provider-default rule → submit enabled.
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
@@ -449,12 +473,14 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    // Switch the auto-selected buzz-agent runtime to the CLI-login runtime.
+    // Harness selection belongs to the per-agent customization flow.
+    await customizeAgentAi(page);
     await selectDropdownOption(
       page,
       page.locator("#persona-runtime"),
       "Claude Code",
     );
+    await page.getByRole("tab", { name: "Use harness defaults" }).click();
 
     // Provider picker hidden — the runtime drives its own provider.
     await expect(page.locator("#persona-llm-provider")).not.toBeVisible();

@@ -30,6 +30,7 @@ export function AgentAiDefaultsNotice({
   triggerRef,
   explicitModel,
   explicitProvider,
+  harness,
   inheritedModel,
   inheritedProvider,
 }: {
@@ -37,6 +38,7 @@ export function AgentAiDefaultsNotice({
   triggerRef?: React.Ref<HTMLButtonElement>;
   explicitModel: string;
   explicitProvider: string;
+  harness?: string;
   inheritedModel: InheritedDefault;
   inheritedProvider: InheritedDefault;
 }) {
@@ -46,6 +48,14 @@ export function AgentAiDefaultsNotice({
   return (
     <div className="space-y-1" data-testid="agent-ai-defaults-notice">
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 text-sm">
+        {harness !== undefined ? (
+          <>
+            <dt className="text-muted-foreground">Harness</dt>
+            <dd className="truncate text-foreground">
+              {harness || "Not configured"}
+            </dd>
+          </>
+        ) : null}
         <dt className="text-muted-foreground">Provider</dt>
         <dd className="truncate text-foreground">
           {provider ? providerLabel(provider) : "Not configured"}
