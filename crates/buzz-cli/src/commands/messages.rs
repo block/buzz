@@ -9,8 +9,8 @@ use crate::validate::{
     validate_content_size, validate_hex64, validate_uuid, MAX_DIFF_BYTES,
 };
 use buzz_sdk::mentions::{
-    extract_at_mentions_with_known, extract_nostr_uris, merge_mentions, strip_code_regions,
-    MENTION_CAP,
+    extract_at_mentions_with_known, extract_at_names, extract_nostr_uris, merge_mentions,
+    strip_code_regions, MENTION_CAP,
 };
 
 /// Extract the thread root event ID from a Nostr tag array.
@@ -121,16 +121,22 @@ async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid,
 
 /// Resolve `@name` mentions in `content` against this channel's members.
 ///
-/// Queries kind 39002 (channel members) then kind 0 (profiles), parses
-/// display names once, and feeds them to [`extract_at_mentions_with_known`]
-/// for multi-word matching. On any I/O or parse failure, returns an empty
-/// vec — auto-tagging is best-effort and must never block a send.
+/// Strips code regions first — an `@name` inside a fenced block or backtick
+/// span must not notify anyone. Queries kind 39002 (channel members) then
+/// kind 0 (profiles), parses display names once, and feeds them to
+/// [`extract_at_mentions_with_known`] for multi-word matching. On any I/O or
+/// parse failure, returns an empty vec — auto-tagging is best-effort and
+/// must never block a send.
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
     content: &str,
 ) -> Vec<String> {
     if !content.contains('@') {
+        return vec![];
+    }
+    let scannable = strip_code_regions(content);
+    if !scannable.contains('@') {
         return vec![];
     }
 
@@ -188,7 +194,7 @@ async fn resolve_content_mentions(
 
     // 4. Two-pass extraction: known multi-word names first, single-word fallback.
     let known_refs: Vec<&str> = display_names.iter().map(|s| s.as_str()).collect();
-    let names = extract_at_mentions_with_known(content, &known_refs);
+    let names = extract_at_mentions_with_known(&scannable, &known_refs);
 
     // 5. Look up matched names → pubkeys via the map we already built.
     names
@@ -196,6 +202,17 @@ async fn resolve_content_mentions(
         .flat_map(|n| name_to_pubkeys.get(n).into_iter().flatten())
         .cloned()
         .collect()
+}
+
+/// True when code-stripped content carries `@mention` candidates but zero
+/// pubkeys were resolved — the silent-failure case of issue #2526, where a
+/// send exits 0 and nobody is notified.
+///
+/// `scannable` must already have code regions stripped, so `@names` inside
+/// code samples don't trigger a spurious warning. Email addresses never
+/// count as candidates (see [`extract_at_names`]).
+fn mentions_went_unresolved(scannable: &str, resolved: &[String]) -> bool {
+    resolved.is_empty() && !extract_at_names(scannable).is_empty()
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
@@ -534,6 +551,13 @@ pub async fn cmd_send_message(
     let stripped = strip_code_regions(&p.content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
     merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
+
+    if mentions_went_unresolved(&stripped, &auto_resolved) {
+        eprintln!(
+            "warning: content contains @mentions but none resolved to a channel member; \
+             no one will be notified"
+        );
+    }
 
     let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
 
@@ -876,9 +900,12 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        find_root_from_tags, match_profiles_by_name, mentions_went_unresolved, parse_member_pubkeys,
+    };
     use buzz_sdk::mentions::{
-        extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
+        extract_at_mentions_with_known, extract_at_names, match_names_to_profiles,
+        strip_code_regions, MentionProfile,
     };
     use serde_json::json;
 
@@ -1061,6 +1088,41 @@ mod tests {
         // Sanity: no `@names` in body → no profile match attempt needed.
         let names = extract_at_names("plain message, no mentions");
         assert!(names.is_empty());
+    }
+
+    #[test]
+    fn cli_pipeline_resolves_bold_wrapped_mention() {
+        // Regression: issue #2526 — `**@Atlas**` through the send pipeline.
+        let known_refs = vec!["Atlas"];
+        let scannable = strip_code_regions("**@Atlas** your fix is aimed at the wrong layer");
+        let names = extract_at_mentions_with_known(&scannable, &known_refs);
+        assert_eq!(names, vec!["atlas"]);
+    }
+
+    #[test]
+    fn cli_pipeline_skips_mentions_inside_code() {
+        // The false-positive mirror of #2526: an `@name` in a code sample
+        // must not notify. resolve_content_mentions strips before extracting.
+        let scannable = strip_code_regions("try this:\n```\ngit blame @alice\n```\ndone");
+        assert!(extract_at_mentions_with_known(&scannable, &["Alice"]).is_empty());
+    }
+
+    #[test]
+    fn unresolved_warning_fires_on_candidates_with_no_matches() {
+        assert!(mentions_went_unresolved("**@Atlas** ping", &[]));
+        assert!(mentions_went_unresolved("@nobody-here hello", &[]));
+    }
+
+    #[test]
+    fn unresolved_warning_silent_when_something_resolved() {
+        assert!(!mentions_went_unresolved("@alice hi", &["pk1".to_string()]));
+    }
+
+    #[test]
+    fn unresolved_warning_silent_without_candidates() {
+        assert!(!mentions_went_unresolved("no mentions here", &[]));
+        assert!(!mentions_went_unresolved("mail user@example.com", &[]));
+        assert!(!mentions_went_unresolved("meet @ 5pm", &[]));
     }
 
     #[test]

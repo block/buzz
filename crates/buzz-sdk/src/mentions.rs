@@ -7,16 +7,20 @@
 //! ## Pipeline
 //!
 //! ```text
-//! body text ──► extract_at_names ──► names: Vec<String>
-//!                                       │
-//! members + profiles (queried by caller) │
-//!                                       ▼
-//!                            match_names_to_profiles ──► pubkeys
-//!                                                          │
-//! body text ──► strip_code_regions ──► extract_nostr_uris ─┤
-//!                                                          ▼
-//!                            explicit mentions ──► normalize ──► merge_mentions ──► p-tags
+//! body text ──► strip_code_regions ──► extract_at_names ──► names: Vec<String>
+//!                     │                                        │
+//!                     │  members + profiles (queried by caller)│
+//!                     │                                        ▼
+//!                     │                     match_names_to_profiles ──► pubkeys
+//!                     │                                                   │
+//!                     └──────────────────► extract_nostr_uris ────────────┤
+//!                                                                         ▼
+//!                     explicit mentions ──► normalize ──► merge_mentions ──► p-tags
 //! ```
+//!
+//! Code regions (fenced blocks and inline spans) are stripped before **both**
+//! `@name` and NIP-27 URI extraction, so mentions inside code samples never
+//! produce notifications.
 //!
 //! When the set of known member names is available upfront,
 //! [`extract_at_mentions_with_known`] replaces the first step to correctly
@@ -50,14 +54,47 @@ pub struct MentionProfile<'a> {
     pub content_json: &'a str,
 }
 
+/// Shared leading-delimiter definition for `@mention` starts.
+///
+/// `prev` is the character immediately before the `@`; `prev2` is the one
+/// before that (consulted only for the two-character spoiler delimiter
+/// `||`). A mention may start at start-of-string, after ASCII whitespace,
+/// after an opening parenthesis, after markdown emphasis markers (`*`, `_`),
+/// or after a spoiler delimiter (`||`). Anything else — most importantly a
+/// word character, which excludes email addresses like `user@host` — is not
+/// a mention start.
+///
+/// This mirrors the leading group of the Desktop parser's regex in
+/// `desktop/src/features/messages/lib/hasMention.ts`. The two surfaces must
+/// agree on what counts as a mention; see issue #2526 for what happens when
+/// they drift.
+fn is_mention_lead(prev: Option<char>, prev2: Option<char>) -> bool {
+    match prev {
+        None => true,
+        Some(c) if c.is_ascii_whitespace() => true,
+        Some('(' | '*' | '_') => true,
+        Some('|') => prev2 == Some('|'),
+        _ => false,
+    }
+}
+
+/// [`is_mention_lead`] for an `@` at byte offset `at` of `content`.
+fn is_mention_lead_at(content: &str, at: usize) -> bool {
+    let mut before = content[..at].chars().rev();
+    let prev = before.next();
+    is_mention_lead(prev, before.next())
+}
+
 /// Extract single-word `@mention` names from message content.
 ///
 /// Prefer [`extract_at_mentions_with_known`] when known member names are
 /// available — it correctly handles multi-word display names.
 ///
 /// Returns lowercased names found after `@` tokens. An `@name` only matches
-/// when the `@` is at start-of-string or preceded by an ASCII whitespace
-/// character — this excludes things like email addresses (`user@host`).
+/// when the `@` is preceded by a mention-leading delimiter (start-of-string,
+/// ASCII whitespace, `(`, markdown emphasis `*`/`_`, or spoiler `||` — see
+/// [`is_mention_lead`]) — this excludes things like email addresses
+/// (`user@host`).
 ///
 /// Allowed name characters: ASCII alphanumerics, `.`, `-`, `_`.
 /// Duplicates are removed; first-seen order is preserved.
@@ -72,8 +109,11 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
     let mut i = 0;
     while i < len {
         if chars[i] == '@' {
-            let preceded_by_ws = i == 0 || chars[i - 1].is_ascii_whitespace();
-            if preceded_by_ws && i + 1 < len {
+            let preceded = is_mention_lead(
+                i.checked_sub(1).map(|j| chars[j]),
+                i.checked_sub(2).map(|j| chars[j]),
+            );
+            if preceded && i + 1 < len {
                 let start = i + 1;
                 let mut end = start;
                 while end < len {
@@ -100,10 +140,11 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
 
 /// Extract `@mention` names from message content using known member names.
 ///
-/// At each `@` preceded by whitespace or start-of-string, tries known names
-/// longest-first (case-insensitive, word-boundary-checked), then falls back
-/// to single-word tokenization. Returns lowercased names in first-seen order,
-/// deduplicated. Empty/whitespace-only entries in `known_names` are ignored.
+/// At each `@` preceded by a mention-leading delimiter (see
+/// [`is_mention_lead`]), tries known names longest-first (case-insensitive,
+/// word-boundary-checked), then falls back to single-word tokenization.
+/// Returns lowercased names in first-seen order, deduplicated.
+/// Empty/whitespace-only entries in `known_names` are ignored.
 pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Vec<String> {
     if content.is_empty() || !content.contains('@') {
         return vec![];
@@ -120,8 +161,7 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     let mut seen = HashSet::new();
 
     for (i, _) in content.match_indices('@') {
-        let preceded = i == 0 || content.as_bytes()[i - 1].is_ascii_whitespace();
-        if !preceded {
+        if !is_mention_lead_at(content, i) {
             continue;
         }
         let rest = &content[i + 1..];
@@ -151,10 +191,21 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
     names
 }
 
+/// True when `s` starts at a word boundary for a matched known name.
+///
+/// Accepts end-of-string, ASCII whitespace, closing punctuation, trailing
+/// markdown emphasis markers (`*`, `_`), and the spoiler delimiter (`||`) —
+/// the counterpart of [`is_mention_lead`], mirroring the trailing lookahead
+/// of the Desktop parser in `desktop/src/features/messages/lib/hasMention.ts`.
 fn is_word_boundary(s: &str) -> bool {
-    s.chars().next().is_none_or(|c| {
-        c.is_ascii_whitespace() || matches!(c, ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}')
-    })
+    let mut chars = s.chars();
+    match chars.next() {
+        None => true,
+        Some(c) if c.is_ascii_whitespace() => true,
+        Some(',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}' | '*' | '_') => true,
+        Some('|') => chars.next() == Some('|'),
+        _ => false,
+    }
 }
 
 /// Match extracted `@names` against channel-member profiles.
@@ -418,6 +469,36 @@ mod tests {
     }
 
     #[test]
+    fn extract_at_names_accepts_markdown_emphasis_lead() {
+        // Regression: issue #2526 — `**@Atlas**` sent zero p tags.
+        assert_eq!(extract_at_names("**@alice** please look"), vec!["alice"]);
+        assert_eq!(extract_at_names("*@bob* ping"), vec!["bob"]);
+        assert_eq!(extract_at_names("(@dave)"), vec!["dave"]);
+        assert_eq!(extract_at_names("||@eve|| spoiler"), vec!["eve"]);
+    }
+
+    #[test]
+    fn extract_at_names_underscore_lead_glues_trailing_underscore() {
+        // `_` is both an emphasis marker and a valid name character. The
+        // single-word tokenizer accepts the lead but swallows the closing
+        // marker into the name; only the known-names path resolves
+        // `_@carol_` to "carol". Pinned so the trade-off stays deliberate.
+        assert_eq!(extract_at_names("_@carol_ hi"), vec!["carol_"]);
+    }
+
+    #[test]
+    fn extract_at_names_single_pipe_is_not_a_lead() {
+        assert!(extract_at_names("a|@alice").is_empty());
+        // Table cells are fine — the pipe is followed by whitespace.
+        assert_eq!(extract_at_names("| @alice |"), vec!["alice"]);
+    }
+
+    #[test]
+    fn extract_at_names_email_rejected_even_inside_emphasis() {
+        assert!(extract_at_names("**user@example.com**").is_empty());
+    }
+
+    #[test]
     fn extract_at_names_rejects_email_and_empty() {
         assert!(extract_at_names("").is_empty());
         assert!(extract_at_names("no mentions").is_empty());
@@ -496,6 +577,54 @@ mod tests {
         let result =
             extract_at_mentions_with_known("thanks @Will Pfleger, great work", &["Will Pfleger"]);
         assert_eq!(result, vec!["will pfleger"]);
+    }
+
+    #[test]
+    fn known_name_survives_bold_wrapping() {
+        // Regression: issue #2526 — the production failure was exactly this.
+        let result = extract_at_mentions_with_known("**@Atlas** your fix is aimed", &["Atlas"]);
+        assert_eq!(result, vec!["atlas"]);
+    }
+
+    #[test]
+    fn known_name_survives_italics_and_spoilers() {
+        assert_eq!(
+            extract_at_mentions_with_known("_@Atlas_ take a look", &["Atlas"]),
+            vec!["atlas"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("*@Atlas* take a look", &["Atlas"]),
+            vec!["atlas"]
+        );
+        assert_eq!(
+            extract_at_mentions_with_known("||@Atlas|| knows", &["Atlas"]),
+            vec!["atlas"]
+        );
+    }
+
+    #[test]
+    fn known_multiword_name_survives_trailing_emphasis() {
+        // Trailing `**` used to fail the boundary check, dropping to the
+        // single-word tokenizer which emits "will" — matching nobody.
+        let result =
+            extract_at_mentions_with_known("ping **@Will Pfleger** now", &["Will Pfleger"]);
+        assert_eq!(result, vec!["will pfleger"]);
+    }
+
+    #[test]
+    fn single_pipe_is_not_a_boundary_for_known_name() {
+        // A lone `|` is neither a lead nor a boundary (the spoiler delimiter
+        // is two pipes) — the known match fails and fallback emits "will".
+        let result = extract_at_mentions_with_known("@Will Pfleger|x", &["Will Pfleger"]);
+        assert_eq!(result, vec!["will"]);
+    }
+
+    #[test]
+    fn at_names_inside_code_regions_not_extracted_after_strip() {
+        let content = "run `git blame @alice` then\n```\n@bob in code\n```\nthanks";
+        let stripped = strip_code_regions(content);
+        assert!(extract_at_names(&stripped).is_empty());
+        assert!(extract_at_mentions_with_known(&stripped, &["alice", "bob"]).is_empty());
     }
 
     #[test]
