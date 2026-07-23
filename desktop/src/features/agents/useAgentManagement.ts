@@ -8,6 +8,11 @@ import {
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
 import {
+  placeAcceptedRequest,
+  takeNextQueuedRequest,
+  type QueuedAgentManagementRequest,
+} from "./agentManagementQueue";
+import {
   managedAgentsQueryKey,
   personasQueryKey,
   useAcpRuntimesQuery,
@@ -79,6 +84,17 @@ export function useAgentManagement() {
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
+  const queuedRequestsRef = React.useRef<QueuedAgentManagementRequest[]>([]);
+
+  // Promote the next queued draft into the visible dialog. Assumes no draft is
+  // currently pending (call only after dismiss clears the active one).
+  const showNextQueuedRequest = React.useEffectEvent(() => {
+    const nextInQueue = takeNextQueuedRequest(queuedRequestsRef.current);
+    if (!nextInQueue) return;
+    pendingRequestId.current = nextInQueue.request.requestId;
+    sourceAgentPubkey.current = nextInQueue.agentPubkey;
+    setRequest(nextInQueue.request);
+  });
 
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
@@ -95,10 +111,16 @@ export function useAgentManagement() {
       }
       seenRequestIds.current.add(next.requestId);
       setError(null);
-      if (pendingRequestId.current === null) {
+      if (
+        placeAcceptedRequest(pendingRequestId.current !== null) === "show"
+      ) {
         pendingRequestId.current = next.requestId;
         sourceAgentPubkey.current = agentPubkey;
         setRequest(next);
+      } else {
+        // A review dialog is already open. Queue this draft so it surfaces once
+        // the owner resolves the current one, rather than dropping it.
+        queuedRequestsRef.current.push({ agentPubkey, request: next });
       }
     },
   );
@@ -263,6 +285,9 @@ export function useAgentManagement() {
     pendingRequestId.current = null;
     sourceAgentPubkey.current = null;
     setRequest(null);
+    // Surface the next queued draft (if any) so a burst of concurrent drafts is
+    // reviewed one at a time instead of the extras being lost.
+    showNextQueuedRequest();
   }
 
   const createInitialValues = React.useMemo(
