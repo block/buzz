@@ -8,9 +8,10 @@ use std::path::PathBuf;
 ///   1. `<home>/.local/bin` — bundled CLI symlink
 ///   2. Buzz-managed npm prefix bin dir — app-private ACP adapter shims
 ///   3. Buzz-managed Node.js bin dir — app-private Node/npm runtime
-///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
-///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
-///   6. user's login-shell `PATH` — runtimes like node/python from other managers
+///   4. well-known Windows Node/npm dirs that exist on disk
+///   5. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
+///   6. exe parent dir — DMG sidecars under `Contents/MacOS/`
+///   7. user's login-shell `PATH`, or the process `PATH` when unavailable
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -24,21 +25,23 @@ pub(in crate::managed_agents) fn build_augmented_path(
     shell_path: Option<String>,
     nvm_bin: Option<PathBuf>,
 ) -> Option<String> {
+    let has_local_context = home.is_some() || exe_parent.is_some();
     let mut parts: Vec<PathBuf> = Vec::new();
-    let home_added = home.is_some();
     if let Some(home) = home {
         parts.push(home.join(".local").join("bin"));
     }
-    // Only add managed runtime dirs when a home or executable context exists.
+    // Only add managed/runtime dirs when a home or executable context exists.
     // This keeps tests/utility callers that intentionally pass no local context
     // from manufacturing a PATH out of ambient platform dirs alone.
-    if home_added || exe_parent.is_some() {
+    if has_local_context {
         if let Some(managed_npm_bin) = crate::managed_agents::buzz_managed_npm_bin_dir() {
             parts.push(managed_npm_bin);
         }
         if let Some(managed_node_bin) = crate::managed_agents::buzz_managed_node_bin_dir() {
             parts.push(managed_node_bin);
         }
+        #[cfg(windows)]
+        parts.extend(crate::managed_agents::windows_existing_well_known_path_dirs());
     }
     if let Some(nvm_bin) = nvm_bin {
         parts.push(nvm_bin);
@@ -46,9 +49,10 @@ pub(in crate::managed_agents) fn build_augmented_path(
     if let Some(parent) = exe_parent {
         parts.push(parent);
     }
-    if let Some(shell_path) = shell_path {
-        parts.extend(std::env::split_paths(&shell_path));
-    }
+    let process_path = has_local_context
+        .then(|| std::env::var_os("PATH"))
+        .flatten();
+    extend_user_path(&mut parts, shell_path.as_deref(), process_path.as_deref());
     if parts.is_empty() {
         return None;
     }
@@ -58,9 +62,21 @@ pub(in crate::managed_agents) fn build_augmented_path(
         .map(|s| s.to_string_lossy().into_owned())
 }
 
+fn extend_user_path(
+    parts: &mut Vec<PathBuf>,
+    shell_path: Option<&str>,
+    process_path: Option<&std::ffi::OsStr>,
+) {
+    if let Some(shell_path) = shell_path {
+        parts.extend(std::env::split_paths(shell_path));
+    } else if let Some(process_path) = process_path {
+        parts.extend(std::env::split_paths(process_path));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::build_augmented_path;
+    use super::{build_augmented_path, extend_user_path};
     use std::path::PathBuf;
 
     #[cfg(unix)]
@@ -127,11 +143,40 @@ mod tests {
         let result = build_augmented_path(
             Some(PathBuf::from("/home/user")),
             Some(PathBuf::from("/usr/local/bin")),
-            None,
+            Some("/usr/bin:/bin".to_string()),
             None,
         );
         let result = result.expect("path");
         assert!(result.starts_with("/home/user/.local/bin:"), "{result}");
-        assert!(result.ends_with(":/usr/local/bin"), "{result}");
+        assert!(result.contains(":/usr/local/bin:"), "{result}");
+        assert!(result.ends_with(":/usr/bin:/bin"), "{result}");
+    }
+
+    #[test]
+    fn process_path_fills_login_shell_gap_for_managed_shims() {
+        let managed = PathBuf::from("/managed/npm");
+        let node = PathBuf::from("/opt/nodejs");
+        let process_path = std::env::join_paths([node.as_path(), std::path::Path::new("/usr/bin")])
+            .expect("join process PATH");
+        let mut parts = vec![managed.clone()];
+        extend_user_path(&mut parts, None, Some(&process_path));
+
+        assert_eq!(parts.first(), Some(&managed));
+        assert!(parts.contains(&node), "{parts:?}");
+    }
+
+    #[test]
+    fn login_shell_path_wins_over_process_path() {
+        let login_path = std::env::join_paths([std::path::Path::new("/login/bin")])
+            .expect("join login PATH")
+            .to_string_lossy()
+            .into_owned();
+        let process_path = std::env::join_paths([std::path::Path::new("/process/bin")])
+            .expect("join process PATH");
+        let mut parts = Vec::new();
+        extend_user_path(&mut parts, Some(&login_path), Some(&process_path));
+
+        assert!(parts.contains(&PathBuf::from("/login/bin")), "{parts:?}");
+        assert!(!parts.contains(&PathBuf::from("/process/bin")), "{parts:?}");
     }
 }
