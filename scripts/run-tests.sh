@@ -100,6 +100,11 @@ run_unit_tests() {
 
   run_test_step "buzz-push-gateway tests" \
     cargo test -p buzz-push-gateway -- --nocapture
+
+  # buzz-admin operator-CLI unit tests: infra-free (clap argument surface,
+  # role/pubkey validation, kind:13534 timestamp bump).
+  run_test_step "buzz-admin unit tests" \
+    cargo test -p buzz-admin -- --nocapture
 }
 
 # ---- DB / integration tests (infra required) --------------------------------

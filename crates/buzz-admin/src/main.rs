@@ -306,6 +306,18 @@ fn parse_pubkey_hex(input: &str) -> std::result::Result<String, String> {
         .map_err(|e| format!("invalid pubkey '{input}': {e}"))
 }
 
+/// Compute the `created_at` for a new kind:13534 snapshot:
+/// `max(now, newest_existing + 1s)`.
+///
+/// Defeats same-second domination for serial invocations (see module doc);
+/// also monotonic under backwards clock skew (`newest_existing > now`).
+fn bumped_created_at(now: u64, newest_existing: Option<u64>) -> u64 {
+    match newest_existing {
+        Some(existing) => (existing + 1).max(now),
+        None => now,
+    }
+}
+
 /// Publish kind:13534 with `custom_created_at = max(now, newest_existing + 1s)`.
 ///
 /// Guarantees the new event is not dominated by a same-second prior invocation,
@@ -337,10 +349,7 @@ async fn publish_membership_list_with_bump(
         .map(|e| e.event.created_at.as_secs());
 
     // custom_created_at = max(now, existing + 1s) — defeats same-second domination.
-    let ts = match newest_ts {
-        Some(existing) => (existing + 1).max(now),
-        None => now,
-    };
+    let ts = bumped_created_at(now, newest_ts);
 
     let members = db.list_relay_members(tenant.community()).await?;
 
@@ -581,4 +590,262 @@ async fn reconcile_channels(relay_key_arg: Option<String>) -> Result<()> {
         channels.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+    use nostr::ToBech32;
+
+    /// Deterministic pubkey fixtures (hex + npub for the same key), derived
+    /// from a fixed secret key so no hard-coded constants can drift.
+    fn fixture_pubkey() -> (String, String) {
+        let keys = Keys::parse("0000000000000000000000000000000000000000000000000000000000000001")
+            .expect("fixture secret key is valid");
+        let hex = keys.public_key().to_hex();
+        let npub = keys
+            .public_key()
+            .to_bech32()
+            .expect("bech32 encoding of a valid pubkey cannot fail");
+        (hex, npub)
+    }
+
+    // ---- clap definition ----
+
+    /// Smoke test: the CLI definition is internally consistent (same pattern
+    /// as buzz-cli's `cli_definition_is_valid`).
+    #[test]
+    fn cli_definition_is_valid() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn add_member_defaults_to_member_role() {
+        let (hex, _) = fixture_pubkey();
+        let cli = Cli::try_parse_from(["buzz-admin", "add-member", "--pubkey", hex.as_str()])
+            .expect("add-member with only --pubkey parses");
+        match cli.command {
+            Command::AddMember { pubkey, role } => {
+                assert_eq!(pubkey, hex);
+                assert_eq!(role, "member", "role must default to 'member'");
+            }
+            _ => panic!("expected AddMember"),
+        }
+    }
+
+    #[test]
+    fn add_member_accepts_explicit_role() {
+        let (hex, _) = fixture_pubkey();
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "add-member",
+            "--pubkey",
+            hex.as_str(),
+            "--role",
+            "admin",
+        ])
+        .expect("add-member with --role parses");
+        match cli.command {
+            Command::AddMember { role, .. } => assert_eq!(role, "admin"),
+            _ => panic!("expected AddMember"),
+        }
+    }
+
+    #[test]
+    fn add_member_requires_pubkey_flag() {
+        assert!(Cli::try_parse_from(["buzz-admin", "add-member"]).is_err());
+    }
+
+    #[test]
+    fn remove_member_role_filter_is_optional() {
+        let (hex, _) = fixture_pubkey();
+
+        let cli = Cli::try_parse_from(["buzz-admin", "remove-member", "--pubkey", hex.as_str()])
+            .expect("remove-member without --role parses");
+        match cli.command {
+            Command::RemoveMember { role, .. } => assert_eq!(role, None),
+            _ => panic!("expected RemoveMember"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "buzz-admin",
+            "remove-member",
+            "--pubkey",
+            hex.as_str(),
+            "--role",
+            "admin",
+        ])
+        .expect("remove-member with --role parses");
+        match cli.command {
+            Command::RemoveMember { role, .. } => assert_eq!(role.as_deref(), Some("admin")),
+            _ => panic!("expected RemoveMember"),
+        }
+    }
+
+    #[test]
+    fn product_feedback_list_defaults_to_100() {
+        let cli = Cli::try_parse_from(["buzz-admin", "product-feedback", "list"])
+            .expect("product-feedback list parses");
+        match cli.command {
+            Command::ProductFeedback {
+                command: ProductFeedbackCommand::List { limit },
+            } => assert_eq!(limit, 100),
+            _ => panic!("expected ProductFeedback::List"),
+        }
+    }
+
+    #[test]
+    fn product_feedback_list_enforces_limit_range() {
+        // In range: 1 and 1000 are accepted.
+        for ok in ["1", "1000"] {
+            assert!(
+                Cli::try_parse_from(["buzz-admin", "product-feedback", "list", "--limit", ok])
+                    .is_ok(),
+                "--limit {ok} should be accepted"
+            );
+        }
+        // Out of range: 0 and 1001 are rejected at parse time.
+        for bad in ["0", "1001"] {
+            assert!(
+                Cli::try_parse_from(["buzz-admin", "product-feedback", "list", "--limit", bad])
+                    .is_err(),
+                "--limit {bad} should be rejected"
+            );
+        }
+        // The subcommand itself is required.
+        assert!(Cli::try_parse_from(["buzz-admin", "product-feedback"]).is_err());
+    }
+
+    #[test]
+    fn reconcile_channels_relay_key_is_optional() {
+        let cli = Cli::try_parse_from(["buzz-admin", "reconcile-channels"])
+            .expect("reconcile-channels without --relay-key parses");
+        match cli.command {
+            Command::ReconcileChannels { relay_key } => assert_eq!(relay_key, None),
+            _ => panic!("expected ReconcileChannels"),
+        }
+
+        let cli = Cli::try_parse_from(["buzz-admin", "reconcile-channels", "--relay-key", "abcd"])
+            .expect("reconcile-channels with --relay-key parses");
+        match cli.command {
+            Command::ReconcileChannels { relay_key } => {
+                assert_eq!(relay_key.as_deref(), Some("abcd"));
+            }
+            _ => panic!("expected ReconcileChannels"),
+        }
+    }
+
+    #[test]
+    fn unknown_subcommand_is_rejected() {
+        assert!(Cli::try_parse_from(["buzz-admin", "no-such-command"]).is_err());
+    }
+
+    // ---- validate_role ----
+
+    #[test]
+    fn validate_role_accepts_member_and_admin() {
+        assert_eq!(validate_role("member"), Ok(()));
+        assert_eq!(validate_role("admin"), Ok(()));
+    }
+
+    #[test]
+    fn validate_role_rejects_owner_with_config_hint() {
+        let err = validate_role("owner").expect_err("'owner' must be rejected");
+        assert!(
+            err.contains("RELAY_OWNER_PUBKEY"),
+            "owner rejection should point at RELAY_OWNER_PUBKEY config, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_role_rejects_unknown_roles() {
+        let err = validate_role("moderator").expect_err("unknown role must be rejected");
+        assert!(
+            err.contains("moderator"),
+            "error should name the offending role, got: {err}"
+        );
+        assert!(validate_role("").is_err());
+        // Roles are case-sensitive: "Admin" is not "admin".
+        assert!(validate_role("Admin").is_err());
+    }
+
+    // ---- parse_pubkey_hex ----
+
+    #[test]
+    fn parse_pubkey_hex_accepts_hex() {
+        let (hex, _) = fixture_pubkey();
+        assert_eq!(parse_pubkey_hex(&hex), Ok(hex.clone()));
+    }
+
+    #[test]
+    fn parse_pubkey_hex_accepts_npub() {
+        let (hex, npub) = fixture_pubkey();
+        assert_eq!(
+            parse_pubkey_hex(&npub),
+            Ok(hex),
+            "npub must decode to the same lowercase hex"
+        );
+    }
+
+    #[test]
+    fn parse_pubkey_hex_normalizes_uppercase_hex() {
+        let (hex, _) = fixture_pubkey();
+        assert_eq!(
+            parse_pubkey_hex(&hex.to_uppercase()),
+            Ok(hex),
+            "uppercase hex input must normalize to lowercase"
+        );
+    }
+
+    #[test]
+    fn parse_pubkey_hex_rejects_garbage() {
+        let err = parse_pubkey_hex("not-a-pubkey").expect_err("garbage must be rejected");
+        assert!(
+            err.contains("not-a-pubkey"),
+            "error should echo the offending input, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_pubkey_hex_rejects_truncated_hex() {
+        let (hex, _) = fixture_pubkey();
+        // 63 chars — one nibble short of a pubkey.
+        assert!(parse_pubkey_hex(&hex[..63]).is_err());
+    }
+
+    // ---- bumped_created_at (same-second domination guard) ----
+
+    #[test]
+    fn bump_uses_now_when_no_existing_list() {
+        assert_eq!(bumped_created_at(1_700_000_000, None), 1_700_000_000);
+    }
+
+    #[test]
+    fn bump_uses_now_when_existing_is_older() {
+        assert_eq!(
+            bumped_created_at(1_700_000_000, Some(1_699_999_998)),
+            1_700_000_000
+        );
+    }
+
+    #[test]
+    fn bump_advances_one_second_on_same_second_collision() {
+        // Serial invocation within the same second: without the bump the new
+        // 13534 would be dominated and never dispatched to Redis.
+        assert_eq!(
+            bumped_created_at(1_700_000_000, Some(1_700_000_000)),
+            1_700_000_001
+        );
+    }
+
+    #[test]
+    fn bump_stays_monotonic_under_backwards_clock_skew() {
+        // Existing event is newer than "now" (clock stepped back): the new
+        // snapshot must still dominate the old one.
+        assert_eq!(
+            bumped_created_at(1_700_000_000, Some(1_700_000_005)),
+            1_700_000_006
+        );
+    }
 }
