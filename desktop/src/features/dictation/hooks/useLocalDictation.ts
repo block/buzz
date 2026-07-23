@@ -82,6 +82,7 @@ export function useLocalDictation({
   const streamRef = useRef<MediaStream | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletRef = useRef<AudioWorkletNode | null>(null);
+  const outputGainRef = useRef<GainNode | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioBatchRef = useRef<Float32Array[]>([]);
   // Tail of the serialized flush chain. Each flush appends its IPC work to
@@ -257,6 +258,10 @@ export function useLocalDictation({
       workletRef.current.disconnect();
       workletRef.current = null;
     }
+    if (outputGainRef.current) {
+      outputGainRef.current.disconnect();
+      outputGainRef.current = null;
+    }
     // Drop any audio still buffered so it can't leak into the next session.
     audioBatchRef.current = [];
     // Close audio context.
@@ -375,6 +380,10 @@ export function useLocalDictation({
             workletRef.current.disconnect();
             workletRef.current = null;
           }
+          if (outputGainRef.current) {
+            outputGainRef.current.disconnect();
+            outputGainRef.current = null;
+          }
           audioBatchRef.current = [];
           if (audioContextRef.current) {
             void audioContextRef.current.close();
@@ -479,9 +488,13 @@ export function useLocalDictation({
       // Start the batch flush timer (~10 IPC calls/s instead of ~375).
       batchTimerRef.current = setInterval(flushAudioBatch, AUDIO_BATCH_MS);
 
+      const outputGain = audioContext.createGain();
+      outputGain.gain.value = 0;
+      outputGainRef.current = outputGain;
+
       source.connect(worklet);
-      // Don't connect to destination — we only capture, not play back.
-      worklet.connect(audioContext.createGain()); // keep worklet alive without audible output
+      worklet.connect(outputGain);
+      outputGain.connect(audioContext.destination);
 
       setIsRecording(true);
       setIsTranscribing(true);
@@ -547,6 +560,10 @@ export function useLocalDictation({
       workletRef.current.port.onmessage = null;
       workletRef.current.disconnect();
       workletRef.current = null;
+    }
+    if (outputGainRef.current) {
+      outputGainRef.current.disconnect();
+      outputGainRef.current = null;
     }
     if (audioContextRef.current) {
       void audioContextRef.current.close();
