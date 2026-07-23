@@ -60,6 +60,9 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Require a successful auth probe's trimmed stdout to parse as a positive
+    /// integer. Used for versioned setup markers such as OMP's `setupVersion`.
+    pub auth_probe_requires_positive_integer_stdout: bool,
 }
 
 impl KnownAcpRuntime {

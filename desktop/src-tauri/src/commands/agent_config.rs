@@ -632,6 +632,7 @@ mod tests {
             required_normalized_fields: &["model", "provider"],
             login_hint: None,
             auth_probe_args: None,
+            auth_probe_requires_positive_integer_stdout: false,
         }
     }
 

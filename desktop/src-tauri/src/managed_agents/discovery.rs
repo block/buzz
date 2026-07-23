@@ -14,6 +14,8 @@ mod runtime_metadata;
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
+const OMP_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/can1357/oh-my-pi/refs/heads/main/assets/icon.svg";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
@@ -49,8 +51,10 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 paths.push(PathBuf::from(appdata).join("npm"));
             }
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let local = PathBuf::from(local);
+                paths.push(local.join("omp"));
                 paths.push(
-                    PathBuf::from(local)
+                    local
                         .join("Programs")
                         .join("OpenAI")
                         .join("Codex")
@@ -93,6 +97,39 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_probe_requires_positive_integer_stdout: false,
+    },
+    KnownAcpRuntime {
+        id: "omp",
+        label: "Oh My Pi",
+        commands: &["omp"],
+        aliases: &["oh-my-pi"],
+        avatar_url: OMP_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("omp"),
+        cli_install_commands: &["curl -fsSL https://omp.sh/install | sh"],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://omp.sh/install.ps1 | iex\""],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://github.com/can1357/oh-my-pi",
+        cli_install_hint: "Install Oh My Pi via the official install script, then run `omp setup`.",
+        adapter_install_hint: "",
+        skill_dir: Some(".omp/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.omp/agent/config.yml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `omp setup` to choose a model and authenticate."),
+        auth_probe_args: Some(&["omp", "config", "get", "setupVersion"]),
+        auth_probe_requires_positive_integer_stdout: true,
     },
     KnownAcpRuntime {
         id: "claude",
@@ -124,6 +161,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &[],
         login_hint: Some("Run the Claude CLI to complete authentication."),
         auth_probe_args: Some(&["claude", "auth", "status"]),
+        auth_probe_requires_positive_integer_stdout: false,
     },
     KnownAcpRuntime {
         id: "codex",
@@ -156,6 +194,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+        auth_probe_requires_positive_integer_stdout: false,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -187,6 +226,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_probe_requires_positive_integer_stdout: false,
     },
 ];
 
@@ -342,7 +382,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "omp" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -902,7 +942,11 @@ pub(crate) fn is_npm_global_install(cmd: &str) -> bool {
 /// background threads to prevent pipe-buffer deadlock. On timeout the child is
 /// killed and `Unknown` is returned; no orphaned threads or processes are left
 /// behind. Returns `Unknown` on timeout.
-fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
+fn probe_auth_status(
+    binary_path: &Path,
+    probe_args: &[&str],
+    require_positive_integer_stdout: bool,
+) -> AuthStatus {
     use crate::managed_agents::readiness::cli_probe;
 
     let augmented_path = cli_probe::augmented_path();
@@ -931,6 +975,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         if let Some(mut pipe) = stdout_pipe {
             let _ = pipe.read_to_end(&mut buf);
         }
+        buf
     });
     let stderr_thread = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -982,8 +1027,18 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
     };
 
     let _ = wait_thread.join();
-    let _ = stdout_thread.join();
+    let stdout_bytes = stdout_thread.join().unwrap_or_default();
     let stderr_bytes = stderr_thread.join().unwrap_or_default();
+
+    if exit_status.success() && require_positive_integer_stdout {
+        let is_positive_integer = String::from_utf8_lossy(&stdout_bytes)
+            .trim()
+            .parse::<u64>()
+            .is_ok_and(|value| value > 0);
+        if !is_positive_integer {
+            return AuthStatus::LoggedOut;
+        }
+    }
 
     match cli_probe::classify_probe_output(&stderr_bytes, exit_status.success()) {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
@@ -1271,10 +1326,12 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
             // Need the resolved binary path for the CLI (e.g. the actual `claude` binary).
             let binary_path = resolve_command(probe_args[0])?;
             let probe_args_owned: Vec<String> = probe_args.iter().map(|s| s.to_string()).collect();
+            let require_positive_integer_stdout =
+                partial.runtime.auth_probe_requires_positive_integer_stdout;
 
             let handle = std::thread::spawn(move || {
                 let refs: Vec<&str> = probe_args_owned.iter().map(String::as_str).collect();
-                probe_auth_status(&binary_path, &refs)
+                probe_auth_status(&binary_path, &refs, require_positive_integer_stdout)
             });
             Some((idx, handle))
         })
