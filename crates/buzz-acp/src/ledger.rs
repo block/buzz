@@ -14,6 +14,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::queue::RecoverableTrigger;
@@ -26,6 +27,11 @@ const LEDGER_VERSION: u32 = 1;
 /// filename — enough to disambiguate multiple agents sharing a nest
 /// without an unwieldy path.
 const PUBKEY_PREFIX_LEN: usize = 16;
+
+/// First 16 hex chars of the sha256 of the canonical relay URL — enough
+/// to namespace ledger files per `(agent, relay)` pair so concurrent
+/// harnesses on different relays never share a file.
+const RELAY_HASH_LEN: usize = 16;
 
 /// The minimal durable identity of one recoverable event, as persisted.
 /// Mirrors [`RecoverableTrigger`] field-for-field; kept as a distinct type
@@ -108,19 +114,29 @@ impl Ledger {
         }
     }
 
-    /// Load `<state_dir>/pending-turns-<agent_pubkey_prefix16>.json` and
+    /// Load `<state_dir>/pending-turns-<pubkey16>-<relayhash16>.json` and
     /// stage its contents for boot processing. Never fails: a missing
     /// file, unparseable JSON, unknown version, or uncreatable state dir
     /// all degrade to an empty stage (one lost recovery at worst, logged),
     /// matching today's every-restart-loses-everything behavior as the
     /// floor.
     ///
+    /// The filename includes both the first 16 hex chars of the agent
+    /// pubkey and the first 16 hex chars of the sha256 of the canonical
+    /// relay URL, so concurrent harnesses for the same agent on different
+    /// relays each own a distinct file.
+    ///
     /// `ttl_secs == 0` disables TTL filtering (default); otherwise records
     /// older than `ttl_secs` (by `enqueued_at_unix`) are dropped from the
     /// stage before it's returned — the ledger file on disk is untouched
     /// until the next write, so a filtered-out record isn't destroyed by
     /// merely loading it.
-    pub fn load(state_dir: &Path, agent_pubkey_hex: &str, ttl_secs: u64) -> (Ledger, StagedLedger) {
+    pub fn load(
+        state_dir: &Path,
+        agent_pubkey_hex: &str,
+        relay_url: &str,
+        ttl_secs: u64,
+    ) -> (Ledger, StagedLedger) {
         let empty = || {
             (
                 Ledger {
@@ -143,7 +159,11 @@ impl Ledger {
         }
 
         let prefix: String = agent_pubkey_hex.chars().take(PUBKEY_PREFIX_LEN).collect();
-        let path = state_dir.join(format!("pending-turns-{prefix}.json"));
+        let canonical_relay = buzz_core::relay::normalize_relay_url(relay_url)
+            .unwrap_or_else(|_| relay_url.to_owned());
+        let relay_hash_full = hex::encode(Sha256::digest(canonical_relay.as_bytes()));
+        let relay_hash: String = relay_hash_full.chars().take(RELAY_HASH_LEN).collect();
+        let path = state_dir.join(format!("pending-turns-{prefix}-{relay_hash}.json"));
 
         let channels = match std::fs::read(&path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
@@ -193,6 +213,14 @@ impl Ledger {
     /// `false` — there was never anything to stage.
     pub fn is_enabled(&self) -> bool {
         self.path.is_some()
+    }
+
+    /// The on-disk path this ledger writes to, or `None` if disabled.
+    /// Exposed for tests that need to construct adjacent paths (e.g. the
+    /// `.tmp` sibling used in atomic-write tests).
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> Option<&std::path::Path> {
+        self.path.as_deref()
     }
 
     /// Record an unresolved boot-fetch trigger for `channel_id` — a
@@ -392,6 +420,21 @@ fn apply_ttl(
 mod tests {
     use super::*;
 
+    /// Relay URL used across all unit tests — stable across runs.
+    const TEST_RELAY_URL: &str = "ws://localhost:3000";
+
+    /// Compute the expected ledger filename for `(pubkey_hex, relay_url)`,
+    /// mirroring the logic in `Ledger::load`. Used by tests that need to
+    /// pre-seed the on-disk file before calling `load`.
+    fn ledger_filename(pubkey_hex: &str, relay_url: &str) -> String {
+        let prefix: String = pubkey_hex.chars().take(PUBKEY_PREFIX_LEN).collect();
+        let canonical = buzz_core::relay::normalize_relay_url(relay_url)
+            .unwrap_or_else(|_| relay_url.to_owned());
+        let hash_full = hex::encode(Sha256::digest(canonical.as_bytes()));
+        let relay_hash: String = hash_full.chars().take(RELAY_HASH_LEN).collect();
+        format!("pending-turns-{prefix}-{relay_hash}.json")
+    }
+
     fn record(event_id: &str, seq: u64, enqueued_at_unix: u64, cap_exempt: bool) -> LedgerRecord {
         LedgerRecord {
             event_id: event_id.to_string(),
@@ -427,7 +470,8 @@ mod tests {
     #[test]
     fn test_load_missing_file_returns_empty_staged_and_enabled() {
         let dir = tempfile::tempdir().unwrap();
-        let (ledger, staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (ledger, staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         assert!(ledger.is_enabled());
         assert!(staged.channels.is_empty());
     }
@@ -435,10 +479,13 @@ mod tests {
     #[test]
     fn test_load_corrupt_file_starts_fresh_and_deletes_it() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pending-turns-deadbeefdeadbeef.json");
+        let path = dir
+            .path()
+            .join(ledger_filename("deadbeefdeadbeefdeadbeef", TEST_RELAY_URL));
         std::fs::write(&path, b"not json").unwrap();
 
-        let (ledger, staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (ledger, staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         assert!(ledger.is_enabled());
         assert!(staged.channels.is_empty());
         assert!(!path.exists(), "corrupt file should be deleted");
@@ -447,10 +494,13 @@ mod tests {
     #[test]
     fn test_load_unknown_version_starts_fresh() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("pending-turns-deadbeefdeadbeef.json");
+        let path = dir
+            .path()
+            .join(ledger_filename("deadbeefdeadbeefdeadbeef", TEST_RELAY_URL));
         std::fs::write(&path, br#"{"version":99,"channels":{}}"#).unwrap();
 
-        let (_ledger, staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (_ledger, staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         assert!(staged.channels.is_empty());
         assert!(!path.exists());
     }
@@ -463,7 +513,8 @@ mod tests {
         let blocked = dir.path().join("state_as_file");
         std::fs::write(&blocked, b"not a dir").unwrap();
 
-        let (ledger, staged) = Ledger::load(&blocked, "deadbeefdeadbeefdeadbeef", 0);
+        let (ledger, staged) =
+            Ledger::load(&blocked, "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         assert!(!ledger.is_enabled());
         assert!(staged.channels.is_empty());
     }
@@ -471,7 +522,8 @@ mod tests {
     #[test]
     fn test_commit_writes_merged_snapshot_sorted_by_admission_seq() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (mut ledger, _staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         let ch = Uuid::new_v4();
         ledger.add_unresolved(ch, record("unresolved-a", 1, 100, false));
 
@@ -490,7 +542,8 @@ mod tests {
     #[test]
     fn test_sync_skips_identical_write() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (mut ledger, _staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         let ch = Uuid::new_v4();
         let path = ledger.path.clone().unwrap();
 
@@ -514,7 +567,8 @@ mod tests {
     #[test]
     fn test_sync_preserves_unresolved_entries_across_channel_rewrite() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (mut ledger, _staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         let ch = Uuid::new_v4();
         ledger.add_unresolved(ch, record("unresolved-a", 1, 100, false));
 
@@ -532,7 +586,8 @@ mod tests {
     #[test]
     fn test_resolve_unresolved_removes_record_then_sync_omits_it() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (mut ledger, _staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         let ch = Uuid::new_v4();
         ledger.add_unresolved(ch, record("unresolved-a", 1, 100, false));
         assert_eq!(ledger.unresolved_seqs(ch), BTreeSet::from([1]));
@@ -551,7 +606,8 @@ mod tests {
     #[test]
     fn test_invalidate_channel_purges_unresolved_and_last_written() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (mut ledger, _staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         let ch = Uuid::new_v4();
         ledger.add_unresolved(ch, record("unresolved-a", 1, 100, false));
         ledger.sync(ch, vec![trigger("live-b", 2, 200, false)]);
@@ -571,7 +627,9 @@ mod tests {
     fn test_ttl_filter_default_zero_keeps_all_records() {
         let dir = tempfile::tempdir().unwrap();
         let ch = Uuid::new_v4();
-        let path = dir.path().join("pending-turns-deadbeefdeadbeef.json");
+        let path = dir
+            .path()
+            .join(ledger_filename("deadbeefdeadbeefdeadbeef", TEST_RELAY_URL));
         let mut channels = HashMap::new();
         channels.insert(ch, vec![record("old", 1, 0, false)]);
         std::fs::write(
@@ -584,7 +642,8 @@ mod tests {
         )
         .unwrap();
 
-        let (_ledger, staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (_ledger, staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         assert_eq!(staged.channels.get(&ch).unwrap().len(), 1);
     }
 
@@ -592,7 +651,9 @@ mod tests {
     fn test_ttl_filter_drops_expired_records() {
         let dir = tempfile::tempdir().unwrap();
         let ch = Uuid::new_v4();
-        let path = dir.path().join("pending-turns-deadbeefdeadbeef.json");
+        let path = dir
+            .path()
+            .join(ledger_filename("deadbeefdeadbeefdeadbeef", TEST_RELAY_URL));
         let mut channels = HashMap::new();
         channels.insert(ch, vec![record("ancient", 1, 0, false)]);
         std::fs::write(
@@ -606,7 +667,8 @@ mod tests {
         .unwrap();
 
         // enqueued_at_unix = 0 (1970) is far older than any positive TTL.
-        let (_ledger, staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 60);
+        let (_ledger, staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 60);
         assert!(
             !staged.channels.contains_key(&ch),
             "expired-only channel should be dropped entirely"
@@ -618,7 +680,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ch_no_exempt = Uuid::new_v4();
         let ch_one_exempt = Uuid::new_v4();
-        let path = dir.path().join("pending-turns-deadbeefdeadbeef.json");
+        let path = dir
+            .path()
+            .join(ledger_filename("deadbeefdeadbeefdeadbeef", TEST_RELAY_URL));
         let mut channels = HashMap::new();
         channels.insert(
             ch_no_exempt,
@@ -638,7 +702,8 @@ mod tests {
         )
         .unwrap();
 
-        let (_ledger, staged) = Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", 0);
+        let (_ledger, staged) =
+            Ledger::load(dir.path(), "deadbeefdeadbeefdeadbeef", TEST_RELAY_URL, 0);
         // Round-trip must preserve the exact persisted cap_exempt bits —
         // `boot_recover`'s whole-snapshot promotion rule reads these values
         // directly from the staged ledger before deciding per-channel promotion.
@@ -646,5 +711,69 @@ mod tests {
         let one_exempt = &staged.channels[&ch_one_exempt];
         assert!(one_exempt.iter().any(|r| r.cap_exempt));
         assert!(one_exempt.iter().any(|r| !r.cap_exempt));
+    }
+
+    /// Two harnesses for the same agent on different relays share a state dir.
+    /// Each must load and commit to its own isolated file; neither boot
+    /// recovery nor a subsequent sync on one pair must drop or mutate the
+    /// other pair's records.
+    #[test]
+    fn test_relay_isolation_same_agent_different_relays_use_distinct_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_pubkey = "deadbeefdeadbeefdeadbeef";
+        let relay_a = "wss://relay-a.example";
+        let relay_b = "wss://relay-b.example";
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+
+        // Pre-seed two files as if two prior runs each wrote their own.
+        let file_a = dir.path().join(ledger_filename(agent_pubkey, relay_a));
+        let file_b = dir.path().join(ledger_filename(agent_pubkey, relay_b));
+        assert_ne!(
+            file_a, file_b,
+            "relay isolation requires distinct filenames"
+        );
+
+        let mk_file = |ch: Uuid, event_id: &str| {
+            let mut channels = HashMap::new();
+            channels.insert(ch, vec![record(event_id, 1, 100, false)]);
+            serde_json::to_vec(&LedgerFile {
+                version: 1,
+                channels,
+            })
+            .unwrap()
+        };
+        std::fs::write(&file_a, mk_file(ch_a, "event-a")).unwrap();
+        std::fs::write(&file_b, mk_file(ch_b, "event-b")).unwrap();
+
+        // Boot-load relay A; verify it loads only relay A's channel.
+        let (mut ledger_a, staged_a) = Ledger::load(dir.path(), agent_pubkey, relay_a, 0);
+        assert!(
+            staged_a.channels.contains_key(&ch_a),
+            "relay A must see ch_a"
+        );
+        assert!(
+            !staged_a.channels.contains_key(&ch_b),
+            "relay A must NOT see ch_b"
+        );
+
+        // Boot-load relay B; verify it loads only relay B's channel.
+        let (_ledger_b, staged_b) = Ledger::load(dir.path(), agent_pubkey, relay_b, 0);
+        assert!(
+            staged_b.channels.contains_key(&ch_b),
+            "relay B must see ch_b"
+        );
+        assert!(
+            !staged_b.channels.contains_key(&ch_a),
+            "relay B must NOT see ch_a"
+        );
+
+        // Commit (empty live) on relay A; relay B's file must be untouched.
+        ledger_a.commit(HashMap::new());
+        let b_after = Ledger::load(dir.path(), agent_pubkey, relay_b, 0).1;
+        assert!(
+            b_after.channels.contains_key(&ch_b),
+            "relay A commit must not erase relay B's records"
+        );
     }
 }

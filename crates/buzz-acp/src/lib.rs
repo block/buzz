@@ -1493,7 +1493,12 @@ async fn tokio_main() -> Result<()> {
                 .unwrap_or_else(|_| PathBuf::from("."))
                 .join(".buzz-acp")
         });
-        Ledger::load(&state_dir, &agent_pubkey_hex, config.resume_ttl_secs)
+        Ledger::load(
+            &state_dir,
+            &agent_pubkey_hex,
+            &config.relay_url,
+            config.resume_ttl_secs,
+        )
     } else {
         (Ledger::disabled(), ledger::StagedLedger::default())
     };
@@ -6718,6 +6723,7 @@ mod boot_recovery_integration_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -6762,6 +6768,7 @@ mod boot_recovery_integration_tests {
             agent_owner_pubkey: None,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            relay_url: "ws://localhost:3000".to_string(),
         })
     }
 
@@ -7239,7 +7246,8 @@ mod boot_recovery_integration_tests {
         // Persist stale state to disk through the real API so the file
         // exists before boot_recover runs.
         {
-            let (mut ledger0, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+            let (mut ledger0, _) =
+                Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
             let trigger = queue::RecoverableTrigger {
                 event_id: ev_gone.id.to_hex(),
                 prompt_tag: "test".into(),
@@ -7251,7 +7259,8 @@ mod boot_recovery_integration_tests {
         }
 
         // Reload — staged must come from disk, not memory.
-        let (mut ledger, staged) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, staged) =
+            Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         assert!(
             !staged.channels.is_empty(),
             "setup guard: stale record must exist on disk before recovery"
@@ -7272,7 +7281,7 @@ mod boot_recovery_integration_tests {
         )
         .await;
 
-        let (_ledger2, staged2) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (_ledger2, staged2) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         assert!(
             staged2.channels.is_empty(),
             "all-dropped boot must commit an empty ledger — stale records must not survive on disk"
@@ -7297,7 +7306,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -7358,7 +7367,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -7413,7 +7422,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -7499,7 +7508,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut pool = dispatch_one_in_flight(&mut queue, &mut ledger, ch, &event_a).await;
         assert!(
             !queue.recoverable_triggers(ch).is_empty(),
@@ -7551,7 +7560,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut pool = dispatch_one_in_flight(&mut queue, &mut ledger, ch, &event_a).await;
 
         // Recover the batch dispatch_pending cloned into TaskMeta so the
@@ -7611,7 +7620,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(dedup_mode);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         queue.push(QueuedEvent::new(
             ch,
             event_a.clone(),
@@ -7707,7 +7716,7 @@ mod boot_recovery_integration_tests {
         let rest = rest_client(&base_url);
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -7807,7 +7816,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch_expected]);
         let mut suppression = HashSet::new();
 
@@ -7927,7 +7936,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -7972,7 +7981,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -8017,7 +8026,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut suppression: HashSet<String> = HashSet::new();
 
         ledger.add_unresolved(ch, record_a.clone());
@@ -8061,7 +8070,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut suppression: HashSet<String> = HashSet::new();
 
         let (accepted, skip_steer) = admit_live_event(
@@ -8091,7 +8100,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut suppression: HashSet<String> = HashSet::from([event_a.id.to_hex()]);
 
         let (accepted, skip_steer) = admit_live_event(
@@ -8126,7 +8135,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
 
         let recovered_b =
             QueuedEvent::from_recovered(ch, event_b.clone(), "test".into(), 2, 1002, false);
@@ -8189,7 +8198,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
 
         let recovered_b =
             QueuedEvent::from_recovered(ch, event_b.clone(), "test".into(), 2, 1002, false);
@@ -8256,7 +8265,7 @@ mod boot_recovery_integration_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut queue = EventQueue::new(DedupMode::Queue);
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -8270,7 +8279,7 @@ mod boot_recovery_integration_tests {
         )
         .await;
 
-        let (_ledger2, staged2) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (_ledger2, staged2) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         assert!(
             !staged2.channels.is_empty(),
             "committed data survives reload"
@@ -8365,7 +8374,7 @@ mod boot_recovery_integration_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut queue = EventQueue::new(DedupMode::Queue);
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -8415,7 +8424,7 @@ mod boot_recovery_integration_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut queue = EventQueue::new(DedupMode::Queue);
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -8463,7 +8472,7 @@ mod boot_recovery_integration_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut queue = EventQueue::new(DedupMode::Queue);
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -8517,7 +8526,7 @@ mod boot_recovery_integration_tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut queue = EventQueue::new(DedupMode::Queue);
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let live_channels = HashSet::from([ch]);
         let mut suppression = HashSet::new();
 
@@ -8632,7 +8641,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut suppression: HashSet<String> = HashSet::new();
 
         // Arm a barrier for `ch` — simulates boot_recover registering an
@@ -8675,7 +8684,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut suppression: HashSet<String> = HashSet::new();
 
         // Arm and immediately expire the barrier.
@@ -8729,7 +8738,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
 
         // Dispatch a real in-flight batch.
         let mut pool = dispatch_one_in_flight(&mut queue, &mut ledger, ch, &event_a).await;
@@ -8791,7 +8800,7 @@ mod boot_recovery_integration_tests {
         // The fix: sync_dirty called before break (P3-F2).
         sync_dirty(&mut queue, &mut ledger);
 
-        let (_, staged) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (_, staged) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         assert!(
             staged.channels.is_empty(),
             "after circuit-open exit with sync, reload must find zero recovered triggers (got: {:?})",
@@ -8816,12 +8825,11 @@ mod boot_recovery_integration_tests {
         let event_a = make_channel_event(&keys, ch, "msg");
 
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
 
-        // Block the .tmp path — must use the actual ledger filename (prefix is
-        // the full hex string, up to 16 chars; "test_pubkey" is only 11 chars).
-        let prefix: String = "test_pubkey".chars().take(16).collect();
-        let ledger_path = dir.path().join(format!("pending-turns-{prefix}.json"));
+        // Block the .tmp path — derive the actual ledger path from the loaded
+        // ledger so the filename (pubkey16 + relay hash) stays in sync automatically.
+        let ledger_path = ledger.path().unwrap().to_path_buf();
         let tmp_path = {
             let mut s = ledger_path.as_os_str().to_os_string();
             s.push(".tmp");
@@ -8844,7 +8852,7 @@ mod boot_recovery_integration_tests {
         std::fs::remove_dir_all(&tmp_path).expect("remove blocker");
         ledger.sync(ch, vec![trigger.clone()]);
 
-        let (_, staged) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (_, staged) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         assert_eq!(
             staged.channels.len(),
             1,
@@ -8871,11 +8879,11 @@ mod boot_recovery_integration_tests {
         let ch_remove = Uuid::new_v4();
 
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
 
-        // Write both channels to disk.
-        let prefix: String = "test_pubkey".chars().take(16).collect();
-        let ledger_path = dir.path().join(format!("pending-turns-{prefix}.json"));
+        // Write both channels to disk; derive path from the ledger so the
+        // filename (pubkey16 + relay hash) stays in sync automatically.
+        let ledger_path = ledger.path().unwrap().to_path_buf();
         let tmp_path = {
             let mut s = ledger_path.as_os_str().to_os_string();
             s.push(".tmp");
@@ -8911,7 +8919,7 @@ mod boot_recovery_integration_tests {
         ledger.sync(ch_keep, vec![trigger_keep.clone()]);
 
         // Reload: removed channel must be absent.
-        let (_, staged) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (_, staged) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         assert!(
             !staged.channels.contains_key(&ch_remove),
             "after invalidation + failed persist + different-channel sync, removed channel must be absent on reload (got: {:?})",
@@ -8948,7 +8956,7 @@ mod boot_recovery_integration_tests {
 
         let mut queue = EventQueue::new(DedupMode::Queue);
         let dir = tempfile::tempdir().unwrap();
-        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", 0);
+        let (mut ledger, _) = Ledger::load(dir.path(), "test_pubkey", "ws://localhost:3000", 0);
         let mut suppression: HashSet<String> = HashSet::new();
 
         ledger.add_unresolved(ch, record_a);
