@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/auth/auth.dart';
+import '../../shared/client/client_headers.dart';
 import '../../shared/deeplink/deep_link.dart';
 import '../../shared/relay/relay_session.dart';
 
@@ -127,6 +128,13 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
           .post(
             Uri.parse(url),
             headers: {
+              ...clientHeadersForUrl(
+                headers: ref.read(clientHeadersProvider),
+                targetUrl: url,
+                // Explicit confirmation makes the invite relay the user's
+                // intended first-party destination for this claim.
+                relayUrl: invite.relayUrl,
+              ),
               'Authorization': buildNip98AuthHeader(
                 method: 'POST',
                 url: url,

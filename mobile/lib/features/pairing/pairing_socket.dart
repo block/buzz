@@ -2,12 +2,16 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
 
 const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
 const _pairingAuthOkTimeout = Duration(seconds: 8);
+
+typedef PairingChannelFactory =
+    WebSocketChannel Function(Uri uri, Map<String, String> headers);
 
 /// Ephemeral WebSocket connection for NIP-AB pairing.
 ///
@@ -29,7 +33,8 @@ class PairingSocket {
   final void Function(Object? error) _onDisconnected;
   final Duration _authChallengeTimeout;
   final Duration _authResponseTimeout;
-  final WebSocketChannel Function(Uri uri) _channelFactory;
+  final Map<String, String> _headers;
+  final PairingChannelFactory _channelFactory;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
@@ -46,21 +51,27 @@ class PairingSocket {
     required void Function(Object? error) onDisconnected,
     Duration authChallengeTimeout = _desktopPairingAuthChallengeGrace,
     Duration authResponseTimeout = _pairingAuthOkTimeout,
-    WebSocketChannel Function(Uri uri) channelFactory =
-        WebSocketChannel.connect,
+    Map<String, String> headers = const {},
+    PairingChannelFactory channelFactory = _defaultChannelFactory,
   }) : _wsUrl = wsUrl,
        _ephemeralPrivkey = ephemeralPrivkey,
        _onMessage = onMessage,
        _onDisconnected = onDisconnected,
        _authChallengeTimeout = authChallengeTimeout,
        _authResponseTimeout = authResponseTimeout,
+       _headers = Map.unmodifiable(headers),
        _channelFactory = channelFactory;
+
+  static WebSocketChannel _defaultChannelFactory(
+    Uri uri,
+    Map<String, String> headers,
+  ) => IOWebSocketChannel.connect(uri, headers: headers);
 
   bool get isConnected => _connected;
 
   /// Connect and answer a NIP-42 challenge when the relay requires one.
   Future<void> connect() async {
-    _channel = _channelFactory(Uri.parse(_wsUrl));
+    _channel = _channelFactory(Uri.parse(_wsUrl), _headers);
     await _channel!.ready;
 
     _authCompleter = Completer<void>();

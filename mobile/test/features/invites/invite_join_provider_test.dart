@@ -8,9 +8,16 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import 'package:buzz/features/invites/invite_join_provider.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/client/client_headers.dart';
 import 'package:buzz/shared/deeplink/deep_link.dart';
 
 import '../../shared/community/community_storage_test.dart';
+
+const _clientHeaders = ClientHeaders(
+  appVersion: '1.0',
+  buzzClient: 'test-client',
+  userAgent: 'Buzz/1.0 (ios; build 1)',
+);
 
 void main() {
   for (final existingRelayUrl in [
@@ -35,6 +42,7 @@ void main() {
         final auth = _RecordingAuthNotifier();
         final container = ProviderContainer(
           overrides: [
+            clientHeadersProvider.overrideWithValue(_clientHeaders),
             communityStorageProvider.overrideWithValue(storage),
             authProvider.overrideWith(() => auth),
             inviteKeyGeneratorProvider.overrideWithValue(() {
@@ -84,6 +92,7 @@ void main() {
       final auth = _RecordingAuthNotifier();
       final container = ProviderContainer(
         overrides: [
+          clientHeadersProvider.overrideWithValue(_clientHeaders),
           communityStorageProvider.overrideWithValue(storage),
           authProvider.overrideWith(() => auth),
           inviteKeyGeneratorProvider.overrideWithValue(() => keys),
@@ -129,6 +138,11 @@ void main() {
       );
       expect(capturedRequest!.body, jsonEncode({'code': 'code'}));
       expect(capturedRequest!.headers['Authorization'], startsWith('Nostr '));
+      expect(
+        capturedRequest!.headers['Buzz-Client'],
+        _clientHeaders.buzzClient,
+      );
+      expect(capturedRequest!.headers['User-Agent'], _clientHeaders.userAgent);
       expect(auth.authenticatedCommunities, hasLength(1));
       expect(
         auth.authenticatedCommunities.single.relayUrl,
@@ -145,6 +159,7 @@ void main() {
     final storage = CommunityStorage(secure: FakeSecureStorage());
     final container = ProviderContainer(
       overrides: [
+        clientHeadersProvider.overrideWithValue(_clientHeaders),
         communityStorageProvider.overrideWithValue(storage),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),
         inviteJoinHttpClientProvider.overrideWithValue(
@@ -191,6 +206,7 @@ void main() {
     final auth = _RecordingAuthNotifier();
     final container = ProviderContainer(
       overrides: [
+        clientHeadersProvider.overrideWithValue(_clientHeaders),
         communityStorageProvider.overrideWithValue(storage),
         authProvider.overrideWith(() => auth),
         inviteKeyGeneratorProvider.overrideWithValue(() => keys),

@@ -5,6 +5,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/features/pairing/pairing_provider.dart';
 import 'package:buzz/features/pairing/pairing_socket.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/client/client_headers.dart';
 
 /// Tests for [PairingNotifier]'s legacy `buzz://` payload parsing and
 /// SSRF-prevention validation.
@@ -23,6 +24,12 @@ import 'package:buzz/shared/auth/auth.dart';
 ///     wrong shape (non-object, missing fields, missing nsec), and SSRF
 ///     guards (private IPs, non-http schemes).
 ///   - `reset()` returning to idle from an error state.
+const _clientHeaders = ClientHeaders(
+  appVersion: '1.0',
+  buzzClient: 'test-client',
+  userAgent: 'Buzz/1.0 (ios; build 1)',
+);
+
 void main() {
   group('PairingNotifier', () {
     late ProviderContainer container;
@@ -31,7 +38,10 @@ void main() {
     ProviderContainer createContainer() {
       fakeAuth = FakeAuthNotifier();
       return ProviderContainer(
-        overrides: [authProvider.overrideWith(() => fakeAuth)],
+        overrides: [
+          clientHeadersProvider.overrideWithValue(_clientHeaders),
+          authProvider.overrideWith(() => fakeAuth),
+        ],
       );
     }
 
@@ -52,12 +62,16 @@ void main() {
               ({
                 required wsUrl,
                 required ephemeralPrivkey,
+                required headers,
                 required onMessage,
                 required void Function(Object? error) onDisconnected,
               }) => _DisconnectingSocket(disconnectCallback: onDisconnected),
         );
         container = ProviderContainer(
-          overrides: [pairingProvider.overrideWith(() => notifier)],
+          overrides: [
+            clientHeadersProvider.overrideWithValue(_clientHeaders),
+            pairingProvider.overrideWith(() => notifier),
+          ],
         );
         const code =
             'nostrpair://62287897da61e3fa294b4570575f7db8bea147d6631150f2e4656714c645fb1e'

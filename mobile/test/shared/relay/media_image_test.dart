@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 
+import 'package:buzz/shared/client/client_headers.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:flutter/painting.dart';
@@ -18,8 +19,16 @@ final _pngBytes = base64Decode(
 const _relayBase = 'https://relay.example.com';
 const _mediaUrl = '$_relayBase/media/abc123.png';
 
-MediaGetAuthService _auth({String? nsec, DateTime Function()? now}) =>
-    MediaGetAuthService(baseUrl: _relayBase, nsec: nsec, now: now);
+MediaGetAuthService _auth({
+  String? nsec,
+  DateTime Function()? now,
+  ClientHeaders? clientHeaders,
+}) => MediaGetAuthService(
+  baseUrl: _relayBase,
+  nsec: nsec,
+  now: now,
+  clientHeaders: clientHeaders,
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -57,10 +66,93 @@ void main() {
       expect(refreshed['Authorization'], isNot(first['Authorization']));
     });
 
+    test('sends both identification headers only for relay media URLs', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      final headers = auth.headersFor(_mediaUrl);
+      expect(headers['Buzz-Client'], 'test-client');
+      expect(headers['User-Agent'], 'test-agent');
+      expect(headers['Authorization'], startsWith('Nostr '));
+    });
+
+    test('sends only User-Agent to third-party media hosts', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      final headers = auth.headersFor(
+        'https://cdn.cloudflare.example/attachments/abc.png',
+      );
+      expect(headers, {'User-Agent': 'test-agent'});
+      expect(headers, isNot(contains('Buzz-Client')));
+      expect(headers, isNot(contains('Authorization')));
+    });
+
+    test('sends only User-Agent when the relay base URL is malformed', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = MediaGetAuthService(
+        baseUrl: '://',
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      expect(
+        auth.headersFor('https://cdn.cloudflare.example/attachments/abc.png'),
+        {'User-Agent': 'test-agent'},
+      );
+    });
+
+    test('malformed target URL gets no headers', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      expect(auth.headersFor('://'), isEmpty);
+    });
+
+    test('sends identification without a signing key', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(clientHeaders: clientHeaders);
+
+      expect(auth.headersFor(_mediaUrl), clientHeaders.values);
+    });
+
     test('non-relay URLs get no headers even with a key', () {
       final nsec = nostr.Keys.generate().nsec;
       final auth = _auth(nsec: nsec);
       expect(auth.headersFor('https://elsewhere.com/media/abc.png'), isEmpty);
+      expect(
+        auth.headersFor('http://relay.example.com/media/abc.png'),
+        isEmpty,
+      );
       expect(auth.headersFor('$_relayBase/not-media/abc.png'), isEmpty);
     });
   });

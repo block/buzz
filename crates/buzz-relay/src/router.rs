@@ -17,9 +17,11 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
+use tracing::Instrument as _;
 
 use crate::api;
 use crate::audio;
+use crate::client_info::ClientInfo;
 use crate::connection::handle_connection;
 use crate::metrics::track_metrics;
 use crate::nip11::{nip11_document, relay_info_handler};
@@ -298,19 +300,36 @@ async fn nip11_or_ws_handler(
     };
 
     let max_frame_bytes = state.config.max_frame_bytes;
+    let client_info = ClientInfo::from_headers(&headers);
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
             // Shutting down: refuse new sockets instead of accepting a
             // connection onto a dying pod. Readiness already returns 503, but
-            // that only stops K8s routing — direct and in-flight upgrades
-            // still reach here during the pre-drain grace window. Clients
-            // treat the refusal as a normal dial failure and retry, landing
-            // on a healthy pod.
+            // that only stops K8s routing. Direct and in-flight upgrades still
+            // reach here during the pre-drain grace window. Clients treat the
+            // refusal as a normal dial failure and retry on a healthy pod.
             if state.shutting_down.load(Ordering::Relaxed) {
                 return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
             }
+
+            let connection_span = tracing::info_span!(
+                "ws.connection",
+                client.app = client_info.as_ref().map(|client| client.app.as_str()),
+                client.platform = client_info.as_ref().map(|client| client.platform.as_str()),
+                client.app_version = client_info
+                    .as_ref()
+                    .map(|client| client.app_version.as_str()),
+                client.app_build = client_info.as_ref().map(|client| client.app_build.as_str()),
+                client.os_version = client_info
+                    .as_ref()
+                    .map(|client| client.os_version.as_str()),
+                client.os_api = client_info.as_ref().and_then(|client| client.os_api),
+            );
             limit_relay_websocket(ws, max_frame_bytes)
-                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .on_upgrade(move |socket| {
+                    handle_connection(socket, state, addr, tenant, client_info)
+                        .instrument(connection_span)
+                })
                 .into_response()
         }
         Err(_) => {

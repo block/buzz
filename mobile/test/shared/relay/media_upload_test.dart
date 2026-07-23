@@ -8,6 +8,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart' as http_testing;
 import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:buzz/shared/client/client_headers.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_upload.dart';
 
@@ -368,6 +369,11 @@ void main() {
       final service = MediaUploadService(
         baseUrl: 'https://relay.example:8443',
         nsec: nsec,
+        clientHeaders: const ClientHeaders(
+          appVersion: '1.0',
+          buzzClient: 'test-client',
+          userAgent: 'test-agent',
+        ),
         httpClient: client,
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
@@ -386,6 +392,8 @@ void main() {
       );
       expect(capturedRequest!.headers['Content-Type'], 'image/png');
       expect(capturedRequest!.headers['X-SHA-256'], isNotEmpty);
+      expect(capturedRequest!.headers['Buzz-Client'], 'test-client');
+      expect(capturedRequest!.headers['User-Agent'], 'test-agent');
       expect(capturedRequest!.bodyBytes, _pngBytes);
 
       final authHeader = capturedRequest!.headers['Authorization'];

@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
@@ -32,6 +33,7 @@ Exception classifyRelayAuthFailure(String message) {
 class RelaySocket {
   final String _wsUrl;
   final String? _nsec;
+  final Map<String, String> _headers;
   final void Function(List<dynamic> message) _onMessage;
   final void Function() _onConnected;
   final void Function(Object? error) _onDisconnected;
@@ -48,11 +50,13 @@ class RelaySocket {
   RelaySocket({
     required String wsUrl,
     required String? nsec,
+    Map<String, String> headers = const {},
     required void Function(List<dynamic> message) onMessage,
     required void Function() onConnected,
     required void Function(Object? error) onDisconnected,
   }) : _wsUrl = wsUrl,
        _nsec = nsec,
+       _headers = Map.unmodifiable(headers),
        _onMessage = onMessage,
        _onConnected = onConnected,
        _onDisconnected = onDisconnected;
@@ -63,7 +67,10 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
+      _channel = IOWebSocketChannel.connect(
+        Uri.parse(_wsUrl),
+        headers: _headers,
+      );
       await _channel!.ready;
     } catch (e) {
       _state = SocketState.disconnected;

@@ -1,9 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:nostr/nostr.dart' as nostr;
-import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
@@ -18,7 +16,7 @@ import '../custom_emoji/custom_emoji_provider.dart';
 import '../custom_emoji/custom_emoji_render.dart';
 import 'theme_picker_page.dart';
 
-class SettingsPage extends HookConsumerWidget {
+class SettingsPage extends ConsumerWidget {
   const SettingsPage({super.key});
 
   @override
@@ -27,8 +25,8 @@ class SettingsPage extends HookConsumerWidget {
     final selectedAccent = ref.watch(accentProvider);
     final selectedScheme = ref.watch(schemeProvider);
     final colorScheme = context.colors;
-    final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
-    final packageInfo = useFuture(packageInfoFuture);
+    final clientHeaders = ref.watch(clientHeadersProvider);
+    final appVersion = clientHeaders.appVersion;
 
     return FrostedScaffold(
       appBar: const FrostedAppBar(title: Text('Settings')),
@@ -166,14 +164,14 @@ class SettingsPage extends HookConsumerWidget {
               ],
             ),
           ),
-          if (packageInfo.hasData)
+          if (appVersion.isNotEmpty)
             SafeArea(
               top: false,
               child: Padding(
                 padding: const EdgeInsets.only(bottom: Grid.xs, top: Grid.xxs),
                 child: Center(
                   child: Text(
-                    'v${packageInfo.data!.version}',
+                    'v$appVersion',
                     style: context.textTheme.bodySmall?.copyWith(
                       color: context.colors.onSurfaceVariant.withValues(
                         alpha: 0.6,

@@ -10,6 +10,12 @@ import 'package:pointycastle/digests/sha256.dart';
 import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 
+const _clientHeaders = ClientHeaders(
+  appVersion: '1.0',
+  buzzClient: 'test-client',
+  userAgent: 'Buzz/1.0 (ios; build 1)',
+);
+
 void main() {
   test('queryRelay sends NIP-98 auth over POST /query', () async {
     final keychain = nostr.Keys.generate();
@@ -22,6 +28,7 @@ void main() {
     final session = RelaySessionNotifier(httpClient: client);
     final container = ProviderContainer(
       overrides: [
+        clientHeadersProvider.overrideWithValue(_clientHeaders),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -52,6 +59,8 @@ void main() {
     expect(capturedRequest!.method, 'POST');
     expect(capturedRequest!.url.toString(), 'https://relay.example/query');
     expect(capturedRequest!.headers['Content-Type'], 'application/json');
+    expect(capturedRequest!.headers['Buzz-Client'], _clientHeaders.buzzClient);
+    expect(capturedRequest!.headers['User-Agent'], _clientHeaders.userAgent);
     expect(jsonDecode(capturedRequest!.body), [filter.toJson()]);
 
     final authHeader = capturedRequest!.headers['Authorization'];
@@ -88,6 +97,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        clientHeadersProvider.overrideWithValue(_clientHeaders),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(
           () => _FakeRelayConfigNotifier(
@@ -174,6 +184,7 @@ void main() {
       final auth = _FakeAuthNotifier();
       final container = ProviderContainer(
         overrides: [
+          clientHeadersProvider.overrideWithValue(_clientHeaders),
           relaySessionProvider.overrideWith(() => session),
           authProvider.overrideWith(() => auth),
         ],
@@ -199,6 +210,7 @@ void main() {
           ({
             required wsUrl,
             required nsec,
+            required headers,
             required onMessage,
             required onConnected,
             required onDisconnected,
@@ -206,6 +218,7 @@ void main() {
             final socket = _ControlledRelaySocket(
               wsUrl: wsUrl,
               nsec: nsec,
+              headers: headers,
               onMessage: onMessage,
               onConnected: onConnected,
               onDisconnected: onDisconnected,
@@ -220,6 +233,7 @@ void main() {
     );
     final container = ProviderContainer(
       overrides: [
+        clientHeadersProvider.overrideWithValue(_clientHeaders),
         relaySessionProvider.overrideWith(() => session),
         relayConfigProvider.overrideWith(() => config),
         authProvider.overrideWith(() => _AuthenticatedAuthNotifier()),
@@ -230,6 +244,11 @@ void main() {
     final subscription = container.listen(relaySessionProvider, (_, _) {});
     addTearDown(subscription.close);
     await Future<void>.delayed(Duration.zero);
+    expect(sockets, hasLength(1));
+    expect(sockets.single.capturedHeaders, {
+      'Buzz-Client': _clientHeaders.buzzClient,
+      'User-Agent': _clientHeaders.userAgent,
+    });
 
     config.update(baseUrl: 'https://new.example', nsec: keychain.nsec);
     await Future<void>.delayed(Duration.zero);
@@ -372,14 +391,17 @@ class _AuthenticatedAuthNotifier extends AuthNotifier {
 class _ControlledRelaySocket extends RelaySocket {
   final void Function() _connected;
   final void Function(Object? error) _disconnected;
+  final Map<String, String> capturedHeaders;
 
   _ControlledRelaySocket({
     required super.wsUrl,
     required super.nsec,
+    required super.headers,
     required super.onMessage,
     required super.onConnected,
     required super.onDisconnected,
-  }) : _connected = onConnected,
+  }) : capturedHeaders = headers,
+       _connected = onConnected,
        _disconnected = onDisconnected;
 
   @override

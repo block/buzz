@@ -61,6 +61,7 @@ typedef PairingSocketFactory =
     PairingSocket Function({
       required String wsUrl,
       required String ephemeralPrivkey,
+      required Map<String, String> headers,
       required void Function(List<dynamic> message) onMessage,
       required void Function(Object? error) onDisconnected,
     });
@@ -76,11 +77,13 @@ class PairingNotifier extends Notifier<PairingState> {
   static PairingSocket _createPairingSocket({
     required String wsUrl,
     required String ephemeralPrivkey,
+    required Map<String, String> headers,
     required void Function(List<dynamic> message) onMessage,
     required void Function(Object? error) onDisconnected,
   }) => PairingSocket(
     wsUrl: wsUrl,
     ephemeralPrivkey: ephemeralPrivkey,
+    headers: headers,
     onMessage: onMessage,
     onDisconnected: onDisconnected,
   );
@@ -194,10 +197,16 @@ class PairingNotifier extends Notifier<PairingState> {
         qr.sourcePubkey,
       );
 
-      // 4. Connect to relay with ephemeral keys.
+      // 4. Connect to the relay with ephemeral keys. The pairing payload has
+      // not been authenticated yet, so do not trust its relay URL as a
+      // configured origin for structured client metadata.
       final socket = _socketFactory(
         wsUrl: relayWsUrl,
         ephemeralPrivkey: _ephemeralPrivkey!,
+        headers: clientHeadersForUrl(
+          headers: ref.read(clientHeadersProvider),
+          targetUrl: relayWsUrl,
+        ),
         onMessage: _handleRelayMessage,
         onDisconnected: _handleDisconnected,
       );
@@ -608,9 +617,15 @@ class PairingNotifier extends Notifier<PairingState> {
     final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
     final wsUrl = uri.replace(scheme: scheme).toString();
 
+    // The credential payload is still untrusted, so only globally recognized
+    // Buzz origins may receive structured client metadata during this probe.
     final socket = RelaySocket(
       wsUrl: wsUrl,
       nsec: nsec,
+      headers: clientHeadersForUrl(
+        headers: ref.read(clientHeadersProvider),
+        targetUrl: wsUrl,
+      ),
       onMessage: (_) {},
       onConnected: () {},
       onDisconnected: (_) {},

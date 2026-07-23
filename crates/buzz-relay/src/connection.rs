@@ -18,6 +18,7 @@ use buzz_auth::{generate_challenge, AuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
+use crate::client_info::ClientInfo;
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
 use crate::state::{run_registered_community_connection, AppState};
@@ -120,6 +121,7 @@ pub async fn handle_connection(
     state: Arc<AppState>,
     addr: SocketAddr,
     tenant: TenantContext,
+    client_info: Option<ClientInfo>,
 ) {
     let conn_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
@@ -133,7 +135,17 @@ pub async fn handle_connection(
         community_id,
         cancel.clone(),
         move || async move { check_state.db.is_community_active(community_id).await },
-        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+        move || {
+            handle_active_connection(
+                socket,
+                run_state,
+                addr,
+                tenant,
+                conn_id,
+                cancel,
+                client_info,
+            )
+        },
     )
     .await;
 }
@@ -145,6 +157,7 @@ async fn handle_active_connection(
     tenant: TenantContext,
     conn_id: Uuid,
     cancel: CancellationToken,
+    client_info: Option<ClientInfo>,
 ) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
@@ -179,7 +192,20 @@ async fn handle_active_connection(
         grace_limit: state.config.slow_client_grace_limit,
     });
 
-    info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
+    if let Some(client) = &client_info {
+        client.record_observation();
+    }
+    info!(
+        conn_id = %conn_id,
+        addr = %addr,
+        client.app = client_info.as_ref().map(|client| client.app.as_str()),
+        client.platform = client_info.as_ref().map(|client| client.platform.as_str()),
+        client.app_version = client_info.as_ref().map(|client| client.app_version.as_str()),
+        client.app_build = client_info.as_ref().map(|client| client.app_build.as_str()),
+        client.os_version = client_info.as_ref().map(|client| client.os_version.as_str()),
+        client.os_api = client_info.as_ref().and_then(|client| client.os_api),
+        "WebSocket connection established"
+    );
     metrics::counter!(
         "buzz_ws_connections_total",
         "community" => conn.tenant.host().to_owned()
