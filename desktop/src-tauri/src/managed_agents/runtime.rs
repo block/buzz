@@ -15,7 +15,7 @@ use crate::{
 };
 
 mod path;
-pub(in crate::managed_agents) use path::build_augmented_path;
+pub(in crate::managed_agents) use path::{build_augmented_path, windows_inherited_path};
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -1692,6 +1692,7 @@ pub fn spawn_agent_child(
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
         login_shell_path(),
         nvm_bin,
+        super::windows_inherited_path(),
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);
