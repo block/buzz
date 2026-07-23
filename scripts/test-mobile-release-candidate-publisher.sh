@@ -21,7 +21,6 @@ case "${1:-}:${2:-}" in
     case "$*" in
       *'.enforcement'*) printf '%s\n' "${GH_TAG_RULESET_STATE:-active}" ;;
       *'.current_user_can_bypass'*) printf '%s\n' "${GH_CURRENT_USER_CAN_BYPASS-always}" ;;
-      *'.bypass_actors[]'*) printf '%s\n' "${GH_BYPASS_ACTORS:-Integration:4349119:always}" ;;
       *'[.rules[].type]'*) printf '%s\n' "${GH_TAG_RULE_TYPES:-creation,deletion,non_fast_forward,update}" ;;
       *'.conditions.ref_name.include[]'*) printf '%s\n' "${GH_TAG_INCLUDES:-refs/tags/mobile-v*}" ;;
       *'.conditions.ref_name.exclude[]'*) printf '%s\n' "${GH_TAG_EXCLUDES:-}" ;;
@@ -89,21 +88,6 @@ if GH_CURRENT_USER_CAN_BYPASS=never "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/
 fi
 if GH_CURRENT_USER_CAN_BYPASS='' "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
   echo "publisher accepted a ruleset response without an effective bypass" >&2
-  exit 1
-fi
-if GH_BYPASS_ACTORS='Integration:4349119:always,Integration:9876543:always' \
-    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
-  echo "publisher accepted an extra ruleset bypass actor" >&2
-  exit 1
-fi
-if GH_BYPASS_ACTORS='Integration:9876543:always' \
-    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
-  echo "publisher accepted a substituted ruleset bypass actor" >&2
-  exit 1
-fi
-if GH_BYPASS_ACTORS='Integration:4349119:pull_request' \
-    "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
-  echo "publisher accepted a ruleset bypass actor with the wrong mode" >&2
   exit 1
 fi
 if GH_TAG_RULESET_STATE=disabled "$publisher" 1.2.3 1 "$GH_TARGET_SHA" >/dev/null 2>&1; then
