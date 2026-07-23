@@ -25,6 +25,15 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    // WSS connections (ephemeral-event publish goes over tokio-tungstenite's
+    // rustls backend) require a process-level CryptoProvider before the first
+    // TLS handshake. With both ring and aws-lc-rs present in the workspace,
+    // rustls cannot auto-select one and otherwise panics inside
+    // `publish_ephemeral_event`. Install the ring provider explicitly; ignore
+    // the error so a repeat call (e.g. when embedded) is a no-op rather than a
+    // panic.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
