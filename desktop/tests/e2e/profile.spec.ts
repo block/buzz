@@ -1021,7 +1021,7 @@ test("declared owner sees runtime tab for a remote relay agent", async ({
     "Goose",
   );
   await expect(panel.getByTestId("user-profile-respond-to")).toContainText(
-    "anyone",
+    "Anyone",
   );
 
   // Declared ownership grants read visibility only; local-management write UI

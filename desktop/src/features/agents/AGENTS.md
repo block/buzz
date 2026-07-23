@@ -114,6 +114,13 @@ with a TypeScript lookup table or an id comparison in a component.
     published or removed. A queued update must stay visibly queued, and the
     catalog itself must render only relay-confirmed publications — never an
     optimistic local persona.
+11. **Open agent access names the consequence where it is selected.** The shared
+   respond-to field shows a persistent warning whenever `anyone` is selected,
+   including persona-backed create and edit surfaces. Keep that disclosure in
+   the shared field instead of adding surface-specific flags. Describe the
+   audience and their ability to use the agent to access the computer or server
+   where it runs in plain language; don't expose `respond-to`, `allowlist`,
+   Nostr, or harness jargon in primary UI copy.
 
 ## The tests that enforce this
 
@@ -128,6 +135,8 @@ with a TypeScript lookup table or an id comparison in a component.
   `isCacheableDiscoveryResponse`, `deriveModelDiscoveryPending`,
   `isSuccessfulEmptyDiscovery`. If the "reopen to retry" copy becomes inert
   again, these tests will catch it.
+- `ui/respondToFieldContract.test.mjs` — plain-language mode labels and the
+  persistent warning contract for open agent access.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.
