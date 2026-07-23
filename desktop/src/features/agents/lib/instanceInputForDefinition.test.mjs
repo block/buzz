@@ -245,6 +245,67 @@ test("row 1: resolves the configured runtime when available", () => {
   assert.deepEqual(warnings, []);
 });
 
+test("row 1: preferred custom + persona custom starts on BYO command", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: "custom" }),
+    [gooseRuntime, claudeRuntime],
+    {
+      preferred_runtime: "custom",
+      preferred_agent_command: "agent",
+      preferred_agent_args: ["acp"],
+    },
+  );
+  assert.equal(runtime.id, "custom");
+  assert.equal(runtime.command, "agent");
+  assert.deepEqual(runtime.defaultArgs, ["acp"]);
+  assert.deepEqual(warnings, []);
+});
+
+test("row 1: persona custom without global BYO refuses rather than silently switching", () => {
+  assert.throws(
+    () =>
+      resolveStartRuntimeForDefinition(
+        persona({ runtime: "custom" }),
+        [gooseRuntime, claudeRuntime],
+        { preferred_runtime: "claude" },
+      ),
+    /custom harness|not available/i,
+  );
+});
+
+test("row 1: no preference with preferred custom uses BYO command", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: undefined }),
+    [gooseRuntime, claudeRuntime],
+    {
+      preferred_runtime: "custom",
+      preferred_agent_command: "yoak",
+      preferred_agent_args: ["acp"],
+    },
+  );
+  assert.equal(runtime.id, "custom");
+  assert.equal(runtime.command, "yoak");
+  assert.deepEqual(warnings, []);
+});
+
+test("buildInstanceInputForDefinition pins BYO command when persona runtime is custom", async () => {
+  const customRuntime = {
+    ...gooseRuntime,
+    id: "custom",
+    label: "Custom command",
+    command: "agent",
+    defaultArgs: ["acp"],
+    mcpCommand: null,
+  };
+  const input = await buildInstanceInputForDefinition(
+    persona({ runtime: "custom" }),
+    customRuntime,
+  );
+  assert.equal(input.agentCommand, "agent");
+  assert.deepEqual(input.agentArgs, ["acp"]);
+  assert.equal(input.harnessOverride, true);
+});
+
 test("row 1: no preference resolves the default with no warnings", () => {
   const { runtime, warnings } = resolveStartRuntimeForDefinition(
     persona({ runtime: undefined }),

@@ -85,6 +85,11 @@ test("getDefaultPersonaRuntime honors an available global preference", () => {
   assert.equal(getDefaultPersonaRuntime(runtimes, "claude")?.id, "claude");
 });
 
+test("getDefaultPersonaRuntime returns null for preferred custom sentinel", () => {
+  const runtimes = [makeRuntime("buzz-agent"), makeRuntime("claude")];
+  assert.equal(getDefaultPersonaRuntime(runtimes, "custom"), null);
+});
+
 test("getDefaultPersonaRuntime ignores an unavailable global preference", () => {
   const runtimes = [
     makeRuntime("buzz-agent"),
@@ -151,6 +156,8 @@ test("resetConfigForHarnessChange clears harness-specific values", () => {
     env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high", KEEP_ME: "yes" },
     model: "claude-opus",
     preferred_runtime: "buzz-agent",
+    preferred_agent_command: "agent",
+    preferred_agent_args: ["acp"],
     provider: "anthropic",
   };
 
@@ -158,6 +165,8 @@ test("resetConfigForHarnessChange clears harness-specific values", () => {
     env_vars: { KEEP_ME: "yes" },
     model: null,
     preferred_runtime: "claude",
+    preferred_agent_command: null,
+    preferred_agent_args: null,
     provider: null,
   });
 });
@@ -167,6 +176,8 @@ test("resetConfigForHarnessChange preserves compatible provider selection", () =
     env_vars: { KEEP_ME: "yes" },
     model: "old-model",
     preferred_runtime: "claude",
+    preferred_agent_command: null,
+    preferred_agent_args: null,
     provider: "anthropic",
   };
 
@@ -174,6 +185,8 @@ test("resetConfigForHarnessChange preserves compatible provider selection", () =
     env_vars: { KEEP_ME: "yes" },
     model: null,
     preferred_runtime: "goose",
+    preferred_agent_command: null,
+    preferred_agent_args: null,
     provider: "anthropic",
   });
 });
@@ -187,6 +200,26 @@ test("resetConfigForHarnessChange does not carry relay mesh to Goose", () => {
   };
 
   assert.equal(resetConfigForHarnessChange(config, "goose").provider, null);
+});
+
+test("resetConfigForHarnessChange to custom keeps existing BYO command/args", () => {
+  const config = {
+    env_vars: {},
+    model: "x",
+    preferred_runtime: "claude",
+    preferred_agent_command: "agent",
+    preferred_agent_args: ["acp"],
+    provider: null,
+  };
+
+  assert.deepEqual(resetConfigForHarnessChange(config, "custom"), {
+    env_vars: {},
+    model: null,
+    preferred_runtime: "custom",
+    preferred_agent_command: "agent",
+    preferred_agent_args: ["acp"],
+    provider: null,
+  });
 });
 
 // ── getPersonaModelOptions — codex/claude do not use global provider ──────────

@@ -20,6 +20,7 @@ import {
 import { OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
+import type { ByoHarnessDraft } from "@/features/agents/lib/customHarness";
 
 export type MachineOnboardingPage =
   | "identity"
@@ -51,6 +52,7 @@ export function MachineOnboardingFlow({
     null,
   );
   const [readyRuntimeIds, setReadyRuntimeIds] = React.useState<string[]>([]);
+  const [byoDraft, setByoDraft] = React.useState<ByoHarnessDraft | null>(null);
   const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
       setReadyRuntimeIds(Array.from(new Set(runtimeIds)));
@@ -214,12 +216,14 @@ export function MachineOnboardingFlow({
               actions={{
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
-                next: (runtimeIds) => {
+                next: (runtimeIds, draft) => {
                   setReadyRuntimeIds(Array.from(runtimeIds));
+                  setByoDraft(draft ?? null);
                   setPage("config");
                 },
               }}
               direction="forward"
+              initialByoDraft={byoDraft}
               onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
             />
           ) : (
@@ -228,6 +232,7 @@ export function MachineOnboardingFlow({
                 back: () => setPage("setup"),
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
+              byoDraft={byoDraft}
               direction="forward"
               readyRuntimeIds={readyRuntimeIds}
             />

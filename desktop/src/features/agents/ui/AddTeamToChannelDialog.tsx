@@ -13,8 +13,8 @@ import {
 } from "@/features/agents/lib/teamPersonas";
 import {
   collectRuntimeWarnings,
-  getDefaultPersonaRuntime,
   resolvePersonaRuntime,
+  resolvePreferredHarness,
 } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
@@ -69,12 +69,8 @@ export function AddTeamToChannelDialog({
   );
 
   const runtimes = providersQuery.data ?? [];
-  // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
-  // single-agent start path (buzz-agent → goose → first available).
-  const defaultProvider = getDefaultPersonaRuntime(
-    runtimes,
-    globalConfig.preferred_runtime,
-  );
+  // Prefer BYO custom command when configured; otherwise buzz-agent-first.
+  const defaultProvider = resolvePreferredHarness(runtimes, globalConfig);
 
   const teamPersonaResolution = React.useMemo(
     () =>

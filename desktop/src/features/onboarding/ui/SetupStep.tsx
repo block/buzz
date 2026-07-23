@@ -18,6 +18,11 @@ import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { Spinner } from "@/shared/ui/spinner";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
+  CUSTOM_RUNTIME_ID,
+  type ByoHarnessDraft,
+} from "@/features/agents/lib/customHarness";
+import { BringYourOwnHarnessCard } from "./BringYourOwnHarnessCard";
+import {
   getReadyOnboardingRuntimes,
   getVisibleOnboardingRuntimes,
   runtimeIsReadyForOnboarding,
@@ -35,6 +40,8 @@ import type { SetupStepActions, SetupStepState } from "./types";
 type SetupStepProps = {
   actions: SetupStepActions;
   direction: OnboardingTransitionDirection;
+  /** Restored when returning from the config step so BYO fields survive remount. */
+  initialByoDraft?: ByoHarnessDraft | null;
   onReadyRuntimeIdsChange: (runtimeIds: readonly string[]) => void;
 };
 
@@ -548,11 +555,23 @@ function RuntimeProvidersLoadingState() {
 }
 
 function RuntimeProvidersSection({
+  byoArgs,
+  byoCommand,
+  byoSelected,
   installResults,
+  onByoArgsChange,
+  onByoCommandChange,
+  onByoSelectedChange,
   onInstallResultsChange,
   runtimeProviders,
 }: {
+  byoArgs: string;
+  byoCommand: string;
+  byoSelected: boolean;
   installResults: InstallResultsState;
+  onByoArgsChange: (value: string) => void;
+  onByoCommandChange: (value: string) => void;
+  onByoSelectedChange: (selected: boolean) => void;
   onInstallResultsChange: React.Dispatch<
     React.SetStateAction<InstallResultsState>
   >;
@@ -596,8 +615,9 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          Install or sign in to Claude Code or Codex, or bring your own ACP
+          harness — any stdio ACP server such as Cursor{" "}
+          <code className="font-mono text-2xs">agent acp</code>.
         </p>
       </div>
 
@@ -624,10 +644,19 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No bundled harnesses were detected yet. Install Claude Code or
+            Codex, or bring your own ACP command below.
           </p>
         )}
+
+        <BringYourOwnHarnessCard
+          args={byoArgs}
+          command={byoCommand}
+          onArgsChange={onByoArgsChange}
+          onCommandChange={onByoCommandChange}
+          selected={byoSelected}
+          onSelectedChange={onByoSelectedChange}
+        />
 
         {errorMessage ? (
           <p className="max-w-[560px] rounded-2xl bg-destructive/10 px-6 py-3 text-sm text-destructive">
@@ -642,18 +671,35 @@ function RuntimeProvidersSection({
 function SetupStepContent({
   actions,
   direction,
+  initialByoDraft = null,
   onReadyRuntimeIdsChange,
   state,
 }: SetupStepContentProps) {
   const { runtimeProviders } = state;
   const [installResults, setInstallResults] =
     React.useState<InstallResultsState>({});
-  const readyRuntimeIds = React.useMemo(
+  const [byoSelected, setByoSelected] = React.useState(() =>
+    Boolean(initialByoDraft?.command.trim()),
+  );
+  const [byoCommand, setByoCommand] = React.useState(
+    () => initialByoDraft?.command ?? "",
+  );
+  const [byoArgs, setByoArgs] = React.useState(
+    () => initialByoDraft?.args ?? "acp",
+  );
+
+  const catalogReadyIds = React.useMemo(
     () =>
       getReadyOnboardingRuntimes(runtimeProviders.items).map(
         (runtime) => runtime.id,
       ),
     [runtimeProviders.items],
+  );
+  const byoIsReady = byoSelected && byoCommand.trim().length > 0;
+  const readyRuntimeIds = React.useMemo(
+    () =>
+      byoIsReady ? [...catalogReadyIds, CUSTOM_RUNTIME_ID] : catalogReadyIds,
+    [byoIsReady, catalogReadyIds],
   );
   const readyRuntimeIdsKey = readyRuntimeIds.join("\0");
   // The key prevents catalog object refreshes from creating an effect loop
@@ -663,6 +709,15 @@ function SetupStepContent({
     onReadyRuntimeIdsChange(readyRuntimeIds);
   }, [onReadyRuntimeIdsChange, readyRuntimeIdsKey]);
 
+  const canAdvance = readyRuntimeIds.length > 0;
+
+  function handleNext() {
+    const draft: ByoHarnessDraft | null = byoIsReady
+      ? { command: byoCommand.trim(), args: byoArgs }
+      : null;
+    actions.next(readyRuntimeIds, draft);
+  }
+
   return (
     <OnboardingSlideTransition
       className="flex min-h-full w-full flex-col items-center"
@@ -671,7 +726,13 @@ function SetupStepContent({
       transitionKey={`setup-${direction}`}
     >
       <RuntimeProvidersSection
+        byoArgs={byoArgs}
+        byoCommand={byoCommand}
+        byoSelected={byoSelected}
         installResults={installResults}
+        onByoArgsChange={setByoArgs}
+        onByoCommandChange={setByoCommand}
+        onByoSelectedChange={setByoSelected}
         onInstallResultsChange={setInstallResults}
         runtimeProviders={runtimeProviders}
       />
@@ -680,8 +741,8 @@ function SetupStepContent({
         <Button
           className={`${ONBOARDING_PRIMARY_CTA_CLASS} text-sm`}
           data-testid="onboarding-setup-next"
-          disabled={readyRuntimeIds.length === 0}
-          onClick={() => actions.next(readyRuntimeIds)}
+          disabled={!canAdvance}
+          onClick={handleNext}
           type="button"
         >
           Next
@@ -704,6 +765,7 @@ function SetupStepContent({
 export function SetupStep({
   actions,
   direction,
+  initialByoDraft = null,
   onReadyRuntimeIdsChange,
 }: SetupStepProps) {
   const state = useSetupStepState();
@@ -712,6 +774,7 @@ export function SetupStep({
     <SetupStepContent
       actions={actions}
       direction={direction}
+      initialByoDraft={initialByoDraft}
       onReadyRuntimeIdsChange={onReadyRuntimeIdsChange}
       state={state}
     />

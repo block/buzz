@@ -89,6 +89,29 @@ buzz-acp
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
+## Running with a custom ACP harness
+
+Any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio works.
+Point `BUZZ_ACP_AGENT_COMMAND` at the binary and set `BUZZ_ACP_AGENT_ARGS` to
+whatever that harness expects:
+
+```bash
+# Cursor Agent CLI (native ACP)
+export BUZZ_ACP_AGENT_COMMAND="agent"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+# Absolute path to your own ACP adapter
+export BUZZ_ACP_AGENT_COMMAND="/usr/local/bin/my-acp-agent"
+export BUZZ_ACP_AGENT_ARGS=""
+
+buzz-acp
+```
+
+In Buzz Desktop, choose **Bring your own harness** during onboarding (or
+**Custom command** under Settings → Agent defaults / Edit agent) and enter the
+same command + args. No Claude Code or Codex install is required. The harness
+must already speak ACP — Buzz does not wrap arbitrary CLIs.
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).

@@ -1,4 +1,13 @@
-import type { AcpRuntime, AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import type {
+  AcpRuntime,
+  AcpRuntimeCatalogEntry,
+  GlobalAgentConfig,
+} from "@/shared/api/types";
+import {
+  buildCustomAcpRuntime,
+  isCustomRuntimeId,
+  resolvePreferredCustomRuntime,
+} from "./customHarness";
 
 /**
  * Select the best default runtime from a catalog, using the same preference
@@ -9,11 +18,17 @@ import type { AcpRuntime, AcpRuntimeCatalogEntry } from "@/shared/api/types";
  * list) returns AcpRuntime | null while passing AcpRuntimeCatalogEntry[]
  * (the full catalog) returns AcpRuntimeCatalogEntry | null.  Both call sites
  * share one preference-order implementation.
+ *
+ * When `preferredRuntimeId` is `"custom"`, returns null — callers that need
+ * BYO resolution should use [`resolvePreferredHarness`].
  */
 export function getDefaultPersonaRuntime<T extends AcpRuntimeCatalogEntry>(
   runtimes: readonly T[],
   preferredRuntimeId?: string | null,
 ): T | null {
+  if (isCustomRuntimeId(preferredRuntimeId)) {
+    return null;
+  }
   const available = runtimes.filter(
     (runtime) => runtime.availability === "available",
   );
@@ -23,6 +38,32 @@ export function getDefaultPersonaRuntime<T extends AcpRuntimeCatalogEntry>(
     available.find((runtime) => runtime.id === "goose") ??
     available[0] ??
     null
+  );
+}
+
+/**
+ * Resolve the user's preferred harness from global config, including a
+ * bring-your-own ACP command outside the Rust catalog.
+ */
+export function resolvePreferredHarness(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+  config: Pick<
+    GlobalAgentConfig,
+    "preferred_runtime" | "preferred_agent_command" | "preferred_agent_args"
+  >,
+): AcpRuntime | null {
+  const custom = resolvePreferredCustomRuntime(config);
+  if (custom) return custom;
+  const available = runtimes.filter(
+    (runtime): runtime is AcpRuntime => runtime.availability === "available",
+  );
+  // Incomplete BYO (preferred_runtime custom, empty command) must not poison
+  // catalog fallback — getDefaultPersonaRuntime returns null for "custom".
+  return getDefaultPersonaRuntime(
+    available,
+    isCustomRuntimeId(config.preferred_runtime)
+      ? null
+      : config.preferred_runtime,
   );
 }
 
@@ -69,8 +110,35 @@ export function resolvePersonaRuntime(
       warnings: defaultRuntime
         ? []
         : [
-            "No agent runtimes are available. Install a runtime (e.g. Goose) to deploy agents.",
+            "No agent runtimes are available. Install a runtime or bring your own ACP command to deploy agents.",
           ],
+      isOverridden: false,
+    };
+  }
+
+  // Case 1b: Persona explicitly pins a custom/BYO command.
+  if (isCustomRuntimeId(personaRuntimeId)) {
+    if (defaultRuntime && isCustomRuntimeId(defaultRuntime.id)) {
+      return {
+        runtime: defaultRuntime,
+        warnings: [],
+        isOverridden: false,
+      };
+    }
+    if (defaultRuntime) {
+      return {
+        runtime: defaultRuntime,
+        warnings: [
+          `This agent is configured for a custom harness but none is set globally. Using ${defaultRuntime.label} instead.`,
+        ],
+        isOverridden: true,
+      };
+    }
+    return {
+      runtime: null,
+      warnings: [
+        "This agent is configured for a custom harness, but no custom command is configured.",
+      ],
       isOverridden: false,
     };
   }
@@ -142,3 +210,5 @@ export function collectRuntimeWarnings(
   }
   return warnings;
 }
+
+export { buildCustomAcpRuntime, isCustomRuntimeId };

@@ -65,8 +65,22 @@ pub struct GlobalAgentConfig {
     pub model: Option<String>,
 
     /// Preferred ACP runtime for definitions without an explicit runtime.
+    ///
+    /// Use `"custom"` together with [`Self::preferred_agent_command`] when the
+    /// user brings their own ACP harness (Cursor `agent`, yoak, OpenCode, …)
+    /// instead of a catalog runtime like Claude Code or Codex.
     #[serde(default)]
     pub preferred_runtime: Option<String>,
+
+    /// Command for a bring-your-own ACP harness when `preferred_runtime` is
+    /// `"custom"` (binary name or absolute path). Ignored otherwise.
+    #[serde(default)]
+    pub preferred_agent_command: Option<String>,
+
+    /// Args for a bring-your-own ACP harness when `preferred_runtime` is
+    /// `"custom"` (e.g. `["acp"]`). Ignored otherwise.
+    #[serde(default)]
+    pub preferred_agent_args: Option<Vec<String>>,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.
@@ -137,6 +151,55 @@ pub fn validate_global_config(config: &GlobalAgentConfig) -> Result<(), String> 
         }
     }
 
+    // Bring-your-own harness: `"custom"` requires a non-blank command.
+    let preferred = config
+        .preferred_runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if preferred == Some("custom") {
+        let command = config
+            .preferred_agent_command
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("");
+        if command.is_empty() {
+            return Err(
+                "preferred_agent_command is required when preferred_runtime is \"custom\""
+                    .to_string(),
+            );
+        }
+        if command.contains('\0') {
+            return Err(
+                "global config `preferred_agent_command` must not contain NUL bytes".to_string(),
+            );
+        }
+        if command.len() > MAX_ENV_VALUE_BYTES {
+            return Err(format!(
+                "global config `preferred_agent_command` exceeds the maximum allowed length \
+                 ({} bytes)",
+                MAX_ENV_VALUE_BYTES
+            ));
+        }
+        if let Some(args) = &config.preferred_agent_args {
+            for arg in args {
+                if arg.contains('\0') {
+                    return Err(
+                        "global config `preferred_agent_args` must not contain NUL bytes"
+                            .to_string(),
+                    );
+                }
+                if arg.len() > MAX_ENV_VALUE_BYTES {
+                    return Err(format!(
+                        "global config `preferred_agent_args` exceeds the maximum allowed length \
+                         ({} bytes)",
+                        MAX_ENV_VALUE_BYTES
+                    ));
+                }
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -149,12 +212,15 @@ pub fn strip_empty_env_vars(config: &mut GlobalAgentConfig) {
     config.env_vars.retain(|_, v| !v.is_empty());
 }
 
-/// Normalize `provider` and `model` to `None` when blank or whitespace-only.
+/// Normalize blank optional fields to `None`.
 ///
 /// `Some("")` and `Some("  ")` have no meaningful value and break
 /// unset/fallback semantics (a blank provider would be treated as "provider
 /// explicitly set to nothing" rather than "inherit"). Normalizing to `None`
 /// preserves the invariant that `Some(s)` always contains a non-blank string.
+///
+/// When `preferred_runtime` is not `"custom"`, BYO command/args fields are
+/// cleared so a leftover custom pin cannot shadow a catalog preference.
 ///
 /// Called from [`save_global_agent_config`] so normalization is applied at
 /// every persist boundary.
@@ -168,6 +234,40 @@ pub fn normalize_global_config_fields(config: &mut GlobalAgentConfig) {
         if v.trim().is_empty() {
             config.model = None;
         }
+    }
+    if let Some(v) = &config.preferred_runtime {
+        if v.trim().is_empty() {
+            config.preferred_runtime = None;
+        }
+    }
+    if let Some(v) = &config.preferred_agent_command {
+        let trimmed = v.trim();
+        if trimmed.is_empty() {
+            config.preferred_agent_command = None;
+        } else if trimmed != v.as_str() {
+            config.preferred_agent_command = Some(trimmed.to_string());
+        }
+    }
+    if let Some(args) = &config.preferred_agent_args {
+        let cleaned: Vec<String> = args
+            .iter()
+            .map(|arg| arg.trim().to_string())
+            .filter(|arg| !arg.is_empty())
+            .collect();
+        config.preferred_agent_args = if cleaned.is_empty() {
+            None
+        } else {
+            Some(cleaned)
+        };
+    }
+
+    let is_custom = config
+        .preferred_runtime
+        .as_deref()
+        .is_some_and(|runtime| runtime.trim() == "custom");
+    if !is_custom {
+        config.preferred_agent_command = None;
+        config.preferred_agent_args = None;
     }
 }
 

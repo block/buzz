@@ -6,7 +6,10 @@ import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
 import type { RuntimeFileConfigSubset } from "@/shared/api/tauri";
 // Dialogs import getDefaultPersonaRuntime via this re-export; lib code imports
 // directly from lib/resolvePersonaRuntime.
-export { getDefaultPersonaRuntime } from "../lib/resolvePersonaRuntime";
+export {
+  getDefaultPersonaRuntime,
+  resolvePreferredHarness,
+} from "../lib/resolvePersonaRuntime";
 
 /**
  * Provider ids suppressed from the selection list on internal Block builds.
@@ -185,11 +188,16 @@ export function resetConfigForHarnessChange(
   const nextEnvVars = { ...config.env_vars };
   delete nextEnvVars[BUZZ_AGENT_THINKING_EFFORT];
 
+  const isCustom = runtimeId.trim() === "custom";
   return {
     ...config,
     env_vars: nextEnvVars,
     model: null,
     preferred_runtime: runtimeId || null,
+    // Catalog harness switches clear BYO pins; custom keeps existing command/args
+    // so the editor can revise them without wiping on every re-select.
+    preferred_agent_command: isCustom ? config.preferred_agent_command : null,
+    preferred_agent_args: isCustom ? config.preferred_agent_args : null,
     provider:
       runtimeSupportsLlmProviderSelection(runtimeId) &&
       config.provider !== "relay-mesh"

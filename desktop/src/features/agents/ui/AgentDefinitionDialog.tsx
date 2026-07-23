@@ -39,11 +39,11 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
   formatRuntimeOptionLabel,
-  getDefaultPersonaRuntime,
   getPersonaModelOptions,
   getPersonaProviderOptions,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
+  resolvePreferredHarness,
   runtimeSupportsLlmProviderSelection,
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -67,6 +67,11 @@ import {
   MODEL_DISCOVERY_LOADING_VALUE,
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
+import {
+  CUSTOM_RUNTIME_ID,
+  CUSTOM_RUNTIME_LABEL,
+  isCustomRuntimeId,
+} from "../lib/customHarness";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
@@ -167,8 +172,8 @@ export function AgentDefinitionDialog({
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
   } = useAgentDialogDefaults({ open });
   const defaultRuntime = React.useMemo(
-    () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
-    [globalConfig.preferred_runtime, runtimes],
+    () => resolvePreferredHarness(runtimes, globalConfig),
+    [globalConfig, runtimes],
   );
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
@@ -324,7 +329,15 @@ export function AgentDefinitionDialog({
     void handleSubmit();
   }
 
-  const selectedRuntime = runtimes.find((p) => p.id === runtime);
+  // BYO is outside the Rust catalog; resolve via the synthetic defaultRuntime
+  // so create/submit availability matches AgentDefaultsEditor.
+  const selectedRuntime =
+    runtimes.find((p) => p.id === runtime) ??
+    (isCustomRuntimeId(runtime) &&
+    defaultRuntime &&
+    isCustomRuntimeId(defaultRuntime.id)
+      ? defaultRuntime
+      : undefined);
   const blankRuntimeModelProviderEditable =
     initialModelProviderEditableWithoutRuntime && runtime.trim().length === 0;
   const runtimeCanChooseLlmProvider =
@@ -561,6 +574,9 @@ export function AgentDefinitionDialog({
     : isCreateMode
       ? "Choose a harness"
       : "No preference (use app default)";
+  const customRuntimeOptionAvailable =
+    Boolean(defaultRuntime && isCustomRuntimeId(defaultRuntime.id)) ||
+    isCustomRuntimeId(runtime);
   const runtimeDropdownOptions: PersonaDropdownOption[] = [
     ...(!isCreateMode
       ? [
@@ -577,6 +593,25 @@ export function AgentDefinitionDialog({
       }`,
       value: candidate.id,
     })),
+    ...(customRuntimeOptionAvailable
+      ? [
+          {
+            disabled:
+              isCreateMode &&
+              !(
+                defaultRuntime &&
+                isCustomRuntimeId(defaultRuntime.id) &&
+                defaultRuntime.availability === "available"
+              ),
+            label: `${CUSTOM_RUNTIME_LABEL}${
+              isCreateMode && defaultRuntime?.id === CUSTOM_RUNTIME_ID
+                ? " (default)"
+                : ""
+            }`,
+            value: CUSTOM_RUNTIME_ID,
+          },
+        ]
+      : []),
   ];
   if (
     runtime.trim().length > 0 &&

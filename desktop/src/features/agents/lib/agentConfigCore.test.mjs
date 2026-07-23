@@ -7,6 +7,8 @@ const config = {
   env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high" },
   model: "test-model",
   preferred_runtime: null,
+  preferred_agent_command: null,
+  preferred_agent_args: null,
   provider: "anthropic",
 };
 

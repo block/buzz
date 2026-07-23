@@ -12,7 +12,8 @@ export type AgentReadinessResult =
 /**
  * Determine whether the user has a working agent path configured.
  *
- * CLI path: the preferred Claude or Codex runtime is available and logged in.
+ * CLI path: the preferred Claude or Codex runtime is available and logged in,
+ * or a bring-your-own ACP command is configured.
  * Provider path: the preferred Buzz Agent or Goose runtime has provider and
  * model set, plus all required credential env vars for that provider.
  *
@@ -23,6 +24,17 @@ export function resolveAgentReadiness(
   globalConfig: GlobalAgentConfig,
   scope: "any" | "preferred" = "any",
 ): AgentReadinessResult {
+  if (
+    globalConfig.preferred_runtime === "custom" &&
+    (globalConfig.preferred_agent_command ?? "").trim().length > 0
+  ) {
+    return {
+      ready: true,
+      reason: "cli",
+      runtimeLabel: "Custom command",
+    };
+  }
+
   if (scope === "any") {
     for (const runtime of runtimes) {
       if (runtime.id === "buzz-agent") continue;

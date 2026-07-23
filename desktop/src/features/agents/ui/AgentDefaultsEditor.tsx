@@ -26,6 +26,16 @@ import {
   resetConfigForHarnessChange,
   sortPersonaRuntimes,
 } from "@/features/agents/ui/agentConfigOptions";
+import {
+  CUSTOM_RUNTIME_ID,
+  CUSTOM_RUNTIME_LABEL,
+  applyCustomHarnessPreference,
+  customHarnessCatalogStub,
+  formatAgentArgsInput,
+  isCustomRuntimeId,
+  resolvePreferredCustomRuntime,
+} from "@/features/agents/lib/customHarness";
+import { CustomHarnessFields } from "@/features/agents/ui/CustomHarnessFields";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import {
   AgentConfigFields,
@@ -120,21 +130,30 @@ export function AgentDefaultsEditor({
   // A missing/stale preference displays the same effective fallback the backend
   // would use; it is persisted only after the user edits and saves this form.
   // Keep persona ordering here so this shared editor matches agent dialogs.
-  const selectedRuntime = React.useMemo(
-    () =>
+  const customRuntime = React.useMemo(
+    () => resolvePreferredCustomRuntime(config),
+    [config],
+  );
+  const selectedRuntime = React.useMemo(() => {
+    if (isCustomRuntimeId(config.preferred_runtime)) {
+      return customRuntime ?? customHarnessCatalogStub();
+    }
+    return (
       sortedRuntimes.find(
         (runtime) => runtime.id === config.preferred_runtime,
       ) ??
       getDefaultPersonaRuntime(sortedRuntimes) ??
-      sortedRuntimes[0],
-    [config.preferred_runtime, sortedRuntimes],
-  );
+      sortedRuntimes[0]
+    );
+  }, [config.preferred_runtime, customRuntime, sortedRuntimes]);
   const harnessOptions = React.useMemo(
-    () =>
-      sortedRuntimes.map((runtime) => ({
+    () => [
+      ...sortedRuntimes.map((runtime) => ({
         label: formatRuntimeOptionLabel(runtime),
         value: runtime.id,
       })),
+      { label: CUSTOM_RUNTIME_LABEL, value: CUSTOM_RUNTIME_ID },
+    ],
     [sortedRuntimes],
   );
   const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
@@ -142,6 +161,11 @@ export function AgentDefaultsEditor({
     loadError ||
     runtimesQuery.isError ||
     (!configSurfaceLoading && selectedRuntime === undefined);
+  const isCustomSelected = isCustomRuntimeId(selectedRuntime?.id);
+  const customCommandValid =
+    !isCustomSelected ||
+    (config.preferred_agent_command ?? "").trim().length > 0;
+  const formIsValid = configIsValid && customCommandValid;
 
   function handleConfigChange(next: GlobalAgentConfig) {
     configRef.current = next;
@@ -232,18 +256,45 @@ export function AgentDefaultsEditor({
               value={selectedRuntime?.id ?? ""}
             />
           </div>
-          <AgentConfigFields
-            bakedEnv={bakedEnv}
-            selectedRuntime={selectedRuntime}
-            config={config}
-            isCustomModelEditing={isCustomModelEditing}
-            isCustomProvider={isCustomProvider}
-            onConfigChange={handleConfigChange}
-            onCustomModelEditingChange={setIsCustomModelEditing}
-            onIsCustomProviderChange={setIsCustomProvider}
-            onValidityChange={setConfigIsValid}
-            useCustomSelect
-          />
+          {isCustomSelected ? (
+            <CustomHarnessFields
+              args={formatAgentArgsInput(config.preferred_agent_args)}
+              argsId="global-agent-custom-args"
+              argsTestId="global-agent-custom-args"
+              command={config.preferred_agent_command ?? ""}
+              commandId="global-agent-custom-command"
+              commandTestId="global-agent-custom-command"
+              onArgsChange={(value) =>
+                handleConfigChange(
+                  applyCustomHarnessPreference(config, {
+                    command: config.preferred_agent_command ?? "",
+                    args: value,
+                  }),
+                )
+              }
+              onCommandChange={(value) =>
+                handleConfigChange(
+                  applyCustomHarnessPreference(config, {
+                    command: value,
+                    args: formatAgentArgsInput(config.preferred_agent_args),
+                  }),
+                )
+              }
+            />
+          ) : (
+            <AgentConfigFields
+              bakedEnv={bakedEnv}
+              selectedRuntime={selectedRuntime}
+              config={config}
+              isCustomModelEditing={isCustomModelEditing}
+              isCustomProvider={isCustomProvider}
+              onConfigChange={handleConfigChange}
+              onCustomModelEditingChange={setIsCustomModelEditing}
+              onIsCustomProviderChange={setIsCustomProvider}
+              onValidityChange={setConfigIsValid}
+              useCustomSelect
+            />
+          )}
         </>
       )}
 
@@ -269,7 +320,7 @@ export function AgentDefaultsEditor({
           <div className="ml-auto flex items-center gap-3">
             {secondaryAction}
             <Button
-              disabled={!dirty || !configIsValid || saveState === "saving"}
+              disabled={!dirty || !formIsValid || saveState === "saving"}
               onClick={() => void handleSave()}
               size="sm"
             >
