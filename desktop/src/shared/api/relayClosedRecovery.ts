@@ -13,13 +13,72 @@ import type { RelayEvent } from "@/shared/api/types";
 
 const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 30_000;
+export const CLOSED_RECOVERY_EOSE_TIMEOUT_MS = 8_000;
 
 type LiveSubscription = Extract<RelaySubscription, { mode: "live" }>;
+
+function setClosedRecoveryState(
+  subscription: LiveSubscription,
+  recovering: boolean,
+) {
+  if (Boolean(subscription.closedRecoveryInProgress) === recovering) return;
+  if (!recovering && subscription.closedRecoveryTimeout !== undefined) {
+    window.clearTimeout(subscription.closedRecoveryTimeout);
+    subscription.closedRecoveryTimeout = undefined;
+  }
+  subscription.closedRecoveryInProgress = recovering || undefined;
+  subscription.onClosedRecoveryStateChange?.(recovering);
+}
+
+function armClosedRecoveryTimeout({
+  subscriptions,
+  subId,
+  subscription,
+}: {
+  subscriptions: Map<string, RelaySubscription>;
+  subId: string;
+  subscription: LiveSubscription;
+}) {
+  if (subscription.closedRecoveryTimeout !== undefined) return;
+  subscription.closedRecoveryTimeout = window.setTimeout(() => {
+    subscription.closedRecoveryTimeout = undefined;
+    if (
+      subscriptions.get(subId) !== subscription ||
+      !subscription.closedRecoveryInProgress
+    ) {
+      return;
+    }
+    const error = new Error(
+      `Timed out waiting for relay EOSE while recovering subscription ${subId}.`,
+    );
+    if (subscription.onClosedRecoveryTimeout) {
+      subscription.onClosedRecoveryTimeout(error);
+      return;
+    }
+    subscriptions.delete(subId);
+    releaseLiveSubscription(subscription);
+  }, CLOSED_RECOVERY_EOSE_TIMEOUT_MS);
+}
+
+export function resolveReconnectEose(subscription: LiveSubscription) {
+  const resolve = subscription.resolveReconnectEose;
+  subscription.resolveReconnectEose = undefined;
+  resolve?.();
+}
 
 export function clearClosedRetry(subscription: LiveSubscription) {
   if (subscription.closedRetryTimeout === undefined) return;
   window.clearTimeout(subscription.closedRetryTimeout);
   subscription.closedRetryTimeout = undefined;
+}
+
+export function releaseLiveSubscription(subscription: LiveSubscription) {
+  subscription.resolveReady?.();
+  subscription.resolveReady = undefined;
+  resolveReconnectEose(subscription);
+  clearClosedRetry(subscription);
+  subscription.closedRetryAttempt = 0;
+  setClosedRecoveryState(subscription, false);
 }
 
 export function handleRelayClosed({
@@ -81,10 +140,15 @@ function recoverLiveSubscriptionFromClosed({
   if (closedClass === "terminal") {
     // Auth/access/filter failure — permanently remove the subscription so it
     // doesn't silently loop.
+    resolveReconnectEose(subscription);
+    clearClosedRetry(subscription);
+    setClosedRecoveryState(subscription, false);
     subscriptions.delete(subId);
     return;
   }
 
+  setClosedRecoveryState(subscription, true);
+  armClosedRecoveryTimeout({ subscriptions, subId, subscription });
   if (subscription.closedRetryTimeout !== undefined) return;
 
   const attempt = subscription.closedRetryAttempt ?? 0;
@@ -112,7 +176,12 @@ function recoverLiveSubscriptionFromClosed({
     subscription.closedRetryTimeout = undefined;
     if (subscriptions.get(subId) !== subscription) return;
     void sendReq(subId, subscription.filter).catch((error) => {
-      if (subscriptions.get(subId) !== subscription) return;
+      if (
+        subscriptions.get(subId) !== subscription ||
+        !subscription.closedRecoveryInProgress
+      ) {
+        return;
+      }
       console.error("Failed to restore closed relay subscription", error);
       recoverLiveSubscriptionFromClosed({
         subscriptions,
@@ -146,18 +215,25 @@ export function handleSubscriptionEose({
   subscriptions,
   subId,
   closeSubscription,
+  beforeLiveRecoveryComplete,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   subId: string;
   closeSubscription: (subId: string) => Promise<void>;
+  beforeLiveRecoveryComplete?: () => void;
 }) {
   const subscription = subscriptions.get(subId);
   if (!subscription) return;
   if (subscription.mode === "live") {
+    if (subscription.closedRecoveryInProgress) {
+      beforeLiveRecoveryComplete?.();
+    }
+    resolveReconnectEose(subscription);
     subscription.resolveReady?.();
     subscription.resolveReady = undefined;
     subscription.closedRetryAttempt = 0;
     clearClosedRetry(subscription);
+    setClosedRecoveryState(subscription, false);
     return;
   }
   window.clearTimeout(subscription.timeout);
