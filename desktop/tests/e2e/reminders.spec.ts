@@ -306,7 +306,7 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
       remindersPanel.getByText("alice", { exact: true }),
     ).toBeVisible();
     await expect(
-      remindersPanel.getByText("general", { exact: true }),
+      remindersPanel.getByText("#general", { exact: true }),
     ).toBeVisible();
     await expect(remindersPanel.getByText("Reply to Alice")).toBeVisible();
     await waitForAnimations(page);
