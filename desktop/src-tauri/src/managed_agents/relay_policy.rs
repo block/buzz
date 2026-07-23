@@ -80,6 +80,34 @@ where
     ))
 }
 
+pub(crate) fn validate_effective_local_agent_relay(
+    backend: &BackendKind,
+    relay_pin: &str,
+    workspace_relay_url: &str,
+) -> Result<(), String> {
+    validate_effective_local_agent_relay_with_policy(
+        backend,
+        relay_pin,
+        workspace_relay_url,
+        super::internal_build(),
+        baked_allowlist,
+    )
+}
+
+fn validate_effective_local_agent_relay_with_policy<F>(
+    backend: &BackendKind,
+    relay_pin: &str,
+    workspace_relay_url: &str,
+    internal: bool,
+    allowlist: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<Vec<String>, String>,
+{
+    let effective = crate::relay::effective_agent_relay_url(relay_pin, workspace_relay_url);
+    validate_local_agent_relay_with_policy(backend, &effective, internal, allowlist)
+}
+
 /// Validate a legacy explicit record pin at persistence boundaries. Empty pins
 /// are workspace-relative and are checked when their effective relay is known.
 pub(crate) fn validate_managed_agent_relay_pin(record: &ManagedAgentRecord) -> Result<(), String> {
@@ -220,6 +248,44 @@ mod tests {
     }
 
     #[test]
+    fn empty_pin_validates_the_effective_workspace_relay() {
+        assert!(validate_effective_local_agent_relay_with_policy(
+            &BackendKind::Local,
+            "",
+            "wss://public.example",
+            true,
+            allowlist,
+        )
+        .is_err());
+        assert!(validate_effective_local_agent_relay_with_policy(
+            &BackendKind::Local,
+            "",
+            "wss://buzz.block.builderlab.xyz",
+            true,
+            allowlist,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn effective_relay_validation_skips_oss_and_provider_backends() {
+        let provider = BackendKind::Provider {
+            id: "provider".into(),
+            config: serde_json::json!({}),
+        };
+        for (backend, internal) in [(&BackendKind::Local, false), (&provider, true)] {
+            assert!(validate_effective_local_agent_relay_with_policy(
+                backend,
+                "",
+                "not-even-a-relay",
+                internal,
+                || Err("allowlist must not load".into()),
+            )
+            .is_ok());
+        }
+    }
+
+    #[test]
     fn member_enrollment_validates_only_matching_local_agents() {
         let provider = BackendKind::Provider {
             id: "provider".into(),
@@ -249,6 +315,15 @@ mod tests {
         )
         .is_ok());
         assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn role_change_rejects_matching_local_agent_before_membership_emit() {
+        let records = vec![record("local", BackendKind::Local)];
+        let result = validate_local_agent_members_with(&records, &["LOCAL".into()], |backend| {
+            validate_local_agent_relay_with_policy(backend, "wss://public.example", true, allowlist)
+        });
+        assert!(result.is_err());
     }
 
     #[test]

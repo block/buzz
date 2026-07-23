@@ -588,6 +588,7 @@ pub async fn create_managed_agent(
     // Snapshot the workspace owner pubkey for the legacy-record auth_tag
     // fallback. Computed outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
+    let workspace_relay_url = relay_ws_url_with_override(&state);
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
@@ -632,9 +633,11 @@ pub async fn create_managed_agent(
             .map(str::trim)
             .unwrap_or("")
             .to_string();
-        if !resolved_relay_url.is_empty() {
-            crate::managed_agents::validate_local_agent_relay(&input.backend, &resolved_relay_url)?;
-        }
+        crate::managed_agents::validate_effective_local_agent_relay(
+            &input.backend,
+            &resolved_relay_url,
+            &workspace_relay_url,
+        )?;
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };

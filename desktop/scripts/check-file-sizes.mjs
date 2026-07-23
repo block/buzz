@@ -468,7 +468,8 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +4: internal relay lockdown validates effective relay before update/profile sync.
+  ["src-tauri/src/commands/agent_models.rs", 1083],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.

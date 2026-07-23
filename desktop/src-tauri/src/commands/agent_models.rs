@@ -801,6 +801,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
+    let workspace_relay_url = relay_ws_url_with_override(&state);
     let (summary, sync_params, rollback) = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -848,9 +849,11 @@ pub async fn update_managed_agent(
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
         if let Some(relay_url) = input.relay_url {
             let relay_url = relay_url.trim().to_string();
-            if !relay_url.is_empty() {
-                crate::managed_agents::validate_local_agent_relay(&record.backend, &relay_url)?;
-            }
+            crate::managed_agents::validate_effective_local_agent_relay(
+                &record.backend,
+                &relay_url,
+                &workspace_relay_url,
+            )?;
             record.relay_url = relay_url;
         }
         if let Some(acp_command) = input.acp_command {
@@ -908,6 +911,13 @@ pub async fn update_managed_agent(
 
         record.updated_at = now_iso();
 
+        if name_changed {
+            crate::managed_agents::validate_effective_local_agent_relay(
+                &record.backend,
+                &record.relay_url,
+                &workspace_relay_url,
+            )?;
+        }
         save_managed_agents(&app, &records)?;
 
         let record = records
