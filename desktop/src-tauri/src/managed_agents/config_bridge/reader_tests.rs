@@ -59,6 +59,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_probe_requires_positive_integer_stdout: false,
     }
 }
 
@@ -635,6 +636,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        auth_probe_requires_positive_integer_stdout: false,
     }
 }
 
