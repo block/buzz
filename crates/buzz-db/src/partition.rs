@@ -133,12 +133,13 @@ async fn ensure_partition(
             Ok(())
         }
         Err(sqlx::Error::Database(db_err))
-            if db_err.code().as_deref() == Some("42P17")
-                && db_err.message().contains("would overlap partition") =>
+            if db_err.message().contains("would overlap partition") =>
         {
             // Fresh schemas include a right-edge catch-all partition (`*_p_future`).
             // If it already covers this month, the table is still safe for writes;
             // treat the overlap as "ensured" rather than failing startup.
+            // Match on the message alone: some Postgres/sqlx paths omit SQLSTATE
+            // `42P17`, and a missed match was logging ERROR on every boot (#2474).
             info!(
                 partition_name,
                 "partition range already covered by an existing partition"
