@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createAvatarProfileSync } from "./avatarProfileSync.ts";
+import {
+  createAvatarProfileSync,
+  createProfileCacheRefreshQueue,
+} from "./avatarProfileSync.ts";
 
 const INPUT = {
   avatarUrl: "https://old-relay.example/avatar.png",
@@ -236,6 +239,49 @@ test("cancelled registration cannot save after the initial profile write fails",
 
   assert.deepEqual(harness.saves, []);
   assert.equal(harness.unsubscribeCount, 1);
+});
+
+test("cache refresh waits for a provider and flushes exactly once", async () => {
+  const refreshed = [];
+  const queue = createProfileCacheRefreshQueue(
+    async (client, profile, relayUrl) => {
+      refreshed.push({ client, profile, relayUrl });
+    },
+  );
+  const profile = { avatarUrl: INPUT.avatarUrl, pubkey: INPUT.expectedPubkey };
+  const client = {};
+
+  await queue.enqueue({ profile, input: INPUT });
+  assert.deepEqual(refreshed, []);
+
+  const detach = queue.setClient(client);
+  await flushPromises();
+  assert.deepEqual(refreshed, [{ client, profile, relayUrl: INPUT.relayUrl }]);
+
+  detach();
+  const detachAgain = queue.setClient(client);
+  await flushPromises();
+  assert.equal(refreshed.length, 1);
+  detachAgain();
+});
+
+test("cache refresh reset discards work from the previous community", async () => {
+  const refreshed = [];
+  const queue = createProfileCacheRefreshQueue(
+    async (client, profile, relayUrl) => {
+      refreshed.push({ client, profile, relayUrl });
+    },
+  );
+
+  await queue.enqueue({
+    profile: { avatarUrl: INPUT.avatarUrl, pubkey: INPUT.expectedPubkey },
+    input: INPUT,
+  });
+  queue.reset();
+  queue.setClient({});
+  await flushPromises();
+
+  assert.deepEqual(refreshed, []);
 });
 
 test("cache refresh follows only a successful save", async () => {

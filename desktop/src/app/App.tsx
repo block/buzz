@@ -198,10 +198,7 @@ function CommunitySwitchGate() {
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
 
-  useEffect(() => {
-    setAvatarProfileSyncQueryClient(queryClient);
-    return () => setAvatarProfileSyncQueryClient(null);
-  }, [queryClient]);
+  useEffect(() => setAvatarProfileSyncQueryClient(queryClient), [queryClient]);
 
   useEffect(() => {
     const e2eWindow = window as Window & {

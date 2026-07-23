@@ -171,13 +171,58 @@ export function createAvatarProfileSync(
   return { registerWhenReady, reset, saveWhenReady: queueSave };
 }
 
-let queryClient: QueryClient | null = null;
+type ProfileCacheRefresh = {
+  profile: Profile;
+  input: PendingAvatarSave;
+};
 
-export function setAvatarProfileSyncQueryClient(
-  client: QueryClient | null,
-): void {
-  queryClient = client;
+type ProfileCacheRefreshQueue = {
+  enqueue: (refresh: ProfileCacheRefresh) => Promise<void>;
+  reset: () => void;
+  setClient: (client: QueryClient) => () => void;
+};
+
+export function createProfileCacheRefreshQueue(
+  refresh: (
+    client: QueryClient,
+    profile: Profile,
+    relayUrl: string,
+  ) => Promise<void>,
+): ProfileCacheRefreshQueue {
+  let client: QueryClient | null = null;
+  const pending = new Map<string, ProfileCacheRefresh>();
+  const refreshKey = ({ profile, input }: ProfileCacheRefresh) =>
+    `${input.relayUrl}:${profile.pubkey.toLowerCase()}`;
+
+  const flush = (nextClient: QueryClient) => {
+    const queued = [...pending.values()];
+    pending.clear();
+    for (const item of queued) {
+      void refresh(nextClient, item.profile, item.input.relayUrl);
+    }
+  };
+
+  return {
+    enqueue: async (item) => {
+      if (client) {
+        await refresh(client, item.profile, item.input.relayUrl);
+        return;
+      }
+      pending.set(refreshKey(item), item);
+    },
+    reset: () => pending.clear(),
+    setClient: (nextClient) => {
+      client = nextClient;
+      flush(nextClient);
+      return () => {
+        if (client === nextClient) client = null;
+      };
+    },
+  };
 }
+
+const profileCacheRefreshQueue =
+  createProfileCacheRefreshQueue(refreshProfileCaches);
 
 const avatarProfileSync = createAvatarProfileSync({
   getPresentation: getAvatarPresentation,
@@ -191,10 +236,15 @@ const avatarProfileSync = createAvatarProfileSync({
     }
   },
   refreshCaches: async (profile, input) => {
-    if (!queryClient) return;
-    await refreshProfileCaches(queryClient, profile, input.relayUrl);
+    await profileCacheRefreshQueue.enqueue({ profile, input });
   },
 });
+
+export function setAvatarProfileSyncQueryClient(
+  client: QueryClient,
+): () => void {
+  return profileCacheRefreshQueue.setClient(client);
+}
 
 export function registerAvatarWhenReady(
   input: DeferredAvatarSave,
@@ -207,5 +257,6 @@ export function saveAvatarWhenReady(input: PendingAvatarSave): void {
 }
 
 export function resetAvatarProfileSync(): void {
+  profileCacheRefreshQueue.reset();
   avatarProfileSync.reset();
 }
