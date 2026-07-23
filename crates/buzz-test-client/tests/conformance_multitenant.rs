@@ -30,6 +30,14 @@
 //! one DB, two communities, provably isolated by `community_id` derived from the
 //! host — never from caller input.
 //!
+//! The `host_aliases` module additionally needs a third host,
+//! `RELAY_URL_ALIAS_A`, seeded as a `community_host_aliases` row for A (not a
+//! `communities.host` row) via:
+//!
+//! ```text
+//! RELAY_URL=http://a.localhost:3000 buzz-admin community alias add alias-a.localhost:3000
+//! ```
+//!
 //! # Status of each row
 //!
 //! A row is `todo!()`-stubbed until the lane it depends on lands on the
@@ -58,6 +66,19 @@ fn url_b() -> String {
 fn url_unknown() -> String {
     std::env::var("RELAY_URL_UNKNOWN")
         .unwrap_or_else(|_| "http://unknown.localhost:3000".to_string())
+}
+
+/// A host that resolves to community A only via `community_host_aliases`,
+/// never `communities.host` directly (see `host_aliases` module below).
+///
+/// Requires seeding once against the running relay before the `host_aliases`
+/// tests: `RELAY_URL=<url_a()> buzz-admin community alias add
+/// <this host's authority>` — mirrors how `RELAY_URL_A`/`RELAY_URL_B` require
+/// a pre-seeded two-community DB, just via the new alias table instead of
+/// `communities.host`.
+fn url_alias_a() -> String {
+    std::env::var("RELAY_URL_ALIAS_A")
+        .unwrap_or_else(|_| "http://alias-a.localhost:3000".to_string())
 }
 
 /// Marker for a conformance obligation whose lane has not yet landed on the
@@ -1638,6 +1659,199 @@ mod channels_membership {
 
         client_a.disconnect().await.expect("disconnect A");
         client_b.disconnect().await.expect("disconnect B");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host aliases: `community_host_aliases` fallback (relay-wiring)
+// ---------------------------------------------------------------------------
+mod host_aliases {
+    use super::*;
+
+    use buzz_test_client::BuzzTestClient;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// Convert any base form to `ws(s)://` for WS connect.
+    fn to_ws(base: &str) -> String {
+        if base.starts_with("ws://") || base.starts_with("wss://") {
+            base.trim_end_matches('/').to_string()
+        } else {
+            base.replace("https://", "wss://")
+                .replace("http://", "ws://")
+                .trim_end_matches('/')
+                .to_string()
+        }
+    }
+
+    /// Convert any base form to `http(s)://` for REST.
+    fn to_http(base: &str) -> String {
+        if base.starts_with("http://") || base.starts_with("https://") {
+            base.trim_end_matches('/').to_string()
+        } else {
+            base.replace("wss://", "https://")
+                .replace("ws://", "http://")
+                .trim_end_matches('/')
+                .to_string()
+        }
+    }
+
+    /// Same shape as `channels_membership::create_channel`: create an
+    /// open/stream channel in the community resolved by `http_base`.
+    async fn create_channel(http_base: &str, keys: &Keys, channel_uuid: uuid::Uuid) -> String {
+        let client = reqwest::Client::new();
+        let pubkey_hex = keys.public_key().to_hex();
+        let event = EventBuilder::new(Kind::Custom(9007), "")
+            .tags(vec![
+                Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
+                Tag::parse(["name", &format!("conformance-alias-{channel_uuid}")]).unwrap(),
+                Tag::parse(["channel_type", "stream"]).unwrap(),
+                Tag::parse(["visibility", "open"]).unwrap(),
+            ])
+            .sign_with_keys(keys)
+            .unwrap();
+        let resp = client
+            .post(format!("{http_base}/events"))
+            .header("X-Pubkey", &pubkey_hex)
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&event).unwrap())
+            .send()
+            .await
+            .expect("submit create-channel");
+        assert!(
+            resp.status().is_success(),
+            "create-channel HTTP failed against {http_base}: {}",
+            resp.status()
+        );
+        let body: serde_json::Value = resp.json().await.expect("parse create-channel response");
+        assert!(
+            body["accepted"].as_bool().unwrap_or(false),
+            "create-channel not accepted against {http_base}: {body}"
+        );
+        channel_uuid.to_string()
+    }
+
+    async fn post_kind9(
+        client: &mut BuzzTestClient,
+        keys: &Keys,
+        channel_id: &str,
+        content: &str,
+    ) -> String {
+        let h_tag = Tag::parse(["h", channel_id]).unwrap();
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .tags([h_tag])
+            .sign_with_keys(keys)
+            .unwrap();
+        let id_hex = event.id.to_hex();
+        let ok = client.send_event(event).await.expect("send kind:9");
+        assert!(ok.accepted, "kind:9 not accepted: {}", ok.message);
+        id_hex
+    }
+
+    async fn query_kind9_in_channel(
+        http_base: &str,
+        pubkey_hex: &str,
+        channel_id: &str,
+    ) -> Vec<serde_json::Value> {
+        let client = reqwest::Client::new();
+        let filters = serde_json::json!([{
+            "kinds": [9],
+            "#h": [channel_id],
+            "limit": 100,
+        }]);
+        let resp = client
+            .post(format!("{http_base}/query"))
+            .header("X-Pubkey", pubkey_hex)
+            .header("Content-Type", "application/json")
+            .body(serde_json::to_string(&filters).unwrap())
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("POST /query against {http_base} failed: {e}"));
+        assert!(
+            resp.status().is_success(),
+            "POST /query against {http_base} returned {}",
+            resp.status()
+        );
+        resp.json().await.expect("parse /query JSON")
+    }
+
+    /// Obligation: a host mapped only through `community_host_aliases` (never
+    /// `communities.host` directly) binds to the aliased community exactly
+    /// like a primary host would, and that binding does not leak into any
+    /// other community on the same relay process.
+    ///
+    /// This is the alias-table analogue of
+    /// [`super::channels_membership::same_channel_uuid_in_two_communities_is_isolated`]:
+    /// same shared-UUID-channel, distinct-content-per-community setup, except
+    /// the "A" side of the request now arrives over the alias host
+    /// (`url_alias_a()`) instead of A's primary host. If `resolve_host` ever
+    /// let the alias fall through to a default tenant, or resolved it to the
+    /// wrong community, the channel/message written over the alias host
+    /// would either fail to appear under community A's primary host, or
+    /// (worse) appear under B.
+    ///
+    /// # Mutate-bite
+    ///
+    /// Drop the alias fallback from `Db::lookup_community_by_host_or_alias`
+    /// (checking only `communities.host`) → the alias host's `bind_community`
+    /// call returns `UnmappedHost`, the `/events` POST over the alias host
+    /// 404s, and `create_channel`/`post_kind9` panic on non-success status.
+    /// Route the fallback to the *wrong* community instead of `NULL`-safe
+    /// `None` → the message posted "as A" over the alias host shows up under
+    /// B's query instead of A's, tripping the cross-leak assertion below.
+    #[tokio::test]
+    #[ignore]
+    async fn alias_host_binds_to_aliased_community_without_leaking_into_another() {
+        let http_alias_a = to_http(&url_alias_a());
+        let ws_alias_a = to_ws(&url_alias_a());
+        let http_a = to_http(&url_a());
+        let http_b = to_http(&url_b());
+
+        let keys = Keys::generate();
+        let pubkey_hex = keys.public_key().to_hex();
+
+        // Create the channel over the alias host — if the alias resolved to
+        // no community (or the wrong one), this create would either 404 or
+        // land somewhere other than community A.
+        let channel_uuid = uuid::Uuid::new_v4();
+        let chan = create_channel(&http_alias_a, &keys, channel_uuid).await;
+
+        let content = format!("alias-bound message {channel_uuid}");
+        let mut client_alias_a = BuzzTestClient::connect(&ws_alias_a, &keys)
+            .await
+            .expect("connect over alias host");
+        let _id = post_kind9(&mut client_alias_a, &keys, &chan, &content).await;
+        client_alias_a
+            .disconnect()
+            .await
+            .expect("disconnect alias connection");
+
+        // Settle time, matching every other row in this file.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // (1) The alias host binds to community A: A's *primary* host sees
+        // the channel and message the alias host wrote.
+        let hits_a = query_kind9_in_channel(&http_a, &pubkey_hex, &chan).await;
+        assert_eq!(
+            hits_a.len(),
+            1,
+            "community A's primary host did not see the message written over \
+             its alias host — alias did not bind to A. hits: {hits_a:?}"
+        );
+        assert_eq!(
+            hits_a[0]["content"].as_str().unwrap_or(""),
+            content,
+            "community A saw a message but not the one written over the alias host"
+        );
+
+        // (2) No leak into community B: B's host must see nothing for this
+        // channel id — the alias must not have bound to B, nor to some
+        // default/shared tenant both A and B's queries would also hit.
+        let hits_b = query_kind9_in_channel(&http_b, &pubkey_hex, &chan).await;
+        assert!(
+            hits_b.is_empty(),
+            "community B saw a message written over community A's alias host — \
+             the alias leaked cross-community. hits: {hits_b:?}"
+        );
     }
 }
 
