@@ -68,6 +68,11 @@ with a TypeScript lookup table or an id comparison in a component.
    sole onboarding surface that chooses and persists `preferred_runtime`.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
+8. **Personality is the existing system prompt, not a second config layer.**
+   Definition and standalone-instance editors render it as a first-class
+   `Personality` field and persist through `systemPrompt`. Do not add a
+   personality env key or parallel prompt field; every runtime must keep using
+   the established system-prompt resolution path.
 
 ## The tests that enforce this
 
@@ -82,6 +87,8 @@ with a TypeScript lookup table or an id comparison in a component.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, navigation, and
   persistence races.
+- `desktop/tests/e2e/edit-agent.spec.ts` — first-class personality editing and
+  persistence for standalone managed agents.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 
 ## Keep this file true

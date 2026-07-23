@@ -63,6 +63,7 @@ import {
   type RuntimeModelProviderSelection,
 } from "./runtimeModelProviderSelection";
 import { AgentCreationPreview } from "./AgentCreationPreview";
+import { AgentPersonalityField } from "./AgentPersonalityField";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
 import { CreateAgentRespondToField } from "./RespondToField";
@@ -920,6 +921,13 @@ export function AgentInstanceEditDialog({
               </div>
             </div>
 
+            <AgentPersonalityField
+              disabled={updateMutation.isPending}
+              id="edit-agent-system-prompt"
+              onChange={setSystemPrompt}
+              value={systemPrompt}
+            />
+
             {/* Who can talk to this agent */}
             <CreateAgentRespondToField
               allowlist={respondToAllowlist}
@@ -1151,7 +1159,6 @@ export function AgentInstanceEditDialog({
                       provider={effectiveProvider}
                       requiredEnvKeys={advancedRequiredEnvKeys}
                       selectedRuntimeId={selectedRuntimeId}
-                      systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
                       onAgentCommandChange={setAgentCommand}
@@ -1159,7 +1166,6 @@ export function AgentInstanceEditDialog({
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
-                      onSystemPromptChange={setSystemPrompt}
                     />
                   </motion.div>
                 ) : null}

@@ -67,6 +67,7 @@ type MockCommandAvailability = {
 type MockManagedAgentSeed = {
   pubkey: string;
   name: string;
+  systemPrompt?: string | null;
   avatarUrl?: string | null;
   personaId?: string | null;
   status?: RawManagedAgent["status"];
@@ -1933,7 +1934,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     idle_timeout_seconds: null,
     max_turn_duration_seconds: null,
     parallelism: 1,
-    system_prompt: null,
+    system_prompt: seed.systemPrompt ?? null,
     avatar_url: seed.avatarUrl ?? null,
     model: null,
     env_vars: {},

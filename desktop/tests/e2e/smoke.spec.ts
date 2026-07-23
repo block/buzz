@@ -206,9 +206,7 @@ test("create agent persists Buzz shared compute with auto model", async ({
   });
 });
 
-test("create agent supports parallelism and system prompt overrides", async ({
-  page,
-}) => {
+test("create agent supports personality and parallelism", async ({ page }) => {
   const agentName = `Parallel agent ${Date.now()}`;
 
   await page.goto("/");
@@ -217,6 +215,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await page.locator("#persona-display-name").fill(agentName);
+  await expect(page.getByLabel("Personality")).toBeVisible();
   await page
     .locator("#persona-system-prompt")
     .fill("You are concise and parallelize independent work.");

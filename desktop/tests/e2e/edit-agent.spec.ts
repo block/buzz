@@ -113,6 +113,42 @@ test.describe("edit agent dialog", () => {
     );
   });
 
+  test("edits personality without opening advanced settings", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      managedAgents: [
+        {
+          pubkey: AGENT_PUBKEY,
+          name: AGENT_NAME,
+          status: "stopped",
+          channelNames: ["agents"],
+          systemPrompt: "Be formal and reserved.",
+        },
+      ],
+    });
+
+    await openEditDialog(page);
+
+    const personality = page.locator("#edit-agent-system-prompt");
+    await expect(personality).toBeVisible();
+    await expect(personality).toHaveValue("Be formal and reserved.");
+    await expect(
+      page.getByRole("button", { name: "Advanced", exact: true }),
+    ).toHaveAttribute("aria-expanded", "false");
+
+    await personality.fill(
+      "Be warm, candid, and concise. Ask before making assumptions.",
+    );
+    await page.getByTestId("edit-agent-dialog-submit").click();
+    await expect(page.getByTestId("edit-agent-dialog")).not.toBeVisible();
+
+    await page.getByTestId("user-profile-edit-agent").click();
+    await expect(page.locator("#edit-agent-system-prompt")).toHaveValue(
+      "Be warm, candid, and concise. Ask before making assumptions.",
+    );
+  });
+
   test("changes the model via custom entry and persists it", async ({
     page,
   }) => {
