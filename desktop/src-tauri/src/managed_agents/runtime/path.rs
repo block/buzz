@@ -11,6 +11,8 @@ use std::path::PathBuf;
 ///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
 ///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
 ///   6. user's login-shell `PATH` — runtimes like node/python from other managers
+///   7. Windows only: the current process `PATH`, since step 6 is always empty
+///      there and callers replace rather than extend the child's `PATH`
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -46,9 +48,30 @@ pub(in crate::managed_agents) fn build_augmented_path(
     if let Some(parent) = exe_parent {
         parts.push(parent);
     }
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    let had_shell_path = shell_path.is_some();
     if let Some(shell_path) = shell_path {
         parts.extend(std::env::split_paths(&shell_path));
     }
+
+    // Windows never supplies a login-shell PATH: `login_shell_path()` returns
+    // None there because Git Bash reports POSIX colon-delimited entries that
+    // would poison a native child. Nothing above contributes the user's real
+    // PATH, and the child does not fall back to its inherited one either —
+    // callers pass this value to `Command::env("PATH", ..)`, which replaces
+    // rather than extends. Without the process PATH the child loses node, npm
+    // and git, and every npm `.cmd` shim dies with
+    // `'"node"' is not recognized as an internal or external command`.
+    // Gated on local context for the same reason the managed dirs above are:
+    // callers that pass nothing must still get `None` back rather than a PATH
+    // manufactured out of ambient process state.
+    #[cfg(windows)]
+    if !had_shell_path && !parts.is_empty() {
+        parts.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+    }
+
     if parts.is_empty() {
         return None;
     }
@@ -133,5 +156,38 @@ mod tests {
         let result = result.expect("path");
         assert!(result.starts_with("/home/user/.local/bin:"), "{result}");
         assert!(result.ends_with(":/usr/local/bin"), "{result}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn appends_process_path_when_no_shell_path() {
+        // Regression: `login_shell_path()` is always None on Windows, and
+        // callers overwrite the child's PATH rather than extending it, so
+        // without this the child loses node/npm/git and every npm `.cmd` shim
+        // fails with `'"node"' is not recognized`.
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        std::env::set_var("PATH", r"C:\Program Files\nodejs");
+
+        let result = build_augmented_path(Some(PathBuf::from(r"C:\Users\agent")), None, None, None);
+
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let result = result.expect("path");
+        assert!(
+            result.starts_with(r"C:\Users\agent\.local\bin;"),
+            "{result}"
+        );
+        assert!(result.ends_with(r";C:\Program Files\nodejs"), "{result}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_path_not_manufactured_without_local_context() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        assert_eq!(build_augmented_path(None, None, None, None), None);
     }
 }
