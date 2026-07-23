@@ -48,6 +48,7 @@ import type {
   ProjectPullRequestCommentAnchor,
 } from "./projectPullRequests.mjs";
 import {
+  nextProjectPullRequestReviewCreatedAt,
   normalizeProjectPullRequestCommentAnchor,
   PR_CHANGES_REQUESTED_LABEL,
   PR_INLINE_COMMENT_LABEL,
@@ -501,6 +502,14 @@ async function createProjectPullRequestComment({
   const event = await signRelayEvent({
     kind: KIND_TEXT_NOTE,
     content: body,
+    ...(decision
+      ? {
+          createdAt: nextProjectPullRequestReviewCreatedAt(
+            pullRequest,
+            Math.floor(Date.now() / 1_000),
+          ),
+        }
+      : {}),
     tags,
   });
 

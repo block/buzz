@@ -453,17 +453,39 @@ function DiffPreview({
 }) {
   const rows = diffRows(file);
   const focusedRowRef = React.useRef<HTMLDivElement | null>(null);
+  const [highlightedAnchor, setHighlightedAnchor] =
+    React.useState<ProjectPullRequestCommentAnchor | null>(null);
 
   React.useEffect(() => {
-    if (!focusedAnchor || focusedAnchor.path !== file.path) return;
+    if (!focusedAnchor || focusedAnchor.path !== file.path) {
+      setHighlightedAnchor(null);
+      return;
+    }
+
+    setHighlightedAnchor(focusedAnchor);
+    let isListeningForInteraction = false;
+    const clearHighlight = () => setHighlightedAnchor(null);
+    const clearHighlightOnKeyDown = (event: KeyboardEvent) => {
+      if (["Alt", "Control", "Meta", "Shift"].includes(event.key)) return;
+      clearHighlight();
+    };
     const frame = window.requestAnimationFrame(() => {
       focusedRowRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "center",
       });
       focusedRowRef.current?.focus({ preventScroll: true });
+      window.addEventListener("pointerdown", clearHighlight, true);
+      window.addEventListener("keydown", clearHighlightOnKeyDown, true);
+      isListeningForInteraction = true;
     });
-    return () => window.cancelAnimationFrame(frame);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      if (isListeningForInteraction) {
+        window.removeEventListener("pointerdown", clearHighlight, true);
+        window.removeEventListener("keydown", clearHighlightOnKeyDown, true);
+      }
+    };
   }, [file.path, focusedAnchor]);
 
   if (rows.length === 0) {
@@ -495,7 +517,7 @@ function DiffPreview({
           inlineComments?.activeAnchor ?? null,
           anchor,
         );
-        const isFocused = anchorsEqual(focusedAnchor ?? null, anchor);
+        const isFocused = anchorsEqual(highlightedAnchor, anchor);
         return (
           <React.Fragment key={row.key}>
             <div

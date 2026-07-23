@@ -363,16 +363,25 @@ export function PullRequestDetailHeader({
           created {relativeTime(pullRequest.createdAt)}
         </span>
         {sourceChannelId ? (
-          <>
-            <span>in</span>
-            <button
-              className="truncate font-medium text-foreground underline-offset-2 hover:underline"
-              onClick={() => void goChannel(sourceChannelId)}
-              type="button"
-            >
-              #{sourceChannel?.name ?? "source channel"}
-            </button>
-          </>
+          <span
+            className="inline-flex min-w-0 items-center gap-1"
+            title="Source channel is claimed by the pull request author and is not relay-verified."
+          >
+            <span>linked from</span>
+            {sourceChannel ? (
+              <button
+                aria-label={`Open author-claimed source channel #${sourceChannel.name}`}
+                className="truncate font-medium text-foreground underline-offset-2 hover:underline"
+                onClick={() => void goChannel(sourceChannel.id)}
+                type="button"
+              >
+                #{sourceChannel.name}
+              </button>
+            ) : (
+              <span>an unavailable channel</span>
+            )}
+            <span>(author-claimed)</span>
+          </span>
         ) : null}
       </p>
     </header>

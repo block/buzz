@@ -32,6 +32,70 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await projectEntry.click();
 }
 
+test("same-second request changes supersedes approval", async ({ page }) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    Date.now = () => 1_900_000_000_000;
+  });
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const aliceRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first();
+  await expect(aliceRow).toBeVisible({ timeout: 10_000 });
+  await aliceRow.getByRole("button", { name: /^#/ }).click();
+
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  const approveDialog = page.getByRole("dialog", {
+    name: "Approve pull request",
+  });
+  await approveDialog
+    .getByRole("textbox", { name: "Approval summary" })
+    .fill("Approved at the fixed second.");
+  await approveDialog
+    .getByRole("button", { name: "Approve", exact: true })
+    .click();
+  await expect(page.getByText("Pull request approved.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Approve", exact: true }),
+  ).toHaveCount(0);
+
+  const commentComposer = page.getByTestId(
+    "project-pull-request-comment-composer",
+  );
+  await commentComposer
+    .getByRole("button", { name: "Comment", exact: true })
+    .click();
+  await page.getByRole("menuitemradio", { name: "Request changes" }).click();
+  await commentComposer
+    .locator('[contenteditable="true"]')
+    .fill("Changes requested at the same fixed second.");
+  await commentComposer.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Changes requested.")).toBeVisible();
+
+  const [approvalEvent, changeRequestEvent] = await page.evaluate(() => {
+    const decisions =
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some(
+            (tag) =>
+              tag[0] === "t" &&
+              (tag[1] === "approval" || tag[1] === "changes-requested"),
+          ),
+      ) ?? [];
+    return [decisions.at(-2), decisions.at(-1)];
+  });
+  expect(approvalEvent?.tags).toContainEqual(["t", "approval"]);
+  expect(changeRequestEvent?.tags).toContainEqual(["t", "changes-requested"]);
+  expect(changeRequestEvent?.createdAt).toBeGreaterThan(
+    approvalEvent?.createdAt ?? 0,
+  );
+});
+
 test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   page,
 }) => {
@@ -55,7 +119,7 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   const header = page.getByRole("heading", { level: 3 });
   await expect(header.first()).toBeVisible();
   const sourceChannelLink = page.getByRole("button", {
-    name: "#general",
+    name: "Open author-claimed source channel #general",
     exact: true,
   });
   await expect(sourceChannelLink).toBeVisible();
@@ -552,6 +616,8 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
   );
   await expect(focusedLine).toHaveAttribute("data-side", "new");
   await expect(focusedLine).toHaveAttribute("data-line", "3");
+  await focusedLine.click();
+  await expect(page.getByTestId("project-diff-focused-line")).toHaveCount(0);
 });
 
 test("managed agent repository owner can merge", async ({ page }) => {

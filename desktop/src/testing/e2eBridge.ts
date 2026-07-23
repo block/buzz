@@ -9661,14 +9661,20 @@ export function maybeInstallE2eTauriMocks() {
           draft: KIND_GIT_STATUS_DRAFT,
           closed: KIND_GIT_STATUS_CLOSED,
         }[input.status];
+        const recipientPubkeys = Array.from(
+          new Set(
+            [input.targetOwner, input.pullRequestAuthor].map((pubkey) =>
+              pubkey.trim().toLowerCase(),
+            ),
+          ),
+        );
         const event = createMockEvent(
           kind,
           "",
           [
             ["e", input.pullRequestId, "", "root"],
             ["a", input.repoAddress],
-            ["p", input.targetOwner],
-            ["p", input.pullRequestAuthor],
+            ...recipientPubkeys.map((pubkey) => ["p", pubkey]),
           ],
           input.targetOwner,
           input.createdAt,

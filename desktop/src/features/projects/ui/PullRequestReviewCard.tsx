@@ -280,8 +280,9 @@ export function PullRequestReviewCard({
       </div>
       <Dialog
         onOpenChange={(open) => {
+          if (!open && isApproving) return;
           setApproveDialogOpen(open);
-          if (!open && !isApproving) setApprovalSummary("");
+          if (!open) setApprovalSummary("");
         }}
         open={approveDialogOpen}
       >

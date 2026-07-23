@@ -1355,12 +1355,9 @@ pub fn build_git_pull_request(
     }
     tags.push(tag(&["c", &meta.commit])?);
     if let Some(ref channel_id) = meta.channel_id {
-        if channel_id.trim().is_empty() {
-            return Err(SdkError::InvalidInput(
-                "channel_id must not be empty".into(),
-            ));
-        }
-        tags.push(tag(&["h", channel_id])?);
+        let channel_id = Uuid::parse_str(channel_id)
+            .map_err(|e| SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}")))?;
+        tags.push(tag(&["h", &channel_id.to_string()])?);
     }
     let mut clone_tag = vec!["clone"];
     clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
@@ -3429,6 +3426,34 @@ mod tests {
         };
         let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_rejects_invalid_channel_id() {
+        for channel_id in ["not-a-uuid", " 11111111-1111-4111-8111-111111111111 "] {
+            let meta = GitPullRequestMeta {
+                subject: "s".to_string(),
+                commit: "c".repeat(40),
+                clone_urls: vec!["https://example.com/repo.git".to_string()],
+                channel_id: Some(channel_id.to_string()),
+                ..Default::default()
+            };
+            let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn git_pr_canonicalizes_channel_id() {
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            channel_id: Some("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE".to_string()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "body", &meta).unwrap());
+        assert!(has_tag(&ev, "h", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
     }
 
     #[test]
