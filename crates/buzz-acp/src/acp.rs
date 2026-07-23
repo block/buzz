@@ -200,6 +200,17 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Accumulated `agent_message_chunk` text for the current turn. Used by the
+    /// content-delivery fallback: weak local models (e.g. via Buzz shared
+    /// compute) often answer a conversational prompt in plain assistant
+    /// `content` instead of calling `buzz messages send`, which would otherwise
+    /// be silently dropped (buzz-agent's output is its tool calls; streamed
+    /// text is observability-only). Reset at the start of every turn.
+    turn_message_text: String,
+    /// Whether a `buzz messages send` (or forum-post/comment) publish tool call
+    /// was observed this turn. When true the fallback does NOT fire — the agent
+    /// delivered its own reply. Reset at the start of every turn.
+    turn_sent_message: bool,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -496,6 +507,8 @@ impl AcpClient {
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            turn_message_text: String::new(),
+            turn_sent_message: false,
         })
     }
 
@@ -689,6 +702,10 @@ impl AcpClient {
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
 
+        // Reset the content-delivery fallback trackers for this turn.
+        self.turn_message_text.clear();
+        self.turn_sent_message = false;
+
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
         self.next_id += 1;
@@ -782,6 +799,29 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Take the accumulated assistant `content` text for the completed turn,
+    /// if and only if the agent did NOT publish a message itself this turn.
+    ///
+    /// Returns `Some(trimmed_text)` when the turn produced streamed assistant
+    /// content but no `buzz messages send` tool call fired — the caller then
+    /// delivers it as the channel reply (content-delivery fallback). Returns
+    /// `None` when the agent sent its own message, when there was no content,
+    /// or when the content is only a bare acknowledgement (which the base
+    /// prompt forbids publishing). Clears the buffer either way.
+    pub fn take_undelivered_turn_message(&mut self) -> Option<String> {
+        let text = std::mem::take(&mut self.turn_message_text);
+        let sent = self.turn_sent_message;
+        self.turn_sent_message = false;
+        if sent {
+            return None;
+        }
+        let trimmed = text.trim();
+        if trimmed.is_empty() || is_bare_acknowledgement(trimmed) {
+            return None;
+        }
+        Some(trimmed.to_string())
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1535,6 +1575,10 @@ impl AcpClient {
             "agent_message_chunk" => {
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
+                    // Accumulate for the content-delivery fallback (see
+                    // `turn_message_text`). Streamed assistant text is otherwise
+                    // observability-only and never posted to the channel.
+                    self.turn_message_text.push_str(text);
                 }
                 false
             }
@@ -1548,6 +1592,17 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
+                // Detect a message-publish tool call so the fallback knows the
+                // agent delivered its own reply. The publish path is the
+                // dev-mcp `shell` tool running `buzz messages send` (title is
+                // the tool name, rawInput carries the command/args), so scan
+                // both title and rawInput for the CLI publish signature.
+                if tool_call_is_message_publish(update) {
+                    self.turn_sent_message = true;
+                    // Debug-level: the model published its own reply, so the
+                    // content-delivery fallback will stay dormant this turn.
+                    tracing::debug!("agent published its own message via send tool ({title})");
+                }
                 true
             }
             "tool_call_update" => {
@@ -1948,6 +2003,73 @@ pub fn model_in_catalog(
         })
 }
 
+/// Return true if a `tool_call` session update represents a Buzz message
+/// publish (kind 9 / forum post / comment). The publish path is the dev-mcp
+/// `shell` tool running `buzz messages send` (or `buzz social publish`), so the
+/// tool name alone is not enough — inspect `rawInput` (the command/args) for the
+/// CLI publish signature. Conservative: only matches an actual send subcommand,
+/// not reads like `buzz messages get`.
+fn tool_call_is_message_publish(update: &serde_json::Value) -> bool {
+    // Flatten title + rawInput into one lowercase haystack. rawInput is
+    // arbitrary JSON (shell command string, or structured args), so serialize
+    // whatever is there.
+    let mut haystack = String::new();
+    if let Some(title) = update.get("title").and_then(|v| v.as_str()) {
+        haystack.push_str(title);
+        haystack.push(' ');
+    }
+    if let Some(raw) = update.get("rawInput") {
+        haystack.push_str(&raw.to_string());
+    }
+    let h = haystack.to_ascii_lowercase();
+    // Match the publish subcommands that actually post to a channel. Guard
+    // against read subcommands (get/thread/search/list) sharing the "messages"
+    // prefix by requiring the send/publish verb.
+    h.contains("messages send") || h.contains("messages send-diff") || h.contains("social publish")
+}
+
+/// Return true if `text` is a bare acknowledgement the base prompt forbids
+/// publishing ("Got it", "Confirmed", "Standing by", …). Used to keep the
+/// content-delivery fallback from posting filler that a capable agent would
+/// have suppressed. Deliberately conservative — only short, whole-message
+/// acks match, so a substantive reply that merely opens with "Got it, …"
+/// still gets delivered.
+fn is_bare_acknowledgement(text: &str) -> bool {
+    // Only consider short messages — a real reply with content is never a bare
+    // ack even if it starts with one.
+    if text.chars().count() > 40 {
+        return false;
+    }
+    let normalized: String = text
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    let normalized = normalized.trim();
+    const BARE_ACKS: &[&str] = &[
+        "got it",
+        "confirmed",
+        "acknowledged",
+        "ack",
+        "clear and noted",
+        "noted",
+        "aligned",
+        "standing by",
+        "parked",
+        "ok",
+        "okay",
+        "will do",
+        "understood",
+        "sounds good",
+        "on it",
+        "roger",
+        "roger that",
+        "i wont reply again",
+        "i will not reply again",
+    ];
+    BARE_ACKS.contains(&normalized)
+}
+
 // ─── Drop: kill child process ─────────────────────────────────────────────────
 
 impl Drop for AcpClient {
@@ -2007,6 +2129,70 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_call_publish_detection() {
+        // A `buzz messages send` shell tool call → detected as a publish.
+        let send = serde_json::json!({
+            "title": "shell",
+            "rawInput": { "command": "buzz messages send --channel abc --content 'hi'" }
+        });
+        assert!(tool_call_is_message_publish(&send));
+
+        // send-diff variant → detected.
+        let diff = serde_json::json!({
+            "title": "shell",
+            "rawInput": { "command": "buzz messages send-diff --channel abc" }
+        });
+        assert!(tool_call_is_message_publish(&diff));
+
+        // social publish → detected.
+        let social = serde_json::json!({
+            "title": "shell",
+            "rawInput": { "command": "buzz social publish --content x" }
+        });
+        assert!(tool_call_is_message_publish(&social));
+
+        // A READ subcommand sharing the "messages" prefix → NOT a publish.
+        let read = serde_json::json!({
+            "title": "shell",
+            "rawInput": { "command": "buzz messages get --channel abc" }
+        });
+        assert!(!tool_call_is_message_publish(&read));
+
+        // Unrelated tool → not a publish.
+        let other = serde_json::json!({
+            "title": "read_file",
+            "rawInput": { "path": "/tmp/foo" }
+        });
+        assert!(!tool_call_is_message_publish(&other));
+    }
+
+    #[test]
+    fn bare_acknowledgement_detection() {
+        // Bare acks the base prompt forbids publishing.
+        for ack in [
+            "Got it",
+            "confirmed",
+            "Standing by",
+            "OK",
+            "  Noted. ",
+            "will do",
+        ] {
+            assert!(is_bare_acknowledgement(ack), "should be bare ack: {ack:?}");
+        }
+        // Substantive replies are NOT bare acks, even if they open with one.
+        for real in [
+            "Got it — I'll start on the migration and report back when the tests pass.",
+            "I'm doing well, thank you for asking! How are you today?",
+            "The build failed: missing dependency in Cargo.toml.",
+        ] {
+            assert!(
+                !is_bare_acknowledgement(real),
+                "should NOT be bare ack: {real:?}"
+            );
+        }
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
