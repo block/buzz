@@ -186,10 +186,16 @@ export function canResolveAllPersonaRuntimes(
   personas: readonly { runtime: string | null }[],
   runtimes: readonly AcpRuntime[],
   fallbackRuntime: AcpRuntime | null,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
 ): boolean {
   return personas.every(
     (persona) =>
-      resolvePersonaRuntime(persona.runtime, runtimes, fallbackRuntime)
-        .runtime !== null,
+      resolvePersonaRuntime(
+        persona.runtime,
+        runtimes,
+        fallbackRuntime,
+        false,
+        disabledRuntimeIds,
+      ).runtime !== null,
   );
 }

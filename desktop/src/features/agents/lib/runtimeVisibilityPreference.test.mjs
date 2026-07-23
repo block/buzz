@@ -9,6 +9,7 @@ import {
   parseDisabledAcpRuntimeIds,
   readDisabledAcpRuntimeIds,
   runtimesForImplicitAcpSelection,
+  visibleAcpRuntimeSeedForCreate,
 } from "./runtimeVisibilityPreference.ts";
 
 test("runtime visibility parsing is normalized and corruption tolerant", () => {
@@ -52,6 +53,19 @@ test("disabled runtimes are removed from selectable catalog entries", () => {
   assert.deepEqual(
     runtimesForImplicitAcpSelection(runtimes, ["buzz-agent"], "buzz-agent"),
     runtimes,
+  );
+});
+
+test("create seeds replace hidden runtimes but preserve selectable ones", () => {
+  const runtimes = [{ id: "buzz-agent" }, { id: "goose" }];
+  assert.equal(
+    visibleAcpRuntimeSeedForCreate("claude", runtimes, "buzz-agent"),
+    "buzz-agent",
+  );
+  assert.equal(visibleAcpRuntimeSeedForCreate("claude", [], null), "");
+  assert.equal(
+    visibleAcpRuntimeSeedForCreate("goose", runtimes, "buzz-agent"),
+    "goose",
   );
 });
 

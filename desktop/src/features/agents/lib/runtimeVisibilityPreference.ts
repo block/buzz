@@ -109,6 +109,24 @@ export function runtimesForImplicitAcpSelection<T extends { id: string }>(
     : filterEnabledAcpRuntimes(runtimes, disabledRuntimeIds);
 }
 
+/** Replace a hidden create-mode seed without changing edit-mode behavior. */
+export function visibleAcpRuntimeSeedForCreate<T extends { id: string }>(
+  runtimeId: string,
+  selectableRuntimes: readonly T[],
+  fallbackRuntimeId: string | null | undefined,
+): string {
+  const normalizedRuntimeId = normalizeRuntimeId(runtimeId);
+  if (
+    !normalizedRuntimeId ||
+    selectableRuntimes.some(
+      (runtime) => normalizeRuntimeId(runtime.id) === normalizedRuntimeId,
+    )
+  ) {
+    return runtimeId.trim();
+  }
+  return fallbackRuntimeId?.trim() ?? "";
+}
+
 /**
  * Prevent a disabled runtime and its dependent defaults from remaining
  * effective for new implicit selections.

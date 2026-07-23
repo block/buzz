@@ -252,3 +252,20 @@ test("team resolution requires a fallback for runtime-less definitions", () => {
     true,
   );
 });
+
+test("team resolution blocks runtime-less definitions when all fallbacks are hidden", () => {
+  assert.equal(
+    canResolveAllPersonaRuntimes([{ runtime: null }], runtimes, goose, [
+      "goose",
+      "claude",
+    ]),
+    false,
+  );
+  assert.equal(
+    canResolveAllPersonaRuntimes([{ runtime: "goose" }], runtimes, goose, [
+      "goose",
+      "claude",
+    ]),
+    true,
+  );
+});

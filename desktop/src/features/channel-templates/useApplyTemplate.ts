@@ -91,8 +91,9 @@ export function useApplyTemplate() {
         runtimes,
         defaultProvider,
       );
+      if (!resolved.runtime) continue;
       inputs.push({
-        runtime: resolved.runtime ?? defaultProvider,
+        runtime: resolved.runtime,
         name: persona.displayName,
         personaId: persona.id,
         systemPrompt: persona.systemPrompt,
@@ -116,8 +117,9 @@ export function useApplyTemplate() {
           runtimes,
           defaultProvider,
         );
+        if (!resolved.runtime) continue;
         inputs.push({
-          runtime: resolved.runtime ?? defaultProvider,
+          runtime: resolved.runtime,
           name: persona.displayName,
           personaId: persona.id,
           systemPrompt: persona.systemPrompt,
