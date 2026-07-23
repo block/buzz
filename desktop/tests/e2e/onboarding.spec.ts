@@ -521,12 +521,31 @@ async function expectIncompleteOnboarding(page: Page) {
   await expect(page.getByTestId("onboarding-display-name")).toHaveValue("");
 }
 
+async function mockAvatarImageFetch(page: Page, url: string) {
+  await page.route(url, (route) =>
+    route.fulfill({
+      body: Buffer.from("mock-avatar-png"),
+      contentType: "image/png",
+      status: 200,
+    }),
+  );
+}
+
+async function importOnboardingAvatarUrl(page: Page, url: string) {
+  await mockAvatarImageFetch(page, url);
+  const input = page.getByTestId("onboarding-avatar-url");
+  await input.fill(url);
+  await input.press("Enter");
+  await expect(input).toHaveValue("");
+}
+
 async function completeProfileOnboarding(page: Page) {
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/onboarding-avatar.png");
+  await importOnboardingAvatarUrl(
+    page,
+    "https://example.com/onboarding-avatar.png",
+  );
   await page.getByTestId("onboarding-next").click();
 }
 
@@ -1999,9 +2018,7 @@ test("avatar step accepts an avatar URL before completing onboarding", async ({
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/morty.png");
+  await importOnboardingAvatarUrl(page, "https://example.com/morty.png");
 
   const preview = page.getByTestId("onboarding-avatar-preview");
   await expect(preview).toBeVisible();
@@ -2024,9 +2041,7 @@ test("failed avatar saves can continue without saving the avatar", async ({
   await page.getByTestId("onboarding-display-name").fill("Morty QA");
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/morty.png");
+  await importOnboardingAvatarUrl(page, "https://example.com/morty.png");
   await page.evaluate(() => {
     const testWindow = window as Window & {
       __BUZZ_E2E__?: { mock?: { profileUpdateError?: string } };

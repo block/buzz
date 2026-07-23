@@ -1,7 +1,13 @@
 import * as React from "react";
 import { flushSync } from "react-dom";
 
+import {
+  importAvatarUrl,
+  parseImportUrl,
+} from "@/features/profile/avatarUrlImport";
 import { uploadMediaBytes } from "@/shared/api/tauri";
+import { isRelayHostedAvatarUrl } from "@/shared/lib/avatarUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 
 const AVATAR_IMAGE_TYPES = [
   "image/gif",
@@ -23,6 +29,7 @@ type UseAvatarUploadReturn = {
   clearError: () => void;
   openPicker: () => void;
   uploadFile: (file: File) => Promise<void>;
+  uploadUrl: (url: string) => Promise<boolean>;
   handleFileChange: (event: React.ChangeEvent<HTMLInputElement>) => void;
 };
 
@@ -32,6 +39,7 @@ export function useAvatarUpload({
   onUploadSuccess,
 }: UseAvatarUploadOptions): UseAvatarUploadReturn {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
+  const relayOrigin = useRelayOrigin();
   const [isUploading, setIsUploading] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
 
@@ -82,6 +90,37 @@ export function useAvatarUpload({
     [onUploadSettled, onUploadStart, onUploadSuccess],
   );
 
+  const uploadUrl = React.useCallback(
+    async (url: string) => {
+      flushSync(() => {
+        setIsUploading(true);
+        setErrorMessage(null);
+      });
+
+      try {
+        const normalizedUrl = parseImportUrl(url);
+        if (isRelayHostedAvatarUrl(normalizedUrl, relayOrigin)) {
+          onUploadSuccess(normalizedUrl);
+          return true;
+        }
+        const uploaded = await importAvatarUrl(url, { relayOrigin });
+        onUploadSuccess(uploaded.url);
+        return true;
+      } catch (error) {
+        setErrorMessage(
+          error instanceof Error
+            ? error.message
+            : "Could not import that avatar image.",
+        );
+        return false;
+      } finally {
+        setIsUploading(false);
+        onUploadSettled?.();
+      }
+    },
+    [onUploadSettled, onUploadSuccess, relayOrigin],
+  );
+
   const handleFileChange = React.useCallback(
     (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
@@ -103,6 +142,7 @@ export function useAvatarUpload({
     clearError,
     openPicker,
     uploadFile,
+    uploadUrl,
     handleFileChange,
   };
 }

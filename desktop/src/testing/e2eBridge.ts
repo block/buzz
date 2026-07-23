@@ -10448,6 +10448,20 @@ export function maybeInstallE2eTauriMocks() {
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
       case "upload_media_bytes":
+        if (activeConfig?.mock?.uploadDescriptors === undefined) {
+          const filename = (payload as { filename?: string | null }).filename;
+          if (filename && /\.(?:png|jpe?g|gif|webp)$/iu.test(filename)) {
+            const hash = "b".repeat(64);
+            return {
+              url: `${getRelayHttpUrl(activeConfig)}/media/${hash}.png`,
+              sha256: hash,
+              size: 1234,
+              type: "image/png",
+              uploaded: Math.floor(Date.now() / 1000),
+              filename,
+            };
+          }
+        }
         return (await resolveMockUploadDescriptors(activeConfig))[0];
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and

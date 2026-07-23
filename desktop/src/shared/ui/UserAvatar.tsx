@@ -1,9 +1,10 @@
 import * as React from "react";
 
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
+import { resolveAvatarImageSrc } from "@/shared/lib/avatarUrl";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 
 type UserAvatarSize = "xs" | "sm" | "md";
@@ -32,14 +33,18 @@ export function UserAvatar({
   testId,
 }: UserAvatarProps) {
   const initials = getInitials(displayName);
+  const relayOrigin = useRelayOrigin();
   // Animated avatars show their static poster frame until hovered, then play
   // the animation.
   const animated = parseAnimatedAvatarUrl(avatarUrl);
   const [isHovered, setIsHovered] = React.useState(false);
   const src = animated
-    ? rewriteRelayUrl(isHovered ? animated.animationUrl : animated.posterUrl)
+    ? resolveAvatarImageSrc(
+        isHovered ? animated.animationUrl : animated.posterUrl,
+        relayOrigin,
+      )
     : avatarUrl
-      ? rewriteRelayUrl(avatarUrl)
+      ? resolveAvatarImageSrc(avatarUrl, relayOrigin)
       : null;
 
   return (

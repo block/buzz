@@ -127,9 +127,18 @@ test("relay onboarding: profile and avatar docked CTAs", async ({ page }) => {
 
   await page.getByTestId("onboarding-next").click();
   await expect(page.getByTestId("onboarding-page-avatar")).toBeVisible();
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/onboarding-avatar.png");
+  const avatarUrl = "https://example.com/onboarding-avatar.png";
+  await page.route(avatarUrl, (route) =>
+    route.fulfill({
+      body: Buffer.from("mock-avatar-png"),
+      contentType: "image/png",
+      status: 200,
+    }),
+  );
+  const input = page.getByTestId("onboarding-avatar-url");
+  await input.fill(avatarUrl);
+  await input.press("Enter");
+  await expect(input).toHaveValue("");
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/05-avatar.png` });
 });
