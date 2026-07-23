@@ -73,6 +73,18 @@ without a parallel TypeScript runtime list.
    sole onboarding surface that chooses and persists `preferred_runtime`.
    `onboarding-agent-defaults.spec.ts` is the acceptance gate for anything
    touching this flow or the shared renderer.
+8. **External agents are relay identities, not shadow managed agents.** Their
+   runtime, prompts, memory, provider, skills, and identity stay on the external
+   host. Desktop may persist an owner-scoped presentation name/avatar, but that
+   presentation must flow through the shared profile query layer so cards,
+   profiles, messages, mentions, DMs, and sidebars agree. Never write the
+   presentation back to kind `0` or external runtime files.
+9. **Owner-declared relay agents participate in observer ingestion.** An
+   external agent with a verified NIP-OA owner belongs in the app-global
+   kind-`24200` ingestion list as `deployed`; non-owned and owner-unknown relay
+   agents stay excluded. Activity UI must use the combined managed + eligible
+   relay-agent candidate list, while interrupt/runtime controls remain local
+   only.
 
 ## The tests that enforce this
 
@@ -87,6 +99,11 @@ without a parallel TypeScript runtime list.
 - `desktop/tests/e2e/onboarding-agent-defaults.spec.ts` — onboarding behavior
   acceptance coverage for readiness, failure states, defaults, navigation, and
   persistence races.
+- `externalAgentPresentation.test.mjs` and
+  `desktop/tests/e2e/agents.spec.ts` — owner presentation propagation across
+  profile-backed surfaces and external-agent Activity ingress.
+- `useAgentObserverIngestion.test.mjs` — verified-owner relay agents join
+  global observer ingestion without admitting unrelated relay identities.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
 
 ## Keep this file true

@@ -93,6 +93,12 @@ belong in the `@` mention picker. The profile carries the identity's kind `0`
 display name, channel list, verified NIP-OA owner, and inbound author gate; it
 contains no credentials.
 
+The verified owner can customize an external agent's display name and avatar
+from that card. This is a Buzz presentation layer: the selected name and avatar
+are applied consistently to the Agents card, profiles, messages, mentions, and
+sidebar surfaces without writing to the external runtime, Hermes configuration,
+Soul, prompts, memory, provider, skills, or identity.
+
 ## Configure the bridge
 
 Create a credential file readable only by the service account. The values
@@ -108,6 +114,7 @@ BUZZ_ACP_AGENT_COMMAND=/home/hermes/.local/bin/hermes
 BUZZ_ACP_AGENT_ARGS=acp
 BUZZ_ACP_RESPOND_TO=allowlist
 BUZZ_ACP_RESPOND_TO_ALLOWLIST=<trusted-user-pubkey-hex>
+BUZZ_ACP_RELAY_OBSERVER=true
 ```
 
 `BUZZ_API_TOKEN` is needed only when the relay enforces token authentication.
@@ -129,6 +136,12 @@ same host capabilities it has when run non-interactively. Use a dedicated
 operating-system account, limit its filesystem permissions, and restrict the
 inbound author gate. Set `BUZZ_ACP_PERMISSION_MODE=default` only when the ACP
 client and your operational workflow can service permission requests.
+
+`BUZZ_ACP_RELAY_OBSERVER=true` publishes encrypted kind `24200` ACP telemetry
+frames addressed only to the verified owner. A signed-in owner Desktop can
+decrypt and render the same live Activity transcript used for locally managed
+agents. Observer frames are ephemeral at the relay; Desktop must be online to
+receive them, and local archiving is the durable owner-side record.
 
 ## Run under systemd
 
@@ -188,8 +201,9 @@ The startup log should show:
 - the expected relay URL and Hermes command;
 - a successful ACP adapter start;
 - the expected Hermes tools and memory mode;
-- at least one discovered channel.
-- `published agent directory profile`.
+- at least one discovered channel;
+- `published agent directory profile`;
+- `relay observer enabled` when `BUZZ_ACP_RELAY_OBSERVER=true`.
 
 Then run a real round trip:
 
@@ -199,6 +213,10 @@ Then run a real round trip:
 3. Ask it to identify its runtime and reply in the same thread.
 4. Confirm the reply is authored by the dedicated agent public key.
 5. Confirm the reply event is accepted by the relay.
+6. Customize the external agent's avatar, then verify the same avatar appears
+   on its card, profile, channel messages, and sidebar entry.
+7. Open **Activity log**, trigger a fresh turn while Desktop is online, and
+   confirm the owner can see the live ACP transcript.
 
 This validates the entire path, not just process health:
 
@@ -218,6 +236,8 @@ Buzz event -> relay subscription -> buzz-acp -> Hermes ACP turn
   when `BUZZ_ACP_AGENTS` is greater than one.
 - Relay disconnects are retried, and channel subscriptions resume with replay
   protection.
+- With relay observation enabled, ACP lifecycle, tool, response, and usage
+  frames are encrypted to the owner and appear in Desktop Activity.
 - `Restart=always` restarts the bridge after a process or host failure.
 
 ## Troubleshooting
@@ -259,6 +279,26 @@ buzz channels members --channel <channel-uuid>
 The agent should appear with role `bot`. Membership notifications normally add
 the subscription without a restart; restart once if the bridge was offline
 when the membership event was issued.
+
+### The custom avatar appears only on the Agents card
+
+Use a Desktop build that includes external-agent presentation propagation, then
+refresh the app. The owner presentation must win in profile-backed surfaces;
+Hermes kind `0` and runtime files are intentionally unchanged.
+
+### Activity says there are no observer updates
+
+Check that:
+
+- `BUZZ_ACP_RELAY_OBSERVER=true` is present in the bridge environment;
+- startup logs contain `relay observer enabled`;
+- the Desktop is signed in as the verified agent owner and was online before
+  the test turn started;
+- the test opens Activity for the same agent and channel that received the
+  prompt.
+
+Kind `24200` frames are not queryable from relay history. Trigger a new turn
+after fixing the subscription instead of expecting an old turn to replay.
 
 ## Security checklist
 
