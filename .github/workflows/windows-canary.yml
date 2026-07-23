@@ -44,9 +44,13 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: ${{ env.TARGET }}
+      # The Windows runner ships with rustup preinstalled; rust-toolchain.toml
+      # in the repo root pins the channel (1.95.0) automatically. We only need
+      # to ensure the cross-compile target is registered; on windows-latest the
+      # host IS x86_64-pc-windows-msvc so this is typically a no-op.
+      - name: Add Rust target
+        shell: bash
+        run: rustup target add "$TARGET"
 
       # Rust cache covering both the workspace sidecar build and the Tauri
       # crate build. shared-key scoped to windows-canary-release so canary
