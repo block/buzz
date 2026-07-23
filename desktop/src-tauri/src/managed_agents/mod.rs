@@ -2,6 +2,7 @@ pub(crate) mod access_policy;
 mod agent_env;
 pub(crate) mod agent_events;
 pub(crate) mod agent_snapshot;
+pub(crate) mod relay_policy;
 pub(crate) mod team_snapshot;
 pub(crate) use access_policy::{
     apply_update_access, internal_build, normalize_definition_access,
@@ -10,6 +11,7 @@ pub(crate) use access_policy::{
 pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };
+pub(crate) use relay_policy::{validate_local_agent_relay, validate_managed_agent_relay_pin};
 mod backend;
 pub(crate) mod config_bridge;
 mod discovery;

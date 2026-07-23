@@ -1014,6 +1014,11 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
 }
 
+/** Return whether local agents may attach to the active workspace relay. */
+export async function getLocalAgentRelayAllowed(): Promise<boolean> {
+  return invokeTauri<boolean>("local_agent_relay_allowed");
+}
+
 /** Return whether this build forces managed-agent access to owner-only. */
 export async function getAgentAccessOwnerOnly(): Promise<boolean> {
   return invokeTauri<boolean>("agent_access_owner_only");

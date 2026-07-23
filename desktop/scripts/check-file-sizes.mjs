@@ -121,7 +121,8 @@ const overrides = new Map([
   // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
   // runtime log path. Load-bearing crash-recovery surface; queued to split.
   // internal-owner-only: persistence choke point normalizes local agent access.
-  ["src-tauri/src/managed_agents/storage.rs", 1386],
+  // internal-local-relay-lockdown: load/save rejects legacy disallowed pins.
+  ["src-tauri/src/managed_agents/storage.rs", 1390],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -136,7 +137,8 @@ const overrides = new Map([
   // lowest env layer (+8 lines). Queued to split.
   // internal-owner-only: runtime authorization normalization protects stale
   // or hand-edited records before spawning an internal managed agent.
-  ["src-tauri/src/managed_agents/runtime.rs", 2228],
+  // internal-local-relay-lockdown: final spawn validates the effective relay.
+  ["src-tauri/src/managed_agents/runtime.rs", 2229],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],

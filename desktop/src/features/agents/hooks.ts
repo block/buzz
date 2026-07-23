@@ -27,6 +27,7 @@ import {
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
   getAgentAccessOwnerOnly,
+  getLocalAgentRelayAllowed,
   getBakedBuildEnv,
   getBakedBuildEnvKeys,
   getChannelMembers,
@@ -910,9 +911,25 @@ export function useRuntimeFileConfigQuery(
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
 export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
+export const localAgentRelayAllowedQueryKey = [
+  "local-agent-relay-allowed",
+] as const;
 export const agentAccessOwnerOnlyQueryKey = [
   "agent-access-owner-only",
 ] as const;
+
+export function useLocalAgentRelayAllowedQuery(options?: {
+  enabled?: boolean;
+}) {
+  return useQuery({
+    queryKey: localAgentRelayAllowedQueryKey,
+    queryFn: () => getLocalAgentRelayAllowed(),
+    enabled: options?.enabled ?? true,
+    staleTime: 30_000,
+    refetchInterval: false,
+    retry: false,
+  });
+}
 
 export function useAgentAccessOwnerOnlyQuery(options?: { enabled?: boolean }) {
   return useQuery({

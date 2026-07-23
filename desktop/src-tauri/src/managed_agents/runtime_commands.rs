@@ -260,6 +260,7 @@ fn start_pair(
     if record.backend != BackendKind::Local {
         return Err("managed runtime pairs require a local agent".into());
     }
+    super::validate_local_agent_relay(&record.backend, &relay_url)?;
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
@@ -400,6 +401,7 @@ async fn probe_agent_relay_access(
     record: super::ManagedAgentRecord,
     requested_relay_url: String,
 ) -> Result<(super::ManagedAgentRecord, ManagedAgentRuntimeKey, String), String> {
+    super::validate_local_agent_relay(&record.backend, &requested_relay_url)?;
     let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;

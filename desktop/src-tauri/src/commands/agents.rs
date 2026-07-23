@@ -632,6 +632,9 @@ pub async fn create_managed_agent(
             .map(str::trim)
             .unwrap_or("")
             .to_string();
+        if !resolved_relay_url.is_empty() {
+            crate::managed_agents::validate_local_agent_relay(&input.backend, &resolved_relay_url)?;
+        }
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };

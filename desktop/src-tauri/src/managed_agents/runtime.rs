@@ -1649,6 +1649,7 @@ pub fn spawn_agent_child(
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
+    super::validate_local_agent_relay(&record.backend, relay_url)?;
     let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(

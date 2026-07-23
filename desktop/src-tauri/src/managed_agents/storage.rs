@@ -199,6 +199,9 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
+    records
+        .iter()
+        .try_for_each(super::validate_managed_agent_relay_pin)?;
     hydrate_keys(&mut records);
     Ok(records)
 }
@@ -302,6 +305,7 @@ pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> R
     let mut sorted = records.to_vec();
     for record in &mut sorted {
         super::normalize_managed_agent_access(record);
+        super::validate_managed_agent_relay_pin(record)?;
     }
     // A caller-supplied key-less record would collide with the definition
     // half re-read below; instances always carry a pubkey.

@@ -353,6 +353,8 @@ type E2eConfig = {
     };
     /** Explicit internal-distribution marker; independent of baked defaults. */
     internalBuild?: boolean;
+    /** Whether local agents may attach to the active mocked community. */
+    localAgentRelayAllowed?: boolean;
     /** Baked build env returned by the display and key-name Tauri commands. */
     bakedBuildEnv?: Array<{
       key: string;
@@ -10289,6 +10291,13 @@ export function maybeInstallE2eTauriMocks() {
         return (config?.mock?.bakedBuildEnv ?? []).map((entry) => entry.key);
       case "agent_access_owner_only":
         return config?.mock?.internalBuild ?? false;
+      case "local_agent_relay_allowed":
+        if (config?.mock?.localAgentRelayAllowed === false) {
+          throw new Error(
+            "local agents in this internal build cannot use the active relay",
+          );
+        }
+        return true;
       case "update_managed_agent":
         return handleUpdateManagedAgent(
           payload as Parameters<typeof handleUpdateManagedAgent>[0],

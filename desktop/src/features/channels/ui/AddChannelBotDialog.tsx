@@ -3,6 +3,7 @@ import * as React from "react";
 
 import {
   useCreateChannelManagedAgentsMutation,
+  useLocalAgentRelayAllowedQuery,
   usePersonasQuery,
   useTeamsQuery,
   type CreateChannelManagedAgentResult,
@@ -63,6 +64,7 @@ export function AddChannelBotDialog({
   onOpenChange,
 }: AddChannelBotDialogProps) {
   const personasQuery = usePersonasQuery();
+  const localRelayPolicy = useLocalAgentRelayAllowedQuery({ enabled: open });
   const teamsQuery = useTeamsQuery();
   const inChannelPersonaIds = useInChannelPersonaIds(
     channelId,
@@ -191,6 +193,7 @@ export function AddChannelBotDialog({
 
   const canSubmit =
     providers.length > 0 &&
+    localRelayPolicy.data === true &&
     selectedPersonas.length > 0 &&
     !providersLoading &&
     !createBotsMutation.isPending;
@@ -259,6 +262,19 @@ export function AddChannelBotDialog({
             selectedPersonaIds={selectedPersonaIds}
             teams={teams}
           />
+        ) : null}
+
+        {localRelayPolicy.isError ? (
+          <div
+            className="flex gap-3 rounded-lg border border-warning/30 bg-warning-bg px-4 py-3"
+            data-testid="local-agent-relay-blocked"
+          >
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+            <p className="text-sm text-warning">
+              Local agents cannot be added to this community on this managed
+              build.
+            </p>
+          </div>
         ) : null}
 
         {providers.length === 0 && !providersLoading ? (

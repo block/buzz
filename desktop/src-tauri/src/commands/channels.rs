@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
@@ -785,9 +785,20 @@ pub async fn add_channel_members(
     channel_id: String,
     pubkeys: Vec<String>,
     role: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    let relay_url = crate::relay::relay_ws_url_with_override(&state);
+    let local_agents = crate::managed_agents::load_managed_agents(&app)?;
+    for pubkey in &pubkeys {
+        if let Some(record) = local_agents.iter().find(|record| {
+            record.pubkey.eq_ignore_ascii_case(pubkey)
+                && record.backend == crate::managed_agents::BackendKind::Local
+        }) {
+            crate::managed_agents::validate_local_agent_relay(&record.backend, &relay_url)?;
+        }
+    }
     let role_str = match role.as_deref() {
         Some("admin") => Some("admin"),
         Some("bot") => Some("bot"),
