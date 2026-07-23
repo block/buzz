@@ -80,7 +80,7 @@ export function TypingIndicatorRow({
       className={cn(
         "shrink-0 bg-transparent",
         isActivityVariant
-          ? "flex h-7 items-center px-0 py-0"
+          ? "flex h-5 items-center px-0 py-0"
           : "px-4 py-2 sm:px-6",
         className,
       )}

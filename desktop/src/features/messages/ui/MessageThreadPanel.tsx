@@ -832,7 +832,7 @@ export function MessageThreadPanel({
             channelId={channelId}
             channelName={channelName}
             channelType={channel?.channelType ?? null}
-            containerClassName={THREAD_PANEL_COMPOSER_GUTTER_CLASS}
+            containerClassName={cn(THREAD_PANEL_COMPOSER_GUTTER_CLASS, "pb-1")}
             disabled={disabled || isSending || !channelId}
             draftKey={`thread:${threadHead.id}`}
             autoSubmitDraftKey={autoSendDraftKey}
@@ -853,11 +853,11 @@ export function MessageThreadPanel({
           />
           <div
             className={cn(
-              "min-h-8 bg-background pb-1.5 pt-0",
+              "-mt-1 min-h-5 bg-background pb-0 pt-0",
               THREAD_PANEL_COMPOSER_GUTTER_CLASS,
             )}
           >
-            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible">
+            <div className="mx-auto flex h-full w-full max-w-4xl items-center gap-2 overflow-visible pl-2">
               {toolbarExtraActions ? (
                 <div className="flex min-w-0 flex-1 overflow-visible">
                   {toolbarExtraActions}

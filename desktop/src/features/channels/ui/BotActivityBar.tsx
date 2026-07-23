@@ -164,7 +164,7 @@ export function BotActivityComposerAction({
           className={cn(
             "inline-flex items-center justify-center rounded-full border border-border/60 bg-background font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring data-[state=open]:border-primary/40 data-[state=open]:bg-primary/10 data-[state=open]:text-primary",
             isInline
-              ? "h-7 min-w-0 gap-2 overflow-visible border-transparent bg-transparent px-0 text-xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
+              ? "h-5 min-w-0 gap-1.5 overflow-visible border-transparent bg-transparent px-0 text-2xs font-semibold leading-none shadow-none hover:border-transparent hover:bg-transparent data-[state=open]:border-transparent data-[state=open]:bg-transparent"
               : "h-9 min-w-9 gap-1.5 px-2 text-xs",
           )}
           data-testid="bot-activity-composer-trigger"
@@ -185,7 +185,7 @@ export function BotActivityComposerAction({
                 className={cn(
                   "border border-background",
                   isInline
-                    ? "!h-[18px] !w-[18px] shadow-xs ring-1 ring-primary/25 text-3xs"
+                    ? "!h-3.5 !w-3.5 shadow-xs ring-1 ring-primary/25 text-3xs"
                     : "shrink-0",
                 )}
                 displayName={agent.name}
