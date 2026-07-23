@@ -292,7 +292,11 @@ fn collect_missing_requirements(
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
         "cursor" => {
-            cli_login::requirements(&["agent", "status"], "run `agent login`", rt)
+            cli_login::requirements(
+                &["cursor-agent", "status"],
+                "run `cursor-agent login`",
+                rt,
+            )
         }
         _ => vec![],
     }

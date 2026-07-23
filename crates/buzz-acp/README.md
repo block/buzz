@@ -94,10 +94,11 @@ treats both Claude ACP command names as the same zero-arg runtime.
 Cursor's Agent CLI speaks ACP natively — no separate `*-acp` adapter.
 
 ```bash
-# Install: https://cursor.com/docs/cli (binary lands as `agent` / `cursor-agent`)
-agent login   # or export CURSOR_API_KEY=...
+# Install: https://cursor.com/docs/cli (binary lands as `cursor-agent` (+ optional `agent` shim))
+cursor-agent login   # or export CURSOR_API_KEY=...
+# Prefer cursor-agent — bare `agent` collides with Grok Build PATH shim.
 
-export BUZZ_ACP_AGENT_COMMAND="agent"
+export BUZZ_ACP_AGENT_COMMAND="cursor-agent"
 export BUZZ_ACP_AGENT_ARGS="acp"
 
 buzz-acp
@@ -194,10 +195,11 @@ buzz-acp --respond-to nobody --heartbeat-interval 300
 Cursor's Agent CLI speaks ACP natively — no separate `*-acp` adapter.
 
 ```bash
-# Install: https://cursor.com/docs/cli (binary lands as `agent` / `cursor-agent`)
-agent login   # or export CURSOR_API_KEY=...
+# Install: https://cursor.com/docs/cli (binary lands as `cursor-agent` (+ optional `agent` shim))
+cursor-agent login   # or export CURSOR_API_KEY=...
+# Prefer cursor-agent — bare `agent` collides with Grok Build PATH shim.
 
-export BUZZ_ACP_AGENT_COMMAND="agent"
+export BUZZ_ACP_AGENT_COMMAND="cursor-agent"
 export BUZZ_ACP_AGENT_ARGS="acp"
 
 buzz-acp
