@@ -4,6 +4,7 @@ import type { ChannelAgentSessionAgent } from "@/features/channels/ui/useChannel
 import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
+import type { RestorableScrollAnchor } from "@/features/messages/lib/restorableScrollAnchor";
 import type { TimelineMessage } from "@/features/messages/types";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -73,6 +74,8 @@ export type ChannelPaneProps = {
    * direct/restored Activity URLs — the close affordance is the fallback.
    */
   onBackFromAgentSession?: () => void;
+  /** Returns from a profile that replaced an open thread. */
+  onBackFromProfilePanel?: () => void;
   onCloseAgentSession: () => void;
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;
@@ -151,9 +154,11 @@ export type ChannelPaneProps = {
   profilePanelTab: ProfilePanelTab;
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
+  threadInitialScrollAnchor?: RestorableScrollAnchor | null;
   threadMessages: MainTimelineEntry[];
   threadMessagesPending?: boolean;
   threadPanelWidthPx: number;
+  onThreadInitialScrollAnchorRestored?: () => void;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
   threadScrollTargetId: string | null;

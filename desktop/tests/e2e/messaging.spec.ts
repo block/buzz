@@ -670,6 +670,121 @@ test("shows your avatar on your own message when profile avatar is set", async (
   );
 });
 
+test("returns from a thread profile to the exact reading position", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const timeline = page.getByTestId("message-timeline");
+  const rootMessage = timeline.getByTestId("message-row").first();
+  const rootMessageId = await rootMessage.getAttribute("data-message-id");
+  if (!rootMessageId) {
+    throw new Error("Expected the seeded thread root id.");
+  }
+
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadBody = threadPanel.getByTestId("message-thread-body");
+  const threadReplies = threadPanel.getByTestId("message-thread-replies");
+  await expect(threadPanel).toBeVisible();
+
+  const replyContents = Array.from(
+    { length: 24 },
+    (_, index) => `Profile return anchor reply ${index}`,
+  );
+  await page.evaluate(
+    ({ contents, parentEventId, pubkeys }) => {
+      const emit = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+      if (!emit) throw new Error("Mock message emitter is unavailable.");
+      const createdAt = Math.floor(Date.now() / 1_000);
+      contents.forEach((content, index) => {
+        emit({
+          channelName: "general",
+          content,
+          createdAt: createdAt + index,
+          parentEventId,
+          pubkey: pubkeys[index % pubkeys.length],
+        });
+      });
+    },
+    {
+      contents: replyContents,
+      parentEventId: rootMessageId,
+      pubkeys: [TEST_IDENTITIES.alice.pubkey, TEST_IDENTITIES.bob.pubkey],
+    },
+  );
+  await expect(threadReplies).toContainText(replyContents.at(-1) ?? "");
+
+  const anchorRow = threadReplies
+    .getByTestId("message-row")
+    .filter({ hasText: replyContents[12] })
+    .first();
+  await anchorRow.evaluate((row) => {
+    row.scrollIntoView({ block: "center" });
+    const body = row.closest(
+      '[data-testid="message-thread-body"]',
+    ) as HTMLDivElement | null;
+    if (!body) throw new Error("Thread body is unavailable.");
+    body.scrollTop += 19;
+  });
+
+  const before = await threadBody.evaluate((body) => {
+    const bodyRect = body.getBoundingClientRect();
+    const row = Array.from(
+      body.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ).find(
+      (candidate) => candidate.getBoundingClientRect().bottom > bodyRect.top,
+    );
+    if (!row?.dataset.messageId) {
+      throw new Error("Expected a visible thread row.");
+    }
+    return {
+      clientHeight: body.clientHeight,
+      messageId: row.dataset.messageId,
+      scrollHeight: body.scrollHeight,
+      scrollTop: body.scrollTop,
+      topOffset: row.getBoundingClientRect().top - bodyRect.top,
+    };
+  });
+  expect(Math.abs(before.topOffset)).toBeGreaterThan(1);
+
+  await anchorRow.getByTestId("message-author").click();
+  const profilePanel = page.getByTestId("user-profile-panel");
+  await expect(profilePanel).toBeVisible();
+  await expect(threadPanel).toBeHidden();
+  const backToThread = profilePanel.getByTestId("user-profile-panel-back");
+  await expect(backToThread).toHaveAccessibleName("Back to thread");
+  await backToThread.click();
+
+  await expect(threadPanel).toBeVisible();
+  await expect(profilePanel).toBeHidden();
+  await expect
+    .poll(async () => {
+      return threadBody.evaluate((body, expected) => {
+        const row = body.querySelector<HTMLElement>(
+          `[data-message-id="${CSS.escape(expected.messageId)}"]`,
+        );
+        if (!row) return Number.POSITIVE_INFINITY;
+        return Math.abs(
+          row.getBoundingClientRect().top -
+            body.getBoundingClientRect().top -
+            expected.topOffset,
+        );
+      }, before);
+    })
+    .toBeLessThanOrEqual(1);
+
+  await anchorRow.getByTestId("message-author").click();
+  await expect(profilePanel).toBeVisible();
+  await profilePanel.getByTestId("auxiliary-panel-close").click();
+  await expect(profilePanel).toBeHidden();
+  await expect(threadPanel).toBeHidden();
+});
+
 test("opens a single-level thread panel with inline expansion", async ({
   page,
 }) => {

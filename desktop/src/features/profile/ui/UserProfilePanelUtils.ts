@@ -94,6 +94,8 @@ export type UserProfilePanelProps = {
   currentPubkey?: string;
   isSinglePanelView?: boolean;
   layout?: "standalone" | "split";
+  /** Contextual return from the profile summary to the panel it replaced. */
+  onBack?: () => void;
   onClose: () => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   onOpenProfile?: (pubkey: string) => void;
