@@ -203,6 +203,8 @@ type E2eConfig = {
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
     channelsReadError?: string;
+    /** Reject successive mock `get_channels` calls, then resume. */
+    channelsReadErrors?: (string | null)[];
     /** Reject successive mock `create_channel` calls, then resume. */
     createChannelErrors?: string[];
     /** Reject successive mock `ensure_starter_channels` calls, then resume. */
@@ -5134,7 +5136,9 @@ async function handleGetChannels(config: E2eConfig | undefined) {
     );
   }
 
-  const channelsReadError = config?.mock?.channelsReadError;
+  const channelsReadError =
+    config?.mock?.channelsReadErrors?.shift() ??
+    config?.mock?.channelsReadError;
   if (channelsReadError) {
     throw new Error(channelsReadError);
   }

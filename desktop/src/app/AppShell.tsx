@@ -241,7 +241,8 @@ export function AppShell() {
     const activeCommunityId = communitiesHook.activeCommunity?.id;
     if (
       hasRestoredCommunityDestinationRef.current ||
-      !channelsQuery.isFetchedAfterMount ||
+      !channelsQuery.isSuccess ||
+      channelsQuery.dataUpdatedAt === 0 ||
       !activeCommunityId
     ) {
       return;
@@ -275,7 +276,8 @@ export function AppShell() {
       void goChannel(destination.channelId, { replace: true });
     }
   }, [
-    channelsQuery.isFetchedAfterMount,
+    channelsQuery.dataUpdatedAt,
+    channelsQuery.isSuccess,
     communitiesHook.activeCommunity?.id,
     goChannel,
     goHome,

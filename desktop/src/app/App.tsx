@@ -12,7 +12,10 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
-import { completeCommunityViewTransition } from "@/app/communityViewTransition";
+import {
+  completeCommunityViewTransition,
+  replaceCommunityDestinationRoute,
+} from "@/app/communityViewTransition";
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
@@ -346,10 +349,9 @@ function CommunityApp({
         markPendingCommunityRestore(targetCommunityId);
         const destination = loadCommunityDestination(targetCommunityId);
         if (destination?.kind === "channel") {
-          window.history.replaceState(
-            window.history.state,
-            "",
-            `#/channels/${encodeURIComponent(destination.channelId)}`,
+          replaceCommunityDestinationRoute(
+            destination.channelId,
+            router.history,
           );
         }
       }

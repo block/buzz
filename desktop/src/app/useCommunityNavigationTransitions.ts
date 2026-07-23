@@ -1,8 +1,12 @@
+import { useRouter } from "@tanstack/react-router";
 import * as React from "react";
 
 import type { deriveShellRoute } from "@/app/AppShell.helpers";
 import type { useAppNavigation } from "@/app/navigation/useAppNavigation";
-import { runCommunityViewTransition } from "@/app/communityViewTransition";
+import {
+  replaceCommunityDestinationRoute,
+  runCommunityViewTransition,
+} from "@/app/communityViewTransition";
 import {
   loadCommunityDestination,
   markPendingCommunityRestore,
@@ -25,6 +29,7 @@ export function useCommunityNavigationTransitions({
   selectedChannelId: ShellRoute["selectedChannelId"];
   selectedView: ShellRoute["selectedView"];
 }) {
+  const router = useRouter();
   const saveActiveDestination = React.useCallback(() => {
     const activeCommunityId = communities.activeCommunity?.id;
     if (!activeCommunityId) return;
@@ -53,16 +58,15 @@ export function useCommunityNavigationTransitions({
         markPendingCommunityRestore(id);
         const destination = loadCommunityDestination(id);
         if (destination?.kind === "channel") {
-          window.history.replaceState(
-            window.history.state,
-            "",
-            `#/channels/${encodeURIComponent(destination.channelId)}`,
+          replaceCommunityDestinationRoute(
+            destination.channelId,
+            router.history,
           );
         }
         communities.switchCommunity(id);
       });
     },
-    [communities, goHome, saveActiveDestination],
+    [communities, goHome, router.history, saveActiveDestination],
   );
 
   const removeCommunity = React.useCallback(
@@ -82,16 +86,15 @@ export function useCommunityNavigationTransitions({
         markPendingCommunityRestore(fallback.id);
         const destination = loadCommunityDestination(fallback.id);
         if (destination?.kind === "channel") {
-          window.history.replaceState(
-            window.history.state,
-            "",
-            `#/channels/${encodeURIComponent(destination.channelId)}`,
+          replaceCommunityDestinationRoute(
+            destination.channelId,
+            router.history,
           );
         }
         communities.removeCommunity(id);
       });
     },
-    [communities, goHome, saveActiveDestination],
+    [communities, goHome, router.history, saveActiveDestination],
   );
 
   return { removeCommunity, switchCommunity };

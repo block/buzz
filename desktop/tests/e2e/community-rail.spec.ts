@@ -163,6 +163,16 @@ test.describe("community rail", () => {
     }, COMMUNITY_B.id);
     await page.goto("/");
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await page.evaluate(() => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        source,
+      );
+    });
 
     await page.evaluate(() => {
       const testWindow = window as typeof window & {
@@ -233,6 +243,87 @@ test.describe("community rail", () => {
         }, COMMUNITY_B.id),
       )
       .toEqual({ kind: "home" });
+  });
+
+  test("does not repair a remembered channel until live validation succeeds", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        channelsReadDelayMs: 300,
+        channelsReadErrors: [null, "temporary channel read failure"],
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        ),
+      )
+      .not.toBeNull();
+    await page.evaluate(() => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source);
+      snapshot.channels = snapshot.channels.filter(
+        (channel: { id: string }) => channel.id !== "general",
+      );
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        JSON.stringify(snapshot),
+      );
+    });
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/channels\/general$/);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+    await page.waitForTimeout(400);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+
+    await expect(page.getByTestId("channel-general")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
   });
 
   test("does not restore a remembered destination on cold boot", async ({
