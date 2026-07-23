@@ -296,9 +296,15 @@ export function useLoadArchivedObserverEvents(
       await ps.backfillPromise;
     }
 
-    // Re-check after awaiting: generation may have advanced (channel switched)
-    // or archive exhausted while we were waiting for backfill.
-    if (!ps.hasOlderArchived || requestGeneration !== ps.resetGeneration) {
+    // Re-check after awaiting: generation may have advanced (channel switched),
+    // archive exhausted, or another concurrent caller may have acquired the
+    // fetch lock while we were suspended on backfill. All three must be
+    // re-evaluated because any of them could have changed mid-await.
+    if (
+      !ps.hasOlderArchived ||
+      requestGeneration !== ps.resetGeneration ||
+      ps.isFetching
+    ) {
       return;
     }
 

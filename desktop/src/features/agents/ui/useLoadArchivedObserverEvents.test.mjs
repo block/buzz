@@ -9,8 +9,9 @@
  *   - the hydration effect
  *   - the resetGeneration checks (post-backfill, post-Tauri-read, post-ingest)
  *   - the generation-aware isFetching clear in finally
+ *   - the post-backfill isFetching recheck before lock acquisition
  *
- * Three regressions:
+ * Four regressions:
  *   (a) exhausted-A → switch-to-B: B must read from a null cursor and ingest
  *       its rows. GREEN at dfb2d0385 (stale-closure was fixed in round 1).
  *       Fails at the pre-round-1 head where ps.hasOlderArchived was read from
@@ -23,7 +24,11 @@
  *       protection the concurrent call is rejected (read count doesn't jump);
  *       without it, A's stale finally clears the lock and the concurrent call
  *       would start a duplicate read.
- *   (c) A→B→A: old-A's in-flight decrypt completes after the user returns to A.
+ *   (c) concurrent fetches during pending backfill: two callers both suspend on
+ *       the backfill promise, both resume after it resolves — only one must
+ *       acquire the lock and issue the Tauri read. Fails at 4c92a018d (no
+ *       post-backfill isFetching recheck).
+ *   (d) A→B→A: old-A's in-flight decrypt completes after the user returns to A.
  *       Old-A's generation no longer matches (each reset increments the counter),
  *       so it must not mark fresh-A exhausted or steal fresh-A's lock. Fails
  *       when resetGeneration is replaced with a channel-string equality check.
@@ -615,7 +620,150 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
   });
 
   /**
-   * Regression (c): A→B→A — old-A's stale in-flight request must not corrupt
+   * Regression (c): concurrent fetches during pending backfill — only one
+   * same-generation call may acquire the lock after backfill resolves.
+   *
+   * The gap at 4c92a018d: `ps.isFetching` was checked only at the top of
+   * fetchOlderArchived, BEFORE `await ps.backfillPromise`. Two callers
+   * (eager hydration loop + a concurrent scroll trigger) could both observe
+   * isFetching=false, both suspend on the same pending backfill promise, then
+   * both resume and proceed past the post-backfill guard (which only checked
+   * generation + exhaustion). Both would set isFetching=true and issue
+   * readArchivedObserverEventsForChannel from the SAME cursor — duplicating
+   * the first page.
+   *
+   * Fix: after `await ps.backfillPromise`, recheck `ps.isFetching` immediately
+   * before acquiring the lock. The second caller finds the lock already taken
+   * and returns without reading.
+   *
+   * The test defers the ARCHIVE response (not just backfill) so we can count
+   * reads while the winner's first response is still in flight. If both
+   * callers acquired the lock, archiveCallCount will be 2 before the first
+   * deferred response is released. With the fix, archiveCallCount is 1.
+   *
+   * Precise race sequence:
+   *   1. Mount on chan-a. Backfill is DEFERRED (backfillDeferred).
+   *      Archive responses are also deferred until resolveArchive() is called.
+   *   2. Hydration loop call #1 suspends on backfill.
+   *   3. Inject manual call #2 — it also sees isFetching=false and suspends on
+   *      backfill.
+   *   4. Resolve backfill. Both calls resume and race to acquire the lock.
+   *      - Without fix: both pass the post-backfill guard, both set
+   *        isFetching=true, both issue the Tauri read — archiveCallCount == 2.
+   *      - With fix: one passes, sets isFetching=true; the other sees the lock
+   *        taken and returns — archiveCallCount == 1.
+   *   5. Assert archiveCallCount == 1 before releasing archive response.
+   *      (Archive is still deferred, so loop hasn't advanced past page 1 yet —
+   *      any count > 1 is purely from the concurrent race, not loop progress.)
+   *
+   * VERIFIED: removing the post-backfill `ps.isFetching` recheck causes
+   * archiveCallCount == 2 at step 5. GREEN at current head.
+   */
+  it("test_two_concurrent_fetches_during_backfill_only_one_proceeds", async () => {
+    let resolveBackfill;
+    const backfillDeferred = new Promise((resolve) => {
+      resolveBackfill = resolve;
+    });
+
+    // Defer ALL archive responses until we release them. This way, if two
+    // callers both acquire the lock, archiveCallCount jumps to 2 before we
+    // release the response — and we can catch it unambiguously.
+    let resolveArchive;
+    const archiveDeferred = new Promise((resolve) => {
+      resolveArchive = resolve;
+    });
+
+    let archiveCallCount = 0;
+
+    setIpcHandler("list_save_subscriptions", async () =>
+      makeOwnerPSubResponse(),
+    );
+    // Defer readUnindexedObserverRows to simulate a pending backfill.
+    setIpcHandler("read_unindexed_observer_rows", async () => {
+      await backfillDeferred;
+      return [];
+    });
+    setIpcHandler("index_observer_channel_id", async () => null);
+    setIpcHandler("read_archived_observer_events_for_channel", async (args) => {
+      if (args.channelId === "chan-a") {
+        archiveCallCount++;
+        // Hold this response until we explicitly release it so we can
+        // count concurrent reads before any result is returned.
+        await archiveDeferred;
+        return Array.from({ length: 200 }, (_, i) =>
+          JSON.stringify(makeArchivedRow(i, "chan-a")),
+        );
+      }
+      return [];
+    });
+    setIpcHandler("decrypt_observer_event", async (args) => {
+      try {
+        const event = JSON.parse(args.eventJson);
+        return JSON.parse(event.content);
+      } catch {
+        return { kind: "telemetry", channelId: null };
+      }
+    });
+
+    const qc = makeQueryClient();
+    const { render, getFetchOlderArchived, unmount } = mountHook("chan-a", qc);
+
+    // Step 1-2: Mount on chan-a. Backfill is in flight (deferred).
+    // Hydration loop call #1 enters fetchOlderArchived and suspends on backfill.
+    await render("chan-a");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // Step 3: Inject call #2 while backfill is still pending and call #1 is
+    // suspended. Both observe isFetching=false here.
+    const fetchFn = getFetchOlderArchived();
+    let call2Promise;
+    if (fetchFn) {
+      // Do NOT await yet — let it run concurrently with call #1.
+      call2Promise = fetchFn();
+    }
+
+    // Let call #2 reach its backfill await before we resolve backfill.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 5));
+    });
+
+    // Step 4: Resolve backfill. Both calls resume and race to acquire lock.
+    resolveBackfill();
+
+    // Yield to let both calls advance past the post-backfill guard and issue
+    // their Tauri reads (or be blocked by the lock recheck).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Step 5: Archive responses are still deferred — loop cannot have advanced
+    // past page 1. Any archiveCallCount > 1 here is purely from concurrent
+    // reads racing through the backfill await without a lock recheck.
+    assert.equal(
+      archiveCallCount,
+      1,
+      `Exactly one archive read must start after backfill resolves — got ${archiveCallCount}. Without the post-backfill isFetching recheck, both concurrent callers acquire the lock and both issue a Tauri read (archiveCallCount == 2).`,
+    );
+
+    // Release archive responses so the lock holder can finish and the test
+    // can unmount cleanly.
+    resolveArchive();
+
+    // Wait for call #2 to settle as well.
+    if (call2Promise) {
+      await act(async () => {
+        await call2Promise;
+      });
+    }
+
+    await settle(5);
+    await unmount();
+  });
+
+  /**
+   * Regression (d): A→B→A — old-A's stale in-flight request must not corrupt
    * fresh-A's paging state when the user returns to channel A.
    *
    * The gap in the channel-string equality check (af45fbf05): using
