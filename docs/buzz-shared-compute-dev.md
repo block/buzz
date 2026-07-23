@@ -22,8 +22,9 @@ This removes development app data, the development keyring entry,
 data, production keyring, and `~/.buzz`. The first dev page load also clears
 only that dev server origin's WebKit storage, so saved fields from an earlier
 run cannot leak into the fresh state. It then seeds local channels and starts
-the mesh-enabled desktop with the repository's public Tyler test identity.
-That identity is a fixture and must never be pointed at staging or production.
+the mesh-enabled desktop with the repository's public test identity. That
+identity is a fixture and must never be pointed at a shared or production
+relay.
 
 If using `mesh-dev-fresh`, the clean window opens at **Welcome to Buzz**. Join
 the seeded local community before continuing:

@@ -105,7 +105,6 @@ const TEAMMATE_READY_WAIT_MS = 60_000;
  * closer had already been stamped final at 15s). A real failure does not wait
  * for this — `failedAfterKickoff` resolves crashed teammates immediately.
  *
- * See docs/welcome-kickoff-silent-failures.md §1.
  */
 const TEAMMATE_INTRO_BACKSTOP_MS = 120_000;
 const CLOSER_BEAT_MS = 3_000;

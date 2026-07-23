@@ -1,4 +1,7 @@
-# 🛡️ Buzz Moderation — Your community, your rules
+# Vision: community moderation
+
+> **Document status:** Implemented foundation. Current limitations and planned
+> layers are called out in [Honest edges](#honest-edges).
 
 > Someone spams #general at midnight. A member taps **Report** — a category, an optional note, done. The report doesn't appear in anyone's feed; it lands in a queue only the community's owners and admins can see. In the morning an admin opens the queue, finds three reports against the same account, deletes the messages, and times the account out for a day. The room sees an honest marker where the spam was. The author gets a message explaining why. The reporter gets a message saying it was handled. Nobody else saw anything.
 
@@ -64,7 +67,10 @@ This document is about the first layer. The second has its own lane.
 
 ## The Point
 
-A community you can't moderate isn't yours — it just has your name on it. The relay is the workspace; moderation is what makes it *governable* by the people it belongs to. Judgment stays human. Enforcement is structural. Everyone affected hears the truth.
+A community you can't moderate isn't yours — it just has your name on it.
+Moderation makes the shared workspace governable by the people it belongs to;
+the relay supplies the structural enforcement. Judgment stays human. Everyone
+affected hears the truth.
 
 ---
 

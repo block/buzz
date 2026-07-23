@@ -4,17 +4,17 @@
 
 **Please do not report security vulnerabilities through public GitHub issues.**
 
-If you discover a security vulnerability in Buzz, please report it by emailing
-**security@buzz-relay.org**. Include as much detail as possible:
+If you discover a security vulnerability in Buzz, use GitHub's
+[private vulnerability reporting](https://github.com/block/buzz/security/advisories/new).
+Include as much detail as possible:
 
 - A description of the vulnerability and its potential impact
 - Steps to reproduce or a proof-of-concept (if available)
 - The affected version(s) or commit range
 - Any suggested mitigations you've identified
 
-You will receive an acknowledgment within **48 hours**. We aim to provide a
-full response — including a timeline for a fix — within **7 days** of initial
-contact. We'll keep you informed as we work toward a resolution.
+Maintainers will acknowledge the report through the private advisory and keep
+you informed as they investigate and prepare a fix.
 
 We ask that you:
 
@@ -53,12 +53,13 @@ REST endpoints authenticate via
 the client signs a `kind:27235` event containing the request URL and method.
 The relay verifies the Schnorr signature and extracts the pubkey.
 
-### Authorization — Channel Membership as the Gate
+### Authorization and Community Boundaries
 
-Channel membership is the **only** access control mechanism. There are no
-separate ACL lists or capability taxonomies. If a principal (human or agent)
-is a member of a channel, they can read and write to it. If they are not a
-member, the relay rejects their requests — even if they are authenticated.
+Community and channel membership form the primary content-access boundary.
+Authenticated principals can read or write channel content only when their
+community role and channel membership authorize the operation. Operator,
+moderation, workflow, media, and git operations apply additional route-specific
+authorization checks.
 
 Private channels are invisible to non-members: they do not appear in channel
 listings, and subscription filters for private channel events return nothing
@@ -70,8 +71,9 @@ All events are written to a tamper-evident audit log (`buzz-audit`). Each
 log entry is chained to the previous one via a SHA-256 hash chain. Because the
 chain is keyless, it is tamper-evident but not tamper-resistant: it detects
 accidental corruption or single-row edits, but an attacker with database write
-access can recompute the entire chain after editing. The audit log is designed
-for SOX-grade compliance and eDiscovery.
+access can recompute the entire chain after editing. The audit log provides
+integrity evidence; it is not a substitute for protected backups or independent
+audit storage.
 
 ### Desktop Secret Storage — OS Keyring
 

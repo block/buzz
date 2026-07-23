@@ -8,20 +8,17 @@ name: Auto-tag on Release PR Merge
 #   relay-release/<v>  → tag relay-v<v>  → docker.yml (relay image)
 #   chart-release/<v>  → tag chart-v<v>  → helm-chart.yml (main helm chart)
 #   push-chart-release/<v> → tag push-chart-v<v> → push-gateway-helm-chart.yml
-#   any internal PR that bumps deploy/charts/buzz/Chart.yaml `version`
+#   any merged PR that bumps deploy/charts/buzz/Chart.yaml `version`
 #                       → tag chart-v<v>  → helm-chart.yml (helm chart)
-#   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
+#   mobile-release/<v> → tag mobile-v<v> → versioned public source
 #
 # Release tags are created with a short-lived token from the dedicated
 # buzz-release-bot GitHub App. GitHub attributes the ref creation to that
 # App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
 # default GITHUB_TOKEN remains read-only and is never used to create a tag.
 #
-# The mobile lane is push-only by infosec necessity: OSS `block/buzz` CI must
-# not trigger CI in the private `buzz-releases` repo, so auto-dispatch across
-# that boundary is deliberately disallowed. The mobile-v* tag is consumed
-# manually instead — a human feeds it as the `sprout_ref` input to the
-# `buzz-releases` Buildkite pipeline, which builds and ships mobile.
+# The mobile lane intentionally ends at a versioned source tag. This repository
+# does not currently publish packaged mobile applications from mobile-v*.
 
 on:
   pull_request:

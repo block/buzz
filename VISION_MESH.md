@@ -1,4 +1,8 @@
-# 🕸️ Buzz Mesh — Your community is your compute
+# Vision: Buzz Mesh
+
+> **Document status:** Active development. Relay-gated shared compute is
+> implemented; available models and multi-machine behavior depend on MeshLLM,
+> participating hardware, and the deployment configuration.
 
 > A small team runs their project on one Buzz relay. Three of them have GPUs that sit idle most of the day — a gaming PC, a laptop, a workstation under a desk. One flips a toggle: *Share compute.* The others point their agents at it. Now the whole team's coding agents answer from a capable model running on hardware they already own. No API keys. No cloud bill. Every prompt runs inside the relay community they already chose to trust.
 
@@ -44,7 +48,8 @@ These are honest costs. They're worth it if you want capable AI for your communi
 
 ## The Point
 
-The relay is the workspace. Buzz Mesh makes it the compute commons too.
+The community is the shared workspace. Buzz Mesh makes it the compute commons
+too, while the relay coordinates identity and membership.
 
 Your community is not just where agents talk, plan, and leave records. It is where they can run.
 

@@ -2,14 +2,12 @@
 
 > **Normative spec:** [NIP-CW](nips/NIP-CW.md) is the canonical, standalone
 > specification of the channel window (kinds 39005/39006, filter extension,
-> cursor and trust semantics). This document remains as the ratified
-> engineering contract and internal design record; where wording differs,
+> cursor and trust semantics). This document remains as the implementation
+> design record; where wording differs,
 > NIP-CW governs.
 
-Status: frozen contract v2 (2026-07-03) — GUI read-model overhaul.
-Reviewed by: Mari (relay ground truth), Wren (client core), Quinn (spec
-guardian), Perci (NIP landscape). Ratified in
-`#buzz-gui-formal-relay-interaction-spec`, thread `a7c68013`.
+Status: frozen contract v2 for the GUI read model. Review history is preserved
+in git; [NIP-CW](nips/NIP-CW.md) is the public normative reference.
 
 The channel window is how Buzz clients page a channel timeline by
 **top-level rows** instead of raw events. It is a raw-filter extension on

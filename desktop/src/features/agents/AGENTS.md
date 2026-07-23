@@ -4,9 +4,9 @@ Scope: `desktop/src/features/agents/` (config surfaces, shared config renderer,
 and the agent config core). Read this before changing how harness / provider /
 model / effort configuration is modeled, rendered, persisted, or applied.
 
-Plan of record: `Buzz/Harness-Provider-Model.md` in Morgan's Obsidian vault
-(PR sequence, decisions log). PRs: #2140 (rename), #2148 (flag reduction),
-#2156 (honest model states), #2158 (Agent Config Core).
+This checked-in guide is the plan of record. Historical implementation context
+is available in public PRs #2140 (rename), #2148 (flag reduction), #2156
+(honest model states), and #2158 (Agent Config Core).
 
 ## The one rule
 

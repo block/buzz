@@ -59,8 +59,8 @@ representative at an online or offline event.
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**conduct@buzz-relay.org**.
+reported to the Block Open Source Governance Committee at
+`open-source-governance@block.xyz`.
 
 All complaints will be reviewed and investigated promptly and fairly.
 

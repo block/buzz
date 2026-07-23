@@ -7,19 +7,16 @@ ever pushes a git tag:
 |------|--------|----------|
 | Desktop | `just release-desktop` | Signed desktop app (macOS/Linux) |
 | Relay | `just release-relay` | `ghcr.io/block/buzz` container image |
-| Mobile | `just release-mobile` | Buzz mobile app (tag is the `sprout_ref` for the internal build) |
+| Mobile | `just release-mobile` | Versioned source tag |
 
 The three lanes version independently: the desktop version lives in
 `desktop/package.json`, the relay version in `crates/buzz-relay/Cargo.toml`, and
 the mobile version in `mobile/pubspec.yaml`.
 
-The mobile lane publishes a `mobile-v<version>` tag that is consumed
-**manually**, cross-repo, as the `sprout_ref` input to the internal
-`buzz-releases` Buildkite pipeline (iOS dogfood → Block Comp Portal, App Store →
-TestFlight — see [Internal Releases](#internal-releases)). The OSS lane is
-tag-only **by design**: OSS `block/buzz` CI cannot trigger CI in the private
-`buzz-releases` repo (infosec), so a human cuts the internal build from the tag
-rather than auto-dispatching across that boundary.
+The mobile lane publishes a `mobile-v<version>` source tag. This repository does
+not currently publish packaged mobile applications from that tag. Distributors
+can build the mobile app from the versioned source using the instructions in
+[`mobile/README.md`](mobile/README.md).
 
 ## Quick Start
 
@@ -44,9 +41,9 @@ just release-mobile 0.4.0
 `just release-desktop` creates a `version-bump/<version>` PR; `just
 release-relay` creates a `relay-release/<version>` PR; `just release-mobile`
 creates a `mobile-release/<version>` PR. Each bumps its own version manifest,
-regenerates lockfiles, and appends a changelog entry. Merge the PR to trigger
-the build automatically (the mobile tag is instead the `sprout_ref` a human
-feeds the internal build — see above).
+regenerates lockfiles, and appends a changelog entry. Merging a desktop or relay
+release PR triggers its public build. Merging a mobile release PR creates the
+versioned source tag.
 
 Re-running any of these recipes with the same version is safe — it detects the
 existing branch and PR, resets to current `main`, regenerates the changelog
@@ -105,12 +102,10 @@ relay release only — it does not move on main pushes or prereleases.
    commits, pushes, and opens (or updates) a PR.
 2. **Merge the PR** — the `auto-tag-on-release-pr-merge` workflow detects the
    `mobile-release/*` branch merge and pushes a `mobile-v<version>` tag.
-3. **The tag is consumed manually, cross-repo** — nothing in OSS `block/buzz`
-   builds on the tag (OSS CI must not trigger CI in the private `buzz-releases`
-   repo — infosec). A human feeds the `mobile-v<version>` tag as the
-   `sprout_ref` input to the internal `buzz-releases` Buildkite pipeline, which
-   builds and ships iOS to Block Comp Portal (dogfood) and TestFlight (App
-   Store, opt-in). See [Internal Releases](#internal-releases).
+3. **The tag marks the public source release** — this repository does not
+   currently build or publish mobile store artifacts from `mobile-v<version>`.
+   Downstream distributors can build from the tag without changing the public
+   release contract.
 
 ---
 
@@ -186,18 +181,9 @@ from `main` or another caller-selected source ref.
 
 ---
 
-## Internal Releases
-
-After the OSS release ships, trigger an internal build via the
-[sprout-releases Buildkite pipeline](https://buildkite.com/runway/sprout-releases).
-See the [buzz-releases README](https://github.com/squareup/buzz-releases#cutting-a-release)
-for the full step-by-step instructions and input field reference.
-
----
-
 ## What Gets Published
 
-Each release produces two GitHub releases:
+Desktop releases produce two GitHub releases:
 
 1. **`v<version>`** — the user-facing release with the `.dmg` installer
    (macOS).
@@ -206,6 +192,11 @@ Each release produces two GitHub releases:
    auto-updater containing `latest.json` and each platform's signed
    updater artifact plus its `.sig` signature (`.tar.gz` on macOS,
    `.AppImage` on Linux, and `_alpha-unsigned.exe` on Windows).
+
+Relay releases publish versioned container tags to
+[`ghcr.io/block/buzz`](https://github.com/block/buzz/pkgs/container/buzz), as
+described in [Relay](#relay). Mobile releases publish a `mobile-v<version>` Git
+tag and changelog entry but no packaged application artifact.
 
 ---
 

@@ -6,29 +6,16 @@ code style, PR process, architecture), see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ---
 
-## Ecosystem
+## Project Scope
 
-Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, desktop, mobile, and CLI. The others handle internal builds and deployment:
+This repository (`block/buzz`) contains the public source for the relay,
+desktop and mobile apps, web client, CLI, agent harness, deployment manifests,
+and release automation. Contributors and coding agents do not need access to
+another repository to build, test, or propose changes.
 
-| Repo | Purpose |
-|------|---------|
-| [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/sprout-releases](https://github.com/squareup/sprout-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
-| [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
-| [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
-| [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
-
-```
-block/buzz (source)
-  ├─► sprout-releases    (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
-  ├─► sprout-oss         (relay Docker image → ECR)
-  │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
-  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
-```
-
-See [RELEASING.md](RELEASING.md) for the desktop release flow and
-[CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for contributor
-access information.
+See [RELEASING.md](RELEASING.md) for the public release flows and
+[CONTRIBUTING.md § Ecosystem](CONTRIBUTING.md#ecosystem) for the contributor
+workflow.
 
 ---
 
@@ -566,5 +553,5 @@ just mobile-dev
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
-- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `release-mobile`, auto-tag, internal builds
+- [RELEASING.md](RELEASING.md) — public desktop, relay, and mobile source release processes
 - [README.md](README.md) — project overview and quick start

@@ -490,12 +490,13 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     echo "Starting standalone desktop on Vite port ${BUZZ_VITE_PORT}; no relay services were started"
     pnpm exec tauri dev --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
-# Run the desktop app against the internal staging relay (installs deps + builds agent tools automatically)
+# Run the desktop app against BUZZ_RELAY_URL (installs deps + builds agent tools automatically)
 staging *ARGS: bootstrap _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
     export PATH="{{justfile_directory()}}/bin:$PATH"
-    pnpm install  # unconditional: staging must always start with a clean dep tree
+    : "${BUZZ_RELAY_URL:?Set BUZZ_RELAY_URL to the remote relay URL}"
+    pnpm install  # unconditional: remote runs always start with a clean dep tree
     cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     FEATURES=()
     if [[ -n "{{mesh}}" ]]; then
@@ -508,13 +509,12 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
     chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
     cd {{desktop_dir}}
-    export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     source ../scripts/instance-env.sh
     # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
     # agent workers. Reap this instance's agents on exit as a backstop.
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
-    echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    echo "Starting remote relay build on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop frontend dev server (port derived from worktree)

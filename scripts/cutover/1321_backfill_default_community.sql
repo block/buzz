@@ -55,7 +55,7 @@
 -- USAGE  (run from anywhere; \ir below resolves the schema include relative to
 --         this file, so cwd does not matter)
 --   psql "$DATABASE_URL" \
---        -v host="'sprout-oss.stage.blox.sqprod.co'" \
+--        -v host="'your-deployment-host.example.com'" \
 --        -v ON_ERROR_STOP=1 \
 --        -f scripts/cutover/1321_backfill_default_community.sql
 --

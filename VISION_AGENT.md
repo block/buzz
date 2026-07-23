@@ -1,4 +1,8 @@
-# Vision: buzz-agent + buzz-dev-mcp
+# Vision: Buzz agent and developer MCP
+
+> **Document status:** Implemented foundation. This document explains the
+> shipped `buzz-agent` and `buzz-dev-mcp` architecture; supported capabilities
+> and limits remain authoritative in their crate documentation and code.
 
 ## The Problem
 
