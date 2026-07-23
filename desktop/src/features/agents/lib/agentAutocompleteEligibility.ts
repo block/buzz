@@ -13,10 +13,23 @@ export function relayAgentIsSharedWithUser(
   agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
+  activeChannelId?: string | null,
 ) {
   const normalizedCurrentPubkey = currentPubkey
     ? normalizePubkey(currentPubkey)
     : null;
+  const sharesActiveChannel =
+    activeChannelId == null || agent.channelIds.includes(activeChannelId);
+  if (!sharesActiveChannel) {
+    return false;
+  }
+
+  const sharesAnyJoinedChannel = agent.channelIds.some((channelId) =>
+    sharedChannelIds.has(channelId),
+  );
+  if (!sharesAnyJoinedChannel) {
+    return false;
+  }
 
   if (agent.respondTo === "allowlist" && normalizedCurrentPubkey) {
     return agent.respondToAllowlist
@@ -24,10 +37,7 @@ export function relayAgentIsSharedWithUser(
       .includes(normalizedCurrentPubkey);
   }
 
-  return (
-    agent.respondTo === "anyone" &&
-    agent.channelIds.some((channelId) => sharedChannelIds.has(channelId))
-  );
+  return agent.respondTo === "anyone";
 }
 
 export function getMentionableAgentPubkeys({
@@ -35,18 +45,27 @@ export function getMentionableAgentPubkeys({
   managedAgentPubkeys,
   relayAgents,
   sharedChannelIds,
+  activeChannelId,
 }: {
   currentPubkey?: string | null;
   managedAgentPubkeys: Iterable<string>;
   relayAgents: readonly RelayAgent[] | undefined;
   sharedChannelIds: ReadonlySet<string>;
+  activeChannelId?: string | null;
 }) {
   const pubkeys = new Set(
     [...managedAgentPubkeys].map((pubkey) => normalizePubkey(pubkey)),
   );
 
   for (const agent of relayAgents ?? []) {
-    if (relayAgentIsSharedWithUser(agent, sharedChannelIds, currentPubkey)) {
+    if (
+      relayAgentIsSharedWithUser(
+        agent,
+        sharedChannelIds,
+        currentPubkey,
+        activeChannelId,
+      )
+    ) {
       pubkeys.add(normalizePubkey(agent.pubkey));
     }
   }

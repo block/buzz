@@ -77,6 +77,29 @@ test("relayAgentIsSharedWithUser: accepts shared anyone agents and rejects unsha
   );
 });
 
+test("relayAgentIsSharedWithUser: active channel must match the agent channel", () => {
+  const sharedChannelIds = new Set(["general", "ops"]);
+
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      { respondTo: "anyone", respondToAllowlist: [], channelIds: ["general"] },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+      "general",
+    ),
+    true,
+  );
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      { respondTo: "anyone", respondToAllowlist: [], channelIds: ["ops"] },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+      "general",
+    ),
+    false,
+  );
+});
+
 test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user", () => {
   const sharedChannelIds = new Set(["general"]);
 
@@ -85,7 +108,7 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
       {
         respondTo: "allowlist",
         respondToAllowlist: [OTHER_OWNER_PUBKEY, CURRENT_PUBKEY.toUpperCase()],
-        channelIds: ["other"],
+        channelIds: ["general"],
       },
       sharedChannelIds,
       CURRENT_PUBKEY,
@@ -98,6 +121,23 @@ test("relayAgentIsSharedWithUser: accepts allowlist agents for the current user"
         respondTo: "allowlist",
         respondToAllowlist: [OTHER_OWNER_PUBKEY],
         channelIds: ["general"],
+      },
+      sharedChannelIds,
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+});
+
+test("relayAgentIsSharedWithUser: allowlist agents still require shared channel placement", () => {
+  const sharedChannelIds = new Set(["general"]);
+
+  assert.equal(
+    relayAgentIsSharedWithUser(
+      {
+        respondTo: "allowlist",
+        respondToAllowlist: [CURRENT_PUBKEY],
+        channelIds: ["other"],
       },
       sharedChannelIds,
       CURRENT_PUBKEY,
@@ -121,7 +161,7 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
         pubkey: PUB_C,
         respondTo: "allowlist",
         respondToAllowlist: [CURRENT_PUBKEY],
-        channelIds: ["other"],
+        channelIds: ["general"],
       },
       {
         pubkey: PUB_D,
@@ -134,6 +174,31 @@ test("getMentionableAgentPubkeys: keeps managed agents and shared relay agents",
   });
 
   assert.deepEqual(result, new Set([PUB_A, PUB_B, PUB_C]));
+});
+
+test("getMentionableAgentPubkeys: scopes relay agents to the active channel", () => {
+  const result = getMentionableAgentPubkeys({
+    managedAgentPubkeys: [PUB_A],
+    currentPubkey: CURRENT_PUBKEY,
+    relayAgents: [
+      {
+        pubkey: PUB_B,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["general"],
+      },
+      {
+        pubkey: PUB_C,
+        respondTo: "anyone",
+        respondToAllowlist: [],
+        channelIds: ["ops"],
+      },
+    ],
+    sharedChannelIds: new Set(["general", "ops"]),
+    activeChannelId: "general",
+  });
+
+  assert.deepEqual(result, new Set([PUB_A, PUB_B]));
 });
 
 test("isAgentIdentityInManagedList: keeps people and only current managed agent identities", () => {

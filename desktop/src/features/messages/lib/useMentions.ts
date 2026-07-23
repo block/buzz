@@ -199,8 +199,10 @@ export function useMentions(
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
+        activeChannelId: channelId,
       }),
     [
+      channelId,
       currentPubkey,
       managedAgentPubkeys,
       relayAgentsQuery.data,
