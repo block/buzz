@@ -705,8 +705,73 @@ fn annotate_retry_attempts(mut result: InstallStepResult, attempts: u32) -> Inst
     result
 }
 
+/// На Windows PowerShell-команды запускаем напрямую, не через bash -l -c.
+/// Исправляет #2401 и #2407: bash ломал вложенные кавычки в -Command,
+/// а флаг -l делал установку зависающей на 45+ минут.
+fn build_install_command(command: &str) -> Result<std::process::Command, String> {
+    #[cfg(windows)]
+    if let Some(cmd) = powershell_command(command) {
+        return Ok(cmd);
+    }
+    install_shell_command(command)
+}
+
+#[cfg(windows)]
+fn powershell_command(command: &str) -> Option<std::process::Command> {
+    let trimmed = command.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("powershell.exe") {
+        return None;
+    }
+    let mut parts = trimmed.splitn(2, "-Command");
+    let flags_part = parts.next().unwrap_or("").trim();
+    let body = parts.next().map(|s| s.trim().trim_matches('"')).unwrap_or("");
+    let mut cmd = std::process::Command::new("powershell.exe");
+    for flag in flags_part.split_whitespace().skip(1) {
+        cmd.arg(flag);
+    }
+    if !body.is_empty() {
+        cmd.arg("-Command");
+        cmd.arg(body);
+    }
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    Some(cmd)
+}
+
+#[cfg(all(test, windows))]
+mod powershell_tests {
+    use super::powershell_command;
+
+    #[test]
+    fn detects_powershell_cli_install() {
+        let cmd = powershell_command(
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex""#,
+        );
+        assert!(cmd.is_some());
+    }
+
+    #[test]
+    fn ignores_npm_adapter_install() {
+        let cmd = powershell_command("npm install -g @agentclientprotocol/claude-agent-acp");
+        assert!(cmd.is_none());
+    }
+
+    #[test]
+    fn ignores_curl_pipe_bash() {
+        let cmd = powershell_command("curl -fsSL https://example.com/install.sh | bash");
+        assert!(cmd.is_none());
+    }
+
+    #[test]
+    fn matches_powershell_case_insensitively() {
+        let cmd = powershell_command(r#"PowerShell.exe -NoProfile -Command "echo test""#);
+        assert!(cmd.is_some());
+    }
+}
+
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
-    let mut cmd = match install_shell_command(command) {
+    let mut cmd = match build_install_command(command) {
         Ok(cmd) => cmd,
         Err(hint) => {
             return InstallStepResult {
