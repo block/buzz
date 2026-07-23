@@ -451,6 +451,26 @@ pub fn resolve_step_templates(
     }
 }
 
+/// Normalize the `SendDm` `to` field into a lowercase hex pubkey.
+///
+/// Accepts a 64-char hex pubkey or a bech32 `npub` (the `| npub` template
+/// filter produces the latter), mirroring how `resolve_send_message_channel`
+/// canonicalizes its destination before the sink call. Rejects empty or
+/// malformed values — including unresolved `{{...}}` placeholders, which
+/// `resolve_template` leaves as literal text.
+fn resolve_dm_recipient(to: &str) -> Result<String, WorkflowError> {
+    let to = to.trim();
+    if to.is_empty() {
+        return Err(WorkflowError::InvalidDefinition(
+            "SendDm: recipient 'to' is empty".into(),
+        ));
+    }
+    let pubkey = nostr::PublicKey::parse(to).map_err(|e| {
+        WorkflowError::InvalidDefinition(format!("SendDm: invalid recipient pubkey '{to}': {e}"))
+    })?;
+    Ok(pubkey.to_hex())
+}
+
 /// Result of dispatching a single step action.
 #[derive(Debug)]
 pub enum StepResult {
@@ -577,10 +597,51 @@ pub async fn dispatch_action(
             })))
         }
 
-        SendDm { to, text: _ } => {
-            warn!(run_id = %run_id, step = step_id, "SendDm not yet implemented (to={to})");
-            // TODO (WF-07): emit DM event.
-            Err(WorkflowError::NotImplemented("SendDm".into()))
+        SendDm { to, text } => {
+            // Same community-scoped run/workflow lookup as SendMessage: the
+            // owner pubkey defines the DM participant set, so loading the
+            // wrong community's row would DM on behalf of the wrong owner.
+            let wf_run = engine
+                .db
+                .get_workflow_run(community_id, run_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendDm: failed to load workflow run {run_id}: {e}"
+                    ))
+                })?;
+            let workflow = engine
+                .db
+                .get_workflow(community_id, wf_run.workflow_id)
+                .await
+                .map_err(|e| {
+                    WorkflowError::WebhookError(format!(
+                        "SendDm: failed to load workflow {}: {e}",
+                        wf_run.workflow_id
+                    ))
+                })?;
+            let recipient = resolve_dm_recipient(to)?;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+
+            // Unlike SendMessage, the body is deliberately not logged — DMs
+            // are private and relay logs are not.
+            info!(
+                run_id = %run_id,
+                step = step_id,
+                to = %recipient,
+                "SendDm → {recipient}"
+            );
+
+            let event_id = engine
+                .action_sink()?
+                .send_dm(community_id, &recipient, text, &owner_pubkey_hex)
+                .await
+                .map_err(WorkflowError::from)?;
+
+            Ok(StepResult::Completed(serde_json::json!({
+                "sent": true,
+                "event_id": event_id,
+            })))
         }
 
         SetChannelTopic { topic: _ } => {
@@ -1830,5 +1891,82 @@ mod tests {
             resolve_send_message_channel(Some(&override_channel_id.to_string()), "", None)
                 .expect("override should be accepted");
         assert_eq!(resolved, override_channel_id.to_string());
+    }
+
+    const RECIPIENT_HEX: &str = "e17e5abf7b1dbd363f0ed6fbda2455609727b2555428dea251388c542cd2f03f";
+    const RECIPIENT_NPUB: &str = "npub1u9l940mmrk7nv0cw6maa5fz4vztj0vj42s5dagj38zx9gtxj7qls94fpux";
+
+    #[test]
+    fn send_dm_recipient_accepts_hex_pubkey() {
+        let resolved = resolve_dm_recipient(RECIPIENT_HEX).expect("hex pubkey should be accepted");
+        assert_eq!(resolved, RECIPIENT_HEX);
+    }
+
+    #[test]
+    fn send_dm_recipient_accepts_npub_and_normalizes_to_hex() {
+        // The `| npub` template filter can hand us a bech32 pubkey; the sink
+        // expects hex, so the resolver must normalize.
+        let resolved = resolve_dm_recipient(RECIPIENT_NPUB).expect("npub should be accepted");
+        assert_eq!(resolved, RECIPIENT_HEX);
+    }
+
+    #[test]
+    fn send_dm_recipient_normalizes_uppercase_hex() {
+        let resolved = resolve_dm_recipient(&RECIPIENT_HEX.to_uppercase())
+            .expect("uppercase hex should be accepted");
+        assert_eq!(resolved, RECIPIENT_HEX);
+    }
+
+    #[test]
+    fn send_dm_recipient_trims_whitespace() {
+        let padded = format!("  {RECIPIENT_HEX}\n");
+        let resolved = resolve_dm_recipient(&padded).expect("padded hex should be accepted");
+        assert_eq!(resolved, RECIPIENT_HEX);
+    }
+
+    #[test]
+    fn send_dm_recipient_rejects_empty_and_whitespace() {
+        for input in ["", "   ", "\t\n"] {
+            let err = resolve_dm_recipient(input).unwrap_err();
+            assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
+        }
+    }
+
+    #[test]
+    fn send_dm_recipient_rejects_malformed_values() {
+        // Includes an unresolved template placeholder: `resolve_template`
+        // leaves unknown `{{keys}}` as literal text, which must not silently
+        // become a DM destination.
+        for input in ["not-a-pubkey", "abc123", "{{trigger.author}}"] {
+            let err = resolve_dm_recipient(input).unwrap_err();
+            assert!(
+                matches!(err, WorkflowError::InvalidDefinition(_)),
+                "expected InvalidDefinition for {input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_step_templates_resolves_send_dm_fields() {
+        let mut ctx = make_trigger();
+        ctx.author = RECIPIENT_HEX.to_owned();
+        let step: Step = serde_yaml::from_str(
+            r#"
+id: notify
+action: send_dm
+to: "{{trigger.author}}"
+text: "You said: {{trigger.text}}"
+"#,
+        )
+        .expect("step should parse");
+        let resolved =
+            resolve_step_templates(&step, &ctx, &HashMap::new()).expect("templates should resolve");
+        match resolved {
+            ActionDef::SendDm { to, text } => {
+                assert_eq!(to, RECIPIENT_HEX);
+                assert_eq!(text, "You said: P1 incident in production");
+            }
+            other => panic!("expected SendDm, got {other:?}"),
+        }
     }
 }
