@@ -8,6 +8,7 @@ import {
   nextDisabledAcpRuntimeIds,
   parseDisabledAcpRuntimeIds,
   readDisabledAcpRuntimeIds,
+  runtimesForImplicitAcpSelection,
 } from "./runtimeVisibilityPreference.ts";
 
 test("runtime visibility parsing is normalized and corruption tolerant", () => {
@@ -40,6 +41,18 @@ test("disabled runtimes are removed from selectable catalog entries", () => {
     runtimes[0],
     runtimes[2],
   ]);
+  assert.deepEqual(filterEnabledAcpRuntimes(runtimes, ["buzz-agent"]), [
+    runtimes[1],
+    runtimes[2],
+  ]);
+  assert.deepEqual(
+    runtimesForImplicitAcpSelection(runtimes, ["buzz-agent"], null),
+    [runtimes[1], runtimes[2]],
+  );
+  assert.deepEqual(
+    runtimesForImplicitAcpSelection(runtimes, ["buzz-agent"], "buzz-agent"),
+    runtimes,
+  );
 });
 
 test("stored runtime visibility is read from the versioned device key", () => {

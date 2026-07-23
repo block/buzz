@@ -34,9 +34,14 @@ import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "../lib/instanceInputForDefinition";
+import {
+  runtimesForImplicitAcpSelection,
+  useDisabledAcpRuntimeIds,
+} from "../lib/runtimeVisibilityPreference";
 
 export function useManagedAgentActions() {
   const { globalConfig } = useGlobalAgentConfig();
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const [shouldLoadChannels, setShouldLoadChannels] = React.useState(false);
@@ -191,7 +196,11 @@ export function useManagedAgentActions() {
     setPersonaStartPending(persona.id, true);
     clearFeedback();
     try {
-      const runtimes = await availableRuntimesForStart(availableRuntimesQuery);
+      const runtimes = runtimesForImplicitAcpSelection(
+        await availableRuntimesForStart(availableRuntimesQuery),
+        disabledRuntimeIds,
+        persona.runtime,
+      );
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         persona,
         runtimes,

@@ -96,6 +96,20 @@ export function filterEnabledAcpRuntimes<T extends { id: string }>(
 }
 
 /**
+ * Apply visibility only when the app is choosing a runtime implicitly.
+ * Existing definitions pinned to a runtime remain runnable.
+ */
+export function runtimesForImplicitAcpSelection<T extends { id: string }>(
+  runtimes: readonly T[],
+  disabledRuntimeIds: readonly string[],
+  explicitRuntimeId?: string | null,
+): T[] {
+  return explicitRuntimeId?.trim()
+    ? [...runtimes]
+    : filterEnabledAcpRuntimes(runtimes, disabledRuntimeIds);
+}
+
+/**
  * Prevent a disabled runtime from remaining the effective global preference.
  *
  * The persisted config is left untouched until the user next saves defaults;

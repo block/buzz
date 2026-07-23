@@ -11,6 +11,7 @@ import {
   emptyResolvedTeamPersonas,
   resolveTeamPersonas,
 } from "@/features/agents/lib/teamPersonas";
+import { useSelectableAcpRuntimes } from "@/features/agents/lib/runtimeVisibilityPreference";
 import {
   collectRuntimeWarnings,
   getDefaultPersonaRuntime,
@@ -68,11 +69,12 @@ export function AddTeamToChannelDialog({
     [channelsQuery.data],
   );
 
-  const runtimes = providersQuery.data ?? [];
+  const runtimes = providersQuery.data;
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimes);
   // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
   // single-agent start path (buzz-agent → goose → first available).
   const defaultProvider = getDefaultPersonaRuntime(
-    runtimes,
+    selectableRuntimes,
     globalConfig.preferred_runtime,
   );
 

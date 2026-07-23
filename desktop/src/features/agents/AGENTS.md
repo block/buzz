@@ -87,7 +87,9 @@ with a TypeScript lookup table or an id comparison in a component.
    runtime off must not uninstall it, stop it, or invalidate an existing
    agent that already uses it. If the disabled runtime was the saved global
    default, consumers immediately ignore that preference and the defaults
-   editor persists its visible fallback on the next save.
+   editor persists its visible fallback on the next save. Runtime-less agent
+   starts and team deploys must filter through the same visible-runtime set;
+   definitions already pinned to a hidden runtime remain runnable.
 
 ## The tests that enforce this
 
