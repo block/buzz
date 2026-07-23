@@ -35,6 +35,10 @@ ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "vendored"], optional = true }
+# Same version tauri links. Needed to reach the native WebKitGTK webview and
+# approve UserMedia permission requests — WebKitGTK denies unhandled requests,
+# which made getUserMedia() (huddle mic) always fail on Linux.
+webkit2gtk = "2.0"
 # Used directly (alongside tauri-plugin-notification) so we can hold the posting
 # D-Bus connection open. GNOME 46+ dismisses a notification the moment that
 # connection is dropped, which the plugin does immediately. Default features

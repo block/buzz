@@ -1045,6 +1045,7 @@ dependencies = [
  "url",
  "user-idle",
  "uuid",
+ "webkit2gtk",
  "window-vibrancy",
  "windows-sys 0.61.2",
  "zeroize",

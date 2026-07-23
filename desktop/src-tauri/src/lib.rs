@@ -187,6 +187,42 @@ pub fn run() {
                 .build(),
         )
         .plugin(
+            tauri::plugin::Builder::<_, ()>::new("linux-media-permissions")
+                .on_webview_ready(|webview| {
+                    // WebKitGTK denies any permission request the embedder
+                    // doesn't handle, so without this getUserMedia() always
+                    // fails on Linux — the huddle mic never connects and the
+                    // huddle tears itself down right after starting. Allow
+                    // media-device requests; everything else keeps the
+                    // default deny.
+                    #[cfg(target_os = "linux")]
+                    {
+                        use webkit2gtk::glib::prelude::*;
+                        use webkit2gtk::{PermissionRequestExt, WebViewExt};
+
+                        let _ = webview.with_webview(|platform_webview| {
+                            platform_webview.inner().connect_permission_request(
+                                |_, request| {
+                                    if request
+                                        .is::<webkit2gtk::UserMediaPermissionRequest>()
+                                        || request
+                                            .is::<webkit2gtk::DeviceInfoPermissionRequest>()
+                                    {
+                                        request.allow();
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                },
+                            );
+                        });
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = &webview;
+                })
+                .build(),
+        )
+        .plugin(
             tauri::plugin::Builder::<_, ()>::new("initial-window-reveal")
                 .on_webview_ready(|webview| {
                     if webview.label() != "main" {
