@@ -434,28 +434,17 @@ test.describe("global agent config screenshots", () => {
     await expect(defaultsDialog).toBeVisible();
     await expect(
       defaultsDialog.getByTestId("global-agent-config-fields"),
-    ).toHaveCount(0);
-    await expect(
-      defaultsDialog.getByTestId("global-agent-provider"),
-    ).toHaveCount(0);
+    ).toBeVisible();
     await expect(defaultsDialog.getByTestId("global-agent-model")).toHaveCount(
       0,
     );
-    const harnessOnlyHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
 
     const harness = defaultsDialog.getByTestId("global-agent-default-harness");
-    await harness.click();
-    await page
-      .getByTestId("global-agent-default-harness-option-buzz-agent")
-      .click();
+    await expect(harness).toHaveText("Buzz Agent");
     const provider = defaultsDialog.getByTestId("global-agent-provider");
     await expect(provider).toBeVisible();
-    await expect(defaultsDialog.getByTestId("global-agent-model")).toHaveCount(
-      0,
-    );
     await waitForAnimations(page);
     const providerHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
-    expect(providerHeight).toBeGreaterThan(harnessOnlyHeight);
 
     await provider.click();
     await page.getByTestId("global-agent-provider-option-anthropic").click();
@@ -512,6 +501,46 @@ test.describe("global agent config screenshots", () => {
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
       path: `${SHOTS}/04-create-blocked-no-provider-no-global.png`,
+    });
+  });
+
+  test("unset defaults persist the visible Buzz Agent fallback", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await openCreateDialog(page);
+    await page
+      .getByTestId("agent-ai-defaults-notice")
+      .getByRole("button", { name: "Set" })
+      .click();
+
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    await expect(
+      defaultsDialog.getByTestId("global-agent-default-harness"),
+    ).toHaveText("Buzz Agent");
+
+    await defaultsDialog.getByTestId("global-agent-provider").click();
+    await page.getByTestId("global-agent-provider-option-anthropic").click();
+    await defaultsDialog.getByLabel("Anthropic API Key").fill("sk-ant-test");
+    await expect(
+      defaultsDialog.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+    await defaultsDialog.getByRole("button", { name: "Save defaults" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    const saved = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(saved).toMatchObject({
+      preferred_runtime: "buzz-agent",
+      provider: "anthropic",
     });
   });
 

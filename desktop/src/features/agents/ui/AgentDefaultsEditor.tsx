@@ -136,20 +136,26 @@ export function AgentDefaultsEditor({
     () => sortPersonaRuntimes(runtimesQuery.data ?? []),
     [runtimesQuery.data],
   );
-  // The settings card keeps displaying the backend's effective fallback for
-  // legacy configs. The modal requires an explicit harness choice so its
-  // progressive flow starts from a truthful empty state.
+  // An unset preferred runtime uses the same Buzz Agent-first fallback as
+  // deployment. The rendered draft below carries that fallback forward so the
+  // next user edit persists the visible harness instead of saving null.
   const selectedRuntime = React.useMemo(() => {
     const configuredRuntime = sortedRuntimes.find(
       (runtime) => runtime.id === config.preferred_runtime,
     );
-    if (flatLayout) return configuredRuntime;
     return (
       configuredRuntime ??
       getDefaultPersonaRuntime(sortedRuntimes) ??
       sortedRuntimes[0]
     );
-  }, [config.preferred_runtime, flatLayout, sortedRuntimes]);
+  }, [config.preferred_runtime, sortedRuntimes]);
+  const renderedConfig = React.useMemo(
+    () =>
+      config.preferred_runtime || !selectedRuntime
+        ? config
+        : { ...config, preferred_runtime: selectedRuntime.id },
+    [config, selectedRuntime],
+  );
   const harnessOptions = React.useMemo(
     () =>
       sortedRuntimes.map((runtime) => ({
@@ -228,7 +234,7 @@ export function AgentDefaultsEditor({
     <AgentConfigFields
       bakedEnv={bakedEnv}
       selectedRuntime={selectedRuntime}
-      config={config}
+      config={renderedConfig}
       disclosure={flatLayout ? "progressive-defaults" : "full"}
       isCustomModelEditing={isCustomModelEditing}
       isCustomProvider={isCustomProvider}
