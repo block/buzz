@@ -110,8 +110,12 @@ export function InvitePage({ code }: { code: string }) {
       await claimInviteInBrowser(code, receipt);
       window.location.assign("/");
     } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not claim this invite.";
       setBrowserJoinError(
-        error instanceof Error ? error.message : "Could not claim this invite.",
+        message.includes("invite_exhausted")
+          ? "This invite has reached its use limit. Ask for a new invite."
+          : message,
       );
     } finally {
       setJoiningBrowser(false);
