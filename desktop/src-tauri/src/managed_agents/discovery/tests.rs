@@ -7,7 +7,7 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GROK_AVATAR_URL,
     GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
@@ -71,6 +71,47 @@ fn normalizes_claude_and_codex_args_to_empty() {
         Vec::<String>::new()
     );
 }
+
+
+#[test]
+fn normalizes_grok_args_to_agent_stdio() {
+    // Grok Build ACP: `grok agent --always-approve stdio`
+    let expected = vec![
+        "agent".to_string(),
+        "--always-approve".to_string(),
+        "stdio".to_string(),
+    ];
+    assert_eq!(normalize_agent_args("grok", Vec::new()), expected);
+    assert_eq!(normalize_agent_args("grok-build", Vec::new()), expected);
+    assert_eq!(
+        normalize_agent_args(
+            "grok",
+            vec![
+                "agent".into(),
+                "--always-approve".into(),
+                "stdio".into()
+            ]
+        ),
+        expected
+    );
+}
+
+#[test]
+fn resolves_grok_avatar() {
+    assert_eq!(
+        managed_agent_avatar_url("grok"),
+        Some(GROK_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/Users/me/.grok/bin/grok"),
+        Some(GROK_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("grok-build"),
+        Some(GROK_AVATAR_URL.to_string())
+    );
+}
+
 
 #[test]
 fn resolves_buzz_agent_avatar() {

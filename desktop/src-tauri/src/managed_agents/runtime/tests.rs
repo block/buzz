@@ -1003,3 +1003,26 @@ fn invalid_pubkey_resolves_no_pair_key() {
     // the summary must fall back to the stopped/legacy-pid path, not panic.
     assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
 }
+
+#[test]
+fn grok_runtime_resolves_native_acp() {
+    use crate::managed_agents::discovery::{known_acp_runtime, normalize_agent_args};
+    let p = known_acp_runtime("grok").expect("grok should resolve");
+    assert_eq!(p.id, "grok");
+    assert_eq!(p.label, "Grok Build");
+    assert_eq!(p.skill_dir, Some(".grok/skills"));
+    assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
+    assert!(p.auth_probe_args.is_none());
+    assert!(
+        known_acp_runtime("grok-build").is_some_and(|r| r.id == "grok"),
+        "grok-build alias should resolve"
+    );
+    assert_eq!(
+        normalize_agent_args("grok", Vec::new()),
+        vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string()
+        ]
+    );
+}
