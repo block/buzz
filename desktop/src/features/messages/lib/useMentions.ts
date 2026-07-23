@@ -16,7 +16,6 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityInManagedList,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -246,9 +245,12 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
-        return;
-      }
+      // NOTE: no pre-emptive managed-list gate here. `shouldHideAgentFromMentions`
+      // is the single authority: it already shows invocable agents (local managed
+      // OR relay-directory-eligible via `mentionableAgentPubkeys`), hides
+      // non-member non-invocable ones, and applies the member/directory rules.
+      // An earlier managed-list-only gate made shared agents owned by other
+      // members unreachable from the composer.
       if (
         shouldHideAgentFromMentions({
           isAgent: candidate.isAgent === true,
