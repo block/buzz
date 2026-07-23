@@ -7,6 +7,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 
 import '../../shared/auth/auth.dart';
 import '../../shared/clipboard_utils.dart';
+import '../../shared/diagnostics/diagnostics.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/widgets/app_list.dart';
@@ -27,6 +28,7 @@ class SettingsPage extends HookConsumerWidget {
     final selectedAccent = ref.watch(accentProvider);
     final selectedScheme = ref.watch(schemeProvider);
     final colorScheme = context.colors;
+    final diagnostics = ref.watch(diagnosticsControllerProvider);
     final packageInfoFuture = useMemoized(() => PackageInfo.fromPlatform());
     final packageInfo = useFuture(packageInfoFuture);
 
@@ -101,6 +103,43 @@ class SettingsPage extends HookConsumerWidget {
                             ],
                           ),
                         ],
+                      ),
+                    ),
+                  ],
+                ),
+
+                // Diagnostics
+                AppListSection(
+                  label: 'Diagnostics',
+                  children: [
+                    AppListRow(
+                      icon: LucideIcons.activity,
+                      title: 'Share crash reports',
+                      subtitle: diagnostics.isConfigured
+                          ? 'Sent anonymously to help fix problems.'
+                          : 'Crash reporting is unavailable in this build.',
+                      subtitleMaxLines: 2,
+                      trailing: Switch.adaptive(
+                        value: diagnostics.consentGranted,
+                        onChanged:
+                            diagnostics.isConfigured ||
+                                diagnostics.consentGranted
+                            ? (value) async {
+                                final messenger = ScaffoldMessenger.of(context);
+                                try {
+                                  await diagnostics.setConsent(value);
+                                } on Object catch (error) {
+                                  messenger.showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        'Could not update crash reporting: '
+                                        '$error',
+                                      ),
+                                    ),
+                                  );
+                                }
+                              }
+                            : null,
                       ),
                     ),
                   ],

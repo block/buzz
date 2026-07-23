@@ -32,6 +32,10 @@ dependencies:
   app_badge_plus: ^1.2.10
   app_links: ^6.4.0
   scrollable_positioned_list: ^0.3.8
+  # 9.24.0 still pins jni 0.14.2, so the resolver also selects the
+  # compatible path_provider_android 2.2.23 instead of the prior jni 1.0.0
+  # graph. Keep this exact pin until Sentry publishes a compatible release.
+  sentry_flutter: 9.24.0
 
 dev_dependencies:
   flutter_test:
@@ -40,6 +44,14 @@ dev_dependencies:
   custom_lint: ^0.8.0
   riverpod_lint: ^3.1.0
   mocktail: ^1.0.4
+  sentry_dart_plugin: 3.4.0
+
+# Symbol uploads are invoked explicitly by official release CI. Keep credentials
+# and project identifiers out of this file; the pipeline passes them at runtime.
+sentry:
+  upload_debug_symbols: true
+  upload_sources: false
+  commits: false
 
 flutter:
   uses-material-design: true
