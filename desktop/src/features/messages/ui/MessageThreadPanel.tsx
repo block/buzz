@@ -46,6 +46,7 @@ import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useAnchoredScroll } from "./useAnchoredScroll";
+import { useAutoContinueThreadSend } from "./useAutoContinueThreadSend";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
 type MessageThreadPanelProps = ThreadPanelLayoutProps & {
@@ -304,6 +305,15 @@ export function MessageThreadPanel({
           id: replyTargetMessage.id,
         }
       : null;
+
+  const handleSend = useAutoContinueThreadSend({
+    agentPubkeys,
+    currentPubkey,
+    threadHead,
+    threadReplies,
+    replyTargetMessageRef,
+    onSend,
+  });
 
   const deferredThreadReplies = React.useDeferredValue(
     threadReplies,
@@ -844,7 +854,7 @@ export function MessageThreadPanel({
             onCaptureSendContext={onCaptureSendContext}
             onEditLastOwnMessage={onEditLastOwnMessage}
             onEditSave={onEditSave}
-            onSend={onSend}
+            onSend={handleSend}
             placeholder={`Reply in thread to ${threadHead.author}`}
             profiles={profiles}
             replyTarget={composerReplyTarget}
