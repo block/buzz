@@ -81,6 +81,7 @@ import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -788,6 +789,11 @@ export function AgentInstanceEditDialog({
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
   });
+  const modelStatusMessage = resolveModelFieldStatusMessage({
+    discoveredModelOptions,
+    loading: modelDiscoveryLoading,
+    status: modelDiscoveryStatus,
+  });
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
@@ -1074,15 +1080,11 @@ export function AgentInstanceEditDialog({
                   />
                 </div>
               ) : null}
-              <p className="text-xs text-muted-foreground">
-                {modelDiscoveryLoading
-                  ? "Loading models..."
-                  : modelDiscoveryStatus !== null
-                    ? modelDiscoveryStatus.message
-                    : discoveredModelOptions !== null
-                      ? "Saved changes take effect on the next start."
-                      : "Select a provider above to see available models."}
-              </p>
+              {modelStatusMessage ? (
+                <p className="text-xs text-muted-foreground">
+                  {modelStatusMessage}
+                </p>
+              ) : null}
             </div>
 
             <AgentAiDefaultsNotice

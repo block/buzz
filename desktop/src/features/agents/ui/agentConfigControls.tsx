@@ -54,6 +54,22 @@ export function appendNoModelsSentinel(
   return options;
 }
 
+export function resolveModelFieldStatusMessage({
+  discoveredModelOptions,
+  loading,
+  status,
+}: {
+  discoveredModelOptions: readonly PersonaModelOption[] | null;
+  loading: boolean;
+  status: PersonaModelDiscoveryStatus | null;
+}): string | null {
+  if (loading) return "Loading models...";
+  if (status !== null) return status.message;
+  return discoveredModelOptions !== null
+    ? "Saved changes take effect on the next start."
+    : null;
+}
+
 function optionTestId(testId: string | undefined, value: string) {
   if (!testId) return undefined;
   return `${testId}-option-${value || "empty"}`;
@@ -474,6 +490,11 @@ export function AgentModelField({
     !isCustomModelEditing
       ? "Loading models..."
       : placeholder;
+  const statusMessage = resolveModelFieldStatusMessage({
+    discoveredModelOptions,
+    loading: modelDiscoveryLoading,
+    status: modelDiscoveryStatus,
+  });
 
   const modelSelect = useCustomSelect ? (
     <AgentDropdownSelect
@@ -546,16 +567,8 @@ export function AgentModelField({
           value={model}
         />
       ) : null}
-      {showStatusMessage ? (
-        <p className="text-xs text-muted-foreground">
-          {modelDiscoveryLoading
-            ? "Loading models..."
-            : modelDiscoveryStatus !== null
-              ? modelDiscoveryStatus.message
-              : discoveredModelOptions !== null
-                ? "Saved changes take effect on the next start."
-                : "Select a provider above to see available models."}
-        </p>
+      {showStatusMessage && statusMessage ? (
+        <p className="text-xs text-muted-foreground">{statusMessage}</p>
       ) : null}
     </div>
   );
