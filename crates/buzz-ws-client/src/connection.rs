@@ -46,6 +46,16 @@ impl NostrWsConnection {
 
     /// Connects to the relay at `url` without performing authentication.
     pub async fn connect(url: &str) -> Result<Self, WsClientError> {
+        // tokio-tungstenite resolves the process-level rustls CryptoProvider
+        // from crate features when it builds the TLS config for wss:// URLs.
+        // Workspace builds enable both `ring` (relay-side crates) and
+        // `aws-lc-rs` (via reqwest), which makes that resolution ambiguous
+        // and panics on the first secure connection. Pin ring at this shared
+        // chokepoint so every consumer works without its own entrypoint
+        // install_default() call; the install is idempotent and the Err from
+        // a provider already being set is intentionally discarded.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         let parsed = url
             .parse::<url::Url>()
             .map_err(|e| WsClientError::Url(e.to_string()))?;

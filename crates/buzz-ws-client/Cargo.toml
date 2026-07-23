@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 nostr = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
