@@ -1017,6 +1017,14 @@ impl Db {
     /// This is the startup/config seeding path for N=1 deployments. Migrations
     /// create the schema only; deployment-specific hosts are not hardcoded into
     /// schema history.
+    ///
+    /// A host already reserved in `community_host_aliases` never gets a
+    /// `communities.host` row of its own, so `ON CONFLICT (lower(host))`
+    /// can't catch that case — migration 0025's `communities_no_alias_collision`
+    /// trigger rejects the `INSERT` instead, raising `23505`. That's caught
+    /// below and surfaced as [`DbError::HostAliasCollision`] so callers (the
+    /// operator provisioning API's legacy convergence path in particular) get
+    /// a distinguishable, mappable error instead of a raw database error.
     pub async fn ensure_configured_community(
         &self,
         normalized_host: &str,
@@ -1031,7 +1039,15 @@ impl Db {
         )
         .bind(normalized_host)
         .fetch_one(&self.pool)
-        .await?;
+        .await;
+
+        let row = match row {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505") => {
+                return Err(DbError::HostAliasCollision(normalized_host.to_string()));
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
@@ -5326,6 +5342,36 @@ mod tests {
         assert!(!second.created, "second ensure should report existed");
         assert_eq!(second.id, first.id);
         assert_eq!(second.host, host);
+    }
+
+    /// The legacy convergence path (used by the operator API's `create_only:
+    /// false` mode and by startup seeding) must also translate an
+    /// alias-reserved host into a distinguishable error rather than letting
+    /// migration 0025's trigger raise a raw database error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ensure_configured_community_rejects_alias_reserved_host() {
+        let db = setup_db().await;
+        let owner_host = format!("ensure-alias-owner-{}.example", Uuid::new_v4().simple());
+
+        let owner = db
+            .ensure_configured_community(&owner_host)
+            .await
+            .expect("create owning community");
+
+        let alias_host = format!("ensure-alias-target-{}.example", Uuid::new_v4().simple());
+        db.add_community_host_alias(&alias_host, owner.id)
+            .await
+            .expect("add alias");
+
+        let err = db
+            .ensure_configured_community(&alias_host)
+            .await
+            .expect_err("alias-reserved host must not silently become a primary host");
+        assert!(
+            matches!(err, DbError::HostAliasCollision(ref h) if h == &alias_host),
+            "expected HostAliasCollision, got {err:?}"
+        );
     }
 
     #[tokio::test]

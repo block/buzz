@@ -564,10 +564,14 @@ async fn connect_db() -> Result<Db> {
 ///
 /// `buzz-admin` runs inside the relay container (`compose exec relay
 /// buzz-admin …`), so it shares the relay's `RELAY_URL` and resolves the same
-/// single community against the durable `communities` host map. This is
-/// deliberately NOT a default tenant: an unmapped host fails closed with an
-/// error, mirroring the relay's own `bind_community` row-zero seam. The CLI is
-/// single-community per invocation — there is no cross-community sweep.
+/// single community the relay's own `HostResolver` would (`communities.host`,
+/// falling back to `community_host_aliases`) — including when `RELAY_URL`
+/// itself is only reachable as an alias, e.g. running `buzz-admin` from an
+/// in-cluster host that has no primary `communities.host` row of its own.
+/// This is deliberately NOT a default tenant: an unmapped host fails closed
+/// with an error, mirroring the relay's own `bind_community` row-zero seam.
+/// The CLI is single-community per invocation — there is no cross-community
+/// sweep.
 async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     let relay_url =
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -579,14 +583,17 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     // — and `wss://relay.example:8443` would resolve `relay.example`. Sharing
     // the helper keeps buzz-admin byte-identical to the community startup seeds.
     let host = relay_url_authority(&relay_url);
-    let record = db.lookup_community_by_host(&host).await?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "RELAY_URL host '{host}' is not mapped to a community.\n\
+    let record = db
+        .lookup_community_by_host_or_alias(&host)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "RELAY_URL host '{host}' is not mapped to a community.\n\
              buzz-admin operates on the configured relay's community; ensure the \
              relay has started and seeded its community (or set RELAY_URL to a \
-             mapped host)."
-        )
-    })?;
+             mapped host or alias)."
+            )
+        })?;
     Ok(TenantContext::resolved(record.id, record.host))
 }
 
