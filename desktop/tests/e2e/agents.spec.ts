@@ -818,7 +818,7 @@ test("custom personas share with people and keep export separate", async ({
   const linkIcon = page.getByTestId("persona-share-link-icon");
   const linkCopy = page.getByTestId("persona-share-link-copy");
   const linkDivider = page.getByTestId("persona-share-link-divider");
-  const catalogDivider = page.getByTestId("persona-share-catalog-divider");
+  const catalogSection = page.getByTestId("persona-share-catalog");
   const staticLinkAccess = page.getByTestId("persona-share-link-access");
   await waitForAnimations(page);
   const [
@@ -827,7 +827,7 @@ test("custom personas share with people and keep export separate", async ({
     linkIconBox,
     linkCopyBox,
     linkDividerBox,
-    catalogDividerBox,
+    catalogSectionBox,
     staticLinkAccessBox,
   ] = await Promise.all([
     linkRow.boundingBox(),
@@ -835,7 +835,7 @@ test("custom personas share with people and keep export separate", async ({
     linkIcon.boundingBox(),
     linkCopy.boundingBox(),
     linkDivider.boundingBox(),
-    catalogDivider.boundingBox(),
+    catalogSection.boundingBox(),
     staticLinkAccess.boundingBox(),
   ]);
   const sendDescriptionBox = await sendDescription.boundingBox();
@@ -843,7 +843,10 @@ test("custom personas share with people and keep export separate", async ({
     (sendDescriptionBox?.height ?? 0) + 30,
   );
   expect(initialCopyLinkButtonBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0) + 23,
+    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0) + 23,
+  );
+  expect(catalogSectionBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0),
   );
   expect(
     Math.abs(
@@ -853,7 +856,7 @@ test("custom personas share with people and keep export separate", async ({
     ),
   ).toBeLessThanOrEqual(1);
   expect(linkDividerBox?.y ?? 0).toBeGreaterThan(
-    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0),
+    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0),
   );
   expect(linkDividerBox?.y ?? 0).toBeLessThan(initialCopyLinkButtonBox?.y ?? 0);
   expect(
@@ -868,14 +871,6 @@ test("custom personas share with people and keep export separate", async ({
           (staticLinkAccessBox?.height ?? 0) / 2),
     ),
   ).toBeLessThanOrEqual(1);
-  const gapAboveCopyLink =
-    (initialCopyLinkButtonBox?.y ?? 0) -
-    ((linkDividerBox?.y ?? 0) + (linkDividerBox?.height ?? 0));
-  const gapBelowCopyLink =
-    (catalogDividerBox?.y ?? 0) -
-    ((initialCopyLinkButtonBox?.y ?? 0) +
-      (initialCopyLinkButtonBox?.height ?? 0));
-  expect(Math.abs(gapAboveCopyLink - gapBelowCopyLink)).toBeLessThanOrEqual(1);
   await expect(copyLinkButton).toHaveClass(
     /border.*bg-background.*border-border/,
   );
@@ -1339,8 +1334,8 @@ This deliberately long fenced-code example must not establish the minimum width 
       catalogSection.boundingBox(),
       shareMainCard.boundingBox(),
     ]);
-  expect(catalogSectionBox?.y ?? 0).toBeGreaterThan(
-    (copyLinkButtonBox?.y ?? 0) + (copyLinkButtonBox?.height ?? 0),
+  expect(copyLinkButtonBox?.y ?? 0).toBeGreaterThan(
+    (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0),
   );
   expect(
     (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0),

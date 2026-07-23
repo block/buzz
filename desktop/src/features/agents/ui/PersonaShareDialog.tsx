@@ -623,6 +623,7 @@ export function SnapshotShareDialog({
                   value={linkShareLevel}
                 />
               </div>
+              {afterLink}
               <Separator
                 className="my-4 bg-input/40"
                 data-testid={`${testIdPrefix}-link-divider`}
@@ -700,15 +701,6 @@ export function SnapshotShareDialog({
                   </motion.button>
                 </Button>
               </div>
-              {afterLink ? (
-                <>
-                  <Separator
-                    className="my-4 bg-input/40"
-                    data-testid={`${testIdPrefix}-catalog-divider`}
-                  />
-                  {afterLink}
-                </>
-              ) : null}
             </section>
           </div>
         </div>
