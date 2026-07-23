@@ -109,9 +109,9 @@ function formatRespondToLabel(agent: ManagedAgent) {
     case "anyone":
       return "Anyone";
     case "allowlist":
-      return `Allowlist (${agent.respondToAllowlist.length})`;
+      return `Selected people (${agent.respondToAllowlist.length})`;
     default:
-      return "Owner only";
+      return "Only me";
   }
 }
 
@@ -379,7 +379,7 @@ function MemberActionsMenu({
                 onClick={() => onEditRespondTo(managedAgent)}
               >
                 <Pencil className="h-4 w-4" />
-                Edit respond-to...
+                Manage agent access...
               </DropdownMenuItem>
             ) : null}
             {canRemoveMember || showChangeRole ? (
