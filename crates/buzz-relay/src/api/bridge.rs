@@ -280,6 +280,78 @@ fn extension_flag(raw: &Value, key: &str) -> bool {
     raw.get(key).and_then(Value::as_bool).unwrap_or(false)
 }
 
+fn extract_agent_owner(raw: &Value) -> Result<Option<Vec<u8>>, (StatusCode, Json<Value>)> {
+    let Some(owner) = raw.get("agent_owner").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let bytes = hex::decode(owner)
+        .ok()
+        .filter(|bytes| bytes.len() == 32)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "agent_owner must be a 64-char hex pubkey",
+            )
+        })?;
+    Ok(Some(bytes))
+}
+
+fn include_agent_owner(raw_filters: &[Value]) -> bool {
+    raw_filters
+        .iter()
+        .any(|raw| extension_flag(raw, "include_agent_owner"))
+}
+
+async fn enrich_agent_owners(
+    state: &AppState,
+    tenant: &buzz_core::tenant::TenantContext,
+    events: &mut [Value],
+) -> Result<(), (StatusCode, Json<Value>)> {
+    let pubkeys: Vec<Vec<u8>> = events
+        .iter()
+        .filter_map(|event| event.get("pubkey").and_then(Value::as_str))
+        .filter_map(|pubkey| hex::decode(pubkey).ok())
+        .collect();
+    let owners = state
+        .db
+        .get_agent_owners(tenant.community(), &pubkeys)
+        .await
+        .map_err(|e| internal_error(&format!("agent owner lookup error: {e}")))?;
+    let owners: std::collections::HashMap<Vec<u8>, buzz_db::user::AgentOwner> = owners
+        .into_iter()
+        .map(|owner| (owner.agent_pubkey.clone(), owner))
+        .collect();
+
+    for event in events {
+        let Some(agent_pubkey) = event
+            .get("pubkey")
+            .and_then(Value::as_str)
+            .and_then(|pubkey| hex::decode(pubkey).ok())
+        else {
+            continue;
+        };
+        let Some(owner) = owners.get(&agent_pubkey) else {
+            continue;
+        };
+        let Some(object) = event.as_object_mut() else {
+            continue;
+        };
+        object.insert(
+            "agent_owner_pubkey".into(),
+            Value::String(hex::encode(&owner.owner_pubkey)),
+        );
+        object.insert(
+            "agent_owner_display_name".into(),
+            owner
+                .owner_display_name
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+    }
+    Ok(())
+}
+
 fn extract_depth_limit(raw: &Value) -> Option<u32> {
     raw.get("depth_limit")?
         .as_u64()
@@ -967,8 +1039,26 @@ async fn query_events_authed(
 
     // Two-pass parse: preserve raw JSON for custom extension fields (before_id,
     // depth_limit, feed_types) that nostr::Filter silently drops.
-    let raw_filters: Vec<Value> = serde_json::from_slice(body)
+    let mut raw_filters: Vec<Value> = serde_json::from_slice(body)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, &format!("invalid filters: {e}")))?;
+    for raw in &mut raw_filters {
+        let Some(owner_pubkey) = extract_agent_owner(raw)? else {
+            continue;
+        };
+        let owned_pubkeys = state
+            .db
+            .list_agent_pubkeys_by_owner(tenant.community(), &owner_pubkey)
+            .await
+            .map_err(|e| internal_error(&format!("agent owner filter error: {e}")))?;
+        let mut owned_hex: std::collections::HashSet<String> =
+            owned_pubkeys.iter().map(hex::encode).collect();
+        if let Some(requested) = raw.get("authors").and_then(Value::as_array) {
+            let requested: std::collections::HashSet<&str> =
+                requested.iter().filter_map(Value::as_str).collect();
+            owned_hex.retain(|pubkey| requested.contains(pubkey.as_str()));
+        }
+        raw["authors"] = Value::Array(owned_hex.into_iter().map(Value::String).collect());
+    }
     let filters: Vec<nostr::Filter> = raw_filters
         .iter()
         .map(|v| serde_json::from_value(v.clone()))
@@ -1205,6 +1295,14 @@ async fn query_events_authed(
         if handled.contains(&idx) {
             continue;
         }
+        if raw.get("agent_owner").is_some()
+            && raw
+                .get("authors")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            continue;
+        }
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             if !accessible_channels.contains(&ch_id) {
@@ -1304,6 +1402,9 @@ async fn query_events_authed(
         }
     }
 
+    if include_agent_owner(&raw_filters) {
+        enrich_agent_owners(state, tenant, &mut events).await?;
+    }
     Ok(Json(Value::Array(events)))
 }
 
@@ -1639,6 +1740,14 @@ async fn handle_bridge_search(
     for (raw, filter) in raw_filters.iter().zip(filters) {
         let search_mode = extract_search_mode(raw);
         let search_page = extract_search_page(raw);
+        if raw.get("agent_owner").is_some()
+            && raw
+                .get("authors")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+        {
+            continue;
+        }
         let search_text = match &filter.search {
             Some(s) if !s.is_empty() => s.clone(),
             _ => continue,
@@ -1745,6 +1854,9 @@ async fn handle_bridge_search(
         }
     }
 
+    if include_agent_owner(raw_filters) {
+        enrich_agent_owners(state, tenant, &mut events).await?;
+    }
     Ok(Json(Value::Array(events)))
 }
 
@@ -2768,6 +2880,19 @@ mod tests {
             "config-relay-url's host MUST NOT influence the NIP-42 expected URL — \
              only its scheme contributes"
         );
+    }
+
+    #[test]
+    fn extract_agent_owner_accepts_hex_and_rejects_invalid_values() {
+        let owner = "a".repeat(64);
+        assert_eq!(
+            extract_agent_owner(&serde_json::json!({"agent_owner": owner}))
+                .unwrap()
+                .unwrap(),
+            vec![0xaa; 32]
+        );
+        assert!(extract_agent_owner(&serde_json::json!({"agent_owner": "bad"})).is_err());
+        assert_eq!(extract_agent_owner(&serde_json::json!({})).unwrap(), None);
     }
 
     /// `nip42_expected_relay_url` derives scheme from `config_relay_url`'s

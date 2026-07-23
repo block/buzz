@@ -5,6 +5,17 @@ use buzz_core::CommunityId;
 use sqlx::PgPool;
 use sqlx::Row;
 
+/// Ownership metadata for an agent profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOwner {
+    /// Raw agent public key.
+    pub agent_pubkey: Vec<u8>,
+    /// Raw owner public key, verified when the agent authenticated via NIP-OA.
+    pub owner_pubkey: Vec<u8>,
+    /// Owner's current display name, when available.
+    pub owner_display_name: Option<String>,
+}
+
 /// A user's profile fields.
 #[derive(Debug, Clone)]
 pub struct UserProfile {
@@ -280,6 +291,65 @@ pub async fn search_users(
         .collect())
 }
 
+/// Return agent pubkeys whose verified owner matches `owner_pubkey`.
+pub async fn list_agent_pubkeys_by_owner(
+    pool: &PgPool,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+) -> Result<Vec<Vec<u8>>> {
+    let rows = sqlx::query_scalar::<_, Vec<u8>>(
+        r#"
+        SELECT pubkey
+        FROM users
+        WHERE community_id = $1 AND agent_owner_pubkey = $2
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(owner_pubkey)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// Fetch verified ownership metadata for the requested agent pubkeys.
+pub async fn get_agent_owners(
+    pool: &PgPool,
+    community_id: CommunityId,
+    agent_pubkeys: &[Vec<u8>],
+) -> Result<Vec<AgentOwner>> {
+    if agent_pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows = sqlx::query_as::<_, (Vec<u8>, Vec<u8>, Option<String>)>(
+        r#"
+        SELECT agent.pubkey, agent.agent_owner_pubkey, owner.display_name
+        FROM users agent
+        LEFT JOIN users owner
+          ON owner.community_id = agent.community_id
+         AND owner.pubkey = agent.agent_owner_pubkey
+        WHERE agent.community_id = $1
+          AND agent.pubkey = ANY($2)
+          AND agent.agent_owner_pubkey IS NOT NULL
+        "#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(agent_pubkeys)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(agent_pubkey, owner_pubkey, owner_display_name)| AgentOwner {
+                agent_pubkey,
+                owner_pubkey,
+                owner_display_name,
+            },
+        )
+        .collect())
+}
+
 /// Set the owner pubkey for an agent user.
 /// The owner pubkey must already exist in the users table (FK constraint).
 /// Returns an error if the agent pubkey is not found (rows_affected == 0).
@@ -461,6 +531,57 @@ mod tests {
             owner,
             Some(owner_pk),
             "owner pubkey should match what was set"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_agent_owner_queries_are_scoped_and_include_display_name() {
+        let db = setup_db().await;
+        let community = make_community(&db.pool).await;
+        let agent_pk = random_pubkey();
+        let other_agent_pk = random_pubkey();
+        let owner_pk = random_pubkey();
+        let other_owner_pk = random_pubkey();
+        for pubkey in [&agent_pk, &other_agent_pk, &owner_pk, &other_owner_pk] {
+            ensure_user(&db.pool, community, pubkey).await.unwrap();
+        }
+        update_user_profile(
+            &db.pool,
+            community,
+            &owner_pk,
+            Some("Owner Name"),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        set_agent_owner(&db.pool, community, &agent_pk, &owner_pk)
+            .await
+            .unwrap();
+        set_agent_owner(&db.pool, community, &other_agent_pk, &other_owner_pk)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            list_agent_pubkeys_by_owner(&db.pool, community, &owner_pk)
+                .await
+                .unwrap(),
+            vec![agent_pk.clone()]
+        );
+        assert_eq!(
+            get_agent_owners(&db.pool, community, &[agent_pk.clone(), other_agent_pk],)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|owner| owner.agent_pubkey == agent_pk)
+                .unwrap(),
+            AgentOwner {
+                agent_pubkey: agent_pk,
+                owner_pubkey: owner_pk,
+                owner_display_name: Some("Owner Name".into()),
+            }
         );
     }
 

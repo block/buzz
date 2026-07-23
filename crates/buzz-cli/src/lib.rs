@@ -808,6 +808,9 @@ pub enum UsersCmd {
         /// Search by display name (case-insensitive substring match)
         #[arg(long = "name")]
         name: Option<String>,
+        /// Filter agents by verified owner (`me`, 64-char hex, or npub)
+        #[arg(long = "owner")]
+        owner: Option<String>,
     },
     /// Update the current identity's profile
     #[command(name = "set-profile")]

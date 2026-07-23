@@ -1843,6 +1843,24 @@ impl Db {
         user::search_users(&self.pool, community_id, query, limit).await
     }
 
+    /// Return agent pubkeys whose verified owner matches `owner_pubkey`.
+    pub async fn list_agent_pubkeys_by_owner(
+        &self,
+        community_id: CommunityId,
+        owner_pubkey: &[u8],
+    ) -> Result<Vec<Vec<u8>>> {
+        user::list_agent_pubkeys_by_owner(&self.pool, community_id, owner_pubkey).await
+    }
+
+    /// Fetch verified ownership metadata for the requested agent pubkeys.
+    pub async fn get_agent_owners(
+        &self,
+        community_id: CommunityId,
+        agent_pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<user::AgentOwner>> {
+        user::get_agent_owners(&self.pool, community_id, agent_pubkeys).await
+    }
+
     /// Atomically set agent owner — only if no owner is currently assigned.
     /// Returns Ok(true) if set, Ok(false) if an owner already exists.
     pub async fn set_agent_owner(
