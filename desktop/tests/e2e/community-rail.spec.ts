@@ -153,26 +153,35 @@ test.describe("community rail", () => {
   }) => {
     await installMockBridge(page, undefined, { skipCommunitySeed: true });
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
-    await page.addInitScript((communityId) => {
-      window.localStorage.setItem(
-        "buzz-community-destinations",
-        JSON.stringify({
-          [communityId]: { kind: "channel", channelId: "general" },
-        }),
-      );
-    }, COMMUNITY_B.id);
     await page.goto("/");
     await expect(page.getByTestId("app-sidebar")).toBeVisible();
-    await page.evaluate(() => {
+    const rememberedChannelId = await page.evaluate((communityId) => {
       const source = window.localStorage.getItem(
         "buzz-channels.v1:ws://localhost:3000",
       );
       if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source) as {
+        channels: Array<{ id: string; name: string }>;
+      };
+      const generalChannel = snapshot.channels.find(
+        (channel) => channel.name === "general",
+      );
+      if (!generalChannel) throw new Error("missing general channel snapshot");
       window.localStorage.setItem(
         "buzz-channels.v1:ws://localhost:3001",
         source,
       );
-    });
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: {
+            kind: "channel",
+            channelId: generalChannel.id,
+          },
+        }),
+      );
+      return generalChannel.id;
+    }, COMMUNITY_B.id);
 
     await page.evaluate(() => {
       const testWindow = window as typeof window & {
@@ -188,8 +197,13 @@ test.describe("community rail", () => {
     });
     await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
 
-    await expect(page).toHaveURL(/#\/channels\/general$/, { timeout: 700 });
-    await expect(page.getByRole("button", { name: "Inbox" })).toBeVisible();
+    await expect(page).toHaveURL(
+      new RegExp(`#/channels/${rememberedChannelId}$`),
+      { timeout: 700 },
+    );
+    await expect(page.getByTestId("message-timeline")).toBeVisible({
+      timeout: 700,
+    });
   });
 
   test("clears a remembered channel that is unavailable after switching", async ({
