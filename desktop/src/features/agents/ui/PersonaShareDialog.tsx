@@ -768,7 +768,7 @@ export function PersonaShareDialog({
                 Share to catalog
               </label>
               <p className="text-xs text-secondary-foreground/75">
-                Let anyone on this relay find and use a copy of this agent.
+                Let anyone in this community find and use a copy of this agent.
               </p>
             </div>
             <div className="flex shrink-0 items-center gap-2">

@@ -915,7 +915,7 @@ test("custom personas share with people and keep export separate", async ({
   await expect(exportAgentRow).toHaveText("Export agent");
   await expect(catalogSection).toContainText("Share to catalog");
   await expect(catalogSection).toContainText(
-    "Let anyone on this relay find and use a copy of this agent.",
+    "Let anyone in this community find and use a copy of this agent.",
   );
   await expect(catalogToggle).toHaveAttribute("aria-checked", "false");
   await expect(shareMainCard.getByTestId("persona-share-export")).toHaveCount(
