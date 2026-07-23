@@ -65,7 +65,7 @@ export function AgentAiDefaultsNotice({
           type="button"
           variant="outline"
         >
-          Set global defaults
+          Set
         </Button>
       </div>
     );

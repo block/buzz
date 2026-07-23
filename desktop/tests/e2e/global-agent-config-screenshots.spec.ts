@@ -409,7 +409,7 @@ test.describe("global agent config screenshots", () => {
     await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
 
     const setDefaults = defaults.getByRole("button", {
-      name: "Set global defaults",
+      name: "Set",
     });
     await expect(setDefaults).toBeVisible();
     await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
