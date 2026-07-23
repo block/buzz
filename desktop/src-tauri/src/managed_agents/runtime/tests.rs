@@ -618,6 +618,98 @@ fn codex_spawn_does_not_set_a_claude_executable() {
         .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
 }
 
+/// On Windows, `.cmd` and `.bat` batch shims must NOT be assigned to
+/// `CLAUDE_CODE_EXECUTABLE` — `CreateProcess` cannot exec them directly and
+/// returns EINVAL (issue #2397). The adapter must fall back to its own PATH
+/// lookup instead.
+#[cfg(windows)]
+#[test]
+fn windows_cmd_shim_does_not_set_claude_code_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    // Write a `.cmd` shim (no execute bit needed on Windows).
+    let shim = temp.path().join("claude.cmd");
+    std::fs::write(&shim, "@echo off\r\necho shim\r\n").expect("write shim");
+
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    match original_path {
+        Some(p) => std::env::set_var("PATH", p),
+        None => std::env::remove_var("PATH"),
+    }
+
+    assert!(
+        !command
+            .get_envs()
+            .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"),
+        "a .cmd shim must not be assigned to CLAUDE_CODE_EXECUTABLE (EINVAL on CreateProcess)"
+    );
+}
+
+/// On Windows, a `.bat` shim is equally unsafe — same EINVAL path as `.cmd`.
+#[cfg(windows)]
+#[test]
+fn windows_bat_shim_does_not_set_claude_code_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    let shim = temp.path().join("claude.bat");
+    std::fs::write(&shim, "@echo off\r\necho shim\r\n").expect("write shim");
+
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    match original_path {
+        Some(p) => std::env::set_var("PATH", p),
+        None => std::env::remove_var("PATH"),
+    }
+
+    assert!(
+        !command
+            .get_envs()
+            .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"),
+        "a .bat shim must not be assigned to CLAUDE_CODE_EXECUTABLE"
+    );
+}
+
+/// On Windows, a real `.exe` binary IS safe to assign — it does not trigger
+/// the shim-rejection path.
+#[cfg(windows)]
+#[test]
+fn windows_exe_sets_claude_code_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+
+    let exe = temp.path().join("claude.exe");
+    std::fs::write(&exe, "").expect("write fake exe");
+
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    match original_path {
+        Some(p) => std::env::set_var("PATH", p),
+        None => std::env::remove_var("PATH"),
+    }
+
+    assert!(
+        command
+            .get_envs()
+            .any(|(key, value)| key == "CLAUDE_CODE_EXECUTABLE" && value == Some(exe.as_os_str())),
+        "a real .exe must still be assigned to CLAUDE_CODE_EXECUTABLE"
+    );
+}
+
 // ── PGID-based orphan sweep tests ───────────────────────────────────────
 
 /// Validates the kernel invariant that the orphan sweep PGID fix relies on:

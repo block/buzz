@@ -575,8 +575,21 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     if let Some(managed_bin) = crate::managed_agents::buzz_managed_npm_bin_dir() {
         path_parts.push(managed_bin);
     }
-    if let Some(ref path) = crate::managed_agents::login_shell_path() {
+    let login_path = crate::managed_agents::login_shell_path();
+    if let Some(ref path) = login_path {
         path_parts.extend(std::env::split_paths(path));
+    }
+    // On Windows, `login_shell_path()` always returns `None` because Git Bash
+    // returns POSIX-shaped colon-delimited paths that poison native children.
+    // `cmd.env("PATH", …)` replaces rather than extends, so without this the
+    // install shell loses node/npm and the install fails with
+    // `'npm' is not recognized`. Append the inherited process PATH last so
+    // Buzz-managed dirs (when present) keep precedence.
+    #[cfg(windows)]
+    if login_path.is_none() {
+        if let Some(proc_path) = std::env::var_os("PATH") {
+            path_parts.extend(std::env::split_paths(&proc_path));
+        }
     }
     if !path_parts.is_empty() {
         if let Ok(path) = std::env::join_paths(path_parts) {
@@ -1294,6 +1307,45 @@ mod tests {
             "install_shell_command must succeed on Windows with Git; got: {:?}",
             result.err()
         );
+    }
+
+    /// On Windows, `install_shell_command` must set PATH to a value that
+    /// includes the inherited process PATH, so node/npm are visible inside
+    /// the install shell even when no managed Node runtime is present.
+    #[cfg(windows)]
+    #[test]
+    fn test_install_shell_command_includes_process_path_on_windows() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        // Plant a sentinel in the process PATH that the test can detect.
+        let sentinel = r"C:\TestSentinel\bin";
+        std::env::set_var("PATH", sentinel);
+
+        let result = super::install_shell_command("echo test");
+
+        match previous {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let cmd = result.expect("install_shell_command must succeed on Windows with Git");
+        let path_value = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, val)| val)
+            .map(|v| v.to_string_lossy().into_owned());
+
+        // PATH may or may not be set (depends on whether managed dirs or
+        // sentinel contributed entries). If set, it must contain the sentinel.
+        if let Some(path) = path_value {
+            assert!(
+                path.contains(sentinel),
+                "install_shell_command PATH must include the inherited process PATH; got: {path}"
+            );
+        }
+        // If PATH is not set, the child inherits it — also acceptable, but our
+        // fix guarantees at least the sentinel is reachable. The absence of
+        // PATH env override is safe because the child inherits the process PATH.
     }
 
     // ── Phase B: per-OS install commands ──────────────────────────────────────

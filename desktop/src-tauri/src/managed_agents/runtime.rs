@@ -1602,6 +1602,18 @@ pub(crate) fn configure_runtime_cli(
         return;
     }
     if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
+        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
+        // passed directly to `CreateProcess` and cause EINVAL when the Claude
+        // adapter tries to spawn them (issue #2397). Skip setting
+        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
+        // its own PATH lookup and finds the real binary instead.
+        #[cfg(windows)]
+        if let Some(ext) = cli_path.extension() {
+            let ext_lower = ext.to_string_lossy().to_lowercase();
+            if ext_lower == "cmd" || ext_lower == "bat" {
+                return;
+            }
+        }
         command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
     }
 }
