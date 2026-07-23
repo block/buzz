@@ -118,6 +118,7 @@ Widget _buildTestable({
   ChannelActions Function(Ref ref)? createChannelActions,
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
+  _NestedThreadRelaySession? relaySession,
   String? canvasContent,
 }) {
   final resolvedChannel = channel ?? _testChannel;
@@ -153,6 +154,8 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
+      if (relaySession != null)
+        relaySessionProvider.overrideWith(() => relaySession),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -1249,6 +1252,69 @@ void main() {
 
       expect(observer.pushCount, initialPushCount + 1);
     });
+
+    testWidgets(
+      'nested thread queries the true root and renders its direct reply',
+      (tester) async {
+        final root = _textMsg(
+          id: 'root',
+          pubkey: 'alice',
+          content: 'Root message',
+          createdAt: 1000,
+        );
+        final nestedHead = _textMsg(
+          id: 'nested-head',
+          pubkey: 'bob',
+          content: 'Nested head',
+          createdAt: 1100,
+          extraTags: const [
+            ['e', 'root', '', 'root'],
+            ['e', 'root', '', 'reply'],
+          ],
+        );
+        final nestedReply = _textMsg(
+          id: 'nested-reply',
+          pubkey: 'carol',
+          content: 'Nested child',
+          createdAt: 1200,
+          extraTags: const [
+            ['e', 'root', '', 'root'],
+            ['e', 'nested-head', '', 'reply'],
+          ],
+        );
+        final relaySession = _NestedThreadRelaySession(
+          expectedRootId: root.id,
+          replies: [nestedHead, nestedReply],
+        );
+
+        await tester.pumpWidget(
+          _buildTestable(
+            messages: [root, nestedHead],
+            relaySession: relaySession,
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        final threadMessages = formatTimeline([root, nestedHead]);
+        Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+          MaterialPageRoute<void>(
+            builder: (_) => ThreadDetailPage(
+              threadHead: threadMessages.last,
+              allMessages: threadMessages,
+              channelId: _channelId,
+              currentPubkey: 'self',
+              isMember: true,
+              isArchived: false,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        expect(relaySession.queryFilters, hasLength(1));
+        expect(relaySession.queryFilters.single.tags['#e'], [root.id]);
+        expect(findRichText('Nested child'), findsOneWidget);
+      },
+    );
   });
 }
 
@@ -1289,6 +1355,38 @@ class _ErrorMessagesNotifier extends ChannelMessagesNotifier {
   @override
   AsyncValue<List<NostrEvent>> build() =>
       AsyncError('Connection failed', StackTrace.current);
+}
+
+class _NestedThreadRelaySession extends RelaySessionNotifier {
+  final String expectedRootId;
+  final List<NostrEvent> replies;
+  final List<NostrFilter> queryFilters = [];
+
+  _NestedThreadRelaySession({
+    required this.expectedRootId,
+    required this.replies,
+  });
+
+  @override
+  SessionState build() => const SessionState(status: SessionStatus.connected);
+
+  @override
+  Future<List<NostrEvent>> queryRelay(
+    List<NostrFilter> filters, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    queryFilters.addAll(filters);
+    if (filters.single.tags['#e']?.single == expectedRootId) {
+      return replies;
+    }
+    return const [];
+  }
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async => const [];
 }
 
 class _FakeTypingNotifier extends ChannelTypingNotifier {

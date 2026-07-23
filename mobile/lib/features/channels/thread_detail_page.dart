@@ -52,9 +52,12 @@ class ThreadDetailPage extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // The relay's thread query is root-scoped. Nested thread heads retain the
+    // original root ID, while top-level thread heads use their own ID.
+    final effectiveRootId = threadHead.rootId ?? threadHead.id;
     final repliesState = ref.watch(
       threadRepliesProvider(
-        ThreadRepliesArgs(channelId: channelId, rootId: threadHead.id),
+        ThreadRepliesArgs(channelId: channelId, rootId: effectiveRootId),
       ),
     );
     final replyMessages = repliesState.whenData((events) {
@@ -130,10 +133,6 @@ class ThreadDetailPage extends HookConsumerWidget {
     // Resolve thread head from live data (reactions/edits may have changed).
     final liveHead =
         allMsgs.where((m) => m.id == threadHead.id).firstOrNull ?? threadHead;
-
-    // The root of the entire thread chain. If the current thread head is
-    // itself a root message its rootId is null, so fall back to its own id.
-    final effectiveRootId = threadHead.rootId ?? threadHead.id;
 
     // Channel names for message content rendering.
     final channelsAsync = ref.watch(channelsProvider);
