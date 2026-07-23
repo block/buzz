@@ -64,10 +64,10 @@ function describeMissingAiPieces(
 }
 
 /**
- * Human-readable reason the Create/Save button is disabled, or `null` when the
- * form can be submitted. Precedence mirrors the `canSubmit` term order in
- * AgentDefinitionDialog so the surfaced reason is deterministic and always the
- * first blocking input — correcting it makes the reason advance or disappear.
+ * Human-readable footer reason the Create/Save button is disabled, or `null`
+ * when no footer reason should be shown. Precedence mirrors the `canSubmit`
+ * term order in AgentDefinitionDialog so the surfaced reason is deterministic.
+ * Create mode explains incomplete global defaults inline beside their controls.
  *
  * While a request or avatar upload is in flight the button communicates the
  * progress itself ("Saving..." / "Uploading..."), so no reason is returned.
@@ -104,6 +104,9 @@ export function personaSubmitBlock(
 
   // 6. Resolved AI configuration (provider/model/credentials) incomplete.
   if (!input.localModeSatisfied) {
+    if (input.isCreateMode && input.aiConfigurationMode === "defaults") {
+      return null;
+    }
     const missing = describeMissingAiPieces(
       input.localModeMissingFields,
       input.localModeMissingEnvKeys,

@@ -466,8 +466,9 @@ export function AgentDefinitionDialog({
 
   // Derive the single, deterministic reason the action is disabled from the
   // same gate outputs that feed canSubmit — no policy is recomputed here.
-  // Precedence mirrors canSubmit's term order, so the reason is `null` exactly
-  // when the form can be submitted (transient Saving/Uploading states aside).
+  // Precedence mirrors canSubmit's term order. In create mode, incomplete
+  // global defaults are explained next to the defaults themselves instead of
+  // being repeated in the footer.
   const submitBlockReason = personaSubmitBlock({
     isPending,
     isAvatarUploadPending,
@@ -958,6 +959,7 @@ export function AgentDefinitionDialog({
                   harness={runtimeSummaryLabel}
                   inheritedModel={inheritedModelDefault}
                   inheritedProvider={inheritedProviderDefault}
+                  isConfigured={localModeSatisfied}
                   model={runtimeFileConfig?.model}
                   onEditDefaults={() => setAiDefaultsOpen(true)}
                   triggerRef={aiDefaultsTriggerRef}

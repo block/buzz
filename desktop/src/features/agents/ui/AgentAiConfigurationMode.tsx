@@ -35,6 +35,7 @@ export function AgentCreateAiDefaultsSummary({
   harness,
   inheritedModel,
   inheritedProvider,
+  isConfigured,
   model,
   onEditDefaults,
   triggerRef,
@@ -43,12 +44,14 @@ export function AgentCreateAiDefaultsSummary({
   harness: string;
   inheritedModel: InheritedDefault;
   inheritedProvider: InheritedDefault;
+  isConfigured: boolean;
   model?: string | null;
   onEditDefaults: () => void;
   triggerRef?: React.Ref<HTMLButtonElement>;
 }) {
   return canChooseProvider ? (
     <AgentAiDefaultsNotice
+      isConfigured={isConfigured}
       onEditDefaults={onEditDefaults}
       triggerRef={triggerRef}
       explicitModel=""

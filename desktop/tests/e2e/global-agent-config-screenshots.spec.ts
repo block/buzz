@@ -400,13 +400,30 @@ test.describe("global agent config screenshots", () => {
       timeout: 10_000,
     });
 
-    // The footer must explain WHY it is disabled (regression guard for the
-    // submitBlockReason wiring, not just the boolean gate): defaults mode with
-    // no resolvable provider names the missing piece and points to Settings.
-    const reason = page.getByTestId("persona-dialog-submit-reason");
-    await expect(reason).toBeVisible({ timeout: 10_000 });
-    await expect(reason).toContainText("provider");
-    await expect(reason).toContainText("Settings → AI defaults");
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Global defaults not set");
+    await expect(defaults.getByText("Harness", { exact: true })).toHaveCount(0);
+    await expect(defaults.getByText("Provider", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
+
+    const setDefaults = defaults.getByRole("button", {
+      name: "Set global defaults",
+    });
+    await expect(setDefaults).toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await setDefaults.click();
+    await expect(page.getByTestId("agent-ai-defaults-dialog")).toBeVisible();
+    await page
+      .getByTestId("agent-ai-defaults-dialog")
+      .getByRole("button", {
+        name: "Close",
+      })
+      .click();
 
     await waitForAnimations(page);
 

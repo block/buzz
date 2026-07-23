@@ -37,7 +37,7 @@ test("missing name is reported first", () => {
   );
 });
 
-test("Buzz Agent + Use AI defaults with no global provider/model names the fix", () => {
+test("create mode leaves incomplete global-default guidance to the inline callout", () => {
   const reason = personaSubmitBlock(
     submittable({
       aiConfigurationMode: "defaults",
@@ -45,14 +45,24 @@ test("Buzz Agent + Use AI defaults with no global provider/model names the fix",
       localModeMissingFields: ["provider", "model"],
     }),
   );
-  assert.match(reason, /global AI defaults are incomplete/);
-  assert.match(reason, /a provider and a model/);
-  assert.match(reason, /Settings → AI defaults/);
+  assert.equal(reason, null);
 });
 
-test("incomplete defaults also names missing credential keys", () => {
+test("create mode also leaves missing-default credentials to the inline callout", () => {
   const reason = personaSubmitBlock(
     submittable({
+      localModeSatisfied: false,
+      localModeMissingFields: [],
+      localModeMissingEnvKeys: ["ANTHROPIC_API_KEY"],
+    }),
+  );
+  assert.equal(reason, null);
+});
+
+test("edit mode still explains incomplete defaults in the footer", () => {
+  const reason = personaSubmitBlock(
+    submittable({
+      isCreateMode: false,
       localModeSatisfied: false,
       localModeMissingFields: [],
       localModeMissingEnvKeys: ["ANTHROPIC_API_KEY"],
@@ -63,6 +73,7 @@ test("incomplete defaults also names missing credential keys", () => {
 
 test("the reason disappears once the blocking input is corrected", () => {
   const blocked = submittable({
+    isCreateMode: false,
     localModeSatisfied: false,
     localModeMissingFields: ["provider", "model"],
   });
