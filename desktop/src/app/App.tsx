@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
+import { completeCommunityViewTransition } from "@/app/communityViewTransition";
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
@@ -524,6 +525,11 @@ function CommunityApp({
   // Tauri backend is still configured for the previous one.
   const communityApplied =
     community.isReady && community.appliedKey === communityKey;
+  useLayoutEffect(() => {
+    if (communityApplied) {
+      completeCommunityViewTransition();
+    }
+  }, [communityApplied]);
   if (appContent === null && (!transaction || isEnteringCurtain)) {
     appContent = communityApplied ? (
       <CommunityQueryProvider key={communityKey}>

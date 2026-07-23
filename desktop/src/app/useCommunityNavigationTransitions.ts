@@ -2,6 +2,7 @@ import * as React from "react";
 
 import type { deriveShellRoute } from "@/app/AppShell.helpers";
 import type { useAppNavigation } from "@/app/navigation/useAppNavigation";
+import { runCommunityViewTransition } from "@/app/communityViewTransition";
 import {
   loadCommunityDestination,
   markPendingCommunityRestore,
@@ -46,18 +47,20 @@ export function useCommunityNavigationTransitions({
         return;
       }
 
-      saveActiveDestination();
-      await goHome({ replace: true });
-      markPendingCommunityRestore(id);
-      const destination = loadCommunityDestination(id);
-      if (destination?.kind === "channel") {
-        window.history.replaceState(
-          window.history.state,
-          "",
-          `#/channels/${encodeURIComponent(destination.channelId)}`,
-        );
-      }
-      communities.switchCommunity(id);
+      await runCommunityViewTransition(async () => {
+        saveActiveDestination();
+        await goHome({ replace: true });
+        markPendingCommunityRestore(id);
+        const destination = loadCommunityDestination(id);
+        if (destination?.kind === "channel") {
+          window.history.replaceState(
+            window.history.state,
+            "",
+            `#/channels/${encodeURIComponent(destination.channelId)}`,
+          );
+        }
+        communities.switchCommunity(id);
+      });
     },
     [communities, goHome, saveActiveDestination],
   );
@@ -73,18 +76,20 @@ export function useCommunityNavigationTransitions({
       );
       if (!fallback) return;
 
-      saveActiveDestination();
-      await goHome({ replace: true });
-      markPendingCommunityRestore(fallback.id);
-      const destination = loadCommunityDestination(fallback.id);
-      if (destination?.kind === "channel") {
-        window.history.replaceState(
-          window.history.state,
-          "",
-          `#/channels/${encodeURIComponent(destination.channelId)}`,
-        );
-      }
-      communities.removeCommunity(id);
+      await runCommunityViewTransition(async () => {
+        saveActiveDestination();
+        await goHome({ replace: true });
+        markPendingCommunityRestore(fallback.id);
+        const destination = loadCommunityDestination(fallback.id);
+        if (destination?.kind === "channel") {
+          window.history.replaceState(
+            window.history.state,
+            "",
+            `#/channels/${encodeURIComponent(destination.channelId)}`,
+          );
+        }
+        communities.removeCommunity(id);
+      });
     },
     [communities, goHome, saveActiveDestination],
   );
