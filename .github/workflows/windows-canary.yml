@@ -11,12 +11,16 @@ name: Windows Canary
 #     zero secrets — building arbitrary refs is safe and is the entire point.
 #   - No `Require main` guard for the same reason.
 #   - No mesh-llm: release-windows doesn't build it.
-#   - pnpm store restore/save pattern mirrors ci.yml:149-196. This is safe
-#     because this job is contents:read and artifact-only (unsigned). The
-#     release.yml Windows job explicitly disables pnpm caching because that
-#     job is contents:write feeding a signed installer — a poisoning vector
-#     (see release.yml:747-750). GitHub cache scoping means PR-branch caches
-#     can never restore into the main-branch scope.
+#   - pnpm store restore/save pattern mirrors ci.yml:149-196.
+#
+# Cache safety: workflow_dispatch executes on the dispatch ref (github.ref /
+# github.sha stay main-scoped even when inputs.ref points at a feature branch).
+# A cache write with the standard pnpm key from a non-main inputs.ref would
+# land in the main-scoped namespace and could be restored by CI later — a
+# cache-poisoning path. To close it:
+#   - Cache restores are unconditional (cold miss for untrusted refs is safe).
+#   - Cache saves (rust-cache save-if, pnpm actions/cache/save if:) only write
+#     when BOTH the dispatch ref and inputs.ref are trusted main.
 on:
   workflow_dispatch:
     inputs:
@@ -44,6 +48,14 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # Capture the checked-out commit SHA for artifact naming and log lines.
+      # github.sha stays the dispatch-ref (main) SHA regardless of inputs.ref;
+      # this step resolves the actual source SHA so artifacts are unambiguous.
+      - name: Capture source SHA
+        id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       # The Windows runner ships with rustup preinstalled; rust-toolchain.toml
       # in the repo root pins the channel (1.95.0) automatically. We only need
       # to ensure the cross-compile target is registered; on windows-latest the
@@ -62,6 +74,9 @@ jobs:
             .
             desktop/src-tauri
           shared-key: windows-canary-release
+          # Save only when both the dispatch ref and the checked-out input are
+          # trusted main; restores are unconditional (a cold miss is safe).
+          save-if: ${{ github.ref == 'refs/heads/main' && inputs.ref == 'main' }}
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -95,6 +110,8 @@ jobs:
       - name: Derive canary version
         id: version
         shell: bash
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           set -euo pipefail
           BASE_VERSION=$(node -p "require('./desktop/package.json').version")
@@ -104,7 +121,7 @@ jobs:
           fi
           VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-test.${GITHUB_RUN_NUMBER}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building canary version $VERSION from $GITHUB_SHA"
+          echo "Building canary version $VERSION from $SOURCE_SHA"
 
       - name: Patch canary version
         shell: bash
@@ -153,12 +170,15 @@ jobs:
       - name: Upload Windows canary installer
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-windows-canary-${{ github.sha }}
+          name: buzz-windows-canary-${{ steps.source.outputs.sha }}
           path: ${{ steps.artifact.outputs.exe }}
           if-no-files-found: error
           retention-days: 7
 
       - name: Save pnpm store cache
+        # Write only when both the dispatch ref and the checked-out input are
+        # trusted main; restores above are unconditional (a cold miss is safe).
+        if: ${{ github.ref == 'refs/heads/main' && inputs.ref == 'main' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
