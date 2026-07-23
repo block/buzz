@@ -85,6 +85,13 @@ pub struct SubscriptionRule {
     pub name: String,
     /// Which channels this rule applies to.
     pub channels: ChannelScope,
+    /// Admit channels that the agent is invited to when their metadata carries
+    /// a positive TTL. Buzz huddles use TTL-scoped private channels.
+    #[serde(default)]
+    pub admit_invited_ephemeral: bool,
+    /// Require exactly one `h` tag equal to the resolved channel UUID.
+    #[serde(default)]
+    pub require_exact_channel_tag: bool,
     /// Nostr event kinds to match. Empty = wildcard (all kinds).
     #[serde(default)]
     pub kinds: Vec<u32>,
@@ -118,6 +125,8 @@ impl Default for SubscriptionRule {
         Self {
             name: String::new(),
             channels: ChannelScope::All("all".into()),
+            admit_invited_ephemeral: false,
+            require_exact_channel_tag: false,
             kinds: Vec::new(),
             require_mention: false,
             filter: None,
@@ -133,6 +142,8 @@ impl Clone for SubscriptionRule {
         Self {
             name: self.name.clone(),
             channels: self.channels.clone(),
+            admit_invited_ephemeral: self.admit_invited_ephemeral,
+            require_exact_channel_tag: self.require_exact_channel_tag,
             kinds: self.kinds.clone(),
             require_mention: self.require_mention,
             filter: self.filter.clone(),
@@ -379,6 +390,23 @@ pub async fn match_event(
             continue;
         }
 
+        if rule.require_exact_channel_tag {
+            let channel = channel_id.to_string();
+            let mut h_tag_count = 0;
+            let mut exact_channel = false;
+            for tag in event.tags.iter() {
+                let values = tag.as_slice();
+                if values.first().map(|value| value.as_str()) == Some("h") {
+                    h_tag_count += 1;
+                    exact_channel =
+                        values.get(1).map(|value| value.as_str()) == Some(channel.as_str());
+                }
+            }
+            if h_tag_count != 1 || !exact_channel {
+                continue;
+            }
+        }
+
         // 2. Kind filter (empty = wildcard).
         if !rule.kinds.is_empty() && !rule.kinds.contains(&(event.kind.as_u16() as u32)) {
             continue;
@@ -484,6 +512,28 @@ mod tests {
             .unwrap()
     }
 
+    fn make_event_with_h_tags(kind: u32, channels: &[Uuid]) -> nostr::Event {
+        let keys = Keys::generate();
+        let tags = channels
+            .iter()
+            .map(|channel| Tag::parse(["h".to_string(), channel.to_string()]).expect("h tag"));
+        EventBuilder::new(Kind::Custom(kind as u16), "hello")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
+    fn make_event_with_valid_and_malformed_h_tag(kind: u32, channel: Uuid) -> nostr::Event {
+        let keys = Keys::generate();
+        EventBuilder::new(Kind::Custom(kind as u16), "hello")
+            .tags([
+                Tag::parse(["h".to_string(), channel.to_string()]).expect("valid h tag"),
+                Tag::parse(["h".to_string()]).expect("malformed h tag"),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap()
+    }
+
     fn any_channel() -> Uuid {
         Uuid::new_v4()
     }
@@ -499,6 +549,8 @@ mod tests {
         SubscriptionRule {
             name: name.into(),
             channels,
+            admit_invited_ephemeral: false,
+            require_exact_channel_tag: false,
             kinds,
             require_mention: mention,
             filter: filter.map(|s| s.into()),
@@ -633,6 +685,55 @@ mod tests {
         let matched = match_event(&event, channel_id, &rules, "").await.unwrap();
         assert_eq!(matched.rule_index, 1);
         assert_eq!(matched.prompt_tag, "matched");
+    }
+
+    #[tokio::test]
+    async fn test_match_event_exact_channel_tag_rejects_missing_wrong_or_multiple() {
+        let channel = any_channel();
+        let other = any_channel();
+        let mut rule = make_rule(
+            "exact-room",
+            ChannelScope::List(vec![channel.to_string()]),
+            vec![9],
+            false,
+            None,
+            None,
+        );
+        rule.require_exact_channel_tag = true;
+        assert!(
+            match_event(&make_event(9, "missing"), channel, &[rule.clone()], "")
+                .await
+                .is_none()
+        );
+        assert!(match_event(
+            &make_event_with_h_tags(9, &[other]),
+            channel,
+            &[rule.clone()],
+            ""
+        )
+        .await
+        .is_none());
+        assert!(match_event(
+            &make_event_with_h_tags(9, &[channel, other]),
+            channel,
+            &[rule.clone()],
+            ""
+        )
+        .await
+        .is_none());
+        assert!(match_event(
+            &make_event_with_valid_and_malformed_h_tag(9, channel),
+            channel,
+            &[rule.clone()],
+            ""
+        )
+        .await
+        .is_none());
+        assert!(
+            match_event(&make_event_with_h_tags(9, &[channel]), channel, &[rule], "")
+                .await
+                .is_some()
+        );
     }
 
     #[tokio::test]

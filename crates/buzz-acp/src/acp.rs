@@ -16,6 +16,80 @@ use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
 use crate::observer::{ObserverContext, ObserverHandle};
 use crate::usage::{TurnUsage, UsageTracker};
 
+/// ACP `_meta` key carrying a Buzz-verified triggering event.
+///
+/// The value is transport metadata, not a prompt content block. Adapters that
+/// do not explicitly consume the extension ignore it per ACP extensibility.
+pub(crate) const TRUSTED_INBOUND_EVENT_META_NAMESPACE: &str = "buzz";
+pub(crate) const TRUSTED_INBOUND_EVENT_META_FIELD: &str = "inboundEvent";
+
+/// Immutable evidence copied from one signature-verified triggering event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrustedInboundEventEnvelope {
+    schema_version: u8,
+    event_id: String,
+    author_pubkey: String,
+    kind: u16,
+    channel_id: String,
+    tags: Vec<Vec<String>>,
+}
+
+impl TrustedInboundEventEnvelope {
+    /// Build an envelope only for an unambiguous single-event batch whose
+    /// signed `h` tag exactly matches the subscribed channel. Any ambiguity or
+    /// failed signature verification produces no trusted metadata.
+    #[cfg(test)]
+    pub(crate) fn from_prompt_batch(batch: Option<&crate::queue::FlushBatch>) -> Option<Self> {
+        Self::try_from_prompt_batch(batch).ok()
+    }
+
+    /// Return a stable, secret-free refusal code when trusted metadata cannot
+    /// be derived. The worker logs this at the admission boundary so a missing
+    /// envelope cannot masquerade as an agent/tool-policy failure.
+    pub(crate) fn try_from_prompt_batch(
+        batch: Option<&crate::queue::FlushBatch>,
+    ) -> Result<Self, &'static str> {
+        let batch = batch.ok_or("missing_batch")?;
+        if batch.cancel_reason.is_some() {
+            return Err("cancelled_batch");
+        }
+        if !batch.cancelled_events.is_empty() {
+            return Err("cancelled_events_present");
+        }
+        if batch.events.len() != 1 {
+            return Err("ambiguous_event_count");
+        }
+        let event = &batch.events[0].event;
+        if event.verify().is_err() {
+            return Err("invalid_signature");
+        }
+        let tags: Vec<Vec<String>> = event
+            .tags
+            .iter()
+            .map(|tag| tag.as_slice().to_vec())
+            .collect();
+        let expected_channel = batch.channel_id.to_string();
+        let h_tags: Vec<&Vec<String>> = tags
+            .iter()
+            .filter(|tag| tag.first().map(String::as_str) == Some("h"))
+            .collect();
+        if h_tags.len() != 1
+            || h_tags[0].get(1).map(String::as_str) != Some(expected_channel.as_str())
+        {
+            return Err("invalid_channel_binding");
+        }
+        Ok(Self {
+            schema_version: 1,
+            event_id: event.id.to_hex(),
+            author_pubkey: event.pubkey.to_hex(),
+            kind: event.kind.as_u16(),
+            channel_id: expected_channel,
+            tags,
+        })
+    }
+}
+
 /// Maximum allowed size of a single NDJSON line from the agent's stdout.
 /// Lines exceeding this limit are rejected to prevent OOM from rogue agents.
 const MAX_LINE_SIZE: usize = 10_000_000; // 10 MB
@@ -106,6 +180,9 @@ pub enum AcpError {
 
     #[error("Agent reported error (code {code}): {message}")]
     AgentError { code: i64, message: String },
+
+    #[error("Trusted inbound event refused: {0}")]
+    TrustedInboundEventRefused(&'static str),
 }
 
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
@@ -187,6 +264,11 @@ pub struct AcpClient {
     /// Other agents may leave this unset — readers must treat `None` as
     /// "no active run to steer into" and fall back to cancel+merge.
     active_run_id: Option<String>,
+    /// Most recent run ID observed during the current prompt, retained after
+    /// adapters clear their active-run marker at turn completion.
+    last_turn_run_id: Option<String>,
+    /// Stable backend session key reported by ACP session lineage metadata.
+    active_session_key: Option<String>,
     /// Per-turn channel for receiving goose-native non-cancelling steer
     /// requests from the main loop. Installed by
     /// [`install_steer_rx`](Self::install_steer_rx) at dispatch and
@@ -200,6 +282,10 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+}
+
+fn harness_bound_agent_env(key: &str) -> bool {
+    matches!(key, "BUZZ_RELAY_URL" | "BUZZ_PRIVATE_KEY")
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -410,6 +496,7 @@ impl AcpClient {
         args: &[String],
         extra_env: &[(String, String)],
         has_generated_codex_config: bool,
+        forward_buzz_publisher_credentials: bool,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
@@ -425,7 +512,9 @@ impl AcpClient {
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
         // For most keys, operator precedence wins: skip injection if already set
-        // in the parent environment.
+        // in the parent environment. Harness-bound Buzz credentials are the
+        // exception: they must match the validated relay identity even if the
+        // parent happens to carry credentials for another workspace.
         //
         // CODEX_CONFIG is handled specially via build_codex_config_env:
         //   • has_generated_codex_config=true: merge all CODEX_CONFIG entries + parent
@@ -447,12 +536,22 @@ impl AcpClient {
         // entry falls through to the standard operator-wins treatment below.
         let codex_merge_active = codex_config_value.is_some();
 
+        // The harness can retain its relay/signer authority while the managed
+        // agent remains unable to publish directly. env_remove also closes the
+        // parent-process inheritance path when credentials configured the harness.
+        if !forward_buzz_publisher_credentials {
+            cmd.env_remove("BUZZ_RELAY_URL");
+            cmd.env_remove("BUZZ_PRIVATE_KEY");
+        }
+
         for (key, value) in extra_env {
             if key == "CODEX_CONFIG" && codex_merge_active {
                 // Handled by build_codex_config_env; skip here to avoid double-setting.
                 continue;
             }
-            if std::env::var(key).is_err() {
+            if (forward_buzz_publisher_credentials && harness_bound_agent_env(key))
+                || (!harness_bound_agent_env(key) && std::env::var(key).is_err())
+            {
                 cmd.env(key, value);
             }
         }
@@ -490,6 +589,8 @@ impl AcpClient {
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
             active_run_id: None,
+            last_turn_run_id: None,
+            active_session_key: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
         })
@@ -676,7 +777,27 @@ impl AcpClient {
         idle_timeout: std::time::Duration,
         max_duration: std::time::Duration,
     ) -> Result<StopReason, AcpError> {
-        let params = build_prompt_params(session_id, prompt_blocks);
+        self.session_prompt_blocks_with_idle_timeout_and_meta(
+            session_id,
+            prompt_blocks,
+            None,
+            idle_timeout,
+            max_duration,
+        )
+        .await
+    }
+
+    /// Send `session/prompt`, optionally attaching a verified Buzz event as
+    /// ACP extension metadata outside the model-visible content blocks.
+    pub(crate) async fn session_prompt_blocks_with_idle_timeout_and_meta(
+        &mut self,
+        session_id: &str,
+        prompt_blocks: &[&str],
+        trusted_inbound_event: Option<&TrustedInboundEventEnvelope>,
+        idle_timeout: std::time::Duration,
+        max_duration: std::time::Duration,
+    ) -> Result<StopReason, AcpError> {
+        let params = build_prompt_params(session_id, prompt_blocks, trusted_inbound_event);
         let hard_deadline = tokio::time::Instant::now() + max_duration;
         self.current_hard_deadline = Some(hard_deadline);
 
@@ -764,6 +885,24 @@ impl AcpClient {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn active_run_id(&self) -> Option<&str> {
         self.active_run_id.as_deref()
+    }
+
+    /// Stable backend session key observed from ACP session lineage evidence.
+    pub fn active_session_key(&self) -> Option<&str> {
+        self.active_session_key.as_deref()
+    }
+
+    /// Run ID observed during the current turn, including after active state clears.
+    pub fn turn_run_id(&self) -> Option<&str> {
+        self.active_run_id
+            .as_deref()
+            .or(self.last_turn_run_id.as_deref())
+    }
+
+    /// Reset turn-scoped evidence before issuing a new prompt.
+    pub fn begin_turn_evidence(&mut self) {
+        self.active_run_id = None;
+        self.last_turn_run_id = None;
     }
 
     /// Consume and return the per-turn usage record computed from the most
@@ -1591,19 +1730,30 @@ impl AcpClient {
                 // on the update object itself — nested inside `update`, not
                 // alongside it at the params level. Goose and buzz-agent both
                 // emit it at `params.update._meta.goose.activeRunId`.
-                let meta = msg["params"]["update"]
-                    .get("_meta")
-                    .and_then(|m| m.get("goose"));
-                if let Some(goose_meta) = meta {
-                    match goose_meta.get("activeRunId") {
-                        Some(serde_json::Value::String(run_id)) => {
+                let update_meta = msg["params"]["update"].get("_meta");
+                if let Some(session_key) = update_meta
+                    .and_then(|meta| meta.get("sessionKey"))
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    self.active_session_key = Some(session_key.to_string());
+                }
+                let run_value = update_meta.and_then(|meta| {
+                    meta.get("activeRunId")
+                        .or_else(|| meta.get("runId"))
+                        .or_else(|| meta.get("goose").and_then(|goose| goose.get("activeRunId")))
+                });
+                if let Some(run_value) = run_value {
+                    match run_value {
+                        serde_json::Value::String(run_id) => {
                             tracing::debug!(
                                 target: "acp::update",
                                 "session_info_update: activeRunId={run_id}"
                             );
                             self.active_run_id = Some(run_id.clone());
+                            self.last_turn_run_id = Some(run_id.clone());
                         }
-                        Some(serde_json::Value::Null) => {
+                        serde_json::Value::Null => {
                             tracing::debug!(
                                 target: "acp::update",
                                 "session_info_update: activeRunId cleared"
@@ -1761,15 +1911,27 @@ impl AcpClient {
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
-fn build_prompt_params(session_id: &str, prompt_blocks: &[&str]) -> serde_json::Value {
+fn build_prompt_params(
+    session_id: &str,
+    prompt_blocks: &[&str],
+    trusted_inbound_event: Option<&TrustedInboundEventEnvelope>,
+) -> serde_json::Value {
     let blocks: Vec<serde_json::Value> = prompt_blocks
         .iter()
         .map(|text| serde_json::json!({ "type": "text", "text": text }))
         .collect();
-    serde_json::json!({
+    let mut params = serde_json::json!({
         "sessionId": session_id,
         "prompt": blocks,
-    })
+    });
+    if let Some(envelope) = trusted_inbound_event {
+        params["_meta"] = serde_json::json!({
+            TRUSTED_INBOUND_EVENT_META_NAMESPACE: {
+                TRUSTED_INBOUND_EVENT_META_FIELD: envelope,
+            },
+        });
+    }
+    params
 }
 
 /// Build `_goose/unstable/session/steer` params from one or more text
@@ -1990,6 +2152,70 @@ fn kill_process_group(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_buzz_credentials_override_parent_environment() {
+        assert!(harness_bound_agent_env("BUZZ_RELAY_URL"));
+        assert!(harness_bound_agent_env("BUZZ_PRIVATE_KEY"));
+        assert!(!harness_bound_agent_env("GOOSE_PROVIDER"));
+        assert!(!harness_bound_agent_env("CODEX_CONFIG"));
+    }
+
+    #[tokio::test]
+    async fn isolated_child_cannot_read_explicit_publisher_credentials() {
+        let script = r#"
+            if test -n "$BUZZ_RELAY_URL" || test -n "$BUZZ_PRIVATE_KEY"; then
+                exit 23
+            fi
+            read -t 2 _init
+            echo '{"jsonrpc":"2.0","id":0,"result":{"protocolVersion":1,"agentCapabilities":{}}}'
+        "#;
+        let publisher_env = vec![
+            (
+                "BUZZ_RELAY_URL".to_string(),
+                "ws://relay.invalid".to_string(),
+            ),
+            ("BUZZ_PRIVATE_KEY".to_string(), "secret".to_string()),
+        ];
+        let mut client = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), script.to_string()],
+            &publisher_env,
+            false,
+            false,
+        )
+        .await
+        .expect("spawn isolated child");
+
+        client
+            .initialize()
+            .await
+            .expect("child initializes only when publisher credentials are absent");
+    }
+
+    fn signed_batch(
+        channel_id: uuid::Uuid,
+        extra_tags: Vec<nostr::Tag>,
+    ) -> crate::queue::FlushBatch {
+        let keys = nostr::Keys::generate();
+        let mut tags =
+            vec![nostr::Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag")];
+        tags.extend(extra_tags);
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello")
+            .tags(tags)
+            .sign_with_keys(&keys)
+            .expect("signed event");
+        crate::queue::FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {
@@ -2224,6 +2450,7 @@ mod tests {
                 "/goal ship it",
                 "[Buzz event: @mention]\nContent: @Eva /goal ship it",
             ],
+            None,
         );
         let prompt = params["prompt"].as_array().unwrap();
         assert_eq!(prompt.len(), 2);
@@ -2231,6 +2458,109 @@ mod tests {
         assert_eq!(prompt[0]["text"].as_str(), Some("/goal ship it"));
         assert!(prompt[0]["text"].as_str().unwrap().starts_with('/'));
         assert_eq!(prompt[1]["type"].as_str(), Some("text"));
+    }
+
+    #[test]
+    fn trusted_inbound_event_is_verified_and_stays_out_of_prompt_blocks() {
+        let channel_id = uuid::Uuid::new_v4();
+        let p_tag = nostr::Tag::parse(["p", "ab".repeat(32).as_str()]).expect("p tag");
+        let batch = signed_batch(channel_id, vec![p_tag]);
+        let envelope = TrustedInboundEventEnvelope::from_prompt_batch(Some(&batch))
+            .expect("valid signed single event");
+        let params = build_prompt_params("session", &["model-visible body"], Some(&envelope));
+
+        assert_eq!(params["prompt"][0]["text"], "model-visible body");
+        assert_eq!(params["prompt"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            params["_meta"].as_object().map(|value| value.len()),
+            Some(1)
+        );
+        assert_eq!(
+            params["_meta"][TRUSTED_INBOUND_EVENT_META_NAMESPACE]
+                .as_object()
+                .map(|value| value.len()),
+            Some(1)
+        );
+        let metadata = &params["_meta"][TRUSTED_INBOUND_EVENT_META_NAMESPACE]
+            [TRUSTED_INBOUND_EVENT_META_FIELD];
+        assert_eq!(metadata["schemaVersion"], 1);
+        assert_eq!(metadata["eventId"], batch.events[0].event.id.to_hex());
+        assert_eq!(
+            metadata["authorPubkey"],
+            batch.events[0].event.pubkey.to_hex()
+        );
+        assert_eq!(metadata["kind"], 9);
+        assert_eq!(metadata["channelId"], channel_id.to_string());
+        assert_eq!(
+            metadata["tags"],
+            serde_json::json!([["h", channel_id.to_string()], ["p", "ab".repeat(32)],])
+        );
+    }
+
+    #[test]
+    fn trusted_inbound_event_fails_closed_for_tampering_or_ambiguous_room() {
+        let channel_id = uuid::Uuid::new_v4();
+        let mut tampered = signed_batch(channel_id, vec![]);
+        let mut raw = serde_json::to_value(&tampered.events[0].event).expect("serialize");
+        raw["content"] = serde_json::Value::String("tampered".into());
+        tampered.events[0].event = serde_json::from_value(raw).expect("parse tampered event");
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&tampered)).is_none());
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&tampered)).err(),
+            Some("invalid_signature")
+        );
+
+        let second_h = nostr::Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag");
+        let duplicate_room = signed_batch(channel_id, vec![second_h]);
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&duplicate_room)).is_none());
+
+        let other_channel = uuid::Uuid::new_v4();
+        let wrong_h =
+            nostr::Tag::parse(["h", other_channel.to_string().as_str()]).expect("wrong h tag");
+        let mut wrong_room = signed_batch(channel_id, vec![]);
+        wrong_room.events[0].event = nostr::EventBuilder::new(nostr::Kind::Custom(9), "hello")
+            .tags([wrong_h])
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("signed wrong-room event");
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&wrong_room)).is_none());
+
+        let mut multi = signed_batch(channel_id, vec![]);
+        multi.events.push(multi.events[0].clone());
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&multi)).is_none());
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&multi)).err(),
+            Some("ambiguous_event_count")
+        );
+
+        let mut cancelled = signed_batch(channel_id, vec![]);
+        cancelled.cancelled_events.push(cancelled.events[0].clone());
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled)).is_none());
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&cancelled)).err(),
+            Some("cancelled_events_present")
+        );
+
+        // Queue fallback re-dispatches cancelled events in the regular event
+        // slot while preserving the cancellation reason. That shape must not
+        // regain trusted inbound authority merely because cancelled_events is
+        // empty after the move.
+        let mut cancelled_fallback = signed_batch(channel_id, vec![]);
+        cancelled_fallback.cancel_reason = Some(crate::queue::CancelReason::Steer);
+        assert!(
+            TrustedInboundEventEnvelope::from_prompt_batch(Some(&cancelled_fallback)).is_none()
+        );
+        assert_eq!(
+            TrustedInboundEventEnvelope::try_from_prompt_batch(Some(&cancelled_fallback)).err(),
+            Some("cancelled_batch")
+        );
+
+        assert!(TrustedInboundEventEnvelope::from_prompt_batch(None).is_none());
+    }
+
+    #[test]
+    fn ordinary_prompt_params_have_no_trusted_metadata() {
+        let params = build_prompt_params("session", &["hello"], None);
+        assert!(params.get("_meta").is_none());
     }
 
     #[test]
@@ -2585,7 +2915,7 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false, true)
             .await
             .expect("failed to spawn test script")
     }
@@ -3041,7 +3371,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[], false)
+        AcpClient::spawn("cat", &[], &[], false, true)
             .await
             .expect("spawn cat as inert client")
     }
@@ -3099,6 +3429,37 @@ mod tests {
             client.active_run_id().is_none(),
             "explicit null must clear active_run_id"
         );
+        assert_eq!(
+            client.turn_run_id(),
+            Some("run-xyz"),
+            "turn evidence must retain the completed run id"
+        );
+    }
+
+    #[tokio::test]
+    async fn openclaw_session_lineage_and_flat_run_id_are_captured() {
+        let mut client = spawn_inert_client().await;
+        let msg = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "acp-session",
+                "update": {
+                    "sessionUpdate": "session_info_update",
+                    "_meta": {
+                        "sessionKey": "agent:main:buzz-private",
+                        "runId": "gateway-run-42"
+                    }
+                }
+            }
+        });
+        let _ = client.handle_session_update(&msg);
+        assert_eq!(client.active_session_key(), Some("agent:main:buzz-private"));
+        assert_eq!(client.turn_run_id(), Some("gateway-run-42"));
+
+        client.begin_turn_evidence();
+        assert_eq!(client.active_session_key(), Some("agent:main:buzz-private"));
+        assert!(client.turn_run_id().is_none());
     }
 
     #[tokio::test]

@@ -133,6 +133,47 @@ use crate::config::ChannelFilter;
 pub struct ChannelInfo {
     pub name: String,
     pub channel_type: String,
+    /// Positive channel TTL in seconds, when declared by kind-39000 metadata.
+    pub ttl_seconds: Option<u64>,
+    /// Canonical absolute expiry from the `ttl_deadline` metadata tag.
+    pub ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    /// Created-at timestamp of the canonical addressable metadata event.
+    pub metadata_created_at: Option<u64>,
+    /// Event ID of the canonical addressable metadata event.
+    pub metadata_event_id: Option<String>,
+}
+
+impl ChannelInfo {
+    /// Whether metadata proves that this is a currently-live TTL channel.
+    pub fn is_ephemeral(&self) -> bool {
+        self.is_ephemeral_at(chrono::Utc::now())
+    }
+
+    /// Evaluate ephemeral eligibility against an explicit clock.
+    pub fn is_ephemeral_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        self.channel_type == "private"
+            && self.ttl_seconds.is_some_and(|ttl| ttl > 0)
+            && self.ttl_deadline.is_some_and(|deadline| deadline > now)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MetadataCandidate {
+    created_at: u64,
+    event_id: String,
+    name: String,
+    channel_type: String,
+    archived: bool,
+    ttl_seconds: Option<u64>,
+    ttl_deadline: Option<chrono::DateTime<chrono::Utc>>,
+    malformed: bool,
+}
+
+impl MetadataCandidate {
+    fn is_newer_than(&self, other: &Self) -> bool {
+        self.created_at > other.created_at
+            || (self.created_at == other.created_at && self.event_id < other.event_id)
+    }
 }
 
 /// Build the discovered-channel subscribe set from the membership UUIDs and the
@@ -149,49 +190,131 @@ fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
-    let mut meta_map: HashMap<Uuid, (String, String)> = HashMap::new();
-    let mut archived: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+    let mut meta_map: HashMap<Uuid, MetadataCandidate> = HashMap::new();
+    let mut unorderable_channels = HashSet::new();
     if let Some(arr) = meta_events.as_array() {
         for ev in arr {
             let tags = match ev.get("tags").and_then(|t| t.as_array()) {
                 Some(t) => t,
                 None => continue,
             };
-            let mut d_val = None;
             let mut name = None;
             let mut is_hidden = false;
             let mut is_private = false;
             let mut is_archived = false;
+            let mut ttl_seconds = None;
+            let mut ttl_deadline = None;
+            let mut seen_singletons = HashSet::new();
+            let mut referenced_channels = HashSet::new();
+            let mut malformed = false;
             for tag in tags {
-                if let Some(arr) = tag.as_array() {
-                    match arr.first().and_then(|v| v.as_str()) {
-                        Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
-                        Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                        Some("hidden") => is_hidden = true,
-                        Some("private") => is_private = true,
-                        Some("archived") => {
-                            is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
+                let Some(arr) = tag.as_array() else {
+                    continue;
+                };
+                let Some(kind) = arr.first().and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if matches!(
+                    kind,
+                    "d" | "name" | "hidden" | "private" | "archived" | "ttl" | "ttl_deadline"
+                ) && !seen_singletons.insert(kind)
+                {
+                    malformed = true;
+                }
+                match kind {
+                    "d" => {
+                        let value = arr.get(1).and_then(|v| v.as_str());
+                        malformed |= arr.len() != 2 || value.is_none_or(str::is_empty);
+                        if let Some(value) = value {
+                            if let Ok(uuid) = value.parse::<Uuid>() {
+                                referenced_channels.insert(uuid);
+                            } else {
+                                malformed = true;
+                            }
                         }
-                        _ => {}
                     }
+                    "name" => {
+                        name = arr.get(1).and_then(|v| v.as_str());
+                        malformed |= arr.len() != 2 || name.is_none();
+                    }
+                    "hidden" => {
+                        malformed |=
+                            arr.len() > 2 || arr.get(1).is_some_and(|v| v.as_str() != Some(""));
+                        is_hidden = true;
+                    }
+                    "private" => {
+                        malformed |=
+                            arr.len() > 2 || arr.get(1).is_some_and(|v| v.as_str() != Some(""));
+                        is_private = true;
+                    }
+                    "archived" => {
+                        let value = arr.get(1).and_then(|v| v.as_str());
+                        malformed |= arr.len() != 2 || !matches!(value, Some("true" | "false"));
+                        is_archived = value == Some("true");
+                    }
+                    "ttl" => {
+                        ttl_seconds = arr
+                            .get(1)
+                            .and_then(|v| v.as_str())
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .filter(|ttl| *ttl > 0);
+                        malformed |= arr.len() != 2 || ttl_seconds.is_none();
+                    }
+                    "ttl_deadline" => {
+                        ttl_deadline = arr
+                            .get(1)
+                            .and_then(|v| v.as_str())
+                            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                            .map(|deadline| deadline.with_timezone(&chrono::Utc));
+                        malformed |= arr.len() != 2 || ttl_deadline.is_none();
+                    }
+                    _ => {}
                 }
             }
-            if let Some(d) = d_val {
-                if let Ok(uuid) = d.parse::<Uuid>() {
-                    if is_archived {
-                        archived.insert(uuid);
-                        continue;
-                    }
-                    let ch_name = name.unwrap_or("unknown").to_string();
-                    // DMs have the "hidden" tag; private channels have "private".
-                    let ch_type = if is_hidden {
-                        "dm".to_string()
-                    } else if is_private {
-                        "private".to_string()
-                    } else {
-                        "stream".to_string()
-                    };
-                    meta_map.insert(uuid, (ch_name, ch_type));
+            if referenced_channels.is_empty() {
+                continue;
+            }
+            let Some(created_at) = ev.get("created_at").and_then(|value| value.as_u64()) else {
+                for uuid in referenced_channels {
+                    warn!(channel_id = %uuid, "channel metadata missing created_at — failing channel metadata closed");
+                    unorderable_channels.insert(uuid);
+                }
+                continue;
+            };
+            let Some(event_id) = ev.get("id").and_then(|value| value.as_str()).filter(|id| {
+                id.len() == 64 && id.chars().all(|character| character.is_ascii_hexdigit())
+            }) else {
+                for uuid in referenced_channels {
+                    warn!(channel_id = %uuid, "channel metadata missing valid event id — failing channel metadata closed");
+                    unorderable_channels.insert(uuid);
+                }
+                continue;
+            };
+            let ch_name = name.unwrap_or("unknown").to_string();
+            // DMs have the "hidden" tag; private channels have "private".
+            let ch_type = if is_hidden {
+                "dm".to_string()
+            } else if is_private {
+                "private".to_string()
+            } else {
+                "stream".to_string()
+            };
+            let candidate = MetadataCandidate {
+                created_at,
+                event_id: event_id.to_ascii_lowercase(),
+                name: ch_name,
+                channel_type: ch_type,
+                archived: is_archived,
+                ttl_seconds,
+                ttl_deadline,
+                malformed,
+            };
+            for uuid in referenced_channels {
+                let replace = meta_map
+                    .get(&uuid)
+                    .is_none_or(|current| candidate.is_newer_than(current));
+                if replace {
+                    meta_map.insert(uuid, candidate.clone());
                 }
             }
         }
@@ -199,13 +322,42 @@ fn merge_discovered_channels(
 
     let mut map = HashMap::with_capacity(channel_uuids.len());
     for uuid in channel_uuids {
-        if archived.contains(&uuid) {
+        if unorderable_channels.contains(&uuid) {
             continue;
         }
-        let (name, channel_type) = meta_map
-            .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
-        map.insert(uuid, ChannelInfo { name, channel_type });
+        match meta_map.remove(&uuid) {
+            Some(candidate) if candidate.malformed => {
+                warn!(channel_id = %uuid, "canonical channel metadata has ambiguous or malformed singleton tags — failing channel metadata closed");
+                continue;
+            }
+            Some(candidate) if candidate.archived => continue,
+            Some(candidate) => {
+                map.insert(
+                    uuid,
+                    ChannelInfo {
+                        name: candidate.name,
+                        channel_type: candidate.channel_type,
+                        ttl_seconds: candidate.ttl_seconds,
+                        ttl_deadline: candidate.ttl_deadline,
+                        metadata_created_at: Some(candidate.created_at),
+                        metadata_event_id: Some(candidate.event_id),
+                    },
+                );
+            }
+            None => {
+                map.insert(
+                    uuid,
+                    ChannelInfo {
+                        name: "unknown".to_string(),
+                        channel_type: "stream".to_string(),
+                        ttl_seconds: None,
+                        ttl_deadline: None,
+                        metadata_created_at: None,
+                        metadata_event_id: None,
+                    },
+                );
+            }
+        }
     }
     map
 }
@@ -224,6 +376,17 @@ pub struct RestClient {
     pub keys: Keys,
     /// Optional NIP-OA auth tag JSON for `x-auth-tag` header (relay membership delegation).
     pub auth_tag_json: Option<String>,
+}
+
+/// Durable reply evidence read back from the relay event log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchoredReply {
+    /// Hex event ID of the verified agent-authored reply event.
+    pub event_id: String,
+    /// Effective NIP-10 `reply` anchor used for relay readback. This can be the
+    /// thread root rather than the triggering request when a follow-up turn is
+    /// deliberately flattened onto its existing thread.
+    pub reply_to: String,
 }
 
 /// Whether an HTTP status code is retriable (transient server/rate-limit errors).
@@ -393,6 +556,28 @@ impl RestClient {
             .map_err(|e| RelayError::Http(e.to_string()))
     }
 
+    /// Query agent-authored kind-9 replies with an exact NIP-10 `reply` anchor.
+    pub async fn query_anchored_replies(
+        &self,
+        channel_id: Uuid,
+        author: nostr::PublicKey,
+        request_event_id: &str,
+    ) -> Result<Vec<AnchoredReply>, RelayError> {
+        use nostr::{Alphabet, SingleLetterTag};
+
+        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+        let e_tag = SingleLetterTag::lowercase(Alphabet::E);
+        let channel = channel_id.to_string();
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16))
+            .author(author)
+            .custom_tags(h_tag, [channel.as_str()])
+            .custom_tags(e_tag, [request_event_id])
+            .limit(3);
+        let response = self.query(&[filter]).await?;
+        parse_anchored_replies(&response, channel_id, author, request_event_id)
+    }
+
     /// Submit a signed event via the HTTP bridge: `POST /events` with NIP-98 auth.
     ///
     /// The event must already be signed. Returns the relay response JSON.
@@ -409,6 +594,62 @@ impl RestClient {
         }
         serde_json::from_str(&text).map_err(|e| RelayError::Http(e.to_string()))
     }
+}
+
+fn parse_anchored_replies(
+    response: &Value,
+    channel_id: Uuid,
+    author: nostr::PublicKey,
+    request_event_id: &str,
+) -> Result<Vec<AnchoredReply>, RelayError> {
+    let events = response
+        .as_array()
+        .ok_or_else(|| RelayError::Http("expected JSON array from /query (replies)".into()))?;
+    let mut replies = Vec::new();
+    let expected_channel = channel_id.to_string();
+    for value in events {
+        let Ok(event) = serde_json::from_value::<Event>(value.clone()) else {
+            continue;
+        };
+        if event.verify().is_err()
+            || event.kind.as_u16() as u32 != buzz_core::kind::KIND_STREAM_MESSAGE
+            || event.pubkey != author
+        {
+            continue;
+        }
+        let mut h_tag_count = 0;
+        let mut exact_channel = false;
+        for tag in event.tags.iter() {
+            let values = tag.as_slice();
+            if values.first().map(|value| value.as_str()) == Some("h") {
+                h_tag_count += 1;
+                exact_channel =
+                    values.get(1).map(|value| value.as_str()) == Some(expected_channel.as_str());
+            }
+        }
+        let mut reply_anchor_count = 0;
+        let mut exact_reply = false;
+        for tag in event.tags.iter() {
+            let values = tag.as_slice();
+            if values.first().map(|value| value.as_str()) == Some("e")
+                && values.get(3).map(|value| value.as_str()) == Some("reply")
+            {
+                reply_anchor_count += 1;
+                exact_reply = values.len() == 4
+                    && values.get(1).map(|value| value.as_str()) == Some(request_event_id)
+                    && values.get(2).map(|value| value.as_str()) == Some("");
+            }
+        }
+        if h_tag_count == 1 && exact_channel && reply_anchor_count == 1 && exact_reply {
+            replies.push(AnchoredReply {
+                event_id: event.id.to_hex(),
+                reply_to: request_event_id.to_ascii_lowercase(),
+            });
+        }
+    }
+    replies.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+    replies.dedup_by(|left, right| left.event_id == right.event_id);
+    Ok(replies)
 }
 
 /// Events the harness cares about.
@@ -698,6 +939,25 @@ impl HarnessRelay {
 
         debug!("discovered {} channel(s)", map.len());
         Ok(map)
+    }
+
+    /// Fetch metadata for a newly invited channel. Missing, malformed, or
+    /// archived metadata returns `None`, allowing admission to fail closed.
+    pub async fn fetch_channel_info(
+        &self,
+        channel_id: Uuid,
+    ) -> Result<Option<ChannelInfo>, RelayError> {
+        use nostr::{Alphabet, SingleLetterTag};
+
+        let d_tag = SingleLetterTag::lowercase(Alphabet::D);
+        let channel = channel_id.to_string();
+        let filter = nostr::Filter::new()
+            .kind(Kind::Custom(
+                buzz_core::kind::KIND_NIP29_GROUP_METADATA as u16,
+            ))
+            .custom_tags(d_tag, [channel.as_str()]);
+        let events = self.rest_client().query(&[filter]).await?;
+        Ok(merge_discovered_channels(vec![channel_id], &events).remove(&channel_id))
     }
 
     /// Build a [`RestClient`] that shares this relay's HTTP credentials.
@@ -4056,6 +4316,16 @@ mod tests {
     }
 
     fn meta_event(uuid: Uuid, name: &str, extra: &[&str]) -> serde_json::Value {
+        meta_event_at(uuid, name, extra, 100, 'a')
+    }
+
+    fn meta_event_at(
+        uuid: Uuid,
+        name: &str,
+        extra: &[&str],
+        created_at: u64,
+        id_character: char,
+    ) -> serde_json::Value {
         let mut tags = vec![
             serde_json::json!(["d", uuid.to_string()]),
             serde_json::json!(["name", name]),
@@ -4068,7 +4338,11 @@ mod tests {
                 _ => {}
             }
         }
-        serde_json::json!({ "tags": tags })
+        serde_json::json!({
+            "id": id_character.to_string().repeat(64),
+            "created_at": created_at,
+            "tags": tags
+        })
     }
 
     #[test]
@@ -4110,6 +4384,364 @@ mod tests {
     }
 
     #[test]
+    fn merge_discovered_channels_marks_positive_ttl_ephemeral() {
+        let huddle = Uuid::new_v4();
+        let ordinary = Uuid::new_v4();
+        let meta = serde_json::json!([
+            meta_event(
+                huddle,
+                "huddle",
+                &[
+                    "private",
+                    "",
+                    "ttl",
+                    "3600",
+                    "ttl_deadline",
+                    "2999-01-01T00:00:00Z"
+                ]
+            ),
+            meta_event(ordinary, "concilium", &["private", ""]),
+        ]);
+
+        let map = merge_discovered_channels(vec![huddle, ordinary], &meta);
+
+        assert!(map[&huddle].is_ephemeral());
+        assert_eq!(map[&huddle].ttl_seconds, Some(3600));
+        assert!(map[&huddle].ttl_deadline.is_some());
+        assert!(!map[&ordinary].is_ephemeral());
+    }
+
+    #[test]
+    fn merge_discovered_channels_requires_future_deadline() {
+        let missing = Uuid::new_v4();
+        let expired = Uuid::new_v4();
+        let malformed = Uuid::new_v4();
+        let meta = serde_json::json!([
+            meta_event(missing, "missing", &["ttl", "3600"]),
+            meta_event(
+                expired,
+                "expired",
+                &["ttl", "3600", "ttl_deadline", "2000-01-01T00:00:00Z"]
+            ),
+            meta_event(
+                malformed,
+                "malformed",
+                &["ttl", "3600", "ttl_deadline", "tomorrow"]
+            ),
+        ]);
+
+        let map = merge_discovered_channels(vec![missing, expired, malformed], &meta);
+        assert!(!map[&missing].is_ephemeral());
+        assert!(!map[&expired].is_ephemeral());
+        assert!(
+            !map.contains_key(&malformed),
+            "a malformed deadline fails the channel metadata closed"
+        );
+    }
+
+    #[test]
+    fn merge_discovered_channels_selects_canonical_latest_metadata() {
+        let channel = Uuid::new_v4();
+        let latest = meta_event_at(
+            channel,
+            "latest",
+            &[
+                "private",
+                "",
+                "ttl",
+                "3600",
+                "ttl_deadline",
+                "2999-01-01T00:00:00Z",
+            ],
+            200,
+            'b',
+        );
+        let stale = meta_event_at(
+            channel,
+            "stale",
+            &[
+                "private",
+                "",
+                "ttl",
+                "3600",
+                "ttl_deadline",
+                "2000-01-01T00:00:00Z",
+            ],
+            100,
+            'a',
+        );
+
+        let forward = merge_discovered_channels(
+            vec![channel],
+            &serde_json::json!([stale.clone(), latest.clone()]),
+        );
+        let reverse = merge_discovered_channels(vec![channel], &serde_json::json!([latest, stale]));
+        assert_eq!(forward[&channel].name, "latest");
+        assert_eq!(reverse[&channel].name, "latest");
+        assert_eq!(
+            forward[&channel].metadata_event_id,
+            reverse[&channel].metadata_event_id
+        );
+        assert!(forward[&channel].is_ephemeral());
+    }
+
+    #[test]
+    fn merge_discovered_channels_latest_archived_metadata_revokes_channel() {
+        let channel = Uuid::new_v4();
+        let live = meta_event_at(
+            channel,
+            "live",
+            &["ttl", "3600", "ttl_deadline", "2999-01-01T00:00:00Z"],
+            100,
+            'a',
+        );
+        let archived = meta_event_at(channel, "archived", &["archived", "true"], 200, 'b');
+
+        let map = merge_discovered_channels(vec![channel], &serde_json::json!([archived, live]));
+        assert!(!map.contains_key(&channel));
+    }
+
+    #[test]
+    fn merge_discovered_channels_same_second_uses_lower_event_id() {
+        let channel = Uuid::new_v4();
+        let lower = meta_event_at(channel, "canonical", &["private", ""], 200, 'a');
+        let higher = meta_event_at(channel, "loser", &["archived", "true"], 200, 'b');
+        let forward = merge_discovered_channels(
+            vec![channel],
+            &serde_json::json!([higher.clone(), lower.clone()]),
+        );
+        let reverse = merge_discovered_channels(vec![channel], &serde_json::json!([lower, higher]));
+        assert_eq!(forward[&channel].name, "canonical");
+        assert_eq!(reverse[&channel].name, "canonical");
+    }
+
+    #[test]
+    fn merge_discovered_channels_requires_private_ttl_metadata() {
+        let public = Uuid::new_v4();
+        let private = Uuid::new_v4();
+        let deadline = ["ttl", "3600", "ttl_deadline", "2999-01-01T00:00:00Z"];
+        let meta = serde_json::json!([
+            meta_event(public, "public", &deadline),
+            meta_event(
+                private,
+                "private",
+                &[
+                    "private",
+                    "",
+                    "ttl",
+                    "3600",
+                    "ttl_deadline",
+                    "2999-01-01T00:00:00Z"
+                ]
+            )
+        ]);
+        let map = merge_discovered_channels(vec![public, private], &meta);
+        assert!(!map[&public].is_ephemeral());
+        assert!(map[&private].is_ephemeral());
+    }
+
+    #[test]
+    fn merge_discovered_channels_malformed_candidate_fails_channel_closed() {
+        let channel = Uuid::new_v4();
+        let valid = meta_event_at(channel, "valid", &["private", ""], 100, 'a');
+        let malformed = serde_json::json!({
+            "created_at": 200,
+            "tags": [["d", channel.to_string()], ["private", ""]]
+        });
+        let map = merge_discovered_channels(vec![channel], &serde_json::json!([valid, malformed]));
+        assert!(!map.contains_key(&channel));
+    }
+
+    #[test]
+    fn merge_discovered_channels_rejects_zero_or_invalid_ttl() {
+        let zero = Uuid::new_v4();
+        let invalid = Uuid::new_v4();
+        let meta = serde_json::json!([
+            meta_event(zero, "zero", &["ttl", "0"]),
+            meta_event(invalid, "invalid", &["ttl", "later"]),
+        ]);
+
+        let map = merge_discovered_channels(vec![zero, invalid], &meta);
+        assert!(!map.contains_key(&zero));
+        assert!(!map.contains_key(&invalid));
+    }
+
+    #[test]
+    fn merge_discovered_channels_rejects_duplicate_or_malformed_singletons() {
+        let duplicate_ttl = Uuid::new_v4();
+        let contradictory_archive = Uuid::new_v4();
+        let malformed_private = Uuid::new_v4();
+        let duplicate_d = Uuid::new_v4();
+        let other_d = Uuid::new_v4();
+
+        let mut duplicate_ttl_event = meta_event(
+            duplicate_ttl,
+            "duplicate ttl",
+            &[
+                "private",
+                "",
+                "ttl",
+                "3600",
+                "ttl_deadline",
+                "2999-01-01T00:00:00Z",
+            ],
+        );
+        duplicate_ttl_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["ttl", "7200"]));
+
+        let mut contradictory_archive_event = meta_event(
+            contradictory_archive,
+            "archive conflict",
+            &["archived", "false"],
+        );
+        contradictory_archive_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["archived", "true"]));
+
+        let mut malformed_private_event = meta_event(malformed_private, "bad private", &[]);
+        malformed_private_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["private", "true"]));
+
+        let mut duplicate_d_event = meta_event(duplicate_d, "duplicate d", &[]);
+        duplicate_d_event["tags"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!(["d", other_d.to_string()]));
+
+        let map = merge_discovered_channels(
+            vec![
+                duplicate_ttl,
+                contradictory_archive,
+                malformed_private,
+                duplicate_d,
+                other_d,
+            ],
+            &serde_json::json!([
+                duplicate_ttl_event,
+                contradictory_archive_event,
+                malformed_private_event,
+                duplicate_d_event,
+            ]),
+        );
+        for channel in [
+            duplicate_ttl,
+            contradictory_archive,
+            malformed_private,
+            duplicate_d,
+            other_d,
+        ] {
+            assert!(
+                !map.contains_key(&channel),
+                "ambiguous singleton metadata must fail {channel} closed"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_discovered_channels_validates_only_the_canonical_latest_candidate() {
+        let recovered = Uuid::new_v4();
+        let poisoned = Uuid::new_v4();
+        let valid_latest = meta_event_at(recovered, "recovered", &["private", ""], 200, 'b');
+        let valid_stale = meta_event_at(poisoned, "stale", &["private", ""], 100, 'a');
+        let mut malformed_stale = meta_event_at(recovered, "bad stale", &[], 100, 'a');
+        malformed_stale["tags"].as_array_mut().unwrap().extend([
+            serde_json::json!(["ttl", "1"]),
+            serde_json::json!(["ttl", "2"]),
+        ]);
+        let mut malformed_latest = meta_event_at(poisoned, "bad latest", &[], 200, 'b');
+        malformed_latest["tags"].as_array_mut().unwrap().extend([
+            serde_json::json!(["archived", "false"]),
+            serde_json::json!(["archived", "true"]),
+        ]);
+
+        for events in [
+            serde_json::json!([
+                malformed_stale.clone(),
+                valid_latest.clone(),
+                valid_stale.clone(),
+                malformed_latest.clone(),
+            ]),
+            serde_json::json!([malformed_latest, valid_stale, valid_latest, malformed_stale]),
+        ] {
+            let map = merge_discovered_channels(vec![recovered, poisoned], &events);
+            assert_eq!(map[&recovered].name, "recovered");
+            assert!(!map.contains_key(&poisoned));
+        }
+    }
+
+    #[test]
+    fn merge_discovered_channels_covers_all_singleton_shapes() {
+        let duplicate_name = Uuid::new_v4();
+        let malformed_hidden = Uuid::new_v4();
+        let duplicate_deadline = Uuid::new_v4();
+        let invalid_archived = Uuid::new_v4();
+        let canonical_private = Uuid::new_v4();
+        let canonical_hidden = Uuid::new_v4();
+
+        let mut events = vec![];
+        for (channel, extra_tag) in [
+            (duplicate_name, serde_json::json!(["name", "again"])),
+            (malformed_hidden, serde_json::json!(["hidden", "true"])),
+            (
+                duplicate_deadline,
+                serde_json::json!(["ttl_deadline", "2998-01-01T00:00:00Z"]),
+            ),
+            (invalid_archived, serde_json::json!(["archived", "yes"])),
+        ] {
+            let mut event = meta_event(channel, "base", &["ttl_deadline", "2999-01-01T00:00:00Z"]);
+            event["tags"].as_array_mut().unwrap().push(extra_tag);
+            events.push(event);
+        }
+        events.push(serde_json::json!({
+            "id": "e".repeat(64),
+            "created_at": 100,
+            "tags": [
+                ["d", canonical_private.to_string()],
+                ["name", "private marker"],
+                ["private"],
+                ["ttl", "3600"],
+                ["ttl_deadline", "2999-01-01T00:00:00Z"]
+            ]
+        }));
+        events.push(serde_json::json!({
+            "id": "f".repeat(64),
+            "created_at": 100,
+            "tags": [
+                ["d", canonical_hidden.to_string()],
+                ["name", "hidden marker"],
+                ["hidden"]
+            ]
+        }));
+
+        let map = merge_discovered_channels(
+            vec![
+                duplicate_name,
+                malformed_hidden,
+                duplicate_deadline,
+                invalid_archived,
+                canonical_private,
+                canonical_hidden,
+            ],
+            &serde_json::Value::Array(events),
+        );
+        for channel in [
+            duplicate_name,
+            malformed_hidden,
+            duplicate_deadline,
+            invalid_archived,
+        ] {
+            assert!(!map.contains_key(&channel));
+        }
+        assert!(map[&canonical_private].is_ephemeral());
+        assert_eq!(map[&canonical_hidden].channel_type, "dm");
+    }
+
+    #[test]
     fn merge_discovered_channels_archived_false_is_kept() {
         // An explicit archived=false (e.g. after unarchive) must NOT be skipped.
         let ch = Uuid::new_v4();
@@ -4118,6 +4750,154 @@ mod tests {
         let map = merge_discovered_channels(vec![ch], &meta);
 
         assert!(map.contains_key(&ch), "archived=false is treated as live");
+    }
+
+    fn signed_reply_event(keys: &Keys, channel: Uuid, request_id: &str, marker: &str) -> Event {
+        EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "reply",
+        )
+        .tags([
+            Tag::parse(["h".to_string(), channel.to_string()]).unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                request_id.to_string(),
+                String::new(),
+                marker.to_string(),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap()
+    }
+
+    #[test]
+    fn anchored_reply_parser_verifies_signature_author_channel_and_marker() {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let request = "a".repeat(64);
+        let valid = signed_reply_event(&keys, channel, &request, "reply");
+        let parsed = parse_anchored_replies(
+            &serde_json::json!([valid]),
+            channel,
+            keys.public_key(),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].reply_to, request);
+
+        let wrong_marker = signed_reply_event(&keys, channel, &request, "root");
+        let wrong_channel = signed_reply_event(&keys, Uuid::new_v4(), &request, "reply");
+        let wrong_author = signed_reply_event(&Keys::generate(), channel, &request, "reply");
+        let mut tampered =
+            serde_json::to_value(signed_reply_event(&keys, channel, &request, "reply")).unwrap();
+        tampered["content"] = serde_json::json!("tampered");
+        let rejected = parse_anchored_replies(
+            &serde_json::json!([wrong_marker, wrong_channel, wrong_author, tampered]),
+            channel,
+            keys.public_key(),
+            &request,
+        )
+        .unwrap();
+        assert!(rejected.is_empty());
+
+        let malformed_extra_h = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "reply",
+        )
+        .tags([
+            Tag::parse(["h".to_string(), channel.to_string()]).unwrap(),
+            Tag::parse(["h".to_string()]).unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                request.clone(),
+                String::new(),
+                "reply".to_string(),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+        assert!(parse_anchored_replies(
+            &serde_json::json!([malformed_extra_h]),
+            channel,
+            keys.public_key(),
+            &request,
+        )
+        .unwrap()
+        .is_empty());
+    }
+
+    #[test]
+    fn anchored_reply_parser_preserves_multiple_distinct_replies_for_fail_closed_receipt() {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let request = "a".repeat(64);
+        let first = signed_reply_event(&keys, channel, &request, "reply");
+        let second = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "second",
+        )
+        .tags([
+            Tag::parse(["h".to_string(), channel.to_string()]).unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                request.clone(),
+                String::new(),
+                "reply".to_string(),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+        let replies = parse_anchored_replies(
+            &serde_json::json!([first, second]),
+            channel,
+            keys.public_key(),
+            &request,
+        )
+        .unwrap();
+        assert_eq!(replies.len(), 2);
+    }
+
+    #[test]
+    fn anchored_reply_parser_rejects_multiple_reply_markers_in_one_event() {
+        let keys = Keys::generate();
+        let channel = Uuid::new_v4();
+        let request = "a".repeat(64);
+        let ambiguous = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "ambiguous",
+        )
+        .tags([
+            Tag::parse(["h".to_string(), channel.to_string()]).unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                request.clone(),
+                String::new(),
+                "reply".to_string(),
+            ])
+            .unwrap(),
+            Tag::parse([
+                "e".to_string(),
+                "b".repeat(64),
+                String::new(),
+                "reply".to_string(),
+            ])
+            .unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+        assert!(parse_anchored_replies(
+            &serde_json::json!([ambiguous]),
+            channel,
+            keys.public_key(),
+            &request,
+        )
+        .unwrap()
+        .is_empty());
     }
 
     #[test]

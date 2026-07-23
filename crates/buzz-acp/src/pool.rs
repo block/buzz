@@ -31,6 +31,7 @@ use uuid::Uuid;
 use crate::acp::{
     extract_model_config_options, extract_model_state, model_in_catalog,
     resolve_model_switch_method, AcpClient, AcpError, McpServer, ModelSwitchMethod, StopReason,
+    TrustedInboundEventEnvelope,
 };
 use crate::config::{DedupMode, PermissionMode};
 use crate::observer;
@@ -473,6 +474,13 @@ pub struct PromptContext {
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
+    /// Opt-in durable-evidence readback for OpenClaw-authored Buzz replies.
+    pub turn_receipts: bool,
+    /// Fixed Gateway session key that ACP lineage evidence must match.
+    pub expected_gateway_session_key: Option<String>,
+    /// Attach one verified triggering event as non-model ACP metadata.
+    pub trusted_inbound_envelope: bool,
+
     /// Relay URL this harness is connected to. Rides in observer payloads that
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
@@ -742,6 +750,221 @@ const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Number of relay readbacks used to resolve an out-of-band Buzz CLI reply.
+const RECEIPT_REPLY_READBACK_ATTEMPTS: usize = 5;
+/// Delay between successful relay queries that have not observed the reply yet.
+const RECEIPT_REPLY_READBACK_DELAY: Duration = Duration::from_millis(200);
+
+fn merge_anchored_replies(
+    accumulated: &mut Vec<crate::relay::AnchoredReply>,
+    observed: Vec<crate::relay::AnchoredReply>,
+) {
+    for reply in observed {
+        if !accumulated
+            .iter()
+            .any(|existing| existing.event_id == reply.event_id)
+        {
+            accumulated.push(reply);
+        }
+    }
+    accumulated.sort_by(|left, right| left.event_id.cmp(&right.event_id));
+}
+
+fn closed_receipt_payload(
+    request_event_ids: &[String],
+    reply_events: &[crate::relay::AnchoredReply],
+    gateway_session_key: Option<&str>,
+    expected_gateway_session_key: Option<&str>,
+    run_id: Option<&str>,
+    acp_session_id: &str,
+    turn_id: &str,
+) -> serde_json::Value {
+    let failure = |reason: &str| {
+        serde_json::json!({
+            "status": "failed",
+            "reason": reason,
+            "requestEventIds": request_event_ids,
+            "schemaVersion": 1,
+            "acpSessionId": acp_session_id,
+            "turnId": turn_id,
+        })
+    };
+    if request_event_ids.len() != 1 {
+        return failure("receipt_requires_exactly_one_request");
+    }
+    if reply_events.len() != 1 {
+        return failure(if reply_events.is_empty() {
+            "receipt_requires_one_anchored_reply_found_zero"
+        } else {
+            "receipt_requires_one_anchored_reply_found_multiple"
+        });
+    }
+    let Some(gateway_session_key) = gateway_session_key.filter(|value| !value.is_empty()) else {
+        return failure("gateway_session_key_evidence_missing");
+    };
+    let Some(expected_gateway_session_key) =
+        expected_gateway_session_key.filter(|value| !value.is_empty())
+    else {
+        return failure("expected_gateway_session_key_missing");
+    };
+    if gateway_session_key != expected_gateway_session_key {
+        return failure("gateway_session_key_mismatch");
+    }
+    let Some(run_id) = run_id.filter(|value| !value.is_empty()) else {
+        return failure("gateway_run_id_evidence_missing");
+    };
+    serde_json::json!({
+        "status": "closed",
+        "schemaVersion": 1,
+        "requestEventId": request_event_ids[0],
+        "replyEventId": reply_events[0].event_id,
+        "replyAnchor": reply_events[0].reply_to,
+        "gatewaySessionKey": gateway_session_key,
+        "expectedGatewaySessionKey": expected_gateway_session_key,
+        "runId": run_id,
+        "acpSessionId": acp_session_id,
+        "turnId": turn_id,
+    })
+}
+
+struct ReplyReadbackScope<'a> {
+    expected_reply_anchor: Option<&'a str>,
+    prior_reply_event_ids: Result<&'a HashSet<String>, &'a str>,
+}
+
+async fn observe_closed_turn_receipt(
+    agent: &AcpClient,
+    ctx: &PromptContext,
+    channel_id: Uuid,
+    request_event_ids: &[String],
+    readback_scope: ReplyReadbackScope<'_>,
+    acp_session_id: &str,
+    turn_id: &str,
+) {
+    let mut replies = Vec::new();
+    if request_event_ids.len() == 1 {
+        let Some(expected_reply_anchor) =
+            receipt_query_anchor(request_event_ids, readback_scope.expected_reply_anchor)
+        else {
+            agent.observe(
+                "turn_receipt",
+                closed_receipt_payload(
+                    request_event_ids,
+                    &replies,
+                    agent.active_session_key(),
+                    ctx.expected_gateway_session_key.as_deref(),
+                    agent.active_run_id(),
+                    acp_session_id,
+                    turn_id,
+                ),
+            );
+            return;
+        };
+        let prior_reply_event_ids = match readback_scope.prior_reply_event_ids {
+            Ok(ids) => ids,
+            Err(error) => {
+                agent.observe(
+                    "turn_receipt",
+                    serde_json::json!({
+                        "status": "failed",
+                        "reason": "reply_evidence_baseline_query_failed",
+                        "requestEventIds": request_event_ids,
+                        "error": error,
+                    }),
+                );
+                return;
+            }
+        };
+        for attempt in 0..RECEIPT_REPLY_READBACK_ATTEMPTS {
+            match ctx
+                .rest_client
+                .query_anchored_replies(
+                    channel_id,
+                    ctx.agent_keys.public_key(),
+                    expected_reply_anchor,
+                )
+                .await
+            {
+                Ok(found) => {
+                    let found = replies_for_current_turn(found, prior_reply_event_ids);
+                    merge_anchored_replies(&mut replies, found);
+                    // Multiple distinct replies can never recover to a valid
+                    // receipt, so fail early. A single reply must remain under
+                    // observation for the complete bounded quiescence window
+                    // so a delayed duplicate cannot escape cardinality checks.
+                    if replies.len() > 1 {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    agent.observe(
+                        "turn_receipt",
+                        serde_json::json!({
+                            "status": "failed",
+                            "reason": "reply_evidence_query_failed",
+                            "requestEventIds": request_event_ids,
+                            "error": error.to_string(),
+                        }),
+                    );
+                    return;
+                }
+            }
+            if attempt + 1 < RECEIPT_REPLY_READBACK_ATTEMPTS {
+                tokio::time::sleep(RECEIPT_REPLY_READBACK_DELAY).await;
+            }
+        }
+    }
+    agent.observe(
+        "turn_receipt",
+        closed_receipt_payload(
+            request_event_ids,
+            &replies,
+            agent.active_session_key(),
+            ctx.expected_gateway_session_key.as_deref(),
+            agent.turn_run_id(),
+            acp_session_id,
+            turn_id,
+        ),
+    );
+}
+
+fn replies_for_current_turn(
+    mut replies: Vec<crate::relay::AnchoredReply>,
+    prior_reply_event_ids: &HashSet<String>,
+) -> Vec<crate::relay::AnchoredReply> {
+    replies.retain(|reply| !prior_reply_event_ids.contains(&reply.event_id));
+    replies
+}
+
+async fn capture_prior_reply_event_ids(
+    ctx: &PromptContext,
+    source: &PromptSource,
+    request_event_ids: &[String],
+    expected_reply_anchor: Option<&str>,
+) -> Result<HashSet<String>, String> {
+    let PromptSource::Channel(channel_id) = source else {
+        return Ok(HashSet::new());
+    };
+    let Some(anchor) = receipt_query_anchor(request_event_ids, expected_reply_anchor) else {
+        return Ok(HashSet::new());
+    };
+    ctx.rest_client
+        .query_anchored_replies(*channel_id, ctx.agent_keys.public_key(), anchor)
+        .await
+        .map(|replies| replies.into_iter().map(|reply| reply.event_id).collect())
+        .map_err(|error| error.to_string())
+}
+
+fn receipt_query_anchor<'a>(
+    request_event_ids: &[String],
+    expected_reply_anchor: Option<&'a str>,
+) -> Option<&'a str> {
+    (request_event_ids.len() == 1)
+        .then_some(expected_reply_anchor)
+        .flatten()
+        .filter(|anchor| !anchor.is_empty())
+}
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
@@ -1261,6 +1484,54 @@ pub async fn run_prompt_task(
         turn_id.clone(),
     );
 
+    // Install reaction cleanup before trusted admission can return. Refused
+    // events are terminal and must not retain a stale seen/typing marker.
+    let reaction_ids: Vec<String> = batch
+        .as_ref()
+        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .unwrap_or_default();
+    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+
+    let trusted_inbound_envelope = if ctx.trusted_inbound_envelope {
+        match &source {
+            PromptSource::Heartbeat => None,
+            PromptSource::Channel(_) => {
+                match TrustedInboundEventEnvelope::try_from_prompt_batch(batch.as_ref()) {
+                    Ok(envelope) => Some(envelope),
+                    Err(reason) => {
+                        tracing::warn!(
+                            refusal_code = reason,
+                            "trusted inbound event envelope refused"
+                        );
+                        agent.acp.observe(
+                            "trusted_inbound_event_refused",
+                            serde_json::json!({ "refusalCode": reason }),
+                        );
+                        send_prompt_result(
+                            &result_tx,
+                            &turn_id,
+                            agent,
+                            source,
+                            PromptOutcome::Error(AcpError::TrustedInboundEventRefused(reason)),
+                            None,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+    } else {
+        None
+    };
+
+    // Trusted turns defer 👀 until signed-event admission succeeds. Awaiting
+    // it here orders the add before ReactionGuard can remove it.
+    if trusted_inbound_envelope.is_some() {
+        for event_id in &reaction_ids {
+            reaction_add(&ctx.rest_client, event_id, REACTION_SEEN).await;
+        }
+    }
+
     // Start liveness with `turn_started`, not the final session/prompt call:
     // session creation, context fetches, and an initial message can themselves
     // take longer than the desktop's bounded prune pause. This future is pinned
@@ -1288,15 +1559,6 @@ pub async fn run_prompt_task(
     );
     let liveness_handle = tokio::spawn(liveness);
     let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
-
-    // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
-    // See `ReactionGuard` docs for ordering guarantees and known edge cases.
-    let reaction_ids: Vec<String> = batch
-        .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
-        .unwrap_or_default();
-    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -1674,6 +1936,7 @@ pub async fn run_prompt_task(
     // (`prompt[0].text.startsWith("/")`) fires; the wrapped Buzz context
     // follows as a second block.
     let mut slash_command: Option<String> = None;
+    let mut expected_reply_anchor: Option<String> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
         // Heartbeats create their session before this point, so a Goose method-not-found
         // probe has already selected the correct framing for this process.
@@ -1723,20 +1986,20 @@ pub async fn run_prompt_task(
             );
         }
 
-        crate::queue::format_prompt(
-            b,
-            &crate::queue::FormatPromptArgs {
-                agent_core: agent_core.as_deref(),
-                channel_info: channel_info.as_ref(),
-                conversation_context: conversation_context.as_ref(),
-                profile_lookup: profile_lookup.as_ref(),
-                has_system_prompt_support: agent.has_system_prompt_support(),
-                base_prompt: ctx.base_prompt,
-                system_prompt: ctx.system_prompt.as_deref(),
-                team_instructions: ctx.team_instructions.as_deref(),
-                agent_canvas: agent_canvas.as_deref(),
-            },
-        )
+        let format_args = crate::queue::FormatPromptArgs {
+            agent_core: agent_core.as_deref(),
+            channel_info: channel_info.as_ref(),
+            conversation_context: conversation_context.as_ref(),
+            profile_lookup: profile_lookup.as_ref(),
+            turn_receipts: ctx.turn_receipts,
+            has_system_prompt_support: agent.has_system_prompt_support(),
+            base_prompt: ctx.base_prompt,
+            system_prompt: ctx.system_prompt.as_deref(),
+            team_instructions: ctx.team_instructions.as_deref(),
+            agent_canvas: agent_canvas.as_deref(),
+        };
+        expected_reply_anchor = crate::queue::resolve_turn_reply_anchor(b, &format_args);
+        crate::queue::format_prompt(b, &format_args)
     } else {
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
@@ -1775,18 +2038,37 @@ pub async fn run_prompt_task(
         None => prompt_sections.iter().map(String::as_str).collect(),
     };
 
+    // Snapshot replies that already exist at this turn's effective anchor.
+    // Thread-root follow-ups intentionally reuse a stable NIP-10 anchor, so
+    // anchor-only readback would otherwise count replies from earlier turns.
+    // The post-turn receipt subtracts this exact baseline and closes only over
+    // reply events first observed for the current turn.
+    let prior_reply_event_ids = if ctx.turn_receipts {
+        capture_prior_reply_event_ids(
+            &ctx,
+            &source,
+            &triggering_event_ids,
+            expected_reply_anchor.as_deref(),
+        )
+        .await
+    } else {
+        Ok(HashSet::new())
+    };
+
     // When control_rx is Some (channel tasks), wrap the prompt in select! so
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
     //
+    agent.acp.begin_turn_evidence();
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_idle_timeout_and_meta(
                     &session_id,
                     &prompt_blocks,
+                    trusted_inbound_envelope.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -1795,9 +2077,10 @@ pub async fn run_prompt_task(
         Some(rx) => {
             tokio::select! {
                 biased;
-                result = agent.acp.session_prompt_blocks_with_idle_timeout(
+                result = agent.acp.session_prompt_blocks_with_idle_timeout_and_meta(
                     &session_id,
                     &prompt_blocks,
+                    trusted_inbound_envelope.as_ref(),
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
@@ -1917,6 +2200,25 @@ pub async fn run_prompt_task(
                             &source,
                             &control_signal,
                         );
+                        if ctx.turn_receipts {
+                            if let PromptSource::Channel(channel_id) = &source {
+                                observe_closed_turn_receipt(
+                                    &agent.acp,
+                                    &ctx,
+                                    *channel_id,
+                                    &triggering_event_ids,
+                                    ReplyReadbackScope {
+                                        expected_reply_anchor: expected_reply_anchor.as_deref(),
+                                        prior_reply_event_ids: prior_reply_event_ids
+                                            .as_ref()
+                                            .map_err(String::as_str),
+                                    },
+                                    &session_id,
+                                    &turn_id,
+                                )
+                                .await;
+                            }
+                        }
                         let usage = agent.acp.take_turn_usage();
                         publish_agent_turn_metric(
                             &ctx,
@@ -1945,6 +2247,30 @@ pub async fn run_prompt_task(
     match prompt_result {
         Ok(stop_reason) => {
             log_stop_reason(&source, &stop_reason);
+
+            // OpenClaw publishes its Buzz reply out of band through buzz-cli.
+            // Close the observer receipt from durable relay evidence before the
+            // agent is returned to the pool. Other ACP adapters retain their
+            // existing behavior and do not pay for this readback.
+            if ctx.turn_receipts {
+                if let PromptSource::Channel(channel_id) = &source {
+                    observe_closed_turn_receipt(
+                        &agent.acp,
+                        &ctx,
+                        *channel_id,
+                        &triggering_event_ids,
+                        ReplyReadbackScope {
+                            expected_reply_anchor: expected_reply_anchor.as_deref(),
+                            prior_reply_event_ids: prior_reply_event_ids
+                                .as_ref()
+                                .map_err(String::as_str),
+                        },
+                        &session_id,
+                        &turn_id,
+                    )
+                    .await;
+                }
+            }
 
             let should_rotate = matches!(
                 stop_reason,
@@ -3066,11 +3392,9 @@ fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
 /// 💬 (`react_working`) is fire-and-forget (spawned before the prompt fires).
 /// A brief race where 💬 appears slightly after the agent starts is acceptable.
 ///
-/// 👀 (`react_seen`) is fire-and-forget from `main.rs` at queue-push time.
-/// On rare fast-failure paths (e.g., `session_new` error on an idle agent),
-/// the cleanup spawn may race with the 👀 add, leaving a stale 👀. This is
-/// accepted as a cosmetic edge case — the message will be retried and the
-/// stale 👀 is harmless.
+/// 👀 (`react_seen`) is normally fire-and-forget from `main.rs` at queue-push
+/// time. Trusted-envelope turns defer and await the add after admission so a
+/// terminal authority refusal cannot leave a stale reaction.
 struct ReactionGuard {
     rest: Option<crate::relay::RestClient>,
     ids: Vec<String>,
@@ -3596,7 +3920,7 @@ async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
 /// Fire-and-forget: remove both 👀 and 💬 from all events. Spawned on turn complete.
 /// Capped at `REACTION_CONCURRENCY` concurrent requests per chunk to avoid
 /// unbounded HTTP fan-out on large batches.
-async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
+pub(crate) async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>) {
     // Each event needs two removals (👀 and 💬); pair them and chunk by
     // REACTION_CONCURRENCY pairs so the total concurrent requests stay bounded.
     for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
@@ -3615,6 +3939,213 @@ mod tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
+
+    #[test]
+    fn receipt_closes_only_with_one_request_reply_and_gateway_evidence() {
+        let payload = closed_receipt_payload(
+            &["a".repeat(64)],
+            &[crate::relay::AnchoredReply {
+                event_id: "b".repeat(64),
+                reply_to: "a".repeat(64),
+            }],
+            Some("agent:main:buzz-private"),
+            Some("agent:main:buzz-private"),
+            Some("run-1"),
+            "acp-1",
+            "turn-1",
+        );
+        assert_eq!(payload["status"], "closed");
+        assert_eq!(payload["requestEventId"], "a".repeat(64));
+        assert_eq!(payload["replyEventId"], "b".repeat(64));
+        assert_eq!(payload["replyAnchor"], "a".repeat(64));
+        assert_eq!(payload["gatewaySessionKey"], "agent:main:buzz-private");
+        assert_eq!(payload["runId"], "run-1");
+    }
+
+    #[test]
+    fn threaded_second_turn_receipt_queries_the_same_root_anchor_as_the_prompt() {
+        let root_id = "a".repeat(64);
+        let parent_id = "b".repeat(64);
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "second turn")
+            .tags([
+                Tag::parse(["e", root_id.as_str(), "", "root"]).expect("root tag"),
+                Tag::parse(["e", parent_id.as_str(), "", "reply"]).expect("reply tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("signed request");
+        let request_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "private-office".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let args = crate::queue::FormatPromptArgs::default();
+        let expected_anchor = crate::queue::resolve_turn_reply_anchor(&batch, &args);
+        let prompt = crate::queue::format_prompt(&batch, &args).join("\n\n");
+
+        assert_eq!(expected_anchor.as_deref(), Some(root_id.as_str()));
+        assert!(prompt.contains(&format!("--reply-to {root_id}")));
+        assert_eq!(
+            receipt_query_anchor(&[request_id], expected_anchor.as_deref()),
+            Some(root_id.as_str())
+        );
+    }
+
+    #[test]
+    fn top_level_dm_receipt_anchors_to_the_current_request() {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "first DM turn")
+            .sign_with_keys(&keys)
+            .expect("signed request");
+        let request_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: Uuid::new_v4(),
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "private-office".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let channel_info = PromptChannelInfo {
+            name: "Nexus private".into(),
+            channel_type: "dm".into(),
+        };
+        let args = crate::queue::FormatPromptArgs {
+            channel_info: Some(&channel_info),
+            turn_receipts: true,
+            ..Default::default()
+        };
+        let expected_anchor = crate::queue::resolve_turn_reply_anchor(&batch, &args);
+        let prompt = crate::queue::format_prompt(&batch, &args).join("\n\n");
+
+        assert_eq!(expected_anchor.as_deref(), Some(request_id.as_str()));
+        assert!(prompt.contains(&format!("--reply-to {request_id}")));
+        assert_eq!(
+            receipt_query_anchor(
+                std::slice::from_ref(&request_id),
+                expected_anchor.as_deref()
+            ),
+            Some(request_id.as_str())
+        );
+    }
+
+    #[test]
+    fn receipt_fails_closed_on_cardinality_or_missing_evidence() {
+        let request = vec!["a".repeat(64)];
+        assert_eq!(
+            closed_receipt_payload(
+                &request,
+                &[],
+                Some("session"),
+                Some("session"),
+                Some("run"),
+                "acp",
+                "turn"
+            )["reason"],
+            "receipt_requires_one_anchored_reply_found_zero"
+        );
+        let duplicate = vec![
+            crate::relay::AnchoredReply {
+                event_id: "b".repeat(64),
+                reply_to: request[0].clone(),
+            },
+            crate::relay::AnchoredReply {
+                event_id: "c".repeat(64),
+                reply_to: request[0].clone(),
+            },
+        ];
+        assert_eq!(
+            closed_receipt_payload(
+                &request,
+                &duplicate,
+                Some("session"),
+                Some("session"),
+                Some("run"),
+                "acp",
+                "turn"
+            )["reason"],
+            "receipt_requires_one_anchored_reply_found_multiple"
+        );
+        assert_eq!(
+            closed_receipt_payload(
+                &request,
+                &duplicate[..1],
+                None,
+                Some("session"),
+                Some("run"),
+                "acp",
+                "turn"
+            )["reason"],
+            "gateway_session_key_evidence_missing"
+        );
+        assert_eq!(
+            closed_receipt_payload(
+                &request,
+                &duplicate[..1],
+                Some("session"),
+                Some("session"),
+                None,
+                "acp",
+                "turn"
+            )["reason"],
+            "gateway_run_id_evidence_missing"
+        );
+    }
+
+    #[test]
+    fn delayed_duplicate_reply_is_retained_for_fail_closed_receipt() {
+        let request = vec!["a".repeat(64)];
+        let first = crate::relay::AnchoredReply {
+            event_id: "b".repeat(64),
+            reply_to: request[0].clone(),
+        };
+        let delayed = crate::relay::AnchoredReply {
+            event_id: "c".repeat(64),
+            reply_to: request[0].clone(),
+        };
+        let mut replies = Vec::new();
+        merge_anchored_replies(&mut replies, vec![first.clone()]);
+        merge_anchored_replies(&mut replies, vec![first, delayed]);
+        assert_eq!(replies.len(), 2);
+        assert_eq!(
+            closed_receipt_payload(
+                &request,
+                &replies,
+                Some("session"),
+                Some("session"),
+                Some("run"),
+                "acp",
+                "turn"
+            )["reason"],
+            "receipt_requires_one_anchored_reply_found_multiple"
+        );
+    }
+
+    #[test]
+    fn stable_thread_anchor_excludes_replies_from_prior_turns() {
+        let stable_root = "a".repeat(64);
+        let prior = crate::relay::AnchoredReply {
+            event_id: "b".repeat(64),
+            reply_to: stable_root.clone(),
+        };
+        let current = crate::relay::AnchoredReply {
+            event_id: "c".repeat(64),
+            reply_to: stable_root,
+        };
+        let prior_ids = HashSet::from([prior.event_id.clone()]);
+
+        let current_turn = replies_for_current_turn(vec![prior, current.clone()], &prior_ids);
+
+        assert_eq!(current_turn, vec![current]);
+    }
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
     // a legacy agent WITH a base_prompt must get [Base] prepended to the user
@@ -4418,6 +4949,61 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn trusted_channel_refusal_stops_before_session_prompt() {
+        let marker = std::env::temp_dir().join(format!(
+            "buzz-acp-unexpected-prompt-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let script = format!(
+            "IFS= read -r _line && : > '{}' ; sleep 10",
+            marker.display()
+        );
+        let acp = AcpClient::spawn("bash", &["-c".to_string(), script], &[], false, true)
+            .await
+            .expect("spawn test agent");
+        let agent = OwnedAgent {
+            index: 0,
+            acp,
+            state: SessionState::default(),
+            model_capabilities: None,
+            desired_model: None,
+            model_overridden: false,
+            agent_name: "test-agent".into(),
+            goose_system_prompt_supported: None,
+            protocol_version: 2,
+        };
+        let channel_id = Uuid::new_v4();
+        let batch = one_event_batch(channel_id);
+        let mut context = make_prompt_context_no_owner();
+        context.trusted_inbound_envelope = true;
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+
+        run_prompt_task(
+            agent,
+            Some(batch),
+            Some("must not reach the agent".into()),
+            Arc::new(context),
+            result_tx,
+            None,
+            "trusted-refusal-turn".into(),
+        )
+        .await;
+
+        let result = result_rx.recv().await.expect("terminal prompt result");
+        assert!(matches!(
+            result.outcome,
+            PromptOutcome::Error(AcpError::TrustedInboundEventRefused(
+                "invalid_channel_binding"
+            ))
+        ));
+        assert!(result.batch.is_none(), "refused authority must not requeue");
+        assert!(
+            !marker.exists(),
+            "session/prompt must not be written after trusted admission refusal"
+        );
+    }
+
     #[test]
     fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
         let cases = [
@@ -4948,6 +5534,7 @@ mod tests {
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
+            true,
         )
         .await
         .expect("failed to spawn test agent");
@@ -5006,6 +5593,7 @@ mod tests {
             &["-c".to_string(), "sleep 10".to_string()],
             &[],
             false,
+            true,
         )
         .await
         .expect("failed to spawn test agent");
@@ -5261,6 +5849,9 @@ mod tests {
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            turn_receipts: false,
+            expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
             relay_url: "ws://127.0.0.1:3000".to_string(),
         }
     }

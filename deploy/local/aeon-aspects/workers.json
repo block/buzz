@@ -1,0 +1,50 @@
+{
+  "schema": "aeon_buzz_acp_workers_v1",
+  "enabled": false,
+  "identityMap": "/Volumes/AEON/aeon-vault/aeon-v6-workspace/contracts/buzz/identity-map.json",
+  "gateway": {
+    "url": "ws://127.0.0.1:18806",
+    "tokenFileEnv": "AEON_GATEWAY_TOKEN_FILE",
+    "tokenFileContract": {"absolute":true,"regular":true,"symlink":false,"owner":"current-user","mode":"0600"},
+    "provenance": "meta+receipt"
+  },
+  "buzz": {
+    "relayUrl": "ws://localhost:3000",
+    "architectPubkey": "73ac8798fd9cedcc5d24645d7ed49332d94a28f2c937f4c1b638f92bf6e8e91f",
+    "conciliumChannelId": "4ac1cee0-2238-483f-b25b-f99ec17eec46"
+  },
+  "posture": {
+    "agents": 1,
+    "respondTo": "owner-only",
+    "allowedRespondTo": ["owner-only"],
+    "memory": false,
+    "basePrompt": false,
+    "dedup": "queue",
+    "multipleEventHandling": "queue",
+    "presence": true,
+    "typing": true,
+    "relayObserver": true,
+    "trustedInboundEnvelope": true,
+    "permissionMode": "bypass-permissions",
+    "heartbeatIntervalSecs": 0,
+    "turnLivenessSecs": 10,
+    "idleTimeoutSecs": 900,
+    "maxTurnDurationSecs": 7200,
+    "contextMessageLimit": 12,
+    "maxTurnsPerSession": 0
+  },
+  "supervisor": {
+    "startOnAppLaunch": false,
+    "runAtLoad": false,
+    "restartOnFailure": false,
+    "throttleSeconds": 10
+  },
+  "workers": [
+    {"aspect":"nexus","displayName":"Nexus","gatewayAgentId":"main","sessionKey":"agent:main:buzz-private","privateChannelId":"7e8c4840-d401-4701-afc9-7ae7174cfc4e","pubkey":"ca2bce90e858e12f399f7b4cd510b5fce74e4238352229ada47b8bdd1a7f3b97"},
+    {"aspect":"mechanon","displayName":"Mechanon","gatewayAgentId":"mechanon","sessionKey":"agent:mechanon:buzz-private","privateChannelId":"7d022bea-5e81-4d18-bd2e-176e9eda1971","pubkey":"44437bd6007641845f154bdb7698b1627745b0a1b1d9bdfcf4826fe82a37ca9d"},
+    {"aspect":"fontis","displayName":"Fontis","gatewayAgentId":"fontis","sessionKey":"agent:fontis:buzz-private","privateChannelId":"600cb602-ff2a-422b-bdb2-6353bb81100d","pubkey":"3672ca65abf6b12effaf57475ce31260a4bc96e6d3acf01b909f9c2a44542147"},
+    {"aspect":"sapientis","displayName":"Sapientis","gatewayAgentId":"sapientis","sessionKey":"agent:sapientis:buzz-private","privateChannelId":"4e9f115c-cf8d-4abe-a085-c2b2c64ef2c2","pubkey":"1b7ddc51e6e7d688cd1816047b3ec35e7460014bf146813a505fee851e8b0d89"},
+    {"aspect":"viatica","displayName":"Viatica","gatewayAgentId":"viatica","sessionKey":"agent:viatica:buzz-private","privateChannelId":"39560f3c-f638-41a1-945b-ed5400ec41fc","pubkey":"89a2f2679f83cd9033582f023a3b92e01ed2b5950587efae565045ae65bd03cc"},
+    {"aspect":"voxis","displayName":"Voxis","gatewayAgentId":"voxis","sessionKey":"agent:voxis:buzz-private","privateChannelId":"d00b15e9-0dbe-4f35-895e-b6d36faa299e","pubkey":"e2b124c4728989a09d0f7df96cd2b1823635cc220ed9cdd4f97eaedc12a17fe4"}
+  ]
+}

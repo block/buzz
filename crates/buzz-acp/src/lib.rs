@@ -313,6 +313,63 @@ async fn check_sibling_via_profile(
     false
 }
 
+fn eligible_ephemeral_deadline(
+    current: &Result<Option<relay::ChannelInfo>, relay::RelayError>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    match current {
+        Ok(Some(info)) if info.is_ephemeral_at(now) => info.ttl_deadline,
+        Ok(_) | Err(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod ephemeral_admission_tests {
+    use super::*;
+
+    fn channel_info(
+        channel_type: &str,
+        ttl_seconds: Option<u64>,
+        deadline: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> relay::ChannelInfo {
+        relay::ChannelInfo {
+            name: "huddle".into(),
+            channel_type: channel_type.into(),
+            ttl_seconds,
+            ttl_deadline: deadline,
+            metadata_created_at: Some(1),
+            metadata_event_id: Some("a".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn canonical_revalidation_fails_closed_and_accepts_only_future_private_ttl() {
+        let now = chrono::Utc::now();
+        let renewed = now + chrono::Duration::minutes(5);
+        assert_eq!(
+            eligible_ephemeral_deadline(
+                &Ok(Some(channel_info("private", Some(300), Some(renewed)))),
+                now
+            ),
+            Some(renewed)
+        );
+        for current in [
+            Ok(None),
+            Ok(Some(channel_info(
+                "private",
+                Some(300),
+                Some(now - chrono::Duration::seconds(1)),
+            ))),
+            Ok(Some(channel_info("private", Some(300), None))),
+            Ok(Some(channel_info("private", Some(0), Some(renewed)))),
+            Ok(Some(channel_info("stream", Some(300), Some(renewed)))),
+            Err(relay::RelayError::Timeout),
+        ] {
+            assert_eq!(eligible_ephemeral_deadline(&current, now), None);
+        }
+    }
+}
+
 const OBSERVER_PUBLISH_INTERVAL: Duration = Duration::from_millis(167);
 const OBSERVER_PUBLISH_LIMIT_PER_MINUTE: usize = 90;
 
@@ -1388,11 +1445,13 @@ async fn tokio_main() -> Result<()> {
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
 
-    let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
+    let mut rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
             vec![SubscriptionRule {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
+                admit_invited_ephemeral: false,
+                require_exact_channel_tag: false,
                 kinds: config.kinds_override.clone().unwrap_or_else(|| {
                     vec![
                         KIND_STREAM_MESSAGE,
@@ -1411,6 +1470,8 @@ async fn tokio_main() -> Result<()> {
             vec![SubscriptionRule {
                 name: "all".into(),
                 channels: filter::ChannelScope::All("all".into()),
+                admit_invited_ephemeral: false,
+                require_exact_channel_tag: false,
                 kinds: config.kinds_override.clone().unwrap_or_default(),
                 require_mention: false,
                 filter: None,
@@ -1424,6 +1485,22 @@ async fn tokio_main() -> Result<()> {
             config::load_rules(&config.config_path)?
         }
     };
+
+    let mut admitted_ephemeral_deadlines: HashMap<Uuid, chrono::DateTime<chrono::Utc>> =
+        HashMap::new();
+    for (channel_id, info) in &channel_info_map {
+        if info.is_ephemeral() && config::admit_invited_ephemeral_channel(&mut rules, *channel_id) {
+            if let Some(deadline) = info.ttl_deadline {
+                admitted_ephemeral_deadlines.insert(*channel_id, deadline);
+            }
+            tracing::debug!(
+                %channel_id,
+                metadata_created_at = ?info.metadata_created_at,
+                metadata_event_id = ?info.metadata_event_id,
+                "admitted canonical private TTL channel"
+            );
+        }
+    }
 
     let channel_filters = config::resolve_channel_filters(&config, &channel_ids, &rules);
     if channel_filters.is_empty() {
@@ -1511,6 +1588,9 @@ async fn tokio_main() -> Result<()> {
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        turn_receipts: config.turn_receipts,
+        expected_gateway_session_key: config.expected_gateway_session_key.clone(),
+        trusted_inbound_envelope: config.trusted_inbound_envelope,
         relay_url: config.relay_url.clone(),
     });
 
@@ -1551,6 +1631,10 @@ async fn tokio_main() -> Result<()> {
     } else {
         None
     };
+    let mut ephemeral_revalidation = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(15),
+        Duration::from_secs(15),
+    );
     let mut typing_channels: HashMap<Uuid, ThreadTags> = HashMap::new();
     let mut presence_task: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -1711,12 +1795,22 @@ async fn tokio_main() -> Result<()> {
                 tracing::info!(agent = idx, "slot refill: spawning background respawn");
                 let cmd = config.agent_command.clone();
                 let args = config.agent_args.clone();
-                let env = config.persona_env_vars.clone();
+                let env = config.agent_spawn_env();
                 let has_codex = config.has_generated_codex_config;
+                let forward_publisher_credentials = config.forward_agent_publisher_credentials;
                 let observer = observer.clone();
                 let guard = RespawnGuard::new(idx, respawn_tx.clone());
                 respawn_tasks.spawn(async move {
-                    let result = spawn_and_init(&cmd, &args, &env, has_codex, idx, observer).await;
+                    let result = spawn_and_init(
+                        &cmd,
+                        &args,
+                        &env,
+                        has_codex,
+                        forward_publisher_credentials,
+                        idx,
+                        observer,
+                    )
+                    .await;
                     guard.send(result);
                 });
             }
@@ -1919,26 +2013,61 @@ async fn tokio_main() -> Result<()> {
 
                                     if subscribed_channel_ids.contains(&ch) {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
-                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
-                                        tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
-                                        if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
-                                            tracing::warn!("failed to subscribe to new channel {ch}: {e}");
-                                        } else {
-                                            subscribed_channel_ids.insert(ch);
-                                        }
                                     } else {
-                                        tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        let mut filter = config::resolve_dynamic_channel_filter(
+                                            &config, ch, &rules,
+                                        );
+                                        if filter.is_none() {
+                                            match relay.fetch_channel_info(ch).await {
+                                                Ok(Some(info)) if info.is_ephemeral() => {
+                                                    if config::admit_invited_ephemeral_channel(
+                                                        &mut rules, ch,
+                                                    ) {
+                                                        if let Some(deadline) = info.ttl_deadline {
+                                                            admitted_ephemeral_deadlines
+                                                                .insert(ch, deadline);
+                                                        }
+                                                        filter = config::resolve_dynamic_channel_filter(
+                                                            &config, ch, &rules,
+                                                        );
+                                                    }
+                                                }
+                                                Ok(_) => {}
+                                                Err(error) => {
+                                                    tracing::warn!(
+                                                        channel_id = %ch,
+                                                        %error,
+                                                        "membership metadata lookup failed — denying channel"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        if let Some(filter) = filter {
+                                            tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
+                                            if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
+                                                tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                            } else {
+                                                subscribed_channel_ids.insert(ch);
+                                            }
+                                        } else {
+                                            tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
+                                        }
                                     }
                                 } else {
+                                    config::remove_invited_ephemeral_channel(&mut rules, ch);
+                                    admitted_ephemeral_deadlines.remove(&ch);
                                     subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
                                     }
-                                    // Drain queued events and invalidate sessions for the
-                                    // removed channel. Events already in-flight will
-                                    // complete normally (the relay may reject actions if
-                                    // the agent lost access).
+                                    // Membership is an authorization boundary: cancel any
+                                    // in-flight turn before draining and invalidating state.
+                                    let _ = signal_in_flight_task(
+                                        &mut pool,
+                                        ch,
+                                        ControlSignal::Cancel,
+                                    );
                                     let drained_ids = queue.drain_channel(ch);
                                     let invalidated = if pool_ready {
                                         pool.invalidate_channel_sessions(ch)
@@ -1979,6 +2108,50 @@ async fn tokio_main() -> Result<()> {
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
+                            }
+
+                            // Dynamic-room admission gates every event behavior,
+                            // including owner control commands. The periodic
+                            // timer is cleanup; it is never an authorization
+                            // grace window.
+                            if admitted_ephemeral_deadlines.contains_key(&buzz_event.channel_id) {
+                                let now = chrono::Utc::now();
+                                let current = relay.fetch_channel_info(buzz_event.channel_id).await;
+                                if let Some(deadline) = eligible_ephemeral_deadline(&current, now) {
+                                    if let Some(current_deadline) = admitted_ephemeral_deadlines.get_mut(&buzz_event.channel_id) {
+                                        *current_deadline = deadline;
+                                    }
+                                } else {
+                                    if let Err(error) = &current {
+                                        tracing::warn!(
+                                            channel_id = %buzz_event.channel_id,
+                                            %error,
+                                            "ephemeral metadata dispatch check failed — revoking channel"
+                                        );
+                                    }
+                                    admitted_ephemeral_deadlines.remove(&buzz_event.channel_id);
+                                    config::remove_invited_ephemeral_channel(&mut rules, buzz_event.channel_id);
+                                    subscribed_channel_ids.remove(&buzz_event.channel_id);
+                                    let _ = signal_in_flight_task(
+                                        &mut pool,
+                                        buzz_event.channel_id,
+                                        ControlSignal::Cancel,
+                                    );
+                                    if let Err(error) = relay.unsubscribe_channel(buzz_event.channel_id).await {
+                                        tracing::warn!(channel_id = %buzz_event.channel_id, %error, "failed to unsubscribe revoked ephemeral channel");
+                                    }
+                                    let drained_ids = queue.drain_channel(buzz_event.channel_id);
+                                    pool.invalidate_channel_sessions(buzz_event.channel_id);
+                                    removed_channels.insert(buzz_event.channel_id);
+                                    typing_channels.remove(&buzz_event.channel_id);
+                                    if !drained_ids.is_empty() {
+                                        let rest = ctx.rest_client.clone();
+                                        tokio::spawn(async move {
+                                            pool::clear_reactions(rest, drained_ids).await;
+                                        });
+                                    }
+                                    continue;
+                                }
                             }
 
                             // Check: kind:9, content "!shutdown", from owner, mentions THIS agent.
@@ -2086,8 +2259,8 @@ async fn tokio_main() -> Result<()> {
 
                             // Coarse security policy: drop events from disallowed
                             // authors before they reach subscription rules or the
-                            // agent. Must be AFTER !shutdown (owner can always
-                            // shut down regardless of gate mode).
+                            // agent. Owner control commands have already been
+                            // handled, after dynamic-room admission above.
                             //
                             // Both OwnerOnly and Allowlist accept events from
                             // "siblings" — pubkeys whose agent_owner_pubkey
@@ -2148,10 +2321,10 @@ async fn tokio_main() -> Result<()> {
                             });
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
-                            // Fire-and-forget: on rare fast-failure paths the
-                            // guard's cleanup may race with this add, leaving a
-                            // cosmetic stale 👀. Acceptable — see ReactionGuard docs.
-                            if accepted {
+                            // Trusted-envelope turns add 👀 only after the
+                            // signed event passes admission in run_prompt_task.
+                            // That keeps terminal refusals free of stale state.
+                            if accepted && !ctx.trusted_inbound_envelope {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
@@ -2284,6 +2457,68 @@ async fn tokio_main() -> Result<()> {
                                 tracing::debug!("typing indicator dropped for {ch}: {e}");
                             }
                         }
+                    }
+                    None
+                }
+                _ = ephemeral_revalidation.tick() => {
+                    let _ = result_rx;
+                    let now = chrono::Utc::now();
+                    let channel_ids: Vec<Uuid> = admitted_ephemeral_deadlines
+                        .keys()
+                        .copied()
+                        .collect();
+                    let mut revoke = Vec::new();
+                    for channel_id in channel_ids {
+                        let eligible = match admitted_ephemeral_deadlines.get(&channel_id) {
+                            Some(_) => {
+                                let current = relay.fetch_channel_info(channel_id).await;
+                                if let Err(error) = &current {
+                                    tracing::warn!(
+                                        %channel_id,
+                                        %error,
+                                        "ephemeral metadata revalidation failed — revoking channel"
+                                    );
+                                }
+                                if let Some(deadline) = eligible_ephemeral_deadline(&current, now) {
+                                    admitted_ephemeral_deadlines.insert(channel_id, deadline);
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                            None => false,
+                        };
+                        if !eligible {
+                            revoke.push(channel_id);
+                        }
+                    }
+                    for channel_id in revoke {
+                        admitted_ephemeral_deadlines.remove(&channel_id);
+                        config::remove_invited_ephemeral_channel(&mut rules, channel_id);
+                        subscribed_channel_ids.remove(&channel_id);
+                        if let Err(error) = relay.unsubscribe_channel(channel_id).await {
+                            tracing::warn!(%channel_id, %error, "failed to unsubscribe revoked ephemeral channel");
+                        }
+                        let drained_ids = queue.drain_channel(channel_id);
+                        let _ = signal_in_flight_task(
+                            &mut pool,
+                            channel_id,
+                            ControlSignal::Cancel,
+                        );
+                        let invalidated = pool.invalidate_channel_sessions(channel_id);
+                        removed_channels.insert(channel_id);
+                        typing_channels.remove(&channel_id);
+                        if !drained_ids.is_empty() {
+                            let rest = ctx.rest_client.clone();
+                            tokio::spawn(async move {
+                                pool::clear_reactions(rest, drained_ids).await;
+                            });
+                        }
+                        tracing::info!(
+                            %channel_id,
+                            invalidated,
+                            "ephemeral channel expired or became ineligible — revoked"
+                        );
                     }
                     None
                 }
@@ -3386,14 +3621,24 @@ fn recover_panicked_agent(
     slot.respawn_in_flight = true;
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
+    let env = config.agent_spawn_env();
     let has_codex = config.has_generated_codex_config;
+    let forward_publisher_credentials = config.forward_agent_publisher_credentials;
     let guard = RespawnGuard::new(i, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, i, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            forward_publisher_credentials,
+            i,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 }
@@ -3564,8 +3809,9 @@ fn spawn_respawn_task(
     // Spawn the actual work (shutdown + sleep + spawn + init) off the main loop.
     let cmd = config.agent_command.clone();
     let args = config.agent_args.clone();
-    let env = config.persona_env_vars.clone();
+    let env = config.agent_spawn_env();
     let has_codex = config.has_generated_codex_config;
+    let forward_publisher_credentials = config.forward_agent_publisher_credentials;
     let guard = RespawnGuard::new(index, respawn_tx.clone());
     respawn_tasks.spawn(async move {
         // Shutdown old agent (reap child, prevent zombie).
@@ -3577,7 +3823,16 @@ fn spawn_respawn_task(
             tokio::time::sleep(delay).await;
         }
 
-        let result = spawn_and_init(&cmd, &args, &env, has_codex, index, observer).await;
+        let result = spawn_and_init(
+            &cmd,
+            &args,
+            &env,
+            has_codex,
+            forward_publisher_credentials,
+            index,
+            observer,
+        )
+        .await;
         guard.send(result);
     });
 
@@ -3621,6 +3876,7 @@ struct PoolStartup {
     args: Vec<String>,
     extra_env: Vec<(String, String)>,
     has_generated_codex_config: bool,
+    forward_buzz_publisher_credentials: bool,
     model: Option<String>,
     observer: Option<observer::ObserverHandle>,
 }
@@ -3631,8 +3887,9 @@ impl PoolStartup {
             agents: config.agents,
             command: config.agent_command.clone(),
             args: config.agent_args.clone(),
-            extra_env: config.persona_env_vars.clone(),
+            extra_env: config.agent_spawn_env(),
             has_generated_codex_config: config.has_generated_codex_config,
+            forward_buzz_publisher_credentials: config.forward_agent_publisher_credentials,
             model: config.model.clone(),
             observer,
         }
@@ -3652,6 +3909,7 @@ async fn initialize_agent_pool(
             &startup.args,
             &startup.extra_env,
             startup.has_generated_codex_config,
+            startup.forward_buzz_publisher_credentials,
         )
         .await;
         match spawn_result {
@@ -3751,12 +4009,19 @@ async fn spawn_and_init(
     args: &[String],
     extra_env: &[(String, String)],
     has_generated_codex_config: bool,
+    forward_buzz_publisher_credentials: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
 ) -> Result<(AcpClient, u32, String)> {
-    let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
+    let mut acp = AcpClient::spawn(
+        command,
+        args,
+        extra_env,
+        has_generated_codex_config,
+        forward_buzz_publisher_credentials,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
     acp.set_observer(observer, agent_index);
 
     match acp.initialize().await {
@@ -3785,7 +4050,7 @@ async fn spawn_and_init(
 
 async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
     let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
-    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false, true).await
 }
 
 fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -3915,7 +4180,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
     let mut client =
-        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false, true).await {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("error: failed to spawn agent: {e}");
@@ -4645,6 +4910,10 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_receipts: false,
+            expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
+            forward_agent_publisher_credentials: true,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -4811,6 +5080,10 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            turn_receipts: false,
+            expected_gateway_session_key: None,
+            trusted_inbound_envelope: false,
+            forward_agent_publisher_credentials: true,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -4840,7 +5113,7 @@ mod error_outcome_emission_tests {
     async fn dummy_agent(index: usize) -> OwnedAgent {
         OwnedAgent {
             index,
-            acp: AcpClient::spawn("cat", &[], &[], false)
+            acp: AcpClient::spawn("cat", &[], &[], false, true)
                 .await
                 .expect("spawn cat as inert agent"),
             state: Default::default(),
