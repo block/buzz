@@ -9,10 +9,17 @@ import {
   PullRequestDetailHeader,
   PullRequestMetaRail,
 } from "@/features/projects/ui/ProjectPullRequestsPanel";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  resolveUserLabel,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { openProjectMergeRecoveryTerminal } from "@/shared/api/projectGit";
+import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
+import { cn } from "@/shared/lib/cn";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { UserAvatar } from "@/shared/ui/UserAvatar";
 
 type ProjectInboxDetailPaneProps = {
   isSinglePanelView?: boolean;
@@ -31,6 +38,19 @@ export function ProjectInboxDetailPane({
   workItem,
 }: ProjectInboxDetailPaneProps) {
   const { activeCommunity } = useCommunities();
+  const [detailContentRef, detailContentWidth] =
+    useElementWidth<HTMLDivElement>();
+  const showSideRail = detailContentWidth >= 760;
+  const authorPubkey =
+    workItem.type === "pull-request"
+      ? workItem.pullRequest.author
+      : workItem.issue.author;
+  const authorLabel = resolveUserLabel({ profiles, pubkey: authorPubkey });
+  const authorAvatarUrl =
+    profiles?.[normalizePubkey(authorPubkey)]?.avatarUrl ?? null;
+  const inboxTitle = `${authorLabel} sent you ${
+    workItem.type === "pull-request" ? "a pull request" : "an issue"
+  }`;
   const handleOpenMergeRecoveryTerminal = React.useCallback(
     async (input: {
       expectedCommit: string;
@@ -61,70 +81,97 @@ export function ProjectInboxDetailPane({
       data-testid="home-project-inbox-detail"
     >
       <TopChromeInsetHeader flush transparent>
-        <div className="flex min-h-13 items-center justify-between gap-3 px-5 py-2">
-          <div className="flex min-w-0 items-center gap-2">
-            {isSinglePanelView && onBack ? (
-              <Button
-                aria-label="Back to Inbox"
-                onClick={onBack}
-                size="icon"
-                type="button"
-                variant="ghost"
+        <div className="px-5 py-2">
+          <div className="flex min-h-9 min-w-0 items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-1">
+              {isSinglePanelView && onBack ? (
+                <Button
+                  aria-label="Back to Inbox"
+                  onClick={onBack}
+                  size="icon"
+                  type="button"
+                  variant="ghost"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                </Button>
+              ) : null}
+              <UserAvatar
+                avatarUrl={authorAvatarUrl}
+                className="shrink-0"
+                displayName={authorLabel}
+                size="sm"
+                testId="project-inbox-author-avatar"
+              />
+              <h2
+                className="min-w-0 translate-y-px truncate text-sm font-semibold leading-5 tracking-tight text-foreground"
+                title={`${inboxTitle} · ${workItem.project.name}`}
               >
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
-            ) : null}
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold">
-                {workItem.project.name}
-              </p>
-              <p className="text-xs text-muted-foreground">
-                {workItem.type === "pull-request" ? "Pull request" : "Issue"}
-              </p>
+                {inboxTitle}
+              </h2>
             </div>
+            <Button
+              aria-label="Open project"
+              className="shrink-0"
+              onClick={onOpenProject}
+              size={showSideRail ? "sm" : "icon"}
+              title="Open project"
+              type="button"
+              variant="ghost"
+            >
+              <ExternalLink className="h-4 w-4" />
+              {showSideRail ? "Open project" : null}
+            </Button>
           </div>
-          <Button
-            className="shrink-0"
-            onClick={onOpenProject}
-            size="sm"
-            type="button"
-            variant="ghost"
-          >
-            <ExternalLink className="h-4 w-4" />
-            Open project
-          </Button>
         </div>
       </TopChromeInsetHeader>
 
-      <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-        {workItem.type === "pull-request" ? (
-          <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
-            <div className="min-w-0">
-              <PullRequestDetailHeader
-                profiles={profiles}
-                pullRequest={workItem.pullRequest}
-              />
-              <ProjectPullRequestDetail
-                mode="conversation"
-                onOpenTerminal={handleOpenMergeRecoveryTerminal}
+      <div
+        className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        ref={detailContentRef}
+      >
+        <div className="p-3">
+          <div
+            className="overflow-hidden rounded-xl border border-border/60 bg-card"
+            data-testid="project-inbox-work-item-card"
+          >
+            {workItem.type === "pull-request" ? (
+              <div
+                className={cn(
+                  "grid",
+                  showSideRail && "grid-cols-[minmax(0,1fr)_18rem]",
+                )}
+                data-testid="project-inbox-work-item-layout"
+              >
+                <div className="min-w-0">
+                  <PullRequestDetailHeader
+                    profiles={profiles}
+                    pullRequest={workItem.pullRequest}
+                  />
+                  <ProjectPullRequestDetail
+                    mode="conversation"
+                    onOpenTerminal={handleOpenMergeRecoveryTerminal}
+                    profiles={profiles}
+                    project={workItem.project}
+                    pullRequest={workItem.pullRequest}
+                  />
+                </div>
+                <PullRequestMetaRail
+                  profiles={profiles}
+                  project={workItem.project}
+                  pullRequest={workItem.pullRequest}
+                  stacked={!showSideRail}
+                />
+              </div>
+            ) : (
+              <ProjectIssueDetail
+                issue={workItem.issue}
                 profiles={profiles}
                 project={workItem.project}
-                pullRequest={workItem.pullRequest}
+                stackMetaRail={!showSideRail}
               />
-            </div>
-            <PullRequestMetaRail
-              profiles={profiles}
-              project={workItem.project}
-              pullRequest={workItem.pullRequest}
-            />
+            )}
           </div>
-        ) : (
-          <ProjectIssueDetail
-            issue={workItem.issue}
-            profiles={profiles}
-            project={workItem.project}
-          />
-        )}
+        </div>
       </div>
     </section>
   );

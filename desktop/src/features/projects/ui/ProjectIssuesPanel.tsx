@@ -15,6 +15,7 @@ import {
 } from "@/features/profile/lib/identity";
 import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ChannelMember } from "@/shared/api/types";
+import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
 import {
@@ -170,10 +171,12 @@ export function ProjectIssueDetail({
   issue,
   profiles,
   project,
+  stackMetaRail = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
   project: Project;
+  stackMetaRail?: boolean;
 }) {
   const commentMutation = useCreateProjectIssueCommentMutation(project);
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
@@ -206,7 +209,12 @@ export function ProjectIssueDetail({
   );
 
   return (
-    <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem]">
+    <div
+      className={cn(
+        "grid",
+        !stackMetaRail && "xl:grid-cols-[minmax(0,1fr)_18rem]",
+      )}
+    >
       <div className="min-w-0 divide-y divide-border/50">
         <header className="space-y-3 p-4">
           <div className="min-w-0">
@@ -269,7 +277,11 @@ export function ProjectIssueDetail({
         </section>
       </div>
 
-      <IssueMetaRail issue={issue} profiles={profiles} />
+      <IssueMetaRail
+        issue={issue}
+        profiles={profiles}
+        stacked={stackMetaRail}
+      />
     </div>
   );
 }
@@ -279,16 +291,23 @@ export function ProjectIssueDetail({
 function IssueMetaRail({
   issue,
   profiles,
+  stacked = false,
 }: {
   issue: ProjectIssue;
   profiles?: UserProfileLookup;
+  stacked?: boolean;
 }) {
   const authorProfile = profiles?.[normalizePubkey(issue.author)];
   const authorLabel = resolveUserLabel({ profiles, pubkey: issue.author });
   const status = issueStatusVisual(issue.status);
 
   return (
-    <aside className="space-y-6 border-t border-border/60 p-4 xl:border-l xl:border-t-0">
+    <aside
+      className={cn(
+        "space-y-6 border-border/60 p-4",
+        stacked ? "border-t" : "border-t xl:border-l xl:border-t-0",
+      )}
+    >
       <OverviewRailSection title="Status">
         <span
           className={`inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1 text-xs font-medium ${status.className}`}

@@ -7,6 +7,7 @@ import type * as React from "react";
  * trailing cluster (hash, id, comment count) on the right.
  */
 export function ProjectFeedRow({
+  eventId,
   meta,
   onOpen,
   statusIcon,
@@ -14,6 +15,7 @@ export function ProjectFeedRow({
   title,
   trailing,
 }: {
+  eventId?: string;
   meta: React.ReactNode;
   onOpen?: () => void;
   statusIcon?: React.ReactNode;
@@ -24,6 +26,7 @@ export function ProjectFeedRow({
   return (
     <article
       className="group/feed-item flex min-w-0 items-center justify-between gap-3 p-3 transition-colors hover:bg-muted/35"
+      data-project-event-id={eventId}
       data-testid={testId}
     >
       <div className="min-w-0 flex-1 space-y-1">

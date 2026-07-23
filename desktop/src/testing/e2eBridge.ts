@@ -6712,7 +6712,24 @@ async function handleGetFeed(
   // For e2e, return a minimal feed structure with mentions.
   const limit = args.limit ?? 50;
   const mentionEvents = await relayQuery(config, [
-    { kinds: [9, 40002, 45001, 45003], "#p": [identity.pubkey], limit },
+    {
+      kinds: [
+        9,
+        40002,
+        1,
+        45001,
+        45003,
+        KIND_GIT_PULL_REQUEST,
+        KIND_GIT_PR_UPDATE,
+        KIND_GIT_ISSUE,
+        KIND_GIT_STATUS_OPEN,
+        KIND_GIT_STATUS_MERGED,
+        KIND_GIT_STATUS_CLOSED,
+        KIND_GIT_STATUS_DRAFT,
+      ],
+      "#p": [identity.pubkey],
+      limit,
+    },
   ]);
 
   // Look up channel names for feed items
