@@ -9,10 +9,10 @@ use buzz_core::{
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_GIT_STATUS_OPEN, KIND_HUDDLE_TRANSCRIPT, KIND_IA_ARCHIVE_REQUEST,
+        KIND_IA_UNARCHIVE_REQUEST, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -1542,6 +1542,68 @@ pub fn build_dm_add_member(channel_id: Uuid, pubkey: &str) -> Result<EventBuilde
     Ok(EventBuilder::new(Kind::Custom(KIND_DM_ADD_MEMBER as u16), "").tags(tags))
 }
 
+/// Maximum transcript-segment content size. A segment is one utterance, far
+/// smaller than a message; the cap is a defense-in-depth bound, not a target.
+const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
+
+/// Build a huddle transcript segment event (kind 48104, issue #2513).
+///
+/// One attributed segment of huddle speech. `text` becomes the event content
+/// as **plain text**, so it is FTS-indexed and readable by agents exactly like
+/// a message. Structure lives in tags:
+/// - `h` = channel id (NIP-29 group scope),
+/// - `p` = speaker pubkey (attribution — the audio room already keys
+///   participants by pubkey, so no diarization is needed),
+/// - `e` = the `KIND_HUDDLE_STARTED` event id this segment belongs to,
+/// - `start` / `end` = millisecond offsets from the huddle start,
+/// - `lang` = optional BCP-47 language (omitted when empty/unknown).
+///
+/// The caller signs. Server-side recording (issue #2513) emits these with the
+/// relay/host key; `buzz_core::huddle::HuddleTranscriptSegment::from_content_and_tags`
+/// reads them back into a typed segment.
+#[allow(clippy::too_many_arguments)]
+pub fn build_huddle_transcript(
+    channel_id: Uuid,
+    speaker_pubkey: &str,
+    huddle_event_id: &str,
+    text: &str,
+    start_ms: u64,
+    end_ms: u64,
+    language: Option<&str>,
+) -> Result<EventBuilder, SdkError> {
+    let speaker = check_pubkey_hex(speaker_pubkey, "speaker_pubkey")?;
+    if huddle_event_id.len() != 64 || !huddle_event_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::InvalidInput(
+            "huddle_event_id must be a 64-character hex event id".into(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "transcript text must not be empty".into(),
+        ));
+    }
+    check_content(text, MAX_TRANSCRIPT_BYTES)?;
+    if end_ms < start_ms {
+        return Err(SdkError::InvalidInput(
+            "transcript end_ms must be >= start_ms".into(),
+        ));
+    }
+
+    let mut tags = vec![
+        tag(&["h", &channel_id.to_string()])?,
+        tag(&["p", &speaker])?,
+        tag(&["e", huddle_event_id])?,
+        tag(&["start", &start_ms.to_string()])?,
+        tag(&["end", &end_ms.to_string()])?,
+    ];
+    if let Some(lang) = language {
+        if !lang.is_empty() {
+            tags.push(tag(&["lang", lang])?);
+        }
+    }
+    Ok(EventBuilder::new(Kind::Custom(KIND_HUDDLE_TRANSCRIPT as u16), text).tags(tags))
+}
+
 /// Build a presence update event (kind 20001).
 ///
 /// `status` must be one of: `"online"`, `"away"`, `"offline"`.
@@ -1998,6 +2060,97 @@ mod tests {
         let cid = uuid();
         let max = "x".repeat(64 * 1024);
         assert!(build_message(cid, &max, None, &[], false, &[]).is_ok());
+    }
+
+    const SPEAKER_HEX: &str = "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
+
+    #[test]
+    fn huddle_transcript_happy_path() {
+        let cid = uuid();
+        let huddle = event_id().to_hex();
+        let ev = sign(
+            build_huddle_transcript(
+                cid,
+                SPEAKER_HEX,
+                &huddle,
+                "hello world",
+                1200,
+                3400,
+                Some("en"),
+            )
+            .unwrap(),
+        );
+        assert_eq!(ev.kind.as_u16(), 48104);
+        assert_eq!(ev.content, "hello world");
+        assert!(has_tag(&ev, "h", &cid.to_string()));
+        assert!(has_tag(&ev, "p", SPEAKER_HEX));
+        assert!(has_tag(&ev, "e", &huddle));
+        assert!(has_tag(&ev, "start", "1200"));
+        assert!(has_tag(&ev, "end", "3400"));
+        assert!(has_tag(&ev, "lang", "en"));
+    }
+
+    #[test]
+    fn huddle_transcript_roundtrips_through_core_reader() {
+        use buzz_core::huddle::HuddleTranscriptSegment;
+        let cid = uuid();
+        let huddle = event_id().to_hex();
+        let ev = sign(
+            build_huddle_transcript(cid, SPEAKER_HEX, &huddle, "привіт", 0, 900, Some("uk"))
+                .unwrap(),
+        );
+        let raw: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        let slices: Vec<&[String]> = raw.iter().map(Vec::as_slice).collect();
+        let seg = HuddleTranscriptSegment::from_content_and_tags(&ev.content, &slices)
+            .expect("reads back");
+        assert_eq!(seg.channel_id, cid);
+        assert_eq!(seg.speaker_pubkey, SPEAKER_HEX);
+        assert_eq!(seg.huddle_event_id.as_deref(), Some(huddle.as_str()));
+        assert_eq!(seg.text, "привіт");
+        assert_eq!(seg.start_ms, 0);
+        assert_eq!(seg.end_ms, 900);
+        assert_eq!(seg.language.as_deref(), Some("uk"));
+    }
+
+    #[test]
+    fn huddle_transcript_lang_optional() {
+        let cid = uuid();
+        let huddle = event_id().to_hex();
+        let ev =
+            sign(build_huddle_transcript(cid, SPEAKER_HEX, &huddle, "hi", 0, 1, None).unwrap());
+        assert!(tag_values(&ev, "lang").is_empty());
+    }
+
+    #[test]
+    fn huddle_transcript_rejects_bad_input() {
+        let cid = uuid();
+        let huddle = event_id().to_hex();
+        // Empty / whitespace-only text.
+        assert!(matches!(
+            build_huddle_transcript(cid, SPEAKER_HEX, &huddle, "   ", 0, 1, None),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Malformed speaker pubkey.
+        assert!(matches!(
+            build_huddle_transcript(cid, "xyz", &huddle, "hi", 0, 1, None),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Malformed huddle event id.
+        assert!(matches!(
+            build_huddle_transcript(cid, SPEAKER_HEX, "short", "hi", 0, 1, None),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // end before start.
+        assert!(matches!(
+            build_huddle_transcript(cid, SPEAKER_HEX, &huddle, "hi", 5, 1, None),
+            Err(SdkError::InvalidInput(_))
+        ));
+        // Content over the cap.
+        let big = "x".repeat(16 * 1024 + 1);
+        assert!(matches!(
+            build_huddle_transcript(cid, SPEAKER_HEX, &huddle, &big, 0, 1, None),
+            Err(SdkError::ContentTooLarge { .. })
+        ));
     }
 
     #[test]
