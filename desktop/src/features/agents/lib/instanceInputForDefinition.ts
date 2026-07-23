@@ -148,6 +148,13 @@ export async function buildInstanceInputForDefinition(
     harnessOverride: !persona.runtime || persona.runtime === runtime.id,
     model: persona.model ?? undefined,
     provider: persona.provider ?? undefined,
+    // Pass definition gate explicitly so create/start doesn't depend solely on
+    // the mint-time linked-persona lookup (still inherited there as fallback).
+    respondTo: persona.respondTo ?? undefined,
+    respondToAllowlist:
+      persona.respondTo === "allowlist"
+        ? [...persona.respondToAllowlist]
+        : undefined,
     spawnAfterCreate: true,
     startOnAppLaunch: true,
     backend: { type: "local" },
