@@ -4,11 +4,11 @@ import { KIND_REPO_ANNOUNCEMENT } from "@/shared/constants/kinds";
 const REPO_ADDRESS_PREFIX = `${KIND_REPO_ANNOUNCEMENT}:`;
 
 /**
- * Project issue/PR comments are published as kind:1 text notes (the relay
- * does not register NIP-22 kind 1111) tagged with the repo's NIP-34 address
- * (`a` = `30617:<owner>:<repo>`). Without this filter they bleed into Pulse
- * feeds as orphaned replies whose parent (a 1618/1621 git event, not a
- * kind:1 note) can never be resolved.
+ * Project issue/PR comments are published as kind:1 text notes (or kind:9
+ * when they @mention an agent — see projectCommentPublish.ts) tagged with
+ * the repo's NIP-34 address (`a` = `30617:<owner>:<repo>`). Without this
+ * filter they bleed into Pulse feeds as orphaned replies whose parent (a
+ * 1618/1621 git event, not a kind:1 note) can never be resolved.
  */
 export function isProjectComment(note: UserNote): boolean {
   return note.tags.some(

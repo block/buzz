@@ -25,6 +25,7 @@ import {
   KIND_GIT_STATUS_OPEN,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
+  KIND_STREAM_MESSAGE,
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
 import type {
@@ -47,11 +48,11 @@ import type {
   ProjectPullRequest,
   ProjectPullRequestCommentAnchor,
 } from "./projectPullRequests.mjs";
+import { projectPullRequestEventsToPullRequests } from "./projectPullRequests.mjs";
 import {
-  normalizeProjectPullRequestCommentAnchor,
-  PR_INLINE_COMMENT_LABEL,
-  projectPullRequestEventsToPullRequests,
-} from "./projectPullRequests.mjs";
+  createProjectIssueComment,
+  createProjectPullRequestComment,
+} from "./projectCommentPublish";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
 
 export type {
@@ -200,14 +201,15 @@ export function eventToProject(
   const webUrl = getTag(event, "web") ?? null;
   const setupUsers = getAllTags(event, "auth");
   const contributors = [...new Set([...getAllTags(event, "p"), ...setupUsers])];
-  // `h`/`project-channel`, `status`, and `default-branch` are NOT part of
-  // NIP-34 — they are read-side tolerance for extension tags no code writes
-  // today (the write path that emitted them was removed). If a write path is
-  // reintroduced it must go through the buzz-sdk repo-announcement builder;
-  // the canonical NIP-34 source for the default branch is the kind:30618
-  // state event's HEAD ref, not a 30617 tag.
+  // Channel binding is a Buzz extension on kind:30617. Prefer the canonical
+  // `buzz-channel` tag (buzz-sdk / git policy / web), then legacy `h` /
+  // `project-channel`. `status` and `default-branch` remain read-side
+  // tolerance only — default branch comes from kind:30618 HEAD.
   const projectChannelId =
-    getTag(event, "h") ?? getTag(event, "project-channel") ?? null;
+    getTag(event, "buzz-channel") ??
+    getTag(event, "h") ??
+    getTag(event, "project-channel") ??
+    null;
 
   return {
     id: `${event.pubkey}:${d}`,
@@ -382,7 +384,7 @@ async function fetchProjectIssues(project: Project): Promise<ProjectIssue[]> {
       limit: 500,
     }),
     relayClient.fetchEvents({
-      kinds: [KIND_TEXT_NOTE],
+      kinds: [KIND_TEXT_NOTE, KIND_STREAM_MESSAGE],
       "#a": [project.repoAddress],
       limit: 500,
     }),
@@ -407,7 +409,7 @@ async function fetchProjectPullRequests(
         limit: 500,
       }),
       relayClient.fetchEvents({
-        kinds: [KIND_TEXT_NOTE],
+        kinds: [KIND_TEXT_NOTE, KIND_STREAM_MESSAGE],
         "#a": [project.repoAddress],
         limit: 500,
       }),
@@ -428,119 +430,6 @@ async function fetchProjectPullRequests(
     updateEvents,
     commentEvents,
     statusEvents,
-  );
-}
-
-// Issue/PR comments are published as kind:1 text notes because the relay
-// does not register NIP-22 kind 1111 (current NIP-34 reply convention).
-// Pulse feeds filter these out via the repo-address `a` tag (see
-// features/pulse/lib/projectComments.ts). If the relay ever allowlists
-// 1111, migrate these to NIP-22 comments and drop that filter.
-async function createProjectPullRequestComment({
-  anchor,
-  content,
-  mediaTags,
-  mentionPubkeys = [],
-  project,
-  pullRequest,
-}: {
-  anchor?: ProjectPullRequestCommentAnchor;
-  content: string;
-  mediaTags?: string[][];
-  mentionPubkeys?: string[];
-  project: Project;
-  pullRequest: ProjectPullRequest;
-}): Promise<void> {
-  const body = content.trim();
-  if (!body) {
-    throw new Error("Comment cannot be empty.");
-  }
-  const normalizedAnchor = anchor
-    ? normalizeProjectPullRequestCommentAnchor(anchor)
-    : null;
-  if (anchor && !normalizedAnchor) {
-    throw new Error("Comment location is invalid.");
-  }
-  if (normalizedAnchor && !pullRequest.commit) {
-    throw new Error("Pull request commit is required for inline comments.");
-  }
-
-  const recipients = new Set([
-    project.owner.toLowerCase(),
-    pullRequest.author.toLowerCase(),
-    ...pullRequest.recipients.map((recipient) => recipient.toLowerCase()),
-    ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
-  ]);
-  const tags = [
-    ["e", pullRequest.id, "", "root"],
-    ["a", project.repoAddress],
-    ...[...recipients].map((recipient) => ["p", recipient]),
-    ...(normalizedAnchor
-      ? [
-          ["t", PR_INLINE_COMMENT_LABEL],
-          ["c", pullRequest.commit as string],
-          ["file", normalizedAnchor.path],
-          ["side", normalizedAnchor.side],
-          ["line", String(normalizedAnchor.line)],
-        ]
-      : []),
-    ...(mediaTags ?? []),
-  ];
-
-  const event = await signRelayEvent({
-    kind: KIND_TEXT_NOTE,
-    content: body,
-    tags,
-  });
-
-  await relayClient.publishEvent(
-    event,
-    "Timed out posting pull request comment.",
-    "Failed to post pull request comment.",
-  );
-}
-
-async function createProjectIssueComment({
-  content,
-  mediaTags,
-  mentionPubkeys = [],
-  issue,
-  project,
-}: {
-  content: string;
-  mediaTags?: string[][];
-  mentionPubkeys?: string[];
-  issue: ProjectIssue;
-  project: Project;
-}): Promise<void> {
-  const body = content.trim();
-  if (!body) {
-    throw new Error("Comment cannot be empty.");
-  }
-
-  const recipients = new Set([
-    project.owner.toLowerCase(),
-    issue.author.toLowerCase(),
-    ...issue.recipients.map((recipient) => recipient.toLowerCase()),
-    ...mentionPubkeys.map((pubkey) => pubkey.toLowerCase()),
-  ]);
-  const tags = [
-    ["e", issue.id, "", "root"],
-    ["a", project.repoAddress],
-    ...[...recipients].map((recipient) => ["p", recipient]),
-    ...(mediaTags ?? []),
-  ];
-
-  const event = await signRelayEvent({
-    kind: KIND_TEXT_NOTE,
-    content: body,
-    tags,
-  });
-
-  await relayClient.publishEvent(
-    event,
-    "Timed out posting issue comment.",
-    "Failed to post issue comment.",
   );
 }
 
