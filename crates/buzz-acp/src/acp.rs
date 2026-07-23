@@ -1863,6 +1863,64 @@ pub fn extract_model_state(result: &serde_json::Value) -> Option<serde_json::Val
     result.get("models").cloned()
 }
 
+/// Match a catalog model id against a desired model string.
+///
+/// Exact (case-sensitive) wins; otherwise case-insensitive equality; otherwise
+/// a unique alias hit where `desired` appears as a hyphen-delimited segment of
+/// the catalog id (so `sonnet` matches `claude-sonnet-4-20250514` but not an
+/// ambiguous pair of sonnet variants).
+fn model_id_matches(candidate: &str, desired: &str) -> MatchKind {
+    if candidate == desired {
+        return MatchKind::Exact;
+    }
+    if candidate.eq_ignore_ascii_case(desired) {
+        return MatchKind::CaseInsensitive;
+    }
+    let c = candidate.to_ascii_lowercase();
+    let d = desired.to_ascii_lowercase();
+    if d.len() >= 3 {
+        let padded = format!("-{c}-");
+        if padded.contains(&format!("-{d}-")) {
+            return MatchKind::Alias;
+        }
+    }
+    MatchKind::None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchKind {
+    Exact,
+    CaseInsensitive,
+    Alias,
+    None,
+}
+
+fn pick_matching_model_id<'a>(
+    candidates: impl IntoIterator<Item = &'a str>,
+    desired: &str,
+) -> Option<String> {
+    let mut exact = None;
+    let mut case_insensitive = None;
+    let mut aliases = Vec::new();
+    for candidate in candidates {
+        match model_id_matches(candidate, desired) {
+            MatchKind::Exact => exact = Some(candidate.to_string()),
+            MatchKind::CaseInsensitive if case_insensitive.is_none() => {
+                case_insensitive = Some(candidate.to_string());
+            }
+            MatchKind::Alias => aliases.push(candidate.to_string()),
+            _ => {}
+        }
+    }
+    exact.or(case_insensitive).or_else(|| {
+        if aliases.len() == 1 {
+            aliases.pop()
+        } else {
+            None
+        }
+    })
+}
+
 /// Match a desired model ID against a fresh `session/new` response.
 ///
 /// Returns the correct ACP method to call, or `None` if no match.
@@ -1874,20 +1932,21 @@ pub fn resolve_model_switch_method(
     desired_model: &str,
 ) -> Option<ModelSwitchMethod> {
     // 1. Search stable configOptions for a "model"-category entry whose
-    //    options contain a value matching desired_model.
+    //    options contain a value matching desired_model (exact / ci / alias).
     for config_opt in extract_model_config_options(session_new_result) {
         let config_id = match config_opt.get("configId").and_then(|v| v.as_str()) {
             Some(id) => id,
             None => continue,
         };
         if let Some(options) = config_opt.get("options").and_then(|v| v.as_array()) {
-            for opt in options {
-                if opt.get("value").and_then(|v| v.as_str()) == Some(desired_model) {
-                    return Some(ModelSwitchMethod::ConfigOption {
-                        config_id: config_id.to_string(),
-                        option_value: desired_model.to_string(),
-                    });
-                }
+            let values = options
+                .iter()
+                .filter_map(|opt| opt.get("value").and_then(|v| v.as_str()));
+            if let Some(option_value) = pick_matching_model_id(values, desired_model) {
+                return Some(ModelSwitchMethod::ConfigOption {
+                    config_id: config_id.to_string(),
+                    option_value,
+                });
             }
         }
     }
@@ -1895,12 +1954,11 @@ pub fn resolve_model_switch_method(
     // 2. Search unstable availableModels for a matching modelId.
     if let Some(models) = extract_model_state(session_new_result) {
         if let Some(available) = models.get("availableModels").and_then(|v| v.as_array()) {
-            for model in available {
-                if model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model) {
-                    return Some(ModelSwitchMethod::SetModel {
-                        model_id: desired_model.to_string(),
-                    });
-                }
+            let ids = available
+                .iter()
+                .filter_map(|model| model.get("modelId").and_then(|v| v.as_str()));
+            if let Some(model_id) = pick_matching_model_id(ids, desired_model) {
+                return Some(ModelSwitchMethod::SetModel { model_id });
             }
         }
     }
@@ -1920,28 +1978,25 @@ pub fn model_in_catalog(
     available_models: Option<&serde_json::Value>,
     desired_model: &str,
 ) -> bool {
-    let in_config_options = config_options.iter().any(|config_opt| {
+    let config_values = config_options.iter().flat_map(|config_opt| {
         config_opt
             .get("options")
             .and_then(|v| v.as_array())
-            .is_some_and(|options| {
-                options
-                    .iter()
-                    .any(|opt| opt.get("value").and_then(|v| v.as_str()) == Some(desired_model))
-            })
+            .into_iter()
+            .flatten()
+            .filter_map(|opt| opt.get("value").and_then(|v| v.as_str()))
     });
-    if in_config_options {
+    if pick_matching_model_id(config_values, desired_model).is_some() {
         return true;
     }
 
-    available_models
+    let ids = available_models
         .and_then(|models| models.get("availableModels"))
         .and_then(|v| v.as_array())
-        .is_some_and(|available| {
-            available
-                .iter()
-                .any(|model| model.get("modelId").and_then(|v| v.as_str()) == Some(desired_model))
-        })
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("modelId").and_then(|v| v.as_str()));
+    pick_matching_model_id(ids, desired_model).is_some()
 }
 
 // ─── Drop: kill child process ─────────────────────────────────────────────────
@@ -2472,6 +2527,44 @@ mod tests {
             }
         });
         assert!(super::resolve_model_switch_method(&result, "nonexistent-model").is_none());
+    }
+
+    #[test]
+    fn resolve_matches_short_alias_to_unique_catalog_id() {
+        // BUZZ_ACP_MODEL=sonnet should resolve against full Anthropic ids (#2265).
+        let result = serde_json::json!({
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [
+                    { "value": "claude-sonnet-4-20250514", "displayName": "Sonnet 4" },
+                    { "value": "claude-opus-4-20250514", "displayName": "Opus 4" }
+                ]
+            }]
+        });
+        let method = super::resolve_model_switch_method(&result, "sonnet");
+        assert_eq!(
+            method,
+            Some(super::ModelSwitchMethod::ConfigOption {
+                config_id: "model".to_string(),
+                option_value: "claude-sonnet-4-20250514".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_ambiguous_alias() {
+        let result = serde_json::json!({
+            "configOptions": [{
+                "configId": "model",
+                "category": "model",
+                "options": [
+                    { "value": "claude-sonnet-4-20250514" },
+                    { "value": "claude-sonnet-3-7-20250219" }
+                ]
+            }]
+        });
+        assert!(super::resolve_model_switch_method(&result, "sonnet").is_none());
     }
 
     #[test]

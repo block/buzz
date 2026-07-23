@@ -2946,6 +2946,31 @@ fn spawn_failure_notice(
     }
 }
 
+/// Application errors that will not succeed on requeue (credits, auth).
+///
+/// Matched on the Display text so we cover both ACP-wrapped
+/// (`Agent reported error (code -32603): …`) and bare harness messages.
+fn is_non_retryable_application_error(err: &acp::AcpError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("usage credits")
+        || lower.contains("/usage-credits")
+        || lower.contains("invalid api key")
+        || lower.contains("authentication_error")
+        || lower.contains("incorrect api key")
+        || (lower.contains("unauthorized") && lower.contains("api"))
+}
+
+fn non_retryable_failure_notice(err: &acp::AcpError) -> String {
+    let text = err.to_string();
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("usage credits") || lower.contains("/usage-credits") {
+        return "⚠️ I couldn't complete that turn — the configured Claude model requires usage credits. Switch to a plan-included model (e.g. `sonnet`) in agent settings, or run `/usage-credits` in Claude Code.".to_string();
+    }
+    format!(
+        "⚠️ I couldn't complete that turn ({text}). Please fix the configuration and re-send if it's still needed."
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3042,6 +3067,23 @@ fn handle_prompt_result(
                     hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                }
+            } else if let PromptOutcome::Error(ref err) = result.outcome {
+                if is_non_retryable_application_error(err) {
+                    // Credits / auth failures will never succeed on retry — tell
+                    // the channel immediately instead of silent backoff (#2265).
+                    tracing::error!(
+                        channel_id = %batch.channel_id,
+                        error = %err,
+                        "dead-lettering batch after non-retryable application error"
+                    );
+                    let content = non_retryable_failure_notice(err);
+                    spawn_failure_notice(rest_client, &batch, content);
+                } else if let Some(dead) = queue.requeue(batch) {
+                    let content = format!(
+                        "⚠️ I couldn't process the last request after multiple retries ({err}). Please re-send if it's still needed."
+                    );
+                    spawn_failure_notice(rest_client, &dead, content);
                 }
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
