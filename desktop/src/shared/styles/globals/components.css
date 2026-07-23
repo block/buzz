@@ -162,8 +162,13 @@
   }
 
   .buzz-onboarding-step-frame {
+    /* Fill the shell under the chrome + docked CTA, but keep tall steps
+       (e.g. machine onboarding model defaults) scrollable instead of clipped
+       when max-height binds. */
     min-height: min(1000px, max(0px, calc(100dvh - 106px - 7rem)));
-    max-height: 1000px;
+    max-height: min(1000px, max(0px, calc(100dvh - 106px - 7rem)));
+    overflow-x: hidden;
+    overflow-y: auto;
   }
 
   .buzz-onboarding-step-frame > .buzz-onboarding-slide,
