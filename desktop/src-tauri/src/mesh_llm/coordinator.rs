@@ -22,10 +22,16 @@ const STATUS_D_TAG_PREFIX: &str = "buzz-mesh-member-status";
 const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_PUBLISH_INTERVAL: Duration = Duration::from_secs(45);
 const STATUS_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Post-launch ingress liveness / re-arm for #2062. Bounded backoff: base 15s,
+/// doubles after consecutive failures up to 120s so a sticky offline peer does
+/// not hammer discovery every tick, but a recovered peer is noticed quickly.
+const INGRESS_WATCHDOG_BASE: Duration = Duration::from_secs(15);
+const INGRESS_WATCHDOG_MAX: Duration = Duration::from_secs(120);
 
 pub struct MeshCoordinator {
     _status_publisher: tokio::task::JoinHandle<()>,
     _roster_watcher: tokio::task::JoinHandle<()>,
+    _ingress_watchdog: tokio::task::JoinHandle<()>,
 }
 
 /// Start the runtime-owned status publisher and admission-roster watcher.
@@ -63,16 +69,42 @@ pub async fn start_coordinator(app: AppHandle) {
         }
     });
 
+    // Brad #2304 / #2062: ensure_relay_mesh_for_record only runs on explicit
+    // start + launch restore. After launch, local buzz-agent processes talk
+    // directly to :9337; there is no desktop "turn dispatch" hook. This
+    // watchdog is the post-launch seam: probe ingress, drop a zombie handle,
+    // re-arm via ensure_relay_mesh_for_record, surface last_error on failure.
+    let ingress_app = app.clone();
+    let ingress_watchdog = tokio::spawn(async move {
+        let mut sleep_for = INGRESS_WATCHDOG_BASE;
+        loop {
+            tokio::time::sleep(sleep_for).await;
+            match crate::commands::mesh_llm::rearm_relay_mesh_for_running_agents(&ingress_app)
+                .await
+            {
+                Ok(()) => {
+                    sleep_for = INGRESS_WATCHDOG_BASE;
+                }
+                Err(error) => {
+                    eprintln!("buzz-mesh: ingress re-arm watchdog: {error}");
+                    sleep_for = (sleep_for * 2).min(INGRESS_WATCHDOG_MAX);
+                }
+            }
+        }
+    });
+
     let state = app.state::<AppState>();
     let mut guard = state.mesh_coordinator.lock().await;
     if guard.is_none() {
         *guard = Some(MeshCoordinator {
             _status_publisher: status_publisher,
             _roster_watcher: roster_watcher,
+            _ingress_watchdog: ingress_watchdog,
         });
     } else {
         status_publisher.abort();
         roster_watcher.abort();
+        ingress_watchdog.abort();
     }
 }
 
