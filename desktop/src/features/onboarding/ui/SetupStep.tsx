@@ -91,13 +91,46 @@ function RuntimeReadinessIndicator({
   );
 }
 
+const ONBOARDING_RUNTIME_ACTION_CLASS =
+  "buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40";
+
+function CheckAgainButton({
+  checking,
+  onCheck,
+  runtimeId,
+  runtimeLabel,
+  testId,
+}: {
+  checking: boolean;
+  onCheck: () => void;
+  runtimeId: string;
+  runtimeLabel: string;
+  testId?: string;
+}) {
+  return (
+    <Button
+      aria-label={`Check ${runtimeLabel} again`}
+      className={ONBOARDING_RUNTIME_ACTION_CLASS}
+      data-testid={testId ?? `onboarding-runtime-check-again-${runtimeId}`}
+      disabled={checking}
+      onClick={onCheck}
+      type="button"
+      variant="ghost"
+    >
+      {checking ? "CHECKING…" : "CHECK AGAIN"}
+    </Button>
+  );
+}
+
 function RuntimeStatus({
   installError,
+  installSuccess,
   isInstalling,
   onInstall,
   runtime,
 }: {
   installError: string | null;
+  installSuccess: boolean;
   isInstalling: boolean;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
@@ -234,21 +267,25 @@ function RuntimeStatus({
     );
   }
 
+  // Auth unknown, or install finished but rediscovery not ready yet (#2239).
+  // Never treat local installSuccess as READY — offer recheck instead.
   if (
-    runtime.availability === "available" &&
-    runtime.authStatus.status === "unknown"
+    (runtime.availability === "available" &&
+      runtime.authStatus.status === "unknown") ||
+    installSuccess
   ) {
     return (
-      <Button
-        aria-label={`Check ${runtime.label} again`}
-        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
-        disabled={runtimesQuery.isFetching}
-        onClick={() => void runtimesQuery.refetch()}
-        type="button"
-        variant="ghost"
-      >
-        {runtimesQuery.isFetching ? "CHECKING…" : "CHECK AGAIN"}
-      </Button>
+      <CheckAgainButton
+        checking={runtimesQuery.isFetching}
+        onCheck={() => void runtimesQuery.refetch()}
+        runtimeId={runtime.id}
+        runtimeLabel={runtime.label}
+        testId={
+          installSuccess
+            ? `onboarding-runtime-check-again-${runtime.id}`
+            : undefined
+        }
+      />
     );
   }
 
@@ -257,7 +294,7 @@ function RuntimeStatus({
     return (
       <Button
         aria-label={`${installError ? "Retry installing" : "Install"} ${runtime.label}`}
-        className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+        className={ONBOARDING_RUNTIME_ACTION_CLASS}
         data-testid={`onboarding-runtime-install-${runtime.id}`}
         onClick={onInstall}
         type="button"
@@ -464,11 +501,13 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 
 function RuntimeCard({
   installError,
+  installSuccess,
   isInstalling,
   onInstall,
   runtime,
 }: {
   installError: string | null;
+  installSuccess: boolean;
   isInstalling: boolean;
   onInstall: () => void;
   runtime: AcpRuntimeCatalogEntry;
@@ -498,6 +537,7 @@ function RuntimeCard({
         </div>
         <RuntimeStatus
           installError={installError}
+          installSuccess={installSuccess}
           isInstalling={isInstalling}
           onInstall={onInstall}
           runtime={runtime}
@@ -607,6 +647,7 @@ function RuntimeProvidersSection({
             {orderedItems.map((runtime) => (
               <RuntimeCard
                 installError={installResults[runtime.id]?.error ?? null}
+                installSuccess={installResults[runtime.id]?.success ?? false}
                 isInstalling={
                   installMutation.isPending &&
                   installMutation.variables === runtime.id

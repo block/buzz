@@ -107,14 +107,13 @@ fn create_job_for_child(pid: u32) -> Option<JobHandle> {
 
 /// Kill the entire process tree rooted at `pid` via `taskkill /T`, the closest
 /// equivalent to the Unix process-group kill. Used on the after-restart path
-/// where no job handle survived. `CREATE_NO_WINDOW` keeps taskkill's own
-/// console from flashing.
+/// where no job handle survived. Hides taskkill's own console via
+/// [`crate::windows_console::hide_console`].
 pub fn taskkill_tree(pid: u32) -> Result<(), String> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let status = std::process::Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .creation_flags(CREATE_NO_WINDOW)
+    let mut command = std::process::Command::new("taskkill");
+    command.args(["/T", "/F", "/PID", &pid.to_string()]);
+    crate::windows_console::hide_console(&mut command);
+    let status = command
         .status()
         .map_err(|error| format!("failed to run taskkill for pid {pid}: {error}"))?;
     if status.success() {

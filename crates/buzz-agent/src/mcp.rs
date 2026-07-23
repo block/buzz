@@ -80,6 +80,19 @@ fn windows_child_passthrough_env() -> impl Iterator<Item = &'static str> {
         .chain(crate::WINDOWS_SHELL_RESOLUTION_ENV.iter().copied())
 }
 
+/// Suppress a console window for MCP children on Windows (no-op elsewhere).
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+    }
+}
+
 type Client = RunningService<RoleClient, ()>;
 
 #[derive(Clone)]
@@ -731,6 +744,9 @@ async fn spawn_one(
 
     #[cfg(unix)]
     cmd.process_group(0);
+
+    // Windowless buzz-acp parent: MCP children must not allocate consoles.
+    hide_console(&mut cmd);
 
     let transport = TokioChildProcess::new(cmd)
         .map_err(|e| AgentError::Mcp(format!("spawn {}: {e}", spec.name)))?;

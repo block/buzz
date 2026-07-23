@@ -42,25 +42,24 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 home.join(".asdf/shims"),
             ]);
         }
-        // Windows well-known dirs for npm global shims and standalone installer targets.
+        // Windows well-known dirs for npm global shims, Node.js, and standalone
+        // installer targets. GUI-launched apps often miss shell-profile PATH
+        // entries, so we probe standard locations + version-manager env vars.
         #[cfg(windows)]
         {
-            if let Some(appdata) = std::env::var_os("APPDATA") {
-                paths.push(PathBuf::from(appdata).join("npm"));
-            }
-            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                paths.push(
-                    PathBuf::from(local)
-                        .join("Programs")
-                        .join("OpenAI")
-                        .join("Codex")
-                        .join("bin"),
-                );
-            }
+            paths.extend(windows_paths::windows_well_known_binary_dirs_from_env());
         }
         paths
     })
 }
+
+#[cfg(windows)]
+mod windows_paths;
+#[cfg(windows)]
+pub(crate) use windows_paths::{
+    windows_existing_well_known_path_dirs, windows_well_known_binary_dirs,
+    windows_well_known_binary_dirs_from_env, WindowsWellKnownEnv,
+};
 
 const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
@@ -73,7 +72,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("goose"),
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        cli_install_commands_windows: &[], // goose install script is already Windows-aware
+        // Pin GOOSE_BIN_DIR to ~/.local/bin (already on Buzz's discovery path
+        // list) so install doesn't land only in %USERPROFILE%\goose off PATH
+        // (#2239). Back-compat: windows_paths still probes the official default.
+        cli_install_commands_windows: &["GOOSE_BIN_DIR=\"$HOME/.local/bin\" curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
         adapter_install_commands: &[],
         install_instructions_url: "https://block.github.io/goose/",
         cli_install_hint: "Install Goose via the official install script.",
@@ -677,7 +679,12 @@ fn login_shell_candidates() -> Vec<PathBuf> {
 /// Returns trimmed stdout if the command succeeds with non-empty output.
 fn run_in_login_shell(args: &[&str]) -> Option<String> {
     for shell in login_shell_candidates() {
-        let Ok(output) = Command::new(&shell).args(args).output() else {
+        let mut cmd = Command::new(&shell);
+        cmd.args(args);
+        // Discovery probes run during onboarding / Doctor refresh — hide the
+        // console so Git Bash doesn't steal focus on Windows (#2239).
+        crate::windows_console::hide_console(&mut cmd);
+        let Ok(output) = cmd.output() else {
             continue;
         };
         if !output.status.success() {
@@ -916,6 +923,7 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    crate::windows_console::hide_console(&mut command);
 
     let mut child = match command.spawn() {
         Ok(c) => c,
@@ -1076,6 +1084,7 @@ pub(crate) fn probe_codex_acp_major_version_with_path(
 
     let mut command = Command::new(binary_path);
     command.arg("--version");
+    crate::windows_console::hide_console(&mut command);
     if let Some(path) = augmented_path {
         command.env("PATH", path);
     }

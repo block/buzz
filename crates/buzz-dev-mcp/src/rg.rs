@@ -21,11 +21,10 @@ fn try_system_rg(args: &[String]) -> Option<i32> {
     let cleaned_path = clean_path(&self_canon);
     let candidate = which_rg(&cleaned_path)?;
 
-    let status = Command::new(&candidate)
-        .args(args)
-        .env("PATH", &cleaned_path)
-        .status()
-        .ok()?;
+    let mut cmd = Command::new(&candidate);
+    cmd.args(args).env("PATH", &cleaned_path);
+    crate::windows_console::hide_std(&mut cmd);
+    let status = cmd.status().ok()?;
     Some(status.code().unwrap_or(2))
 }
 

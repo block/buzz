@@ -29,6 +29,7 @@ mod secret_store;
 mod shutdown;
 mod templates;
 mod util;
+mod windows_console;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;

@@ -196,12 +196,15 @@ fn resolve_git_bash_inner(
     local_app_data: Option<PathBuf>,
     check_registry: bool,
 ) -> Option<PathBuf> {
+    // Prefer real Git Bash over WindowsApps\bash.exe (App Execution Alias →
+    // WSL; #2328). Order: overrides → git.exe sibling → well-known dirs →
+    // registry → PATH bash (System32 + WindowsApps skipped).
+    // KEEP IN SYNC with `crates/buzz-dev-mcp/src/shell.rs` `resolve_bash`.
     let result = shell_override
         .and_then(|path| resolve_shell_override(&path, path_env))
         .or_else(|| git_bash_override.filter(|path| path.is_file()))
-        .or_else(|| scan_path_for_bash(path_env, system_root.as_deref()))
         .or_else(|| {
-            scan_path_for_command(Path::new("git.exe"), path_env, None)
+            scan_path_for_command(Path::new("git.exe"), path_env, None, false)
                 .and_then(|git| bash_from_git(&git))
         })
         .or_else(|| {
@@ -211,9 +214,11 @@ fn resolve_git_bash_inner(
         return result;
     }
     if check_registry {
-        return git_bash_from_registry();
+        if let Some(bash) = git_bash_from_registry() {
+            return Some(bash);
+        }
     }
-    None
+    scan_path_for_bash(path_env, system_root.as_deref())
 }
 
 /// Like `resolve_git_bash` but skips the ambient Windows registry lookup, so
@@ -249,7 +254,7 @@ fn resolve_shell_override(shell: &Path, path_env: &str) -> Option<PathBuf> {
     if shell.components().count() > 1 || shell.has_root() {
         shell.is_file().then(|| shell.to_path_buf())
     } else {
-        scan_path_for_command(shell, path_env, None)
+        scan_path_for_command(shell, path_env, None, false)
     }
 }
 
@@ -261,18 +266,28 @@ fn bash_from_git(git: &Path) -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn scan_path_for_bash(path_env: &str, system_root: Option<&Path>) -> Option<PathBuf> {
-    scan_path_for_command(Path::new("bash.exe"), path_env, system_root)
+    // Bash-only: also reject WindowsApps App Execution Alias (#2328).
+    scan_path_for_command(Path::new("bash.exe"), path_env, system_root, true)
 }
 
+/// Scan PATH for `name`. When `skip_windows_apps`, reject
+/// `…\Microsoft\WindowsApps` (App Execution Alias → WSL hang for bash).
+///
+/// KEEP IN SYNC with `crates/buzz-dev-mcp/src/shell.rs` (`scan_path_for_command`
+/// + `path_looks_like_windows_apps` + resolve probe order).
 #[cfg(windows)]
 fn scan_path_for_command(
     name: &Path,
     path_env: &str,
     system_root: Option<&Path>,
+    skip_windows_apps: bool,
 ) -> Option<PathBuf> {
     let needs_exe = name.extension().is_none();
     std::env::split_paths(path_env).find_map(|dir| {
         if system_root.is_some_and(|root| is_under_dir(&dir, root)) {
+            return None;
+        }
+        if skip_windows_apps && path_looks_like_windows_apps(&dir) {
             return None;
         }
         let candidate = dir.join(name);
@@ -287,6 +302,18 @@ fn scan_path_for_command(
             }
         }
         None
+    })
+}
+
+/// True for `…\Microsoft\WindowsApps` (App Execution Alias dir), any casing.
+#[cfg(windows)]
+fn path_looks_like_windows_apps(dir: &Path) -> bool {
+    let parts: Vec<_> = dir
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    parts.windows(2).any(|w| {
+        w[0].eq_ignore_ascii_case("Microsoft") && w[1].eq_ignore_ascii_case("WindowsApps")
     })
 }
 
@@ -543,10 +570,87 @@ mod tests {
         );
 
         // Install path: shell_override=None skips pwsh, finds bash on PATH.
+        // no_registry: ambient GitForWindows would otherwise win after reorder.
         assert_eq!(
-            resolve_git_bash(path_str, None, None, None, None, None, None),
+            resolve_git_bash_no_registry(path_str, None, None, None, None, None, None),
             Some(bash),
             "install path must skip BUZZ_SHELL and find bash on PATH"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_bash_skipped_in_favor_of_git() {
+        let temp = tempdir().expect("tempdir");
+        let apps = temp
+            .path()
+            .join("Local")
+            .join("Microsoft")
+            .join("WindowsApps");
+        let apps_bash = apps.join("bash.exe");
+        std::fs::create_dir_all(&apps).expect("mkdir apps");
+        std::fs::write(&apps_bash, []).expect("apps bash");
+
+        let git = temp
+            .path()
+            .join("Git")
+            .join("cmd")
+            .join("git.exe");
+        let real_bash = temp
+            .path()
+            .join("Git")
+            .join("bin")
+            .join("bash.exe");
+        std::fs::create_dir_all(git.parent().expect("git parent")).expect("mkdir git");
+        std::fs::create_dir_all(real_bash.parent().expect("bash parent")).expect("mkdir bash");
+        std::fs::write(&git, []).expect("git");
+        std::fs::write(&real_bash, []).expect("bash");
+
+        // WindowsApps first on PATH (common machine layout).
+        let path = std::env::join_paths([
+            apps.as_path(),
+            git.parent().expect("cmd dir"),
+        ])
+        .expect("PATH");
+        assert_eq!(
+            resolve_git_bash(
+                path.to_str().expect("utf8"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(temp.path().join("Local")),
+            ),
+            Some(real_bash),
+            "must prefer Git Bash over WindowsApps alias"
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_bash_alone_is_not_resolved() {
+        let temp = tempdir().expect("tempdir");
+        let apps = temp
+            .path()
+            .join("Local")
+            .join("Microsoft")
+            .join("WindowsApps");
+        let apps_bash = apps.join("bash.exe");
+        std::fs::create_dir_all(&apps).expect("mkdir apps");
+        std::fs::write(&apps_bash, []).expect("apps bash");
+
+        let path = std::env::join_paths([apps.as_path()]).expect("PATH");
+        assert_eq!(
+            resolve_git_bash_no_registry(
+                path.to_str().expect("utf8"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(temp.path().join("Local")),
+            ),
+            None,
+            "WindowsApps bash must not count as Git Bash"
         );
     }
 
@@ -570,8 +674,9 @@ mod tests {
         );
 
         // Install path: shell_override=None skips cmd, finds bash on PATH.
+        // no_registry: ambient GitForWindows would otherwise win after reorder.
         assert_eq!(
-            resolve_git_bash(path_str, None, None, None, None, None, None),
+            resolve_git_bash_no_registry(path_str, None, None, None, None, None, None),
             Some(bash),
             "install path must skip BUZZ_SHELL and find bash on PATH"
         );
