@@ -588,6 +588,7 @@ pub async fn create_managed_agent(
     // Snapshot the workspace owner pubkey for the legacy-record auth_tag
     // fallback. Computed outside the records lock to keep lock ordering simple.
     let owner_hex = workspace_owner_hex(&state)?;
+    let workspace_relay_url = relay_ws_url_with_override(&state);
 
     // ── Phase 1: generate keys (sync lock) ────────────────────────────────────
     let (agent_keys, private_key_nsec, pubkey, resolved_relay_url, input) = {
@@ -632,6 +633,11 @@ pub async fn create_managed_agent(
             .map(str::trim)
             .unwrap_or("")
             .to_string();
+        crate::managed_agents::validate_effective_local_agent_relay(
+            &input.backend,
+            &resolved_relay_url,
+            &workspace_relay_url,
+        )?;
 
         (keys, private_key_nsec, pubkey, resolved_relay_url, input)
     };
@@ -1077,6 +1083,7 @@ pub async fn start_managed_agent(
 
         let reconcile = ProfileReconcileData {
             private_key_nsec: record.private_key_nsec.clone(),
+            backend: record.backend.clone(),
             name: record.name.clone(),
             relay_url: record.relay_url.clone(),
             avatar_url: record.avatar_url.clone(),
@@ -1319,7 +1326,7 @@ pub(crate) use deploy::resolve_deploy_model_provider;
 #[path = "agents_profile.rs"]
 mod profile;
 #[cfg(test)]
-use profile::{profile_needs_sync, resolve_legacy_avatar};
+use profile::{profile_needs_sync, resolve_legacy_avatar, validate_profile_reconcile_relay_with};
 pub(crate) use profile::{reconcile_agent_profile, ProfileReconcileData};
 
 #[cfg(test)]

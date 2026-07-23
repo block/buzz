@@ -16,12 +16,22 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_INTERNAL");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_LOCAL_AGENT_RELAY_ALLOWLIST");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
 
     // Explicit distribution identity. Internal packaging sets this presence-only
     // marker; OSS/custom builds remain public regardless of baked defaults.
     if std::env::var("BUZZ_BUILD_INTERNAL").is_ok() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_INTERNAL=1");
+    }
+
+    // Newline-delimited exact relay URLs. Runtime parsing canonicalizes every
+    // entry with buzz-core before comparing an effective local-agent relay.
+    // Preserve malformed or empty input so internal builds fail loudly at the
+    // policy boundary instead of silently compiling to an empty allowlist.
+    if let Ok(raw) = std::env::var("BUZZ_BUILD_LOCAL_AGENT_RELAY_ALLOWLIST") {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw.as_bytes());
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_LOCAL_AGENT_RELAY_ALLOWLIST={encoded}");
     }
 
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {

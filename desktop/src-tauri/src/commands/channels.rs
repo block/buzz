@@ -1,4 +1,4 @@
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     app_state::AppState,
@@ -785,9 +785,14 @@ pub async fn add_channel_members(
     channel_id: String,
     pubkeys: Vec<String>,
     role: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let uuid = parse_channel_uuid(&channel_id)?;
+    let relay_url = crate::relay::relay_ws_url_with_override(&state);
+    crate::managed_agents::validate_local_agent_members_from_store(&pubkeys, &relay_url, || {
+        crate::managed_agents::load_managed_agents(&app)
+    })?;
     let role_str = match role.as_deref() {
         Some("admin") => Some("admin"),
         Some("bot") => Some("bot"),
@@ -833,6 +838,7 @@ pub async fn change_channel_member_role(
     channel_id: String,
     pubkey: String,
     role: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let uuid = parse_channel_uuid(&channel_id)?;
@@ -843,6 +849,12 @@ pub async fn change_channel_member_role(
         "owner" => return Err("cannot assign owner role — use transfer ownership".into()),
         other => return Err(format!("invalid role: {other}")),
     };
+    let relay_url = crate::relay::relay_ws_url_with_override(&state);
+    crate::managed_agents::validate_local_agent_members_from_store(
+        std::slice::from_ref(&pubkey),
+        &relay_url,
+        || crate::managed_agents::load_managed_agents(&app),
+    )?;
     let builder = events::build_add_member(uuid, &pubkey, Some(role_str))?;
     submit_event(builder, &state).await?;
     Ok(())

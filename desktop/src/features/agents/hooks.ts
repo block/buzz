@@ -11,6 +11,7 @@ import {
   ensureChannelAgentPresetInChannel,
   provisionChannelManagedAgent,
 } from "@/features/agents/channelAgents";
+import { localAgentRelayAllowedQueryKey } from "@/features/agents/localAgentRelayPolicyQuery";
 import { resolveSnapshotAvatarPng } from "@/features/agents/ui/snapshotAvatarPng";
 import {
   channelsQueryKey,
@@ -27,6 +28,7 @@ import {
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
   getAgentAccessOwnerOnly,
+  getLocalAgentRelayAllowed,
   getBakedBuildEnv,
   getBakedBuildEnvKeys,
   getChannelMembers,
@@ -913,6 +915,20 @@ export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
 export const agentAccessOwnerOnlyQueryKey = [
   "agent-access-owner-only",
 ] as const;
+
+export function useLocalAgentRelayAllowedQuery(
+  communityId: string | null,
+  options?: { enabled?: boolean },
+) {
+  return useQuery({
+    queryKey: localAgentRelayAllowedQueryKey(communityId),
+    queryFn: () => getLocalAgentRelayAllowed(),
+    enabled: options?.enabled ?? true,
+    staleTime: 30_000,
+    refetchInterval: false,
+    retry: false,
+  });
+}
 
 export function useAgentAccessOwnerOnlyQuery(options?: { enabled?: boolean }) {
   return useQuery({

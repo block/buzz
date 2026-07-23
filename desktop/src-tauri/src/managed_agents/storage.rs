@@ -193,12 +193,18 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
     })
 }
 
+fn retain_managed_agent_instances(records: &mut Vec<ManagedAgentRecord>) {
+    records.retain(|record| !record.pubkey.is_empty());
+}
+
 /// Load the keyed agent *instances*. Key-less definitions (former personas,
 /// folded into the same store) are filtered out so every pre-fold call site
-/// keeps seeing exactly the records it always did.
+/// keeps seeing exactly the records it always did. Relay-policy violations are
+/// enforced at save/attach/start boundaries, not here, so a bad legacy pin can
+/// still be listed, fixed, or deleted.
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
-    records.retain(|record| !record.pubkey.is_empty());
+    retain_managed_agent_instances(&mut records);
     hydrate_keys(&mut records);
     Ok(records)
 }
@@ -292,13 +298,57 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
     }
 }
 
+fn validate_changed_relay_pins_with<F>(
+    records: &[ManagedAgentRecord],
+    previous: &[ManagedAgentRecord],
+    validate: F,
+) -> Result<(), String>
+where
+    F: Fn(&ManagedAgentRecord) -> Result<(), String>,
+{
+    for record in records {
+        let unchanged = previous.iter().any(|old| {
+            old.pubkey == record.pubkey
+                && old.backend == record.backend
+                && old.relay_url == record.relay_url
+        });
+        if !unchanged {
+            validate(record)?;
+        }
+    }
+    Ok(())
+}
+
+fn load_managed_agent_save_baseline_with<F>(
+    load: F,
+) -> Result<(Vec<ManagedAgentRecord>, Vec<ManagedAgentRecord>), String>
+where
+    F: FnOnce() -> Result<Vec<ManagedAgentRecord>, String>,
+{
+    let stored = load()?;
+    let definitions = stored
+        .iter()
+        .filter(|record| record.pubkey.is_empty())
+        .cloned()
+        .collect();
+    let instances = stored
+        .into_iter()
+        .filter(|record| !record.pubkey.is_empty())
+        .collect();
+    Ok((definitions, instances))
+}
+
 /// Save the keyed agent *instances*, preserving the key-less definitions that
 /// share the unified store: callers pass exactly the records they loaded via
 /// [`load_managed_agents`], and this re-reads the definition half from disk
 /// before the wholesale rewrite so a definition is never dropped by an
 /// instance-side save (and vice versa via [`save_agent_definitions`]).
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
-    let definitions = load_agent_definitions(app).unwrap_or_default();
+    let (definitions, previous_instances) =
+        load_managed_agent_save_baseline_with(|| load_agent_store(app))?;
+    validate_changed_relay_pins_with(records, &previous_instances, |record| {
+        super::validate_managed_agent_relay_pin(record)
+    })?;
     let mut sorted = records.to_vec();
     for record in &mut sorted {
         super::normalize_managed_agent_access(record);
@@ -797,8 +847,9 @@ mod tests {
     use tempfile::NamedTempFile;
 
     use super::{
-        agent_keyring_name, hydrate_keys_with, migrate_inline_key, persist_agent_keys_with,
-        KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
+        agent_keyring_name, hydrate_keys_with, load_managed_agent_save_baseline_with,
+        migrate_inline_key, persist_agent_keys_with, retain_managed_agent_instances,
+        validate_changed_relay_pins_with, KeyMigration, KeyStore, KeyringProbe, ManagedAgentRecord,
     };
 
     /// In-memory [`KeyStore`] for testing the migrate decision without the OS
@@ -926,6 +977,65 @@ mod tests {
             }}"#
         ))
         .expect("sample record")
+    }
+
+    #[test]
+    fn save_baseline_propagates_store_errors_without_rewriting_from_empty() {
+        let result = load_managed_agent_save_baseline_with(|| Err("broken store".into()));
+        assert_eq!(result.unwrap_err(), "broken store");
+    }
+
+    #[test]
+    fn save_baseline_preserves_definitions_and_instances() {
+        let instance = record_with_key("nsec1realkey");
+        let mut definition = instance.clone();
+        definition.pubkey.clear();
+
+        let (definitions, instances) = load_managed_agent_save_baseline_with(|| {
+            Ok(vec![definition.clone(), instance.clone()])
+        })
+        .expect("baseline");
+
+        assert_eq!(definitions, vec![definition]);
+        assert_eq!(instances, vec![instance]);
+    }
+
+    #[test]
+    fn instance_filter_keeps_legacy_pins_available_for_remediation() {
+        let mut pinned = record_with_key("nsec1realkey");
+        pinned.relay_url = "wss://public.example".into();
+        let mut definition = pinned.clone();
+        definition.pubkey.clear();
+        let mut records = vec![pinned.clone(), definition];
+
+        retain_managed_agent_instances(&mut records);
+
+        assert_eq!(records, vec![pinned]);
+    }
+
+    #[test]
+    fn legacy_bad_pin_allows_unrelated_save_but_changed_pin_is_validated() {
+        let mut pinned = record_with_key("nsec1realkey");
+        pinned.relay_url = "wss://public.example".into();
+        let previous = vec![pinned.clone()];
+        let calls = std::cell::Cell::new(0);
+
+        assert!(
+            validate_changed_relay_pins_with(&[pinned.clone()], &previous, |_| {
+                calls.set(calls.get() + 1);
+                Err("blocked".into())
+            })
+            .is_ok()
+        );
+        assert_eq!(calls.get(), 0);
+
+        pinned.relay_url = "wss://other.example".into();
+        assert!(validate_changed_relay_pins_with(&[pinned], &previous, |_| {
+            calls.set(calls.get() + 1);
+            Err("blocked".into())
+        })
+        .is_err());
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

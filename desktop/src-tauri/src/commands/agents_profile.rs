@@ -11,6 +11,7 @@ use super::*;
 
 pub(crate) struct ProfileReconcileData {
     pub(crate) private_key_nsec: String,
+    pub(crate) backend: BackendKind,
     pub(crate) name: String,
     pub(crate) relay_url: String,
     /// Expected avatar URL for the published profile. `None` for legacy records
@@ -49,6 +50,17 @@ pub(super) fn resolve_legacy_avatar(
         .unwrap_or_default()
 }
 
+pub(super) fn validate_profile_reconcile_relay_with<F>(
+    data: &ProfileReconcileData,
+    workspace_relay_url: &str,
+    validate: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&BackendKind, &str, &str) -> Result<(), String>,
+{
+    validate(&data.backend, &data.relay_url, workspace_relay_url)
+}
+
 /// Reconcile an agent's kind:0 profile on the relay.
 ///
 /// Queries the relay for the agent's existing profile and re-publishes if missing
@@ -74,19 +86,25 @@ pub(crate) async fn reconcile_agent_profile(
 ) -> Result<(), String> {
     use crate::relay::{query_agent_profile, sync_managed_agent_profile};
 
-    // An explicit per-agent relay wins; an empty one falls back to the active
-    // workspace relay. Resolved once and used for both the read and write-back.
-    let relay_url = crate::relay::effective_agent_relay_url(
-        &data.relay_url,
-        &relay_ws_url_with_override(state),
-    );
-
     if !state
         .managed_agent_profile_reconcile_enabled
         .load(std::sync::atomic::Ordering::Acquire)
     {
         return Ok(());
     }
+
+    let workspace_relay_url = relay_ws_url_with_override(state);
+    validate_profile_reconcile_relay_with(
+        data,
+        &workspace_relay_url,
+        |backend, pin, workspace| {
+            crate::managed_agents::validate_effective_local_agent_relay(backend, pin, workspace)
+        },
+    )?;
+
+    // An explicit per-agent relay wins; an empty one falls back to the active
+    // workspace relay. Resolved once and used for both the read and write-back.
+    let relay_url = crate::relay::effective_agent_relay_url(&data.relay_url, &workspace_relay_url);
 
     // Query the relay for the agent's existing kind:0 profile.
     let existing = query_agent_profile(state, &relay_url, agent_pubkey).await?;

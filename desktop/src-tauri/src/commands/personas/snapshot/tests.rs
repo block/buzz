@@ -1,6 +1,7 @@
 use super::import::{
     decode_snapshot_from_bytes, reject_legacy_persona_filename, resolve_snapshot_import_behavior,
-    AgentSnapshotImportResult, MAX_SNAPSHOT_JSON_BYTES, MAX_SNAPSHOT_PNG_BYTES,
+    validated_snapshot_import_relay_with, AgentSnapshotImportResult, MAX_SNAPSHOT_JSON_BYTES,
+    MAX_SNAPSHOT_PNG_BYTES,
 };
 use super::*;
 use crate::managed_agents::{
@@ -968,4 +969,30 @@ fn validate_encode_size_png_over_boundary_is_rejected() {
         err.contains("size limit"),
         "error must mention size limit, got: {err}"
     );
+}
+
+#[test]
+fn individual_snapshot_import_carries_the_validated_relay_snapshot_to_io() {
+    let reads = std::cell::Cell::new(0);
+    let relay = validated_snapshot_import_relay_with(
+        || {
+            reads.set(reads.get() + 1);
+            "wss://allowed.example".into()
+        },
+        |backend, pin, relay| {
+            assert_eq!(backend, &BackendKind::Local);
+            assert!(pin.is_empty());
+            assert_eq!(relay, "wss://allowed.example");
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(relay, "wss://allowed.example");
+    assert_eq!(reads.get(), 1);
+
+    let blocked = validated_snapshot_import_relay_with(
+        || "wss://public.example".into(),
+        |_, _, _| Err("blocked before mutation".into()),
+    );
+    assert_eq!(blocked.unwrap_err(), "blocked before mutation");
 }

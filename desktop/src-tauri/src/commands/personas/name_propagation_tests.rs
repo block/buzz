@@ -156,3 +156,44 @@ fn test_rename_renames_all_matching_instances_in_one_pass() {
     assert_eq!(records[1].name, "Duncan Idaho");
     assert_eq!(records[2].name, "Birch", "pool-named instance untouched");
 }
+
+#[test]
+fn persona_profile_updates_preflight_only_records_that_would_mutate_or_publish() {
+    let mut records = vec![
+        agent("persona-1", "Paul", Some("Paul")),
+        agent("persona-1", "Birch", Some("Birch")),
+        agent("persona-2", "Paul", Some("Paul")),
+    ];
+    records[0].backend = crate::managed_agents::BackendKind::Local;
+    records[1].backend = crate::managed_agents::BackendKind::Provider {
+        id: "provider".into(),
+        config: serde_json::json!({}),
+    };
+    let visited = std::cell::RefCell::new(Vec::new());
+
+    validate_persona_profile_updates_with(&records, "persona-1", "Paul", true, false, |record| {
+        visited.borrow_mut().push(record.pubkey.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(*visited.borrow(), vec!["pubkey-Paul"]);
+
+    visited.borrow_mut().clear();
+    validate_persona_profile_updates_with(&records, "persona-1", "Paul", false, true, |record| {
+        visited.borrow_mut().push(record.pubkey.clone());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(*visited.borrow(), vec!["pubkey-Paul", "pubkey-Birch"]);
+}
+
+#[test]
+fn persona_profile_preflight_failure_happens_before_name_mutation() {
+    let records = vec![agent("persona-1", "Paul", Some("Paul"))];
+    let result =
+        validate_persona_profile_updates_with(&records, "persona-1", "Paul", true, false, |_| {
+            Err("blocked".into())
+        });
+    assert_eq!(result.unwrap_err(), "blocked");
+    assert_eq!(records[0].name, "Paul");
+}

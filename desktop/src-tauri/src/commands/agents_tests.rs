@@ -414,3 +414,32 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     assert_eq!(payload["provider"], "openai");
     assert_eq!(payload["relay_url"], "wss://relay.example");
 }
+
+#[test]
+fn profile_reconcile_preflights_legacy_empty_pin_before_relay_io() {
+    let data = ProfileReconcileData {
+        private_key_nsec: String::new(),
+        backend: BackendKind::Local,
+        name: "legacy".into(),
+        relay_url: String::new(),
+        avatar_url: None,
+        auth_tag: None,
+        pubkey: "pubkey".into(),
+        agent_command: "goose".into(),
+        persona_id: None,
+    };
+    let calls = std::cell::Cell::new(0);
+    let result = validate_profile_reconcile_relay_with(
+        &data,
+        "wss://public.example",
+        |backend, pin, workspace| {
+            calls.set(calls.get() + 1);
+            assert_eq!(backend, &BackendKind::Local);
+            assert!(pin.is_empty());
+            assert_eq!(workspace, "wss://public.example");
+            Err("blocked before query".into())
+        },
+    );
+    assert_eq!(result.unwrap_err(), "blocked before query");
+    assert_eq!(calls.get(), 1);
+}

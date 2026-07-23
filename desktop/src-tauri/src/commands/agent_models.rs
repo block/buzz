@@ -773,6 +773,22 @@ pub fn agent_access_owner_only() -> bool {
     crate::managed_agents::internal_build()
 }
 
+/// Return whether local agents may attach to the active workspace relay.
+#[tauri::command]
+pub fn local_agent_relay_allowed(
+    state: tauri::State<'_, crate::app_state::AppState>,
+) -> Result<bool, String> {
+    if !crate::managed_agents::internal_build() {
+        return Ok(true);
+    }
+    let relay_url = crate::relay::relay_ws_url_with_override(&state);
+    crate::managed_agents::validate_local_agent_relay(
+        &crate::managed_agents::BackendKind::Local,
+        &relay_url,
+    )?;
+    Ok(true)
+}
+
 /// Update mutable fields on an existing managed agent record.
 ///
 /// Does NOT auto-restart the agent. Runtime config changes (system prompt,
@@ -785,6 +801,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
+    let workspace_relay_url = relay_ws_url_with_override(&state);
     let (summary, sync_params, rollback) = {
         let _store_guard = state
             .managed_agents_store_lock
@@ -831,7 +848,13 @@ pub async fn update_managed_agent(
         // value pins the agent; empty falls back to the workspace relay at
         // read-time. A name-only edit (relay_url == None) leaves the pin intact.
         if let Some(relay_url) = input.relay_url {
-            record.relay_url = relay_url.trim().to_string();
+            let relay_url = relay_url.trim().to_string();
+            crate::managed_agents::validate_effective_local_agent_relay(
+                &record.backend,
+                &relay_url,
+                &workspace_relay_url,
+            )?;
+            record.relay_url = relay_url;
         }
         if let Some(acp_command) = input.acp_command {
             record.acp_command = acp_command;
@@ -888,6 +911,13 @@ pub async fn update_managed_agent(
 
         record.updated_at = now_iso();
 
+        if name_changed {
+            crate::managed_agents::validate_effective_local_agent_relay(
+                &record.backend,
+                &record.relay_url,
+                &workspace_relay_url,
+            )?;
+        }
         save_managed_agents(&app, &records)?;
 
         let record = records

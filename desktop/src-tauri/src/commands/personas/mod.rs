@@ -144,6 +144,24 @@ fn propagate_persona_name_rename(
     renamed
 }
 
+fn validate_persona_profile_updates_with<F>(
+    records: &[ManagedAgentRecord],
+    persona_id: &str,
+    old_display_name: &str,
+    name_changed: bool,
+    avatar_changed: bool,
+    mut validate: F,
+) -> Result<(), String>
+where
+    F: FnMut(&ManagedAgentRecord) -> Result<(), String>,
+{
+    records
+        .iter()
+        .filter(|record| record.persona_id.as_deref() == Some(persona_id))
+        .filter(|record| avatar_changed || (name_changed && record.name == old_display_name))
+        .try_for_each(&mut validate)
+}
+
 #[tauri::command]
 pub async fn update_persona(
     input: UpdatePersonaRequest,
@@ -176,10 +194,32 @@ pub async fn update_persona(
                 .find(|record| record.id == input.id)
                 .ok_or_else(|| format!("agent {} not found", input.id))?;
 
-            // Track what changed so we can propagate to linked agent records.
+            // Track what changed so we can preflight every linked agent before
+            // mutating either store or enqueueing agent-keyed profile I/O.
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
             let old_display_name = persona.display_name.clone();
+            let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
+            let mut linked_records = if avatar_changed || name_changed {
+                let records = load_managed_agents(&app)?;
+                validate_persona_profile_updates_with(
+                    &records,
+                    &persona.id,
+                    &old_display_name,
+                    name_changed,
+                    avatar_changed,
+                    |record| {
+                        crate::managed_agents::validate_effective_local_agent_relay(
+                            &record.backend,
+                            &record.relay_url,
+                            &workspace_relay,
+                        )
+                    },
+                )?;
+                Some(records)
+            } else {
+                None
+            };
 
             persona.display_name = display_name;
             persona.avatar_url = avatar_url;
@@ -209,11 +249,9 @@ pub async fn update_persona(
 
             // If the avatar or display_name changed, propagate to linked agent
             // records and collect relay profile sync params for the async phase.
-            let sync_params: ProfileSyncParams = if avatar_changed || name_changed {
-                let mut records = load_managed_agents(&app)?;
+            let sync_params: ProfileSyncParams = if let Some(mut records) = linked_records.take() {
                 let mut params: ProfileSyncParams = Vec::new();
                 let mut agents_modified = false;
-                let workspace_relay = crate::relay::relay_ws_url_with_override(&state);
 
                 // Propagate the display_name rename to instances that still
                 // carry the old definition display_name (pool-named instances

@@ -394,6 +394,7 @@ type MockBridgeOptions = {
     preferred_runtime?: string | null;
   };
   internalBuild?: boolean;
+  localAgentRelayAllowed?: boolean;
   bakedBuildEnv?: Array<{
     key: string;
     masked: boolean;

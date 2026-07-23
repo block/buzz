@@ -1528,6 +1528,37 @@ test("empty channel shows intro actions", async ({ page }) => {
   );
 });
 
+test("internal build blocks local agents on a non-allowlisted community", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    internalBuild: true,
+    localAgentRelayAllowed: false,
+    activePersonaIds: ["builtin:fizz"],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await page.getByTestId("channel-intro-action-create-agent").click();
+
+  await expect(page.getByTestId("local-agent-relay-blocked")).toBeVisible();
+  await page.getByRole("button", { name: "Fizz" }).click();
+  await expect(page.getByRole("button", { name: "Add agent" })).toBeDisabled();
+});
+
+test("OSS build keeps local agent attachment available", async ({ page }) => {
+  await installMockBridge(page, {
+    internalBuild: false,
+    activePersonaIds: ["builtin:fizz"],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await page.getByTestId("channel-intro-action-create-agent").click();
+
+  await expect(page.getByTestId("local-agent-relay-blocked")).toHaveCount(0);
+  await page.getByRole("button", { name: "Fizz" }).click();
+  await expect(page.getByRole("button", { name: "Add agent" })).toBeEnabled();
+});
+
 test("short channel with messages shows intro actions on open", async ({
   page,
 }) => {

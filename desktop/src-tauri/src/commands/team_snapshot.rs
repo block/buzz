@@ -483,12 +483,12 @@ pub async fn preview_team_snapshot_import(
 ///      If ANY generation fails, return immediately — zero writes.
 ///   3. Store — inside `managed_agents_store_lock`: write all `AgentDefinition`s
 ///      + all `ManagedAgentRecord`s (with `team_id` set) + `TeamRecord`.
-///      Both store files are snapshotted (or noted absent) before the first
-///      write. On any write error the pre-import state is restored — including
-///      deleting a file that was absent, cleaning minted keyring entries, and
-///      surfacing rollback failures alongside the original error. This makes
-///      the store phase all-or-none for ordinary application errors; a process
-///      crash between atomic file commits is NOT covered.
+///        Both store files are snapshotted (or noted absent) before the first
+///        write. On any write error the pre-import state is restored — including
+///        deleting a file that was absent, cleaning minted keyring entries, and
+///        surfacing rollback failures alongside the original error. This makes
+///        the store phase all-or-none for ordinary application errors; a process
+///        crash between atomic file commits is NOT covered.
 ///   4. Profile sync — for each member, call `sync_managed_agent_profile`.
 ///      Best-effort; errors are collected per member.
 ///   5. Memory restore — for each member with non-empty snapshot memory,
@@ -496,6 +496,23 @@ pub async fn preview_team_snapshot_import(
 ///
 /// Importing the same file twice yields two distinct teams with different
 /// agent keypairs (same as individual agent import).
+fn validated_team_snapshot_import_relay_with<R, F>(
+    read_workspace_relay: R,
+    validate: F,
+) -> Result<String, String>
+where
+    R: FnOnce() -> String,
+    F: FnOnce(&crate::managed_agents::BackendKind, &str, &str) -> Result<(), String>,
+{
+    let workspace_relay_url = read_workspace_relay();
+    validate(
+        &crate::managed_agents::BackendKind::Local,
+        "",
+        &workspace_relay_url,
+    )?;
+    Ok(workspace_relay_url)
+}
+
 #[tauri::command]
 pub async fn confirm_team_snapshot_import(
     input: TeamSnapshotImportConfirm,
@@ -505,6 +522,15 @@ pub async fn confirm_team_snapshot_import(
     // ── Phase 1: validate (no I/O) ───────────────────────────────────────────
     let snapshot = decode_team_snapshot_from_bytes(&input.file_bytes)?;
     let now = now_iso();
+
+    // Team snapshots mint only empty-pin local agents. Preflight the workspace
+    // relay once before generating any member key or mutating any store.
+    let workspace_relay_url = validated_team_snapshot_import_relay_with(
+        || relay_ws_url_with_override(&state),
+        |backend, pin, workspace| {
+            crate::managed_agents::validate_effective_local_agent_relay(backend, pin, workspace)
+        },
+    )?;
 
     // Resolve behavioral defaults for every member before any key generation.
     let definitions = build_import_definitions(&snapshot, input.keep_allowlist, &now)?;
@@ -754,7 +780,8 @@ pub async fn confirm_team_snapshot_import(
     };
 
     // ── Phase 4 & 5: profile sync + memory restore (async, outside lock) ────
-    let relay_ws = relay_ws_url_with_override(&state);
+    // Use the relay snapshot validated before mint/store for all agent-keyed I/O.
+    let relay_ws = workspace_relay_url;
     let mut member_results: Vec<TeamSnapshotImportMemberResult> = Vec::with_capacity(minted.len());
 
     for (m, snap_member) in minted.iter().zip(snapshot.members.iter()) {

@@ -67,7 +67,7 @@ pub use transcription::{set_huddle_transcription_enabled, start_stt_pipeline};
 // ── Imports ───────────────────────────────────────────────────────────────────
 
 use std::sync::{atomic::Ordering, Arc};
-use tauri::State;
+use tauri::{AppHandle, State};
 use uuid::Uuid;
 
 use crate::{app_state::AppState, events, relay::submit_event};
@@ -92,6 +92,17 @@ fn normalize_huddle_channel_name(candidate: Option<String>, fallback: &str) -> S
     };
 
     name.chars().take(80).collect()
+}
+
+fn validate_huddle_agent_enrollment(
+    app: &AppHandle,
+    state: &AppState,
+    pubkeys: &[String],
+) -> Result<(), String> {
+    let relay_url = crate::relay::relay_ws_url_with_override(state);
+    crate::managed_agents::validate_local_agent_members_from_store(pubkeys, &relay_url, || {
+        crate::managed_agents::load_managed_agents(app)
+    })
 }
 
 // ── Tauri commands ────────────────────────────────────────────────────────────
@@ -162,6 +173,7 @@ pub async fn start_huddle(
     parent_channel_id: String,
     member_pubkeys: Vec<String>,
     channel_name: Option<String>,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<HuddleJoinInfo, String> {
     // Validate inputs at the Tauri boundary.
@@ -184,6 +196,7 @@ pub async fn start_huddle(
         }
         deduped
     };
+    validate_huddle_agent_enrollment(&app, &state, &member_pubkeys)?;
 
     // Transition to Creating.
     {
@@ -925,9 +938,11 @@ pub async fn speak_agent_message(text: String, state: State<'_, AppState>) -> Re
 #[tauri::command]
 pub async fn add_agent_to_huddle(
     agent_pubkey: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<agents::AgentAddResult, String> {
     validate_pubkey_hex(&agent_pubkey)?;
+    validate_huddle_agent_enrollment(&app, &state, std::slice::from_ref(&agent_pubkey))?;
 
     let (eph_id, parent_id) = {
         let hs = state.huddle()?;

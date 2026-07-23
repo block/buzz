@@ -87,7 +87,8 @@ const overrides = new Map([
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
   // Consolidation removed the legacy persona-card import/export codecs.
-  ["src-tauri/src/commands/personas/mod.rs", 984],
+  // internal-local-relay-lockdown round 5: preflight linked-agent profile updates.
+  ["src-tauri/src/commands/personas/mod.rs", 1018],
   // #1418 read-path fix: get_thread_replies' blocker fix (shared TIMELINE_KINDS
   // const + build_thread_replies_filter helper, mirroring the channel sibling so
   // the two p-gate filters can't drift) plus two guard unit tests. The file was
@@ -121,7 +122,11 @@ const overrides = new Map([
   // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
   // runtime log path. Load-bearing crash-recovery surface; queued to split.
   // internal-owner-only: persistence choke point normalizes local agent access.
-  ["src-tauri/src/managed_agents/storage.rs", 1386],
+  // internal-local-relay-lockdown: load/save rejects legacy disallowed pins.
+  // internal-local-relay-lockdown round 3: fail-loud save baselines and regressions.
+  ["src-tauri/src/managed_agents/storage.rs", 1496],
+  // internal-local-relay-lockdown rounds 2-3: guarded enrollment; OSS fast-path.
+  ["src-tauri/src/huddle/mod.rs", 1007],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -136,7 +141,8 @@ const overrides = new Map([
   // lowest env layer (+8 lines). Queued to split.
   // internal-owner-only: runtime authorization normalization protects stale
   // or hand-edited records before spawning an internal managed agent.
-  ["src-tauri/src/managed_agents/runtime.rs", 2228],
+  // internal-local-relay-lockdown: final spawn validates the effective relay.
+  ["src-tauri/src/managed_agents/runtime.rs", 2229],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -463,7 +469,8 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +4: internal relay lockdown validates effective relay before update/profile sync.
+  ["src-tauri/src/commands/agent_models.rs", 1083],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.

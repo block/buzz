@@ -422,6 +422,7 @@ pub async fn restore_managed_agents_on_launch(
                     pubkey.clone(),
                     crate::commands::ProfileReconcileData {
                         private_key_nsec: record.private_key_nsec.clone(),
+                        backend: record.backend.clone(),
                         name: record.name.clone(),
                         relay_url: record.relay_url.clone(),
                         avatar_url: record.avatar_url.clone(),
