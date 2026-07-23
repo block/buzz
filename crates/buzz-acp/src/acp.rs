@@ -967,6 +967,19 @@ impl AcpClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, AcpError> {
+        self.send_request_with_timeout(method, params, Self::REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`send_request`](Self::send_request) with an explicit timeout instead
+    /// of `REQUEST_TIMEOUT` — the seam that lets tests exercise the timeout
+    /// path without a 60s wait.
+    async fn send_request_with_timeout(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> Result<serde_json::Value, AcpError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -982,7 +995,6 @@ impl AcpClient {
         // Wrap write + read in a single timeout so a hung agent can't block forever.
         // We cannot use an async block that borrows `self` mutably across two awaits
         // inside timeout(), so we sequence them with early-return on timeout.
-        let timeout = Self::REQUEST_TIMEOUT;
         match tokio::time::timeout(timeout, self.write_ndjson(&msg)).await {
             Ok(result) => result?,
             Err(_) => return Err(AcpError::Timeout(timeout)),
@@ -2808,6 +2820,30 @@ mod tests {
             .await;
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert_eq!(result.unwrap()["worked"], serde_json::json!(true));
+    }
+
+    /// A hung non-prompt RPC must surface WHICH method timed out. When an
+    /// agent stalls during `session/new` (e.g. goose blocking on MCP
+    /// extension startup while the package index is unreachable), a bare
+    /// "agent did not respond within 60s" gives the operator nothing to
+    /// act on — the error must name the hung method.
+    #[tokio::test]
+    async fn request_timeout_error_names_the_hung_rpc_method() {
+        // Agent that reads the request but never responds.
+        let mut client = spawn_script("read -t 5 _req; sleep 5").await;
+        let err = client
+            .send_request_with_timeout(
+                "session/new",
+                serde_json::json!({}),
+                std::time::Duration::from_millis(100),
+            )
+            .await
+            .expect_err("request against a silent agent must time out");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("session/new"),
+            "timeout error must name the hung RPC method; got: {msg}"
+        );
     }
 
     #[tokio::test]
