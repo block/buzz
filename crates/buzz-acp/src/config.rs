@@ -418,6 +418,29 @@ pub struct CliArgs {
     )]
     pub base_prompt_file: Option<PathBuf>,
 
+    /// Resume in-progress work on restart (kill -9, crash, manual restart,
+    /// or app update) by replaying a durable pending-turn ledger on boot.
+    /// On by default. `--resume-on-restart=false` disables.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_RESUME_ON_RESTART",
+        default_value_t = true,
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_missing_value = "true",
+    )]
+    pub resume_on_restart: bool,
+
+    /// TTL (seconds) for resume ledger entries, by original admission time.
+    /// 0 = no expiry (default) — the ledger only ever holds never-completed
+    /// turns, so even a long-idle relaunch should still resume them.
+    #[arg(long, env = "BUZZ_ACP_RESUME_TTL", default_value_t = 0)]
+    pub resume_ttl_secs: u64,
+
+    /// Directory for the resume ledger file. Defaults to `<cwd>/.buzz-acp/`.
+    #[arg(long, env = "BUZZ_ACP_STATE_DIR")]
+    pub state_dir: Option<PathBuf>,
+
     /// Desired LLM model ID. Applied to every new ACP session after creation.
     /// Use `buzz-acp models` to discover available model IDs.
     #[arg(long, env = "BUZZ_ACP_MODEL")]
@@ -552,6 +575,14 @@ pub struct Config {
     /// `from_cli()`. `None` when using the compiled-in default or when
     /// `--no-base-prompt` is set.
     pub base_prompt_content: Option<String>,
+    /// Whether to replay the durable pending-turn ledger on boot. On by
+    /// default; `--resume-on-restart=false` restores today's stateless-boot
+    /// behavior.
+    pub resume_on_restart: bool,
+    /// TTL (seconds) for resume ledger entries. 0 = no expiry (default).
+    pub resume_ttl_secs: u64,
+    /// Directory for the resume ledger file. `None` = `<cwd>/.buzz-acp/`.
+    pub state_dir: Option<PathBuf>,
 }
 
 /// Validate and deduplicate allowlist entries: each must be exactly 64 hex chars.
@@ -1003,6 +1034,9 @@ impl Config {
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
+            resume_on_restart: args.resume_on_restart,
+            resume_ttl_secs: args.resume_ttl_secs,
+            state_dir: args.state_dir,
         };
 
         Ok(config)
@@ -1024,7 +1058,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} resume={} resume_ttl={}s {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1045,6 +1079,8 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.resume_on_restart,
+            self.resume_ttl_secs,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1372,6 +1408,9 @@ mod tests {
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
+            resume_on_restart: true,
+            resume_ttl_secs: 0,
+            state_dir: None,
         }
     }
 
@@ -2705,5 +2744,72 @@ channels = "ALL"
         const {
             assert!(MAX_TURN_DURATION_CEILING_SECS < u64::MAX - 100);
         }
+    }
+
+    /// `BUZZ_ACP_RESUME_ON_RESTART` is process-global; `resume_on_restart_
+    /// env_false_disables` below sets/clears it around its parse, so any
+    /// other test that parses `CliArgs` without an explicit
+    /// `--resume-on-restart` flag (and would therefore observe the env var)
+    /// must serialize against it with this same lock. Tests that pass an
+    /// explicit flag are unaffected — clap's explicit-arg-over-env
+    /// precedence means the flag always wins regardless of the race.
+    static RESUME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resume_on_restart_default_is_true() {
+        let _guard = RESUME_ENV_LOCK.lock().unwrap();
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY])
+            .expect("clap should parse args");
+        assert!(args.resume_on_restart);
+    }
+
+    #[test]
+    fn resume_on_restart_bare_flag_is_true() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--resume-on-restart",
+        ])
+        .expect("clap should parse args");
+        assert!(args.resume_on_restart);
+    }
+
+    #[test]
+    fn resume_on_restart_equals_false_disables() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--resume-on-restart=false",
+        ])
+        .expect("clap should parse args");
+        assert!(!args.resume_on_restart);
+    }
+
+    #[test]
+    fn resume_on_restart_equals_true_enables() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--resume-on-restart=true",
+        ])
+        .expect("clap should parse args");
+        assert!(args.resume_on_restart);
+    }
+
+    #[test]
+    fn resume_on_restart_env_false_disables() {
+        // See RESUME_ENV_LOCK doc comment above — env var is process-global.
+        let _guard = RESUME_ENV_LOCK.lock().unwrap();
+        std::env::set_var("BUZZ_ACP_RESUME_ON_RESTART", "false");
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", TEST_PRIVATE_KEY]);
+        std::env::remove_var("BUZZ_ACP_RESUME_ON_RESTART");
+        let args = args.expect("clap should parse args");
+        assert!(
+            !args.resume_on_restart,
+            "BUZZ_ACP_RESUME_ON_RESTART=false must disable resume without a CLI flag"
+        );
     }
 }
