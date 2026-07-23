@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isInteractiveSidebarTarget } from "./sidebarBackgroundTarget.ts";
+import { isSidebarBackgroundTarget } from "./sidebarBackgroundTarget.ts";
 
-test("non-DOM event targets are sidebar background", () => {
-  assert.equal(isInteractiveSidebarTarget(null), false);
-  assert.equal(isInteractiveSidebarTarget({}), false);
+test("non-DOM event targets are not sidebar background", () => {
+  assert.equal(isSidebarBackgroundTarget(null), false);
+  assert.equal(isSidebarBackgroundTarget({}), false);
 });

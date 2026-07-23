@@ -199,7 +199,8 @@ test("focus and split preserve reading context and interaction ownership", async
   await expect(channel).not.toHaveAttribute("inert", "");
   await expectChannelHeaderUnobscured(page);
   await expect(page.getByRole("tooltip")).toHaveCount(0);
-  await expect(page.getByTestId("thread-view-mode-toggle")).not.toBeFocused();
+  await expect(page.getByTestId("message-thread-body")).toBeFocused();
+  await expect(summary).not.toBeFocused();
   await expect(
     body.locator(`[data-message-id="${anchorId}"]`),
   ).toBeInViewport();
@@ -241,6 +242,12 @@ test("focus and split preserve reading context and interaction ownership", async
 
   await summary.click();
   await expect(drawer).toBeVisible();
+  const profileCard = page.getByTestId("sidebar-profile-card");
+  await profileCard.click({ position: { x: 8, y: 8 } });
+  await expect(page.getByTestId("profile-popover")).toBeVisible();
+  await expect(drawer).toBeVisible();
+  await profileCard.click({ position: { x: 8, y: 8 } });
+  await expect(page.getByTestId("profile-popover")).toHaveCount(0);
   await page
     .getByTestId("app-sidebar-scroll-anchor")
     .evaluate((element) => (element as HTMLElement).click());

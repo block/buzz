@@ -57,17 +57,17 @@ export function useThreadViewModeSwitch({
       setLayoutScrollTargetId(anchorId);
       onModeChange?.(mode);
       setThreadViewMode(mode);
-      if (restoreFocus) {
+      requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            document
-              .querySelector<HTMLElement>(
-                '[data-testid="thread-view-mode-toggle"]',
-              )
-              ?.focus({ preventScroll: true });
-          });
+          document
+            .querySelector<HTMLElement>(
+              restoreFocus
+                ? '[data-testid="thread-view-mode-toggle"]'
+                : '[data-testid="message-thread-body"]',
+            )
+            ?.focus({ preventScroll: true });
         });
-      }
+      });
     },
     [onModeChange],
   );
