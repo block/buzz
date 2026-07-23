@@ -31,6 +31,43 @@ pub enum AuditError {
         seq: i64,
     },
 
+    /// A verification that should have started at the chain's genesis found a
+    /// different first entry — the earliest entries have been removed.
+    #[error("chain does not start at genesis: expected seq 1 with no predecessor, found seq {found_seq} first")]
+    MissingGenesis {
+        /// Per-community sequence number of the first entry actually found.
+        found_seq: i64,
+    },
+
+    /// A mid-chain verification could not find the entry immediately before
+    /// its range. In an append-only chain every predecessor must exist, so a
+    /// missing anchor means entries in front of the range were removed.
+    #[error("missing anchor entry at seq {anchor_seq}: the verified segment cannot be linked to the preceding chain")]
+    MissingAnchor {
+        /// Per-community sequence number of the absent anchor entry.
+        anchor_seq: i64,
+    },
+
+    /// Sequence numbers stopped being contiguous — one or more entries were
+    /// removed from the middle of the chain.
+    #[error("chain gap: expected seq {expected_seq} next but found seq {found_seq}")]
+    SequenceGap {
+        /// Per-community sequence number that should have come next.
+        expected_seq: i64,
+        /// Per-community sequence number actually found.
+        found_seq: i64,
+    },
+
+    /// The verified chain head is behind the head the caller expected (from an
+    /// externally recorded report) — the newest entries have been removed.
+    #[error("chain head at seq {head_seq} is behind the expected head seq {expected_seq}: tail entries are missing")]
+    TruncatedTail {
+        /// Per-community sequence number of the verified head.
+        head_seq: i64,
+        /// Per-community sequence number the caller expected the head to reach.
+        expected_seq: i64,
+    },
+
     /// An unrecognised action string was found in the database.
     #[error("unknown audit action in database")]
     UnknownAction,
@@ -68,6 +105,16 @@ mod tests {
         let domain_errors = [
             AuditError::ChainViolation { seq: 7 },
             AuditError::HashMismatch { seq: 42 },
+            AuditError::MissingGenesis { found_seq: 9 },
+            AuditError::MissingAnchor { anchor_seq: 4 },
+            AuditError::SequenceGap {
+                expected_seq: 5,
+                found_seq: 8,
+            },
+            AuditError::TruncatedTail {
+                head_seq: 11,
+                expected_seq: 15,
+            },
             AuditError::UnknownAction,
         ];
 

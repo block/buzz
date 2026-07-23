@@ -93,6 +93,12 @@ run_unit_tests() {
   run_test_step "buzz-db unit tests" \
     cargo test -p buzz-db --lib -- --nocapture
 
+  # buzz-audit chain-walk tests: pure in-memory hash-chain verification
+  # (verify_entries) plus error-text sanitization. The Postgres-backed
+  # buzz-audit tests are #[ignore]d, so --lib keeps this step infra-free.
+  run_test_step "buzz-audit unit tests" \
+    cargo test -p buzz-audit --lib -- --nocapture
+
   # Multi-tenant conformance gate: independent replay checker + golden
   # fixtures (buzz-conformance). Pure in-process trace replay, no infra.
   run_test_step "buzz-conformance tests" \

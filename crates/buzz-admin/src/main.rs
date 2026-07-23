@@ -93,6 +93,38 @@ enum Command {
         #[arg(long)]
         relay_key: Option<String>,
     },
+    /// Inspect the tamper-evident audit log.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// Verify this relay's audit hash chain, genesis to head.
+    ///
+    /// Walks the community's whole chain: the first entry must be the genesis
+    /// (seq 1, no predecessor), sequence numbers must be contiguous, every
+    /// entry must link to its predecessor's hash, and every stored hash must
+    /// match a recomputation over the stored fields. Any deletion or edit of
+    /// stored entries fails the walk.
+    ///
+    /// Prints a JSON report with the verified head seq and head hash. Record
+    /// both somewhere outside the database after each run and pass the
+    /// recorded seq back via --expect-head on the next run: deleting the
+    /// newest entries is otherwise invisible, because the head is defined by
+    /// what is stored.
+    ///
+    /// Exit codes: 0 = chain verified; 1 = verification failed (report on
+    /// stdout says why); 5 = operational error (DB unreachable, unmapped
+    /// host, ...).
+    Verify {
+        /// Fail with a tail-truncation error unless the verified head has
+        /// reached at least this seq (from a previously recorded report).
+        #[arg(long)]
+        expect_head: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -151,6 +183,62 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::ReconcileChannels { relay_key } => {
             reconcile_channels(relay_key).await?;
             Ok(0)
+        }
+        Command::Audit {
+            command: AuditCommand::Verify { expect_head },
+        } => cmd_audit_verify(expect_head).await,
+    }
+}
+
+/// Run `buzz-admin audit verify [--expect-head N]`.
+///
+/// Resolves the deployment's community the same way every other buzz-admin
+/// command does (RELAY_URL host → durable host map), then verifies that
+/// community's full audit chain. Integrity failures are the command's
+/// *finding*, not an operational error: they print a JSON verdict on stdout
+/// and exit 1, while DB/serialization failures propagate as errors (exit 5).
+async fn cmd_audit_verify(expect_head: Option<i64>) -> Result<i32> {
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+
+    // The audit service owns a plain PgPool rather than a Db — mirror the
+    // relay's own construction (buzz-relay main.rs) with a small dedicated
+    // pool for this one-shot read.
+    let db_url = std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    let audit_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
+    let audit = buzz_audit::AuditService::new(audit_pool);
+
+    match audit
+        .verify_full_chain(tenant.community(), expect_head)
+        .await
+    {
+        Ok(report) => {
+            let out = serde_json::json!({
+                "ok": true,
+                "community": tenant.community().as_uuid(),
+                "entries_verified": report.entries_verified,
+                "head_seq": report.head_seq,
+                "head_hash": report.head_hash,
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(0)
+        }
+        Err(
+            e @ (buzz_audit::AuditError::Database(_) | buzz_audit::AuditError::Serialization(_)),
+        ) => Err(e.into()),
+        Err(e) => {
+            let out = serde_json::json!({
+                "ok": false,
+                "community": tenant.community().as_uuid(),
+                "error": e.to_string(),
+            });
+            println!("{}", serde_json::to_string_pretty(&out)?);
+            Ok(1)
         }
     }
 }
