@@ -1657,6 +1657,40 @@ test("channel date divider keeps the date sticky while the separator rule scroll
 
   const timeline = page.getByTestId("message-timeline");
   await timeline.evaluate((element) => {
+    element.scrollTop = 0;
+    element.dispatchEvent(new Event("scroll", { bubbles: true }));
+  });
+  await page.waitForTimeout(50);
+
+  const initialAlignment = await timeline.evaluate((element) => {
+    const firstGroup = element.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-group"]',
+    );
+    const firstDivider = firstGroup?.querySelector<HTMLElement>(
+      '[data-testid="message-timeline-day-divider"]',
+    );
+    const firstDividerPill = firstDivider?.querySelector<HTMLElement>("p");
+    if (!firstGroup || !firstDivider || !firstDividerPill) {
+      throw new Error("missing day group or divider pill");
+    }
+
+    const groupRect = firstGroup.getBoundingClientRect();
+    const pillRect = firstDividerPill.getBoundingClientRect();
+    const groupBefore = getComputedStyle(firstGroup, "::before");
+    return {
+      pillCenter: pillRect.top + pillRect.height / 2,
+      ruleCenter:
+        groupRect.top +
+        Number.parseFloat(groupBefore.top) +
+        Number.parseFloat(groupBefore.height) / 2,
+    };
+  });
+  expect(initialAlignment.ruleCenter).toBeCloseTo(
+    initialAlignment.pillCenter,
+    0,
+  );
+
+  await timeline.evaluate((element) => {
     const firstGroup = element.querySelector<HTMLElement>(
       '[data-testid="message-timeline-day-group"]',
     );
