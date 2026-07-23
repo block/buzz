@@ -944,6 +944,35 @@ export function AgentInstanceEditDialog({
                 </p>
               ) : null}
             </div>
+            {selectedRuntimeId === "custom" && !inheritHarness ? (
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="edit-agent-command"
+                >
+                  Agent command
+                </label>
+                <div
+                  className={cn(
+                    "flex min-h-11 items-center px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  <Input
+                    autoCorrect="off"
+                    className={cn(
+                      "h-8 px-0 py-0 leading-6",
+                      PERSONA_FIELD_CONTROL_CLASS,
+                    )}
+                    disabled={updateMutation.isPending}
+                    id="edit-agent-command"
+                    onChange={(event) => setAgentCommand(event.target.value)}
+                    placeholder="Full path or shell command"
+                    value={agentCommand}
+                  />
+                </div>
+              </div>
+            ) : null}
             {/* LLM provider */}
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">
@@ -1112,7 +1141,6 @@ export function AgentInstanceEditDialog({
                     <EditAgentAdvancedFields
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
-                      agentCommand={agentCommand}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
@@ -1133,11 +1161,9 @@ export function AgentInstanceEditDialog({
                       parallelism={parallelism}
                       provider={effectiveProvider}
                       requiredEnvKeys={advancedRequiredEnvKeys}
-                      selectedRuntimeId={selectedRuntimeId}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
-                      onAgentCommandChange={setAgentCommand}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}

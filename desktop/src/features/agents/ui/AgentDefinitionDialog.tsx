@@ -428,7 +428,6 @@ export function AgentDefinitionDialog({
   // requiredEnvKeys: the gate already handles baked-, global-, and file-
   // satisfied keys so no further filtering is needed.
   const { requiredEnvKeys } = localModeGate;
-  // D1: single boolean for both canSubmit and handleSubmit — never recompose.
   const localModeSatisfied = localModeGate.satisfied;
   // Effective provider: agent value → global fallback → file fallback.
   // Mirrors the chain inside computeLocalModeGate so model-option scoping and
@@ -436,7 +435,6 @@ export function AgentDefinitionDialog({
   const fileProvider = runtimeFileConfig?.provider?.trim() ?? "";
   const effectiveProvider =
     trimmedProvider || inheritedProviderDefault.value || fileProvider;
-  // D2: the top-level API key owns display while the full gate remains intact.
   const apiKeyFieldState = useProviderApiKeyFieldState({
     bakedEnvKeys,
     effectiveEnvVars: envVars,
@@ -454,14 +452,6 @@ export function AgentDefinitionDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
-  // Provider required-ness is a static property of the field's visibility — it
-  // does not change based on whether the field is currently filled. Using the
-  // dynamic missingNormalizedFields check would flip the asterisk off once a
-  // value is selected, which is incoherent (required means required, not
-  // "required until satisfied"). runtimeCanChooseLlmProvider is the authoritative
-  // gate: it tracks exactly when the provider picker is shown (Buzz Agent/Goose,
-  // plus runtime-less legacy/builtin definitions), so the required marker never
-  // drifts from whether Save actually needs a provider.
   const providerIsRequired =
     aiConfigurationMode === "custom" && runtimeCanChooseLlmProvider;
   const modelFieldVisible =
@@ -982,6 +972,17 @@ export function AgentDefinitionDialog({
                 type="button"
               >
                 <span>Advanced</span>
+                {localModeGate.missingEnvKeys.some((key) =>
+                  advancedRequiredEnvKeys.includes(key),
+                ) ? (
+                  <span
+                    aria-hidden="true"
+                    className="rounded-full bg-destructive/10 px-2 py-0.5 text-xs text-destructive"
+                    data-testid="persona-advanced-required-badge"
+                  >
+                    Required
+                  </span>
+                ) : null}
                 <ChevronDown
                   className={cn(
                     "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",

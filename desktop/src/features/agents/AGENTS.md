@@ -94,6 +94,9 @@ with a TypeScript lookup table or an id comparison in a component.
    well as provider/model values. If no available harness can resolve, Create
    starts in Customize and lets unavailable catalog entries be selected only
    to expose their setup guidance; submission remains blocked.
+   Advanced-only required credentials mark the collapsed Advanced toggle
+   without opening it. In Edit, selecting Custom command keeps its required
+   command field beside the harness picker rather than hiding it in Advanced.
 
 ## The tests that enforce this
 

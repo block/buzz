@@ -295,6 +295,9 @@ test.describe("global agent config screenshots", () => {
       "Databricks v2",
     );
     await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("persona-advanced-required-badge"),
+    ).toHaveText("Required");
     await advanced.click();
     await expect(advanced).toHaveAttribute("aria-expanded", "true");
   });
