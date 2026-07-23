@@ -16,6 +16,7 @@ pub(crate) fn augmented_path() -> Option<String> {
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
         crate::managed_agents::login_shell_path(),
         nvm_bin,
+        std::env::var_os("PATH"),
     )
 }
 

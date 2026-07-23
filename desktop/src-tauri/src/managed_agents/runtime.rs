@@ -1692,6 +1692,7 @@ pub fn spawn_agent_child(
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf)),
         login_shell_path(),
         nvm_bin,
+        std::env::var_os("PATH"),
     );
 
     let mut command = std::process::Command::new(&resolved_acp_command);

@@ -112,11 +112,25 @@ mod tests {
         discovery_env_with_baked_floor, parse_agent_env_lines,
     };
 
+    fn environment_dump_command() -> std::process::Command {
+        #[cfg(windows)]
+        {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "set"]);
+            command
+        }
+
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("env")
+        }
+    }
+
     #[test]
     fn buzz_agent_provider_defaults_empty_in_oss_build() {
         // OSS (and normal test) builds set neither BUZZ_BUILD_BUZZ_AGENT_*,
         // so nothing is baked in and no BUZZ_AGENT_* is injected on spawn.
-        let mut cmd = std::process::Command::new("env");
+        let mut cmd = environment_dump_command();
         cmd.env_clear();
         build_buzz_agent_provider_defaults(&mut cmd);
         let output = cmd.output().expect("env should run");
@@ -223,7 +237,7 @@ mod tests {
     // writing the baked default first, then overwriting with the record value.
     #[test]
     fn baked_defaults_do_not_override_record_provider_written_after() {
-        let mut cmd = std::process::Command::new("env");
+        let mut cmd = environment_dump_command();
         cmd.env_clear();
         // Simulate what an internal build's baked defaults would inject.
         cmd.env("BUZZ_AGENT_PROVIDER", "databricks");

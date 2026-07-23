@@ -11,6 +11,8 @@ use std::path::PathBuf;
 ///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
 ///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
 ///   6. user's login-shell `PATH` — runtimes like node/python from other managers
+///   7. on Windows, the app's inherited `PATH` — standard installations such as
+///      `C:\Program Files\nodejs` are not available from a POSIX login shell
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -23,6 +25,7 @@ pub(in crate::managed_agents) fn build_augmented_path(
     exe_parent: Option<PathBuf>,
     shell_path: Option<String>,
     nvm_bin: Option<PathBuf>,
+    inherited_path: Option<std::ffi::OsString>,
 ) -> Option<String> {
     let mut parts: Vec<PathBuf> = Vec::new();
     let home_added = home.is_some();
@@ -49,6 +52,14 @@ pub(in crate::managed_agents) fn build_augmented_path(
     if let Some(shell_path) = shell_path {
         parts.extend(std::env::split_paths(&shell_path));
     }
+    // Windows does not use `login_shell_path()` because Git Bash returns a
+    // POSIX, colon-delimited PATH. Do retain the native process PATH though:
+    // npm shims such as `codex-acp.cmd` need it to locate a standard Node.js
+    // installation in `C:\Program Files\nodejs`.
+    #[cfg(windows)]
+    parts.extend(windows_path_entries(inherited_path));
+    #[cfg(not(windows))]
+    let _ = inherited_path;
     if parts.is_empty() {
         return None;
     }
@@ -58,9 +69,19 @@ pub(in crate::managed_agents) fn build_augmented_path(
         .map(|s| s.to_string_lossy().into_owned())
 }
 
+#[cfg(windows)]
+fn windows_path_entries(path: Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    path.as_deref()
+        .map(std::env::split_paths)
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::build_augmented_path;
+    #[cfg(not(windows))]
     use std::path::PathBuf;
 
     #[cfg(unix)]
@@ -75,6 +96,7 @@ mod tests {
             Some(PathBuf::from("/Applications/Buzz.app/Contents/MacOS")),
             Some("/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin".to_string()),
             None,
+            None,
         );
         let result = result.expect("path");
         assert!(result.starts_with("/home/agent/.local/bin:"), "{result}");
@@ -88,15 +110,17 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn none_when_no_inputs() {
-        assert_eq!(build_augmented_path(None, None, None, None), None);
+        assert_eq!(build_augmented_path(None, None, None, None, None), None);
     }
 
     #[cfg(unix)]
     #[test]
     fn shell_path_only() {
-        let result = build_augmented_path(None, None, Some("/usr/bin:/bin".to_string()), None);
+        let result =
+            build_augmented_path(None, None, Some("/usr/bin:/bin".to_string()), None, None);
         assert_eq!(result.as_deref(), Some("/usr/bin:/bin"));
     }
 
@@ -108,6 +132,7 @@ mod tests {
             Some(PathBuf::from("/Applications/Buzz.app/Contents/MacOS")),
             Some("/usr/bin:/bin".to_string()),
             Some(PathBuf::from("/home/user/.nvm/versions/node/v20.0.0/bin")),
+            None,
         );
         let result = result.expect("path");
         let local = result.find("/home/user/.local/bin").unwrap();
@@ -129,9 +154,23 @@ mod tests {
             Some(PathBuf::from("/usr/local/bin")),
             None,
             None,
+            None,
         );
         let result = result.expect("path");
         assert!(result.starts_with("/home/user/.local/bin:"), "{result}");
         assert!(result.ends_with(":/usr/local/bin"), "{result}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_inherited_path_is_available_to_managed_processes() {
+        let result = build_augmented_path(
+            None,
+            None,
+            None,
+            None,
+            Some(std::ffi::OsString::from(r"C:\Program Files\nodejs")),
+        );
+        assert_eq!(result.as_deref(), Some(r"C:\Program Files\nodejs"));
     }
 }
