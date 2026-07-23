@@ -16,7 +16,7 @@ import {
   coalesceAutocompleteCandidatesByKey,
   getMentionableAgentPubkeys,
   getSharedChannelIds,
-  isAgentIdentityReachableForMentions,
+  isAgentMentionReachable,
   shouldHideAgentFromMentions,
 } from "@/features/agents/lib/agentAutocompleteEligibility";
 import {
@@ -246,13 +246,7 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (
-        !isAgentIdentityReachableForMentions(
-          candidate,
-          managedAgentPubkeys,
-          mentionableAgentPubkeys,
-        )
-      ) {
+      if (!isAgentMentionReachable(candidate, managedAgentPubkeys)) {
         return;
       }
       if (
