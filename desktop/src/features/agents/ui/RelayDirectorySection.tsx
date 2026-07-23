@@ -1,25 +1,42 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, Search } from "lucide-react";
+import { ChevronDown, ChevronRight, Pencil, Search } from "lucide-react";
 
+import { externalAgentPresentationScope } from "@/features/agents/externalAgentPresentation";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayAgent } from "@/shared/api/types";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
-import { Card } from "@/shared/ui/card";
+import { Badge } from "@/shared/ui/badge";
+import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
-import { truncatePubkey } from "@/shared/lib/pubkey";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { AgentIdentityCard } from "./AgentIdentityCard";
+import { ExternalAgentPresentationDialog } from "./ExternalAgentPresentationDialog";
 
 export function RelayDirectorySection({
   error,
   isLoading,
   managedPubkeys,
+  onOpenAgentProfile,
   relayAgents,
 }: {
   error: Error | null;
   isLoading: boolean;
   managedPubkeys: Set<string>;
+  onOpenAgentProfile: (pubkey: string) => void;
   relayAgents: RelayAgent[];
 }) {
+  const identityQuery = useIdentityQuery();
+  const { activeCommunity } = useCommunities();
   const [isExpanded, setIsExpanded] = React.useState(true);
   const [searchQuery, setSearchQuery] = React.useState("");
+  const [agentToCustomize, setAgentToCustomize] =
+    React.useState<RelayAgent | null>(null);
+  const currentPubkey = normalizePubkey(identityQuery.data?.pubkey ?? "");
+  const presentationScope = externalAgentPresentationScope({
+    identityPubkey: identityQuery.data?.pubkey,
+    relayUrl: activeCommunity?.relayUrl,
+  });
 
   // Only show agents that are NOT managed locally — those are already in the
   // managed agents section above.
@@ -94,58 +111,50 @@ export function RelayDirectorySection({
                 : "No other agents in this community."}
             </p>
           ) : (
-            <Card className="overflow-hidden">
-              <div className="overflow-x-auto">
-                <table
-                  className="w-full border-collapse text-left text-sm"
-                  data-testid="relay-directory-table"
-                >
-                  <thead className="bg-muted/35 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    <tr>
-                      <th className="px-4 py-3">Agent</th>
-                      <th className="px-4 py-3">Status</th>
-                      <th className="px-4 py-3">Type</th>
-                      <th className="px-4 py-3">Channels</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {sortedAgents.map((agent) => (
-                      <tr
-                        className="border-b border-border/60 last:border-b-0"
-                        key={agent.pubkey}
-                      >
-                        <td className="min-w-[16rem] px-4 py-3 align-top">
-                          <div className="min-w-0">
-                            <p className="truncate font-medium text-foreground">
-                              {agent.name}
-                            </p>
-                            <p className="mt-1 text-xs text-muted-foreground">
-                              {truncatePubkey(agent.pubkey)}
-                            </p>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 align-top">
-                          <PresenceBadge
-                            className="px-2.5 py-0.5 text-2xs"
-                            status={agent.status}
-                          />
-                        </td>
-                        <td className="px-4 py-3 align-top text-muted-foreground">
-                          {agent.agentType || "Unknown"}
-                        </td>
-                        <td className="max-w-[20rem] px-4 py-3 align-top text-muted-foreground">
-                          <span className="block truncate">
-                            {agent.channels.length > 0
-                              ? agent.channels.join(", ")
-                              : "No visible channel memberships"}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </Card>
+            <div
+              className="grid w-full grid-cols-[repeat(auto-fill,minmax(220px,240px))] justify-start gap-3"
+              data-testid="relay-directory-cards"
+            >
+              {sortedAgents.map((agent) => {
+                const canCustomize =
+                  presentationScope !== null &&
+                  normalizePubkey(agent.ownerPubkey ?? "") === currentPubkey;
+                return (
+                  <AgentIdentityCard
+                    actions={
+                      canCustomize ? (
+                        <Button
+                          aria-label={`Customize ${agent.name}`}
+                          className="h-8 w-8 rounded-full"
+                          data-testid={`customize-external-agent-${agent.pubkey}`}
+                          onClick={() => setAgentToCustomize(agent)}
+                          size="icon"
+                          variant="secondary"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                      ) : null
+                    }
+                    ariaLabel={`${agent.name} external agent profile`}
+                    avatarUrl={agent.avatarUrl}
+                    dataTestId={`external-agent-card-${agent.pubkey}`}
+                    key={agent.pubkey}
+                    label={agent.name}
+                    modelLabel={agent.agentType || "External runtime"}
+                    onClick={() => onOpenAgentProfile(agent.pubkey)}
+                    statusBadge={
+                      <span className="mt-1 flex flex-wrap items-center gap-1.5">
+                        <Badge variant="info">External</Badge>
+                        <PresenceBadge
+                          className="border-0 bg-transparent px-0 py-0 text-2xs"
+                          status={agent.status}
+                        />
+                      </span>
+                    }
+                  />
+                );
+              })}
+            </div>
           )}
         </>
       ) : null}
@@ -155,6 +164,15 @@ export function RelayDirectorySection({
           {error.message}
         </p>
       ) : null}
+
+      <ExternalAgentPresentationDialog
+        agent={agentToCustomize}
+        onOpenChange={(open) => {
+          if (!open) setAgentToCustomize(null);
+        }}
+        open={agentToCustomize !== null}
+        scope={presentationScope}
+      />
     </section>
   );
 }

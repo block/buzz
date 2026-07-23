@@ -90,6 +90,8 @@ type MockManagedAgentRuntimeSeed = {
 type MockRelayAgentSeed = {
   pubkey: string;
   name: string;
+  avatarUrl?: string | null;
+  ownerPubkey?: string | null;
   agentType?: string;
   capabilities?: string[];
   respondTo?: RawRelayAgent["respond_to"];
@@ -648,6 +650,8 @@ type RawSendChannelMessageResponse = {
 type RawRelayAgent = {
   pubkey: string;
   name: string;
+  avatar_url?: string | null;
+  owner_pubkey?: string | null;
   agent_type: string;
   channels: string[];
   channel_ids: string[];
@@ -1981,6 +1985,8 @@ function resetMockRelayAgents(config?: E2eConfig) {
     mockRelayAgents.push({
       pubkey: seed.pubkey,
       name: seed.name,
+      avatar_url: seed.avatarUrl ?? null,
+      owner_pubkey: seed.ownerPubkey ?? null,
       agent_type: seed.agentType ?? "goose",
       channels: channels.map((channel) => channel.name),
       channel_ids: channels.map((channel) => channel.id),
@@ -3103,6 +3109,8 @@ function syncMockRelayAgentsFromManagedAgents() {
       return {
         pubkey: agent.pubkey,
         name: agent.name,
+        avatar_url: agent.avatar_url,
+        owner_pubkey: MOCK_IDENTITY_PUBKEY,
         agent_type: agent.agent_command,
         channels: memberships.channels,
         channel_ids: memberships.channelIds,

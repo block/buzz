@@ -106,6 +106,7 @@ type RawSendChannelMessageResult = {
 type RawRelayAgent = {
   pubkey: string;
   name: string;
+  avatar_url?: string | null;
   owner_pubkey?: string | null;
   agent_type: string;
   channels: string[];
@@ -667,6 +668,7 @@ function fromRawRelayAgent(agent: RawRelayAgent): RelayAgent {
   return {
     pubkey: agent.pubkey,
     name: agent.name,
+    avatarUrl: agent.avatar_url ?? null,
     ownerPubkey: agent.owner_pubkey ?? null,
     agentType: agent.agent_type,
     channels: agent.channels,

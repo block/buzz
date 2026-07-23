@@ -483,6 +483,14 @@ pub fn agents_from_events(events: &[Event]) -> Value {
                 if !obj.get("agent_type").is_some_and(Value::is_string) {
                     obj.insert("agent_type".to_string(), json!("agent"));
                 }
+                if !obj.get("avatar_url").is_some_and(Value::is_string) {
+                    let avatar_url = obj
+                        .get("picture")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .map(str::to_string);
+                    obj.insert("avatar_url".to_string(), json!(avatar_url));
+                }
                 if !obj.get("channels").is_some_and(Value::is_array) {
                     obj.insert("channels".to_string(), json!([]));
                 }
@@ -499,6 +507,7 @@ pub fn agents_from_events(events: &[Event]) -> Value {
                 v = json!({
                     "pubkey": pubkey,
                     "name": npub,
+                    "avatar_url": null,
                     "agent_type": "agent",
                     "channels": [],
                     "channel_ids": [],
@@ -960,7 +969,7 @@ mod tests {
     fn agents_default_sparse_agent_profiles_for_directory_parse() {
         let e = ev(
             10100,
-            r#"{"channel_add_policy":"owner-only","display_name":"Scout"}"#,
+            r#"{"channel_add_policy":"owner-only","display_name":"Scout","picture":"https://example.com/scout.png"}"#,
             vec![],
         );
         let v = agents_from_events(std::slice::from_ref(&e));
@@ -971,6 +980,10 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].pubkey, e.pubkey.to_hex());
         assert_eq!(parsed[0].name, "Scout");
+        assert_eq!(
+            parsed[0].avatar_url.as_deref(),
+            Some("https://example.com/scout.png")
+        );
         assert_eq!(parsed[0].agent_type, "agent");
         assert_eq!(parsed[0].channels, Vec::<String>::new());
         assert_eq!(parsed[0].capabilities, Vec::<String>::new());

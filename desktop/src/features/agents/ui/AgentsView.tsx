@@ -235,6 +235,9 @@ export function AgentsView() {
               }
               isLoading={agents.relayAgentsQuery.isLoading}
               managedPubkeys={agents.managedPubkeys}
+              onOpenAgentProfile={(pubkey) => {
+                openProfilePanel?.(pubkey);
+              }}
               relayAgents={agents.relayAgentsQuery.data ?? []}
             />
           </div>

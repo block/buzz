@@ -2,6 +2,13 @@ import * as React from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  applyExternalAgentPresentations,
+  externalAgentPresentationScope,
+  useExternalAgentPresentations,
+} from "@/features/agents/externalAgentPresentation";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import {
   connectAcpRuntime,
   discoverAcpAuthMethods,
 } from "@/shared/api/tauriAgentAuth";
@@ -68,6 +75,7 @@ import type {
   CreateManagedAgentInput,
   CreatePersonaInput,
   ManagedAgent,
+  RelayAgent,
   UpdateManagedAgentInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
@@ -291,9 +299,22 @@ export function useManagedAgentPrereqsQuery(
 }
 
 export function useRelayAgentsQuery(options?: { enabled?: boolean }) {
+  const identityQuery = useIdentityQuery();
+  const { activeCommunity } = useCommunities();
+  const presentationScope = externalAgentPresentationScope({
+    identityPubkey: identityQuery.data?.pubkey,
+    relayUrl: activeCommunity?.relayUrl,
+  });
+  const presentations = useExternalAgentPresentations(presentationScope);
+
   return useQuery({
     queryKey: relayAgentsQueryKey,
     queryFn: listRelayAgents,
+    select: React.useCallback(
+      (agents: RelayAgent[]) =>
+        applyExternalAgentPresentations(agents, presentations),
+      [presentations],
+    ),
     staleTime: 15_000,
     // Relay agent profiles (kind:10100) are near-static and the backing
     // `list_relay_agents` command is an unfiltered relay query for the whole

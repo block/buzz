@@ -154,6 +154,71 @@ async function invokeTauriExpectError(
   );
 }
 
+test("owned external agents are first-class, labeled, and presentation-customizable", async ({
+  page,
+}) => {
+  const externalPubkey = "a0456f86".repeat(8);
+  await page.route("https://example.com/alice.png", async (route) => {
+    await route.fulfill({
+      body: Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        "base64",
+      ),
+      contentType: "image/png",
+      status: 200,
+    });
+  });
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: externalPubkey,
+        name: "Alice",
+        ownerPubkey: "deadbeef".repeat(8),
+        agentType: "hermes",
+        channelNames: ["agents"],
+        respondTo: "anyone",
+        status: "online",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  const card = page.getByTestId(`external-agent-card-${externalPubkey}`);
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Alice");
+  await expect(card).toContainText("External");
+  await expect(card).toContainText("Online");
+
+  await page.getByTestId(`customize-external-agent-${externalPubkey}`).click();
+  const dialog = page.getByTestId("external-agent-presentation-dialog");
+  await expect(dialog).toContainText(
+    "never edits the external runtime, Soul, prompts, memory, or provider files",
+  );
+  await dialog.getByTestId("external-agent-display-name").fill("ALICE");
+  await dialog
+    .getByTestId("external-agent-avatar-url")
+    .fill("https://example.com/alice.png");
+  await dialog.getByTestId("external-agent-display-name").click();
+  await dialog.getByRole("button", { name: "Save appearance" }).click();
+
+  await expect(card).toContainText("ALICE");
+  await card
+    .getByRole("button", { name: "ALICE external agent profile" })
+    .click();
+  const panel = page.getByTestId("user-profile-panel");
+  await expect(panel).toContainText("ALICE");
+  await expect(
+    panel.locator('img[src="https://example.com/alice.png"]'),
+  ).toBeVisible();
+
+  await page.reload();
+  await page.getByTestId("open-agents-view").click();
+  await expect(
+    page.getByTestId(`external-agent-card-${externalPubkey}`),
+  ).toContainText("ALICE");
+});
+
 test("built-in personas are used from the catalog dialog", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 420 });
   await gotoApp(page);
