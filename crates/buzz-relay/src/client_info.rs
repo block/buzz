@@ -35,8 +35,18 @@ impl ClientInfo {
     /// counter and also returns `None`, so it can never reject a request.
     #[must_use]
     pub fn from_headers(headers: &HeaderMap) -> Option<Self> {
-        let value = headers.get("buzz-client")?;
-        let parsed = value.to_str().ok().and_then(|raw| Self::parse(raw).ok());
+        let all_values = headers.get_all("buzz-client");
+        let mut values = all_values.iter();
+        let first = values.next()?;
+        let parsed = (|| {
+            let mut raw = first.to_str().map_err(|_| ())?.to_owned();
+            for value in values {
+                raw.push_str(", ");
+                raw.push_str(value.to_str().map_err(|_| ())?);
+            }
+            Self::parse(&raw)
+        })()
+        .ok();
         if parsed.is_none() {
             metrics::counter!("buzz_client_header_parse_failures_total").increment(1);
         }
@@ -263,6 +273,43 @@ mod tests {
             assert_eq!(ClientInfo::from_headers(&HeaderMap::new()), None);
         });
         assert_eq!(parse_failures(&recorder), 0);
+    }
+
+    #[test]
+    fn joins_multiple_header_lines_before_parsing() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "buzz-client",
+            HeaderValue::from_static(r#"v=1, app=buzz-mobile, platform=ios, app-version="0.4.5""#),
+        );
+        headers.append(
+            "buzz-client",
+            HeaderValue::from_static(r#"app-build="6", os-version="18.5""#),
+        );
+
+        let client = ClientInfo::from_headers(&headers).expect("valid combined header");
+        assert_eq!(client.app_version, "0.4.5");
+        assert_eq!(client.app_build, "6");
+        assert_eq!(client.os_version, "18.5");
+    }
+
+    #[test]
+    fn rejects_non_utf8_in_any_header_line() {
+        let recorder = DebuggingRecorder::new();
+        let mut headers = HeaderMap::new();
+        headers.append(
+            "buzz-client",
+            HeaderValue::from_static(r#"v=1, app=buzz-mobile, platform=ios, app-version="0.4.5""#),
+        );
+        headers.append(
+            "buzz-client",
+            HeaderValue::from_bytes(&[0xff]).expect("opaque test header value"),
+        );
+
+        metrics::with_local_recorder(&recorder, || {
+            assert_eq!(ClientInfo::from_headers(&headers), None);
+        });
+        assert_eq!(parse_failures(&recorder), 1);
     }
 
     #[test]

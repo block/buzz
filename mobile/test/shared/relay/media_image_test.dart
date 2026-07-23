@@ -102,6 +102,38 @@ void main() {
       expect(headers, isNot(contains('Authorization')));
     });
 
+    test('sends only User-Agent when the relay base URL is malformed', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = MediaGetAuthService(
+        baseUrl: '://',
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      expect(
+        auth.headersFor('https://cdn.cloudflare.example/attachments/abc.png'),
+        {'User-Agent': 'test-agent'},
+      );
+    });
+
+    test('malformed target URL gets no headers', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      expect(auth.headersFor('://'), isEmpty);
+    });
+
     test('sends identification without a signing key', () {
       const clientHeaders = ClientHeaders(
         appVersion: '1.0',

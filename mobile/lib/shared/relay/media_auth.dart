@@ -57,7 +57,8 @@ class MediaGetAuthService {
           );
     final uri = Uri.tryParse(url);
     final relayUri = Uri.tryParse(_baseUrl);
-    if (uri == null || relayUri == null) return const {};
+    if (uri == null) return const {};
+    if (relayUri == null) return identificationHeaders;
     if (!_isRelayMediaUrl(uri, relayUri)) return identificationHeaders;
 
     final nsec = _nsec;

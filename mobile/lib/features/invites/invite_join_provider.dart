@@ -131,6 +131,8 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
               ...clientHeadersForUrl(
                 headers: ref.read(clientHeadersProvider),
                 targetUrl: url,
+                // Explicit confirmation makes the invite relay the user's
+                // intended first-party destination for this claim.
                 relayUrl: invite.relayUrl,
               ),
               'Authorization': buildNip98AuthHeader(
