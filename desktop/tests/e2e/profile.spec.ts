@@ -2319,6 +2319,102 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
   await expect.poll(getAppBadgeCount).toBe(baseline);
 });
 
+test("Windows retries a false denied notification permission from settings", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "Win32",
+    });
+    (window as Window & { isTauri?: boolean }).isTauri = true;
+  });
+  await page.goto("/");
+
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?: (
+          permission: NotificationPermission,
+          requestResult?: NotificationPermission,
+        ) => void;
+      }
+    ).__BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?.("denied", "granted");
+  });
+
+  await openSettings(page, "notifications");
+  const desktopToggle = page.getByTestId("notifications-desktop-toggle");
+  const desktopState = page.getByTestId("notifications-desktop-state");
+
+  await desktopToggle.click();
+  await expect(desktopToggle).not.toBeChecked();
+  await expect(desktopState).toContainText("Blocked");
+
+  await desktopToggle.click();
+  await expect(desktopToggle).toBeChecked();
+  await expect(desktopState).toContainText("On");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_GET_NOTIFICATION_PERMISSION_REQUEST_COUNT__?: () => number;
+            }
+          ).__BUZZ_E2E_GET_NOTIFICATION_PERMISSION_REQUEST_COUNT__?.() ?? 0,
+      ),
+    )
+    .toBe(1);
+});
+
+test("Windows boot-time recovery prevents false-denied from disabling persisted notifications", async ({
+  page,
+}) => {
+  // Simulates the scenario Joxyko reported: a persisted desktopEnabled=true
+  // is written off on every relaunch because the boot-time read sees the
+  // init shim's false "denied" before the app is registered as a notification
+  // sender. With the boot-time recovery in refreshPermission, the mount-time
+  // read should request once and see "granted", so the toggle stays on.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "Win32",
+    });
+    (window as Window & { isTauri?: boolean }).isTauri = true;
+  });
+  await page.goto("/");
+
+  // Pre-seed a persisted desktopEnabled=true and set the shim to false-deny
+  // then grant on request — exactly what happens on a clean Windows relaunch.
+  await page.evaluate(() => {
+    const pubkey = (window as Window & { __BUZZ_E2E_PUBKEY__?: string })
+      .__BUZZ_E2E_PUBKEY__;
+    if (pubkey) {
+      window.localStorage.setItem(
+        `buzz-notification-settings.v2:${pubkey}`,
+        JSON.stringify({ desktopEnabled: true, homeBadgeEnabled: true, notifyWhileViewing: false, sounds: {}, slotAlertsEnabled: {}, slotAlertsSnapshot: null }),
+      );
+    }
+    (
+      window as Window & {
+        __BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?: (
+          permission: NotificationPermission,
+          requestResult?: NotificationPermission,
+        ) => void;
+      }
+    ).__BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?.("denied", "granted");
+  });
+
+  await openSettings(page, "notifications");
+  const desktopToggle = page.getByTestId("notifications-desktop-toggle");
+  const desktopState = page.getByTestId("notifications-desktop-state");
+
+  // The boot-time recovery should have fired during mount, so the toggle
+  // stays on without the user touching it.
+  await expect(desktopState).toContainText("On");
+  await expect(desktopToggle).toBeChecked();
+});
+
 test("desktop notification clicks open the matching forum thread", async ({
   page,
 }) => {
