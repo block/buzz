@@ -629,12 +629,18 @@ export async function deleteMessage(
   await invokeTauri("delete_message", { channelId, eventId });
 }
 
+/**
+ * `targetPubkey` is the resolved author of the reacted-to message. It becomes
+ * the NIP-25 `p` tag on the kind:7, which is what lets the author find the
+ * reaction with a `{"kinds":[7],"#p":[self]}` notification filter.
+ */
 export async function addReaction(
   eventId: string,
   emoji: string,
+  targetPubkey: string,
   emojiUrl?: string,
 ): Promise<void> {
-  await invokeTauri("add_reaction", { eventId, emoji, emojiUrl });
+  await invokeTauri("add_reaction", { eventId, emoji, emojiUrl, targetPubkey });
 }
 
 export async function removeReaction(

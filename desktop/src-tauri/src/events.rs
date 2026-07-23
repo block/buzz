@@ -443,14 +443,31 @@ pub fn build_delete_compat(
 // ── Reactions ────────────────────────────────────────────────────────────────
 
 /// Kind 7 — NIP-25 reaction.
-pub fn build_reaction(target_event_id: EventId, emoji: &str) -> Result<EventBuilder, String> {
+///
+/// `target_author` is the pubkey of the reacted-to event. NIP-25 requires the
+/// `p` tag: it is what makes the reaction visible to a
+/// `{"kinds":[7],"#p":[<self>]}` notification filter (the shape the relay's
+/// push-lease surface advertises for kind 7).
+///
+/// `.allow_self_tagging()` is required: reacting to your own message makes the
+/// `p` tag match the signer, and nostr strips matching `p` tags by default.
+pub fn build_reaction(
+    target_event_id: EventId,
+    target_author: nostr::PublicKey,
+    emoji: &str,
+) -> Result<EventBuilder, String> {
     if emoji.chars().count() > MAX_EMOJI_CHARS {
         return Err(format!(
             "emoji exceeds maximum length of {MAX_EMOJI_CHARS} characters"
         ));
     }
-    let tags = vec![tag(vec!["e", &target_event_id.to_hex()])?];
-    Ok(EventBuilder::new(Kind::Custom(7), emoji).tags(tags))
+    let tags = vec![
+        tag(vec!["e", &target_event_id.to_hex()])?,
+        tag(vec!["p", &target_author.to_hex()])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(7), emoji)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Kind 5 — delete a reaction event.

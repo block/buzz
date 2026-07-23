@@ -921,6 +921,7 @@ export function HomeView({
                         emoji,
                         eventId: message.id,
                         remove,
+                        targetPubkey: message.pubkey,
                       });
                       await threadContext.refreshReactions();
                       await channelMessagesQuery.refetch();

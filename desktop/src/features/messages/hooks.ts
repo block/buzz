@@ -643,12 +643,25 @@ export function useToggleReactionMutation() {
       eventId: string;
       emoji: string;
       remove: boolean;
+      /**
+       * Resolved author of the message being reacted to. Becomes the kind:7
+       * NIP-25 `p` tag so the author's notification filter can match.
+       */
+      targetPubkey: string | undefined;
     }
   >({
-    mutationFn: async ({ eventId, emoji, remove }) => {
+    mutationFn: async ({ eventId, emoji, remove, targetPubkey }) => {
       if (remove) {
         await removeReaction(eventId, emoji);
         return;
+      }
+
+      // NIP-25 requires the target author's `p` tag, so a message whose author
+      // we could not resolve cannot produce a conformant reaction. Every
+      // timeline row carries a resolved author, so this is a guard, not a
+      // reachable UI state.
+      if (!targetPubkey) {
+        throw new Error("Cannot react: the message author is unknown.");
       }
 
       // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
@@ -658,7 +671,7 @@ export function useToggleReactionMutation() {
         emoji,
         queryClient.getQueryData<CustomEmoji[]>(customEmojiQueryKey),
       );
-      await addReaction(eventId, emoji, emojiUrl);
+      await addReaction(eventId, emoji, targetPubkey, emojiUrl);
     },
   });
 }

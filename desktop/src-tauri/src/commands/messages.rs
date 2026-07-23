@@ -816,21 +816,32 @@ pub async fn send_managed_agent_channel_message(
     })
 }
 
+/// `target_pubkey` is the *displayed* author of the reacted-to message — the
+/// pubkey the timeline resolved via `resolveEventAuthorPubkey`, not the raw
+/// signer. For relay-signed agent messages those differ, and the person who
+/// should see the notification is the resolved author. Callers already hold
+/// this on the message they are reacting to, so it is passed in rather than
+/// re-derived here from a second relay round trip.
 #[tauri::command]
 pub async fn add_reaction(
     event_id: String,
     emoji: String,
     emoji_url: Option<String>,
+    target_pubkey: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let target_eid = EventId::from_hex(&event_id).map_err(|e| format!("invalid event ID: {e}"))?;
+    let target_author = PublicKey::from_hex(target_pubkey.trim())
+        .map_err(|e| format!("invalid target pubkey: {e}"))?;
     let builder = match emoji_url {
         // Custom-emoji reaction (NIP-30): kind:7 with `:shortcode:` content and
         // an `["emoji", shortcode, url]` tag. Delegates to the SDK builder so
         // shortcode normalization + validation match the relay exactly.
-        Some(url) => buzz_sdk_pkg::build_custom_emoji_reaction(target_eid, emoji.trim(), &url)
-            .map_err(|e| format!("invalid custom emoji reaction: {e}"))?,
-        None => events::build_reaction(target_eid, emoji.trim())?,
+        Some(url) => {
+            buzz_sdk_pkg::build_custom_emoji_reaction(target_eid, target_author, emoji.trim(), &url)
+                .map_err(|e| format!("invalid custom emoji reaction: {e}"))?
+        }
+        None => events::build_reaction(target_eid, target_author, emoji.trim())?,
     };
     submit_event(builder, &state).await?;
     Ok(())

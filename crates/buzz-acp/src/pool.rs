@@ -1289,14 +1289,30 @@ pub async fn run_prompt_task(
     let liveness_handle = tokio::spawn(liveness);
     let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
 
-    // Collects event IDs up front. On drop (any exit path — normal, early
-    // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
+    // Collects reaction targets up front. On drop (any exit path — normal,
+    // early return, or panic), spawns best-effort cleanup of both 👀 and 💬.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
-    let reaction_ids: Vec<String> = batch
+    let reaction_targets: Vec<ReactionTarget> = batch
         .as_ref()
-        .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
+        .map(|b| {
+            b.events
+                .iter()
+                .map(|be| ReactionTarget {
+                    event_id: be.event.id.to_hex(),
+                    author: be.event.pubkey,
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
+    // Removal is a kind:5 delete keyed on the reaction's own id, so cleanup
+    // only ever needs the target event ids.
+    let _reaction_guard = ReactionGuard::new(
+        ctx.rest_client.clone(),
+        reaction_targets
+            .iter()
+            .map(|t| t.event_id.clone())
+            .collect(),
+    );
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -1755,11 +1771,11 @@ pub async fn run_prompt_task(
     // 💬 — fire-and-forget so the prompt fires immediately.
     // The guard's cleanup (spawned on drop) removes 💬 after the turn completes.
     // A brief race where 💬 appears slightly after the agent starts is acceptable.
-    if !reaction_ids.is_empty() {
+    if !reaction_targets.is_empty() {
         let rest = ctx.rest_client.clone();
-        let ids = reaction_ids.clone();
+        let targets = reaction_targets.clone();
         tokio::spawn(async move {
-            react_working(&rest, &ids).await;
+            react_working(&rest, &targets).await;
         });
     }
 
@@ -3422,7 +3438,16 @@ fn pct_encode(s: &str) -> String {
 /// Builds a reaction event with `buzz_sdk::build_reaction`, signs it with
 /// the keys already stored in `RestClient`, and submits via `POST /events`.
 /// Returns immediately on timeout or any error — reactions are cosmetic.
-pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str, emoji: &str) {
+///
+/// `target_author` is the pubkey of the event being reacted to; it becomes the
+/// NIP-25 `p` tag. The agent's 👀/💬 indicators are reactions like any other,
+/// so they carry it too rather than emitting a non-conformant kind:7.
+pub(crate) async fn reaction_add(
+    rest: &crate::relay::RestClient,
+    event_id: &str,
+    target_author: nostr::PublicKey,
+    emoji: &str,
+) {
     let target_id = match nostr::EventId::from_hex(event_id) {
         Ok(id) => id,
         Err(e) => {
@@ -3430,7 +3455,7 @@ pub(crate) async fn reaction_add(rest: &crate::relay::RestClient, event_id: &str
             return;
         }
     };
-    let builder = match buzz_sdk::build_reaction(target_id, emoji) {
+    let builder = match buzz_sdk::build_reaction(target_id, target_author, emoji) {
         Ok(b) => b,
         Err(e) => {
             tracing::warn!(event_id, emoji, "reaction add: build failed: {e}");
@@ -3580,14 +3605,27 @@ pub(crate) async fn reaction_remove(rest: &crate::relay::RestClient, event_id: &
 /// Prevents unbounded parallelism when a large batch of events arrives.
 const REACTION_CONCURRENCY: usize = 10;
 
+/// An event an agent status reaction is attached to.
+///
+/// Adding a reaction needs the target's author for the NIP-25 `p` tag;
+/// removing one does not (a kind:5 delete keys off the reaction's own id).
+#[derive(Clone)]
+pub(crate) struct ReactionTarget {
+    pub(crate) event_id: String,
+    pub(crate) author: nostr::PublicKey,
+}
+
 /// Add 💬 to all events, capped at `REACTION_CONCURRENCY` concurrent requests.
 /// Awaited inline before the prompt fires.
-async fn react_working(rest: &crate::relay::RestClient, event_ids: &[String]) {
-    for chunk in event_ids.chunks(REACTION_CONCURRENCY) {
+///
+/// Targets are `(event_id, author)` pairs — the author rides along so each
+/// kind:7 can carry its NIP-25 `p` tag.
+async fn react_working(rest: &crate::relay::RestClient, targets: &[ReactionTarget]) {
+    for chunk in targets.chunks(REACTION_CONCURRENCY) {
         futures_util::future::join_all(
             chunk
                 .iter()
-                .map(|eid| reaction_add(rest, eid, REACTION_WORKING)),
+                .map(|t| reaction_add(rest, &t.event_id, t.author, REACTION_WORKING)),
         )
         .await;
     }
