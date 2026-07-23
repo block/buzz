@@ -383,6 +383,11 @@ test.describe("global agent config screenshots", () => {
           value: "high",
           masked: false,
         },
+        {
+          key: "ANTHROPIC_API_KEY",
+          value: "sk-ant-baked-test",
+          masked: true,
+        },
       ],
     });
 
@@ -542,6 +547,110 @@ test.describe("global agent config screenshots", () => {
       preferred_runtime: "buzz-agent",
       provider: "anthropic",
     });
+  });
+
+  test("create defaults follow a preferred harness saved while open", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CLAUDE,
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
+      },
+    });
+    await openCreateDialog(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Buzz Agent");
+    await defaults
+      .getByRole("button", { name: "Edit global defaults" })
+      .click();
+
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    const harness = defaultsDialog.getByTestId("global-agent-default-harness");
+    await harness.press("Enter");
+    await page
+      .getByTestId("global-agent-default-harness-option-claude")
+      .click();
+    await defaultsDialog.getByRole("button", { name: "Save defaults" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    const harnessDefaults = page.getByTestId("agent-harness-defaults-notice");
+    await expect(harnessDefaults).toContainText("Claude Code");
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
+    await page.getByTestId("persona-dialog-submit").click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const log = (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: { input?: Record<string, unknown> };
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__;
+          const createPayload = log?.find(
+            (entry) => entry.command === "create_persona",
+          )?.payload.input;
+          return createPayload?.runtime;
+        }),
+      )
+      .toBe("claude");
+  });
+
+  test("missing global credentials show the unset defaults notice", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
+    });
+    await openCreateDialog(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Global defaults not set");
+    await expect(defaults.getByRole("button", { name: "Set" })).toBeVisible();
+    await expect(defaults.getByText("Harness", { exact: true })).toHaveCount(0);
+    await expect(defaults.getByText("Provider", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
+  });
+
+  test("create exposes setup guidance when no harness is available", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_NONE_AVAILABLE,
+    });
+    await openCreateDialog(page);
+
+    const customSection = page.getByTestId(
+      "agent-custom-configuration-section",
+    );
+    const harness = customSection.locator("#persona-runtime");
+    await expect(harness).toBeVisible();
+    await expect(harness).toContainText("Choose a harness");
+
+    await selectDropdownOption(page, harness, "Buzz Agent (not installed)");
+    await expect(
+      customSection
+        .locator("p")
+        .filter({ hasText: "Buzz Agent is not installed." }),
+    ).toContainText(
+      "Buzz Agent is not installed. Visit Settings > Agents to set it up.",
+    );
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
   });
 
   test("create with a missing name has no footer message", async ({ page }) => {

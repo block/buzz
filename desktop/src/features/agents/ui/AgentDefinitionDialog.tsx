@@ -169,6 +169,7 @@ export function AgentDefinitionDialog({
     () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
     [globalConfig.preferred_runtime, runtimes],
   );
+  const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const shouldReduceMotion = useReducedMotion();
   const initialModelProviderEditableWithoutRuntime = Boolean(
     initialValues &&
@@ -237,6 +238,46 @@ export function AgentDefinitionDialog({
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
+
+  // Keep an inherited Create runtime synced with defaults saved in-place.
+  React.useEffect(() => {
+    if (
+      !open ||
+      !initialValues ||
+      "id" in initialValues ||
+      initialValues.runtime?.trim() ||
+      aiConfigurationMode !== "defaults" ||
+      runtimesLoading ||
+      defaultRuntime === null ||
+      (runtime.trim().length > 0 && !isRuntimeAutoSeededRef.current)
+    ) {
+      return;
+    }
+
+    if (runtime !== defaultRuntime.id) setRuntime(defaultRuntime.id);
+    isRuntimeAutoSeededRef.current = true;
+    hasSeededForOpenRef.current = true;
+  }, [
+    aiConfigurationMode,
+    defaultRuntime,
+    initialValues,
+    open,
+    runtime,
+    runtimesLoading,
+  ]);
+
+  // Keep setup guidance reachable when no available runtime can be inherited.
+  React.useEffect(() => {
+    if (
+      open &&
+      isCreateMode &&
+      !runtimesLoading &&
+      defaultRuntime === null &&
+      runtime.trim().length === 0
+    ) {
+      setAiConfigurationMode("custom");
+    }
+  }, [defaultRuntime, isCreateMode, open, runtime, runtimesLoading]);
 
   function handleOpenChange(next: boolean) {
     if (!next) {
@@ -437,7 +478,6 @@ export function AgentDefinitionDialog({
     { provider, model },
     runtimeCanChooseLlmProvider,
   );
-  const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
@@ -541,7 +581,10 @@ export function AgentDefinitionDialog({
         ]
       : []),
     ...sortedRuntimes.map((candidate) => ({
-      disabled: isCreateMode && candidate.availability !== "available",
+      disabled:
+        isCreateMode &&
+        defaultRuntime !== null &&
+        candidate.availability !== "available",
       label: `${formatRuntimeOptionLabel(candidate)}${
         isCreateMode && candidate.id === defaultRuntime?.id ? " (default)" : ""
       }`,
@@ -915,9 +958,7 @@ export function AgentDefinitionDialog({
                   harness={runtimeSummaryLabel}
                   inheritedModel={inheritedModelDefault}
                   inheritedProvider={inheritedProviderDefault}
-                  isConfigured={
-                    localModeGate.missingNormalizedFields.length === 0
-                  }
+                  isConfigured={localModeGate.satisfied}
                   model={runtimeFileConfig?.model}
                   onEditDefaults={() => setAiDefaultsOpen(true)}
                   triggerRef={aiDefaultsTriggerRef}

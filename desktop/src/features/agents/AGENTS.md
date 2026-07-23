@@ -88,7 +88,12 @@ with a TypeScript lookup table or an id comparison in a component.
    height through Motion and become immediate when reduced motion is requested.
    Once the Advanced toggle is visible, its expanded state is exclusively
    user-controlled: provider, harness, and required-env changes must never
-   open it automatically in defaults, create, or edit flows.
+   open it automatically in defaults, create, or edit flows. In Create mode,
+   the defaults summary follows preferred-harness changes saved while the
+   dialog is open, and its configured state includes required credentials as
+   well as provider/model values. If no available harness can resolve, Create
+   starts in Customize and lets unavailable catalog entries be selected only
+   to expose their setup guidance; submission remains blocked.
 
 ## The tests that enforce this
 
