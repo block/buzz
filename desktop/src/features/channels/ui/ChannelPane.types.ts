@@ -5,6 +5,7 @@ import type { ImetaMedia } from "@/features/messages/lib/imetaMediaMarkdown";
 import type { MainTimelineEntry } from "@/features/messages/lib/threadPanel";
 import type { ChannelWindowThreadSummary } from "@/features/messages/lib/channelWindowStore";
 import type { TimelineMessage } from "@/features/messages/types";
+import type { ScrollTargetAlignment } from "@/features/messages/ui/anchoredScrollTarget";
 import type { TypingIndicatorEntry } from "@/features/messages/useChannelTyping";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { useChannelFind } from "@/features/search/useChannelFind";
@@ -156,7 +157,10 @@ export type ChannelPaneProps = {
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;
-  threadScrollTargetId: string | null;
+  threadScrollTarget: {
+    alignment: ScrollTargetAlignment;
+    id: string | null;
+  };
   threadUnreadCounts?: ReadonlyMap<string, number>;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadFirstUnreadReplyId?: string | null;

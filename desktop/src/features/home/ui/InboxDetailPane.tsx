@@ -6,6 +6,11 @@ import type {
   InboxItem,
   InboxReply,
 } from "@/features/home/lib/inbox";
+import {
+  type InboxOpenScrollIntent,
+  type InboxOpenScrollTarget,
+  resolveInboxOpenScrollTarget,
+} from "@/features/home/lib/inboxOpenScroll";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
@@ -23,6 +28,7 @@ import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionP
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
+import { UnreadDivider } from "@/features/messages/ui/UnreadDivider";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
@@ -81,6 +87,8 @@ type InboxDetailPaneProps = {
    * (e.g. a very old anchor evicted by a newer representative).
    */
   latchedDefaultParentId?: string | null;
+  /** Inbox-row layout intent captured before opening advances read state. */
+  openScrollIntent?: InboxOpenScrollIntent | null;
   onBack?: () => void;
   onDelete: () => void;
   onManageChannel: (channelId: string) => void;
@@ -121,6 +129,7 @@ export function InboxDetailPane({
   currentPubkey,
   selectedEventId,
   latchedDefaultParentId = null,
+  openScrollIntent = null,
   onBack,
   onDelete,
   onManageChannel,
@@ -209,14 +218,60 @@ export function InboxDetailPane({
             ...pendingReplyMessages,
           ]
         : pendingReplyMessages;
+  const [latchedOpenTarget, setLatchedOpenTarget] = React.useState<{
+    requestId: number;
+    target: InboxOpenScrollTarget;
+  } | null>(null);
+  const hasMatchingOpenIntent =
+    openScrollIntent?.conversationId === conversationId &&
+    openScrollIntent.anchorEventId === selectedEventId;
+  React.useEffect(() => {
+    if (!hasMatchingOpenIntent || !openScrollIntent) {
+      setLatchedOpenTarget(null);
+      return;
+    }
+    if (
+      isThreadContextLoading ||
+      latchedOpenTarget?.requestId === openScrollIntent.requestId
+    ) {
+      return;
+    }
+    const target = resolveInboxOpenScrollTarget(
+      openScrollIntent,
+      displayMessages,
+    );
+    if (target) {
+      setLatchedOpenTarget({ requestId: openScrollIntent.requestId, target });
+    }
+  }, [
+    displayMessages,
+    hasMatchingOpenIntent,
+    isThreadContextLoading,
+    latchedOpenTarget?.requestId,
+    openScrollIntent,
+  ]);
+  const openTarget =
+    hasMatchingOpenIntent &&
+    latchedOpenTarget?.requestId === openScrollIntent?.requestId
+      ? latchedOpenTarget.target
+      : null;
+  const scrollTarget = hasMatchingOpenIntent
+    ? openTarget
+    : selectedEventId
+      ? { alignment: "center" as const, id: selectedEventId }
+      : null;
   const { onScroll } = useAnchoredScroll({
-    channelId: conversationId,
+    channelId: hasMatchingOpenIntent
+      ? `${conversationId}:${openScrollIntent.requestId}`
+      : conversationId,
     contentRef,
+    highlightTargetMessage: !hasMatchingOpenIntent,
     isLoading: isThreadContextLoading,
     messages: displayMessages,
-    pinTargetCentered: true,
+    pinTargetCentered: !hasMatchingOpenIntent,
     scrollContainerRef,
-    targetMessageId: selectedEventId,
+    targetAlignment: scrollTarget?.alignment,
+    targetMessageId: scrollTarget?.id ?? null,
   });
 
   const focusComposer = React.useCallback(() => {
@@ -480,6 +535,7 @@ export function InboxDetailPane({
           aria-busy={isThreadContextLoading}
           className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13 [overflow-anchor:none]"
           data-testid="home-inbox-detail-scroll"
+          key={conversationId}
           onScroll={onScroll}
           ref={scrollContainerRef}
         >
@@ -499,18 +555,24 @@ export function InboxDetailPane({
                 );
 
               return (
-                <InboxMessageRow
-                  agentPubkeys={agentPubkeys}
-                  canReply={canReply}
-                  channelId={item.item.channelId}
-                  isContinuation={isContinuation}
-                  isFirst={index === 0}
-                  isFocusHighlightVisible={isFocusHighlightVisible}
-                  key={message.id}
-                  message={message}
-                  onSelectReplyTarget={handleSelectReplyTarget}
-                  onToggleReaction={onToggleReaction}
-                />
+                <React.Fragment key={message.id}>
+                  {openTarget?.alignment === "top-with-divider" &&
+                  openTarget.id === message.id &&
+                  index > 0 ? (
+                    <UnreadDivider />
+                  ) : null}
+                  <InboxMessageRow
+                    agentPubkeys={agentPubkeys}
+                    canReply={canReply}
+                    channelId={item.item.channelId}
+                    isContinuation={isContinuation}
+                    isFirst={index === 0}
+                    isFocusHighlightVisible={isFocusHighlightVisible}
+                    message={message}
+                    onSelectReplyTarget={handleSelectReplyTarget}
+                    onToggleReaction={onToggleReaction}
+                  />
+                </React.Fragment>
               );
             })}
           </div>

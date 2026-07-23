@@ -30,6 +30,7 @@ type MockWindow = Window & {
     parentEventId?: string | null;
     pubkey?: string;
     mentionPubkeys?: string[];
+    createdAt?: number;
     id?: string;
     kind?: number;
     extraTags?: string[][];
@@ -70,6 +71,13 @@ type MockWindow = Window & {
   __BUZZ_E2E_RELEASE_GET_EVENT__?: () => number;
   /** Running count of get_event invocations since installMockBridge. */
   __BUZZ_E2E_GET_EVENT_CALL_COUNT__?: number;
+  __BUZZ_E2E_EMIT_MOCK_READ_STATE__?: (input: {
+    clientId: string;
+    contexts: Record<string, number>;
+    createdAt: number;
+    slotId: string;
+  }) => unknown;
+  __BUZZ_E2E_RETIRED_INBOX_SCROLLER__?: HTMLElement;
 };
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -171,6 +179,16 @@ async function getItemParam(page: import("@playwright/test").Page) {
     url.hash.slice(url.hash.indexOf("?") + 1),
   );
   return hashSearch.get("item");
+}
+
+async function navigateToInboxItem(
+  page: import("@playwright/test").Page,
+  itemId: string,
+) {
+  await page.evaluate((id) => {
+    window.location.hash = `#/?item=${id}`;
+  }, itemId);
+  await expect.poll(() => getItemParam(page)).toBe(itemId);
 }
 
 // ─── seed helpers ─────────────────────────────────────────────────────────
@@ -325,8 +343,12 @@ test.describe("inbox stable-conversation regressions", () => {
       ) as HTMLElement | null;
       if (!pane) return;
       pane.scrollTop = pane.scrollHeight; // go to bottom
-      const mid = Math.max(1, Math.floor(pane.scrollHeight / 2));
+      const mid = Math.max(
+        1,
+        Math.floor((pane.scrollHeight - pane.clientHeight) / 2),
+      );
       pane.scrollTop = mid; // settle at mid
+      pane.dispatchEvent(new Event("scroll", { bubbles: true }));
     });
     // State-based wait: scroll must be non-zero before proceeding.
     await page.waitForFunction(() => {
@@ -337,6 +359,18 @@ test.describe("inbox stable-conversation regressions", () => {
     });
     const scrollTopBefore = await getScrollTop(page);
     expect(scrollTopBefore).toBeGreaterThan(0);
+    const rootOffsetBefore = await page.evaluate((rootId) => {
+      const pane = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      const rootRow = pane?.querySelector<HTMLElement>(
+        `[data-message-id="${rootId}"]`,
+      );
+      return pane && rootRow
+        ? rootRow.getBoundingClientRect().top - pane.getBoundingClientRect().top
+        : null;
+    }, root.id);
+    expect(rootOffsetBefore).not.toBeNull();
 
     // Type a draft and confirm focus before the live update.
     const composer = detail.getByTestId("message-input");
@@ -358,8 +392,21 @@ test.describe("inbox stable-conversation regressions", () => {
     ).toBeVisible();
 
     // ── 1: scroll position preserved ──────────────────────────────────
-    const scrollTopAfter = await getScrollTop(page);
-    expect(Math.abs(scrollTopAfter - scrollTopBefore)).toBeLessThanOrEqual(2);
+    const rootOffsetAfter = await page.evaluate((rootId) => {
+      const pane = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail"] [aria-busy]',
+      );
+      const rootRow = pane?.querySelector<HTMLElement>(
+        `[data-message-id="${rootId}"]`,
+      );
+      return pane && rootRow
+        ? rootRow.getBoundingClientRect().top - pane.getBoundingClientRect().top
+        : null;
+    }, root.id);
+    expect(rootOffsetAfter).not.toBeNull();
+    expect(
+      Math.abs((rootOffsetAfter ?? 0) - (rootOffsetBefore ?? 0)),
+    ).toBeLessThanOrEqual(2);
 
     // ── 2a: draft text preserved ───────────────────────────────────────
     await expect(composer).toHaveText(
@@ -929,7 +976,7 @@ test.describe("inbox stable-conversation regressions", () => {
     expect(raceSend?.parentEventId).toBe(coldRoot.id);
   });
 
-  test("clicking newest inbox item after fetch-path load snaps to that message, not mid-thread", async ({
+  test("unread fetch-path thread waits for context, then opens at its first unread reply", async ({
     page,
   }) => {
     // Regression: the selected message was visible in `displayMessages` at
@@ -937,8 +984,8 @@ test.describe("inbox stable-conversation regressions", () => {
     // fetched older ancestors and prepended them above the viewport, shifting
     // scrollTop to mid-thread while the newest message slid below the fold.
     //
-    // Fix: the deliberate-selection center is deferred until
-    // isThreadContextLoading transitions true → false (fetch settled).
+    // Fix: the Inbox layout target is deferred until context loading settles,
+    // then resolves against the pre-click read frontier.
     //
     // Fixture:
     //   - fetchRoot + 10 older replies are in mockMessages only (fetch path).
@@ -946,9 +993,8 @@ test.describe("inbox stable-conversation regressions", () => {
     //     representative.
     //   - The thread is long enough that the detail pane requires scrolling.
     //
-    // This test must FAIL at 5536cede5 (center fires before fetch, lands
-    // mid-thread) and PASS with the fix (center fires after fetch, lands on
-    // the newest message).
+    // This test must not latch the visible representative before fetched older
+    // replies reveal the real first-unread boundary.
 
     await installMockBridge(page);
     await page.goto("/");
@@ -963,11 +1009,17 @@ test.describe("inbox stable-conversation regressions", () => {
         const win = window as MockWindow;
         const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
         const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
-        if (!emit || !push) throw new Error("Bridge helpers not ready");
+        const emitReadState = win.__BUZZ_E2E_EMIT_MOCK_READ_STATE__;
+        if (!emit || !push || !emitReadState) {
+          throw new Error("Bridge helpers not ready");
+        }
+
+        const base = Math.floor(Date.now() / 1_000) - 30;
 
         const fetchRoot = emit({
           channelName: "general",
           content: "Fetch-path thread root.",
+          createdAt: base,
           pubkey: senderPubkey,
           id: "d0".repeat(32),
         });
@@ -978,6 +1030,7 @@ test.describe("inbox stable-conversation regressions", () => {
           emit({
             channelName: "general",
             content: `Fetch-path older reply ${i} — long enough to occupy vertical space in the pane so that the total thread height requires scrolling to see the newest message.`,
+            createdAt: base + i,
             parentEventId: fetchRoot.id,
             pubkey: senderPubkey,
             id: `d${i.toString(16).padStart(1, "0")}`.repeat(32),
@@ -989,6 +1042,7 @@ test.describe("inbox stable-conversation regressions", () => {
           channelName: "general",
           content:
             "Fetch-path newest reply — the one the user clicks in inbox.",
+          createdAt: base + 20,
           parentEventId: fetchRoot.id,
           pubkey: senderPubkey,
           mentionPubkeys: [currentPubkey],
@@ -1006,6 +1060,12 @@ test.describe("inbox stable-conversation regressions", () => {
           tags: fetchNewest.tags,
           category: "mention",
         });
+        emitReadState({
+          clientId: "inbox-fetch-boundary-client",
+          contexts: { [`thread:${fetchRoot.id}`]: base },
+          createdAt: base + 25,
+          slotId: "inboxfetchboundary00000000000000",
+        });
 
         return { fetchRoot, fetchNewest };
       },
@@ -1016,11 +1076,33 @@ test.describe("inbox stable-conversation regressions", () => {
       },
     );
 
+    await page.waitForFunction(
+      ({ contextId, expectedReadAt }) => {
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (!key?.startsWith("buzz.channel-read-state.v2:")) continue;
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          if (
+            Date.parse(JSON.parse(raw)[contextId]) / 1_000 ===
+            expectedReadAt
+          ) {
+            return true;
+          }
+        }
+        return false;
+      },
+      {
+        contextId: `thread:${fetchRoot.id}`,
+        expectedReadAt: fetchRoot.created_at,
+      },
+    );
+
     // Confirm the feed representative row appeared in the inbox list.
     const newestRow = page.getByTestId(`home-inbox-item-${fetchNewest.id}`);
     await expect(newestRow).toBeVisible();
 
-    // Reset the spy so only the click's center is counted.
+    // Reset the spy so this layout open cannot hide a center fallback.
     await resetScrollIntoViewCount(page);
 
     // ── Click the newest reply row ────────────────────────────────────
@@ -1041,27 +1123,26 @@ test.describe("inbox stable-conversation regressions", () => {
     // After settle, confirm the older replies are now rendered (fetch landed).
     await expect(detail).toContainText("Fetch-path older reply 1");
 
-    // ── Assert: selected message is within the pane viewport ─────────
-    // The selected message (fetchNewest) must be visible inside the scroll
-    // container — i.e. its bounding rect overlaps with the pane's visible area.
-    const isSelectedMessageInViewport = await page.evaluate(() => {
-      const selectedMsg = document.querySelector<HTMLElement>(
-        '[data-testid="home-inbox-selected-message"]',
+    // The first fetched reply is the first unread message in this never-read
+    // thread, so its divider and row must be visible after context settles.
+    const firstUnreadIsInViewport = await page.evaluate(() => {
+      const firstUnread = document.querySelector<HTMLElement>(
+        `[data-message-id="${"d1".repeat(32)}"]`,
       );
       const pane = document.querySelector<HTMLElement>(
         '[data-testid="home-inbox-detail"] [aria-busy]',
       );
-      if (!selectedMsg || !pane) return false;
+      if (!firstUnread || !pane) return false;
       const paneRect = pane.getBoundingClientRect();
-      const msgRect = selectedMsg.getBoundingClientRect();
-      // At least the top half of the element must overlap the pane's visible area.
+      const msgRect = firstUnread.getBoundingClientRect();
       const msgCenter = msgRect.top + msgRect.height / 2;
       return msgCenter >= paneRect.top && msgCenter <= paneRect.bottom;
     });
-    expect(isSelectedMessageInViewport).toBe(true);
+    expect(firstUnreadIsInViewport).toBe(true);
+    await expect(page.getByTestId("message-unread-divider")).toBeVisible();
 
-    // ── Assert: exactly one programmatic scroll fired ─────────────────
-    expect(await getScrollIntoViewCount(page)).toBe(1);
+    // Layout targets use container scroll placement, never center fallback.
+    expect(await getScrollIntoViewCount(page)).toBe(0);
 
     // ── Bonus: passive live arrivals after settle still trigger zero ──
     // Inject a sibling to confirm the scroll-stability invariant is intact.
@@ -1102,8 +1183,242 @@ test.describe("inbox stable-conversation regressions", () => {
     await expect(
       page.getByTestId(`home-inbox-item-${"de".repeat(32)}`),
     ).toBeVisible();
-    // Count must remain 1 — passive arrival must not trigger another center.
-    expect(await getScrollIntoViewCount(page)).toBe(1);
+    // Passive arrival must not trigger a center.
+    expect(await getScrollIntoViewCount(page)).toBe(0);
+  });
+
+  test("long inbox thread opens at its frozen unread boundary, then reopens at bottom", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await page.goto("/");
+    await expect(getListPane(page)).toBeVisible();
+    await waitForBridgeReady(page);
+
+    const { firstUnreadId, longNewest, otherReply } = await page.evaluate(
+      ({ channelId, currentPubkey, senderPubkey }) => {
+        const win = window as MockWindow;
+        const emit = win.__BUZZ_E2E_EMIT_MOCK_MESSAGE__;
+        const push = win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+        const emitReadState = win.__BUZZ_E2E_EMIT_MOCK_READ_STATE__;
+        if (!emit || !push || !emitReadState) {
+          throw new Error("Bridge helpers not ready");
+        }
+
+        const base = Math.floor(Date.now() / 1_000) - 100;
+        const longRoot = emit({
+          channelName: "general",
+          content: "Long reopen thread root.",
+          createdAt: base,
+          pubkey: senderPubkey,
+          id: "91".repeat(32),
+        });
+        let firstUnreadId = "";
+        for (let index = 0; index < 40; index += 1) {
+          const reply = emit({
+            channelName: "general",
+            content: `Long reopen older reply ${index + 1} — enough body text to make repeated selection and late layout changes exercise a genuinely tall inbox conversation.`,
+            createdAt: base + index + 1,
+            parentEventId: longRoot.id,
+            pubkey: senderPubkey,
+            id: `${(0xa0 + index).toString(16).padStart(2, "0")}`.repeat(32),
+          });
+          if (index === 30) firstUnreadId = reply.id;
+        }
+        const longNewest = emit({
+          channelName: "general",
+          content: "Long reopen newest reply — this must remain visible.",
+          createdAt: base + 50,
+          parentEventId: longRoot.id,
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "d1".repeat(32),
+        });
+        push({
+          id: longNewest.id,
+          kind: longNewest.kind,
+          pubkey: longNewest.pubkey,
+          content: longNewest.content,
+          created_at: longNewest.created_at,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: longNewest.tags,
+          category: "mention",
+        });
+        emitReadState({
+          clientId: "inbox-open-boundary-client",
+          contexts: { [`thread:${longRoot.id}`]: base + 30 },
+          createdAt: base + 70,
+          slotId: "inboxopenboundary000000000000000",
+        });
+
+        const otherRoot = emit({
+          channelName: "general",
+          content: "Other reopen thread root.",
+          createdAt: base + 60,
+          pubkey: senderPubkey,
+          id: "e1".repeat(32),
+        });
+        const otherReply = emit({
+          channelName: "general",
+          content: "Other reopen thread reply.",
+          createdAt: base + 61,
+          parentEventId: otherRoot.id,
+          pubkey: senderPubkey,
+          mentionPubkeys: [currentPubkey],
+          id: "e2".repeat(32),
+        });
+        push({
+          id: otherReply.id,
+          kind: otherReply.kind,
+          pubkey: otherReply.pubkey,
+          content: otherReply.content,
+          created_at: otherReply.created_at,
+          channel_id: channelId,
+          channel_name: "general",
+          tags: otherReply.tags,
+          category: "mention",
+        });
+
+        return { firstUnreadId, longNewest, otherReply };
+      },
+      {
+        channelId: GENERAL_CHANNEL_ID,
+        currentPubkey: TEST_IDENTITIES.tyler.pubkey,
+        senderPubkey: TEST_IDENTITIES.alice.pubkey,
+      },
+    );
+
+    await page.waitForFunction(
+      ({ contextId, expectedReadAt }) => {
+        for (let index = 0; index < localStorage.length; index += 1) {
+          const key = localStorage.key(index);
+          if (!key?.startsWith("buzz.channel-read-state.v2:")) continue;
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          const value = JSON.parse(raw)[contextId];
+          if (Date.parse(value) / 1_000 === expectedReadAt) return true;
+        }
+        return false;
+      },
+      {
+        contextId: `thread:${"91".repeat(32)}`,
+        expectedReadAt: longNewest.created_at - 20,
+      },
+    );
+
+    const longRow = page.getByTestId(`home-inbox-item-${longNewest.id}`);
+    const otherRow = page.getByTestId(`home-inbox-item-${otherReply.id}`);
+    await expect(longRow).toBeVisible();
+    await expect(otherRow).toBeVisible();
+
+    await longRow.click();
+    await expect(getDetailPane(page)).toContainText(
+      "Long reopen older reply 1",
+    );
+    await page.waitForFunction(() => {
+      const scroller = document.querySelector(
+        '[data-testid="home-inbox-detail-scroll"]',
+      );
+      return scroller?.getAttribute("aria-busy") !== "true";
+    });
+    await expect(page.getByTestId("message-unread-divider")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          ({ targetId }) => {
+            const scroller = document.querySelector<HTMLElement>(
+              '[data-testid="home-inbox-detail-scroll"]',
+            );
+            const divider = scroller?.querySelector<HTMLElement>(
+              '[data-testid="message-unread-divider"]',
+            );
+            const target = scroller?.querySelector<HTMLElement>(
+              `[data-message-id="${targetId}"]`,
+            );
+            if (!scroller || !divider || !target) return null;
+            return {
+              dividerNearTop: (() => {
+                const offset =
+                  divider.getBoundingClientRect().top -
+                  scroller.getBoundingClientRect().top;
+                return offset >= 0 && offset <= 40;
+              })(),
+              targetVisible:
+                target.getBoundingClientRect().top <
+                scroller.getBoundingClientRect().bottom,
+            };
+          },
+          { targetId: firstUnreadId },
+        ),
+      )
+      .toEqual({ dividerNearTop: true, targetVisible: true });
+    await page.evaluate(() => {
+      const scroller = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail-scroll"]',
+      );
+      if (!scroller) throw new Error("Expected inbox detail scroller");
+      (window as MockWindow).__BUZZ_E2E_RETIRED_INBOX_SCROLLER__ = scroller;
+    });
+
+    await otherRow.click();
+    await expect(getDetailPane(page)).toContainText(
+      "Other reopen thread reply",
+    );
+    await longRow.click();
+    await expect(getDetailPane(page)).toContainText(
+      "Long reopen older reply 1",
+    );
+    await page.waitForFunction(() => {
+      const scroller = document.querySelector(
+        '[data-testid="home-inbox-detail-scroll"]',
+      );
+      return scroller?.getAttribute("aria-busy") !== "true";
+    });
+
+    const liveScrollerIsAtBottom = () =>
+      page.evaluate(() => {
+        const scroller = document.querySelector<HTMLElement>(
+          '[data-testid="home-inbox-detail-scroll"]',
+        );
+        if (!scroller) return false;
+        return (
+          Math.abs(
+            scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop,
+          ) <= 1
+        );
+      });
+    await expect(page.getByTestId("message-unread-divider")).toHaveCount(0);
+    await expect.poll(liveScrollerIsAtBottom).toBe(true);
+    expect(
+      await page.evaluate(() => {
+        const retired = (window as MockWindow)
+          .__BUZZ_E2E_RETIRED_INBOX_SCROLLER__;
+        const live = document.querySelector<HTMLElement>(
+          '[data-testid="home-inbox-detail-scroll"]',
+        );
+        return {
+          retiredIsConnected: retired?.isConnected ?? null,
+          sameNode: retired === live,
+        };
+      }),
+    ).toEqual({ retiredIsConnected: false, sameNode: false });
+
+    await page.evaluate(() => {
+      const retired = (window as MockWindow)
+        .__BUZZ_E2E_RETIRED_INBOX_SCROLLER__;
+      if (!retired) throw new Error("Expected retired inbox detail scroller");
+      retired.dispatchEvent(new Event("scroll", { bubbles: true }));
+
+      const live = document.querySelector<HTMLElement>(
+        '[data-testid="home-inbox-detail-scroll"]',
+      );
+      const firstRow = live?.querySelector<HTMLElement>("[data-message-id]");
+      if (!firstRow) throw new Error("Expected a rendered inbox message row");
+      firstRow.style.minHeight = `${firstRow.getBoundingClientRect().height + 1_200}px`;
+    });
+
+    await expect.poll(liveScrollerIsAtBottom).toBe(true);
   });
 
   test("post-settle reaction hydration does not shift the centered selected message out of viewport", async ({
@@ -1210,11 +1525,9 @@ test.describe("inbox stable-conversation regressions", () => {
     const newestRow = page.getByTestId(`home-inbox-item-${fetchNewest.id}`);
     await expect(newestRow).toBeVisible();
 
-    // Reset the spy so only the center from the click is counted.
+    // A URL-owned target is an explicit deep-link and remains centered.
     await resetScrollIntoViewCount(page);
-
-    // ── Click the newest reply row ────────────────────────────────────
-    await newestRow.click();
+    await navigateToInboxItem(page, fetchNewest.id);
     const detail = getDetailPane(page);
     await expect(detail).toContainText("Reaction-drift selected reply");
 
@@ -1325,12 +1638,12 @@ test.describe("inbox stable-conversation regressions", () => {
     expect(await getScrollIntoViewCount(page)).toBe(1);
   });
 
-  test("direct container scroll releases the hold before late reaction hydration", async ({
+  test("pointer-driven container scroll releases the hold before late reaction hydration", async ({
     page,
   }) => {
-    // A direct scroll (such as a scrollbar drag) must release the post-center
-    // anchor hold before late reaction hydration. The test asserts the user
-    // action is recognized without wheel, touch, or key events.
+    // A scrollbar drag must release the post-center anchor hold before late
+    // reaction hydration. Pointer-down supplies the user-intent signal; the
+    // following native scroll event must not be confused with target settling.
     //
     // Fixture (same shape as test 6):
     //   - fetchRoot + 10 older replies in mockMessages only (fetch path).
@@ -1421,11 +1734,9 @@ test.describe("inbox stable-conversation regressions", () => {
     const newestRow = page.getByTestId(`home-inbox-item-${fetchNewest.id}`);
     await expect(newestRow).toBeVisible();
 
-    // Reset the spy so only the center from the click is counted.
+    // A URL-owned target is an explicit deep-link and remains centered.
     await resetScrollIntoViewCount(page);
-
-    // ── Click the newest reply row ────────────────────────────────────
-    await newestRow.click();
+    await navigateToInboxItem(page, fetchNewest.id);
     const detail = getDetailPane(page);
     await expect(detail).toContainText("Reaction-drift selected reply");
 
@@ -1441,9 +1752,8 @@ test.describe("inbox stable-conversation regressions", () => {
     await expect(detail).toContainText("Reaction-drift older reply 1");
     expect(await getScrollIntoViewCount(page)).toBe(1);
 
-    // Simulate a scrollbar drag: change the actual scroll container directly
-    // and dispatch only `scroll`, without wheel/touch/key input. This must
-    // release the post-center hold before late layout growth arrives.
+    // Simulate a scrollbar drag: pointer-down on the actual scroll container,
+    // then change its offset and dispatch the resulting native scroll event.
     const scrollTopAfterDirectScroll = await page.evaluate(() => {
       const pane = document.querySelector<HTMLElement>(
         '[data-testid="home-inbox-detail"] [aria-busy]',
@@ -1457,6 +1767,7 @@ test.describe("inbox stable-conversation regressions", () => {
       };
       (window as Window & { __scrollByCalls?: () => number }).__scrollByCalls =
         () => scrollByCalls;
+      pane.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
       const scrollTopBefore = pane.scrollTop;
       pane.scrollTop = Math.min(
         pane.scrollHeight - pane.clientHeight,

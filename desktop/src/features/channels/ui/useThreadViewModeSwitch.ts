@@ -4,6 +4,7 @@ import {
   setThreadViewMode,
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
+import type { ScrollTargetAlignment } from "@/features/messages/ui/anchoredScrollTarget";
 
 export function findTopVisibleThreadMessageId(
   body: HTMLElement | null,
@@ -32,6 +33,7 @@ export function getResolvedThreadTargets({
 }
 
 type ThreadViewModeSwitchOptions = {
+  externalScrollTargetAlignment: ScrollTargetAlignment;
   externalScrollTargetId: string | null;
   onExternalTargetResolved: () => void;
   onModeChange?: (mode: ThreadViewMode) => void;
@@ -39,6 +41,7 @@ type ThreadViewModeSwitchOptions = {
 
 /** Preserves the reply being read while the thread changes presentation. */
 export function useThreadViewModeSwitch({
+  externalScrollTargetAlignment,
   externalScrollTargetId,
   onExternalTargetResolved,
   onModeChange,
@@ -81,7 +84,13 @@ export function useThreadViewModeSwitch({
 
   return {
     changeThreadViewMode,
-    layoutScrollTargetId,
     resolveScrollTarget,
+    scrollTarget: {
+      alignment: layoutScrollTargetId
+        ? "center"
+        : externalScrollTargetAlignment,
+      id: layoutScrollTargetId ?? externalScrollTargetId,
+      isLayout: layoutScrollTargetId !== null,
+    },
   };
 }

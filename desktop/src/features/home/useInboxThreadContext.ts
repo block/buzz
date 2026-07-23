@@ -38,7 +38,9 @@ export function useInboxThreadContext(
   channelMessages: RelayEvent[] | undefined,
 ): InboxThreadContextResult {
   const [fetchedEvents, setFetchedEvents] = React.useState<RelayEvent[]>([]);
-  const [isLoading, setIsLoading] = React.useState(false);
+  const [loadedSelectionKey, setLoadedSelectionKey] = React.useState<
+    string | null
+  >(null);
 
   const selectedEvent = React.useMemo(
     () => (item ? relayEventFromFeedItem(item) : null),
@@ -52,13 +54,21 @@ export function useInboxThreadContext(
     ? getThreadReference(selectedEvent.tags).parentId
     : null;
   const selectedChannelId = item?.channelId ?? null;
+  const selectionKey = selectedEvent
+    ? [
+        selectedChannelId,
+        selectedEvent.id,
+        selectedParentId,
+        selectedThreadRootId,
+      ].join(":")
+    : null;
 
   React.useEffect(() => {
     let isCancelled = false;
 
     if (!selectedEvent || !selectedThreadRootId) {
       setFetchedEvents([]);
-      setIsLoading(false);
+      setLoadedSelectionKey(null);
       return () => {
         isCancelled = true;
       };
@@ -70,8 +80,6 @@ export function useInboxThreadContext(
       if (!targetEvent || !threadRootId) {
         return;
       }
-
-      setIsLoading(true);
 
       try {
         const selection = {
@@ -127,7 +135,7 @@ export function useInboxThreadContext(
         );
       } finally {
         if (!isCancelled) {
-          setIsLoading(false);
+          setLoadedSelectionKey(selectionKey);
         }
       }
     }
@@ -142,6 +150,7 @@ export function useInboxThreadContext(
     selectedEvent,
     selectedParentId,
     selectedThreadRootId,
+    selectionKey,
   ]);
 
   const events = React.useMemo(() => {
@@ -240,7 +249,7 @@ export function useInboxThreadContext(
 
   return {
     events,
-    isLoading,
+    isLoading: selectionKey !== null && loadedSelectionKey !== selectionKey,
     reactionEvents,
     refreshReactions,
   };

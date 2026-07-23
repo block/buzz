@@ -45,6 +45,7 @@ import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
 import { UnreadDivider } from "./UnreadDivider";
 import { useComposerHeightPadding } from "./useComposerHeightPadding";
+import type { ScrollTargetAlignment } from "./anchoredScrollTarget";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
@@ -98,6 +99,7 @@ type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   ) => Promise<void>;
   profiles?: UserProfileLookup;
   replyTargetMessage: TimelineMessage | null;
+  scrollTargetAlignment?: ScrollTargetAlignment;
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
@@ -213,6 +215,7 @@ export function MessageThreadPanel({
   onUnfollowThread,
   profiles,
   replyTargetMessage,
+  scrollTargetAlignment = "center",
   scrollTargetId,
   scrollTargetHighlights = true,
   threadHead,
@@ -489,6 +492,7 @@ export function MessageThreadPanel({
       highlightTargetMessage: scrollTargetHighlights,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
+      targetAlignment: scrollTargetAlignment,
       targetMessageId: scrollTargetId,
     });
 

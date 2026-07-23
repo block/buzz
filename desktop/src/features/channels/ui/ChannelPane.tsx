@@ -153,7 +153,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   threadMessages,
   threadMessagesPending = false,
   threadPanelWidthPx,
-  threadScrollTargetId,
+  threadScrollTarget,
   threadTypingPubkeys,
   threadReplyTargetMessage,
   threadUnreadCounts,
@@ -514,19 +514,18 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
-  // Focus mode is a wide-viewport-only alternative to the split thread pane:
-  // narrow viewports keep their existing single-panel / floating-overlay
-  // behavior untouched. It applies to the thread panel only — channel
-  // management, agent session and profile panels always use the split pane.
+  // Focus is a wide-only thread alternative; narrow and non-thread panels keep
+  // their existing single-panel, overlay, or split-pane behavior.
   const useFocusThreadDrawer =
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
     (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
   const { channelIsCovered, markExitComplete } =
     useFocusDrawerPresence(useFocusThreadDrawer);
-  const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
+  const { changeThreadViewMode, resolveScrollTarget, scrollTarget } =
     useThreadViewModeSwitch({
-      externalScrollTargetId: threadScrollTargetId,
+      externalScrollTargetAlignment: threadScrollTarget.alignment,
+      externalScrollTargetId: threadScrollTarget.id,
       onExternalTargetResolved: onThreadScrollTargetResolved,
       onModeChange: markExitComplete,
     });
@@ -886,8 +885,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onUnfollowThread={onUnfollowThread}
                 profiles={profiles}
                 replyTargetMessage={threadReplyTargetMessage}
-                scrollTargetHighlights={!layoutScrollTargetId}
-                scrollTargetId={layoutScrollTargetId ?? threadScrollTargetId}
+                scrollTargetHighlights={!scrollTarget.isLayout}
+                scrollTargetAlignment={scrollTarget.alignment}
+                scrollTargetId={scrollTarget.id}
                 threadHead={threadHeadMessage}
                 threadHeadVideoReviewContext={threadHeadVideoReviewContext}
                 widthPx={threadPanelWidthPx}

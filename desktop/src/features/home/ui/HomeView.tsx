@@ -17,6 +17,7 @@ import {
   getInboxConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
+import { useInboxRowSelection } from "@/features/home/useInboxRowSelection";
 import {
   getReactionTargetId,
   matchesInboxFilter,
@@ -167,20 +168,8 @@ export function HomeView({
   const profilePanelView = profilePanelViewFromSearch(
     inboxSearchValues.profileView,
   );
-  // Selection state — two-tier design so explicit and automatic selections
-  // have distinct ownership:
-  //
-  //   urlSelectedItemId  — explicit/user anchor, URL-authoritative.  Written
-  //     only by handleUserSelectItem (via applyInboxSearchPatch) and by
-  //     back/forward navigation.  Never touched by background data loads.
-  //
-  //   autoSelectedEventId — default desktop selection when the URL carries no
-  //     explicit anchor.  Written only by the auto-selection effect.  Never
-  //     triggers a history push.
-  //
-  //   selectedEventId — the effective anchor used everywhere below: the URL
-  //     anchor when present, otherwise the auto-selected fallback.  Derived
-  //     synchronously, no separate state — so there is no mirror-revert race.
+  // Explicit selections are URL-owned; automatic desktop selection stays
+  // local so background data never creates navigation entries.
   const [autoSelectedEventId, setAutoSelectedEventId] = React.useState<
     string | null
   >(null);
@@ -396,6 +385,16 @@ export function HomeView({
       undoDoneLocal: undoDone,
       undoUnreadLocal: undoUnread,
     });
+  const { openScrollIntent, selectInboxRow } = useInboxRowSelection({
+    doneSet: effectiveDoneSet,
+    getChannelReadAt,
+    getMessageReadAt,
+    getThreadReadAt,
+    items: inboxItems,
+    localUnreadSet: unreadSet,
+    markItemRead,
+    selectItem: handleUserSelectItem,
+  });
   // Resolve the selected row and stable conversation ID from inboxItems
   // (unfiltered). We need conversationId before filtering so we can keep the
   // selected item visible when unreadOnly is on. The event anchor may point to
@@ -757,10 +756,7 @@ export function HomeView({
                   preview: item.preview.slice(0, 100),
                 });
               }}
-              onSelect={(itemId) => {
-                handleUserSelectItem(itemId);
-                markItemRead(itemId);
-              }}
+              onSelect={selectInboxRow}
               onSelectDraft={setSelectedDraftKey}
               onUnreadOnlyChange={setUnreadOnly}
               reminderPubkey={currentPubkey}
@@ -814,6 +810,7 @@ export function HomeView({
               item={selectedItem}
               latchedDefaultParentId={latchedDefaultParentId}
               messages={contextMessages}
+              openScrollIntent={openScrollIntent}
               profiles={feedProfiles}
               selectedEventId={selectedEventId}
               onBack={
