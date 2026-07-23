@@ -8,6 +8,15 @@ import {
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
 import {
+  enqueueAgentManagementDraft,
+  peekPendingAgentManagementDraft,
+  removeAgentManagementDraft,
+  requestAgentManagementDraftReview,
+  useAgentManagementDraftCount,
+  useAgentManagementReviewRequestVersion,
+  type PendingAgentManagementDraft,
+} from "./agentManagementDraftStore";
+import {
   managedAgentsQueryKey,
   personasQueryKey,
   useAcpRuntimesQuery,
@@ -32,6 +41,7 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { toast } from "sonner";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -66,19 +76,32 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
-  const [request, setRequest] = React.useState<AgentManagementRequest | null>(
-    null,
-  );
+  const [activeDraft, setActiveDraft] =
+    React.useState<PendingAgentManagementDraft | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
-  const pendingRequestId = React.useRef<string | null>(null);
-  const sourceAgentPubkey = React.useRef<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
+  const pendingDraftCount = useAgentManagementDraftCount();
+  const reviewRequestVersion = useAgentManagementReviewRequestVersion();
+  const previousPendingDraftCount = React.useRef(pendingDraftCount);
+  const previousReviewRequestVersion = React.useRef(reviewRequestVersion);
+  const request = activeDraft?.request ?? null;
+  const sourceAgentPubkey = activeDraft?.agentPubkey ?? null;
+
+  // Promote the oldest persisted draft into the visible dialog. The store stays
+  // authoritative so a missed dialog still has a sidebar entry point.
+  const showNextPendingDraft = React.useCallback(() => {
+    if (activeDraft) return;
+    const nextDraft = peekPendingAgentManagementDraft();
+    if (!nextDraft) return;
+    setError(null);
+    setActiveDraft(nextDraft);
+  }, [activeDraft]);
 
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
@@ -95,11 +118,20 @@ export function useAgentManagement() {
       }
       seenRequestIds.current.add(next.requestId);
       setError(null);
-      if (pendingRequestId.current === null) {
-        pendingRequestId.current = next.requestId;
-        sourceAgentPubkey.current = agentPubkey;
-        setRequest(next);
+      const didEnqueue = enqueueAgentManagementDraft(agentPubkey, next);
+      if (didEnqueue) {
+        toast("Agent draft ready", {
+          action: {
+            label: "Review",
+            onClick: requestAgentManagementDraftReview,
+          },
+          description:
+            next.action === "create"
+              ? `Review ${next.request.displayName}.`
+              : `Review changes for ${next.request.agentName}.`,
+        });
       }
+      showNextPendingDraft();
     },
   );
 
@@ -161,7 +193,7 @@ export function useAgentManagement() {
     const targetChannel = (channelsQuery.data ?? []).find(
       (channel) => channel.id === channelId,
     );
-    const requestingPubkey = sourceAgentPubkey.current?.toLowerCase();
+    const requestingPubkey = sourceAgentPubkey?.toLowerCase();
     if (
       !targetChannel?.isMember ||
       !requestingPubkey ||
@@ -227,7 +259,7 @@ export function useAgentManagement() {
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
-      dismiss();
+      resolveActiveDraft();
       return true;
     } catch (cause) {
       setError(
@@ -249,7 +281,7 @@ export function useAgentManagement() {
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
-      dismiss();
+      resolveActiveDraft();
       return true;
     } catch (cause) {
       setError(
@@ -259,11 +291,36 @@ export function useAgentManagement() {
     }
   }
 
-  function dismiss() {
-    pendingRequestId.current = null;
-    sourceAgentPubkey.current = null;
-    setRequest(null);
+  function clearActiveDraft(removeFromStore: boolean) {
+    const requestId = activeDraft?.request.requestId;
+    if (removeFromStore && requestId) {
+      removeAgentManagementDraft(requestId);
+      setActiveDraft(peekPendingAgentManagementDraft() ?? null);
+      setError(null);
+      return;
+    }
+    setActiveDraft(null);
+    setError(null);
   }
+
+  function resolveActiveDraft() {
+    clearActiveDraft(true);
+  }
+
+  function dismiss() {
+    clearActiveDraft(false);
+  }
+
+  React.useEffect(() => {
+    const countIncreased =
+      pendingDraftCount > previousPendingDraftCount.current;
+    const reviewRequested =
+      reviewRequestVersion !== previousReviewRequestVersion.current;
+    previousPendingDraftCount.current = pendingDraftCount;
+    previousReviewRequestVersion.current = reviewRequestVersion;
+    if (!countIncreased && !reviewRequested) return;
+    showNextPendingDraft();
+  }, [pendingDraftCount, reviewRequestVersion, showNextPendingDraft]);
 
   const createInitialValues = React.useMemo(
     () =>

@@ -21,6 +21,10 @@ import {
   saveActiveAgentTurnsForCommunity,
   restoreActiveAgentTurnsForCommunity,
 } from "@/features/agents/activeAgentTurnsStore";
+import {
+  initAgentManagementDraftStore,
+  resetAgentManagementDraftStore,
+} from "@/features/agents/agentManagementDraftStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
@@ -51,6 +55,7 @@ function resetCommunityState({
   resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
+  resetAgentManagementDraftStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
   if (resetAvatarState) {
@@ -248,6 +253,10 @@ export function useCommunityInit(
           const identity = await getIdentity();
           if (cancelled) return;
           initDraftStore(identity.pubkey, activeCommunity.relayUrl);
+          initAgentManagementDraftStore(
+            identity.pubkey,
+            activeCommunity.relayUrl,
+          );
         } catch (err) {
           if (cancelled) return;
           console.error(

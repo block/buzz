@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FilePenLine,
+  FolderGit2,
+  Inbox,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -36,7 +43,9 @@ type AppSidebarPinnedHeaderProps = {
 };
 
 type AppSidebarPrimaryMenuProps = {
+  agentDraftCount: number;
   homeBadgeCount: number;
+  onSelectAgentDrafts: () => void;
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -81,7 +90,9 @@ export function AppSidebarPinnedHeader({
 }
 
 export function AppSidebarPrimaryMenu({
+  agentDraftCount,
   homeBadgeCount,
+  onSelectAgentDrafts,
   onSelectAgents,
   onSelectHome,
   onSelectProjects,
@@ -154,6 +165,25 @@ export function AppSidebarPrimaryMenu({
             <Bot className="h-4 w-4" />
             <SidebarMenuLabel>Agents</SidebarMenuLabel>
           </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-agent-drafts"
+            onClick={onSelectAgentDrafts}
+            tooltip="Drafts"
+            type="button"
+          >
+            <FilePenLine className="h-4 w-4" />
+            <SidebarMenuLabel>Drafts</SidebarMenuLabel>
+          </SidebarMenuButton>
+          {agentDraftCount > 0 ? (
+            <SidebarMenuBadge
+              className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+              data-testid="sidebar-agent-draft-count"
+            >
+              {Math.min(agentDraftCount, 99)}
+            </SidebarMenuBadge>
+          ) : null}
         </SidebarMenuItem>
         <FeatureGate feature="workflows">
           <SidebarMenuItem>
