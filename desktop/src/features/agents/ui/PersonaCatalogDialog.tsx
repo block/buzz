@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { isCatalogPersonaSelected } from "@/features/agents/lib/catalog";
+import { isCatalogPersona } from "@/features/agents/lib/personaCatalogRelay";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { AgentPersona } from "@/shared/api/types";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
@@ -288,7 +289,16 @@ function PersonaCatalogDetail({ persona }: { persona: AgentPersona }) {
           <h3 className="truncate text-xl font-semibold leading-snug">
             {persona.displayName}
           </h3>
-          {persona.isBuiltIn ? null : <PersonaAddedBy className="mt-0.5" />}
+          {persona.isBuiltIn ? null : (
+            <PersonaAddedBy
+              className="mt-0.5"
+              label={
+                isCatalogPersona(persona) && !persona.catalogSource.isOwn
+                  ? "Community member"
+                  : "You"
+              }
+            />
+          )}
         </div>
       </div>
 

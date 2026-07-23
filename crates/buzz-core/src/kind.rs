@@ -182,6 +182,21 @@ pub const KIND_TEAM: u32 = 30176;
 /// since these events are world-readable on the relay.
 pub const KIND_MANAGED_AGENT: u32 = 30177;
 
+/// Buzz community agent catalog entry (parameterized replaceable, owner-authored).
+///
+/// Addressed by `(pubkey, kind, d_tag)` where `d_tag` is the source persona's
+/// stable local id. Unlike [`KIND_PERSONA`], readers intentionally query this
+/// kind across every community member: a `published` head contains an explicit
+/// public projection plus a verified same-relay agent-snapshot reference, while
+/// an `unpublished` head removes that coordinate from discovery.
+///
+/// Privacy contract: catalog entries and their referenced snapshots are
+/// community-readable plaintext. Publishers MUST use an explicit allowlist
+/// projection that excludes private keys, auth tags, environment variables,
+/// machine-local runtime state, and response allowlists. Optional memory is
+/// included only at the user-selected `none`, `core`, or `everything` level.
+pub const KIND_PERSONA_CATALOG: u32 = 30178;
+
 // NIP-56 reporting
 /// NIP-56: Report an event, pubkey, or blob to relay moderators (kind:1984).
 ///
@@ -510,6 +525,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PERSONA,
     KIND_TEAM,
     KIND_MANAGED_AGENT,
+    KIND_PERSONA_CATALOG,
     KIND_REPORT,
     KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
@@ -708,6 +724,7 @@ const _: () = assert!(is_replaceable(KIND_AGENT_PROFILE)); // 10100 ∈ 10000–
 const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA_CATALOG)); // 30178 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999

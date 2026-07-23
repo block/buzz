@@ -374,9 +374,10 @@ export function AgentsView() {
           onCatalogShareLevelChange={(shareLevel) => {
             const shareTarget = personas.personaToShare;
             if (!shareTarget) return;
-            personas.setPersonaCatalogShareLevel(
+            void personas.setPersonaCatalogShareLevel(
               shareTarget.persona,
               shareLevel,
+              shareTarget.linkedAgentPubkey,
             );
           }}
           onExport={() => {
@@ -393,7 +394,10 @@ export function AgentsView() {
           onPublishCatalogUpdates={() => {
             const shareTarget = personas.personaToShare;
             if (!shareTarget) return;
-            personas.publishPersonaCatalogUpdates(shareTarget.persona);
+            void personas.publishPersonaCatalogUpdates(
+              shareTarget.persona,
+              shareTarget.linkedAgentPubkey,
+            );
           }}
           open={personas.personaToShare !== null}
           persona={personas.personaToShare.persona}
@@ -442,8 +446,8 @@ export function AgentsView() {
       {personas.isCatalogDialogOpen ? (
         <PersonaCatalogDialog
           error={
-            personas.personasQuery.error instanceof Error
-              ? personas.personasQuery.error
+            personas.catalogQuery.error instanceof Error
+              ? personas.catalogQuery.error
               : null
           }
           feedbackErrorMessage={
@@ -456,8 +460,8 @@ export function AgentsView() {
               ? personas.personaNoticeMessage
               : null
           }
-          isLoading={personas.personasQuery.isLoading}
-          isPending={personas.setPersonaActiveMutation.isPending}
+          isLoading={personas.catalogQuery.isLoading}
+          isPending={personas.isPending}
           onClearFeedback={() => {
             personas.clearFeedback("catalog");
           }}

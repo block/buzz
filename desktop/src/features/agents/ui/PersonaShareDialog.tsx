@@ -12,7 +12,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
-import type { CatalogPersonaShareLevel } from "@/features/agents/lib/personaCatalogVisibility";
+import type { CatalogPersonaShareLevel } from "@/features/agents/lib/personaCatalogRelay";
 import {
   useOpenDmMutation,
   useUpsertCachedChannel,
@@ -740,6 +740,8 @@ export function PersonaShareDialog({
   persona,
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
+  const [pendingCatalogMemoryLevel, setPendingCatalogMemoryLevel] =
+    React.useState<Exclude<SnapshotMemoryLevel, "none"> | null>(null);
   const catalogShareLevels = React.useMemo(
     () => [
       { value: "not-shared", label: "Not shared" },
@@ -767,60 +769,107 @@ export function PersonaShareDialog({
   );
 
   return (
-    <SnapshotShareDialog
-      afterLink={
-        persona.isBuiltIn ? null : (
-          <section
-            className="flex min-h-16 w-full items-center gap-3"
-            data-testid="persona-share-catalog"
-          >
-            <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
-              <BookUser className="h-4 w-4" />
-            </span>
-            <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-medium">Share to catalog</h3>
-              <p className="text-xs text-secondary-foreground/75">
-                Let anyone in this community find and use a copy of this agent.
-              </p>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              {catalogShareLevel !== "not-shared" && hasCatalogUpdates ? (
-                <Button
-                  data-testid="persona-share-publish-catalog-updates"
+    <>
+      <SnapshotShareDialog
+        afterLink={
+          persona.isBuiltIn ? null : (
+            <section
+              className="flex min-h-16 w-full items-center gap-3"
+              data-testid="persona-share-catalog"
+            >
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                <BookUser className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-medium">Share to catalog</h3>
+                <p className="text-xs text-secondary-foreground/75">
+                  Anyone in this community can find and use a copy. Catalog data
+                  is plaintext; secrets and response allowlists are never
+                  included.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {catalogShareLevel !== "not-shared" && hasCatalogUpdates ? (
+                  <Button
+                    data-testid="persona-share-publish-catalog-updates"
+                    disabled={isPending}
+                    onClick={onPublishCatalogUpdates}
+                    size="sm"
+                    variant="outline"
+                  >
+                    Publish updates
+                  </Button>
+                ) : null}
+                <SnapshotOptionMenu
+                  ariaLabel="What to share in the catalog"
                   disabled={isPending}
-                  onClick={onPublishCatalogUpdates}
-                  size="sm"
-                  variant="outline"
-                >
-                  Publish updates
-                </Button>
-              ) : null}
-              <SnapshotOptionMenu
-                ariaLabel="What to share in the catalog"
-                disabled={isPending}
-                onValueChange={(nextValue) =>
-                  onCatalogShareLevelChange(
-                    nextValue as CatalogPersonaShareLevel,
-                  )
-                }
-                options={catalogShareLevels}
-                testId="persona-share-catalog-access"
-                value={catalogShareLevel}
-              />
-            </div>
-          </section>
-        )
-      }
-      displayName={persona.displayName}
-      encodeSnapshot={encodeSnapshot}
-      hasMemoryOptions={linkedAgentPubkey !== null}
-      isPending={isPending}
-      onExport={onExport}
-      onOpenChange={onOpenChange}
-      onReset={encodeSnapshotMutation.reset}
-      open={open}
-      snapshotKind="agent"
-      testIdPrefix="persona-share"
-    />
+                  onValueChange={(nextValue) => {
+                    const shareLevel = nextValue as CatalogPersonaShareLevel;
+                    if (shareLevel === "core" || shareLevel === "everything") {
+                      setPendingCatalogMemoryLevel(shareLevel);
+                    } else {
+                      onCatalogShareLevelChange(shareLevel);
+                    }
+                  }}
+                  options={catalogShareLevels}
+                  testId="persona-share-catalog-access"
+                  value={catalogShareLevel}
+                />
+              </div>
+            </section>
+          )
+        }
+        displayName={persona.displayName}
+        encodeSnapshot={encodeSnapshot}
+        hasMemoryOptions={linkedAgentPubkey !== null}
+        isPending={isPending}
+        onExport={onExport}
+        onOpenChange={onOpenChange}
+        onReset={encodeSnapshotMutation.reset}
+        open={open}
+        snapshotKind="agent"
+        testIdPrefix="persona-share"
+      />
+      <AlertDialog
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setPendingCatalogMemoryLevel(null);
+        }}
+        open={pendingCatalogMemoryLevel !== null}
+      >
+        <AlertDialogContent data-testid="persona-catalog-memory-confirmation">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Publish memories to the catalog?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The selected memory will be stored as plaintext community data.
+              Anyone in this community can read it and keep a copy, even if you
+              stop sharing the agent later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
+            </AlertDialogCancel>
+            <AlertDialogAction asChild>
+              <Button
+                data-testid="persona-catalog-memory-confirm"
+                onClick={() => {
+                  if (pendingCatalogMemoryLevel) {
+                    onCatalogShareLevelChange(pendingCatalogMemoryLevel);
+                  }
+                  setPendingCatalogMemoryLevel(null);
+                }}
+                type="button"
+              >
+                Publish
+              </Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

@@ -1,7 +1,58 @@
 import { expect, test } from "@playwright/test";
 
+import type { RelayEvent } from "@/shared/api/types";
+
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
+
+const DEFAULT_MOCK_OWNER_PUBKEY = "deadbeef".repeat(8);
+
+function createCatalogEvent(input: {
+  ownerPubkey: string;
+  sourcePersonaId: string;
+  sourceUpdatedAt: string;
+  displayName: string;
+  systemPrompt: string;
+  createdAt?: number;
+}): RelayEvent {
+  const snapshot = {
+    url: `https://relay.example/media/${"c".repeat(64)}`,
+    sha256: "c".repeat(64),
+    size: 512,
+    type: "application/json",
+    fileName: `${input.sourcePersonaId}.agent.json`,
+  } as const;
+  return {
+    id: "1".repeat(64),
+    pubkey: input.ownerPubkey,
+    created_at: input.createdAt ?? 1_721_750_400,
+    kind: 30178,
+    tags: [
+      ["d", input.sourcePersonaId],
+      ["status", "published"],
+      ["source_updated_at", input.sourceUpdatedAt],
+      ["memory", "none"],
+    ],
+    content: JSON.stringify({
+      format: "buzz-persona-catalog",
+      version: 1,
+      status: "published",
+      sourcePersonaId: input.sourcePersonaId,
+      sourceUpdatedAt: input.sourceUpdatedAt,
+      memoryLevel: "none",
+      agent: {
+        displayName: input.displayName,
+        avatarUrl: null,
+        systemPrompt: input.systemPrompt,
+        runtime: null,
+        model: null,
+        provider: null,
+      },
+      snapshot,
+    }),
+    sig: "2".repeat(128),
+  };
+}
 
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
@@ -1272,12 +1323,6 @@ test("custom personas share with people and keep export separate", async ({
 
 test("custom personas can be shared to the relay catalog", async ({ page }) => {
   const personaId = "custom:catalog-analyst";
-  await page.addInitScript((legacyPersonaId) => {
-    localStorage.setItem(
-      "buzz-persona-catalog-visibility-v1",
-      JSON.stringify([legacyPersonaId]),
-    );
-  }, personaId);
   await installMockBridge(page, {
     globalAgentConfig: {
       env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
@@ -1332,7 +1377,10 @@ This deliberately long fenced-code example must not establish the minimum width 
   ).toBeVisible();
   await expect(catalogSection).toContainText("Share to catalog");
   await expect(catalogSection).toContainText(
-    "Let anyone in this community find and use a copy of this agent.",
+    "Anyone in this community can find and use a copy.",
+  );
+  await expect(catalogSection).toContainText(
+    "Catalog data is plaintext; secrets and response allowlists are never included.",
   );
   const [copyLinkButtonBox, catalogSectionBox, shareMainCardBox] =
     await Promise.all([
@@ -1430,37 +1478,6 @@ This deliberately long fenced-code example must not establish the minimum width 
     .getByRole("button", { name: "Close" })
     .click();
 
-  await page.evaluate((id) => {
-    const storageKey = "buzz-persona-catalog-published-versions-v1";
-    const publishedVersions = JSON.parse(
-      localStorage.getItem(storageKey) ?? "{}",
-    ) as Record<string, string>;
-    publishedVersions[id] = "stale";
-    localStorage.setItem(storageKey, JSON.stringify(publishedVersions));
-  }, personaId);
-  await gotoApp(page);
-  await page.getByTestId("open-agents-view").click();
-
-  await page.getByLabel("Open actions for Catalog Analyst").click();
-  await page.getByRole("menuitem", { name: "Share" }).click();
-  await expect(catalogAccess).toHaveText("Agent only");
-  await expect(publishCatalogUpdatesButton).toBeVisible();
-  const [catalogAccessBox, publishCatalogUpdatesButtonBox] = await Promise.all([
-    catalogAccess.boundingBox(),
-    publishCatalogUpdatesButton.boundingBox(),
-  ]);
-  expect(
-    (publishCatalogUpdatesButtonBox?.x ?? 0) +
-      (publishCatalogUpdatesButtonBox?.width ?? 0),
-  ).toBeLessThan(catalogAccessBox?.x ?? 0);
-  await publishCatalogUpdatesButton.click();
-  await expect(publishCatalogUpdatesButton).toHaveCount(0);
-  await expect(catalogAccess).toHaveText("Agent only");
-  await page
-    .getByTestId("persona-share-dialog")
-    .getByRole("button", { name: "Close" })
-    .click();
-
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await expect(catalogAccess).toHaveText("Agent only");
@@ -1478,6 +1495,103 @@ This deliberately long fenced-code example must not establish the minimum width 
   await expect(
     page.getByTestId(`persona-catalog-list-item-${personaId}`),
   ).toHaveCount(0);
+});
+
+test("catalog owners can publish local updates to an existing relay entry", async ({
+  page,
+}) => {
+  const personaId = "custom:catalog-updates";
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Catalog Updates",
+        systemPrompt: "The locally updated instructions.",
+        updatedAt: "2026-07-23T17:00:00.000Z",
+      },
+    ],
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: DEFAULT_MOCK_OWNER_PUBKEY,
+        sourcePersonaId: personaId,
+        sourceUpdatedAt: "2026-07-23T16:00:00.000Z",
+        displayName: "Catalog Updates",
+        systemPrompt: "The previously published instructions.",
+      }),
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await page.getByLabel("Open actions for Catalog Updates").click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  const catalogAccess = page.getByTestId("persona-share-catalog-access");
+  const publishButton = page.getByTestId(
+    "persona-share-publish-catalog-updates",
+  );
+  await expect(catalogAccess).toHaveText("Agent only");
+  await expect(publishButton).toBeVisible();
+  const [catalogAccessBox, publishButtonBox] = await Promise.all([
+    catalogAccess.boundingBox(),
+    publishButton.boundingBox(),
+  ]);
+  expect(
+    (publishButtonBox?.x ?? 0) + (publishButtonBox?.width ?? 0),
+  ).toBeLessThan(catalogAccessBox?.x ?? 0);
+
+  await publishButton.click();
+  await expect(publishButton).toHaveCount(0);
+  await expect(catalogAccess).toHaveText("Agent only");
+});
+
+test("a community member can discover and add another member's catalog agent", async ({
+  page,
+}) => {
+  const personaId = "shared-reviewer";
+  const remoteCatalogId = `catalog:${TEST_IDENTITIES.alice.pubkey}:${personaId}`;
+  await installMockBridge(page, {
+    personaCatalogEvents: [
+      createCatalogEvent({
+        ownerPubkey: TEST_IDENTITIES.alice.pubkey,
+        sourcePersonaId: personaId,
+        sourceUpdatedAt: "2026-07-23T16:00:00.000Z",
+        displayName: "Alice’s Reviewer",
+        systemPrompt: "Review changes for the whole community.",
+      }),
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await openPersonaCatalog(page);
+
+  const remoteEntry = page.getByTestId(
+    `persona-catalog-list-item-${remoteCatalogId}`,
+  );
+  await expect(remoteEntry).toContainText("Alice’s Reviewer");
+  await remoteEntry.click();
+  await expect(page.getByTestId("persona-catalog-detail-pane")).toContainText(
+    "Added by Community member",
+  );
+
+  await page
+    .getByRole("button", {
+      name: "Add Alice’s Reviewer from Agent Catalog",
+    })
+    .click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_COMMANDS__?: string[];
+            }
+          ).__BUZZ_E2E_COMMANDS__?.filter(
+            (command) => command === "confirm_agent_snapshot_import",
+          ).length ?? 0,
+      ),
+    )
+    .toBe(1);
 });
 
 test("share access controls include the selected memories", async ({

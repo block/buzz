@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { RelayEvent } from "@/shared/api/types";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -87,6 +88,7 @@ type MockPersonaSeed = {
   displayName: string;
   avatarUrl?: string | null;
   systemPrompt: string;
+  updatedAt?: string;
   isActive?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
@@ -210,6 +212,8 @@ type MockBridgeOptions = {
       | "stopped";
   }>;
   personas?: MockPersonaSeed[];
+  /** Community catalog replaceable-event heads returned by relay queries. */
+  personaCatalogEvents?: RelayEvent[];
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
