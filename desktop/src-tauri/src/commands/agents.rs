@@ -293,16 +293,16 @@ fn resolve_created_avatar_url(
 #[cfg(feature = "mesh-llm")]
 async fn ensure_relay_mesh_for_record(
     app: &AppHandle,
-    record: &ManagedAgentRecord,
+    model_id: Option<&str>,
     allow_fresh_create_start: bool,
 ) -> Result<(), String> {
-    crate::commands::ensure_relay_mesh_for_record(app, record, allow_fresh_create_start).await
+    crate::commands::ensure_relay_mesh_for_record(app, model_id, allow_fresh_create_start).await
 }
 
 #[cfg(not(feature = "mesh-llm"))]
 async fn ensure_relay_mesh_for_record(
     _app: &AppHandle,
-    _record: &ManagedAgentRecord,
+    _model_id: Option<&str>,
     _allow_fresh_create_start: bool,
 ) -> Result<(), String> {
     Ok(())
@@ -327,7 +327,16 @@ pub(super) async fn start_local_agent_pairs_with_preflight(
     if record_snapshot.backend != BackendKind::Local {
         return Err(format!("agent {pubkey} is not a local agent"));
     }
-    ensure_relay_mesh_for_record(app, &record_snapshot, false).await?;
+    let personas_for_preflight = load_personas(app).unwrap_or_default();
+    let global_for_preflight =
+        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let mesh_model_id =
+        crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
+            &record_snapshot,
+            &personas_for_preflight,
+            &global_for_preflight,
+        );
+    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), false).await?;
 
     {
         let _store_guard = state
@@ -407,7 +416,22 @@ pub(super) async fn start_local_agent_with_preflight(
         return Err(format!("agent {pubkey} is not a local agent"));
     }
 
-    ensure_relay_mesh_for_record(app, &record_snapshot, allow_fresh_create_start).await?;
+    // Preflight against the same resolution spawn uses — `resolve_effective_config`
+    // (definition → global fallback) — never the record's own `provider`/`model`/
+    // `relay_mesh` bytes. For a linked instance this reads the CURRENT definition
+    // directly, so a definition edit that flips `provider` to/from relay-mesh
+    // between saves is reflected here without needing a prospective re-snapshot;
+    // for a global-inherited blank definition, it also folds in the global
+    // default, which record-byte sniffing could never see.
+    let personas = load_personas(app).unwrap_or_default();
+    let global = crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
+    let mesh_model_id =
+        crate::managed_agents::effective_config::resolve_effective_relay_mesh_model_id(
+            &record_snapshot,
+            &personas,
+            &global,
+        );
+    ensure_relay_mesh_for_record(app, mesh_model_id.as_deref(), allow_fresh_create_start).await?;
 
     let _store_guard = state
         .managed_agents_store_lock
@@ -431,9 +455,16 @@ pub(super) async fn start_local_agent_with_preflight(
     // at the end — avoids a second disk read for the same file in the same call.
     let personas = load_personas(app).unwrap_or_default();
     if let Some(persona_id) = record.persona_id.clone() {
-        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
-            record.updated_at = crate::util::now_iso();
+        match personas.iter().find(|p| p.id == persona_id) {
+            Some(persona) => {
+                crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
+                record.updated_at = crate::util::now_iso();
+            }
+            None => {
+                return Err(
+                    crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR.to_string(),
+                );
+            }
         }
     }
     start_managed_agent_process(app, record, &mut runtimes, Some(owner_hex))?;

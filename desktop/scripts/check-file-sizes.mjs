@@ -80,7 +80,15 @@ const overrides = new Map([
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports
   // add ~40 lines on top of the 1A.1 ratchet. Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1340],
+  // +22 (1340 -> 1360): agent-config-resolver — start_local_agent_with_preflight
+  // uses resolve_effective_relay_mesh_model_id at both preflight call sites;
+  // preview_prospective_persona_snapshot helper extracted; orphan guard threaded
+  // through restore path. Load-bearing feature changes; queued to split.
+  // +9 (1360 -> 1369): start_local_agent_pairs_with_preflight — added
+  // personas/global load + resolve_effective_relay_mesh_model_id call to
+  // replace stale record-byte preflight. Same resolver pattern as
+  // start_local_agent_with_preflight. Load-bearing; queued to split.
+  ["src-tauri/src/commands/agents.rs", 1369],
   // agent-lifecycle-fixes: cascade-delete in delete_persona restructured into
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
@@ -203,7 +211,8 @@ const overrides = new Map([
   // mapper. This is the existing API boundary; split remains queued.
   // team-instructions-first-class: createManagedAgent Tauri bridge threads the
   // new teamId input through to the backend (+1 line).
-  ["src/shared/api/tauri.ts", 1305],
+  // +2 for model_source field in RawManagedAgent + fromRawManagedAgent mapping.
+  ["src/shared/api/tauri.ts", 1307],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
@@ -452,7 +461,15 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +22 (1079 -> 1101): Finding 2 — model discovery now resolves through
+  // resolve_effective_model_provider instead of raw record bytes
+  // (saved_agent_model_discovery_config takes personas/global and the
+  // get_agent_models call site loads global config), plus
+  // apply_model_provider_prompt_update's linked-instance write-guard
+  // extraction and its regression tests.
+  // +4 (1101 -> 1105): rebase onto agents-everywhere — agents.rs function
+  // signatures updated for ManagedAgentRuntimeKey-keyed runtimes map.
+  ["src-tauri/src/commands/agent_models.rs", 1105],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
@@ -468,7 +485,12 @@ const overrides = new Map([
   // relay from the harness-attached payload relayUrl (with effective-relay
   // fallback for older harnesses) instead of a required arg the frontend
   // wrapper never passed, which silently broke the session-config cache.
-  ["src-tauri/src/commands/agent_config.rs", 1050],
+  // +60 (1050 -> 1110): agent-config-resolver — resolve_config_surface now
+  // clears a linked instance's own system_prompt/model/provider before
+  // computing had_* so stale materialized snapshot bytes can never be tagged
+  // BuzzExplicit and shadow the definition/global fallthrough; the dead
+  // persona-model re-tag branch replaced; two new regression tests added.
+  ["src-tauri/src/commands/agent_config.rs", 1110],
   // codex-install-auto-restart review-fixes: should_restart_after_install
   // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
   // cache tests replaced with 6 pure availability_drift predicate tests;

@@ -481,11 +481,11 @@ fn pick_serve_target_for_model(
 /// Non relay-mesh records are a no-op.
 pub(crate) async fn ensure_relay_mesh_for_record(
     app: &AppHandle,
-    record: &crate::managed_agents::ManagedAgentRecord,
+    model_id: Option<&str>,
     _allow_fresh_create_start: bool,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let Some(model_id) = crate::managed_agents::relay_mesh_model_id(record) else {
+    let Some(model_id) = model_id else {
         return Ok(());
     };
     // A local serve/client runtime already owns the OpenAI ingress and its
@@ -505,7 +505,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         .await
         {
             mesh_llm::MeshRuntimeRecovery::Live => {
-                return wait_for_mesh_inference(&model_id).await;
+                return wait_for_mesh_inference(model_id).await;
             }
             mesh_llm::MeshRuntimeRecovery::Evicted | mesh_llm::MeshRuntimeRecovery::Absent => {}
             mesh_llm::MeshRuntimeRecovery::Debouncing => {
@@ -521,7 +521,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
                 );
             }
             mesh_llm::MeshRuntimeRecovery::Replaced => {
-                return wait_for_mesh_inference(&model_id).await;
+                return wait_for_mesh_inference(model_id).await;
             }
             mesh_llm::MeshRuntimeRecovery::RestartRequired => {
                 app.request_restart();
@@ -532,7 +532,7 @@ pub(crate) async fn ensure_relay_mesh_for_record(
             }
         }
     }
-    let target = match resolve_mesh_bootstrap_target(&state, &model_id).await {
+    let target = match resolve_mesh_bootstrap_target(&state, model_id).await {
         Ok(Some(target)) => target,
         Ok(None) => {
             return Err(
@@ -556,8 +556,8 @@ pub(crate) async fn ensure_relay_mesh_for_record(
     // (the router resolves per-request), so it only cold-starts a Client when
     // there is genuinely no runtime. Falling back to Client if a serve node
     // crashed under local pressure is a desirable fail-safe, not a regression.
-    ensure_client_node_for_model(&state, &model_id, Some(target.endpoint_addr)).await?;
-    wait_for_mesh_inference(&model_id).await
+    ensure_client_node_for_model(&state, model_id, Some(target.endpoint_addr)).await?;
+    wait_for_mesh_inference(model_id).await
 }
 
 #[tauri::command]

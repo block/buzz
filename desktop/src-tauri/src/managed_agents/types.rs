@@ -259,13 +259,19 @@ pub struct ManagedAgentRecord {
     /// Desired LLM model ID. Matches AgentModelInfo.id from discovery.
     /// The harness re-discovers the correct ACP switching metadata at session
     /// creation by matching this ID against the fresh session/new response.
+    /// For a linked instance this is a legacy/display snapshot only — spawn
+    /// and deploy resolve the effective model from the definition, never
+    /// from this field (see `effective_config::resolve_effective_config`).
+    /// For a definition-less instance this field is authoritative.
     #[serde(default)]
     pub model: Option<String>,
-    /// LLM inference provider snapshotted from the persona at create time
-    /// (e.g. 'databricks', 'anthropic'). Spawn and deploy read this, never the
-    /// live persona — so the agent stays pinned to the provider it was created
-    /// with across restarts. `#[serde(default)]` so pre-existing records
-    /// deserialize as `None` and get backfilled on first load.
+    /// LLM inference provider. For a linked instance this is a legacy/display
+    /// snapshot only — spawn and deploy resolve the effective provider from
+    /// the definition, never from this field (see
+    /// `effective_config::resolve_effective_config`). For a definition-less
+    /// instance this field is authoritative. `#[serde(default)]` so
+    /// pre-existing records deserialize as `None` and get backfilled on
+    /// first load.
     #[serde(default)]
     pub provider: Option<String>,
     /// Content hash of the persona at the time this agent was created — the
@@ -478,7 +484,11 @@ pub struct ManagedAgentSummary {
     pub system_prompt: Option<String>,
     pub avatar_url: Option<String>,
     pub model: Option<String>,
-    /// LLM inference provider, from the agent's pinned record snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_source: Option<super::effective_config::ConfigSource>,
+    /// LLM inference provider, resolved the same way as `model`/`model_source`
+    /// (definition → global for linked instances; instance → global for
+    /// definition-less instances). `None` for an orphaned instance.
     pub provider: Option<String>,
     /// `true` when the linked persona has been edited since this agent was
     /// created — the running agent uses the older pinned snapshot. The UI
@@ -487,9 +497,11 @@ pub struct ManagedAgentSummary {
     /// persona is gone, so there is nothing newer to drift toward).
     pub persona_out_of_date: bool,
     /// `true` when the agent was created from a persona that no longer exists.
-    /// Distinct from out-of-date: there is no current persona to respawn into,
-    /// so the UI should not prompt a respawn — the pinned snapshot is all the
-    /// config that remains.
+    /// Distinct from out-of-date: there is no current persona to respawn into.
+    /// An orphaned agent also cannot be (re)started — `spawn_agent_child`
+    /// refuses it (see `effective_config::resolve_effective_config`'s
+    /// `OrphanedInstance` arm via `require_resolved`) — so the UI
+    /// should surface that it's stuck, not merely stale.
     pub persona_orphaned: bool,
     /// `true` when the running process was spawned with a config that no
     /// longer matches what a spawn would use today — a plain restart would

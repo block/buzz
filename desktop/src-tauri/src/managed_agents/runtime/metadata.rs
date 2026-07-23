@@ -24,18 +24,11 @@ pub(crate) fn runtime_metadata_env_vars<'a>(
     vars
 }
 
-/// Resolve the effective (prompt, model, provider) triple for a persona-linked agent.
-///
-/// Given a persona_id, finds the persona in the list and returns its system_prompt,
-/// model, and provider as the authoritative values. When the persona leaves `model`
-/// or `provider` blank (None or whitespace-only), falls back to the record's own
-/// field using the same precedence rule as `persona_snapshot_with_agent_config_fallback`
-/// so the display surface matches spawn behavior. Falls back to the record's own
-/// prompt/model/provider when no persona is linked or found.
+/// Resolve effective prompt/model/provider using definition-authoritative
+/// semantics for linked instances.
 ///
 /// Used by `agent_config.rs` to inject persona defaults into the config surface
-/// before running the reader, so BuzzExplicit-tagged fields can be re-tagged to
-/// PersonaDefault for fields the record did not independently set.
+/// before running the reader.
 pub(crate) fn resolve_effective_prompt_model_provider(
     persona_id: Option<&str>,
     personas: &[crate::managed_agents::types::AgentDefinition],
@@ -43,13 +36,16 @@ pub(crate) fn resolve_effective_prompt_model_provider(
     record_model: Option<String>,
     record_provider: Option<String>,
 ) -> (Option<String>, Option<String>, Option<String>) {
-    let fallback = crate::managed_agents::persona_events::persona_field_with_record_fallback;
     match persona_id.and_then(|pid| personas.iter().find(|p| p.id == pid)) {
-        Some(p) => (
-            Some(p.system_prompt.clone()),
-            fallback(p.model.as_deref(), record_model.as_deref()), // fallback: record.model
-            fallback(p.provider.as_deref(), record_provider.as_deref()), // fallback: record.provider
-        ),
+        Some(p) => {
+            fn non_blank(v: Option<&str>) -> Option<String> {
+                v.filter(|s| !s.trim().is_empty()).map(str::to_owned)
+            }
+            let prompt = non_blank(Some(&p.system_prompt));
+            let model = non_blank(p.model.as_deref());
+            let provider = non_blank(p.provider.as_deref());
+            (prompt, model, provider)
+        }
         None => (record_prompt, record_model, record_provider),
     }
 }

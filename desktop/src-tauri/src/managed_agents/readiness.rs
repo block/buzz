@@ -98,11 +98,6 @@ pub(crate) fn resolve_effective_agent_env(
     // Layer 1: baked build defaults (floor — internal builds only; OSS = empty).
     let mut env = baked_build_env();
 
-    // Layer 2: runtime metadata env vars (model / provider keys derived from
-    // the record's structured fields, with global as fallback).
-    //
-    // Uses the shared resolver to guarantee readiness and spawn agree on the
-    // effective model/provider: agent → persona → global → None.
     let (effective_model, effective_provider) =
         super::global_config::resolve_effective_model_provider(record, personas, global);
 
@@ -111,8 +106,8 @@ pub(crate) fn resolve_effective_agent_env(
             rt.model_env_var,
             rt.provider_env_var,
             rt.provider_locked,
-            effective_model,
-            effective_provider,
+            effective_model.as_deref(),
+            effective_provider.as_deref(),
         ) {
             env.insert(key.to_string(), value.to_string());
         }
@@ -138,7 +133,11 @@ pub(crate) fn resolve_effective_agent_env(
     // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
     // OpenAI-compatible transport only in the effective runtime environment.
     #[cfg(feature = "mesh-llm")]
-    super::apply_relay_mesh_env(&mut env, effective_provider, effective_model);
+    super::apply_relay_mesh_env(
+        &mut env,
+        effective_provider.as_deref(),
+        effective_model.as_deref(),
+    );
 
     EffectiveAgentEnv {
         env,
