@@ -1032,7 +1032,17 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
         }
     }
 
-    let content = serde_json::json!({ "channel_add_policy": policy }).to_string();
+    // Kind 10100 is the complete replaceable agent-directory profile. Preserve
+    // fields published by buzz-acp (name, channels, audience) when changing
+    // only the channel-add policy.
+    let profile_filter = serde_json::json!({
+        "authors": [client.keys().public_key().to_hex()],
+        "kinds": [buzz_sdk::kind::KIND_AGENT_PROFILE],
+        "limit": 1
+    });
+    let raw_profile = client.query(&profile_filter).await?;
+    let existing_content = parse_agent_profile_query_response(&raw_profile)?;
+    let content = set_channel_add_policy_content(existing_content, policy)?.to_string();
     use nostr::{EventBuilder, Kind};
     let builder = EventBuilder::new(
         Kind::Custom(buzz_sdk::kind::KIND_AGENT_PROFILE as u16),
@@ -1044,6 +1054,45 @@ pub async fn cmd_set_add_policy(client: &BuzzClient, policy: &str) -> Result<(),
     let resp = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&resp));
     Ok(())
+}
+
+fn set_channel_add_policy_content(
+    existing: Option<serde_json::Value>,
+    policy: &str,
+) -> Result<serde_json::Value, CliError> {
+    let mut content = match existing {
+        Some(value) => value.as_object().cloned().ok_or_else(|| {
+            CliError::Other("existing agent profile content is not a JSON object".into())
+        })?,
+        None => serde_json::Map::new(),
+    };
+    content.insert("channel_add_policy".to_string(), serde_json::json!(policy));
+    Ok(serde_json::Value::Object(content))
+}
+
+fn parse_agent_profile_query_response(raw: &str) -> Result<Option<serde_json::Value>, CliError> {
+    let events: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        CliError::Other(format!("failed to parse agent profile query: {error}"))
+    })?;
+    let events = events
+        .as_array()
+        .ok_or_else(|| CliError::Other("agent profile query response is not an array".into()))?;
+    let Some(event) = events.first() else {
+        return Ok(None);
+    };
+    let content = event
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| CliError::Other("agent profile event is missing string content".into()))?;
+    let content: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+        CliError::Other(format!("failed to parse agent profile content: {error}"))
+    })?;
+    if !content.is_object() {
+        return Err(CliError::Other(
+            "existing agent profile content is not a JSON object".into(),
+        ));
+    }
+    Ok(Some(content))
 }
 
 pub async fn cmd_set_canvas(
@@ -1177,9 +1226,9 @@ pub async fn dispatch_canvas(cmd: crate::CanvasCmd, client: &BuzzClient) -> Resu
 mod tests {
     use super::{
         apply_cardinality_rule, build_template_report, cmd_set_add_policy,
-        finalize_roster_resolution, name_matches, resolve_roster_with_archive_filter,
-        validate_ttl_seconds, ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution,
-        SkippedSlug,
+        finalize_roster_resolution, name_matches, parse_agent_profile_query_response,
+        resolve_roster_with_archive_filter, set_channel_add_policy_content, validate_ttl_seconds,
+        ArchivedExclusion, ChannelSummary, ResolvedAgent, RosterResolution, SkippedSlug,
     };
     use crate::client::BuzzClient;
     use crate::CliError;
@@ -1339,6 +1388,47 @@ mod tests {
         assert!(
             result.is_ok(),
             "empty allowed list should permit any policy: {result:?}"
+        );
+    }
+
+    #[test]
+    fn set_add_policy_preserves_complete_directory_profile() {
+        let updated = set_channel_add_policy_content(
+            Some(json!({
+                "name": "Alice",
+                "channel_ids": ["identity"],
+                "respond_to": "owner-only",
+                "owner_pubkey": "a".repeat(64),
+            })),
+            "nobody",
+        )
+        .expect("valid object profile");
+
+        assert_eq!(updated["name"], "Alice");
+        assert_eq!(updated["channel_ids"], json!(["identity"]));
+        assert_eq!(updated["respond_to"], "owner-only");
+        assert_eq!(updated["owner_pubkey"], "a".repeat(64));
+        assert_eq!(updated["channel_add_policy"], "nobody");
+    }
+
+    #[test]
+    fn set_add_policy_allows_successful_empty_profile_query() {
+        let existing =
+            parse_agent_profile_query_response("[]").expect("empty query response is valid");
+        let updated =
+            set_channel_add_policy_content(existing, "owner_only").expect("new profile content");
+
+        assert_eq!(updated, json!({ "channel_add_policy": "owner_only" }));
+    }
+
+    #[test]
+    fn set_add_policy_fails_closed_on_malformed_profile_query() {
+        assert!(parse_agent_profile_query_response("not-json").is_err());
+        assert!(parse_agent_profile_query_response("{}").is_err());
+        assert!(parse_agent_profile_query_response(r#"[{"content":"not-json"}]"#).is_err());
+        assert!(
+            parse_agent_profile_query_response(r#"[{"content":"[]"}]"#).is_err(),
+            "non-object profile content must not be replaced by a policy-only record"
         );
     }
 

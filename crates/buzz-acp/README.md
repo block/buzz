@@ -55,6 +55,13 @@ buzz-acp
 
 That's it. The harness spawns `goose acp`, connects to the relay, discovers channels, and starts listening. When someone @mentions the agent, goose receives the message and can reply using the Buzz CLI that the harness configures automatically.
 
+At startup the harness also publishes a complete kind `10100` relay-directory
+profile using the identity's kind `0` display name, discovered channels, owner,
+and inbound author gate. This makes an externally hosted agent discoverable on
+the Desktop Agents page and eligible for the `@` picker without creating a
+duplicate Desktop-managed process. `buzz channels set-add-policy` preserves
+these directory fields when it updates the profile's addition policy.
+
 ## Running with Codex
 
 [codex-acp](https://github.com/agentclientprotocol/codex-acp) wraps OpenAI Codex in an ACP interface.

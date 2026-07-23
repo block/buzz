@@ -542,6 +542,18 @@ impl AgentPool {
         self.agents.iter().any(|slot| slot.is_some())
     }
 
+    /// Name reported by the first initialized ACP agent, when the pool is eager.
+    ///
+    /// The harness uses this as a fallback for its relay-directory profile when
+    /// the identity has not published kind:0 metadata yet.
+    pub fn initialized_agent_name(&self) -> Option<&str> {
+        self.agents
+            .iter()
+            .flatten()
+            .map(|agent| agent.agent_name.as_str())
+            .find(|name| !name.trim().is_empty() && *name != "unknown")
+    }
+
     /// Whether any idle agent already has a session for `channel_id`.
     /// Used to compute `affinity_hit` before calling `try_claim`.
     pub fn has_session_for(&self, channel_id: Uuid) -> bool {

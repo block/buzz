@@ -18,7 +18,7 @@ export function RelayDirectorySection({
   managedPubkeys: Set<string>;
   relayAgents: RelayAgent[];
 }) {
-  const [isExpanded, setIsExpanded] = React.useState(false);
+  const [isExpanded, setIsExpanded] = React.useState(true);
   const [searchQuery, setSearchQuery] = React.useState("");
 
   // Only show agents that are NOT managed locally — those are already in the
@@ -63,14 +63,15 @@ export function RelayDirectorySection({
             <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
           )}
           <h2 className="text-lg font-semibold tracking-tight">
-            Agent directory
+            External agents
           </h2>
           <span className="text-sm text-muted-foreground">
             ({otherAgents.length})
           </span>
         </button>
         <p className="pl-6 text-sm text-muted-foreground">
-          View agents other members have shared in this community.
+          Agents hosted outside this Desktop. You can mention them, but runtime
+          controls stay with their host.
         </p>
       </div>
 

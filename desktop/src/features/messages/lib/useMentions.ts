@@ -341,7 +341,7 @@ export function useMentions(
         personaId:
           managedAgentPersonaIdsByPubkey.get(pubkey) ??
           (activePersonaById.has(pubkey) ? pubkey : undefined),
-        ownerPubkey: null,
+        ownerPubkey: agent.ownerPubkey,
         isAgent: true,
       });
     }

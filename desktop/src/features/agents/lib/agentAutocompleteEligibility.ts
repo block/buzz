@@ -10,7 +10,10 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
 }
 
 export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  agent: Pick<
+    RelayAgent,
+    "channelIds" | "ownerPubkey" | "respondTo" | "respondToAllowlist"
+  >,
   sharedChannelIds: ReadonlySet<string>,
   currentPubkey?: string | null,
 ) {
@@ -22,6 +25,14 @@ export function relayAgentIsSharedWithUser(
     return agent.respondToAllowlist
       .map((pubkey) => normalizePubkey(pubkey))
       .includes(normalizedCurrentPubkey);
+  }
+
+  if (
+    agent.respondTo === "owner-only" &&
+    normalizedCurrentPubkey &&
+    agent.ownerPubkey
+  ) {
+    return normalizePubkey(agent.ownerPubkey) === normalizedCurrentPubkey;
   }
 
   return (

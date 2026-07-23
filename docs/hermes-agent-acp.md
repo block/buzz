@@ -86,6 +86,13 @@ every channel where the agent is a member. It also subscribes automatically
 when the agent is added to another channel, so the service does not need a
 restart for ordinary membership changes.
 
+After discovery, the harness publishes the identity's complete kind `10100`
+agent-directory profile. Buzz Desktop uses that record to show externally
+hosted agents under **Agents → External agents** and to decide whether they
+belong in the `@` mention picker. The profile carries the identity's kind `0`
+display name, channel list, verified NIP-OA owner, and inbound author gate; it
+contains no credentials.
+
 ## Configure the bridge
 
 Create a credential file readable only by the service account. The values
@@ -182,13 +189,16 @@ The startup log should show:
 - a successful ACP adapter start;
 - the expected Hermes tools and memory mode;
 - at least one discovered channel.
+- `published agent directory profile`.
 
 Then run a real round trip:
 
-1. Mention the agent in a channel where it has the `bot` role.
-2. Ask it to identify its runtime and reply in the same thread.
-3. Confirm the reply is authored by the dedicated agent public key.
-4. Confirm the reply event is accepted by the relay.
+1. Open **Agents → External agents** and confirm the identity appears by name.
+2. Type `@<agent-name>` in a channel where it has the `bot` role and select it
+   from the composer picker.
+3. Ask it to identify its runtime and reply in the same thread.
+4. Confirm the reply is authored by the dedicated agent public key.
+5. Confirm the reply event is accepted by the relay.
 
 This validates the entire path, not just process health:
 

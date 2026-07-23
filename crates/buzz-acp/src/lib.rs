@@ -21,8 +21,8 @@ use std::time::Duration;
 use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
+    KIND_AGENT_PROFILE, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
+    KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -87,6 +87,248 @@ async fn publish_presence(
         .sign_with_keys(keys)
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
+    Ok(())
+}
+
+fn directory_profile_content(
+    existing: Option<serde_json::Value>,
+    display_name: &str,
+    channel_info: &HashMap<Uuid, relay::ChannelInfo>,
+    respond_to: &RespondTo,
+    respond_to_allowlist: &HashSet<String>,
+    owner_pubkey: Option<&str>,
+) -> serde_json::Value {
+    let mut profile = existing
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+
+    let mut channels: Vec<(String, String)> = channel_info
+        .iter()
+        .map(|(id, info)| (id.to_string(), info.name.clone()))
+        .collect();
+    channels.sort_by(|left, right| left.0.cmp(&right.0));
+
+    profile.insert("name".into(), serde_json::json!(display_name));
+    profile.insert("display_name".into(), serde_json::json!(display_name));
+    profile.insert("agent_type".into(), serde_json::json!("agent"));
+    profile.insert(
+        "channels".into(),
+        serde_json::json!(channels.iter().map(|(_, name)| name).collect::<Vec<_>>()),
+    );
+    profile.insert(
+        "channel_ids".into(),
+        serde_json::json!(channels.iter().map(|(id, _)| id).collect::<Vec<_>>()),
+    );
+    profile
+        .entry("capabilities")
+        .or_insert_with(|| serde_json::json!([]));
+    profile
+        .entry("channel_add_policy")
+        .or_insert_with(|| serde_json::json!("owner_only"));
+
+    if *respond_to == RespondTo::Nobody {
+        profile.remove("respond_to");
+    } else {
+        profile.insert(
+            "respond_to".into(),
+            serde_json::json!(respond_to.to_string()),
+        );
+    }
+    let mut allowlist: Vec<&String> = respond_to_allowlist.iter().collect();
+    allowlist.sort();
+    profile.insert("respond_to_allowlist".into(), serde_json::json!(allowlist));
+    if let Some(owner) = owner_pubkey {
+        profile.insert("owner_pubkey".into(), serde_json::json!(owner));
+    } else {
+        profile.remove("owner_pubkey");
+    }
+
+    serde_json::Value::Object(profile)
+}
+
+#[cfg(test)]
+mod directory_profile_tests {
+    use super::*;
+
+    #[test]
+    fn profile_preserves_policy_and_publishes_invocation_metadata() {
+        let channel_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let channels = HashMap::from([(
+            channel_id,
+            relay::ChannelInfo {
+                name: "identity".into(),
+                channel_type: "stream".into(),
+            },
+        )]);
+        let content = directory_profile_content(
+            Some(serde_json::json!({
+                "channel_add_policy": "nobody",
+                "custom": "preserved"
+            })),
+            "Alice",
+            &channels,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            Some(&"a".repeat(64)),
+        );
+
+        assert_eq!(content["name"], "Alice");
+        assert_eq!(content["channels"], serde_json::json!(["identity"]));
+        assert_eq!(
+            content["channel_ids"],
+            serde_json::json!(["11111111-1111-1111-1111-111111111111"])
+        );
+        assert_eq!(content["respond_to"], "owner-only");
+        assert_eq!(content["owner_pubkey"], "a".repeat(64));
+        assert_eq!(content["channel_add_policy"], "nobody");
+        assert_eq!(content["custom"], "preserved");
+    }
+
+    #[test]
+    fn nobody_mode_is_not_advertised_as_invocable() {
+        let content = directory_profile_content(
+            None,
+            "Silent",
+            &HashMap::new(),
+            &RespondTo::Nobody,
+            &HashSet::new(),
+            None,
+        );
+
+        assert!(content.get("respond_to").is_none());
+        assert!(content.get("owner_pubkey").is_none());
+    }
+
+    #[test]
+    fn fresh_membership_snapshot_replaces_stale_directory_channels() {
+        let current_channel = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let channels = HashMap::from([(
+            current_channel,
+            relay::ChannelInfo {
+                name: "current".into(),
+                channel_type: "stream".into(),
+            },
+        )]);
+        let content = directory_profile_content(
+            Some(serde_json::json!({
+                "channels": ["removed"],
+                "channel_ids": ["11111111-1111-1111-1111-111111111111"]
+            })),
+            "Alice",
+            &channels,
+            &RespondTo::OwnerOnly,
+            &HashSet::new(),
+            Some(&"a".repeat(64)),
+        );
+
+        assert_eq!(content["channels"], serde_json::json!(["current"]));
+        assert_eq!(
+            content["channel_ids"],
+            serde_json::json!(["22222222-2222-2222-2222-222222222222"])
+        );
+    }
+}
+
+async fn publish_directory_profile(
+    relay: &HarnessRelay,
+    config: &Config,
+    channel_info: &HashMap<Uuid, relay::ChannelInfo>,
+    fallback_name: Option<&str>,
+    owner_pubkey: Option<&str>,
+) -> Result<(), relay::RelayError> {
+    use nostr::{EventBuilder, Filter, Kind};
+
+    let author = config.keys.public_key();
+    let rest = relay.rest_client();
+    let events = rest
+        .query(&[
+            Filter::new().author(author).kind(Kind::Metadata).limit(1),
+            Filter::new()
+                .author(author)
+                .kind(Kind::Custom(KIND_AGENT_PROFILE as u16))
+                .limit(1),
+        ])
+        .await?;
+
+    let events = events.as_array().ok_or_else(|| {
+        relay::RelayError::Http("expected JSON array from /query (profile)".into())
+    })?;
+    let mut display_name = None;
+    let mut existing_profile = None;
+    for event in events {
+        match event.get("kind").and_then(serde_json::Value::as_u64) {
+            Some(0) => {
+                let metadata = event
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok());
+                display_name = metadata.as_ref().and_then(|value| {
+                    value
+                        .get("display_name")
+                        .or_else(|| value.get("name"))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_string)
+                });
+            }
+            Some(kind) if kind == KIND_AGENT_PROFILE as u64 => {
+                let content = event
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        relay::RelayError::Http(
+                            "existing agent profile is missing string content".into(),
+                        )
+                    })?;
+                let parsed: serde_json::Value = serde_json::from_str(content).map_err(|error| {
+                    relay::RelayError::Http(format!(
+                        "failed to parse existing agent profile content: {error}"
+                    ))
+                })?;
+                if !parsed.is_object() {
+                    return Err(relay::RelayError::Http(
+                        "existing agent profile content is not a JSON object".into(),
+                    ));
+                }
+                existing_profile = Some(parsed);
+            }
+            _ => {}
+        }
+    }
+
+    let existing_display_name = existing_profile.as_ref().and_then(|value| {
+        value
+            .get("display_name")
+            .or_else(|| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    });
+    let display_name = display_name
+        .or(existing_display_name)
+        .or_else(|| fallback_name.map(str::to_string))
+        .unwrap_or_else(|| config.keys.public_key().to_bech32().unwrap_or_default());
+    let content = directory_profile_content(
+        existing_profile,
+        &display_name,
+        channel_info,
+        &config.respond_to,
+        &config.respond_to_allowlist,
+        owner_pubkey,
+    );
+    let mut tags = Vec::new();
+    if let Ok(raw_auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+        if let Ok(auth_tag) = buzz_sdk::nip_oa::parse_auth_tag(&raw_auth_tag) {
+            tags.push(auth_tag);
+        }
+    }
+    let event = EventBuilder::new(Kind::Custom(KIND_AGENT_PROFILE as u16), content.to_string())
+        .tags(tags)
+        .sign_with_keys(&config.keys)
+        .map_err(|error| relay::RelayError::Http(format!("agent profile sign error: {error}")))?;
+    rest.submit_event(&event).await?;
     Ok(())
 }
 
@@ -1387,6 +1629,21 @@ async fn tokio_main() -> Result<()> {
 
     tracing::info!("discovered {} channel(s)", channel_info_map.len());
     let channel_ids: Vec<Uuid> = channel_info_map.keys().copied().collect();
+    let directory_fallback_name = pool.initialized_agent_name().map(str::to_string);
+
+    if let Err(error) = publish_directory_profile(
+        &relay,
+        &config,
+        &channel_info_map,
+        directory_fallback_name.as_deref(),
+        startup_owner.as_deref(),
+    )
+    .await
+    {
+        tracing::warn!("failed to publish agent directory profile: {error}");
+    } else {
+        tracing::info!("published agent directory profile");
+    }
 
     let rules: Vec<SubscriptionRule> = match config.subscribe_mode {
         SubscribeMode::Mentions => {
@@ -1970,6 +2227,36 @@ async fn tokio_main() -> Result<()> {
                                             drained = drained_ids.len(),
                                             invalidated,
                                             "cleaned up after membership removal"
+                                        );
+                                    }
+                                }
+                                match relay.discover_channels().await {
+                                    Ok(fresh_channel_info) => {
+                                        if let Err(error) = publish_directory_profile(
+                                            &relay,
+                                            &config,
+                                            &fresh_channel_info,
+                                            directory_fallback_name.as_deref(),
+                                            startup_owner.as_deref(),
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                channel_id = %ch,
+                                                "failed to refresh agent directory profile after membership change: {error}"
+                                            );
+                                        } else {
+                                            tracing::info!(
+                                                channel_id = %ch,
+                                                channels = fresh_channel_info.len(),
+                                                "refreshed agent directory profile after membership change"
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            channel_id = %ch,
+                                            "failed to rediscover channels after membership change: {error}"
                                         );
                                     }
                                 }
