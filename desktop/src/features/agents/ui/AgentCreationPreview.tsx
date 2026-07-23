@@ -109,6 +109,7 @@ export function AgentCreationPreview({
     clearError: clearUploadError,
     openPicker: openUploadPicker,
     uploadFile: uploadAvatarFile,
+    uploadUrl: uploadAvatarUrl,
     handleFileChange: handleAvatarUploadFileChange,
   } = useAvatarUpload({
     onUploadSuccess: (url) => {
@@ -183,8 +184,11 @@ export function AgentCreationPreview({
       return;
     }
     clearUploadError();
-    onSelectAvatar(nextUrl);
-    setIsAvatarMenuOpen(false);
+    void uploadAvatarUrl(nextUrl).then((uploaded) => {
+      if (!uploaded) return;
+      setAvatarUrlDraft("");
+      setIsAvatarMenuOpen(false);
+    });
   }
 
   function applyEmojiAvatar(emoji: string, color = selectedColor) {

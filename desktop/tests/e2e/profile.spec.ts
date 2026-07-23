@@ -44,6 +44,24 @@ async function waitForAvatarEditorToClose(page: Page) {
   await expect(page.getByTestId("profile-avatar-editor-shell")).toHaveCount(0);
 }
 
+async function mockAvatarImageFetch(page: Page, url: string) {
+  await page.route(url, (route) =>
+    route.fulfill({
+      body: Buffer.from("mock-avatar-png"),
+      contentType: "image/png",
+      status: 200,
+    }),
+  );
+}
+
+async function importProfileAvatarUrl(page: Page, url: string) {
+  await mockAvatarImageFetch(page, url);
+  const input = page.getByTestId("profile-avatar-url");
+  await input.fill(url);
+  await input.press("Enter");
+  await expect(input).toHaveValue("");
+}
+
 async function waitForReactEffects(page: Page) {
   await page.evaluate(
     () =>
@@ -243,7 +261,7 @@ test("updates the relay-backed profile from settings", async ({ page }) => {
   await expect(page.getByTestId("profile-about-value")).toHaveText(about);
 
   await page.getByTestId("profile-avatar-edit").click();
-  await page.getByTestId("profile-avatar-url").fill(avatarUrl);
+  await importProfileAvatarUrl(page, avatarUrl);
   await page.getByTestId("profile-avatar-done").click();
   await waitForAvatarEditorToClose(page);
 
@@ -498,19 +516,6 @@ test("highlights the avatar drop target while dragging an image", async ({
 });
 
 test("uploads local profile avatar files before saving", async ({ page }) => {
-  const uploadedAvatarUrl = "https://mock.relay/media/avatar-profile.png";
-  await installMockBridge(page, {
-    uploadDescriptors: [
-      {
-        filename: "avatar-profile.png",
-        sha256: "b".repeat(64),
-        size: 553432,
-        type: "image/png",
-        uploaded: 1_779_900_000,
-        url: uploadedAvatarUrl,
-      },
-    ],
-  });
   await page.goto("/");
 
   await openSettings(page, "profile");
@@ -527,26 +532,10 @@ test("uploads local profile avatar files before saving", async ({ page }) => {
   await page.getByTestId("profile-avatar-edit").click();
   await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
 
-  const pastedAvatarUrl = await page.evaluate(
-    () => new URL("/buzz.svg", window.location.href).href,
-  );
-  await page.getByTestId("profile-avatar-url").click();
-  await page.keyboard.insertText(pastedAvatarUrl);
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue(
-    pastedAvatarUrl,
-  );
+  const pastedAvatarUrl = "https://example.com/pasted-profile-avatar.png";
+  await importProfileAvatarUrl(page, pastedAvatarUrl);
   await page.getByTestId("profile-avatar-done").click();
   await waitForAvatarEditorToClose(page);
-  await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
-  await page.getByTestId("profile-avatar-url").fill("");
-  await page.getByTestId("profile-avatar-done").click();
-  await expect(
-    page.getByTestId("profile-avatar-preview").locator("img"),
-  ).toHaveCount(1);
-  await waitForAvatarEditorToClose(page);
-  await page.getByTestId("profile-avatar-edit").click();
-  await expect(page.getByTestId("profile-avatar-url")).toHaveValue("");
 
   await expect
     .poll(() =>
@@ -593,7 +582,7 @@ test("reveals emoji background colors only after choosing an emoji", async ({
 
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
-  await page.getByTestId("profile-avatar-url").fill(imageAvatarUrl);
+  await importProfileAvatarUrl(page, imageAvatarUrl);
   await page.getByTestId("profile-avatar-done").click();
   await waitForAvatarEditorToClose(page);
 

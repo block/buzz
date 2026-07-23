@@ -3,9 +3,10 @@ import { UserRound } from "lucide-react";
 
 import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
 import { parseAnimatedAvatarUrl } from "@/shared/lib/animatedAvatar";
+import { resolveAvatarImageSrc } from "@/shared/lib/avatarUrl";
 import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
-import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 import { Avatar, AvatarFallback, AvatarImage } from "@/shared/ui/avatar";
 import { Spinner } from "@/shared/ui/spinner";
 
@@ -31,6 +32,7 @@ export function ProfileAvatar({
   testId,
 }: ProfileAvatarProps) {
   const initials = getInitials(label);
+  const relayOrigin = useRelayOrigin();
   const presentation = useAvatarPresentation(avatarUrl);
   const presentedAvatarUrl = presentation?.displayUrl ?? avatarUrl;
 
@@ -46,15 +48,19 @@ export function ProfileAvatar({
 
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently.
-  const liveSrc = baseUrl ? rewriteRelayUrl(baseUrl) : null;
+  const liveSrc = baseUrl ? resolveAvatarImageSrc(baseUrl, relayOrigin) : null;
+  const isBlockedAvatarUrl =
+    baseUrl !== undefined && baseUrl !== null && liveSrc === null;
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
   const liveFailed = liveSrc !== null && failedSrc === liveSrc;
 
   // When the relay is unreachable the proxied avatar URL 404s/times out; fall
   // back to the locally cached data URL instead of dropping to initials.
-  const src = liveFailed
-    ? (avatarDataUrl ?? undefined)
-    : (liveSrc ?? avatarDataUrl ?? undefined);
+  const src = isBlockedAvatarUrl
+    ? undefined
+    : liveFailed
+      ? (avatarDataUrl ?? undefined)
+      : (liveSrc ?? avatarDataUrl ?? undefined);
   const shouldShowFallback = src === undefined || (!animated && liveFailed);
 
   return (

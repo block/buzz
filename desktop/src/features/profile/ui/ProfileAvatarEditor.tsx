@@ -185,6 +185,7 @@ export function ProfileAvatarEditor({
     isUploading,
     openPicker,
     uploadFile,
+    uploadUrl,
   } = useAvatarUpload(uploadPreviewLifecycle);
   const isInputDisabled = disabled || isUploading || isAnimatedApplyPending;
   const handleAnimatedApply = React.useCallback(
@@ -379,14 +380,16 @@ export function ProfileAvatarEditor({
 
     clearUploadError();
     onUploadedAvatarChange?.(null);
-    onUrlChange(nextUrl);
+    void uploadUrl(nextUrl).then((uploaded) => {
+      if (uploaded) setUrlDraft("");
+    });
     hasUserEditedUrlDraftRef.current = false;
     updateMode("image");
   }, [
     clearUploadError,
     isInputDisabled,
     onUploadedAvatarChange,
-    onUrlChange,
+    uploadUrl,
     updateMode,
     urlDraft,
   ]);
@@ -698,8 +701,6 @@ export function ProfileAvatarEditor({
                         clearUploadError();
                         hasUserEditedUrlDraftRef.current = true;
                         setUrlDraft(event.target.value);
-                        onUploadedAvatarChange?.(null);
-                        onUrlChange(event.target.value);
                       }}
                       onFocus={() => {
                         isUrlInputFocusedRef.current = true;

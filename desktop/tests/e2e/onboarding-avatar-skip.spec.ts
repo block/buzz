@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { waitForAnimations } from "../helpers/animations";
@@ -10,6 +10,16 @@ const BLANK_TYLER_IDENTITY = {
 };
 
 const SHOTS = "test-results/screenshots-onboarding";
+
+async function mockAvatarImageFetch(page: Page, url: string) {
+  await page.route(url, (route) =>
+    route.fulfill({
+      body: Buffer.from("mock-avatar-png"),
+      contentType: "image/png",
+      status: 200,
+    }),
+  );
+}
 
 test("avatar step always shows Skip for now button without an error", async ({
   page,
@@ -69,10 +79,13 @@ test("avatar Next button still requires an avatar to be chosen", async ({
   // Next is disabled until an avatar is set.
   await expect(page.getByTestId("onboarding-next")).toBeDisabled();
 
-  // Once an avatar URL is provided, Next enables.
-  await page
-    .getByTestId("onboarding-avatar-url")
-    .fill("https://example.com/avatar.png");
+  // Once an avatar URL is imported, Next enables.
+  const avatarUrl = "https://example.com/avatar.png";
+  await mockAvatarImageFetch(page, avatarUrl);
+  const input = page.getByTestId("onboarding-avatar-url");
+  await input.fill(avatarUrl);
+  await input.press("Enter");
+  await expect(input).toHaveValue("");
   await expect(page.getByTestId("onboarding-next")).toBeEnabled();
 });
 

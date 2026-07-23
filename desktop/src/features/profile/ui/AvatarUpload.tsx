@@ -31,6 +31,8 @@ export function AvatarUpload({
   testIdPrefix = "avatar",
 }: AvatarUploadProps) {
   const [isDragging, setIsDragging] = React.useState(false);
+  const [urlDraft, setUrlDraft] = React.useState(avatarUrl);
+  const isUrlInputFocusedRef = React.useRef(false);
 
   const onUploadSuccess = React.useCallback(
     (url: string) => {
@@ -46,6 +48,7 @@ export function AvatarUpload({
     clearError,
     openPicker,
     handleFileChange,
+    uploadUrl,
   } = useAvatarUpload({ onUploadSuccess });
 
   React.useEffect(() => {
@@ -53,6 +56,19 @@ export function AvatarUpload({
   }, [isUploading, onUploadingChange]);
 
   const isInputDisabled = disabled || isUploading;
+
+  React.useEffect(() => {
+    if (!isUrlInputFocusedRef.current) setUrlDraft(avatarUrl);
+  }, [avatarUrl]);
+
+  const applyUrl = React.useCallback(() => {
+    const nextUrl = urlDraft.trim();
+    if (nextUrl.length === 0 || isInputDisabled) return;
+    clearError();
+    void uploadUrl(nextUrl).then((uploaded) => {
+      if (uploaded) setUrlDraft("");
+    });
+  }, [clearError, isInputDisabled, uploadUrl, urlDraft]);
 
   const handleDrop = React.useCallback(
     (e: React.DragEvent) => {
@@ -185,12 +201,26 @@ export function AvatarUpload({
             data-testid={`${testIdPrefix}-url`}
             disabled={isInputDisabled}
             id={`${testIdPrefix}-url`}
+            onBlur={() => {
+              isUrlInputFocusedRef.current = false;
+              applyUrl();
+            }}
             onChange={(event) => {
               clearError();
-              onUrlChange(event.target.value);
+              setUrlDraft(event.target.value);
+            }}
+            onFocus={() => {
+              isUrlInputFocusedRef.current = true;
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                applyUrl();
+              }
             }}
             placeholder="https://example.com/avatar.png"
-            value={avatarUrl}
+            type="url"
+            value={urlDraft}
           />
         </div>
         <p className="text-xs text-muted-foreground">

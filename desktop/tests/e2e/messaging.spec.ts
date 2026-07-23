@@ -1,8 +1,18 @@
-import { expect, test, type Locator } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
+
+async function mockAvatarImageFetch(page: Page, url: string) {
+  await page.route(url, (route) =>
+    route.fulfill({
+      body: Buffer.from("mock-avatar-png"),
+      contentType: "image/png",
+      status: 200,
+    }),
+  );
+}
 
 async function expectThreadReplyUnobscured(row: Locator) {
   await expect
@@ -646,13 +656,16 @@ test("shows your avatar on your own message when profile avatar is set", async (
   page,
 }) => {
   const message = `Avatar message ${Date.now()}`;
-  const avatarUrl =
-    'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"%3E%3Crect width="16" height="16" rx="4" fill="%2300a36c"/%3E%3C/svg%3E';
+  const avatarUrl = `https://example.com/message-avatar-${Date.now()}.png`;
+  await mockAvatarImageFetch(page, avatarUrl);
 
   await page.goto("/");
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
-  await page.getByTestId("profile-avatar-url").fill(avatarUrl);
+  const input = page.getByTestId("profile-avatar-url");
+  await input.fill(avatarUrl);
+  await input.press("Enter");
+  await expect(input).toHaveValue("");
   await page.getByTestId("profile-avatar-done").click();
   await page.getByTestId("settings-back-to-app").click();
 
@@ -666,7 +679,7 @@ test("shows your avatar on your own message when profile avatar is set", async (
   await expect(lastMessage).toContainText(message);
   await expect(lastMessage.getByTestId("message-avatar-image")).toHaveAttribute(
     "src",
-    avatarUrl,
+    /\/media\/[\da-f]{64}\.png$/,
   );
 });
 
