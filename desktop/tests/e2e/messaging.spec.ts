@@ -156,6 +156,56 @@ test("send a message and see it in timeline", async ({ page }) => {
   );
 });
 
+test("rapid same-author messages never overlap in a direct message", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  const burstPrefix = `rapid-dm-${Date.now()}`;
+  await page.evaluate(
+    ({ channelName, createdAt, prefix, pubkey }) => {
+      for (let index = 0; index < 5; index += 1) {
+        window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+          channelName,
+          content: `${prefix}-${index}`,
+          createdAt,
+          pubkey,
+        });
+      }
+    },
+    {
+      channelName: "alice-tyler",
+      createdAt: Math.floor(Date.now() / 1_000),
+      prefix: burstPrefix,
+      pubkey: TEST_IDENTITIES.tyler.pubkey,
+    },
+  );
+
+  const burstRows = page
+    .getByTestId("message-row")
+    .filter({ hasText: burstPrefix });
+  await expect(burstRows).toHaveCount(5);
+
+  await expect
+    .poll(async () =>
+      burstRows.evaluateAll((rows) =>
+        rows
+          .map((row) => row.getBoundingClientRect())
+          .sort((left, right) => left.top - right.top)
+          .every(
+            (row, index, ordered) =>
+              index === 0 || row.top >= ordered[index - 1].bottom - 0.5,
+          ),
+      ),
+    )
+    .toBe(true);
+});
+
 test("long autolink wraps without widening the timeline", async ({ page }) => {
   await page.setViewportSize({ width: 800, height: 600 });
 
