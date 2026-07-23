@@ -109,6 +109,10 @@ If `hermes-acp` is on `PATH`, it can be launched directly with empty agent
 arguments instead. Buzz Desktop discovers that entrypoint as the first-class
 `Hermes Agent` runtime.
 
+For dedicated identities, channel membership, secret storage, a persistent
+`systemd` service, end-to-end verification, and troubleshooting, see
+[Run a Hermes Agent in Buzz](../../docs/hermes-agent-acp.md).
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).
