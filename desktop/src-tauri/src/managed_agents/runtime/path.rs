@@ -119,13 +119,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shell_path_only() {
-        let result = build_augmented_path(
-            None,
-            None,
-            Some("/usr/bin:/bin".to_string()),
-            None,
-            None,
-        );
+        let result =
+            build_augmented_path(None, None, Some("/usr/bin:/bin".to_string()), None, None);
         assert_eq!(result.as_deref(), Some("/usr/bin:/bin"));
     }
 
