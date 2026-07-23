@@ -37,6 +37,10 @@ import {
   type ThreadViewMode,
 } from "@/features/channels/lib/threadViewModePreference";
 import { cn } from "@/shared/lib/cn";
+import {
+  setWindowDecorationsVisible,
+  useWindowDecorationsVisible,
+} from "@/shared/lib/windowDecorationsPreference";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -84,6 +88,7 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { Switch } from "@/shared/ui/switch";
 
 export type SettingsSection =
   | "profile"
@@ -647,8 +652,37 @@ function ThemeSettingsCard() {
         </AnimatePresence>
       )}
 
+      <WindowDecorationsSetting />
       <ThreadLayoutSetting />
     </section>
+  );
+}
+
+function WindowDecorationsSetting() {
+  const decorationsVisible = useWindowDecorationsVisible();
+
+  return (
+    <SettingsOptionGroup className="mt-8">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <label
+            className="text-sm font-medium"
+            htmlFor="native-window-controls-switch"
+          >
+            Native window controls
+          </label>
+          <p className="text-sm font-normal text-muted-foreground">
+            Show the title bar with minimize, maximize, and close controls.
+          </p>
+        </div>
+        <Switch
+          checked={decorationsVisible}
+          data-testid="native-window-controls-toggle"
+          id="native-window-controls-switch"
+          onCheckedChange={setWindowDecorationsVisible}
+        />
+      </SettingsOptionRow>
+    </SettingsOptionGroup>
   );
 }
 
@@ -682,7 +716,7 @@ function ThreadLayoutSetting() {
     ) ?? THREAD_VIEW_MODE_OPTIONS[0];
 
   return (
-    <SettingsOptionGroup className="mt-8">
+    <SettingsOptionGroup className="mt-3">
       <SettingsOptionRow>
         <div className="min-w-0">
           <p className="text-sm font-medium">Thread layout</p>
