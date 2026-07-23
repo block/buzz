@@ -116,6 +116,7 @@ Widget _buildComposeBar({
   List<ChannelMember> members = const <ChannelMember>[],
   Future<List<ChannelMember>>? membersFuture,
   List<AgentDirectoryEntry> relayAgents = const <AgentDirectoryEntry>[],
+  Map<String, String> agentOwners = const <String, String>{},
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
@@ -128,7 +129,7 @@ Widget _buildComposeBar({
         'channel-1',
       ).overrideWith((ref) => membersFuture ?? Future.value(members)),
       agentDirectoryProvider.overrideWith((ref) async => relayAgents),
-      agentOwnersProvider.overrideWith((ref) async => const <String, String>{}),
+      agentOwnersProvider.overrideWith((ref) async => agentOwners),
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
@@ -891,6 +892,62 @@ void main() {
         findsOneWidget,
       );
     });
+
+    testWidgets(
+      'disambiguates colliding agent titles without changing selection text',
+      (tester) async {
+        final currentPubkey = 'a' * 64;
+        final ownedAgentPubkey = 'b' * 64;
+        final remoteAgentPubkey = 'c' * 64;
+
+        await tester.pumpWidget(
+          _buildComposeBar(
+            uploadService: _testUploadService(nostr.Keys.generate().nsec),
+            currentPubkey: currentPubkey,
+            relayAgents: [
+              AgentDirectoryEntry(
+                pubkey: ownedAgentPubkey,
+                displayName: 'Bumble',
+                respondTo: 'anyone',
+                channelIds: const ['shared-channel'],
+              ),
+              AgentDirectoryEntry(
+                pubkey: remoteAgentPubkey,
+                displayName: 'bUmBlE',
+                respondTo: 'anyone',
+                channelIds: const ['shared-channel'],
+              ),
+            ],
+            agentOwners: {
+              ownedAgentPubkey: currentPubkey,
+              remoteAgentPubkey: 'd' * 64,
+            },
+            channels: [_makeCurrentChannel(), _makeSharedMemberChannel()],
+            onSend:
+                (
+                  content,
+                  mentionPubkeys, {
+                  mediaTags = const <List<String>>[],
+                }) async {},
+          ),
+        );
+
+        await tester.enterText(find.byType(TextField), '@bum');
+        await tester.pumpAndSettle();
+
+        expect(find.text('Bumble (you)'), findsOneWidget);
+        expect(find.text('bUmBlE (dddddddd…)'), findsOneWidget);
+        expect(find.text('owned by you · not in channel'), findsOneWidget);
+
+        await tester.tap(find.text('Bumble (you)'));
+        await tester.pumpAndSettle();
+        expect(find.byType(TextField), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).controller?.text,
+          '@Bumble ',
+        );
+      },
+    );
 
     testWidgets('adds a selected non-member agent as a bot before sending', (
       tester,

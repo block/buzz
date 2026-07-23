@@ -17,6 +17,10 @@ class _MentionSuggestions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final nameCounts = countVisibleMentionDisplayNames(
+      suggestions.map((candidate) => candidate.label),
+    );
+
     return Container(
       constraints: const BoxConstraints(maxHeight: 240),
       clipBehavior: Clip.hardEdge,
@@ -41,6 +45,22 @@ class _MentionSuggestions extends StatelessWidget {
         itemBuilder: (context, index) {
           final candidate = suggestions[index];
           final name = candidate.label;
+          final ownerLabel = candidate.isAgent
+              ? formatOwnerLabel(
+                  candidate.ownerPubkey,
+                  currentPubkey,
+                  userCache,
+                )
+              : null;
+          final displayName = formatDisambiguatedMentionDisplayName(
+            displayName: name,
+            hasNameCollision: hasVisibleMentionDisplayNameCollision(
+              name,
+              nameCounts,
+            ),
+            isAgent: candidate.isAgent,
+            ownerLabel: ownerLabel,
+          );
           final avatarUrl =
               candidate.avatarUrl ?? userCache[candidate.pubkey]?.avatarUrl;
 
@@ -58,7 +78,7 @@ class _MentionSuggestions extends StatelessWidget {
                 ),
               ),
             ),
-            title: Text(name, style: context.textTheme.bodyMedium),
+            title: Text(displayName, style: context.textTheme.bodyMedium),
             subtitle: _MentionSuggestionInfo.build(
               context,
               candidate: candidate,

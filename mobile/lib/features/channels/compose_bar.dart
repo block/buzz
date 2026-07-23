@@ -22,6 +22,7 @@ import 'channels_provider.dart';
 import 'emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
+import 'mentions/mention_display_name.dart';
 import 'mentions/mention_ranking.dart';
 
 part 'compose_bar/helpers.dart';
