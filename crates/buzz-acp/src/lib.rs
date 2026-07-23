@@ -10,6 +10,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+mod silent_reply;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -1977,6 +1978,9 @@ async fn tokio_main() -> Result<()> {
                             }
 
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
+                                if silent_reply::is_agent_reply_kind(kind_u32) {
+                                    queue.note_self_publish(buzz_event.channel_id);
+                                }
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -2984,7 +2988,20 @@ fn handle_prompt_result(
         // Don't requeue batches for channels the agent was removed from —
         // those events are stale and should be silently dropped.
         if !removed_channels.contains(&batch.channel_id) {
-            if matches!(
+            if matches!(result.outcome, PromptOutcome::Ok(_)) {
+                // Ok turns keep the batch only for silent-reply detection —
+                // never requeue a successful turn (#2459).
+                let publishes = queue.take_self_publishes(batch.channel_id);
+                if let Some(content) =
+                    silent_reply::silent_reply_loss_notice(&result.outcome, Some(&batch), publishes)
+                {
+                    tracing::warn!(
+                        channel_id = %batch.channel_id,
+                        "mention turn completed Ok with no agent channel publish — posting failure notice"
+                    );
+                    spawn_failure_notice(rest_client, &batch, content);
+                }
+            } else if matches!(
                 result.outcome,
                 PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_)
             ) {

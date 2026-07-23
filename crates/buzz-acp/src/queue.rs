@@ -141,6 +141,11 @@ pub struct EventQueue {
     in_flight_deadlines: HashMap<Uuid, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
     in_flight_batch_sizes: HashMap<Uuid, usize>,
+    /// Agent-authored stream messages observed on the wire while a channel
+    /// turn is in flight (counted at the `ignore_self` drop site). Used to
+    /// detect silent reply loss when ACP reports Ok but `buzz messages send`
+    /// never landed (#2459).
+    in_flight_self_publishes: HashMap<Uuid, u64>,
     retry_after: HashMap<Uuid, Instant>,
     /// Per-channel retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<Uuid, u32>,
@@ -182,6 +187,7 @@ impl EventQueue {
             in_flight_channels: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
+            in_flight_self_publishes: HashMap::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
@@ -278,6 +284,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.in_flight_self_publishes.remove(&id);
             // Recover any withheld goose-native steer events for the expired
             // channel back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -393,6 +400,7 @@ impl EventQueue {
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
+        self.in_flight_self_publishes.remove(&channel_id);
         let now = Instant::now();
         match self.retry_after.get(&channel_id) {
             // Active throttle → channel was requeued; keep retry_counts intact.
@@ -574,6 +582,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.in_flight_self_publishes.remove(&id);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired channel so they are
             // not permanently orphaned in the side table.
@@ -644,6 +653,21 @@ impl EventQueue {
     /// Whether a prompt is currently in-flight for the given channel.
     pub fn is_channel_in_flight(&self, channel_id: Uuid) -> bool {
         self.in_flight_channels.contains(&channel_id)
+    }
+
+    /// Record a self-authored stream message seen on the wire for an in-flight
+    /// channel turn. No-op when the channel is not in flight.
+    pub fn note_self_publish(&mut self, channel_id: Uuid) {
+        if self.in_flight_channels.contains(&channel_id) {
+            *self.in_flight_self_publishes.entry(channel_id).or_insert(0) += 1;
+        }
+    }
+
+    /// Take and clear the self-publish count for `channel_id` (0 if none).
+    pub fn take_self_publishes(&mut self, channel_id: Uuid) -> u64 {
+        self.in_flight_self_publishes
+            .remove(&channel_id)
+            .unwrap_or(0)
     }
 
     // ── Goose-native steer withhold (side table) ──────────────────────────
