@@ -76,6 +76,10 @@ dirs = "6"
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
 
+# The release build can enable both rustls providers through other sidecars, so
+# the CLI selects ring explicitly before opening any wss:// connection.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
