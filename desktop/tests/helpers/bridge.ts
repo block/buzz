@@ -695,11 +695,18 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         title: string;
       }> = [];
       const notificationInstances: MockNotification[] = [];
+      let notificationPermissionRequestCount = 0;
+      let notificationPermissionRequestResult: NotificationPermission | null =
+        null;
 
       class MockNotification extends EventTarget {
         static permission: NotificationPermission = "granted";
 
         static async requestPermission(): Promise<NotificationPermission> {
+          notificationPermissionRequestCount += 1;
+          if (notificationPermissionRequestResult) {
+            MockNotification.permission = notificationPermissionRequestResult;
+          }
           return MockNotification.permission;
         }
 
@@ -732,10 +739,15 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         __BUZZ_E2E_APP_BADGE_COUNT__?: number;
         __BUZZ_E2E_APP_BADGE_STATE__?: string;
         __BUZZ_E2E_CLICK_NOTIFICATION__?: (index: number) => boolean;
+        __BUZZ_E2E_GET_NOTIFICATION_PERMISSION_REQUEST_COUNT__?: () => number;
         __BUZZ_E2E_NOTIFICATIONS__?: Array<{
           body: string | null;
           title: string;
         }>;
+        __BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?: (
+          permission: NotificationPermission,
+          requestResult?: NotificationPermission,
+        ) => void;
       };
       const currentConfig = testWindow.__BUZZ_E2E__ ?? {};
 
@@ -760,7 +772,17 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         notification.onclick?.(event);
         return true;
       };
+      testWindow.__BUZZ_E2E_GET_NOTIFICATION_PERMISSION_REQUEST_COUNT__ = () =>
+        notificationPermissionRequestCount;
       testWindow.__BUZZ_E2E_NOTIFICATIONS__ = notificationLog;
+      testWindow.__BUZZ_E2E_SET_NOTIFICATION_PERMISSION__ = (
+        permission,
+        requestResult,
+      ) => {
+        MockNotification.permission = permission;
+        notificationPermissionRequestCount = 0;
+        notificationPermissionRequestResult = requestResult ?? null;
+      };
     },
     {
       identity,

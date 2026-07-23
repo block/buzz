@@ -1306,6 +1306,53 @@ test("notification settings drive the Inbox badge and desktop alerts", async ({
   await expect.poll(getAppBadgeCount).toBe(baseline);
 });
 
+test("Windows retries a false denied notification permission from settings", async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", {
+      configurable: true,
+      value: "Win32",
+    });
+  });
+  await page.goto("/");
+
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?: (
+          permission: NotificationPermission,
+          requestResult?: NotificationPermission,
+        ) => void;
+      }
+    ).__BUZZ_E2E_SET_NOTIFICATION_PERMISSION__?.("denied", "granted");
+  });
+
+  await openSettings(page, "notifications");
+  const desktopToggle = page.getByTestId("notifications-desktop-toggle");
+  const desktopState = page.getByTestId("notifications-desktop-state");
+
+  await desktopToggle.click();
+  await expect(desktopToggle).not.toBeChecked();
+  await expect(desktopState).toContainText("Blocked");
+
+  await desktopToggle.click();
+  await expect(desktopToggle).toBeChecked();
+  await expect(desktopState).toContainText("On");
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (
+            window as Window & {
+              __BUZZ_E2E_GET_NOTIFICATION_PERMISSION_REQUEST_COUNT__?: () => number;
+            }
+          ).__BUZZ_E2E_GET_NOTIFICATION_PERMISSION_REQUEST_COUNT__?.() ?? 0,
+      ),
+    )
+    .toBe(1);
+});
+
 test("desktop notification clicks open the matching forum thread", async ({
   page,
 }) => {
