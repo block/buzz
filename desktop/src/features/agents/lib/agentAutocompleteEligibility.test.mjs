@@ -6,6 +6,7 @@ import {
   getMentionableAgentPubkeys,
   getSharedChannelIds,
   isAgentIdentityInManagedList,
+  relayAgentIsInvocableByUser,
   relayAgentIsSharedWithUser,
   shouldHideAgentFromMentions,
 } from "./agentAutocompleteEligibility.ts";
@@ -305,4 +306,65 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
   const second = makeAgent({ pubkey: PUB_B, isAgent: false });
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
+});
+
+test("relayAgentIsInvocableByUser: anyone responds regardless of channel overlap", () => {
+  assert.equal(
+    relayAgentIsInvocableByUser(
+      { respondTo: "anyone", respondToAllowlist: [] },
+      CURRENT_PUBKEY,
+    ),
+    true,
+  );
+});
+
+test("relayAgentIsInvocableByUser: allowlist honors membership", () => {
+  const agent = { respondTo: "allowlist", respondToAllowlist: [CURRENT_PUBKEY] };
+  assert.equal(relayAgentIsInvocableByUser(agent, CURRENT_PUBKEY), true);
+  assert.equal(relayAgentIsInvocableByUser(agent, OTHER_OWNER_PUBKEY), false);
+});
+
+test("relayAgentIsInvocableByUser: owner-only and unknown modes are not invocable", () => {
+  assert.equal(
+    relayAgentIsInvocableByUser(
+      { respondTo: "owner-only", respondToAllowlist: [] },
+      CURRENT_PUBKEY,
+    ),
+    false,
+  );
+  assert.equal(
+    relayAgentIsInvocableByUser({ respondTo: null, respondToAllowlist: [] }, CURRENT_PUBKEY),
+    false,
+  );
+});
+
+test("shouldHideAgentFromMentions: relay-shared agent shows without local managed entry", () => {
+  // Regression: a shared agent owned by another member (directory-eligible,
+  // respond_to=anyone, shared channel) must be mentionable even though it is
+  // not in this device's managed-agents list.
+  const sharedChannelIds = new Set(["chan-1"]);
+  const relayAgents = [
+    {
+      pubkey: PUB_D,
+      respondTo: "anyone",
+      respondToAllowlist: [],
+      channelIds: ["chan-1"],
+    },
+  ];
+  const mentionable = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: [],
+    relayAgents,
+    sharedChannelIds,
+  });
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_D,
+      mentionableAgentPubkeys: mentionable,
+      directoryAgentPubkeys: new Set([PUB_D]),
+    }),
+    false,
+  );
 });
