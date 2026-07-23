@@ -108,6 +108,27 @@ pub enum AcpError {
     AgentError { code: i64, message: String },
 }
 
+impl AcpError {
+    /// Whether this adapter-reported error requires the user to authenticate
+    /// before another prompt can succeed.
+    ///
+    /// ACP adapters do not currently share a dedicated authentication error
+    /// code: Buzz's native agent uses `-32001`, while other adapters commonly
+    /// return the generic JSON-RPC server-error code (`-32000`) with an
+    /// authentication message. Centralizing the compatibility classification
+    /// here keeps orchestration and queue policy independent of any adapter.
+    pub(crate) fn requires_authentication(&self) -> bool {
+        let Self::AgentError { code, message } = self else {
+            return false;
+        };
+        let message = message.to_ascii_lowercase();
+        *code == -32001
+            || message.contains("authentication required")
+            || message.contains("not authenticated")
+            || message.contains("unauthorized")
+    }
+}
+
 /// Build an [`AcpError::AgentError`] from a JSON-RPC error object,
 /// preserving the numeric code. When the `message` field is missing or
 /// non-string, fall back to the full JSON object so provider-specific
@@ -3463,6 +3484,52 @@ mod tests {
                 assert_eq!(message, "auth denied");
             }
             other => panic!("expected AgentError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn authentication_requirement_classification_is_adapter_agnostic() {
+        let cases = [
+            AcpError::AgentError {
+                code: -32001,
+                message: "provider-specific auth failure".into(),
+            },
+            AcpError::AgentError {
+                code: -32000,
+                message: "Authentication required".into(),
+            },
+            AcpError::AgentError {
+                code: -32000,
+                message: "Agent is not authenticated".into(),
+            },
+            AcpError::AgentError {
+                code: -32000,
+                message: "401 Unauthorized".into(),
+            },
+        ];
+        for error in cases {
+            assert!(
+                error.requires_authentication(),
+                "expected authentication requirement for {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_errors_do_not_require_authentication() {
+        let cases = [
+            AcpError::AgentError {
+                code: -32000,
+                message: "temporary provider failure".into(),
+            },
+            AcpError::IdleTimeout(std::time::Duration::from_secs(1)),
+            AcpError::Protocol("malformed response".into()),
+        ];
+        for error in cases {
+            assert!(
+                !error.requires_authentication(),
+                "unexpected authentication requirement for {error}"
+            );
         }
     }
 
