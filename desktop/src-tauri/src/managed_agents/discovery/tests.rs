@@ -8,7 +8,7 @@ use super::{
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
     refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    GOOSE_AVATAR_URL, HERMES_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -93,6 +93,41 @@ fn normalizes_buzz_agent_args_to_empty() {
     assert_eq!(
         normalize_agent_args("buzz-agent", vec!["acp".into()]),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn normalizes_hermes_entrypoints() {
+    assert_eq!(
+        normalize_agent_args("hermes", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("hermes-acp", Vec::new()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args("hermes-acp", vec!["acp".into()]),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        normalize_agent_args(
+            "hermes",
+            vec!["-p".into(), "default".into(), "acp".into()]
+        ),
+        vec!["-p".to_string(), "default".to_string(), "acp".to_string()]
+    );
+}
+
+#[test]
+fn resolves_hermes_avatar() {
+    assert_eq!(
+        managed_agent_avatar_url("hermes"),
+        Some(HERMES_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/Users/openclaw/.local/bin/hermes-acp"),
+        Some(HERMES_AVATAR_URL.to_string())
     );
 }
 

@@ -601,6 +601,47 @@ impl AcpClient {
             .session_id)
     }
 
+    /// Send `session/load` for an existing ACP session id.
+    ///
+    /// Used after harness restart when a durable channel→session binding is
+    /// known and the agent advertised `agentCapabilities.loadSession`.
+    /// History-replay `session/update` notifications are consumed by the
+    /// request loop and logged only — they are not re-published to Buzz.
+    pub async fn session_load_full(
+        &mut self,
+        cwd: &str,
+        session_id: &str,
+        mcp_servers: Vec<McpServer>,
+    ) -> Result<SessionNewResponse, AcpError> {
+        let params = serde_json::json!({
+            "cwd": cwd,
+            "sessionId": session_id,
+            "mcpServers": mcp_servers,
+        });
+        let result = self.send_request("session/load", params).await?;
+        // Spec-compliant agents may omit sessionId on load (it is implied).
+        // Prefer the request id so callers always have a concrete binding.
+        let resolved_id = result
+            .get("sessionId")
+            .and_then(|v| v.as_str())
+            .unwrap_or(session_id)
+            .to_owned();
+        tracing::info!(target: "acp::session", "session loaded: {resolved_id}");
+        Ok(SessionNewResponse {
+            session_id: resolved_id,
+            raw: result,
+        })
+    }
+
+    /// Returns true when an initialize result advertises `loadSession`.
+    pub fn agent_supports_load_session(init_result: &serde_json::Value) -> bool {
+        init_result
+            .get("agentCapabilities")
+            .and_then(|caps| caps.get("loadSession"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+
     /// Send Goose's custom system-prompt request after `session/new`.
     pub async fn session_set_goose_system_prompt(
         &mut self,

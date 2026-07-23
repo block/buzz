@@ -168,6 +168,8 @@ pub struct OwnedAgent {
     pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
     pub protocol_version: u32,
+    /// Whether the agent advertised `agentCapabilities.loadSession` at init.
+    pub supports_load_session: bool,
 }
 
 fn has_system_prompt_support(
@@ -529,6 +531,12 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Agent binary as configured (for durable session binding identity).
+    pub agent_command: String,
+    /// Agent args as configured (for durable session binding identity).
+    pub agent_args: Vec<String>,
+    /// Durable channel→session bindings surviving harness restarts.
+    pub session_store: std::sync::Arc<crate::session_store::SessionStore>,
 }
 
 impl AgentPool {
@@ -794,6 +802,81 @@ const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
 
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Try to restore a durable channel session via `session/load`.
+///
+/// Returns `Some(session_id)` on success. On miss, capability absence, or load
+/// failure, clears the stale binding (when present) and returns `None` so the
+/// caller can fall through to `session/new`.
+async fn try_load_persisted_session(
+    agent: &mut OwnedAgent,
+    ctx: &PromptContext,
+    channel_id: &Uuid,
+    _agent_core: Option<&str>,
+    _agent_canvas: Option<&str>,
+) -> Option<String> {
+    if !agent.supports_load_session {
+        return None;
+    }
+    let stored = ctx
+        .session_store
+        .get(&ctx.agent_command, &ctx.agent_args, channel_id)?;
+    match agent
+        .acp
+        .session_load_full(&ctx.cwd, &stored, ctx.mcp_servers.clone())
+        .await
+    {
+        Ok(resp) => {
+            if agent.model_capabilities.is_none() {
+                agent.model_capabilities = Some(AgentModelCapabilities {
+                    config_options_raw: extract_model_config_options(&resp.raw),
+                    available_models_raw: extract_model_state(&resp.raw),
+                });
+            }
+            // Re-apply desired model after load when present.
+            if let Some(ref desired) = agent.desired_model {
+                if let Some(method) = resolve_model_switch_method(&resp.raw, desired) {
+                    if let Err(e) =
+                        apply_model_switch(&mut agent.acp, &resp.session_id, desired, &method).await
+                    {
+                        tracing::warn!(
+                            target: "pool::session",
+                            error = %e,
+                            "model re-apply after session/load failed — continuing with loaded session"
+                        );
+                    }
+                }
+            }
+            if !ctx.permission_mode.is_default()
+                && agent_supports_mode(&resp.raw, ctx.permission_mode.as_wire_str())
+            {
+                if let Err(e) =
+                    apply_permission_mode(&mut agent.acp, &resp.session_id, &ctx.permission_mode)
+                        .await
+                {
+                    tracing::warn!(
+                        target: "pool::session",
+                        error = %e,
+                        "permission mode after session/load failed — continuing"
+                    );
+                }
+            }
+            Some(resp.session_id)
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "pool::session",
+                session_id = %stored,
+                channel_id = %channel_id,
+                error = %e,
+                "session/load failed — clearing binding and creating a new session"
+            );
+            ctx.session_store
+                .remove(&ctx.agent_command, &ctx.agent_args, channel_id);
+            None
+        }
+    }
+}
 
 /// Create a new ACP session via `session_new_full()`, populate model capabilities
 /// on the agent (first session only), and apply `desired_model` if set.
@@ -1469,6 +1552,24 @@ pub async fn run_prompt_task(
         PromptSource::Channel(cid) => {
             if let Some(sid) = agent.state.sessions.get(cid) {
                 (sid.clone(), false)
+            } else if let Some(sid) = try_load_persisted_session(
+                &mut agent,
+                &ctx,
+                cid,
+                agent_core.as_deref(),
+                agent_canvas.as_deref(),
+            )
+            .await
+            {
+                tracing::info!(
+                    target: "pool::session",
+                    "loaded session {sid} for channel {cid}"
+                );
+                agent.state.sessions.insert(*cid, sid.clone());
+                if let Some((pending_cid, section)) = pending_canvas.take() {
+                    agent.state.canvas_sections.insert(pending_cid, section);
+                }
+                (sid, false)
             } else {
                 // Create new session with model application.
                 match create_session_and_apply_model(
@@ -1485,6 +1586,12 @@ pub async fn run_prompt_task(
                             "created session {sid} for channel {cid}"
                         );
                         agent.state.sessions.insert(*cid, sid.clone());
+                        ctx.session_store.put(
+                            &ctx.agent_command,
+                            &ctx.agent_args,
+                            cid,
+                            &sid,
+                        );
                         // Commit canvas only after session creation succeeds (I3).
                         if let Some((pending_cid, section)) = pending_canvas.take() {
                             agent.state.canvas_sections.insert(pending_cid, section);
@@ -4998,6 +5105,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            supports_load_session: false,
         };
 
         // Simulate dispatch: install a steer receiver (normally done by
@@ -5056,6 +5164,7 @@ mod tests {
             agent_name: "unknown".into(),
             goose_system_prompt_supported: None,
             protocol_version: 2,
+            supports_load_session: false,
         };
 
         // Simulate a completed turn: `steer_rx` was consumed by the read loop
@@ -5307,6 +5416,14 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            agent_command: "goose".to_string(),
+            agent_args: vec!["acp".to_string()],
+            session_store: std::sync::Arc::new(crate::session_store::SessionStore::open(
+                std::env::temp_dir().join(format!(
+                    "buzz-acp-test-sessions-{}.json",
+                    uuid::Uuid::new_v4()
+                )),
+            )),
         }
     }
 
