@@ -12,7 +12,7 @@ import type { TimelineMessage } from "@/features/messages/types";
 export function buildChannelMainTimelineEntries(
   channel: Pick<Channel, "channelType" | "visibility"> | null | undefined,
   messages: TimelineMessage[],
-  threadSummaries: ReadonlyMap<string, ChannelWindowThreadSummary>,
+  threadSummaries: ReadonlyMap<string, ChannelWindowThreadSummary> | undefined,
   profiles?: UserProfileLookup,
 ): { entries: MainTimelineEntry[]; flattenReplies: boolean } {
   const flattenReplies = shouldFlattenChannelTimeline(channel);
@@ -21,7 +21,7 @@ export function buildChannelMainTimelineEntries(
     entries: buildMainTimelineEntries(
       messages,
       new Set(),
-      threadSummaries,
+      threadSummaries ?? new Map(),
       profiles,
       {
         flattenReplies,
