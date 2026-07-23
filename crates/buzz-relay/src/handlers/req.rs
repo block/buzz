@@ -839,18 +839,32 @@ fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
 }
 
 /// Extract a channel UUID from a single filter's `#h` tag.
+///
+/// Returns `None` when the filter carries multiple distinct parseable channel
+/// UUIDs — NIP-01 `#h` values are OR'd, so pinning the query to any single one
+/// would silently drop the other channels' events. Callers then fall back to
+/// the access-scope path (`apply_access_scope_to_query`) and the in-memory
+/// `filters_match` post-filter enforces the per-event `#h` OR. Mirrors the
+/// multi-filter rule in [`extract_channel_id_from_filters`].
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
+    let mut found_id: Option<uuid::Uuid> = None;
     for (tag_key, tag_values) in filter.generic_tags.iter() {
         let key = tag_key.to_string();
         if key == "h" {
             for val in tag_values {
                 if let Ok(id) = val.parse::<uuid::Uuid>() {
-                    return Some(id);
+                    match found_id {
+                        Some(existing) if existing != id => {
+                            // Multiple distinct channel IDs — not single-channel.
+                            return None;
+                        }
+                        _ => found_id = Some(id),
+                    }
                 }
             }
         }
     }
-    None
+    found_id
 }
 
 /// Convert a single NIP-01 filter into an [`EventQuery`] for the database.
@@ -1233,6 +1247,51 @@ fn topic_for_subscription(channel_id: Option<uuid::Uuid>) -> EventTopic {
 mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
+
+    fn filter_with_h_values(values: &[&str]) -> Filter {
+        Filter::new().custom_tags(
+            SingleLetterTag::lowercase(Alphabet::H),
+            values.iter().map(|v| v.to_string()),
+        )
+    }
+
+    #[test]
+    fn single_h_value_extracts_channel_id() {
+        let channel = uuid::Uuid::new_v4();
+        let filter = filter_with_h_values(&[&channel.to_string()]);
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel));
+    }
+
+    /// Regression test for #2385: a filter listing multiple distinct channels
+    /// must not be pinned to any single one of them. Before the fix the
+    /// extractor returned the lexicographically-first value from the BTreeSet,
+    /// so `/query` and COUNT silently dropped every other listed channel.
+    #[test]
+    fn multiple_distinct_h_values_do_not_pin_a_channel() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let filter = filter_with_h_values(&[&a.to_string(), &b.to_string()]);
+        assert_eq!(extract_channel_id_from_filter(&filter), None);
+    }
+
+    #[test]
+    fn duplicate_h_values_for_same_channel_still_pin() {
+        let channel = uuid::Uuid::new_v4();
+        // Same UUID in two spellings — parses to one channel, safe to pin.
+        let upper = channel.to_string().to_uppercase();
+        let filter = filter_with_h_values(&[&channel.to_string(), &upper]);
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel));
+    }
+
+    #[test]
+    fn unparseable_h_values_are_ignored_for_pinning() {
+        let channel = uuid::Uuid::new_v4();
+        let filter = filter_with_h_values(&["not-a-uuid", &channel.to_string()]);
+        assert_eq!(extract_channel_id_from_filter(&filter), Some(channel));
+
+        let no_uuid = filter_with_h_values(&["not-a-uuid"]);
+        assert_eq!(extract_channel_id_from_filter(&no_uuid), None);
+    }
 
     #[test]
     fn global_queries_push_access_scope_before_limit() {
