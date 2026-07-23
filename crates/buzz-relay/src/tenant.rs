@@ -10,9 +10,10 @@
 //!
 //! This module owns the *seam* (the [`HostResolver`] trait and the fail-closed
 //! [`bind_community`] helper) and the relay-side call site. The DB-backed
-//! implementation that queries the `communities` table lives in `buzz-db`
-//! (`Db::resolve_host`); the relay depends on the trait, not the query, so the
-//! binding is testable without a database.
+//! implementation that queries the `communities` table (falling back to
+//! `community_host_aliases`) lives in `buzz-db`
+//! (`Db::lookup_community_by_host_or_alias`); the relay depends on the trait,
+//! not the query, so the binding is testable without a database.
 
 use buzz_core::tenant::{normalize_host, CommunityId, TenantContext};
 
@@ -123,14 +124,26 @@ pub async fn bind_deployment_community<R: HostResolver>(
 pub use buzz_core::tenant::relay_url_authority;
 
 /// Production [`HostResolver`]: the relay resolves hosts against the durable
-/// `communities` host map in Postgres.
+/// `communities` host map in Postgres, falling back to `community_host_aliases`
+/// when the host has no primary-host row.
 ///
 /// This is the *only* place the relay couples the row-zero seam to buzz-db. The
 /// trait keeps `bind_community` and every call site database-free and testable;
-/// this impl is the thin adapter from buzz-db's `lookup_community_by_host`
+/// this impl is the thin adapter from buzz-db's `lookup_community_by_host_or_alias`
 /// (which returns a `CommunityRecord`) to the seam's `CommunityId`. A lookup
-/// that succeeds but finds no row is `Ok(None)` — fail-closed, never a default
-/// tenant; a lookup that *fails* (DB unreachable) is `Err`, also fail-closed.
+/// that succeeds but finds no row (in either table) is `Ok(None)` — fail-closed,
+/// never a default tenant; a lookup that *fails* (DB unreachable) is `Err`,
+/// also fail-closed.
+///
+/// The alias fallback exists for deployments where a client can only reach the
+/// relay through a hostname distinct from the community's primary host (e.g.
+/// an in-cluster Service DNS name that a mesh sidecar routes by Host header,
+/// which has no `communities.host` row of its own). Resolving via an alias
+/// still returns only the `CommunityId` — [`bind_community`] binds the
+/// *request's* normalized host into `TenantContext::host()`, never the
+/// primary host a lookup happened to resolve through. NIP-98 `u`-URL and
+/// NIP-42 `relay` checks therefore keep comparing against the host the client
+/// actually used, alias or not.
 impl HostResolver for buzz_db::Db {
     type Error = buzz_db::DbError;
 
@@ -139,7 +152,7 @@ impl HostResolver for buzz_db::Db {
         normalized_host: &str,
     ) -> Result<Option<CommunityId>, Self::Error> {
         Ok(self
-            .lookup_community_by_host(normalized_host)
+            .lookup_community_by_host_or_alias(normalized_host)
             .await?
             .map(|record| record.id))
     }

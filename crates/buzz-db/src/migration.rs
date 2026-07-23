@@ -348,6 +348,7 @@ mod tests {
             "push_gateway_delivery_request_replays",
             "product_feedback",
             "replica_heartbeat",
+            "community_host_aliases",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -561,7 +562,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 27);
+        assert_eq!(migrations.len(), 28);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -940,6 +941,19 @@ mod tests {
             desired_schema.contains("idx_channels_id_live"),
             "desired-state schema must carry the channel-id lookup index",
         );
+
+        // Host aliases (this branch, renumbered to 0028 after main's
+        // 0026_replica_heartbeat and 0027_channels_id_lookup_index landed): additional
+        // hostnames resolving to an existing community, guarded both
+        // directions against collision with a primary communities.host.
+        assert_eq!(migrations[27].version, 28);
+        let host_aliases = migrations[27].sql.as_str();
+        assert!(host_aliases.contains("CREATE TABLE community_host_aliases"));
+        assert!(host_aliases
+            .contains("CREATE UNIQUE INDEX idx_community_host_aliases_host ON community_host_aliases (lower(host))"));
+        assert!(host_aliases.contains("trg_community_host_aliases_no_primary_collision"));
+        assert!(host_aliases.contains("trg_communities_no_alias_collision"));
+        assert!(host_aliases.contains("'community_host_aliases'"));
     }
 
     #[test]
