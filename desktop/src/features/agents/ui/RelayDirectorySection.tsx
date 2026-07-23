@@ -3,6 +3,7 @@ import { ChevronDown, ChevronRight, Pencil, Search } from "lucide-react";
 
 import { externalAgentPresentationScope } from "@/features/agents/externalAgentPresentation";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { usePresenceQuery } from "@/features/presence/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { RelayAgent } from "@/shared/api/types";
 import { PresenceBadge } from "@/features/presence/ui/PresenceBadge";
@@ -44,6 +45,13 @@ export function RelayDirectorySection({
     () => relayAgents.filter((agent) => !managedPubkeys.has(agent.pubkey)),
     [relayAgents, managedPubkeys],
   );
+  const otherAgentPubkeys = React.useMemo(
+    () => otherAgents.map((agent) => normalizePubkey(agent.pubkey)),
+    [otherAgents],
+  );
+  const presenceQuery = usePresenceQuery(otherAgentPubkeys, {
+    enabled: otherAgentPubkeys.length > 0,
+  });
 
   const filteredAgents = React.useMemo(() => {
     if (!searchQuery.trim()) return otherAgents;
@@ -119,6 +127,12 @@ export function RelayDirectorySection({
                 const canCustomize =
                   presentationScope !== null &&
                   normalizePubkey(agent.ownerPubkey ?? "") === currentPubkey;
+                // kind:10100 is persistent directory metadata, not liveness.
+                // External hosts publish live status as ephemeral kind:20001,
+                // which is also the source used by DMs and profile surfaces.
+                const liveStatus =
+                  presenceQuery.data?.[normalizePubkey(agent.pubkey)] ??
+                  "offline";
                 return (
                   <AgentIdentityCard
                     actions={
@@ -147,7 +161,7 @@ export function RelayDirectorySection({
                         <Badge variant="info">External</Badge>
                         <PresenceBadge
                           className="border-0 bg-transparent px-0 py-0 text-2xs"
-                          status={agent.status}
+                          status={liveStatus}
                         />
                       </span>
                     }

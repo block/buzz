@@ -177,7 +177,9 @@ test("owned external agents are first-class, labeled, and presentation-customiza
         agentType: "hermes",
         channelNames: ["general", "agents"],
         respondTo: "anyone",
-        status: "online",
+        // Directory metadata is intentionally stale. The card must use the
+        // independent live-presence source, which seeds Alice as online.
+        status: "offline",
       },
     ],
     searchProfiles: [

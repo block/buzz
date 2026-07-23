@@ -96,6 +96,13 @@ belong in the `@` mention picker. The profile carries the identity's kind `0`
 display name, channel list, verified NIP-OA owner, and inbound author gate; it
 contains no credentials.
 
+Desktop only treats records with a non-empty `name` or `display_name` as
+directory declarations. A policy-only kind `10100` record therefore remains
+valid for channel-add enforcement without creating a key-only external-agent
+card. The card's Online/Away/Offline indicator comes from the harness's live,
+ephemeral kind `20001` presence heartbeat, matching DMs and profile surfaces;
+kind `10100` is not used as a liveness source.
+
 The verified owner can customize an external agent's display name and avatar
 from that card. This is a Buzz presentation layer: the selected name and avatar
 are applied consistently to the Agents card, profiles, messages, mentions, and

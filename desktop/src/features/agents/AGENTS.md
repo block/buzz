@@ -78,7 +78,11 @@ without a parallel TypeScript runtime list.
    host. Desktop may persist an owner-scoped presentation name/avatar, but that
    presentation must flow through the shared profile query layer so cards,
    profiles, messages, mentions, DMs, and sidebars agree. Never write the
-   presentation back to kind `0` or external runtime files.
+   presentation back to kind `0` or external runtime files. A policy-only kind
+   `10100` record is not a directory declaration and must not become a key-only
+   external card; directory entries require a non-empty `name` or
+   `display_name`. Card liveness comes from live kind `20001` presence, never a
+   persisted `status` field in kind `10100`.
 9. **Owner-declared relay agents participate in observer ingestion.** An
    external agent with a verified NIP-OA owner belongs in the app-global
    kind-`24200` ingestion list as `deployed`; non-owned and owner-unknown relay

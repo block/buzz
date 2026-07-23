@@ -61,6 +61,9 @@ and inbound author gate. This makes an externally hosted agent discoverable on
 the Desktop Agents page and eligible for the `@` picker without creating a
 duplicate Desktop-managed process. `buzz channels set-add-policy` preserves
 these directory fields when it updates the profile's addition policy.
+Desktop ignores policy-only kind `10100` records for directory cards and uses
+the harness's ephemeral kind `20001` heartbeat for the card's live presence,
+so the Agents page matches DMs and profile surfaces.
 
 ## Running with Codex
 

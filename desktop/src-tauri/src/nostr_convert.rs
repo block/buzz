@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use nostr::{Event, ToBech32};
+use nostr::Event;
 use serde_json::{json, Value};
 
 use crate::models::*;
@@ -449,73 +449,66 @@ pub fn search_response_from_events(events: &[Event]) -> SearchResponse {
 pub fn agents_from_events(events: &[Event]) -> Value {
     let arr: Vec<Value> = events
         .iter()
-        .map(|ev| {
-            let mut v: Value = serde_json::from_str(&ev.content).unwrap_or_else(|_| json!({}));
+        .filter_map(|ev| {
+            let mut v: Value = serde_json::from_str(&ev.content).ok()?;
+            let obj = v.as_object_mut()?;
+            // kind:10100 is also used to persist channel-add policy. A
+            // policy-only record is not a complete directory declaration and
+            // must not become a key-only "external agent" card.
+            let directory_name = ["name", "display_name"]
+                .iter()
+                .filter_map(|key| obj.get(*key).and_then(Value::as_str))
+                .find(|value| !value.trim().is_empty())
+                .map(str::to_string)?;
+
             let pubkey = ev.pubkey.to_hex();
             let verified_owner_pubkey = valid_oa_owner_pubkey(ev);
-            // Full npub fallback — truncated prefixes are grindable (see pubkey-display).
-            let npub = ev.pubkey.to_bech32().unwrap_or_else(|_| pubkey.clone());
             // Always overwrite the pubkey with the event author — it's the
             // authoritative source even if the content claims otherwise.
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("pubkey".to_string(), json!(pubkey.clone()));
-                // Never trust the self-claimed directory JSON for ownership.
-                // NIP-OA binds the owner signature to this event author's
-                // pubkey, so only the verified auth tag may populate this
-                // security-sensitive field.
-                match verified_owner_pubkey {
-                    Some(owner_pubkey) => {
-                        obj.insert("owner_pubkey".to_string(), json!(owner_pubkey));
-                    }
-                    None => {
-                        obj.remove("owner_pubkey");
-                    }
+            obj.insert("pubkey".to_string(), json!(pubkey.clone()));
+            // Never trust the self-claimed directory JSON for ownership.
+            // NIP-OA binds the owner signature to this event author's
+            // pubkey, so only the verified auth tag may populate this
+            // security-sensitive field.
+            match verified_owner_pubkey {
+                Some(owner_pubkey) => {
+                    obj.insert("owner_pubkey".to_string(), json!(owner_pubkey));
                 }
-                let fallback_name = obj
-                    .get("display_name")
+                None => {
+                    obj.remove("owner_pubkey");
+                }
+            }
+            if obj
+                .get("name")
+                .and_then(Value::as_str)
+                .is_none_or(|value| value.trim().is_empty())
+            {
+                obj.insert("name".to_string(), json!(directory_name));
+            }
+            if !obj.get("agent_type").is_some_and(Value::is_string) {
+                obj.insert("agent_type".to_string(), json!("agent"));
+            }
+            if !obj.get("avatar_url").is_some_and(Value::is_string) {
+                let avatar_url = obj
+                    .get("picture")
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| npub.clone());
-                if !obj.get("name").is_some_and(Value::is_string) {
-                    obj.insert("name".to_string(), json!(fallback_name));
-                }
-                if !obj.get("agent_type").is_some_and(Value::is_string) {
-                    obj.insert("agent_type".to_string(), json!("agent"));
-                }
-                if !obj.get("avatar_url").is_some_and(Value::is_string) {
-                    let avatar_url = obj
-                        .get("picture")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .map(str::to_string);
-                    obj.insert("avatar_url".to_string(), json!(avatar_url));
-                }
-                if !obj.get("channels").is_some_and(Value::is_array) {
-                    obj.insert("channels".to_string(), json!([]));
-                }
-                if !obj.get("channel_ids").is_some_and(Value::is_array) {
-                    obj.insert("channel_ids".to_string(), json!([]));
-                }
-                if !obj.get("capabilities").is_some_and(Value::is_array) {
-                    obj.insert("capabilities".to_string(), json!([]));
-                }
-                if !obj.get("status").is_some_and(Value::is_string) {
-                    obj.insert("status".to_string(), json!("offline"));
-                }
-            } else {
-                v = json!({
-                    "pubkey": pubkey,
-                    "name": npub,
-                    "avatar_url": null,
-                    "agent_type": "agent",
-                    "channels": [],
-                    "channel_ids": [],
-                    "capabilities": [],
-                    "status": "offline",
-                });
+                    .map(str::to_string);
+                obj.insert("avatar_url".to_string(), json!(avatar_url));
             }
-            v
+            if !obj.get("channels").is_some_and(Value::is_array) {
+                obj.insert("channels".to_string(), json!([]));
+            }
+            if !obj.get("channel_ids").is_some_and(Value::is_array) {
+                obj.insert("channel_ids".to_string(), json!([]));
+            }
+            if !obj.get("capabilities").is_some_and(Value::is_array) {
+                obj.insert("capabilities".to_string(), json!([]));
+            }
+            if !obj.get("status").is_some_and(Value::is_string) {
+                obj.insert("status".to_string(), json!("offline"));
+            }
+            Some(v)
         })
         .collect();
     json!({ "agents": arr })
@@ -959,10 +952,23 @@ mod tests {
         let e = ev(10100, "not-json", vec![]);
         let v = agents_from_events(std::slice::from_ref(&e));
         let arr = v.get("agents").and_then(Value::as_array).unwrap();
-        assert_eq!(
-            arr[0].get("pubkey").and_then(Value::as_str).unwrap(),
-            e.pubkey.to_hex()
-        );
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn agents_ignores_policy_only_profiles() {
+        let e = ev(10100, r#"{"channel_add_policy":"owner_only"}"#, vec![]);
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let arr = v.get("agents").and_then(Value::as_array).unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn agents_accepts_display_name_when_name_is_empty() {
+        let e = ev(10100, r#"{"name":"","display_name":"Alice"}"#, vec![]);
+        let v = agents_from_events(std::slice::from_ref(&e));
+        let arr = v.get("agents").and_then(Value::as_array).unwrap();
+        assert_eq!(arr[0].get("name").and_then(Value::as_str), Some("Alice"));
     }
 
     #[test]
