@@ -45,7 +45,7 @@ export function buildActivityListRows({
   return [
     ...items.map(
       (item): ActivityListRow => ({
-        key: `inbox:${item.id}`,
+        key: `inbox:${item.conversationId}`,
         kind: "inbox",
         item,
         sortAt: item.latestActivityAt,

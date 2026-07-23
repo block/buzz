@@ -4,7 +4,7 @@ import test from "node:test";
 import { buildActivityListRows } from "./activityListRows.ts";
 
 function inboxItem(id, latestActivityAt) {
-  return { id, latestActivityAt };
+  return { conversationId: `conversation:${id}`, id, latestActivityAt };
 }
 
 function draftItem(key, updatedAt, rootStatus = "available") {
@@ -42,4 +42,24 @@ test("Activity All excludes completed reminders and deleted-root drafts", () => 
   });
 
   assert.deepEqual(rows, []);
+});
+
+test("Activity conversation keys stay stable when the representative changes", () => {
+  const first = buildActivityListRows({
+    drafts: [],
+    items: [
+      { conversationId: "thread-root", id: "reply-1", latestActivityAt: 1 },
+    ],
+    reminders: [],
+  });
+  const second = buildActivityListRows({
+    drafts: [],
+    items: [
+      { conversationId: "thread-root", id: "reply-2", latestActivityAt: 2 },
+    ],
+    reminders: [],
+  });
+
+  assert.equal(first[0].key, "inbox:thread-root");
+  assert.equal(second[0].key, first[0].key);
 });

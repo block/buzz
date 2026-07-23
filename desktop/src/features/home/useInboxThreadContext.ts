@@ -7,10 +7,14 @@ import { relayClient } from "@/shared/api/relayClient";
 import { buildChannelReactionAuxFilter } from "@/shared/api/relayChannelFilters";
 import { getEventById } from "@/shared/api/tauri";
 import type { FeedItem, RelayEvent } from "@/shared/api/types";
-import { HOME_MENTION_EVENT_KINDS } from "@/shared/constants/kinds";
+import {
+  CHANNEL_TIMELINE_CONTENT_KINDS,
+  HOME_MENTION_EVENT_KINDS,
+} from "@/shared/constants/kinds";
 
 type InboxThreadContextResult = {
   events: RelayEvent[];
+  hasLoadError: boolean;
   isLoading: boolean;
   /** kind:7 events referencing the context messages, fetched by `#e`. */
   reactionEvents: RelayEvent[];
@@ -19,6 +23,10 @@ type InboxThreadContextResult = {
 };
 
 const THREAD_CONTEXT_LIMIT = 100;
+const MAX_ANCESTOR_HOPS = 50;
+const CHANNEL_CONTEXT_EVENT_KINDS = new Set<number>(
+  CHANNEL_TIMELINE_CONTENT_KINDS,
+);
 
 function dedupeEvents(events: RelayEvent[]): RelayEvent[] {
   const eventsById = new Map<string, RelayEvent>();
@@ -36,8 +44,14 @@ function getThreadRootId(event: RelayEvent): string {
 export function useInboxThreadContext(
   item: FeedItem | null,
   channelMessages: RelayEvent[] | undefined,
+  options: {
+    fullChannel?: boolean;
+    hasChannelLoadError?: boolean;
+    isChannelLoading?: boolean;
+  } = {},
 ): InboxThreadContextResult {
   const [fetchedEvents, setFetchedEvents] = React.useState<RelayEvent[]>([]);
+  const [hasLoadError, setHasLoadError] = React.useState(false);
   const [isLoading, setIsLoading] = React.useState(false);
 
   const selectedEvent = React.useMemo(
@@ -52,12 +66,14 @@ export function useInboxThreadContext(
     ? getThreadReference(selectedEvent.tags).parentId
     : null;
   const selectedChannelId = item?.channelId ?? null;
+  const fullChannel = options.fullChannel === true;
 
   React.useEffect(() => {
     let isCancelled = false;
 
-    if (!selectedEvent || !selectedThreadRootId) {
+    if (fullChannel || !selectedEvent || !selectedThreadRootId) {
       setFetchedEvents([]);
+      setHasLoadError(false);
       setIsLoading(false);
       return () => {
         isCancelled = true;
@@ -72,6 +88,7 @@ export function useInboxThreadContext(
       }
 
       setIsLoading(true);
+      setHasLoadError(false);
 
       try {
         const selection = {
@@ -80,22 +97,48 @@ export function useInboxThreadContext(
           selectedParentId,
           selectedThreadRootId: threadRootId,
         };
-        const eventIds = new Set<string>([threadRootId]);
-        if (selectedParentId) {
-          eventIds.add(selectedParentId);
-        }
+        const ancestorEventsPromise = (async () => {
+          const eventsById = new Map<string, RelayEvent>();
+          let failed = false;
 
-        const ancestorEventsPromise = Promise.all(
-          [...eventIds]
-            .filter((eventId) => eventId !== targetEvent.id)
-            .map(async (eventId) => {
-              try {
-                return await getEventById(eventId);
-              } catch {
-                return null;
-              }
-            }),
-        );
+          const fetchEvent = async (eventId: string) => {
+            if (eventId === targetEvent.id || eventsById.has(eventId)) {
+              return eventsById.get(eventId) ?? targetEvent;
+            }
+
+            try {
+              const event = await getEventById(eventId);
+              eventsById.set(event.id, event);
+              return event;
+            } catch {
+              failed = true;
+              return null;
+            }
+          };
+
+          if (threadRootId !== targetEvent.id) {
+            await fetchEvent(threadRootId);
+          }
+
+          let ancestorId = selectedParentId;
+          const seen = new Set<string>([targetEvent.id]);
+          let hops = 0;
+          while (
+            ancestorId &&
+            !seen.has(ancestorId) &&
+            hops < MAX_ANCESTOR_HOPS
+          ) {
+            seen.add(ancestorId);
+            const ancestor = await fetchEvent(ancestorId);
+            if (!ancestor || ancestorId === threadRootId) {
+              break;
+            }
+            ancestorId = getThreadReference(ancestor.tags).parentId;
+            hops += 1;
+          }
+
+          return { events: [...eventsById.values()], failed };
+        })();
 
         const descendantEventsPromise =
           selectedChannelId && threadRootId
@@ -106,9 +149,18 @@ export function useInboxThreadContext(
                   kinds: [...HOME_MENTION_EVENT_KINDS],
                   limit: THREAD_CONTEXT_LIMIT,
                 })
-                .catch(() => [])
-            : Promise.resolve([]);
-        const [ancestorEvents, descendantEvents] = await Promise.all([
+                .then((events) => ({ events, failed: false }))
+                .catch((error) => {
+                  console.error(
+                    "Failed to hydrate Activity thread context",
+                    selectedChannelId,
+                    threadRootId,
+                    error,
+                  );
+                  return { events: [] as RelayEvent[], failed: true };
+                })
+            : Promise.resolve({ events: [] as RelayEvent[], failed: false });
+        const [ancestorResult, descendantResult] = await Promise.all([
           ancestorEventsPromise,
           descendantEventsPromise,
         ]);
@@ -117,14 +169,20 @@ export function useInboxThreadContext(
           return;
         }
 
+        setHasLoadError(ancestorResult.failed || descendantResult.failed);
         setFetchedEvents(
           dedupeEvents(
-            [...ancestorEvents, ...descendantEvents].filter(
+            [...ancestorResult.events, ...descendantResult.events].filter(
               (event): event is RelayEvent =>
                 event !== null && isInboxThreadContextEvent(event, selection),
             ),
           ),
         );
+      } catch (error) {
+        if (!isCancelled) {
+          console.error("Failed to load Activity message context", error);
+          setHasLoadError(true);
+        }
       } finally {
         if (!isCancelled) {
           setIsLoading(false);
@@ -142,11 +200,21 @@ export function useInboxThreadContext(
     selectedEvent,
     selectedParentId,
     selectedThreadRootId,
+    fullChannel,
   ]);
 
   const events = React.useMemo(() => {
     if (!selectedEvent) {
       return [];
+    }
+
+    if (fullChannel) {
+      return dedupeEvents([
+        selectedEvent,
+        ...(channelMessages ?? []).filter((event) =>
+          CHANNEL_CONTEXT_EVENT_KINDS.has(event.kind),
+        ),
+      ]);
     }
 
     const localContext = (channelMessages ?? []).filter((event) => {
@@ -175,6 +243,7 @@ export function useInboxThreadContext(
   }, [
     channelMessages,
     fetchedEvents,
+    fullChannel,
     selectedChannelId,
     selectedEvent,
     selectedParentId,
@@ -240,7 +309,10 @@ export function useInboxThreadContext(
 
   return {
     events,
-    isLoading,
+    hasLoadError: fullChannel
+      ? options.hasChannelLoadError === true
+      : hasLoadError,
+    isLoading: fullChannel ? options.isChannelLoading === true : isLoading,
     reactionEvents,
     refreshReactions,
   };

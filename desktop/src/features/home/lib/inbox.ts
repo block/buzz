@@ -29,7 +29,8 @@ export type InboxFilter =
   | "activity"
   | "agent_activity"
   | "reminders"
-  | "drafts";
+  | "drafts"
+  | "custom";
 
 export type InboxItem = {
   avatarUrl: string | null;
@@ -55,6 +56,7 @@ export type InboxItem = {
   senderLabel: string;
   subject: string;
   timestampLabel: string;
+  unreadCount: number;
 };
 
 export type InboxTypeLabel = {
@@ -238,6 +240,29 @@ export function isThreadActivityItem(item: FeedItem) {
   return thread.parentId !== null && !isBroadcastReply(item.tags);
 }
 
+function isThreadReplyItem(item: FeedItem) {
+  const thread = getThreadReference(item.tags);
+  return thread.parentId !== null && !isBroadcastReply(item.tags);
+}
+
+function uniqueItemsById(items: readonly FeedItem[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) return false;
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function isItemUnread(
+  item: FeedItem,
+  readAt: number | null,
+  getMessageReadAt?: (messageId: string) => number | null,
+) {
+  const messageReadAt = getMessageReadAt?.(item.id) ?? null;
+  return item.createdAt > Math.max(readAt ?? 0, messageReadAt ?? 0);
+}
+
 function activityHeadline(item: FeedItem) {
   return feedHeadline(item);
 }
@@ -338,18 +363,30 @@ function categoryPriority(category: FeedItemCategory) {
   }
 }
 
-function getInboxThreadKey(item: FeedItem) {
+function getInboxThreadKey(
+  item: FeedItem,
+  channelById: ReadonlyMap<string, InboxChannel>,
+) {
   const projectReference = getProjectInboxReference(item);
   if (projectReference) {
     return `project:${projectReference.repoAddress}:${projectReference.rootId}`;
   }
 
-  const thread = getThreadReference(item.tags);
-  return thread.rootId ?? thread.parentId ?? item.id;
+  const channelType = resolveItemChannel(item, channelById).type;
+  return getInboxConversationId(
+    item.tags,
+    item.id,
+    item.channelId,
+    channelType,
+    item.kind,
+  );
 }
 
-function getStableConversationId(item: FeedItem) {
-  return getInboxItemConversationId(item);
+function getStableConversationId(
+  item: FeedItem,
+  channelById: ReadonlyMap<string, InboxChannel>,
+) {
+  return getInboxThreadKey(item, channelById);
 }
 
 /**
@@ -361,6 +398,8 @@ function getStableConversationId(item: FeedItem) {
 export function getInboxConversationId(
   tags: string[][],
   eventId: string,
+  channelId?: string | null,
+  channelType?: string,
   kind?: number,
 ): string {
   if (kind !== undefined) {
@@ -374,13 +413,37 @@ export function getInboxConversationId(
     }
   }
 
+  if (channelType === "dm" && channelId) {
+    return `dm:${channelId}`;
+  }
+
   const thread = getThreadReference(tags);
   return thread.rootId ?? thread.parentId ?? eventId;
 }
 
 /** Returns the stable conversation identity for a complete Inbox feed item. */
 export function getInboxItemConversationId(item: FeedItem) {
-  return getInboxConversationId(item.tags, item.id, item.kind);
+  return getInboxConversationId(
+    item.tags,
+    item.id,
+    item.channelId,
+    item.channelType,
+    item.kind,
+  );
+}
+
+/** Finds the Activity row containing an event, including grouped events. */
+export function findInboxItemByEventId(
+  items: readonly InboxItem[],
+  eventId: string,
+): InboxItem | null {
+  return (
+    items.find((item) => item.id === eventId) ??
+    items.find((item) =>
+      item.groupItems.some((groupItem) => groupItem.id === eventId),
+    ) ??
+    null
+  );
 }
 
 function formatInboxTimestamp(unixSeconds: number) {
@@ -450,11 +513,20 @@ export function buildInboxItems({
   channels,
   currentPubkey,
   feed,
+  getChannelReadAt,
+  getMessageReadAt,
+  getThreadReadAt,
   profiles,
 }: {
   channels?: InboxChannel[];
   currentPubkey?: string;
   feed?: HomeFeedResponse;
+  getChannelReadAt?: (channelId: string) => number | null;
+  getMessageReadAt?: (messageId: string) => number | null;
+  getThreadReadAt?: (
+    rootId: string,
+    channelId?: string | null,
+  ) => number | null;
   profiles?: UserProfileLookup;
 }): InboxItem[] {
   if (!feed) {
@@ -493,7 +565,7 @@ export function buildInboxItems({
   >();
 
   for (const item of feedItems) {
-    const threadKey = getInboxThreadKey(item);
+    const threadKey = getInboxThreadKey(item, channelById);
     const group = threadGroups.get(threadKey) ?? {
       items: [],
       latestActivityAt: 0,
@@ -502,7 +574,7 @@ export function buildInboxItems({
 
     group.items.push(item);
     group.latestActivityAt = Math.max(group.latestActivityAt, item.createdAt);
-    if (item.id === getStableConversationId(item)) {
+    if (item.id === getStableConversationId(item, channelById)) {
       group.rootItem = item;
     }
 
@@ -514,11 +586,49 @@ export function buildInboxItems({
       ([, left], [, right]) => right.latestActivityAt - left.latestActivityAt,
     )
     .map(([, group]) => {
-      const conversationId = getStableConversationId(group.items[0]);
+      const conversationId = getStableConversationId(
+        group.items[0],
+        channelById,
+      );
       const latestItem = group.items.reduce((latest, current) =>
         current.createdAt > latest.createdAt ? current : latest,
       );
-      const item = latestItem;
+      const groupChannel = resolveGroupChannel(
+        latestItem,
+        group.items,
+        channelById,
+      );
+      const groupChannelId = group.items.find(
+        (candidate) => candidate.channelId,
+      )?.channelId;
+      const channelReadAt =
+        groupChannel.type === "dm" && groupChannelId && getChannelReadAt
+          ? getChannelReadAt(groupChannelId)
+          : undefined;
+      const uniqueGroupItems = uniqueItemsById(group.items);
+      const threadReplyItems = uniqueGroupItems.filter(isThreadReplyItem);
+      const threadReadAt =
+        groupChannel.type !== "dm" &&
+        threadReplyItems.length > 0 &&
+        getThreadReadAt
+          ? getThreadReadAt(conversationId, groupChannelId)
+          : undefined;
+      const unreadItems = (
+        channelReadAt !== undefined
+          ? uniqueGroupItems.filter((candidate) =>
+              isItemUnread(candidate, channelReadAt),
+            )
+          : threadReplyItems.length > 0 && getMessageReadAt
+            ? threadReplyItems.filter((candidate) =>
+                isItemUnread(candidate, null, getMessageReadAt),
+              )
+            : threadReadAt !== undefined
+              ? threadReplyItems.filter((candidate) =>
+                  isItemUnread(candidate, threadReadAt),
+                )
+              : []
+      ).sort((left, right) => left.createdAt - right.createdAt);
+      const item = unreadItems[0] ?? latestItem;
       const categories = [
         ...new Set(group.items.map((groupItem) => groupItem.category)),
       ].sort((left, right) => categoryPriority(left) - categoryPriority(right));
@@ -534,7 +644,6 @@ export function buildInboxItems({
         item.tags,
         profiles,
       );
-      const groupChannel = resolveGroupChannel(item, group.items, channelById);
       const channelLabel = groupChannel.name;
       const displayItem: FeedItem = {
         ...item,
@@ -561,6 +670,7 @@ export function buildInboxItems({
         senderLabel,
         subject,
         timestampLabel: formatInboxTimestamp(group.latestActivityAt),
+        unreadCount: unreadItems.length,
       };
     });
 }
