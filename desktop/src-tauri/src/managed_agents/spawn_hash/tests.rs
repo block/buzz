@@ -149,6 +149,19 @@ fn record_prompt_edit_changes_hash() {
 }
 
 #[test]
+fn record_name_edit_changes_hash() {
+    // Renames regenerate AGENTS.md; running agents must restart to see the
+    // new display name in core memory / mention routing.
+    let rec = record();
+    let mut edited = record();
+    edited.name = "Renamed Scout".into();
+    assert_ne!(
+        spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
+    );
+}
+
+#[test]
 fn persona_runtime_edit_changes_hash() {
     // The harness command resolves live personas at spawn, so a persona
     // runtime change means a restart WOULD change what runs → badge trips.

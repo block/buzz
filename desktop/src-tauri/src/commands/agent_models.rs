@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use nostr::Keys;
 use serde::Deserialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use super::agent_model_process::run_agent_models_command;
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
@@ -969,6 +969,10 @@ pub async fn update_managed_agent(
             ));
         }
     }
+
+    // Persona/team mutate paths emit this so the Agents UI refreshes; do the
+    // same after instance edits (rename, respond-to, prompt, …).
+    let _ = app.emit("agents-data-changed", ());
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,
