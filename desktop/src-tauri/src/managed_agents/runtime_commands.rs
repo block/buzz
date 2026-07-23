@@ -160,16 +160,21 @@ pub fn list_managed_agent_runtimes(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    let exited_keys: Vec<_> = runtimes
+    // Reap exited children the same way as `sync_managed_agent_processes` so
+    // unexpected harness deaths set `last_error` / `last_exit_code` (and the
+    // Agents UI can show them) instead of silently clearing the runtime
+    // (#2453). Capture wait results before removing map entries.
+    let exited: Vec<_> = runtimes
         .iter_mut()
         .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
+            Ok(Some(status)) => Some((key.clone(), Ok(status), runtime.log_path.clone())),
+            Err(error) => Some((key.clone(), Err(error), runtime.log_path.clone())),
             Ok(None) => None,
         })
         .collect();
-    let records_changed = !exited_keys.is_empty();
+    let records_changed = !exited.is_empty();
     let mut statuses = Vec::new();
-    for key in exited_keys {
+    for (key, wait_result, log_path) in exited {
         runtimes.remove(&key);
         super::remove_agent_runtime_receipt(&app, &key);
         state.clear_agent_session_cache(&key);
@@ -179,6 +184,28 @@ pub fn list_managed_agent_runtimes(
         {
             record.updated_at = crate::util::now_iso();
             record.last_stopped_at = Some(record.updated_at.clone());
+            match wait_result {
+                Ok(status) => {
+                    record.last_exit_code = status.code();
+                    if status.success() {
+                        // Stopped without our stop command — still a signal.
+                        record.last_error = Some("agent runtime exited unexpectedly".to_string());
+                        record.last_error_code = None;
+                    } else {
+                        let log_err = super::meaningful_agent_error_from_log(&log_path)
+                            .unwrap_or_else(|| super::storage::AgentLogError {
+                                message: format!("harness exited with status {status}"),
+                                code: None,
+                            });
+                        record.last_error = Some(log_err.message);
+                        record.last_error_code = log_err.code;
+                    }
+                }
+                Err(error) => {
+                    record.last_error = Some(format!("failed to inspect process state: {error}"));
+                    record.last_error_code = None;
+                }
+            }
             let status = status_for_with(
                 &app,
                 record,
@@ -193,6 +220,9 @@ pub fn list_managed_agent_runtimes(
             emit_status(&app, &status);
             statuses.push(status);
         }
+    }
+    if records_changed {
+        let _ = app.emit("agents-data-changed", ());
     }
     statuses.extend(runtimes.iter().filter_map(|(key, runtime)| {
         let record = records
@@ -212,7 +242,8 @@ pub fn list_managed_agent_runtimes(
     }));
     drop(runtimes);
     // Records are only mutated above when a runtime exited — skip the store
-    // rewrite on the common nothing-changed poll.
+    // rewrite on the common nothing-changed poll. (`agents-data-changed` is
+    // emitted earlier so the Agents list refreshes alongside status events.)
     if records_changed {
         save_managed_agents(&app, &records)?;
     }
