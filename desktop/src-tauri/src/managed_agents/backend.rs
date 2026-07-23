@@ -375,6 +375,47 @@ pub fn provider_deploy(
         .ok_or_else(|| "deploy response missing agent_id".to_string())
 }
 
+/// Soft-stop a remote agent while keeping provider capacity (e.g. a warm lease).
+///
+/// Providers that do not implement `stop` return an error; callers treat that as
+/// best-effort. Soft stop is optional because Desktop's primary remote stop is
+/// the in-channel `!shutdown` mention the harness already understands.
+pub fn provider_stop(
+    binary: &Path,
+    agent_id: &str,
+    provider_config: &serde_json::Value,
+) -> Result<(), String> {
+    let request = serde_json::json!({
+        "op": "stop",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "agent_id": agent_id,
+        "provider_config": provider_config,
+    });
+    let _ = invoke_provider(binary, &request, Duration::from_secs(120))?;
+    Ok(())
+}
+
+/// Tear down remote capacity for a deployed agent (release lease / VM / etc.).
+///
+/// Called on forced remote delete so OSS providers like Crabbox do not leave
+/// paid boxes running after the Desktop record is gone. Providers that only
+/// implement `deploy` may return an error; the delete path logs and continues
+/// because the user already confirmed orphan risk.
+pub fn provider_destroy(
+    binary: &Path,
+    agent_id: &str,
+    provider_config: &serde_json::Value,
+) -> Result<(), String> {
+    let request = serde_json::json!({
+        "op": "destroy",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+        "agent_id": agent_id,
+        "provider_config": provider_config,
+    });
+    let _ = invoke_provider(binary, &request, Duration::from_secs(180))?;
+    Ok(())
+}
+
 /// Validate provider_config: flat object, scalar values, no secret-like keys.
 pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String> {
     let obj = config
@@ -520,11 +561,70 @@ fn is_executable(path: &Path) -> bool {
 pub struct BackendProviderInfo {
     pub id: String,
     pub binary_path: String,
+    /// Friendly label from a best-effort `info` probe (`name` field). Falls
+    /// back to `id` when the probe fails or omits a name so the Desktop
+    /// "Run on" picker never has to invent presentation strings.
+    pub name: String,
+    /// Optional short description from the `info` probe for the create dialog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional provider protocol version from the `info` probe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+}
+
+/// Probe a discovered provider for presentation metadata. Never fails the
+/// discovery list — a hung or broken provider still appears as `id` so the
+/// user can see it and the trust warning still names the binary path.
+pub fn probe_provider_info(binary: &Path) -> (String, Option<String>, Option<String>) {
+    let id_fallback = binary
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("buzz-backend-"))
+        .unwrap_or("provider");
+    let request = serde_json::json!({
+        "op": "info",
+        "request_id": uuid::Uuid::new_v4().to_string(),
+    });
+    match invoke_provider(binary, &request, Duration::from_secs(3)) {
+        Ok(resp) => {
+            let name = resp
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(id_fallback)
+                .to_string();
+            let description = resp
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let version = resp
+                .get("version")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            (name, description, version)
+        }
+        Err(_) => (id_fallback.to_string(), None, None),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_provider_info_falls_back_when_binary_missing() {
+        let (name, description, version) =
+            probe_provider_info(Path::new("/nonexistent/buzz-backend-demo"));
+        assert_eq!(name, "demo");
+        assert!(description.is_none());
+        assert!(version.is_none());
+    }
 
     #[test]
     fn redact_secrets_replaces_nsec() {

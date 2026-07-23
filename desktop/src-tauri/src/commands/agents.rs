@@ -7,8 +7,8 @@ use crate::{
         build_managed_agent_summary, current_instance_id, discover_provider_candidates,
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
         load_teams, managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
-        provider_deploy, resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        provider_deploy, provider_destroy, resolve_provider_binary, save_managed_agents,
+        start_managed_agent_process, stop_managed_agent_process, stop_managed_agent_workspace_pair,
         sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
         CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
         ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
@@ -452,8 +452,9 @@ pub(super) async fn start_local_agent_with_preflight(
 /// spawn_blocking, and persists the result (backend_agent_id or last_error).
 ///
 /// Idempotency: calling deploy on an already-deployed agent sends the same payload
-/// again. Providers are expected to handle this as an update-in-place or no-op —
-/// the protocol does not include an explicit `undeploy` operation (deferred to v2).
+/// again. Providers are expected to handle this as an update-in-place or no-op.
+/// Forced remote delete invokes provider `destroy` (best-effort) so capacity
+/// providers like Crabbox can release the lease.
 ///
 /// Returns Ok(()) on success, Err(message) on failure. Either way the record is
 /// updated and saved before returning.
@@ -1271,7 +1272,7 @@ pub async fn delete_managed_agent(
             // invariant — a buggy or compromised IPC caller cannot silently orphan a live
             // remote deployment. The frontend sends force_remote_delete: true only after
             // the user confirms the orphan warning.
-            if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
+            let remote_destroy = if let Some(record) = records.iter().find(|r| r.pubkey == pubkey) {
                 if record.backend != BackendKind::Local
                     && record.backend_agent_id.is_some()
                     && !force_remote_delete.unwrap_or(false)
@@ -1280,6 +1281,58 @@ pub async fn delete_managed_agent(
                         "cannot delete a deployed remote agent without force_remote_delete: true"
                             .to_string(),
                     );
+                }
+                // Capture destroy target before we drop the record so forced
+                // deletes can release provider capacity (lease / VM).
+                match (&record.backend, &record.backend_agent_id) {
+                    (
+                        BackendKind::Provider {
+                            id,
+                            config,
+                        },
+                        Some(agent_id),
+                    ) if force_remote_delete.unwrap_or(false) => Some((
+                        id.clone(),
+                        config.clone(),
+                        agent_id.clone(),
+                        record.provider_binary_path.clone(),
+                    )),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // Best-effort remote teardown before local removal. Failure does not
+            // block delete — the user already confirmed orphan risk — but we try
+            // hard so Crabbox/etc. stop billing when the agent is deleted.
+            if let Some((provider_id, config, agent_id, cached_path)) = remote_destroy {
+                let bin_path = cached_path
+                    .map(std::path::PathBuf::from)
+                    .filter(|p| p.exists())
+                    .map(|p| p.canonicalize().unwrap_or(p))
+                    .filter(|canonical| {
+                        discover_provider_candidates().iter().any(|(id, cp)| {
+                            id == &provider_id
+                                && cp.canonicalize().ok().as_ref() == Some(canonical)
+                        })
+                    })
+                    .map_or_else(|| resolve_provider_binary(&provider_id), Ok);
+                match bin_path {
+                    Ok(path) => {
+                        if let Err(e) = provider_destroy(&path, &agent_id, &config) {
+                            eprintln!(
+                                "buzz-desktop: provider destroy failed for {pubkey} \
+                                 (agent_id={agent_id}, provider={provider_id}): {e}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "buzz-desktop: provider destroy skipped for {pubkey} \
+                             (provider={provider_id}): {e}"
+                        );
+                    }
                 }
             }
 

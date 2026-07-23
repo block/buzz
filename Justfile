@@ -898,6 +898,34 @@ _release-pr lane version:
 
 # ─── Agent Harness ────────────────────────────────────────────────────────────
 
+# Install the Crabbox Desktop backend provider so agents can Run on → Crabbox.
+# Builds release agent binaries, puts the provider on PATH (~/.local/bin), and
+# prints the Desktop setup steps. Requires the crabbox CLI separately:
+#   brew install openclaw/tap/crabbox && crabbox login --url <broker>
+install-backend-crabbox:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    echo "→ building buzz-acp / buzz-agent / buzz-cli / buzz-dev-mcp (release)…"
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-cli -p buzz-dev-mcp -p git-credential-nostr
+    release="{{justfile_directory()}}/target/release"
+    export PATH="$release:$PATH"
+    "{{justfile_directory()}}/examples/buzz-backend-crabbox/install.sh"
+    echo
+    if command -v crabbox >/dev/null 2>&1; then
+        echo "✓ crabbox CLI: $(command -v crabbox) ($(crabbox --version 2>/dev/null || echo present))"
+    else
+        echo "! crabbox CLI not found. Install: brew install openclaw/tap/crabbox"
+        echo "  then: crabbox login --url <broker-url> && crabbox doctor"
+    fi
+    echo
+    echo "Desktop: restart Buzz, create/start an agent, choose Run on → Crabbox."
+    echo "Docs: docs/backend-providers/crabbox.md"
+
+# Offline unit tests for the Crabbox backend provider (no live Crabbox required)
+test-backend-crabbox:
+    python3 "{{justfile_directory()}}/examples/buzz-backend-crabbox/test_provider.py"
+
 # Run a goose agent connected to a Buzz relay (foreground)
 goose relay="ws://localhost:3000" agents="1" heartbeat="0" prompt="" key="$BUZZ_PRIVATE_KEY":
     #!/usr/bin/env bash

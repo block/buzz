@@ -56,8 +56,14 @@ export function ManagedAgentRow({
   onSelectLogAgent: (pubkey: string | null) => void;
 }) {
   const isLocal = agent.backend.type === "local";
+  // Prefer a human backend id (e.g. "crabbox") and surface the remote handle
+  // Desktop got back from deploy (lease slug / provider agent id) when present.
   const runtimeSource =
-    agent.backend.type === "provider" ? `Remote (${agent.backend.id})` : null;
+    agent.backend.type === "provider"
+      ? agent.backendAgentId
+        ? `Remote · ${agent.backend.id} · ${agent.backendAgentId}`
+        : `Remote · ${agent.backend.id}`
+      : null;
   const personaLabel = agent.personaId
     ? (personaLabelsById[agent.personaId] ?? null)
     : null;
@@ -408,9 +414,21 @@ function RuntimeBlock({
 }
 
 function AgentOriginBadge({ agent }: { agent: ManagedAgent }) {
+  if (agent.backend.type === "local") {
+    return <Badge variant="outline">Local</Badge>;
+  }
+  // Surface the backend id so Crabbox/Blox/etc. read as product destinations,
+  // not a generic "Remote" blob. Title-case single-token ids for polish.
+  const raw = agent.backend.id.trim();
+  const label =
+    raw.length === 0
+      ? "Remote"
+      : raw.includes("-") || raw.includes("_")
+        ? raw
+        : raw.charAt(0).toUpperCase() + raw.slice(1);
   return (
-    <Badge variant="outline">
-      {agent.backend.type === "local" ? "Local" : "Remote"}
+    <Badge variant="outline" title={agent.backendAgentId ?? label}>
+      {label}
     </Badge>
   );
 }

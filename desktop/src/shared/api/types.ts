@@ -420,6 +420,10 @@ export type RespondToMode = "owner-only" | "allowlist" | "anyone";
 export type BackendProviderCandidate = {
   id: string;
   binaryPath: string;
+  /** Friendly label from the provider `info` probe; falls back to `id`. */
+  name: string;
+  description?: string | null;
+  version?: string | null;
 };
 
 export type BackendProviderProbeResult = {

@@ -13,6 +13,16 @@ It demonstrates two identity paths:
 
 See [`countdown-bot/README.md`](countdown-bot/README.md) for usage.
 
+## `buzz-backend-crabbox/`
+
+A Desktop **backend provider** that deploys managed agents onto
+[Crabbox](https://crabbox.sh) remote boxes. Install as
+`~/.local/bin/buzz-backend-crabbox`, then choose **Run on → crabbox** when
+creating or starting an agent.
+
+See [`buzz-backend-crabbox/README.md`](buzz-backend-crabbox/README.md) and
+[`docs/backend-providers/crabbox.md`](../docs/backend-providers/crabbox.md).
+
 ## `meadow-core/`
 
 A persona-pack example for Buzz agents.

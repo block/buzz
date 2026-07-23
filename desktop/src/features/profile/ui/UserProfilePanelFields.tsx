@@ -363,9 +363,11 @@ export function buildOwnerFields({
   }
 
   if (managedAgent?.backend.type === "provider") {
-    const backendLabel = managedAgent.backend.id;
+    const backendLabel = managedAgent.backendAgentId
+      ? `${managedAgent.backend.id} · ${managedAgent.backendAgentId}`
+      : managedAgent.backend.id;
     fields.push({
-      copyValue: backendLabel,
+      copyValue: managedAgent.backendAgentId ?? managedAgent.backend.id,
       displayValue: backendLabel,
       icon: Server,
       label: "Backend",
