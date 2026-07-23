@@ -58,7 +58,10 @@ async function sharePersonaToCatalog(
 ) {
   await page.getByLabel(`Open actions for ${displayName}`).click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  await page.getByTestId("persona-share-show-in-catalog").click();
+  await page.getByTestId("persona-share-catalog-access").click();
+  await page
+    .getByRole("menuitemradio", { name: "Agent only", exact: true })
+    .click();
   await page
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })
@@ -204,9 +207,7 @@ test("catalog hides built-ins and shows the shared-agent empty state", async ({
   await page.getByLabel("Open actions for Fizz").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
   await expect(page.getByTestId("persona-share-catalog")).toHaveCount(0);
-  await expect(page.getByTestId("persona-share-show-in-catalog")).toHaveCount(
-    0,
-  );
+  await expect(page.getByTestId("persona-share-catalog-access")).toHaveCount(0);
 });
 
 test("catalog empty state remains available after reopening", async ({
@@ -1317,7 +1318,7 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  const catalogToggle = page.getByTestId("persona-share-show-in-catalog");
+  const catalogAccess = page.getByTestId("persona-share-catalog-access");
   const shareDialog = page.getByTestId("persona-share-dialog");
   const shareMainCard = shareDialog.getByTestId("persona-share-main-card");
   const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
@@ -1346,10 +1347,17 @@ This deliberately long fenced-code example must not establish the minimum width 
   ).toBeLessThanOrEqual(
     (shareMainCardBox?.y ?? 0) + (shareMainCardBox?.height ?? 0),
   );
-  await expect(catalogToggle).toHaveAttribute("aria-checked", "false");
+  await expect(catalogAccess).toHaveText("Not shared");
   await expect(publishCatalogUpdatesButton).toHaveCount(0);
-  await catalogToggle.click();
-  await expect(catalogToggle).toHaveAttribute("aria-checked", "true");
+  await catalogAccess.click();
+  await expect(page.getByRole("menuitemradio")).toHaveText([
+    "Not shared",
+    "Agent only",
+  ]);
+  await page
+    .getByRole("menuitemradio", { name: "Agent only", exact: true })
+    .click();
+  await expect(catalogAccess).toHaveText("Agent only");
   await expect(publishCatalogUpdatesButton).toHaveCount(0);
   await page
     .getByTestId("persona-share-dialog")
@@ -1415,19 +1423,19 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  await expect(catalogToggle).toHaveAttribute("aria-checked", "true");
+  await expect(catalogAccess).toHaveText("Agent only");
   await expect(publishCatalogUpdatesButton).toBeVisible();
-  const [catalogToggleBox, publishCatalogUpdatesButtonBox] = await Promise.all([
-    catalogToggle.boundingBox(),
+  const [catalogAccessBox, publishCatalogUpdatesButtonBox] = await Promise.all([
+    catalogAccess.boundingBox(),
     publishCatalogUpdatesButton.boundingBox(),
   ]);
   expect(
     (publishCatalogUpdatesButtonBox?.x ?? 0) +
       (publishCatalogUpdatesButtonBox?.width ?? 0),
-  ).toBeLessThan(catalogToggleBox?.x ?? 0);
+  ).toBeLessThan(catalogAccessBox?.x ?? 0);
   await publishCatalogUpdatesButton.click();
   await expect(publishCatalogUpdatesButton).toHaveCount(0);
-  await expect(catalogToggle).toHaveAttribute("aria-checked", "true");
+  await expect(catalogAccess).toHaveText("Agent only");
   await page
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })
@@ -1446,9 +1454,12 @@ This deliberately long fenced-code example must not establish the minimum width 
 
   await page.getByLabel("Open actions for Catalog Analyst").click();
   await page.getByRole("menuitem", { name: "Share" }).click();
-  await expect(catalogToggle).toHaveAttribute("aria-checked", "true");
+  await expect(catalogAccess).toHaveText("Agent only");
   await expect(publishCatalogUpdatesButton).toHaveCount(0);
-  await catalogToggle.click();
+  await catalogAccess.click();
+  await page
+    .getByRole("menuitemradio", { name: "Not shared", exact: true })
+    .click();
   await page
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })
@@ -1511,6 +1522,7 @@ test("share access controls include the selected memories", async ({
     (element) => element.getBoundingClientRect().height,
   );
   const linkAccess = shareDialog.getByLabel("What to include in the link");
+  const catalogAccess = shareDialog.getByLabel("What to share in the catalog");
   const recipientField = page.getByTestId("persona-share-recipient-field");
   const emptyRecipientFieldBox = await recipientField.boundingBox();
   await expect(shareDialog.getByTestId("persona-share-send")).toHaveCount(0);
@@ -1522,6 +1534,15 @@ test("share access controls include the selected memories", async ({
   await expect(linkAccess).toHaveCSS("text-decoration-line", "none");
   await expect(linkAccess).toHaveCSS("padding-left", "8px");
   await expect(linkAccess).toHaveCSS("padding-right", "8px");
+  await expect(catalogAccess).toHaveText("Not shared");
+  await catalogAccess.click();
+  await expect(page.getByRole("menuitemradio")).toHaveText([
+    "Not shared",
+    "Agent only",
+    "Agent + core memory",
+    "Agent + all memories",
+  ]);
+  await page.keyboard.press("Escape");
   const copyLinkButton = shareDialog.getByTestId("persona-share-copy-link");
   const [linkAccessBox, copyLinkButtonBox] = await Promise.all([
     linkAccess.boundingBox(),

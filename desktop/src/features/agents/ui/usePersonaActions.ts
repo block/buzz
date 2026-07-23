@@ -19,8 +19,11 @@ import {
 } from "@/features/agents/hooks";
 import { getPersonaLibraryState } from "@/features/agents/lib/catalog";
 import {
+  type CatalogPersonaShareLevel,
+  readCatalogPersonaMemoryLevels,
   readPublishedCatalogPersonaVersions,
   readSharedCatalogPersonaIds,
+  writeCatalogPersonaMemoryLevels,
   writePublishedCatalogPersonaVersions,
   writeSharedCatalogPersonaIds,
 } from "@/features/agents/lib/personaCatalogVisibility";
@@ -96,6 +99,8 @@ export function usePersonaActions() {
   const [sharedCatalogPersonaIds, setSharedCatalogPersonaIds] = React.useState<
     string[]
   >(readSharedCatalogPersonaIds);
+  const [catalogPersonaMemoryLevels, setCatalogPersonaMemoryLevels] =
+    React.useState(readCatalogPersonaMemoryLevels);
   const [publishedCatalogPersonaVersions, setPublishedCatalogPersonaVersions] =
     React.useState<Record<string, string>>(readPublishedCatalogPersonaVersions);
   const [personaNoticeMessage, setPersonaNoticeMessage] = React.useState<
@@ -411,12 +416,20 @@ export function usePersonaActions() {
     );
   }
 
-  function setPersonaCatalogVisibility(
+  function getPersonaCatalogShareLevel(
     persona: AgentPersona,
-    visible: boolean,
+  ): CatalogPersonaShareLevel {
+    if (!sharedCatalogPersonaIdSet.has(persona.id)) return "not-shared";
+    return catalogPersonaMemoryLevels[persona.id] ?? "none";
+  }
+
+  function setPersonaCatalogShareLevel(
+    persona: AgentPersona,
+    shareLevel: CatalogPersonaShareLevel,
   ) {
     if (persona.isBuiltIn) return;
 
+    const visible = shareLevel !== "not-shared";
     clearFeedback("library");
     setSharedCatalogPersonaIds((current) => {
       const next = new Set(current);
@@ -429,6 +442,16 @@ export function usePersonaActions() {
       const ids = Array.from(next);
       writeSharedCatalogPersonaIds(ids);
       return ids;
+    });
+    setCatalogPersonaMemoryLevels((current) => {
+      const next = { ...current };
+      if (shareLevel !== "not-shared") {
+        next[persona.id] = shareLevel;
+      } else {
+        delete next[persona.id];
+      }
+      writeCatalogPersonaMemoryLevels(next);
+      return next;
     });
     setPublishedCatalogPersonaVersions((current) => {
       const next = { ...current };
@@ -506,7 +529,8 @@ export function usePersonaActions() {
     personaToExportSnapshot,
     setPersonaToExportSnapshot,
     handleExportSnapshot,
-    setPersonaCatalogVisibility,
+    getPersonaCatalogShareLevel,
+    setPersonaCatalogShareLevel,
     hasPersonaCatalogUpdates,
     publishPersonaCatalogUpdates,
     sharedCatalogPersonaIdSet,

@@ -366,18 +366,18 @@ export function AgentsView() {
           hasCatalogUpdates={personas.hasPersonaCatalogUpdates(
             personas.personaToShare.persona,
           )}
-          isCatalogVisible={
-            personas.personaToShare.persona.isBuiltIn ||
-            personas.sharedCatalogPersonaIdSet.has(
-              personas.personaToShare.persona.id,
-            )
-          }
+          catalogShareLevel={personas.getPersonaCatalogShareLevel(
+            personas.personaToShare.persona,
+          )}
           isPending={personas.isPending}
           linkedAgentPubkey={personas.personaToShare.linkedAgentPubkey}
-          onCatalogVisibilityChange={(visible) => {
+          onCatalogShareLevelChange={(shareLevel) => {
             const shareTarget = personas.personaToShare;
             if (!shareTarget) return;
-            personas.setPersonaCatalogVisibility(shareTarget.persona, visible);
+            personas.setPersonaCatalogShareLevel(
+              shareTarget.persona,
+              shareLevel,
+            );
           }}
           onExport={() => {
             const shareTarget = personas.personaToShare;
