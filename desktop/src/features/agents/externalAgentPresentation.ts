@@ -1,6 +1,10 @@
 import * as React from "react";
 
-import type { RelayAgent } from "@/shared/api/types";
+import type {
+  RelayAgent,
+  UserProfileSummary,
+  UsersBatchResponse,
+} from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
 const STORAGE_PREFIX = "buzz.external-agent-presentations.v1";
@@ -160,4 +164,35 @@ export function applyExternalAgentPresentations(
       avatarUrl: presentation.avatarUrl ?? agent.avatarUrl,
     };
   });
+}
+
+export function applyExternalAgentPresentationToProfile<
+  T extends Pick<UserProfileSummary, "displayName" | "avatarUrl">,
+>(pubkey: string, profile: T, presentations: ExternalAgentPresentations): T {
+  const presentation = presentations[normalizePubkey(pubkey)];
+  if (!presentation) return profile;
+  return {
+    ...profile,
+    displayName: presentation.displayName ?? profile.displayName,
+    avatarUrl: presentation.avatarUrl ?? profile.avatarUrl,
+  };
+}
+
+export function applyExternalAgentPresentationsToUsersBatch(
+  response: UsersBatchResponse,
+  presentations: ExternalAgentPresentations,
+): UsersBatchResponse {
+  let changed = false;
+  const profiles = Object.fromEntries(
+    Object.entries(response.profiles).map(([pubkey, profile]) => {
+      const presented = applyExternalAgentPresentationToProfile(
+        pubkey,
+        profile,
+        presentations,
+      );
+      changed ||= presented !== profile;
+      return [pubkey, presented];
+    }),
+  );
+  return changed ? { ...response, profiles } : response;
 }

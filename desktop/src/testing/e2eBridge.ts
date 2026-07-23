@@ -1976,6 +1976,9 @@ function resetMockRelayAgents(config?: E2eConfig) {
   }));
 
   for (const seed of config?.mock?.relayAgents ?? []) {
+    mockRelayAgents = mockRelayAgents.filter(
+      (agent) => agent.pubkey.toLowerCase() !== seed.pubkey.toLowerCase(),
+    );
     const channels = mockChannels.filter((channel) => {
       return (
         seed.channelIds?.includes(channel.id) ||

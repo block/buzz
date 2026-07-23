@@ -157,7 +157,7 @@ async function invokeTauriExpectError(
 test("owned external agents are first-class, labeled, and presentation-customizable", async ({
   page,
 }) => {
-  const externalPubkey = "a0456f86".repeat(8);
+  const externalPubkey = TEST_IDENTITIES.alice.pubkey;
   await page.route("https://example.com/alice.png", async (route) => {
     await route.fulfill({
       body: Buffer.from(
@@ -175,9 +175,18 @@ test("owned external agents are first-class, labeled, and presentation-customiza
         name: "Alice",
         ownerPubkey: "deadbeef".repeat(8),
         agentType: "hermes",
-        channelNames: ["agents"],
+        channelNames: ["general", "agents"],
         respondTo: "anyone",
         status: "online",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: externalPubkey,
+        displayName: "Alice",
+        avatarUrl: null,
+        ownerPubkey: "deadbeef".repeat(8),
+        isAgent: true,
       },
     ],
   });
@@ -210,6 +219,19 @@ test("owned external agents are first-class, labeled, and presentation-customiza
   await expect(panel).toContainText("ALICE");
   await expect(
     panel.locator('img[src="https://example.com/alice.png"]'),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Close panel" }).click();
+
+  const aliceDm = page.getByTestId("channel-alice-tyler");
+  await expect(
+    aliceDm.locator('img[src="https://example.com/alice.png"]'),
+  ).toBeVisible();
+  await page.getByTestId("channel-general").click();
+  const alicePost = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  await expect(
+    alicePost.locator('img[src="https://example.com/alice.png"]'),
   ).toBeVisible();
 
   await page.reload();
