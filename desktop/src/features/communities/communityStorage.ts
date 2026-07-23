@@ -81,8 +81,11 @@ export function loadCommunities(): Community[] {
   }
 }
 
-export function saveCommunities(communities: Community[]): void {
-  setLocalStorageItemWithRecovery(COMMUNITIES_KEY, JSON.stringify(communities));
+export function saveCommunities(communities: Community[]): boolean {
+  return setLocalStorageItemWithRecovery(
+    COMMUNITIES_KEY,
+    JSON.stringify(communities),
+  );
 }
 
 export function clearCommunityStorage(storage: Storage = localStorage): void {
@@ -97,8 +100,8 @@ export function loadActiveCommunityId(): string | null {
   return localStorage.getItem(ACTIVE_COMMUNITY_KEY);
 }
 
-export function saveActiveCommunityId(id: string): void {
-  setLocalStorageItemWithRecovery(ACTIVE_COMMUNITY_KEY, id);
+export function saveActiveCommunityId(id: string): boolean {
+  return setLocalStorageItemWithRecovery(ACTIVE_COMMUNITY_KEY, id);
 }
 
 export function normalizeRelayUrl(url: string): string {
@@ -111,7 +114,9 @@ export function normalizeRelayUrl(url: string): string {
 export function shouldAutoConnectDefaultRelay(relayUrl: string): boolean {
   try {
     const parsed = new URL(normalizeRelayUrl(relayUrl));
-    return parsed.hostname !== "localhost" && parsed.hostname !== "127.0.0.1";
+    return !["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(
+      parsed.hostname,
+    );
   } catch {
     return false;
   }
@@ -145,7 +150,7 @@ export function initFirstCommunity(
   relayUrl: string,
   pubkey: string,
   name?: string,
-): Community {
+): Community | null {
   const normalizedUrl = normalizeRelayUrl(relayUrl);
   const trimmedName = name?.trim();
   const community: Community = {
@@ -155,7 +160,16 @@ export function initFirstCommunity(
     pubkey,
     addedAt: new Date().toISOString(),
   };
-  saveCommunities([community]);
-  saveActiveCommunityId(community.id);
+  const didSaveCommunities = saveCommunities([community]);
+  const didSaveActiveCommunity =
+    didSaveCommunities && saveActiveCommunityId(community.id);
+
+  // The quota-recovery helper reports failure instead of throwing. Do not let
+  // callers reload unless both writes landed; otherwise first launch can loop.
+  if (!didSaveCommunities || !didSaveActiveCommunity) {
+    clearCommunityStorage();
+    return null;
+  }
+
   return community;
 }

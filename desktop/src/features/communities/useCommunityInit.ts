@@ -107,9 +107,20 @@ export function useCommunityInit(
           ) {
             const identity = await getIdentity();
             if (cancelled) return;
-            initFirstCommunity(defaultRelayUrl, identity.pubkey);
-            if (!cancelled) {
+            const community = initFirstCommunity(
+              defaultRelayUrl,
+              identity.pubkey,
+            );
+            if (community && !cancelled) {
               window.location.reload();
+              return;
+            }
+            if (!cancelled) {
+              setResult({
+                isReady: false,
+                needsSetup: true,
+                defaultRelayUrl,
+              });
             }
             return;
           }
