@@ -288,18 +288,21 @@ pub async fn preview_agent_snapshot_import(
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
 }
 
-pub(super) fn validate_snapshot_import_relay_with<F>(
-    workspace_relay_url: &str,
+pub(super) fn validated_snapshot_import_relay_with<R, F>(
+    read_workspace_relay: R,
     validate: F,
-) -> Result<(), String>
+) -> Result<String, String>
 where
+    R: FnOnce() -> String,
     F: FnOnce(&crate::managed_agents::BackendKind, &str, &str) -> Result<(), String>,
 {
+    let workspace_relay_url = read_workspace_relay();
     validate(
         &crate::managed_agents::BackendKind::Local,
         "",
-        workspace_relay_url,
-    )
+        &workspace_relay_url,
+    )?;
+    Ok(workspace_relay_url)
 }
 
 // ── `confirm_agent_snapshot_import` ──────────────────────────────────────────
@@ -337,10 +340,12 @@ pub async fn confirm_agent_snapshot_import(
 
     // Snapshot imports always mint a local agent with an empty relay pin. Reject
     // a disallowed effective workspace relay before key generation or store I/O.
-    let workspace_relay_url = relay_ws_url_with_override(&state);
-    validate_snapshot_import_relay_with(&workspace_relay_url, |backend, pin, workspace| {
-        crate::managed_agents::validate_effective_local_agent_relay(backend, pin, workspace)
-    })?;
+    let workspace_relay_url = validated_snapshot_import_relay_with(
+        || relay_ws_url_with_override(&state),
+        |backend, pin, workspace| {
+            crate::managed_agents::validate_effective_local_agent_relay(backend, pin, workspace)
+        },
+    )?;
 
     // ── Resolve behavioral defaults ──────────────────────────────────────────
     let minted = resolve_snapshot_import_behavior(
@@ -527,8 +532,7 @@ pub async fn confirm_agent_snapshot_import(
     };
 
     // ── Phase 3b: publish kind:0 profile (async, outside lock) ───────────────
-    let relay_url =
-        effective_agent_relay_url(&record.relay_url, &relay_ws_url_with_override(&state));
+    let relay_url = effective_agent_relay_url(&record.relay_url, &workspace_relay_url);
     let profile_sync_error = sync_managed_agent_profile(
         &state,
         &relay_url,

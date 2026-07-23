@@ -726,16 +726,39 @@ fn full_rollback_at_teams_boundary_absent_agents_store() {
 }
 
 #[test]
+fn team_snapshot_import_carries_the_validated_relay_snapshot_to_io() {
+    let workspace_reads = std::cell::Cell::new(0);
+    let validated_relay = validated_team_snapshot_import_relay_with(
+        || {
+            workspace_reads.set(workspace_reads.get() + 1);
+            "wss://allowed.example".to_string()
+        },
+        |backend, pin, relay| {
+            assert_eq!(backend, &crate::managed_agents::BackendKind::Local);
+            assert!(pin.is_empty());
+            assert_eq!(relay, "wss://allowed.example");
+            Ok(())
+        },
+    )
+    .unwrap();
+
+    assert_eq!(validated_relay, "wss://allowed.example");
+    assert_eq!(workspace_reads.get(), 1);
+}
+
+#[test]
 fn team_snapshot_import_preflights_empty_pin_once_before_mint_or_store() {
     let calls = std::cell::Cell::new(0);
-    let result =
-        validate_team_snapshot_import_relay_with("wss://public.example", |backend, pin, relay| {
+    let result = validated_team_snapshot_import_relay_with(
+        || "wss://public.example".to_string(),
+        |backend, pin, relay| {
             calls.set(calls.get() + 1);
             assert_eq!(backend, &crate::managed_agents::BackendKind::Local);
             assert!(pin.is_empty());
             assert_eq!(relay, "wss://public.example");
             Err("blocked before mutation".into())
-        });
+        },
+    );
     assert_eq!(result.unwrap_err(), "blocked before mutation");
     assert_eq!(calls.get(), 1);
 }

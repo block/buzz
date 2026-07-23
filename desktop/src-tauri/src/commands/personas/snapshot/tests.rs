@@ -1,6 +1,6 @@
 use super::import::{
     decode_snapshot_from_bytes, reject_legacy_persona_filename, resolve_snapshot_import_behavior,
-    validate_snapshot_import_relay_with, AgentSnapshotImportResult, MAX_SNAPSHOT_JSON_BYTES,
+    validated_snapshot_import_relay_with, AgentSnapshotImportResult, MAX_SNAPSHOT_JSON_BYTES,
     MAX_SNAPSHOT_PNG_BYTES,
 };
 use super::*;
@@ -972,16 +972,27 @@ fn validate_encode_size_png_over_boundary_is_rejected() {
 }
 
 #[test]
-fn individual_snapshot_import_preflights_empty_pin_before_mint_or_store() {
-    let calls = std::cell::Cell::new(0);
-    let result =
-        validate_snapshot_import_relay_with("wss://public.example", |backend, pin, relay| {
-            calls.set(calls.get() + 1);
+fn individual_snapshot_import_carries_the_validated_relay_snapshot_to_io() {
+    let reads = std::cell::Cell::new(0);
+    let relay = validated_snapshot_import_relay_with(
+        || {
+            reads.set(reads.get() + 1);
+            "wss://allowed.example".into()
+        },
+        |backend, pin, relay| {
             assert_eq!(backend, &BackendKind::Local);
             assert!(pin.is_empty());
-            assert_eq!(relay, "wss://public.example");
-            Err("blocked before mutation".into())
-        });
-    assert_eq!(result.unwrap_err(), "blocked before mutation");
-    assert_eq!(calls.get(), 1);
+            assert_eq!(relay, "wss://allowed.example");
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(relay, "wss://allowed.example");
+    assert_eq!(reads.get(), 1);
+
+    let blocked = validated_snapshot_import_relay_with(
+        || "wss://public.example".into(),
+        |_, _, _| Err("blocked before mutation".into()),
+    );
+    assert_eq!(blocked.unwrap_err(), "blocked before mutation");
 }
