@@ -207,6 +207,20 @@ test("reconcilePreferredRuntimeFallback updates a hidden saved default", () => {
   assert.equal(reconcilePreferredRuntimeFallback(config, "goose"), config);
 });
 
+test("reconcilePreferredRuntimeFallback persists an unsaved displayed fallback", () => {
+  const config = {
+    env_vars: { SHARED: "kept" },
+    provider: "relay-mesh",
+    model: "auto",
+    preferred_runtime: null,
+  };
+
+  assert.deepEqual(reconcilePreferredRuntimeFallback(config, "buzz-agent"), {
+    ...config,
+    preferred_runtime: "buzz-agent",
+  });
+});
+
 // ── getPersonaModelOptions — codex/claude do not use global provider ──────────
 //
 // The discovery call in AgentDefinitionDialog passes

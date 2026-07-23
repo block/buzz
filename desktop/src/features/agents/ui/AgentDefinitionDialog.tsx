@@ -68,7 +68,7 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
-import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { useDefinitionAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import {
@@ -164,7 +164,7 @@ export function AgentDefinitionDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ open });
+  } = useDefinitionAgentDialogDefaults(initialValues, open);
   const selectableRuntimes = useSelectableAcpRuntimes(runtimes);
   const defaultRuntime = getDefaultPersonaRuntime(
     selectableRuntimes,

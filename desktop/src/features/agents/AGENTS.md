@@ -90,6 +90,8 @@ with a TypeScript lookup table or an id comparison in a component.
    editor persists its visible fallback on the next save. Its dependent
    provider/model defaults are also ignored for new implicit fallback agents,
    without changing the persisted configuration used by existing agents.
+   Create-mode dialogs use the implicit masked config; existing definition and
+   instance edit dialogs use the raw persisted config.
    `resolvePersonaRuntime` is the shared visibility boundary for every
    runtime-less deployment or provisioning path. Definition-to-instance starts
    use the stricter `resolveStartRuntimeForDefinition` wrapper; call one of

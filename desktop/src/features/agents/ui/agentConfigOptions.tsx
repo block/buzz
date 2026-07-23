@@ -199,19 +199,23 @@ export function resetConfigForHarnessChange(
 }
 
 /**
- * Align a stale or hidden saved preference with the fallback shown by a
- * runtime selector, clearing values that are not portable across harnesses.
+ * Align a missing, stale, or hidden saved preference with the shown fallback.
+ * A missing preference adopts the current context without clearing its draft;
+ * switching away from a saved harness clears values that are not portable.
  */
 export function reconcilePreferredRuntimeFallback(
   config: GlobalAgentConfig,
   fallbackRuntimeId: string | null,
 ): GlobalAgentConfig {
-  if (
-    !config.preferred_runtime ||
-    !fallbackRuntimeId ||
-    config.preferred_runtime === fallbackRuntimeId
-  ) {
+  if (!fallbackRuntimeId || config.preferred_runtime === fallbackRuntimeId) {
     return config;
+  }
+
+  if (!config.preferred_runtime) {
+    return {
+      ...config,
+      preferred_runtime: fallbackRuntimeId,
+    };
   }
 
   return resetConfigForHarnessChange(config, fallbackRuntimeId);
