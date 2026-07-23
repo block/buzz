@@ -89,12 +89,60 @@ pub(crate) fn validate_managed_agent_relay_pin(record: &ManagedAgentRecord) -> R
     validate_local_agent_relay(&record.backend, &record.relay_url)
 }
 
+/// Reject attachment of locally managed agents to a disallowed effective relay.
+/// Unknown pubkeys and provider-backed records are outside this policy.
+pub(crate) fn validate_local_agent_members(
+    records: &[ManagedAgentRecord],
+    pubkeys: &[String],
+    relay_url: &str,
+) -> Result<(), String> {
+    validate_local_agent_members_with(records, pubkeys, |backend| {
+        validate_local_agent_relay(backend, relay_url)
+    })
+}
+
+fn validate_local_agent_members_with<F>(
+    records: &[ManagedAgentRecord],
+    pubkeys: &[String],
+    validate: F,
+) -> Result<(), String>
+where
+    F: Fn(&BackendKind) -> Result<(), String>,
+{
+    for pubkey in pubkeys {
+        if let Some(record) = records.iter().find(|record| {
+            record.pubkey.eq_ignore_ascii_case(pubkey) && record.backend == BackendKind::Local
+        }) {
+            validate(&record.backend)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn allowlist() -> Result<Vec<String>, String> {
         parse_allowlist(" WSS://Buzz.Block.Builderlab.XYZ:443/\n")
+    }
+
+    fn record(pubkey: &str, backend: BackendKind) -> ManagedAgentRecord {
+        let mut record: ManagedAgentRecord = serde_json::from_value(serde_json::json!({
+            "pubkey": pubkey,
+            "name": "test-agent",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }))
+        .expect("sample record");
+        record.backend = backend;
+        record
     }
 
     #[test]
@@ -136,6 +184,38 @@ mod tests {
             unavailable,
         )
         .is_ok());
+    }
+
+    #[test]
+    fn member_enrollment_validates_only_matching_local_agents() {
+        let provider = BackendKind::Provider {
+            id: "provider".into(),
+            config: serde_json::json!({}),
+        };
+        let records = vec![
+            record("local", BackendKind::Local),
+            record("provider", provider),
+        ];
+        let calls = std::cell::Cell::new(0);
+
+        assert!(
+            validate_local_agent_members_with(&records, &["LOCAL".into()], |_| {
+                calls.set(calls.get() + 1);
+                Err("blocked".to_string())
+            })
+            .is_err()
+        );
+        assert_eq!(calls.get(), 1);
+        assert!(validate_local_agent_members_with(
+            &records,
+            &["provider".into(), "unknown".into()],
+            |_| {
+                calls.set(calls.get() + 1);
+                Err("blocked".to_string())
+            },
+        )
+        .is_ok());
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

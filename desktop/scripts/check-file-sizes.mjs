@@ -122,7 +122,10 @@ const overrides = new Map([
   // runtime log path. Load-bearing crash-recovery surface; queued to split.
   // internal-owner-only: persistence choke point normalizes local agent access.
   // internal-local-relay-lockdown: load/save rejects legacy disallowed pins.
-  ["src-tauri/src/managed_agents/storage.rs", 1390],
+  // internal-local-relay-lockdown round 2: remediation-safe changed-pin checks and tests.
+  ["src-tauri/src/managed_agents/storage.rs", 1464],
+  // internal-local-relay-lockdown round 2: guard initial and incremental huddle enrollment.
+  ["src-tauri/src/huddle/mod.rs", 1006],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
