@@ -40,6 +40,19 @@ cd "${REPO_ROOT}"
 
 # ---- Load environment -------------------------------------------------------
 
+# Extract the host port from a postgres:// or redis:// URL. Empty when absent
+# or unparsable (e.g. unix sockets / missing authority).
+url_host_port() {
+  local url="$1"
+  local authority
+  authority="${url#*://}"
+  authority="${authority%%/*}"
+  authority="${authority##*@}"
+  if [[ "${authority}" == *:* ]]; then
+    echo "${authority##*:}"
+  fi
+}
+
 load_env() {
   if [[ -f ".env" ]]; then
     log "Loading .env..."
@@ -67,6 +80,33 @@ load_env() {
   export PGPASSWORD="${PGPASSWORD:-buzz_dev}"
   export PGDATABASE="${PGDATABASE:-buzz}"
   export REDIS_URL="${REDIS_URL:-redis://localhost:6379}"
+
+  # Host publish port for buzz-redis. Prefer an explicit override; otherwise
+  # derive from REDIS_URL so a remapped URL alone is enough.
+  if [[ -z "${BUZZ_REDIS_HOST_PORT:-}" ]]; then
+    BUZZ_REDIS_HOST_PORT="$(url_host_port "${REDIS_URL}")"
+  fi
+  export BUZZ_REDIS_HOST_PORT="${BUZZ_REDIS_HOST_PORT:-6379}"
+}
+
+# Fail when host-port knobs disagree with the connection URLs Compose clients
+# will actually dial. Keeps "I changed PGPORT but forgot DATABASE_URL" from
+# becoming a mysterious connection refused after a healthy `docker compose up`.
+validate_host_port_urls() {
+  local db_port redis_port
+  db_port="$(url_host_port "${DATABASE_URL}")"
+  if [[ -n "${db_port}" && "${db_port}" != "${PGPORT}" ]]; then
+    error "PGPORT (${PGPORT}) does not match the port in DATABASE_URL (${db_port})."
+    error "Update both together, e.g. PGPORT=${db_port} and DATABASE_URL=...@localhost:${db_port}/buzz"
+    exit 1
+  fi
+
+  redis_port="$(url_host_port "${REDIS_URL}")"
+  if [[ -n "${redis_port}" && "${redis_port}" != "${BUZZ_REDIS_HOST_PORT}" ]]; then
+    error "BUZZ_REDIS_HOST_PORT (${BUZZ_REDIS_HOST_PORT}) does not match the port in REDIS_URL (${redis_port})."
+    error "Update both together, e.g. BUZZ_REDIS_HOST_PORT=${redis_port} and REDIS_URL=redis://localhost:${redis_port}"
+    exit 1
+  fi
 }
 
 cleanup_legacy_sprout_containers() {
@@ -82,30 +122,63 @@ cleanup_legacy_sprout_containers() {
   success "Legacy sprout-* containers removed (volumes preserved)"
 }
 
-fail_if_local_redis_blocks_compose() {
+# List PIDs listening on a TCP port that look like a host Redis server (not
+# Docker's published buzz-redis). Empty when none / lsof unavailable.
+host_redis_listener_pids() {
+  local port="$1"
   if ! command -v lsof >/dev/null 2>&1; then
     return
   fi
+  lsof -nP -iTCP:"${port}" -sTCP:LISTEN 2>/dev/null \
+    | awk 'NR > 1 && $1 == "redis-ser" {print $2}' \
+    | sort -u \
+    | tr '\n' ' '
+}
+
+fail_if_local_redis_blocks_compose() {
   if docker ps --format '{{.Names}}' | grep -qx 'buzz-redis'; then
     return
   fi
   local redis_pids
-  redis_pids=$(lsof -nP -iTCP:6379 -sTCP:LISTEN 2>/dev/null | awk 'NR > 1 && $1 == "redis-ser" {print $2}' | sort -u | tr '
-' ' ' || true)
+  redis_pids="$(host_redis_listener_pids "${BUZZ_REDIS_HOST_PORT}")"
   if [[ -n "${redis_pids}" ]]; then
-    error "Local Redis is already listening on port 6379 (pid(s): ${redis_pids}). Stop it before running setup: brew services stop redis"
+    error "Local Redis is already listening on port ${BUZZ_REDIS_HOST_PORT} (pid(s): ${redis_pids})."
+    error "Stop it, or remap Buzz by setting BUZZ_REDIS_HOST_PORT and REDIS_URL together (see .env.example)."
+    exit 1
+  fi
+}
+
+fail_if_local_postgres_blocks_compose() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return
+  fi
+  if docker ps --format '{{.Names}}' | grep -qx 'buzz-postgres'; then
+    return
+  fi
+  local pg_pids
+  # Match both "postgres" and truncated "postgre" COMMAND names from lsof.
+  pg_pids=$(lsof -nP -iTCP:"${PGPORT}" -sTCP:LISTEN 2>/dev/null \
+    | awk 'NR > 1 && ($1 == "postgres" || $1 == "postgre") {print $2}' \
+    | sort -u \
+    | tr '\n' ' ' || true)
+  if [[ -n "${pg_pids}" ]]; then
+    error "Local Postgres is already listening on port ${PGPORT} (pid(s): ${pg_pids})."
+    error "Stop it, or remap Buzz by setting PGPORT and DATABASE_URL together (see .env.example)."
     exit 1
   fi
 }
 
 postgres_accepting_connections() {
+  # Always probe the container-internal port — host PGPORT only affects publish.
   docker exec buzz-postgres \
     pg_isready -h localhost -p 5432 -U "${PGUSER}" -d "${PGDATABASE}" \
     >/dev/null 2>&1
 }
 
 load_env
+validate_host_port_urls
 cleanup_legacy_sprout_containers
+fail_if_local_postgres_blocks_compose
 fail_if_local_redis_blocks_compose
 
 # ---- Start services ---------------------------------------------------------
@@ -190,6 +263,10 @@ echo -e "  ${BLUE}Redis${NC}       ${REDIS_URL}"
 echo -e "  ${BLUE}Adminer${NC}     http://localhost:8082  (DB browser)"
 echo -e "  ${BLUE}Keycloak${NC}    http://localhost:8180  (admin / admin — local OAuth testing)"
 echo ""
+if [[ "${PGPORT}" != "5432" || "${BUZZ_REDIS_HOST_PORT}" != "6379" ]]; then
+  echo -e "  ${YELLOW}Host ports remapped:${NC} Postgres ${PGPORT}, Redis ${BUZZ_REDIS_HOST_PORT}"
+  echo ""
+fi
 echo -e "  ${YELLOW}Next steps:${NC}"
 echo -e "    just relay                              # start the relay (terminal 1)"
 echo -e "    just dev                                # start the desktop app (terminal 2)"
