@@ -108,7 +108,19 @@ The `content` field decrypts to a UTF-8 JSON object:
   // "turn" object unreliable for this event.
   "deltaReliable": true,
 
-  "stopReason": "end_turn"               // optional
+  "stopReason": "end_turn",              // optional
+
+  // Stage latencies for this turn, all optional (present only when the
+  // publisher measured them). Monotonic-clock millisecond durations except
+  // relayLagSecs (wall-clock seconds, 1s resolution). Correlation/timing
+  // metadata only — never message content.
+  "relayLagSecs":   1  | null,           // relay accept -> harness receipt
+  "admissionMs":    4  | null,           // receipt -> queue admission
+  "queueWaitMs":    12 | null,           // admission -> turn dispatch
+  "sessionSetupMs": 850 | null,          // dispatch -> ACP session resolved
+  "firstOutputMs":  2900 | null,         // prompt sent -> first model output
+  "turnTotalMs":    9400 | null,         // dispatch -> turn completion
+  "sessionReused":  true | null          // warm (true) vs cold (false) session
 }
 ```
 

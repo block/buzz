@@ -200,6 +200,14 @@ pub struct AcpClient {
     /// deltas. Both goose and buzz-agent emit this notification; goose gates
     /// on client capability advertisement, buzz-agent emits unconditionally.
     goose_usage: UsageTracker,
+    /// Instant captured immediately before the current turn's `session/prompt`
+    /// request was written. Reset alongside the usage tracker at turn begin;
+    /// consumed by [`take_first_output_latency_ms`](Self::take_first_output_latency_ms).
+    prompt_sent_at: Option<std::time::Instant>,
+    /// Instant of the FIRST `agent_message_chunk` observed after the current
+    /// turn's prompt was sent. Reset at turn begin; consumed by
+    /// [`take_first_output_latency_ms`](Self::take_first_output_latency_ms).
+    first_output_at: Option<std::time::Instant>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -492,6 +500,8 @@ impl AcpClient {
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
+            prompt_sent_at: None,
+            first_output_at: None,
         })
     }
 
@@ -684,6 +694,10 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        // Reset per-turn first-output tracking alongside the usage tracker so
+        // a prior turn's chunk timing can never leak into this turn.
+        self.prompt_sent_at = None;
+        self.first_output_at = None;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -697,6 +711,9 @@ impl AcpClient {
         });
 
         tracing::debug!(target: "acp::wire", "→ {}", &serde_json::to_string(&msg).unwrap_or_default());
+        // Captured immediately before the write: first-output latency is
+        // measured from the moment the prompt hits the agent's stdin.
+        self.prompt_sent_at = Some(std::time::Instant::now());
         if let Err(e) = self.write_ndjson(&msg).await {
             self.last_prompt_id = None;
             self.current_hard_deadline = None;
@@ -778,6 +795,24 @@ impl AcpClient {
     /// publish a kind 44200 NIP-AM event.
     pub fn take_turn_usage(&mut self) -> Option<TurnUsage> {
         self.goose_usage.take()
+    }
+
+    /// Consume the first-output latency for the turn that just ended: elapsed
+    /// milliseconds from the `session/prompt` write to the first
+    /// `agent_message_chunk` the agent streamed back.
+    ///
+    /// Returns `None` when no prompt was sent or the agent produced no message
+    /// chunk (e.g. failed, cancelled before output, or tool-only turns).
+    /// Clears both marks so a later call cannot report a stale turn's latency.
+    pub fn take_first_output_latency_ms(&mut self) -> Option<u64> {
+        let sent = self.prompt_sent_at.take();
+        let first = self.first_output_at.take();
+        match (sent, first) {
+            (Some(sent), Some(first)) => {
+                Some(first.saturating_duration_since(sent).as_millis() as u64)
+            }
+            _ => None,
+        }
     }
 
     /// Install a per-turn steer request channel for goose-native
@@ -1529,6 +1564,12 @@ impl AcpClient {
 
         match update_type {
             "agent_message_chunk" => {
+                // First model output for the in-flight turn — the mark is
+                // reset when the next prompt begins, so only the first chunk
+                // per turn lands here.
+                if self.first_output_at.is_none() {
+                    self.first_output_at = Some(std::time::Instant::now());
+                }
                 if let Some(text) = update["content"]["text"].as_str() {
                     tracing::info!(target: "acp::stream", "{text}");
                 }
@@ -3071,6 +3112,63 @@ mod tests {
                 },
             }
         })
+    }
+
+    /// Build a `session/update` notification carrying an `agent_message_chunk`.
+    fn agent_message_chunk_msg(text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "test-session",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": { "text": text },
+                },
+            }
+        })
+    }
+
+    /// First `agent_message_chunk` after a prompt is the first-output mark;
+    /// later chunks don't move it. `take_first_output_latency_ms` measures
+    /// from the prompt-sent mark, drains both marks, and returns `None` when
+    /// either mark is missing.
+    #[tokio::test]
+    async fn first_output_latency_marks_first_chunk_and_drains_on_take() {
+        let mut client = spawn_inert_client().await;
+        assert!(
+            client.take_first_output_latency_ms().is_none(),
+            "no prompt sent — no latency"
+        );
+
+        // Chunk with no prompt-sent mark: recorded, but take() yields None
+        // (and drains the stray mark).
+        let _ = client.handle_session_update(&agent_message_chunk_msg("early"));
+        assert!(client.first_output_at.is_some());
+        assert!(client.take_first_output_latency_ms().is_none());
+        assert!(client.first_output_at.is_none(), "take must drain the mark");
+
+        // Simulate a prompt write, then two chunks — the FIRST chunk wins.
+        client.prompt_sent_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(80));
+        let _ = client.handle_session_update(&agent_message_chunk_msg("chunk one"));
+        let first_mark = client.first_output_at;
+        let _ = client.handle_session_update(&agent_message_chunk_msg("chunk two"));
+        assert_eq!(
+            client.first_output_at, first_mark,
+            "later chunks must not move the first-output mark"
+        );
+
+        let latency = client
+            .take_first_output_latency_ms()
+            .expect("both marks set — latency must be reported");
+        assert!(
+            latency >= 80,
+            "latency must cover the sent→chunk gap: {latency}"
+        );
+
+        // Drained: a second take reports nothing.
+        assert!(client.take_first_output_latency_ms().is_none());
     }
 
     #[tokio::test]
