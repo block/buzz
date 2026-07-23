@@ -66,16 +66,18 @@ test("stored runtime visibility is read from the versioned device key", () => {
   assert.deepEqual(readDisabledAcpRuntimeIds(storage), ["claude"]);
 });
 
-test("a disabled saved runtime is removed from the effective preference", () => {
+test("a disabled saved runtime and its dependent defaults are masked", () => {
   const config = {
     env_vars: {},
-    provider: null,
-    model: null,
+    provider: "relay-mesh",
+    model: "auto",
     preferred_runtime: "Goose",
   };
 
   assert.deepEqual(maskDisabledAcpRuntimePreference(config, ["goose"]), {
     ...config,
+    provider: null,
+    model: null,
     preferred_runtime: null,
   });
   assert.equal(maskDisabledAcpRuntimePreference(config, ["claude"]), config);

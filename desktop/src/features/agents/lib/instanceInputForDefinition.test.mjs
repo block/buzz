@@ -5,6 +5,7 @@ import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
+  shouldPinSelectedRuntimeForDefinition,
 } from "./instanceInputForDefinition.ts";
 
 // ── Phase 1B.3.5: the single definition→instance mapping ────────────────────
@@ -74,6 +75,9 @@ test("row 4: create input never contains definition env vars", async () => {
 });
 
 test("row 2: harnessOverride follows the backend-aligned formula", async () => {
+  assert.equal(shouldPinSelectedRuntimeForDefinition(undefined, "goose"), true);
+  assert.equal(shouldPinSelectedRuntimeForDefinition("claude", "goose"), false);
+
   const match = await buildInstanceInputForDefinition(
     persona({ runtime: "goose" }),
     gooseRuntime,

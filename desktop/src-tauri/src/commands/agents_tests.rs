@@ -192,6 +192,24 @@ fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
 }
 
 #[test]
+fn deploy_resolver_ignores_defaults_from_a_different_implicit_runtime() {
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.agent_command_override = Some("goose".to_string());
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("auto".to_string()),
+        provider: Some("relay-mesh".to_string()),
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_deploy_model_provider(&record, &personas, &global),
+        (None, None)
+    );
+}
+
+#[test]
 fn normalize_relay_mesh_rejects_empty_model_ref() {
     let config = RelayMeshConfig {
         model_ref: "  \t ".to_string(),

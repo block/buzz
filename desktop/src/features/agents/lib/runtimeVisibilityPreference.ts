@@ -110,13 +110,20 @@ export function runtimesForImplicitAcpSelection<T extends { id: string }>(
 }
 
 /**
- * Prevent a disabled runtime from remaining the effective global preference.
+ * Prevent a disabled runtime and its dependent defaults from remaining
+ * effective for new implicit selections.
  *
  * The persisted config is left untouched until the user next saves defaults;
- * consumers immediately fall back through the normal runtime selection path.
+ * existing agents keep their configuration while new consumers immediately
+ * fall back through the normal runtime selection path without carrying a
+ * provider or model selected for the hidden harness.
  */
 export function maskDisabledAcpRuntimePreference<
-  T extends { preferred_runtime: string | null },
+  T extends {
+    model: string | null;
+    preferred_runtime: string | null;
+    provider: string | null;
+  },
 >(config: T, disabledRuntimeIds: readonly string[]): T {
   const preferredRuntime = config.preferred_runtime;
   if (
@@ -128,7 +135,12 @@ export function maskDisabledAcpRuntimePreference<
     return config;
   }
 
-  return { ...config, preferred_runtime: null };
+  return {
+    ...config,
+    model: null,
+    preferred_runtime: null,
+    provider: null,
+  };
 }
 
 function getDisabledRuntimeIdsSnapshot(): readonly string[] {

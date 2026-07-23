@@ -469,6 +469,63 @@ fn resolve_global_fallback_when_record_and_persona_have_none() {
     );
 }
 
+#[test]
+fn runtime_fallback_does_not_inherit_defaults_from_a_different_preferred_runtime() {
+    let mut record = bare_record();
+    record.persona_id = Some("p1".to_string());
+    record.agent_command_override = Some("goose".to_string());
+    let personas = vec![persona("p1", None, None)];
+    let global = GlobalAgentConfig {
+        model: Some("auto".to_string()),
+        provider: Some("relay-mesh".to_string()),
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_effective_model_provider(&record, &personas, &global),
+        (None, None)
+    );
+}
+
+#[test]
+fn runtime_fallback_inherits_defaults_when_it_matches_the_preferred_runtime() {
+    let mut record = bare_record();
+    record.persona_id = Some("p1".to_string());
+    record.agent_command_override = Some("goose".to_string());
+    let personas = vec![persona("p1", None, None)];
+    let global = GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-provider".to_string()),
+        preferred_runtime: Some("goose".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_effective_model_provider(&record, &personas, &global),
+        (Some("global-model"), Some("global-provider"))
+    );
+}
+
+#[test]
+fn explicit_runtime_keeps_global_defaults_when_another_runtime_is_preferred() {
+    let mut record = bare_record();
+    record.persona_id = Some("p1".to_string());
+    record.runtime = Some("goose".to_string());
+    let personas = vec![persona("p1", None, None)];
+    let global = GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-provider".to_string()),
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_effective_model_provider(&record, &personas, &global),
+        (Some("global-model"), Some("global-provider"))
+    );
+}
+
 /// Tier 4 — no persona linked: record.persona_id is None, record has no
 /// model/provider; global defaults must still fill in (persona lookup skipped).
 #[cfg(feature = "mesh-llm")]

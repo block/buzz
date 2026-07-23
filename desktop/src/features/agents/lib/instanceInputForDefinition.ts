@@ -88,6 +88,16 @@ export type BackendIntent = {
   config: Record<string, unknown>;
 };
 
+/** Keep every definition-start surface aligned on runtime pinning semantics. */
+export function shouldPinSelectedRuntimeForDefinition(
+  definitionRuntimeId: string | null | undefined,
+  selectedRuntimeId: string,
+): boolean {
+  return (
+    !definitionRuntimeId || definitionRuntimeId.trim() === selectedRuntimeId
+  );
+}
+
 /**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
  * surface that creates a running instance from a definition builds its
@@ -145,7 +155,10 @@ export async function buildInstanceInputForDefinition(
     agentCommand: runtime.command,
     agentArgs: runtime.defaultArgs,
     mcpCommand: runtime.mcpCommand ?? "",
-    harnessOverride: !persona.runtime || persona.runtime === runtime.id,
+    harnessOverride: shouldPinSelectedRuntimeForDefinition(
+      persona.runtime,
+      runtime.id,
+    ),
     model: persona.model ?? undefined,
     provider: persona.provider ?? undefined,
     spawnAfterCreate: true,

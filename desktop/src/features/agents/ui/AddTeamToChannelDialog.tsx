@@ -11,6 +11,7 @@ import {
   emptyResolvedTeamPersonas,
   resolveTeamPersonas,
 } from "@/features/agents/lib/teamPersonas";
+import { shouldPinSelectedRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
 import { useSelectableAcpRuntimes } from "@/features/agents/lib/runtimeVisibilityPreference";
 import {
   collectRuntimeWarnings,
@@ -147,6 +148,10 @@ export function AddTeamToChannelDialog({
           name: persona.displayName,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
+          harnessOverride: shouldPinSelectedRuntimeForDefinition(
+            persona.runtime,
+            runtimeToUse.id,
+          ),
           model: persona.model ?? undefined,
           personaId: persona.id,
           teamId: team.id,

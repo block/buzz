@@ -204,20 +204,60 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
     atomic_write_json_restricted(&path, &payload)
 }
 
+/// Return the global provider/model values that are safe for this record.
+///
+/// A runtime-less definition can be started on a fallback runtime when its
+/// saved global preference is hidden or unavailable. In that case the selected
+/// command is pinned on the record, and provider/model defaults belonging to a
+/// different preferred runtime must not cross the harness boundary. Explicitly
+/// configured definitions and standalone agents keep normal global inheritance.
+pub(crate) fn global_model_provider_for_record<'a>(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    global: &'a GlobalAgentConfig,
+) -> (Option<&'a str>, Option<&'a str>) {
+    let global_values = (global.model.as_deref(), global.provider.as_deref());
+    if record.persona_id.is_none() {
+        return global_values;
+    }
+
+    let definition_runtime = record.runtime.as_deref().or_else(|| {
+        record
+            .persona_id
+            .as_deref()
+            .and_then(|id| personas.iter().find(|persona| persona.id == id))
+            .and_then(|persona| persona.runtime.as_deref())
+    });
+    if definition_runtime.is_some_and(|runtime| !runtime.trim().is_empty()) {
+        return global_values;
+    }
+
+    let Some(selected_runtime) = record
+        .agent_command_override
+        .as_deref()
+        .and_then(crate::managed_agents::known_acp_runtime)
+    else {
+        return global_values;
+    };
+    let preferred_runtime = global
+        .preferred_runtime
+        .as_deref()
+        .and_then(crate::managed_agents::known_acp_runtime);
+
+    if preferred_runtime.is_some_and(|preferred| std::ptr::eq(preferred, selected_runtime)) {
+        global_values
+    } else {
+        (None, None)
+    }
+}
+
 /// Resolve the effective model and provider for an agent using the
-/// precedence chain: `agent record → linked persona → global defaults → None`.
+/// precedence chain: `agent record → linked persona → applicable global
+/// defaults → None`.
 ///
-/// This is the single source of truth used by readiness evaluation, spawn,
-/// and deploy-payload construction. All three paths must use this function so
-/// they agree on what model/provider the agent will actually run with.
-///
-/// # Arguments
-/// * `record` — the `ManagedAgentRecord` (may have `None` for model/provider)
-/// * `personas` — all current persona records (looked up by `record.persona_id`)
-/// * `global` — global agent config defaults
-///
-/// # Returns
-/// `(effective_model, effective_provider)` — both `Option<&str>`.
+/// This is the single source of truth used by readiness evaluation and spawn.
+/// Deploy uses the same global applicability helper with its live-persona-first
+/// precedence.
 pub(crate) fn resolve_effective_model_provider<'a>(
     record: &'a ManagedAgentRecord,
     personas: &'a [AgentDefinition],
@@ -229,17 +269,15 @@ pub(crate) fn resolve_effective_model_provider<'a>(
         .and_then(|pid| personas.iter().find(|p| p.id == pid))
         .map(|p| (p.model.as_deref(), p.provider.as_deref()))
         .unwrap_or((None, None));
+    let (global_model, global_provider) =
+        global_model_provider_for_record(record, personas, global);
 
-    let effective_model = record
-        .model
-        .as_deref()
-        .or(persona_model)
-        .or(global.model.as_deref());
+    let effective_model = record.model.as_deref().or(persona_model).or(global_model);
     let effective_provider = record
         .provider
         .as_deref()
         .or(persona_provider)
-        .or(global.provider.as_deref());
+        .or(global_provider);
 
     (effective_model, effective_provider)
 }
