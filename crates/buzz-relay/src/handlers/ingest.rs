@@ -1902,6 +1902,12 @@ async fn ingest_event_inner(
         });
     }
 
+    if kind_u32 == KIND_GIT_REPO_ANNOUNCEMENT {
+        crate::handlers::side_effects::validate_git_repo_announcement(tenant, &event, state)
+            .await
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     if crate::handlers::side_effects::is_admin_kind(kind_u32) {
         crate::handlers::side_effects::validate_admin_event(tenant, kind_u32, &event, state)
             .await

@@ -73,6 +73,9 @@ export type Project = {
   contributors: string[];
   createdAt: number;
   projectChannelId: string | null;
+  visibility: "public" | "private";
+  privateChannelId: string | null;
+  channelBindingId: string | null;
   status: string;
   defaultBranch: string;
   repoAddress: string;
@@ -220,6 +223,13 @@ export function eventToProject(
     contributors,
     createdAt: event.created_at,
     projectChannelId,
+    visibility:
+      getTag(event, "buzz-visibility") === "private" ? "private" : "public",
+    privateChannelId:
+      getTag(event, "buzz-visibility") === "private"
+        ? (getTag(event, "buzz-channel") ?? null)
+        : null,
+    channelBindingId: getTag(event, "buzz-channel") ?? null,
     status: getTag(event, "status") ?? "active",
     defaultBranch: getTag(event, "default-branch") ?? "main",
     repoAddress: projectCoordinate({ owner: event.pubkey, dtag: d }),

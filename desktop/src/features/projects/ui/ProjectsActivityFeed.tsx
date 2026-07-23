@@ -1,3 +1,4 @@
+import { LockKeyhole } from "lucide-react";
 import {
   resolveUserLabel,
   type UserProfileLookup,
@@ -313,11 +314,18 @@ function ActivityCard({
                 )}{" "}
                 {item.action}{" "}
                 <button
-                  className="pointer-events-auto relative z-10 inline-block max-w-48 truncate rounded-sm align-bottom hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
+                  className="pointer-events-auto relative z-10 inline-flex max-w-48 items-center gap-1 truncate rounded-sm align-bottom hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring sm:max-w-64 2xl:max-w-none"
                   onClick={onOpenProject}
                   type="button"
                 >
-                  {item.target.project.name}
+                  <span className="truncate">{item.target.project.name}</span>
+                  {item.target.project.visibility === "private" ? (
+                    <LockKeyhole
+                      aria-label="Private project"
+                      className="h-3 w-3 shrink-0 text-muted-foreground/70"
+                      data-testid="project-private-indicator"
+                    />
+                  ) : null}
                 </button>
               </span>
               <Tooltip>

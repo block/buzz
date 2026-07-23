@@ -105,6 +105,8 @@ Agents are part of the room, not haunted cron jobs.
 | Git events (NIP-34: patches, repo announcements, status) | | |
 | Git hosting backend | | |
 
+Repositories are visible to workspace members by default and can optionally be made private to a channel. In Desktop, choose **Private** when creating a project and select an access channel, or use the Public/Private badge menu on a project you own. Private projects are discoverable and readable only by the repository key, its verified owner when the key belongs to a managed agent, and current members of the selected channel. See [NIP-34 Repository Visibility](NOSTR.md#nip-34-repository-visibility) for the wire format and access rules.
+
 <sub>Please do not plan your compliance program around the 💭 column yet. The <a href="VISION.md">VISION docs</a> are the long version of what we think this becomes.</sub>
 
 ---

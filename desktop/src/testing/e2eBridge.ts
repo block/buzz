@@ -133,6 +133,12 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Reject project publications once with these exact relay messages. */
+    projectEventRejectionMessages?: string[];
+    /** Expose only the named non-DM channels to the active mock identity. */
+    projectEligibleChannelNames?: string[];
+    /** Seed the first project as private to this channel name. */
+    projectPrivateChannelName?: string;
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
@@ -976,6 +982,8 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Accepted project announcements, including event pubkeys and final tags. */
+    __BUZZ_E2E_PUBLISHED_PROJECT_EVENTS__?: RelayEvent[];
     /** Project event kinds rejected once, in order, to exercise retry flows. */
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
     /** Structured merge error returned by the mock native merge command. */
@@ -2224,7 +2232,19 @@ function listMockProfiles(): RawProfile[] {
 }
 
 function listMockChannels(config?: E2eConfig): RawChannelWithMembership[] {
-  return mockChannels.map((channel) => toRawChannel(channel, config));
+  const eligibleNames = config?.mock?.projectEligibleChannelNames;
+  if (eligibleNames === undefined) {
+    return mockChannels.map((channel) => toRawChannel(channel, config));
+  }
+
+  const eligible = new Set(eligibleNames);
+  return mockChannels.map((channel) => {
+    const raw = toRawChannel(channel, config);
+    return {
+      ...raw,
+      is_member: raw.channel_type !== "dm" && eligible.has(raw.name),
+    };
+  });
 }
 
 function getMockChannel(channelId: string): MockChannel {
@@ -4837,6 +4857,14 @@ function buildMockProjectEvents(): RelayEvent[] {
         : seed.owner;
     const repoAddress = `${KIND_REPO_ANNOUNCEMENT}:${owner}:${seed.dtag}`;
     const authors = [seed.owner, ...seed.contributors];
+    const privateChannel =
+      projectIndex === 0 && getConfig()?.mock?.projectPrivateChannelName
+        ? mockChannels.find(
+            (channel) =>
+              channel.name === getConfig()?.mock?.projectPrivateChannelName &&
+              channel.channel_type !== "dm",
+          )
+        : undefined;
     const random = mulberry32(projectIndex + 1);
 
     events.push(
@@ -4849,6 +4877,12 @@ function buildMockProjectEvents(): RelayEvent[] {
           ["description", seed.description],
           ["clone", `https://relay.example.com/git/${owner}/${seed.dtag}`],
           ...seed.contributors.map((pubkey) => ["p", pubkey]),
+          ...(privateChannel
+            ? [
+                ["buzz-visibility", "private"],
+                ["buzz-channel", privateChannel.id],
+              ]
+            : []),
         ],
         owner,
         now - (historyDays + 30 + projectIndex) * daySeconds,
@@ -4932,10 +4966,75 @@ function getMockProjectEventStore(): RelayEvent[] {
   return mockProjectEventStore;
 }
 
+function repositoryVisibilityMetadata(event: RelayEvent): {
+  channelId: string | null;
+  privateVisibility: boolean;
+} {
+  const visibilityTags = event.tags.filter(
+    (tag) => tag[0] === "buzz-visibility",
+  );
+  if (visibilityTags.length === 0) {
+    return { channelId: null, privateVisibility: false };
+  }
+  if (
+    visibilityTags.length !== 1 ||
+    visibilityTags[0].length !== 2 ||
+    visibilityTags[0][1] !== "private"
+  ) {
+    throw new Error("unsupported buzz-visibility value");
+  }
+
+  const channelTags = event.tags.filter((tag) => tag[0] === "buzz-channel");
+  if (channelTags.length !== 1 || channelTags[0].length !== 2) {
+    throw new Error(
+      "private repository requires exactly one buzz-channel UUID",
+    );
+  }
+  return { channelId: channelTags[0][1], privateVisibility: true };
+}
+
+function validateMockProjectAnnouncement(
+  event: RelayEvent,
+  config: E2eConfig | undefined,
+): string | null {
+  if (event.kind !== KIND_REPO_ANNOUNCEMENT) return null;
+
+  let visibility: ReturnType<typeof repositoryVisibilityMetadata>;
+  try {
+    visibility = repositoryVisibilityMetadata(event);
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "invalid repository metadata";
+  }
+  if (!visibility.privateVisibility || !visibility.channelId) return null;
+
+  const channel = mockChannels.find(
+    (candidate) => candidate.id === visibility.channelId,
+  );
+  const viewerCanUseChannel = listMockChannels(config).some(
+    (candidate) =>
+      candidate.id === visibility.channelId &&
+      candidate.channel_type !== "dm" &&
+      candidate.is_member,
+  );
+  if (
+    !channel ||
+    channel.channel_type === "dm" ||
+    !viewerCanUseChannel ||
+    event.pubkey.toLowerCase() !== getMockMemberPubkey(config).toLowerCase()
+  ) {
+    return "private repository owner must be a current member of buzz-channel";
+  }
+  return null;
+}
+
 /** Project-scoped publishes (PR/issue comments, NIP-34 status events) carry
  * a repo-address `a` tag instead of a channel `h` tag — store them with the
  * seeded project events so refetches see them. */
 function isMockProjectScopedEvent(event: RelayEvent): boolean {
+  if (event.kind === KIND_REPO_ANNOUNCEMENT) return true;
+
   const hasRepoAddressTag = event.tags.some(
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
@@ -8782,12 +8881,37 @@ function sendToMockSocket(args: {
     }
 
     if (isMockProjectScopedEvent(event)) {
-      if (event.pubkey !== DEFAULT_MOCK_IDENTITY.pubkey) {
+      const authenticatedPubkey = getMockMemberPubkey(getConfig());
+      if (event.pubkey.toLowerCase() !== authenticatedPubkey.toLowerCase()) {
         sendWsText(socket.handler, [
           "OK",
           event.id,
           false,
           "invalid: event pubkey does not match authenticated identity",
+        ]);
+        return;
+      }
+      const configuredRejection =
+        getConfig()?.mock?.projectEventRejectionMessages?.shift();
+      if (configuredRejection) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          configuredRejection,
+        ]);
+        return;
+      }
+      const announcementRejection = validateMockProjectAnnouncement(
+        event,
+        getConfig(),
+      );
+      if (announcementRejection) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          announcementRejection,
         ]);
         return;
       }
@@ -8808,6 +8932,9 @@ function sendToMockSocket(args: {
         return;
       }
       getMockProjectEventStore().push(event);
+      if (event.kind === KIND_REPO_ANNOUNCEMENT) {
+        window.__BUZZ_E2E_PUBLISHED_PROJECT_EVENTS__?.push(event);
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -8877,6 +9004,7 @@ export function maybeInstallE2eTauriMocks() {
   window.__BUZZ_E2E_COMMAND_PAYLOADS__ = [];
   window.__BUZZ_E2E_COMMAND_LOG__ = [];
   window.__BUZZ_E2E_SIGNED_EVENTS__ = [];
+  window.__BUZZ_E2E_PUBLISHED_PROJECT_EVENTS__ = [];
   window.__BUZZ_E2E_WEBVIEW_ZOOM__ = 1;
   window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ = ({
     channelName,

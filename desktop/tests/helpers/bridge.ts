@@ -127,6 +127,12 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** Reject project publications once with these exact relay messages. */
+  projectEventRejectionMessages?: string[];
+  /** Expose only the named non-DM channels to the active mock identity. */
+  projectEligibleChannelNames?: string[];
+  /** Seed the first project as private to this channel name. */
+  projectPrivateChannelName?: string;
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */

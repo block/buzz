@@ -1,6 +1,12 @@
 import * as React from "react";
 
+import { useChannelsQuery } from "@/features/channels/hooks";
 import type { CreateProjectInput } from "@/features/projects/useCreateProject";
+import {
+  eligibleProjectChannels,
+  ProjectVisibilityFields,
+  type ProjectVisibility,
+} from "@/features/projects/ui/ProjectVisibilityFields";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -33,6 +39,11 @@ export function CreateProjectDialog({
   const [description, setDescription] = React.useState("");
   const [cloneUrl, setCloneUrl] = React.useState("");
   const [webUrl, setWebUrl] = React.useState("");
+  const [visibility, setVisibility] =
+    React.useState<ProjectVisibility>("public");
+  const [channelId, setChannelId] = React.useState("");
+  const channelsQuery = useChannelsQuery({ enabled: open });
+  const channels = eligibleProjectChannels(channelsQuery.data);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const nameInputRef = React.useRef<HTMLInputElement>(null);
 
@@ -43,6 +54,8 @@ export function CreateProjectDialog({
     setDescription("");
     setCloneUrl("");
     setWebUrl("");
+    setVisibility("public");
+    setChannelId("");
     setErrorMessage(null);
 
     // Small delay to let the dialog animation start before focusing.
@@ -66,6 +79,9 @@ export function CreateProjectDialog({
         description: description.trim() || undefined,
         cloneUrl: cloneUrl.trim() || undefined,
         webUrl: webUrl.trim() || undefined,
+        visibility,
+        channelId:
+          visibility === "private" ? channelId || undefined : undefined,
       });
 
       onOpenChange(false);
@@ -93,7 +109,11 @@ export function CreateProjectDialog({
           <div className="flex w-full items-center justify-end gap-3">
             <Button
               data-testid="create-project-submit"
-              disabled={isCreating || name.trim().length === 0}
+              disabled={
+                isCreating ||
+                name.trim().length === 0 ||
+                (visibility === "private" && !channelId)
+              }
               form="create-project-form"
               type="submit"
             >
@@ -248,8 +268,38 @@ export function CreateProjectDialog({
             </div>
           </div>
 
+          <ProjectVisibilityFields
+            channelId={channelId}
+            channels={channels}
+            channelsError={
+              channelsQuery.error instanceof Error
+                ? channelsQuery.error.message
+                : channelsQuery.isError
+                  ? "Try again."
+                  : null
+            }
+            channelsLoading={channelsQuery.isLoading}
+            disabled={isCreating}
+            idPrefix="create-project"
+            onChannelChange={(nextChannelId) => {
+              setChannelId(nextChannelId);
+              setErrorMessage(null);
+            }}
+            onRetryChannels={() => {
+              void channelsQuery.refetch();
+            }}
+            onVisibilityChange={(nextVisibility) => {
+              setVisibility(nextVisibility);
+              if (nextVisibility === "public") setChannelId("");
+              setErrorMessage(null);
+            }}
+            visibility={visibility}
+          />
+
           {errorMessage ? (
-            <p className="text-sm text-destructive">{errorMessage}</p>
+            <p className="text-sm text-destructive" role="alert">
+              {errorMessage}
+            </p>
           ) : null}
         </form>
       </ChooserDialogContent>

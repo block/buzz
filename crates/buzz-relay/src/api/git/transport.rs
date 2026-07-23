@@ -28,6 +28,7 @@ use tokio::process::Command;
 use tower_http::limit::RequestBodyLimitLayer;
 use tracing::{error, info, warn};
 
+use super::access::requester_can_access_repository;
 use super::cas_publish::{cas_publish, CasError, ParentState, PublishLimits};
 use super::hook::install_hook;
 use super::hydrate::{
@@ -282,6 +283,45 @@ fn validate_repo_id<'a>(owner: &str, repo: &'a str) -> Result<&'a str, Response>
     }
 
     Ok(repo_name)
+}
+
+fn repository_not_found() -> Response {
+    (StatusCode::NOT_FOUND, "repository not found").into_response()
+}
+
+/// Gate every Smart HTTP surface before manifest hydration or subprocess work.
+///
+/// Denials intentionally use the same response as an absent repository so a
+/// caller cannot distinguish private existence from a bad owner/repo URL.
+#[allow(clippy::result_large_err)]
+async fn authorize_repository_request(
+    state: &Arc<AppState>,
+    auth: &GitAuth,
+    owner_hex: &str,
+    repo_id: &str,
+) -> Result<(), Response> {
+    let owner = hex::decode(owner_hex).map_err(|_| repository_not_found())?;
+    let allowed = requester_can_access_repository(
+        state,
+        &auth.tenant,
+        &owner,
+        repo_id,
+        auth.pubkey.as_bytes(),
+    )
+    .await
+    .map_err(|error| {
+        error!(
+            owner = %owner_hex,
+            repo = %repo_id,
+            error = %error,
+            "git repository authorization failed closed"
+        );
+        repository_not_found()
+    })?;
+    if !allowed {
+        return Err(repository_not_found());
+    }
+    Ok(())
 }
 
 /// Apply hardened environment to a git subprocess command.
@@ -540,7 +580,8 @@ pub async fn info_refs(
         "git-upload-pack" | "git-receive-pack" => &query.service,
         _ => return Err((StatusCode::BAD_REQUEST, "invalid service").into_response()),
     };
-    let _repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    authorize_repository_request(&state, &auth, &params.owner, repo_name).await?;
 
     // Track C fast path: only for clone advertisement. The receive-pack
     // advertisement carries a different capability set (report-status,
@@ -726,7 +767,8 @@ pub async fn upload_pack(
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
-    let _ = validate_repo_id(&params.owner, &params.repo)?;
+    let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    authorize_repository_request(&state, &auth, &params.owner, repo_name).await?;
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
@@ -797,6 +839,7 @@ pub async fn receive_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    authorize_repository_request(&state, &auth, &params.owner, repo_name).await?;
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;
 
@@ -2092,5 +2135,256 @@ mod track_c_tests {
         let body = build_upload_pack_advertisement(&m);
         let caps = String::from_utf8_lossy(&body);
         assert!(caps.contains("object-format=sha256"));
+    }
+
+    async fn private_repo_endpoint_test_state(
+        host: &str,
+    ) -> Option<(Arc<AppState>, TenantContext, Keys, Keys)> {
+        use buzz_db::channel::{ChannelType, ChannelVisibility};
+
+        let mut config = crate::config::Config::from_env().ok()?;
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_owned()); // sadscan:disable np.postgres.1
+        config.database_url = database_url.clone();
+        config.redis_url = "redis://127.0.0.1:1".to_owned();
+        config.relay_url = format!("wss://{host}");
+        config.require_relay_membership = false;
+        let scratch =
+            std::env::temp_dir().join(format!("buzz-git-access-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&scratch).ok()?;
+        config.git_repo_path = scratch.clone();
+        config.git_pack_cache_path = scratch.join("pack-cache");
+
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
+        let db = buzz_db::Db::from_pool(pool.clone());
+        db.migrate().await.ok()?;
+        db.ensure_configured_community(host).await.ok()?;
+        let community = db.lookup_community_by_host(host).await.ok()??.id;
+        let tenant = TenantContext::resolved(community, host);
+
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .ok()?,
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).ok()?;
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            Keys::generate(),
+            media_storage,
+        );
+        let state = Arc::new(state);
+
+        let owner = Keys::generate();
+        let outsider = Keys::generate();
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "private-repo-endpoint-test",
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                owner.public_key().as_bytes(),
+                None,
+            )
+            .await
+            .ok()?;
+        state
+            .db
+            .add_member(
+                community,
+                channel.id,
+                outsider.public_key().as_bytes(),
+                buzz_core::channel::MemberRole::Member,
+                Some(owner.public_key().as_bytes()),
+            )
+            .await
+            .ok()?;
+        let channel_id = channel.id.to_string();
+        let event = EventBuilder::new(Kind::Custom(30617), "")
+            .tags([
+                Tag::parse(["d", "private-repo"]).ok()?,
+                Tag::parse(["buzz-visibility", "private"]).ok()?,
+                Tag::parse(["buzz-channel", channel_id.as_str()]).ok()?,
+            ])
+            .sign_with_keys(&owner)
+            .ok()?;
+        state.db.insert_event(community, &event, None).await.ok()?;
+
+        // Seed the same empty manifest pointer that announce side effects create
+        // in production so allowed advertisement/read paths can run end to end.
+        let manifest = super::super::manifest::Manifest {
+            version: super::super::manifest::MANIFEST_VERSION,
+            head: "refs/heads/main".to_owned(),
+            refs: std::collections::BTreeMap::new(),
+            packs: Vec::new(),
+            parent: None,
+        };
+        let manifest_key = state
+            .git_store
+            .put_manifest(&manifest.canonical_bytes().ok()?)
+            .await
+            .ok()?;
+        let digest = manifest_key.strip_prefix("manifests/")?;
+        let pointer = super::super::manifest::pointer_key(
+            community,
+            &owner.public_key().to_hex(),
+            "private-repo",
+        );
+        match state
+            .git_store
+            .put_pointer(
+                &pointer,
+                digest.as_bytes(),
+                super::super::store::Precond::IfNoneMatchStar,
+            )
+            .await
+            .ok()?
+        {
+            super::super::store::CasOutcome::Won(_) => {}
+            super::super::store::CasOutcome::LostRace => return None,
+        }
+
+        Some((state, tenant, owner, outsider))
+    }
+
+    fn test_git_auth(keys: &Keys, tenant: &TenantContext) -> GitAuth {
+        GitAuth {
+            pubkey: keys.public_key(),
+            tenant: tenant.clone(),
+        }
+    }
+
+    fn private_repo_params(owner: &Keys) -> GitRepoParams {
+        GitRepoParams {
+            owner: owner.public_key().to_hex(),
+            // Exercise the exact clone URL shape while authorizing against the
+            // canonical d-tag value without `.git`.
+            repo: "private-repo.git".to_owned(),
+        }
+    }
+
+    async fn assert_repository_not_found(result: Result<Response, Response>) {
+        let response = match result {
+            Ok(_) => panic!("private repository endpoint unexpectedly allowed outsider"),
+            Err(response) => response,
+        };
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("read denial body");
+        assert_eq!(body.as_ref(), b"repository not found");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn private_repo_outsider_is_hidden_on_every_smart_http_endpoint() {
+        let host = format!(
+            "git-private-endpoints-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let Some((state, tenant, owner, outsider)) = private_repo_endpoint_test_state(&host).await
+        else {
+            return;
+        };
+        let community = tenant.community();
+        let owner_advertisement = info_refs(
+            State(state.clone()),
+            test_git_auth(&owner, &tenant),
+            AxumPath(private_repo_params(&owner)),
+            Query(InfoRefsQuery {
+                service: "git-upload-pack".to_owned(),
+            }),
+        )
+        .await
+        .expect("owner can advertise private repository");
+        assert_eq!(owner_advertisement.status(), StatusCode::OK);
+
+        let outsider_advertisement = info_refs(
+            State(state.clone()),
+            test_git_auth(&outsider, &tenant),
+            AxumPath(private_repo_params(&owner)),
+            Query(InfoRefsQuery {
+                service: "git-upload-pack".to_owned(),
+            }),
+        )
+        .await
+        .expect("current channel member can advertise private repository");
+        assert_eq!(outsider_advertisement.status(), StatusCode::OK);
+
+        let channel_id = state
+            .db
+            .list_channels(community, None)
+            .await
+            .expect("list channels")
+            .into_iter()
+            .find(|channel| channel.name == "private-repo-endpoint-test")
+            .expect("private repository channel")
+            .id;
+        state
+            .db
+            .remove_member(
+                community,
+                channel_id,
+                outsider.public_key().as_bytes(),
+                owner.public_key().as_bytes(),
+            )
+            .await
+            .expect("revoke outsider before requests");
+
+        for service in ["git-upload-pack", "git-receive-pack"] {
+            assert_repository_not_found(
+                info_refs(
+                    State(state.clone()),
+                    test_git_auth(&outsider, &tenant),
+                    AxumPath(private_repo_params(&owner)),
+                    Query(InfoRefsQuery {
+                        service: service.to_owned(),
+                    }),
+                )
+                .await,
+            )
+            .await;
+        }
+
+        assert_repository_not_found(
+            upload_pack(
+                State(state.clone()),
+                test_git_auth(&outsider, &tenant),
+                AxumPath(private_repo_params(&owner)),
+                Body::empty(),
+            )
+            .await,
+        )
+        .await;
+        assert_repository_not_found(
+            receive_pack(
+                State(state),
+                test_git_auth(&outsider, &tenant),
+                AxumPath(private_repo_params(&owner)),
+                Body::empty(),
+            )
+            .await,
+        )
+        .await;
     }
 }

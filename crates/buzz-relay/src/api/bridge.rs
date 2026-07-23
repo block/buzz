@@ -1200,7 +1200,7 @@ async fn query_events_authed(
     // skips and the `before_id` BAD_REQUEST are decided here, before any DB
     // work is issued (validation errors are deterministic client mistakes, so
     // surfacing them ahead of transient DB errors is strictly more predictable).
-    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery)> = Vec::new();
+    let mut catchall_queries: Vec<(usize, buzz_db::EventQuery, usize, usize)> = Vec::new();
     for (idx, (raw, filter)) in raw_filters.iter().zip(filters.iter()).enumerate() {
         if handled.contains(&idx) {
             continue;
@@ -1244,6 +1244,10 @@ async fn query_events_authed(
             BeforeId::Absent => {}
         }
 
+        let requested_limit = filter.limit.unwrap_or(2_000);
+        let requested_offset = extract_page_offset(raw, query.limit)
+            .unwrap_or_default()
+            .max(0) as usize;
         // Honor `page` on non-search general queries so offset paging works for
         // the empty-query people directory (kind:0 listing). The FTS path
         // (`handle_bridge_search`) has its own `page`/`per_page`; a filter with
@@ -1256,7 +1260,15 @@ async fn query_events_authed(
             query.offset = Some(offset);
         }
 
-        catchall_queries.push((idx, query));
+        // Repository access is result-dependent. Apply limit/offset only after
+        // filtering so hidden private rows cannot consume a discovery page.
+        if crate::api::git::access::filter_can_match_repository_discovery(filter) {
+            query.limit = None;
+            query.offset = None;
+            query.max_limit = Some(2_000);
+        }
+
+        catchall_queries.push((idx, query, requested_offset, requested_limit));
     }
 
     // Phase 2 — DB reads, bounded-concurrent, order-preserving (`buffered`).
@@ -1264,15 +1276,27 @@ async fn query_events_authed(
     // and error semantics match the previous serial loop.
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
-    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(|(idx, query)| {
-        let db = db.clone();
-        async move { (idx, db.query_events(&query).await) }
-    }))
+    let mut catchall_results = stream::iter(catchall_queries.into_iter().map(
+        |(idx, query, requested_offset, requested_limit)| {
+            let db = db.clone();
+            async move {
+                (
+                    idx,
+                    requested_offset,
+                    requested_limit,
+                    db.query_events(&query).await,
+                )
+            }
+        },
+    ))
     .buffered(crate::handlers::req::FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, filter_events)) = catchall_results.next().await {
+    while let Some((idx, requested_offset, requested_limit, filter_events)) =
+        catchall_results.next().await
+    {
         let filter = &filters[idx];
+        let mut accepted_for_filter = 0usize;
         match filter_events {
             Ok(stored_events) => {
                 for se in stored_events {
@@ -1292,6 +1316,25 @@ async fn query_events_authed(
                     }
                     if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes) {
                         continue;
+                    }
+                    if !crate::api::git::access::requester_can_discover_repository_event(
+                        state,
+                        tenant,
+                        &se.event,
+                        &pubkey_bytes,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
+                    if crate::api::git::access::filter_can_match_repository_discovery(filter) {
+                        let position = accepted_for_filter;
+                        accepted_for_filter += 1;
+                        if position < requested_offset
+                            || position >= requested_offset.saturating_add(requested_limit)
+                        {
+                            continue;
+                        }
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
                         events.push(v);
@@ -1439,6 +1482,8 @@ async fn count_events_authed(
                     filter,
                     &authed_pubkey_hex,
                 );
+        let needs_repository_filtering =
+            crate::api::git::access::filter_can_match_repository_discovery(filter);
 
         // If filter targets a specific channel, verify access.
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1462,6 +1507,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_repository_filtering
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -1470,12 +1516,30 @@ async fn count_events_authed(
                     }
                 }
             } else {
-                // Fallback: query + post-filter for non-pushable constraints.
+                // Repository discovery COUNT always needs the complete candidate
+                // set so the per-event access predicate can return an exact count.
+                // Other non-pushable filters retain the bounded abuse guard.
                 let mut q = query;
-                crate::handlers::req::apply_count_fallback_limit(&mut q);
+                if needs_repository_filtering {
+                    crate::handlers::req::apply_repository_discovery_count_limit(&mut q);
+                } else {
+                    crate::handlers::req::apply_count_fallback_limit(&mut q);
+                }
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
-                        if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
+                        if needs_repository_filtering
+                            && crate::handlers::req::repository_discovery_count_exceeded(
+                                stored_events.len(),
+                            )
+                        {
+                            return Err(api_error(
+                                StatusCode::BAD_REQUEST,
+                                "repository count requires narrower constraints",
+                            ));
+                        }
+                        if !needs_repository_filtering
+                            && crate::handlers::req::count_fallback_exceeded(stored_events.len())
+                        {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
                             return Err(api_error(
                                 StatusCode::BAD_REQUEST,
@@ -1495,6 +1559,16 @@ async fn count_events_authed(
                                 &se.event,
                                 &authed_pubkey_hex,
                             ) {
+                                continue;
+                            }
+                            if !crate::api::git::access::requester_can_discover_repository_event(
+                                state,
+                                tenant,
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -1526,6 +1600,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_repository_filtering
             {
                 query.limit = None;
                 match state.db.count_events(&query).await {
@@ -1535,11 +1610,28 @@ async fn count_events_authed(
                     }
                 }
             } else {
-                // Fallback: query a bounded candidate set + post-filter.
-                crate::handlers::req::apply_count_fallback_limit(&mut query);
+                // Repository discovery COUNT must not be truncated before the
+                // per-event access gate. Other fallbacks keep the abuse bound.
+                if needs_repository_filtering {
+                    crate::handlers::req::apply_repository_discovery_count_limit(&mut query);
+                } else {
+                    crate::handlers::req::apply_count_fallback_limit(&mut query);
+                }
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
-                        if crate::handlers::req::count_fallback_exceeded(stored_events.len()) {
+                        if needs_repository_filtering
+                            && crate::handlers::req::repository_discovery_count_exceeded(
+                                stored_events.len(),
+                            )
+                        {
+                            return Err(api_error(
+                                StatusCode::BAD_REQUEST,
+                                "repository count requires narrower constraints",
+                            ));
+                        }
+                        if !needs_repository_filtering
+                            && crate::handlers::req::count_fallback_exceeded(stored_events.len())
+                        {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
                             return Err(api_error(
                                 StatusCode::BAD_REQUEST,
@@ -1559,6 +1651,16 @@ async fn count_events_authed(
                                 &se.event,
                                 &authed_pubkey_hex,
                             ) {
+                                continue;
+                            }
+                            if !crate::api::git::access::requester_can_discover_repository_event(
+                                state,
+                                tenant,
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -1733,6 +1835,16 @@ async fn handle_bridge_search(
                 continue;
             }
             if crate::handlers::req::is_author_only_event(&stored.event, pubkey_bytes) {
+                continue;
+            }
+            if !crate::api::git::access::requester_can_discover_repository_event(
+                state,
+                tenant,
+                &stored.event,
+                pubkey_bytes,
+            )
+            .await
+            {
                 continue;
             }
             // Dedup across filters.
@@ -3291,11 +3403,18 @@ mod tests {
     ///
     /// Returns `None` when local Postgres is not reachable.
     async fn bridge_handler_test_state() -> Option<Arc<crate::state::AppState>> {
+        bridge_handler_test_state_with_redis(
+            &std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+        )
+        .await
+    }
+
+    async fn bridge_handler_test_state_with_redis(
+        redis_url: &str,
+    ) -> Option<Arc<crate::state::AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
         config.database_url = TEST_DB_URL.to_string();
-        // Use the real local Redis so enforce_http_admission can pass.
-        config.redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        config.redis_url = redis_url.to_owned();
         config.relay_url = "wss://bridge-test.local".to_string();
         config.require_auth_token = false;
         config.require_relay_membership = false;
@@ -3390,6 +3509,180 @@ mod tests {
                 ((transport, reason), n)
             })
             .collect()
+    }
+
+    /// HTTP `/query` and `/count` must filter private kind:30617 and kind:30618
+    /// events without hiding a legacy public repository that has only a
+    /// `buzz-channel` push binding.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bridge_repository_discovery_and_counts_follow_live_access() {
+        let Some(fixture) =
+            crate::api::git::access::tests::repository_access_fixture("redis://127.0.0.1:6379")
+                .await
+        else {
+            return;
+        };
+        let filters = serde_json::to_vec(&[nostr::Filter::new().kinds([
+            Kind::Custom(buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16),
+            Kind::Custom(buzz_core::kind::KIND_GIT_REPO_STATE as u16),
+        ])])
+        .expect("serialize discovery filter");
+        let headers = HeaderMap::new();
+
+        for requester in [&fixture.owner, &fixture.member] {
+            let Json(Value::Array(events)) = query_events_authed(
+                &fixture.state,
+                &fixture.tenant,
+                &headers,
+                &filters,
+                requester.public_key(),
+                [0u8; 32],
+            )
+            .await
+            .expect("allowed repository query") else {
+                panic!("query response must be an event array");
+            };
+            let ids: std::collections::HashSet<String> = events
+                .iter()
+                .filter_map(|event| {
+                    event
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .collect();
+            assert!(ids.contains(&fixture.private_announcement.id.to_hex()));
+            assert!(ids.contains(&fixture.private_state.id.to_hex()));
+            assert!(ids.contains(&fixture.public_announcement.id.to_hex()));
+
+            let Json(count) = count_events_authed(
+                &fixture.state,
+                &fixture.tenant,
+                &headers,
+                &filters,
+                requester.public_key(),
+                [0u8; 32],
+            )
+            .await
+            .expect("allowed repository count");
+            assert_eq!(count["count"], 3);
+        }
+
+        let Json(Value::Array(events)) = query_events_authed(
+            &fixture.state,
+            &fixture.tenant,
+            &headers,
+            &filters,
+            fixture.outsider.public_key(),
+            [0u8; 32],
+        )
+        .await
+        .expect("outsider repository query") else {
+            panic!("query response must be an event array");
+        };
+        let ids: std::collections::HashSet<String> = events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            })
+            .collect();
+        assert!(!ids.contains(&fixture.private_announcement.id.to_hex()));
+        assert!(!ids.contains(&fixture.private_state.id.to_hex()));
+        assert!(ids.contains(&fixture.public_announcement.id.to_hex()));
+
+        let Json(count) = count_events_authed(
+            &fixture.state,
+            &fixture.tenant,
+            &headers,
+            &filters,
+            fixture.outsider.public_key(),
+            [0u8; 32],
+        )
+        .await
+        .expect("outsider repository count");
+        assert_eq!(count["count"], 1);
+    }
+
+    /// Repository discovery COUNT must reject an over-budget candidate set
+    /// instead of reporting a value truncated at the database fetch limit.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bridge_repository_discovery_count_rejects_more_than_twenty_thousand_candidates() {
+        let Some(fixture) =
+            crate::api::git::access::tests::repository_access_fixture("redis://127.0.0.1:6379")
+                .await
+        else {
+            return;
+        };
+        let marker = format!(
+            "repository-count-overflow-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let tags = serde_json::to_value(&fixture.public_announcement.tags)
+            .expect("serialize repository tags");
+        let sig = fixture.public_announcement.sig.serialize();
+        let candidate_count = crate::handlers::req::REPOSITORY_DISCOVERY_COUNT_LIMIT + 1;
+
+        sqlx::query(
+            r#"
+            INSERT INTO events
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, d_tag)
+            SELECT
+                $1,
+                digest($2::bytea || int8send(n), 'sha256'),
+                $3,
+                clock_timestamp(),
+                $4,
+                $5,
+                $6,
+                $7,
+                concat($6, '-', n)
+            FROM generate_series(1::bigint, $8::bigint) AS generated(n)
+            "#,
+        )
+        .bind(fixture.tenant.community().as_uuid())
+        .bind(marker.as_bytes())
+        .bind(fixture.owner.public_key().as_bytes().as_slice())
+        .bind(buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as i32)
+        .bind(tags)
+        .bind(&marker)
+        .bind(sig.as_slice())
+        .bind(candidate_count)
+        .execute(&fixture.pool)
+        .await
+        .expect("insert over-budget repository discovery candidates");
+
+        let filters = serde_json::to_vec(&[nostr::Filter::new().kind(Kind::Custom(
+            buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT as u16,
+        ))])
+        .expect("serialize repository count filter");
+        let result = count_events_authed(
+            &fixture.state,
+            &fixture.tenant,
+            &HeaderMap::new(),
+            &filters,
+            fixture.outsider.public_key(),
+            [0u8; 32],
+        )
+        .await;
+
+        sqlx::query("DELETE FROM events WHERE community_id = $1 AND content = $2")
+            .bind(fixture.tenant.community().as_uuid())
+            .bind(&marker)
+            .execute(&fixture.pool)
+            .await
+            .expect("remove repository count overflow candidates");
+
+        let (status, Json(error)) = result.expect_err("over-budget count must be rejected");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error["error"],
+            "repository count requires narrower constraints"
+        );
     }
 
     /// T2a — pre-parse 400 arm: a POST /events with an invalid JSON body must

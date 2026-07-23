@@ -82,6 +82,13 @@ buzz mem set <slug> "my-value"
 buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
+# Repository visibility (public is the default)
+buzz repos create --id public-repo --name "Public repository"
+buzz repos create --id private-repo --name "Private repository" \
+  --visibility private --channel <channel-uuid>
+buzz repos edit --id private-repo --visibility public
+buzz repos edit --id public-repo --visibility private --channel <channel-uuid>
+
 # Repository protection
 buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
@@ -94,6 +101,8 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+Private repositories require `--visibility private` and `--channel <uuid>`. The repository owner must currently belong to that channel. `repos edit --visibility public` removes private-read gating while preserving an existing `buzz-channel` push-policy binding. Relay rejections, including a stale or invalid channel membership, are returned with the relay's specific error message.
 
 ## Commands
 
@@ -148,6 +157,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `notes` | Get notes for a user |
 | | `contacts` | Get NIP-02 contact list |
 | `repos` | `create` | Announce a git repository (NIP-34) |
+| | `edit` | Change repository visibility and private channel binding |
 | | `get` | Get a repository announcement |
 | | `list` | List repository announcements |
 | | `protect list` | List branch and tag protection rules |

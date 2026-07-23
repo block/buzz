@@ -1079,6 +1079,14 @@ pub enum NotesCmd {
     },
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RepoVisibility {
+    /// Existing behavior: any authenticated relay member can discover and read.
+    Public,
+    /// Restrict discovery and Git access to the selected channel.
+    Private,
+}
+
 #[derive(Subcommand)]
 pub enum ReposCmd {
     /// Announce a git repository (NIP-34)
@@ -1101,6 +1109,24 @@ pub enum ReposCmd {
         /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
         #[arg(long = "nostr-relay")]
         relays: Vec<String>,
+        /// Repository read visibility (default: public)
+        #[arg(long, value_enum, default_value_t = RepoVisibility::Public)]
+        visibility: RepoVisibility,
+        /// Channel UUID that may discover/read a private repository
+        #[arg(long, requires_if("private", "visibility"))]
+        channel: Option<String>,
+    },
+    /// Change repository visibility and channel binding
+    Edit {
+        /// Repository identifier (d-tag)
+        #[arg(long)]
+        id: String,
+        /// New repository read visibility
+        #[arg(long, value_enum)]
+        visibility: RepoVisibility,
+        /// Channel UUID for private visibility. Omit with public to preserve the existing push binding
+        #[arg(long, requires_if("private", "visibility"))]
+        channel: Option<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1930,7 +1956,7 @@ mod tests {
         );
         assert_eq!(
             names(&cmd, "repos"),
-            vec!["create", "get", "list", "protect"]
+            vec!["create", "edit", "get", "list", "protect"]
         );
         let repos = cmd
             .get_subcommands()
@@ -1993,7 +2019,7 @@ mod tests {
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 4),
+            ("repos", 5),
             ("social", 7),
             ("upload", 1),
             ("users", 4),

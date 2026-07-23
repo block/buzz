@@ -2382,6 +2382,29 @@ fn validate_repo_id(repo_id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// Validate a kind:30617 announcement before it is stored.
+///
+/// Private repository metadata is an authorization boundary, so malformed
+/// bindings and bindings to channels the announcer has not joined are rejected
+/// instead of being persisted and left for a best-effort side effect.
+pub async fn validate_git_repo_announcement(
+    tenant: &TenantContext,
+    event: &Event,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
+    let repo_id =
+        extract_tag_value(event, "d").ok_or_else(|| anyhow::anyhow!("kind:30617 missing d tag"))?;
+    if !validate_repo_id(&repo_id) {
+        return Err(anyhow::anyhow!(
+            "invalid repo identifier: must be [a-zA-Z0-9._-]{{1,64}}, no leading dots, no '..'"
+        ));
+    }
+
+    crate::api::git::access::validate_private_repository_announcement(state, tenant, event).await?;
+
+    Ok(())
+}
+
 /// Handle kind:30617 (NIP-34 Git Repository Announcement).
 ///
 /// Reserves the repo name and seeds its empty-manifest pointer when a repo
@@ -2398,15 +2421,12 @@ async fn handle_git_repo_announcement(
     event: &Event,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    // Extract repo identifier from d tag (required for NIP-33 parameterized replaceable events).
+    // Validation runs before storage. This keeps authorization metadata out of
+    // the side-effect phase, whose failures are deliberately best-effort.
     let repo_id =
         extract_tag_value(event, "d").ok_or_else(|| anyhow::anyhow!("kind:30617 missing d tag"))?;
 
-    if !validate_repo_id(&repo_id) {
-        return Err(anyhow::anyhow!(
-            "invalid repo identifier: must be [a-zA-Z0-9._-]{{1,64}}, no leading dots, no '..'"
-        ));
-    }
+    debug_assert!(validate_repo_id(&repo_id));
 
     let owner_hex = hex::encode(event.pubkey.to_bytes());
 

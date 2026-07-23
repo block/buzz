@@ -9,7 +9,8 @@ export interface Repo {
   description: string;
   cloneUrls: string[];
   webUrl: string | null;
-  channelId: string | null;
+  privateChannelId: string | null;
+  visibility: "public" | "private";
   owner: string;
   contributors: string[];
   createdAt: number;
@@ -31,7 +32,10 @@ function eventToRepo(event: NostrEvent): Repo {
   const description = getTag(event, "description") || event.content || "";
   const cloneUrls = getAllTags(event, "clone");
   const webUrl = getTag(event, "web") ?? null;
-  const channelId = getTag(event, "buzz-channel") ?? null;
+  const visibility =
+    getTag(event, "buzz-visibility") === "private" ? "private" : "public";
+  const privateChannelId =
+    visibility === "private" ? (getTag(event, "buzz-channel") ?? null) : null;
   const contributors = getAllTags(event, "p");
   const owner = event.pubkey;
 
@@ -41,7 +45,8 @@ function eventToRepo(event: NostrEvent): Repo {
     description,
     cloneUrls,
     webUrl,
-    channelId,
+    privateChannelId,
+    visibility,
     owner,
     contributors,
     createdAt: event.created_at,
