@@ -117,8 +117,13 @@ export function usePersonaActions() {
 
   const personas = personasQuery.data ?? [];
   const sharedCatalogPersonaIdSet = React.useMemo(
-    () => new Set(sharedCatalogPersonaIds),
-    [sharedCatalogPersonaIds],
+    () =>
+      new Set(
+        sharedCatalogPersonaIds.filter(
+          (personaId) => catalogPersonaMemoryLevels[personaId] !== undefined,
+        ),
+      ),
+    [catalogPersonaMemoryLevels, sharedCatalogPersonaIds],
   );
   const availableRuntimes = React.useMemo(
     () =>

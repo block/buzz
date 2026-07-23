@@ -623,7 +623,7 @@ export function SnapshotShareDialog({
                   value={linkShareLevel}
                 />
               </div>
-              {afterLink}
+              {afterLink ? <div className="mt-2">{afterLink}</div> : null}
               <Separator
                 className="my-4 bg-input/40"
                 data-testid={`${testIdPrefix}-link-divider`}

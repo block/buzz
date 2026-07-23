@@ -846,7 +846,7 @@ test("custom personas share with people and keep export separate", async ({
     (catalogSectionBox?.y ?? 0) + (catalogSectionBox?.height ?? 0) + 23,
   );
   expect(catalogSectionBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0),
+    (linkRowBox?.y ?? 0) + (linkRowBox?.height ?? 0) + 7,
   );
   expect(
     Math.abs(
@@ -1272,6 +1272,12 @@ test("custom personas share with people and keep export separate", async ({
 
 test("custom personas can be shared to the relay catalog", async ({ page }) => {
   const personaId = "custom:catalog-analyst";
+  await page.addInitScript((legacyPersonaId) => {
+    localStorage.setItem(
+      "buzz-persona-catalog-visibility-v1",
+      JSON.stringify([legacyPersonaId]),
+    );
+  }, personaId);
   await installMockBridge(page, {
     globalAgentConfig: {
       env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
