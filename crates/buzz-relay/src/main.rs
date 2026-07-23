@@ -334,7 +334,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&config.redis_url);
+        let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
+        cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
     };
