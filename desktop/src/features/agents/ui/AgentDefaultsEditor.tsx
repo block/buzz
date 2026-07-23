@@ -8,6 +8,7 @@
  * Precedence: baked floor < GLOBAL (this card) < persona < per-agent.
  */
 import { AlertCircle, Check, Loader } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import { useQueryClient } from "@tanstack/react-query";
@@ -36,6 +37,11 @@ import { Button } from "@/shared/ui/button";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
+const PROGRESSIVE_FIELDS_TRANSITION = {
+  duration: 0.22,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
+
 export type GlobalAgentConfigSaveResult = Awaited<
   ReturnType<typeof setGlobalAgentConfig>
 >;
@@ -56,6 +62,7 @@ export function AgentDefaultsEditor({
   secondaryAction,
 }: AgentDefaultsEditorProps) {
   const flatLayout = layout === "flat";
+  const shouldReduceMotion = useReducedMotion();
   const [config, setConfig] =
     React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
   const configRef = React.useRef(config);
@@ -121,18 +128,20 @@ export function AgentDefaultsEditor({
     () => sortPersonaRuntimes(runtimesQuery.data ?? []),
     [runtimesQuery.data],
   );
-  // A missing/stale preference displays the same effective fallback the backend
-  // would use; it is persisted only after the user edits and saves this form.
-  // Keep persona ordering here so this shared editor matches agent dialogs.
-  const selectedRuntime = React.useMemo(
-    () =>
-      sortedRuntimes.find(
-        (runtime) => runtime.id === config.preferred_runtime,
-      ) ??
+  // The settings card keeps displaying the backend's effective fallback for
+  // legacy configs. The modal requires an explicit harness choice so its
+  // progressive flow starts from a truthful empty state.
+  const selectedRuntime = React.useMemo(() => {
+    const configuredRuntime = sortedRuntimes.find(
+      (runtime) => runtime.id === config.preferred_runtime,
+    );
+    if (flatLayout) return configuredRuntime;
+    return (
+      configuredRuntime ??
       getDefaultPersonaRuntime(sortedRuntimes) ??
-      sortedRuntimes[0],
-    [config.preferred_runtime, sortedRuntimes],
-  );
+      sortedRuntimes[0]
+    );
+  }, [config.preferred_runtime, flatLayout, sortedRuntimes]);
   const harnessOptions = React.useMemo(
     () =>
       sortedRuntimes.map((runtime) => ({
@@ -145,7 +154,7 @@ export function AgentDefaultsEditor({
   const configSurfaceError =
     loadError ||
     runtimesQuery.isError ||
-    (!configSurfaceLoading && selectedRuntime === undefined);
+    (!configSurfaceLoading && sortedRuntimes.length === 0);
 
   function handleConfigChange(next: GlobalAgentConfig) {
     configRef.current = next;
@@ -157,6 +166,7 @@ export function AgentDefaultsEditor({
 
   function handleHarnessChange(runtimeId: string) {
     handleConfigChange(resetConfigForHarnessChange(config, runtimeId));
+    setConfigIsValid(false);
     setIsCustomModelEditing(false);
     setIsCustomProvider(false);
   }
@@ -206,6 +216,26 @@ export function AgentDefaultsEditor({
     }
   }
 
+  const configFields = selectedRuntime ? (
+    <AgentConfigFields
+      bakedEnv={bakedEnv}
+      selectedRuntime={selectedRuntime}
+      config={config}
+      disclosure={flatLayout ? "progressive-defaults" : "full"}
+      isCustomModelEditing={isCustomModelEditing}
+      isCustomProvider={isCustomProvider}
+      onConfigChange={handleConfigChange}
+      onCustomModelEditingChange={setIsCustomModelEditing}
+      onIsCustomProviderChange={setIsCustomProvider}
+      onValidityChange={setConfigIsValid}
+      unstyled={flatLayout}
+      useCustomSelect
+    />
+  ) : null;
+  const progressiveFieldsTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : PROGRESSIVE_FIELDS_TRANSITION;
+
   return (
     <div className={cn("min-w-0", flatLayout ? "space-y-7" : "space-y-4")}>
       {configSurfaceLoading ? (
@@ -239,19 +269,25 @@ export function AgentDefaultsEditor({
               value={selectedRuntime?.id ?? ""}
             />
           </div>
-          <AgentConfigFields
-            bakedEnv={bakedEnv}
-            selectedRuntime={selectedRuntime}
-            config={config}
-            isCustomModelEditing={isCustomModelEditing}
-            isCustomProvider={isCustomProvider}
-            onConfigChange={handleConfigChange}
-            onCustomModelEditingChange={setIsCustomModelEditing}
-            onIsCustomProviderChange={setIsCustomProvider}
-            onValidityChange={setConfigIsValid}
-            unstyled={flatLayout}
-            useCustomSelect
-          />
+          {flatLayout ? (
+            <AnimatePresence initial={false}>
+              {configFields ? (
+                <motion.div
+                  animate={{ height: "auto", opacity: 1 }}
+                  className="overflow-hidden"
+                  data-testid="global-agent-runtime-fields-motion"
+                  exit={{ height: 0, opacity: 0 }}
+                  initial={{ height: 0, opacity: 0 }}
+                  key={selectedRuntime?.id}
+                  transition={progressiveFieldsTransition}
+                >
+                  {configFields}
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          ) : (
+            configFields
+          )}
         </>
       )}
 
@@ -277,7 +313,12 @@ export function AgentDefaultsEditor({
           <div className="ml-auto flex items-center gap-3">
             {secondaryAction}
             <Button
-              disabled={!dirty || !configIsValid || saveState === "saving"}
+              disabled={
+                !dirty ||
+                !configIsValid ||
+                selectedRuntime === undefined ||
+                saveState === "saving"
+              }
               onClick={() => void handleSave()}
               size="sm"
             >

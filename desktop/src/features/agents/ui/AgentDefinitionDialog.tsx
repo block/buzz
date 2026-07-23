@@ -921,7 +921,9 @@ export function AgentDefinitionDialog({
                   harness={runtimeSummaryLabel}
                   inheritedModel={inheritedModelDefault}
                   inheritedProvider={inheritedProviderDefault}
-                  isConfigured={localModeSatisfied}
+                  isConfigured={
+                    localModeGate.missingNormalizedFields.length === 0
+                  }
                   model={runtimeFileConfig?.model}
                   onEditDefaults={() => setAiDefaultsOpen(true)}
                   triggerRef={aiDefaultsTriggerRef}

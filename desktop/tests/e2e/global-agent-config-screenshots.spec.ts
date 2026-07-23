@@ -421,6 +421,39 @@ test.describe("global agent config screenshots", () => {
     await expect(defaultsDialog).toBeVisible();
     await expect(
       defaultsDialog.getByTestId("global-agent-config-fields"),
+    ).toHaveCount(0);
+    await expect(
+      defaultsDialog.getByTestId("global-agent-provider"),
+    ).toHaveCount(0);
+    await expect(defaultsDialog.getByTestId("global-agent-model")).toHaveCount(
+      0,
+    );
+    const harnessOnlyHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+
+    const harness = defaultsDialog.getByTestId("global-agent-default-harness");
+    await harness.click();
+    await page
+      .getByTestId("global-agent-default-harness-option-buzz-agent")
+      .click();
+    const provider = defaultsDialog.getByTestId("global-agent-provider");
+    await expect(provider).toBeVisible();
+    await expect(defaultsDialog.getByTestId("global-agent-model")).toHaveCount(
+      0,
+    );
+    await waitForAnimations(page);
+    const providerHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+    expect(providerHeight).toBeGreaterThan(harnessOnlyHeight);
+
+    await provider.click();
+    await page.getByTestId("global-agent-provider-option-anthropic").click();
+    await expect(
+      defaultsDialog.getByTestId("global-agent-model"),
+    ).toBeVisible();
+    await waitForAnimations(page);
+    const configuredHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+    expect(configuredHeight).toBeGreaterThan(providerHeight);
+    await expect(
+      defaultsDialog.getByTestId("global-agent-config-fields"),
     ).not.toHaveClass(/bg-muted\/20/);
     const harnessBox = await defaultsDialog
       .getByTestId("global-agent-default-harness")
@@ -439,6 +472,8 @@ test.describe("global agent config screenshots", () => {
         name: "Close",
       })
       .click();
+    await page.getByRole("button", { name: "Discard changes" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
 
     await waitForAnimations(page);
 
