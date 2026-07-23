@@ -732,6 +732,16 @@ async fn spawn_one(
     #[cfg(unix)]
     cmd.process_group(0);
 
+    // Windows: the desktop spawns the agent with CREATE_NO_WINDOW, so buzz-agent has no console
+    // to share. Without the same flag here, every console-subsystem MCP server child — a `node`
+    // stdio server, a cmd shim — gets a fresh visible console window that lingers. Mirror the
+    // desktop's suppression at the MCP spawn, alongside the existing #[cfg(unix)] process_group(0).
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
     let transport = TokioChildProcess::new(cmd)
         .map_err(|e| AgentError::Mcp(format!("spawn {}: {e}", spec.name)))?;
     let pgid = transport.id();

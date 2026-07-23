@@ -466,6 +466,17 @@ impl AcpClient {
         #[cfg(unix)]
         cmd.process_group(0);
 
+        // Windows: the desktop layer spawns THIS harness with CREATE_NO_WINDOW
+        // (see managed_agents/runtime.rs), so buzz-acp has no console to share.
+        // Without the same flag here, every console-subsystem agent child — the
+        // `claude-agent-acp`/`goose` cmd-shim, node, `claude.exe` — gets a fresh
+        // visible console window that lingers. Mirror the desktop's suppression.
+        #[cfg(windows)]
+        {
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
         let mut child = cmd.spawn()?;
 
         let stdin = child
