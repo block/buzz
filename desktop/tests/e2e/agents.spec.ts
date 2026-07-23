@@ -263,6 +263,29 @@ test("built-in persona edits persist", async ({ page }) => {
   });
 });
 
+test("searches agent avatar emoji with focus on open", async ({ page }) => {
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+
+  await expect(page.getByTestId("persona-dialog")).toBeVisible();
+  await page.getByLabel("Add avatar").click();
+  await page.getByRole("tab", { name: "Emoji" }).click();
+
+  const picker = page.locator("em-emoji-picker");
+  const searchInput = picker.locator("input[type='search']");
+  await expect(searchInput).toBeVisible();
+  await expect(searchInput).toBeFocused();
+
+  await searchInput.fill("rocket");
+  await picker.locator("button[aria-label='🚀']").first().click();
+
+  await expect(page.getByRole("img", { name: "Agent name avatar" })).toHaveText(
+    "🚀",
+  );
+});
+
 test("agent avatar emoji picker scrolls inside its popover", async ({
   page,
 }) => {

@@ -122,6 +122,32 @@ export function AgentCreationPreview({
     isAvatarMenuOpen && activeTab === "emoji",
   );
 
+  // Emoji Mart mounts its search input inside a shadow root. Wait for it
+  // before focusing so the surrounding Radix popover cannot win the race.
+  React.useEffect(() => {
+    if (!isAvatarMenuOpen || activeTab !== "emoji") {
+      return;
+    }
+
+    let animationFrame = 0;
+    const focusSearchInput = () => {
+      const searchInput =
+        emojiPickerContainerRef.current
+          ?.querySelector("em-emoji-picker")
+          ?.shadowRoot?.querySelector<HTMLInputElement>(
+            'input[type="search"]',
+          ) ?? null;
+      if (!searchInput) {
+        animationFrame = window.requestAnimationFrame(focusSearchInput);
+        return;
+      }
+      searchInput.focus();
+    };
+
+    animationFrame = window.requestAnimationFrame(focusSearchInput);
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [activeTab, isAvatarMenuOpen]);
+
   const customColorDraft = React.useMemo(
     () => hsvToHex(customHue, customSaturation, customValue),
     [customHue, customSaturation, customValue],
@@ -526,6 +552,7 @@ export function AgentCreationPreview({
               style={emojiMartThemeVars}
             >
               <Picker
+                autoFocus
                 categories={EMOJI_MART_CATEGORIES}
                 data={emojiData}
                 dynamicWidth
@@ -553,7 +580,7 @@ export function AgentCreationPreview({
                   applyEmojiAvatar(emoji.native, nextColor);
                 }}
                 previewPosition="none"
-                searchPosition="none"
+                searchPosition="sticky"
                 set="native"
                 skinTonePosition="none"
                 theme="auto"
