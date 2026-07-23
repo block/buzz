@@ -75,7 +75,7 @@ export function useHomePersonalActivity({
   const drafts = useHomeDrafts({
     autoSelect: isDrafts,
     isNarrowHomeViewport,
-    selectionEnabled: activityEnabled && (isDrafts || allowMixedSelection),
+    selectionEnabled: isDrafts || (activityEnabled && allowMixedSelection),
     viewportWidthPx,
   });
 
