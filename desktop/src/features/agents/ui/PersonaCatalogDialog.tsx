@@ -102,7 +102,7 @@ export function PersonaCatalogDialog({
     <Dialog onOpenChange={onOpenChange} open={open}>
       <ChooserDialogContent
         className="h-[42rem] max-w-4xl"
-        contentClassName="flex min-h-0 flex-1 p-0"
+        contentClassName="flex min-h-0 min-w-0 flex-1 p-0"
         data-testid="persona-catalog-dialog"
         description={personaCatalogCopy.dialogDescription}
         headerClassName="bg-sidebar pb-3 text-sidebar-foreground"

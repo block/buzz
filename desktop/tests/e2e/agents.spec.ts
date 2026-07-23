@@ -1305,7 +1305,12 @@ test("custom personas can be shared to the relay catalog", async ({ page }) => {
 
 \`\`\`text
 This deliberately long fenced-code example must not establish the minimum width of the full custom-agent instruction document or force earlier prose outside the catalog detail pane.
-\`\`\``,
+\`\`\`
+
+| Before | After | Why |
+| --- | --- | --- |
+| \`transition: all 300ms\` | \`transition: transform 200ms ease-out\` | Specify exact properties so a wide instruction table stays independently scrollable without expanding the full catalog detail pane. |
+| \`transform: scale(0)\` | \`transform: scale(0.95); opacity: 0\` | Preserve physicality while keeping the shared agent instructions inside their container. |`,
       },
     ],
   });
@@ -1342,8 +1347,19 @@ This deliberately long fenced-code example must not establish the minimum width 
     page.getByTestId(`persona-catalog-list-item-${personaId}`),
   ).toContainText("Catalog Analyst");
   await selectCatalogPersona(page, personaId);
+  const catalogDialog = page.getByTestId("persona-catalog-dialog");
   const catalogDetailPane = page.getByTestId("persona-catalog-detail-pane");
   await expect(catalogDetailPane).toContainText("Design System And Styling");
+  await expect(catalogDialog).toBeVisible();
+  await expect(catalogDetailPane).toBeVisible();
+  await waitForAnimations(page);
+  const [catalogDialogRight, catalogDetailPaneRight] = await Promise.all([
+    catalogDialog.evaluate((element) => element.getBoundingClientRect().right),
+    catalogDetailPane.evaluate(
+      (element) => element.getBoundingClientRect().right,
+    ),
+  ]);
+  expect(catalogDetailPaneRight).toBeLessThanOrEqual(catalogDialogRight);
   expect(
     await catalogDetailPane.evaluate(
       (element) => element.scrollWidth - element.clientWidth,
