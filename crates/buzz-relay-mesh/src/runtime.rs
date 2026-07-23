@@ -327,6 +327,11 @@ async fn reconcile_loop(inner: Arc<Inner>) {
 }
 
 async fn reconcile_once(inner: &Arc<Inner>) {
+    for runtime_id in inner.membership.evict_stale_peers() {
+        remove_peer(inner, runtime_id);
+        tracing::info!(peer = %runtime_id, "mesh: evicted stale peer");
+    }
+
     if let Some(registry) = &inner.registry {
         match registry.scan_ready().await {
             Ok(records) => inner.membership.apply_ready_records(records),
