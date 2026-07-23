@@ -142,6 +142,52 @@ fn explicit_path_resolution_ignores_non_executable_files() {
 }
 
 #[test]
+fn release_command_search_prefers_bundled_sidecars() {
+    let dirs = super::command_search_dirs_for_profile(
+        std::path::Path::new("/workspace"),
+        Some(std::path::Path::new("/working-copy")),
+        Some(std::path::Path::new(
+            "/Applications/Buzz.app/Contents/MacOS",
+        )),
+        false,
+    );
+
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/Applications/Buzz.app/Contents/MacOS"),
+            PathBuf::from("/workspace/target/release"),
+            PathBuf::from("/workspace/target/debug"),
+            PathBuf::from("/working-copy/target/release"),
+            PathBuf::from("/working-copy/target/debug"),
+        ]
+    );
+}
+
+#[test]
+fn debug_command_search_prefers_fresh_workspace_artifacts() {
+    let dirs = super::command_search_dirs_for_profile(
+        std::path::Path::new("/workspace"),
+        Some(std::path::Path::new("/working-copy")),
+        Some(std::path::Path::new(
+            "/Applications/Buzz.app/Contents/MacOS",
+        )),
+        true,
+    );
+
+    assert_eq!(
+        dirs,
+        vec![
+            PathBuf::from("/workspace/target/debug"),
+            PathBuf::from("/workspace/target/release"),
+            PathBuf::from("/working-copy/target/debug"),
+            PathBuf::from("/working-copy/target/release"),
+            PathBuf::from("/Applications/Buzz.app/Contents/MacOS"),
+        ]
+    );
+}
+
+#[test]
 fn classifies_available_when_adapter_found() {
     let (status, cmd, path) = classify_runtime(
         Some(("goose", PathBuf::from("/usr/local/bin/goose"))),
