@@ -12,8 +12,11 @@ Buzz relay <-- WebSocket --> buzz-acp <-- ACP over stdio --> Hermes Agent
 ```
 
 This guide covers a persistent Linux deployment. For a local desktop setup,
-choose **Hermes Agent** in Buzz Desktop after it detects `hermes-acp`. A custom
+choose **Hermes Agent** in Buzz Desktop after it detects the official `hermes`
+entrypoint or the direct `hermes-acp` executable. A custom
 command with `hermes` and the argument `acp` is equivalent.
+Desktop prefers the native entrypoint and verifies its optional ACP dependencies
+with `hermes acp --check`.
 
 ## Prerequisites
 

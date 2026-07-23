@@ -573,26 +573,31 @@ fn name_matches_known_binary_rejects_node() {
 }
 
 #[test]
-fn name_matches_interpreter_accepts_node() {
-    // `node` IS a known script interpreter and must be recognized.
+fn name_matches_interpreter_accepts_exact_known_names() {
+    // Script interpreters are candidates only when the separate
+    // BUZZ_MANAGED_AGENT marker check proves ownership.
     assert!(super::name_matches_interpreter("node"));
+    assert!(super::name_matches_interpreter("python"));
+    assert!(super::name_matches_interpreter("python3"));
 }
 
 #[test]
 fn name_matches_interpreter_rejects_unknown() {
     // Interpreters not in KNOWN_SCRIPT_INTERPRETERS must not match.
-    assert!(!super::name_matches_interpreter("python3"));
     assert!(!super::name_matches_interpreter("deno"));
     assert!(!super::name_matches_interpreter("bun"));
 }
 
 #[test]
-fn name_matches_interpreter_rejects_node_prefix() {
-    // A name that starts with "node" but is longer must not match —
+fn name_matches_interpreter_rejects_interpreter_prefixes() {
+    // A name that starts with a known interpreter but is longer must not match —
     // exact equality is required to avoid false positives.
     assert!(!super::name_matches_interpreter("node_modules"));
     assert!(!super::name_matches_interpreter("nodejs"));
     assert!(!super::name_matches_interpreter("node-gyp"));
+    assert!(!super::name_matches_interpreter("python3.12"));
+    assert!(!super::name_matches_interpreter("python3-config"));
+    assert!(!super::name_matches_interpreter("pythonw"));
 }
 
 #[test]

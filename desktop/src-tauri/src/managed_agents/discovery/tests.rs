@@ -5,10 +5,11 @@ use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
-    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL, HERMES_AVATAR_URL,
+    hermes_readiness_probe_args, is_login_shell_path_uninit, is_safe_nvm_tag,
+    managed_agent_avatar_url, normalize_agent_args, parse_semver_tag,
+    probe_codex_acp_major_version, record_agent_command, refresh_login_shell_path,
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
+    HERMES_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -89,6 +90,29 @@ fn normalizes_hermes_entrypoints() {
     assert_eq!(
         normalize_agent_args("hermes-acp", vec!["acp".into()]),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn hermes_prefers_native_entrypoint_and_probes_acp_readiness() {
+    let runtime = super::known_acp_runtime("hermes").expect("Hermes runtime should resolve");
+
+    assert_eq!(runtime.commands, &["hermes", "hermes-acp"]);
+    assert_eq!(
+        hermes_readiness_probe_args("hermes"),
+        Some(&["hermes", "acp", "--check"][..])
+    );
+    assert_eq!(
+        hermes_readiness_probe_args("hermes-acp"),
+        Some(&["hermes-acp", "--check"][..])
+    );
+    assert_eq!(runtime.auth_probe_args, None);
+
+    let record = record_with(Some("hermes"), None, None);
+    assert_eq!(record_agent_command(&record, &[]), "hermes");
+    assert_eq!(
+        normalize_agent_args(&record_agent_command(&record, &[]), Vec::new()),
+        vec!["acp".to_string()]
     );
 }
 

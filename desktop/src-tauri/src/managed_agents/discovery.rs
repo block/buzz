@@ -162,8 +162,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
     KnownAcpRuntime {
         id: "hermes",
         label: "Hermes Agent",
-        commands: &["hermes-acp"],
-        aliases: &["hermes"],
+        commands: &["hermes", "hermes-acp"],
+        aliases: &[],
         avatar_url: HERMES_AVATAR_URL,
         mcp_command: None,
         mcp_hooks: false,
@@ -175,7 +175,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
             "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp/",
         cli_install_hint: "Install and configure Hermes Agent.",
         adapter_install_hint:
-            "Install Hermes's optional ACP support so `hermes-acp` is available.",
+            "Install Hermes's optional ACP support so `hermes acp --check` succeeds.",
         skill_dir: None,
         supports_acp_model_switching: false,
         model_env_var: None,
@@ -380,6 +380,14 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         "goose" | "hermes" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "hermes-acp" | "buzz-agent" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+fn hermes_readiness_probe_args(command: &str) -> Option<&'static [&'static str]> {
+    match normalize_command_identity(command).as_str() {
+        "hermes" => Some(&["hermes", "acp", "--check"]),
+        "hermes-acp" => Some(&["hermes-acp", "--check"]),
         _ => None,
     }
 }
@@ -1202,7 +1210,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 .underlying_cli
                 .map(|cli| find_command(cli).is_some())
                 .unwrap_or(false);
-            let (mut availability, command, binary_path) =
+            let (mut availability, mut command, mut binary_path) =
                 classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
 
             // For codex-acp: when the adapter resolves as Available, probe the
@@ -1214,6 +1222,30 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
             {
                 if let Some(path_str) = &binary_path {
                     availability = codex_adapter_availability(&PathBuf::from(path_str));
+                }
+            }
+
+            // Hermes's official installer exposes the native `hermes` binary
+            // even when the optional ACP dependencies are absent. A successful
+            // path lookup therefore is not enough to call the runtime ready.
+            // Probe the selected entrypoint with its command-specific `--check`
+            // invocation and surface a failure as AdapterMissing, not as an
+            // authentication problem.
+            if runtime.id == "hermes" && availability == AcpAvailabilityStatus::Available {
+                let readiness = command
+                    .as_deref()
+                    .and_then(hermes_readiness_probe_args)
+                    .zip(binary_path.as_deref())
+                    .map(|(args, path)| {
+                        matches!(
+                            probe_auth_status(Path::new(path), args),
+                            AuthStatus::LoggedIn
+                        )
+                    });
+                if readiness == Some(false) {
+                    availability = AcpAvailabilityStatus::AdapterMissing;
+                    command = None;
+                    binary_path = None;
                 }
             }
 
