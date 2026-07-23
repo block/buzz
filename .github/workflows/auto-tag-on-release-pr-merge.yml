@@ -1,6 +1,6 @@
 name: Auto-tag on Release PR Merge
 
-# Five release lanes share this one workflow. Four use an explicit branch
+# Four PR-driven release lanes share this workflow. Each uses an explicit branch
 # prefix; the main chart lane also auto-detects a Chart.yaml version bump so
 # a chart feature PR can publish its own new version when merged:
 #
@@ -10,18 +10,20 @@ name: Auto-tag on Release PR Merge
 #   push-chart-release/<v> → tag push-chart-v<v> → push-gateway-helm-chart.yml
 #   any internal PR that bumps deploy/charts/buzz/Chart.yaml `version`
 #                       → tag chart-v<v>  → helm-chart.yml (helm chart)
-#   mobile-release/<v> → tag mobile-v<v> → (manual sprout_ref for buzz-releases build — see below)
+#
+# Mobile candidate tags do not come from merged PRs. Operators create immutable
+# mobile-v<v>-rc.N tags directly from remote main with scripts/mobile-release.sh,
+# then hand the exact tag to buzz-releases.
 #
 # Release tags are created with a short-lived token from the dedicated
 # buzz-release-bot GitHub App. GitHub attributes the ref creation to that
 # App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
 # default GITHUB_TOKEN remains read-only and is never used to create a tag.
 #
-# The mobile lane is push-only by infosec necessity: OSS `block/buzz` CI must
-# not trigger CI in the private `buzz-releases` repo, so auto-dispatch across
-# that boundary is deliberately disallowed. The mobile-v* tag is consumed
-# manually instead — a human feeds it as the `sprout_ref` input to the
-# `buzz-releases` Buildkite pipeline, which builds and ships mobile.
+# Mobile is manual-only by infosec necessity: OSS `block/buzz` CI must
+# not trigger CI in the private `buzz-releases` repo. A human feeds the exact
+# mobile candidate tag to the private Buildkite pipeline, which builds and
+# ships mobile.
 
 on:
   pull_request:
@@ -65,9 +67,6 @@ jobs:
             push-chart-release/*)
               VERSION="${BRANCH#push-chart-release/}"
               TAG_PREFIX="push-chart-v" ;;
-            mobile-release/*)
-              VERSION="${BRANCH#mobile-release/}"
-              TAG_PREFIX="mobile-v" ;;
             *)
               parent_sha="$(git rev-parse HEAD^)"
               old_version="$(git show "${parent_sha}:deploy/charts/buzz/Chart.yaml" 2>/dev/null | awk '/^version:/ {print $2}')"

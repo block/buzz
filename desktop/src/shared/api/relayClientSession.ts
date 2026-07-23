@@ -43,6 +43,8 @@ import {
 import { requestHistoryGated } from "@/shared/api/relayGateBoundary";
 import { RelayConnectionStateEmitter } from "@/shared/api/relayConnectionStateEmitter";
 import {
+  isServiceRestartClose,
+  isWebSocketClose,
   shouldRefuseConnect,
   shouldScheduleReconnect,
 } from "@/shared/api/relayReconnectPolicy";
@@ -767,16 +769,12 @@ export class RelayClient {
     if (generation !== this.connectionGeneration) return;
     this.stallWatchdog.recordInbound();
 
-    if (
-      typeof message === "object" &&
-      message !== null &&
-      "type" in message &&
-      message.type === "Close"
-    ) {
+    if (isWebSocketClose(message)) {
+      if (isServiceRestartClose(message))
+        this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
       this.resetConnection(new Error("Relay connection closed."));
       return;
     }
-
     if (
       typeof message === "object" &&
       message !== null &&
