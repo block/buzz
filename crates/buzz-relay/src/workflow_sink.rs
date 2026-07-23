@@ -8,9 +8,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
-use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_core::kind::{KIND_REACTION, KIND_STREAM_MESSAGE};
+use buzz_core::tenant::{CommunityId, TenantContext};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, AddReactionOutcome};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -169,6 +169,23 @@ impl RelayActionSink {
     }
 }
 
+async fn resolve_workflow_tenant(
+    state: &AppState,
+    community_id: CommunityId,
+) -> Result<TenantContext, ActionSinkError> {
+    let host = state
+        .db
+        .lookup_community_host(community_id)
+        .await
+        .map_err(|e| ActionSinkError::Database(e.to_string()))?
+        .ok_or_else(|| {
+            ActionSinkError::Database(format!(
+                "workflow run community {community_id} is not mapped to a host"
+            ))
+        })?;
+    Ok(TenantContext::resolved(community_id, host))
+}
+
 impl ActionSink for RelayActionSink {
     fn send_message(
         &self,
@@ -196,17 +213,7 @@ impl ActionSink for RelayActionSink {
             // form a complete TenantContext (host is for labelling only — the
             // community is already fixed and is never re-derived from it). Fail
             // closed if the community no longer maps to a host.
-            let host = state
-                .db
-                .lookup_community_host(community_id)
-                .await
-                .map_err(|e| ActionSinkError::Database(e.to_string()))?
-                .ok_or_else(|| {
-                    ActionSinkError::Database(format!(
-                        "workflow run community {community_id} is not mapped to a host"
-                    ))
-                })?;
-            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+            let tenant = resolve_workflow_tenant(&state, community_id).await?;
 
             // 1. Validate content is not empty/whitespace-only
             if text.trim().is_empty() {
@@ -360,6 +367,157 @@ impl ActionSink for RelayActionSink {
             }
 
             Ok(event_id_hex)
+        })
+    }
+
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        emoji: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<AddReactionOutcome, ActionSinkError>> + Send + '_>>
+    {
+        let message_id = message_id.to_owned();
+        let emoji = emoji.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+            let tenant = resolve_workflow_tenant(&state, community_id).await?;
+
+            let target_event_id = nostr::EventId::from_hex(&message_id).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid target event ID: {e}"))
+            })?;
+            let target_event_id_bytes = target_event_id.as_bytes().to_vec();
+            let target_event = state
+                .db
+                .get_event_by_id(tenant.community(), &target_event_id_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::InvalidInput(format!(
+                        "reaction target event not found: {message_id}"
+                    ))
+                })?;
+            let channel_uuid = target_event.channel_id.ok_or_else(|| {
+                ActionSinkError::InvalidInput(
+                    "reaction target event is not scoped to a channel".into(),
+                )
+            })?;
+
+            let channel = state
+                .db
+                .get_channel(tenant.community(), channel_uuid)
+                .await
+                .map_err(|e| match &e {
+                    buzz_db::DbError::ChannelNotFound(_) | buzz_db::DbError::NotFound(_) => {
+                        ActionSinkError::ChannelNotFound(channel_uuid.to_string())
+                    }
+                    _ => ActionSinkError::Database(e.to_string()),
+                })?;
+            if channel.archived_at.is_some() {
+                return Err(ActionSinkError::ChannelArchived(channel_uuid.to_string()));
+            }
+
+            let author_pubkey = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let author_pubkey_bytes = author_pubkey.to_bytes().to_vec();
+            let author_pubkey_hex = author_pubkey.to_hex();
+            let is_member = state
+                .is_member_cached(tenant.community(), channel_uuid, &author_pubkey_bytes)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+            if !is_member && channel.visibility != "open" {
+                return Err(ActionSinkError::InvalidInput(
+                    "workflow owner does not have access to reaction target channel".into(),
+                ));
+            }
+
+            const MAX_REACTION_EMOJI_CHARS: usize = 64;
+            let emoji_char_count = emoji.chars().count();
+            if emoji_char_count > MAX_REACTION_EMOJI_CHARS {
+                return Err(ActionSinkError::InvalidInput(format!(
+                    "reaction emoji exceeds {MAX_REACTION_EMOJI_CHARS} characters (got {emoji_char_count})"
+                )));
+            }
+            let normalized_emoji = if emoji.is_empty() { "+" } else { &emoji };
+            let nonce = Uuid::new_v4().to_string();
+
+            // The relay signs workflow events, while the actor tag preserves the
+            // workflow owner as the effective reaction author for deduplication,
+            // deletion, and reaction summaries. A nonce keeps a rapid
+            // delete-then-readd from reusing the same second-granularity event
+            // ID and colliding with the soft-deleted kind:7 row.
+            let event = EventBuilder::new(Kind::from(KIND_REACTION as u16), &emoji)
+                .tags([
+                    Tag::parse(["e", &target_event_id.to_hex()])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("e tag: {e}")))?,
+                    Tag::parse(["actor", &author_pubkey_hex])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("actor tag: {e}")))?,
+                    Tag::parse(["buzz:workflow", "true"])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+                    Tag::parse(["nonce", &nonce])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("nonce tag: {e}")))?,
+                ])
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+            let event_id_hex = event.id.to_hex();
+
+            let outcome = state
+                .db
+                .insert_reaction_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(channel_uuid),
+                    None,
+                    &target_event_id_bytes,
+                    &author_pubkey_bytes,
+                    normalized_emoji,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            match outcome {
+                buzz_db::ReactionEventInsertOutcome::TargetMissing => {
+                    Err(ActionSinkError::InvalidInput(format!(
+                        "reaction target event not found: {message_id}"
+                    )))
+                }
+                buzz_db::ReactionEventInsertOutcome::Duplicate => {
+                    Ok(AddReactionOutcome::AlreadyPresent)
+                }
+                buzz_db::ReactionEventInsertOutcome::Inserted {
+                    stored_event,
+                    was_inserted,
+                } => {
+                    info!(
+                        event_id = %event_id_hex,
+                        target_event_id = %message_id,
+                        channel_id = %channel_uuid,
+                        author = %author_pubkey_hex,
+                        "Workflow AddReaction: posting kind {KIND_REACTION} event"
+                    );
+                    if was_inserted {
+                        let _ = dispatch_persistent_event(
+                            &tenant,
+                            &state,
+                            &stored_event,
+                            KIND_REACTION,
+                            &author_pubkey_hex,
+                            None,
+                        )
+                        .await;
+                    }
+                    Ok(AddReactionOutcome::Added {
+                        event_id: event_id_hex,
+                    })
+                }
+            }
         })
     }
 }
@@ -706,6 +864,165 @@ mod integration_tests {
         assert!(
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_add_reaction_persists_attributed_kind_7_and_dedupes() {
+        let state = test_state().await;
+
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let owner_bytes = owner.public_key().to_bytes().to_vec();
+        let host = format!("wf-reaction-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+        let channel = state
+            .db
+            .create_channel(
+                community,
+                "wf-reaction",
+                ChannelType::Stream,
+                ChannelVisibility::Open,
+                None,
+                &owner_bytes,
+                None,
+            )
+            .await
+            .expect("create channel");
+
+        let target = EventBuilder::new(Kind::from(KIND_STREAM_MESSAGE as u16), "target")
+            .tags([Tag::parse(["h", &channel.id.to_string()]).expect("h tag")])
+            .sign_with_keys(&owner)
+            .expect("sign target");
+        let target_created_at =
+            chrono::DateTime::from_timestamp(target.created_at.as_secs() as i64, 0)
+                .expect("valid target timestamp");
+        state
+            .db
+            .insert_event_with_thread_metadata(community, &target, Some(channel.id), None)
+            .await
+            .expect("persist target");
+
+        let sink = RelayActionSink::new(&state);
+        let outcome = sink
+            .add_reaction(community, &target.id.to_hex(), "👀", &owner_hex)
+            .await
+            .expect("add reaction");
+        let AddReactionOutcome::Added { event_id } = outcome else {
+            panic!("expected inserted reaction, got {outcome:?}");
+        };
+
+        let reaction_id = nostr::EventId::from_hex(&event_id).expect("reaction event id");
+        let stored = state
+            .db
+            .get_event_by_id(community, reaction_id.as_bytes())
+            .await
+            .expect("query reaction")
+            .expect("reaction persisted");
+        assert_eq!(u32::from(stored.event.kind.as_u16()), KIND_REACTION);
+        assert_eq!(stored.event.content, "👀");
+        assert_eq!(stored.event.pubkey, state.relay_keypair.public_key());
+        assert!(stored
+            .event
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["e".to_string(), target.id.to_hex()] }));
+        assert!(stored
+            .event
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["actor".to_string(), owner_hex.clone()] }));
+        assert!(stored
+            .event
+            .tags
+            .iter()
+            .any(|tag| { tag.as_slice() == ["buzz:workflow".to_string(), "true".to_string()] }));
+        assert!(stored
+            .event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("nonce")));
+
+        let active_reaction = state
+            .db
+            .get_active_reaction_record(
+                community,
+                target.id.as_bytes(),
+                target_created_at,
+                &owner_bytes,
+                "👀",
+            )
+            .await
+            .expect("query reaction row")
+            .expect("reaction row exists");
+        assert_eq!(
+            active_reaction.reaction_event_id.as_deref(),
+            Some(reaction_id.as_bytes().as_slice())
+        );
+
+        let duplicate = sink
+            .add_reaction(community, &target.id.to_hex(), "👀", &owner_hex)
+            .await
+            .expect("repeat reaction");
+        assert_eq!(duplicate, AddReactionOutcome::AlreadyPresent);
+
+        assert!(state
+            .db
+            .soft_delete_event(community, reaction_id.as_bytes())
+            .await
+            .expect("soft-delete reaction event"));
+        assert!(state
+            .db
+            .remove_reaction_by_source_event_id(community, reaction_id.as_bytes())
+            .await
+            .expect("remove reaction row"));
+
+        let readded = sink
+            .add_reaction(community, &target.id.to_hex(), "👀", &owner_hex)
+            .await
+            .expect("re-add reaction");
+        let AddReactionOutcome::Added {
+            event_id: readded_id,
+        } = readded
+        else {
+            panic!("expected re-added reaction, got {readded:?}");
+        };
+        assert_ne!(
+            readded_id, event_id,
+            "delete-then-readd must publish a fresh kind:7 event"
+        );
+
+        let readded_id = nostr::EventId::from_hex(&readded_id).expect("re-added reaction event id");
+        assert!(state
+            .db
+            .get_event_by_id(community, readded_id.as_bytes())
+            .await
+            .expect("query re-added event")
+            .is_some());
+        let readded_reaction = state
+            .db
+            .get_active_reaction_record(
+                community,
+                target.id.as_bytes(),
+                target_created_at,
+                &owner_bytes,
+                "👀",
+            )
+            .await
+            .expect("query re-added reaction row")
+            .expect("re-added reaction row exists");
+        assert_eq!(
+            readded_reaction.reaction_event_id.as_deref(),
+            Some(readded_id.as_bytes().as_slice())
         );
     }
 }
