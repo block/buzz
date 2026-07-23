@@ -272,22 +272,10 @@ async fn author_allowed(
 /// the fetch instead of pinning a mis-classification.
 pub(crate) async fn is_dm_channel(
     channel_id: Uuid,
-    startup_info: &HashMap<Uuid, relay::ChannelInfo>,
-    cache: &mut HashMap<Uuid, bool>,
-    rest_client: &relay::RestClient,
+    channel_info: &pool::ChannelInfoResolver,
 ) -> bool {
-    if let Some(ci) = startup_info.get(&channel_id) {
-        return ci.channel_type == "dm";
-    }
-    if let Some(&cached) = cache.get(&channel_id) {
-        return cached;
-    }
-    match pool::fetch_channel_info(channel_id, rest_client).await {
-        Some(ci) => {
-            let is_dm = ci.channel_type == "dm";
-            cache.insert(channel_id, is_dm);
-            is_dm
-        }
+    match channel_info.resolve(channel_id).await {
+        Some(info) => info.channel_type == "dm",
         None => {
             tracing::warn!(
                 channel_id = %channel_id,
@@ -1561,7 +1549,7 @@ async fn tokio_main() -> Result<()> {
             .to_string_lossy()
             .to_string(),
         rest_client: relay.rest_client(),
-        channel_info: channel_info_map,
+        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
@@ -1669,10 +1657,6 @@ async fn tokio_main() -> Result<()> {
     // second are both processed. The seen_membership_ids set handles exact
     // replays that share the same timestamp.
     let mut membership_newest_ts: HashMap<Uuid, u64> = HashMap::new();
-    // Resolved channel-type cache for the inbound author gate's DM check.
-    // Covers channels joined after startup (not in ctx.channel_info). Only
-    // successful lookups are cached — failures fail closed per-event and retry.
-    let mut dm_channel_cache: HashMap<Uuid, bool> = HashMap::new();
     // Two-generation dedup for membership event replays (bounded, no amnesia).
     // Rotates at 1000 entries instead of clearing the entire set at 2000.
     let mut seen_membership_current: HashSet<String> = HashSet::new();
@@ -2164,13 +2148,8 @@ async fn tokio_main() -> Result<()> {
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
-                                let is_dm = is_dm_channel(
-                                    buzz_event.channel_id,
-                                    &ctx.channel_info,
-                                    &mut dm_channel_cache,
-                                    &ctx.rest_client,
-                                )
-                                .await;
+                                let is_dm =
+                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -4571,64 +4550,146 @@ mod author_gate_tests {
 
     // ── is_dm_channel resolution ──────────────────────────────────────────
 
-    fn startup_info(id: Uuid, channel_type: &str) -> HashMap<Uuid, relay::ChannelInfo> {
-        HashMap::from([(
+    fn resolver(startup: HashMap<Uuid, relay::ChannelInfo>) -> pool::ChannelInfoResolver {
+        pool::ChannelInfoResolver::new(startup, dummy_rest_client())
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_uses_definitive_startup_metadata() {
+        let dm_id = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
+        let startup = HashMap::from([
+            (
+                dm_id,
+                relay::ChannelInfo {
+                    name: "dm".into(),
+                    channel_type: "dm".into(),
+                },
+            ),
+            (
+                stream_id,
+                relay::ChannelInfo {
+                    name: "stream".into(),
+                    channel_type: "stream".into(),
+                },
+            ),
+        ]);
+        let resolver = resolver(startup);
+        assert!(is_dm_channel(dm_id, &resolver).await);
+        assert!(!is_dm_channel(stream_id, &resolver).await);
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_fails_closed_for_unknown_startup_metadata() {
+        let id = Uuid::new_v4();
+        let startup = HashMap::from([(
             id,
             relay::ChannelInfo {
-                name: "test".into(),
-                channel_type: channel_type.into(),
+                name: "unknown".into(),
+                channel_type: "unknown".into(),
             },
-        )])
+        )]);
+        assert!(
+            is_dm_channel(id, &resolver(startup)).await,
+            "missing startup metadata must not be trusted as a stream"
+        );
     }
 
-    #[tokio::test]
-    async fn test_is_dm_channel_uses_startup_metadata() {
-        let id = Uuid::new_v4();
-        let mut cache = HashMap::new();
-        assert!(
-            is_dm_channel(
-                id,
-                &startup_info(id, "dm"),
-                &mut cache,
-                &dummy_rest_client()
-            )
+    async fn lazy_resolver_with_response(
+        response: serde_json::Value,
+    ) -> (
+        pool::ChannelInfoResolver,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let body = response.to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (
+            pool::ChannelInfoResolver::new(HashMap::new(), rest),
+            requests,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_lazy_resolves_declared_dm_and_caches_it() {
+        use std::sync::atomic::Ordering;
+
+        let id = Uuid::new_v4();
+        let response = serde_json::json!([{
+            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
+        }]);
+        let (resolver, requests, server) = lazy_resolver_with_response(response).await;
+
+        assert!(is_dm_channel(id, &resolver).await);
+        assert!(is_dm_channel(id, &resolver).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "second resolution uses cache"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_discovery_without_metadata_stays_fail_closed_at_author_gate() {
+        let id = Uuid::new_v4();
+        let discovered = relay::merge_discovered_channels(vec![id], &serde_json::json!([]));
+        let channel_info = resolver(discovered);
+        let owner_cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+
+        let is_dm = is_dm_channel(id, &channel_info).await;
+        assert!(is_dm, "unknown startup metadata must fail closed as DM");
         assert!(
-            !is_dm_channel(
-                id,
-                &startup_info(id, "stream"),
-                &mut cache,
-                &dummy_rest_client()
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                is_dm,
+                &owner_cache,
+                &dummy_rest_client(),
             )
-            .await
+            .await,
+            "an external author must not pass when startup discovery omitted metadata"
         );
     }
 
     #[tokio::test]
-    async fn test_is_dm_channel_uses_resolution_cache() {
-        let id = Uuid::new_v4();
-        let empty = HashMap::new();
-        let mut cache = HashMap::from([(id, false)]);
+    async fn test_is_dm_channel_fails_closed_when_lazy_resolution_fails() {
         assert!(
-            !is_dm_channel(id, &empty, &mut cache, &dummy_rest_client()).await,
-            "a cached non-DM resolution must be honored without a fetch"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_is_dm_channel_fails_closed_and_does_not_cache_failure() {
-        // dummy_rest_client points at localhost:0 — the lazy fetch fails.
-        let id = Uuid::new_v4();
-        let empty = HashMap::new();
-        let mut cache = HashMap::new();
-        assert!(
-            is_dm_channel(id, &empty, &mut cache, &dummy_rest_client()).await,
-            "an unresolvable channel type must be treated as a DM (fail closed)"
-        );
-        assert!(
-            !cache.contains_key(&id),
-            "a failed resolution must not be cached — later events must retry"
+            is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
+            "an unresolvable channel type must be treated as a DM"
         );
     }
 }
