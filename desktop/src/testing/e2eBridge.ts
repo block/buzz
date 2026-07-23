@@ -250,6 +250,8 @@ type E2eConfig = {
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
     nostrBindSignDelayMs?: number;
+    /** Reject successive mock WebSocket connect attempts, then resume. */
+    websocketConnectErrors?: string[];
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -393,9 +395,29 @@ type E2eConfig = {
      * spec can interleave edits and exercise the mid-save race handling.
      */
     globalConfigSaveDelayMs?: number;
+    /**
+     * Override the `discover_agent_models` mock response. When set, returns
+     * this catalog instead of the default per-harness model list.
+     */
+    discoverAgentModels?: {
+      models: Array<{
+        id: string;
+        name: string | null;
+        description?: string | null;
+      }>;
+      supportsSwitching: boolean;
+      agentDefaultModel?: string | null;
+      selectedModel?: string | null;
+    };
+    /**
+     * When set, `discover_agent_models` throws with this message instead of
+     * returning a catalog.
+     */
+    discoverAgentModelsError?: string;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   identity?: TestIdentity;
 };
 
@@ -1017,6 +1039,7 @@ declare global {
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
+    __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
@@ -3305,9 +3328,10 @@ function sendWsText(handler: WsHandler, payload: unknown[]) {
   });
 }
 
-function sendWsClose(handler: WsHandler) {
+function sendWsClose(handler: WsHandler, code?: number, reason?: string) {
   handler({
     type: "Close",
+    data: code === undefined ? undefined : { code, reason: reason ?? "" },
   });
 }
 
@@ -8480,6 +8504,11 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
+  const connectError = getConfig()?.mock?.websocketConnectErrors?.shift();
+  if (connectError) {
+    throw new Error(connectError);
+  }
+
   if (mockWebsocketSendMutexWedged) {
     return new Promise<number>(() => {});
   }
@@ -9060,6 +9089,14 @@ export function maybeInstallE2eTauriMocks() {
     for (const socketId of socketIds) disconnectMockSocket(socketId);
     return socketIds.length;
   };
+  window.__BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__ = () => {
+    const sockets = [...mockSockets.values()];
+    mockSockets.clear();
+    for (const socket of sockets) {
+      sendWsClose(socket.handler, 1012, "relay restarting");
+    }
+    return sockets.length;
+  };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
   window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
@@ -9306,6 +9343,13 @@ export function maybeInstallE2eTauriMocks() {
       case "update_profile":
         return handleUpdateProfile(
           payload as Parameters<typeof handleUpdateProfile>[0],
+          activeConfig,
+        );
+      case "update_profile_at_relay":
+        return handleUpdateProfile(
+          {
+            avatarUrl: (payload as { avatarUrl: string }).avatarUrl,
+          },
           activeConfig,
         );
       case "get_user_profile":
@@ -9812,6 +9856,8 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "auto_connect_default_relay_enabled":
+        return activeConfig?.autoConnectDefaultRelay ?? false;
       case "get_legacy_workspace_storage":
         return {
           workspaces: null,
@@ -10174,6 +10220,25 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
+        const discoverError = activeConfig?.mock?.discoverAgentModelsError;
+        if (discoverError) {
+          throw new Error(discoverError);
+        }
+        const discoverOverride = activeConfig?.mock?.discoverAgentModels;
+        if (discoverOverride) {
+          return {
+            agentName: "mock-agent",
+            agentVersion: "0.0.0",
+            models: discoverOverride.models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              description: model.description ?? null,
+            })),
+            agentDefaultModel: discoverOverride.agentDefaultModel ?? null,
+            selectedModel: discoverOverride.selectedModel ?? null,
+            supportsSwitching: discoverOverride.supportsSwitching,
+          };
+        }
         const input = (
           payload as {
             input?: { agentCommand?: string; provider?: string };
