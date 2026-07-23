@@ -25,6 +25,13 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    // The CLI can use both reqwest and buzz-ws-client. Their transitive
+    // dependencies enable multiple Rustls crypto providers, so Rustls cannot
+    // select one automatically. Install ring before either client builds TLS
+    // configuration (including a plain ws:// connection). Ignore an already
+    // installed provider when the CLI is embedded in another process.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
@@ -1786,6 +1793,29 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[tokio::test]
+    async fn agent_draft_missing_auth_returns_error_without_crypto_panic() {
+        let exit_code = run_from_args([
+            "buzz",
+            "--private-key",
+            "0000000000000000000000000000000000000000000000000000000000000001",
+            "agents",
+            "draft-create",
+            "--channel",
+            "00000000-0000-0000-0000-000000000000",
+            "--display-name",
+            "Test Agent",
+            "--system-prompt",
+            "Follow the system instructions.",
+        ])
+        .await;
+
+        // Constructing BuzzClient occurs before draft authorization. This
+        // asserts it gets that far and returns the expected auth error rather
+        // than panicking because Rustls lacks a CryptoProvider.
+        assert_eq!(exit_code, 3);
     }
 
     #[test]
