@@ -1049,6 +1049,16 @@ impl Db {
     /// Holds a per-owner advisory lock while enforcing the ownership limit.
     /// Identical create retries return the original record; host collisions and
     /// limit failures remain distinguishable to the operator API.
+    ///
+    /// A host already reserved in `community_host_aliases` collides too:
+    /// `ON CONFLICT (lower(host))` only catches conflicts against
+    /// `communities`' own unique index, so an alias collision instead trips
+    /// migration 0025's `communities_no_alias_collision` trigger, which
+    /// raises a `23505` (`unique_violation`) from the `BEFORE INSERT` and
+    /// never reaches `ON CONFLICT`. That's caught below and folded into the
+    /// same [`CreateCommunityWithOwnerResult::HostExists`] outcome, so
+    /// callers see one "host taken" case regardless of which table claimed
+    /// it first.
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
@@ -1074,7 +1084,16 @@ impl Db {
         )
         .bind(normalized_host)
         .fetch_optional(&mut *tx)
-        .await?;
+        .await;
+
+        let row = match row {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505") => {
+                tx.rollback().await?;
+                return Ok(CreateCommunityWithOwnerResult::HostExists);
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         let (id, host) = if let Some(row) = row {
             let id: Uuid = row.try_get("id")?;
@@ -5121,6 +5140,48 @@ mod tests {
             post_rotation_retry,
             CreateCommunityWithOwnerResult::HostExists
         );
+    }
+
+    /// A host already reserved via `community_host_aliases` never has a
+    /// `communities.host` row of its own, so `ON CONFLICT (lower(host))`
+    /// can't catch the collision — it's the `communities_no_alias_collision`
+    /// trigger that rejects the `INSERT`. That must still surface as the
+    /// typed `HostExists` outcome, not a raw database error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_treats_alias_reserved_host_as_host_exists() {
+        let db = setup_db().await;
+        let owner_host = format!("alias-owner-{}.example", Uuid::new_v4().simple());
+        let owner = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        let created = db
+            .create_community_with_owner(&owner_host, owner)
+            .await
+            .expect("create owning community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+
+        let alias_host = format!("alias-target-{}.example", Uuid::new_v4().simple());
+        db.add_community_host_alias(&alias_host, created.id)
+            .await
+            .expect("add alias");
+
+        let other = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let collision = db
+            .create_community_with_owner(&alias_host, other)
+            .await
+            .expect("collision result should not be a raw DB error");
+        assert_eq!(collision, CreateCommunityWithOwnerResult::HostExists);
+
+        // The failed create must not have poisoned the pool connection or
+        // left the alias's owning community mutated.
+        let aliases = db
+            .list_community_host_aliases(created.id)
+            .await
+            .expect("list aliases after collision");
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].host, alias_host);
     }
 
     #[tokio::test]
