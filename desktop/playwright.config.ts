@@ -115,6 +115,7 @@ export default defineConfig({
         "**/mesh-compute.spec.ts",
         "**/observer-archive-policy.spec.ts",
         "**/agent-usage.spec.ts",
+        "**/agent-usage-screenshots.spec.ts",
       ],
       use: {
         ...devices["Desktop Chrome"],
