@@ -125,6 +125,41 @@ export function shouldShowModelStatusMessage(
   return showDescriptions || status !== null;
 }
 
+/**
+ * Whether the Model control should render given discovery state.
+ *
+ * Optional-model harnesses (Claude Code / Codex, `acpNative`) omit the control
+ * while discovery is in flight and after a **confirmed successful empty**
+ * catalog (IPC resolved, no usable options) — there is nothing useful to pick.
+ * Discovery failures / unavailable runtimes keep the control so #2246 failure
+ * UI can render. Full disclosure still shows the control when Custom model is
+ * available. Required-model harnesses always render the control.
+ */
+export function shouldRenderModelControl({
+  discoveredModelOptions,
+  modelDiscoveryLoading,
+  modelDiscoverySuccessfulEmpty,
+  modelIsOptional,
+  showCustomModelOption,
+}: {
+  discoveredModelOptions: readonly { id: string }[] | null;
+  modelDiscoveryLoading: boolean;
+  /** True only when discovery IPC resolved with a response that yielded no options. */
+  modelDiscoverySuccessfulEmpty: boolean;
+  modelIsOptional: boolean;
+  showCustomModelOption: boolean;
+}): boolean {
+  if (!modelIsOptional) return true;
+  if (modelDiscoveryLoading) return false;
+  const hasExplicitModel = (discoveredModelOptions ?? []).some(
+    (option) => option.id.trim().length > 0,
+  );
+  if (hasExplicitModel) return true;
+  if (showCustomModelOption) return true;
+  // Omit only on confirmed successful empty — not on failure/unavailable.
+  return !modelDiscoverySuccessfulEmpty;
+}
+
 export type AgentConfigFieldsProps = {
   bakedEnv: BakedEnvEntry[];
   selectedRuntime: AcpRuntimeCatalogEntry | undefined;
@@ -277,6 +312,7 @@ export function AgentConfigFields({
     discoveredModelOptions,
     modelDiscoveryLoading,
     modelDiscoveryStatus,
+    modelDiscoverySuccessfulEmpty,
   } = usePersonaModelDiscovery({
     envVars: config.env_vars,
     isCustomProviderEditing: isCustomProvider,
@@ -284,6 +320,18 @@ export function AgentConfigFields({
     open: true,
     provider: providerForDiscovery,
     selectedRuntime,
+  });
+  const modelControlVisible = shouldRenderModelControl({
+    discoveredModelOptions: dependentFieldsDisabled
+      ? null
+      : discoveredModelOptions,
+    modelDiscoveryLoading: dependentFieldsDisabled
+      ? false
+      : modelDiscoveryLoading,
+    modelDiscoverySuccessfulEmpty:
+      !dependentFieldsDisabled && modelDiscoverySuccessfulEmpty,
+    modelIsOptional,
+    showCustomModelOption,
   });
 
   // Mount-time healing policy: onboarding page 4 edits the root config during
@@ -353,16 +401,23 @@ export function AgentConfigFields({
   // the old harness. In onboarding, heal that stale value as soon as the new
   // harness catalog proves it is unsupported; otherwise a Codex id like
   // `gpt-5.5[low]` appears as a Claude Code custom model.
+  // Also clear when the Model control is omitted after a confirmed successful
+  // empty catalog — never while discovery failed/unavailable (transient
+  // failures must not erase saved model/effort).
   React.useEffect(() => {
     if (!healOnMount) return;
     const currentModel = (config.model ?? "").trim();
     if (currentModel.length === 0) return;
-    if (modelDiscoveryLoading || discoveredModelOptions === null) return;
-    if (
-      discoveredModelOptions.some((option) => option.id.trim() === currentModel)
-    ) {
-      return;
-    }
+    if (modelDiscoveryLoading) return;
+
+    const catalogMiss =
+      discoveredModelOptions !== null &&
+      !discoveredModelOptions.some(
+        (option) => option.id.trim() === currentModel,
+      );
+    const omittedAfterSuccessfulEmpty =
+      modelIsOptional && !modelControlVisible && modelDiscoverySuccessfulEmpty;
+    if (!catalogMiss && !omittedAfterSuccessfulEmpty) return;
 
     const nextEnvVars = { ...config.env_vars };
     if (effortPersistenceKey) delete nextEnvVars[effortPersistenceKey];
@@ -371,7 +426,10 @@ export function AgentConfigFields({
   }, [
     config,
     discoveredModelOptions,
+    modelControlVisible,
     modelDiscoveryLoading,
+    modelDiscoverySuccessfulEmpty,
+    modelIsOptional,
     onConfigChange,
     onCustomModelEditingChange,
     healOnMount,
@@ -659,53 +717,55 @@ export function AgentConfigFields({
         </div>
       ) : null}
 
-      {/* Model field */}
-      <div className={showDescriptions ? fieldClassName : undefined}>
-        <AgentModelField
-          allowDefaultModel={fallbackModel !== null}
-          defaultModelLabel={
-            fallbackModel ? `Default model (${fallbackModel})` : undefined
-          }
-          disableSelectDuringDiscovery={disableModelSelectDuringDiscovery}
-          disabled={dependentFieldsDisabled}
-          discoveredModelOptions={
-            dependentFieldsDisabled ? null : discoveredModelOptions
-          }
-          globalModel={fallbackModel ?? undefined}
-          id="global-agent-model"
-          isCustomModelEditing={isCustomModelEditing}
-          isRequired={
-            showRequiredIndicators &&
-            !modelIsOptional &&
-            fallbackModel === null &&
-            !dependentFieldsDisabled
-          }
-          keepSelectedModelValueLabel
-          model={dependentFieldsDisabled ? "" : (config.model ?? "")}
-          modelDiscoveryLoading={
-            dependentFieldsDisabled ? false : modelDiscoveryLoading
-          }
-          modelDiscoveryStatus={
-            dependentFieldsDisabled ? null : modelDiscoveryStatus
-          }
-          onIsCustomModelEditingChange={onCustomModelEditingChange}
-          onModelChange={handleModelChange}
-          placeholderClassName={placeholderClassName}
-          placeholder="Select a model"
-          provider={providerForDiscovery}
-          fieldClassName={unstyled ? fieldClassName : undefined}
-          labelClassName={fieldLabelClassName}
-          selectClassName={selectClassName}
-          showCustomModelOption={showCustomModelOption}
-          showStatusMessage={shouldShowModelStatusMessage(
-            showDescriptions,
-            modelDiscoveryStatus,
-          )}
-          testId="global-agent-model"
-          useCustomSelect={useCustomSelect}
-          useChevronIcon={useChevronSelectIcon}
-        />
-      </div>
+      {/* Model field — omitted only after confirmed successful empty discovery */}
+      {modelControlVisible ? (
+        <div className={showDescriptions ? fieldClassName : undefined}>
+          <AgentModelField
+            allowDefaultModel={fallbackModel !== null}
+            defaultModelLabel={
+              fallbackModel ? `Default model (${fallbackModel})` : undefined
+            }
+            disableSelectDuringDiscovery={disableModelSelectDuringDiscovery}
+            disabled={dependentFieldsDisabled}
+            discoveredModelOptions={
+              dependentFieldsDisabled ? null : discoveredModelOptions
+            }
+            globalModel={fallbackModel ?? undefined}
+            id="global-agent-model"
+            isCustomModelEditing={isCustomModelEditing}
+            isRequired={
+              showRequiredIndicators &&
+              !modelIsOptional &&
+              fallbackModel === null &&
+              !dependentFieldsDisabled
+            }
+            keepSelectedModelValueLabel
+            model={dependentFieldsDisabled ? "" : (config.model ?? "")}
+            modelDiscoveryLoading={
+              dependentFieldsDisabled ? false : modelDiscoveryLoading
+            }
+            modelDiscoveryStatus={
+              dependentFieldsDisabled ? null : modelDiscoveryStatus
+            }
+            onIsCustomModelEditingChange={onCustomModelEditingChange}
+            onModelChange={handleModelChange}
+            placeholderClassName={placeholderClassName}
+            placeholder="Select a model"
+            provider={providerForDiscovery}
+            fieldClassName={unstyled ? fieldClassName : undefined}
+            labelClassName={fieldLabelClassName}
+            selectClassName={selectClassName}
+            showCustomModelOption={showCustomModelOption}
+            showStatusMessage={shouldShowModelStatusMessage(
+              showDescriptions,
+              dependentFieldsDisabled ? null : modelDiscoveryStatus,
+            )}
+            testId="global-agent-model"
+            useCustomSelect={useCustomSelect}
+            useChevronIcon={useChevronSelectIcon}
+          />
+        </div>
+      ) : null}
 
       {/* Thinking / Effort */}
       {effortFieldVisible ? (

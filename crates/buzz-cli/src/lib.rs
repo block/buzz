@@ -25,6 +25,18 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    // Install ring as the process-level rustls CryptoProvider. Required because the
+    // release workflow builds all binaries in one cargo invocation, which unifies
+    // features across the workspace and enables *both* ring (from buzz-acp/buzz-dev-mcp)
+    // and aws-lc-rs (from reqwest's rustls feature via hyper-rustls). With both on,
+    // rustls cannot auto-select a provider, and any code that reaches
+    // ClientConfig::builder() — specifically the WSS path in publish_ephemeral_event
+    // used by `agents draft-create`, `agents draft-update`, and `users set-presence`
+    // — panics at rustls crypto/mod.rs. The `let _ =` swallow is intentional: when
+    // buzz-dev-mcp delegates to run_from_args, it has already installed ring; the
+    // double-install returns Err and is harmless.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
