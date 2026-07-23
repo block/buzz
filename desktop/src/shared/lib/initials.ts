@@ -4,8 +4,9 @@ export function getInitials(name: string): string {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .trim()
     .split(/\s+/)
-    .map((part) => part[0] ?? "")
-    .join("")
+    .map((part) => [...part][0] ?? "")
+    .filter(Boolean)
     .slice(0, 2)
+    .join("")
     .toUpperCase();
 }
