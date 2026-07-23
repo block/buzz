@@ -110,6 +110,8 @@ pub async fn handle_count(
         // reader's own pubkey.
         let needs_result_gated_filtering = filter_can_match_result_gated_kinds(filter)
             && !result_gated_count_safe_for_pushdown(filter, &authed_pubkey_hex);
+        let needs_repository_filtering =
+            crate::api::git::access::filter_can_match_repository_discovery(filter);
 
         if let Some(ch_id) = extract_channel_from_filter(filter) {
             // Filter targets a specific channel — verify access. Mirrors the WS
@@ -160,6 +162,7 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_repository_filtering
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -169,12 +172,28 @@ pub async fn handle_count(
                     }
                 }
             } else {
-                // Fallback: query + post-filter for non-pushable constraints.
+                // Repository discovery COUNT must inspect the complete matching
+                // set before applying its result-level access predicate.
                 let mut q = query;
-                super::req::apply_count_fallback_limit(&mut q);
+                if needs_repository_filtering {
+                    super::req::apply_repository_discovery_count_limit(&mut q);
+                } else {
+                    super::req::apply_count_fallback_limit(&mut q);
+                }
                 match state.db.query_events(&q).await {
                     Ok(stored_events) => {
-                        if super::req::count_fallback_exceeded(stored_events.len()) {
+                        if needs_repository_filtering
+                            && super::req::repository_discovery_count_exceeded(stored_events.len())
+                        {
+                            conn.send(RelayMessage::closed(
+                                &sub_id,
+                                "restricted: repository count requires narrower constraints",
+                            ));
+                            return;
+                        }
+                        if !needs_repository_filtering
+                            && super::req::count_fallback_exceeded(stored_events.len())
+                        {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
                             conn.send(RelayMessage::closed(
                                 &sub_id,
@@ -194,6 +213,16 @@ pub async fn handle_count(
                                 &se.event,
                                 &authed_pubkey_hex,
                             ) {
+                                continue;
+                            }
+                            if !crate::api::git::access::requester_can_discover_repository_event(
+                                &state,
+                                &conn.tenant,
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;
@@ -230,6 +259,7 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_repository_filtering
             {
                 query.limit = None; // COUNT doesn't need a row limit
                 match state.db.count_events(&query).await {
@@ -240,11 +270,27 @@ pub async fn handle_count(
                     }
                 }
             } else {
-                // Fallback: query a bounded candidate set + post-filter.
-                super::req::apply_count_fallback_limit(&mut query);
+                // Repository discovery COUNT must inspect the complete matching
+                // set before applying its result-level access predicate.
+                if needs_repository_filtering {
+                    super::req::apply_repository_discovery_count_limit(&mut query);
+                } else {
+                    super::req::apply_count_fallback_limit(&mut query);
+                }
                 match state.db.query_events(&query).await {
                     Ok(stored_events) => {
-                        if super::req::count_fallback_exceeded(stored_events.len()) {
+                        if needs_repository_filtering
+                            && super::req::repository_discovery_count_exceeded(stored_events.len())
+                        {
+                            conn.send(RelayMessage::closed(
+                                &sub_id,
+                                "restricted: repository count requires narrower constraints",
+                            ));
+                            return;
+                        }
+                        if !needs_repository_filtering
+                            && super::req::count_fallback_exceeded(stored_events.len())
+                        {
                             metrics::counter!("buzz_count_fallback_rejections_total").increment(1);
                             conn.send(RelayMessage::closed(
                                 &sub_id,
@@ -264,6 +310,16 @@ pub async fn handle_count(
                                 &se.event,
                                 &authed_pubkey_hex,
                             ) {
+                                continue;
+                            }
+                            if !crate::api::git::access::requester_can_discover_repository_event(
+                                &state,
+                                &conn.tenant,
+                                &se.event,
+                                &pubkey_bytes,
+                            )
+                            .await
+                            {
                                 continue;
                             }
                             total += 1;

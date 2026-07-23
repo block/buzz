@@ -286,7 +286,7 @@ export function RepoDetailPage() {
               variant="outline"
               className="border-black/15 text-black/60 dark:border-white/15 dark:text-white/60"
             >
-              Public
+              {repo.visibility === "private" ? "Private" : "Public"}
             </Badge>
           </div>
           {repo.description && (
@@ -367,14 +367,14 @@ export function RepoDetailPage() {
         })()}
 
         {/* Channel link */}
-        {repo.channelId && (
+        {repo.privateChannelId && (
           <div className="mt-8">
             <Button
               variant="outline"
               className="border-black/10 bg-white text-black hover:bg-black/5 dark:border-white/10 dark:bg-white/5 dark:text-white dark:hover:bg-white/10"
               asChild
             >
-              <a href={`/channels/${repo.channelId}`}>
+              <a href={`/channels/${repo.privateChannelId}`}>
                 <MessageSquare className="h-4 w-4" />
                 View channel
               </a>

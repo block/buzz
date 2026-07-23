@@ -151,6 +151,46 @@ pub async fn filter_fanout_by_access(
         matches
     };
 
+    // Repository discovery events are globally stored but carry their own
+    // live channel-membership boundary. Resolve each recipient independently
+    // before the ordinary channel visibility gate below.
+    let kind_u32 = event_kind_u32(&stored_event.event);
+    let matches = if matches!(
+        kind_u32,
+        buzz_core::kind::KIND_GIT_REPO_ANNOUNCEMENT | buzz_core::kind::KIND_GIT_REPO_STATE
+    ) {
+        let tenant = match state.db.lookup_community_host(community_id).await {
+            Ok(Some(host)) => TenantContext::resolved(community_id, host),
+            Ok(None) => {
+                warn!(%community_id, "repository fan-out access filter: community not found");
+                return Vec::new();
+            }
+            Err(error) => {
+                warn!(%community_id, %error, "repository fan-out access filter: community lookup failed");
+                return Vec::new();
+            }
+        };
+        let mut allowed = Vec::with_capacity(matches.len());
+        for (conn_id, sub_id) in matches {
+            let Some(pubkey) = state.conn_manager.pubkey_for_conn(conn_id) else {
+                continue;
+            };
+            if crate::api::git::access::requester_can_discover_repository_event(
+                state,
+                &tenant,
+                &stored_event.event,
+                &pubkey,
+            )
+            .await
+            {
+                allowed.push((conn_id, sub_id));
+            }
+        }
+        allowed
+    } else {
+        matches
+    };
+
     let Some(channel_id) = stored_event.channel_id else {
         return matches;
     };
@@ -1955,6 +1995,67 @@ mod tests {
                 "B's chain must verify independently"
             );
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn live_repository_fanout_hides_private_announcement_and_state() {
+        let Some(fixture) =
+            crate::api::git::access::tests::repository_access_fixture("redis://127.0.0.1:1").await
+        else {
+            return;
+        };
+        let state = fixture.state;
+        let community = fixture.tenant.community();
+        let make_match = |keys: &Keys| {
+            use std::sync::atomic::AtomicU8;
+            use tokio::sync::{mpsc, Mutex};
+            use tokio_util::sync::CancellationToken;
+
+            let conn_id = uuid::Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(4);
+            let (ctrl_tx, _ctrl_rx) = mpsc::channel(4);
+            state.conn_manager.register(
+                conn_id,
+                tx,
+                ctrl_tx,
+                CancellationToken::new(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            state
+                .conn_manager
+                .set_authenticated_pubkey(conn_id, keys.public_key().to_bytes().to_vec());
+            (conn_id, format!("sub-{conn_id}"))
+        };
+        let member_match = make_match(&fixture.member);
+        let outsider_match = make_match(&fixture.outsider);
+
+        for event in [fixture.private_announcement, fixture.private_state] {
+            let stored = buzz_core::StoredEvent::new(event, None);
+            let matches = super::filter_fanout_by_access(
+                &state,
+                community,
+                &stored,
+                vec![member_match.clone(), outsider_match.clone()],
+                None,
+            )
+            .await;
+            assert_eq!(matches, vec![member_match.clone()]);
+        }
+
+        let public = buzz_core::StoredEvent::new(fixture.public_announcement, None);
+        let matches = super::filter_fanout_by_access(
+            &state,
+            community,
+            &public,
+            vec![member_match.clone(), outsider_match.clone()],
+            None,
+        )
+        .await;
+        assert_eq!(matches, vec![member_match, outsider_match]);
     }
 
     mod fanout_access {

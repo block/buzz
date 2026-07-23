@@ -70,6 +70,7 @@ import {
   resolveProjectDefaultBranch,
 } from "@/features/projects/lib/projectBranches";
 import { normalizeRepositoryUrl } from "@/features/projects/lib/projectsViewHelpers";
+import { ProjectVisibilityControl } from "./ProjectVisibilityControl";
 import { WorkspaceTabs } from "./ProjectWorkspaceTabs";
 import type { RepoSourceHeaderControls } from "./ProjectRepositorySource";
 import {
@@ -97,7 +98,6 @@ const PROJECT_DETAIL_PANEL_SEARCH_KEYS = [
   "profileTab",
   "profileView",
 ] as const;
-
 export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
   const { commitHash, projectId, pullRequestId, issueId } = props;
   const { goChannel, goProject, goProjects } = useAppNavigation();
@@ -859,54 +859,58 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                   </span>
                 )}
               </nav>
-              {project.projectChannelId ? (
-                <Button
-                  className="h-8 shrink-0 gap-1.5"
-                  onClick={() => {
-                    if (project.projectChannelId) {
-                      void goChannel(project.projectChannelId);
-                    }
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  <MessageSquare className="h-4 w-4" />
-                  Open Discussion
-                </Button>
-              ) : null}
+              <div className="flex shrink-0 items-center gap-2">
+                <ProjectVisibilityControl
+                  currentPubkey={identityQuery.data?.pubkey ?? null}
+                  project={project}
+                />
+                {project.projectChannelId ? (
+                  <Button
+                    className="h-8 shrink-0 gap-1.5"
+                    onClick={() => {
+                      if (project.projectChannelId) {
+                        void goChannel(project.projectChannelId);
+                      }
+                    }}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <MessageSquare className="h-4 w-4" />
+                    Open Discussion
+                  </Button>
+                ) : null}
+              </div>
             </div>
           </div>
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto px-4 pb-4">
             <div className="w-full space-y-3 pt-[calc(var(--buzz-channel-content-top-padding,5.75rem)_+_1px)]">
-              <section className="space-y-3">
-                <div className="flex min-w-0 items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1 space-y-0.5">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <h2 className="truncate text-xl font-semibold tracking-tight">
-                        {project.name}
-                      </h2>
-                      {safeWebUrl ? (
-                        <Button
-                          asChild
-                          aria-label="Open project web page"
-                          className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
-                          size="icon-xs"
-                          variant="ghost"
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <h2 className="truncate text-xl font-semibold tracking-tight">
+                      {project.name}
+                    </h2>
+                    {safeWebUrl ? (
+                      <Button
+                        asChild
+                        aria-label="Open project web page"
+                        className="h-6 w-6 shrink-0 text-muted-foreground hover:text-foreground"
+                        size="icon-xs"
+                        variant="ghost"
+                      >
+                        <a
+                          href={safeWebUrl}
+                          rel="noopener noreferrer"
+                          target="_blank"
                         >
-                          <a
-                            href={safeWebUrl}
-                            rel="noopener noreferrer"
-                            target="_blank"
-                          >
-                            <ExternalLink className="h-3.5 w-3.5" />
-                          </a>
-                        </Button>
-                      ) : null}
-                    </div>
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </a>
+                      </Button>
+                    ) : null}
                   </div>
                 </div>
-              </section>
+              </div>
 
               <WorkspaceTabs
                 key={`${project.id}:${tabsResetKey}`}

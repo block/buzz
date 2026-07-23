@@ -138,6 +138,69 @@ fn build_updated_repo_announcement(
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
 }
 
+fn visibility_tags(
+    visibility: crate::RepoVisibility,
+    channel: Option<&str>,
+) -> Result<Vec<Tag>, CliError> {
+    match visibility {
+        crate::RepoVisibility::Public => {
+            if channel.is_some() {
+                return Err(CliError::Usage(
+                    "--channel is only valid with --visibility private".into(),
+                ));
+            }
+            Ok(Vec::new())
+        }
+        crate::RepoVisibility::Private => {
+            let channel = channel.ok_or_else(|| {
+                CliError::Usage("--visibility private requires --channel <uuid>".into())
+            })?;
+            uuid::Uuid::parse_str(channel)
+                .map_err(|_| CliError::Usage("--channel must be a valid UUID".into()))?;
+            Ok(vec![
+                Tag::parse(["buzz-visibility", "private"])
+                    .map_err(|error| CliError::Other(format!("build visibility tag: {error}")))?,
+                Tag::parse(["buzz-channel", channel])
+                    .map_err(|error| CliError::Other(format!("build channel tag: {error}")))?,
+            ])
+        }
+    }
+}
+
+fn build_updated_repo_metadata(
+    existing: &Event,
+    visibility: crate::RepoVisibility,
+    channel: Option<&str>,
+) -> Result<EventBuilder, CliError> {
+    let repo_id = repo_id_from_event(existing)?;
+    let existing_channel = existing
+        .tags
+        .iter()
+        .find(|tag| has_tag_name(tag, "buzz-channel"))
+        .cloned();
+    let mut tags: Vec<Tag> = existing
+        .tags
+        .iter()
+        .filter(|tag| !has_tag_name(tag, "buzz-visibility") && !has_tag_name(tag, "buzz-channel"))
+        .cloned()
+        .collect();
+    tags.extend(visibility_tags(visibility, channel)?);
+    if matches!(visibility, crate::RepoVisibility::Public) {
+        if let Some(existing_channel) = existing_channel {
+            tags.push(existing_channel);
+        }
+    }
+
+    let next_created_at = existing
+        .created_at
+        .as_secs()
+        .checked_add(1)
+        .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
+        .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
+        .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
+}
+
 fn protection_rules_json(event: &Event) -> Result<serde_json::Value, CliError> {
     let raw_tags: Vec<Vec<String>> = event
         .tags
@@ -199,29 +262,37 @@ async fn submit_repo_update(client: &BuzzClient, builder: EventBuilder) -> Resul
     Ok(())
 }
 
-pub async fn cmd_create_repo(
-    client: &BuzzClient,
-    repo_id: &str,
-    name: Option<&str>,
-    description: Option<&str>,
-    clone_urls: &[String],
-    web_url: Option<&str>,
-    relays: &[String],
-) -> Result<(), CliError> {
-    validate_repo_id(repo_id)?;
+struct CreateRepoArgs<'a> {
+    repo_id: &'a str,
+    name: Option<&'a str>,
+    description: Option<&'a str>,
+    clone_urls: &'a [String],
+    web_url: Option<&'a str>,
+    relays: &'a [String],
+    visibility: crate::RepoVisibility,
+    channel: Option<&'a str>,
+}
 
-    let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
-    let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
+fn build_create_repo_announcement(args: &CreateRepoArgs<'_>) -> Result<EventBuilder, CliError> {
+    let clone_refs: Vec<&str> = args.clone_urls.iter().map(String::as_str).collect();
+    let relay_refs: Vec<&str> = args.relays.iter().map(String::as_str).collect();
+    let visibility_tags = visibility_tags(args.visibility, args.channel)?;
 
-    let builder = buzz_sdk::build_repo_announcement(
-        repo_id,
-        name,
-        description,
+    buzz_sdk::build_repo_announcement(
+        args.repo_id,
+        args.name,
+        args.description,
         &clone_refs,
-        web_url,
+        args.web_url,
         &relay_refs,
     )
-    .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?;
+    .map(|builder| builder.tags(visibility_tags))
+    .map_err(|error| CliError::Other(format!("build_repo_announcement failed: {error}")))
+}
+
+async fn cmd_create_repo(client: &BuzzClient, args: CreateRepoArgs<'_>) -> Result<(), CliError> {
+    validate_repo_id(args.repo_id)?;
+    let builder = build_create_repo_announcement(&args)?;
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
@@ -292,6 +363,17 @@ async fn current_repo(client: &BuzzClient, repo_id: &str) -> Result<Event, CliEr
         })
 }
 
+async fn cmd_edit_repo(
+    client: &BuzzClient,
+    repo_id: &str,
+    visibility: crate::RepoVisibility,
+    channel: Option<&str>,
+) -> Result<(), CliError> {
+    let event = current_repo(client, repo_id).await?;
+    let builder = build_updated_repo_metadata(&event, visibility, channel)?;
+    submit_repo_update(client, builder).await
+}
+
 async fn cmd_protect_list(client: &BuzzClient, repo_id: &str) -> Result<(), CliError> {
     let event = current_repo(client, repo_id).await?;
     println!("{}", protection_rules_json(&event)?);
@@ -356,18 +438,29 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             clone_urls,
             web,
             relays,
+            visibility,
+            channel,
         } => {
             cmd_create_repo(
                 client,
-                &id,
-                name.as_deref(),
-                description.as_deref(),
-                &clone_urls,
-                web.as_deref(),
-                &relays,
+                CreateRepoArgs {
+                    repo_id: &id,
+                    name: name.as_deref(),
+                    description: description.as_deref(),
+                    clone_urls: &clone_urls,
+                    web_url: web.as_deref(),
+                    relays: &relays,
+                    visibility,
+                    channel: channel.as_deref(),
+                },
             )
             .await
         }
+        ReposCmd::Edit {
+            id,
+            visibility,
+            channel,
+        } => cmd_edit_repo(client, &id, visibility, channel.as_deref()).await,
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
         ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
         ReposCmd::Protect(command) => match command {
@@ -403,8 +496,9 @@ mod tests {
     use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     use super::{
-        build_protection_tag, build_updated_repo_announcement, protection_rules_json,
-        validate_write_response, ProtectionChange,
+        build_create_repo_announcement, build_protection_tag, build_updated_repo_announcement,
+        build_updated_repo_metadata, has_tag_name, protection_rules_json, validate_write_response,
+        visibility_tags, CreateRepoArgs, ProtectionChange,
     };
 
     fn signed_repo(tags: Vec<Tag>, content: &str, created_at: u64) -> nostr::Event {
@@ -417,6 +511,98 @@ mod tests {
 
     fn tag(parts: &[&str]) -> Tag {
         Tag::parse(parts.iter().copied()).expect("valid test tag")
+    }
+
+    #[test]
+    fn create_builds_metadata_and_visibility_tags_in_one_pass() {
+        let clone_urls = vec!["https://relay.example/git/owner/demo".to_string()];
+        let relays = vec!["wss://relay.example".to_string()];
+        let channel = uuid::Uuid::new_v4().to_string();
+        let event = build_create_repo_announcement(&CreateRepoArgs {
+            repo_id: "demo",
+            name: Some("Demo"),
+            description: Some("Private demo repository"),
+            clone_urls: &clone_urls,
+            web_url: Some("https://relay.example/repos/demo"),
+            relays: &relays,
+            visibility: crate::RepoVisibility::Private,
+            channel: Some(&channel),
+        })
+        .expect("build repository announcement")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign repository announcement");
+
+        for expected in [
+            vec!["d", "demo"],
+            vec!["name", "Demo"],
+            vec!["description", "Private demo repository"],
+            vec!["clone", "https://relay.example/git/owner/demo"],
+            vec!["web", "https://relay.example/repos/demo"],
+            vec!["relays", "wss://relay.example"],
+            vec!["buzz-visibility", "private"],
+            vec!["buzz-channel", channel.as_str()],
+        ] {
+            assert!(
+                event.tags.iter().any(|tag| tag.as_slice() == expected),
+                "missing tag {expected:?}"
+            );
+        }
+        assert!(event.content.is_empty());
+    }
+
+    #[test]
+    fn visibility_tags_require_private_channel_and_reject_public_channel() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let private = visibility_tags(crate::RepoVisibility::Private, Some(&channel))
+            .expect("private visibility tags");
+        assert!(private
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-visibility", "private"]));
+        assert!(private
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-channel", channel.as_str()]));
+        assert!(visibility_tags(crate::RepoVisibility::Private, None).is_err());
+        assert!(visibility_tags(crate::RepoVisibility::Private, Some("invalid")).is_err());
+        assert!(visibility_tags(crate::RepoVisibility::Public, Some(&channel)).is_err());
+        assert!(visibility_tags(crate::RepoVisibility::Public, None)
+            .expect("public visibility tags")
+            .is_empty());
+    }
+
+    #[test]
+    fn visibility_update_preserves_metadata_and_push_binding_for_public() {
+        let channel = uuid::Uuid::new_v4().to_string();
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "demo"]),
+                tag(&["name", "Demo"]),
+                tag(&["buzz-visibility", "private"]),
+                tag(&["buzz-channel", &channel]),
+                tag(&["future-metadata", "preserve-me"]),
+                tag(&["auth", &"a".repeat(64), "kind=30617", &"b".repeat(128)]),
+            ],
+            "repository content",
+            100,
+        );
+        let updated = build_updated_repo_metadata(&existing, crate::RepoVisibility::Public, None)
+            .expect("build public update")
+            .sign_with_keys(&Keys::generate())
+            .expect("sign update");
+        assert_eq!(updated.created_at.as_secs(), 101);
+        assert_eq!(updated.content, "repository content");
+        assert!(!updated
+            .tags
+            .iter()
+            .any(|tag| has_tag_name(tag, "buzz-visibility")));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["buzz-channel", channel.as_str()]));
+        assert!(updated
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["future-metadata", "preserve-me"]));
+        assert!(updated.tags.iter().any(|tag| has_tag_name(tag, "auth")));
     }
 
     #[test]

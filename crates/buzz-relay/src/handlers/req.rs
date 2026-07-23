@@ -267,7 +267,7 @@ pub async fn handle_req(
     let viewer_hex = hex::encode(&pubkey_bytes);
 
     // Phase 1 — pure query construction, in filter order.
-    let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery)> = filters
+    let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery, usize)> = filters
         .iter()
         .enumerate()
         .map(|(idx, filter)| {
@@ -291,8 +291,21 @@ pub async fn handle_req(
             };
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
+            // Repository access is result-dependent. Fetch the full matching
+            // discovery set before applying the requester's live access gate;
+            // otherwise hidden rows can consume the SQL limit and suppress
+            // later public/member-visible repositories.
+            if crate::api::git::access::filter_can_match_repository_discovery(filter) {
+                params.limit = None;
+                params.max_limit = Some(MAX_HISTORICAL_LIMIT);
+            }
             apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
-            (idx, per_filter_channel, params)
+            (
+                idx,
+                per_filter_channel,
+                params,
+                filter.limit.unwrap_or(2_000),
+            )
         })
         .collect();
 
@@ -303,18 +316,18 @@ pub async fn handle_req(
     use futures_util::stream::{self, StreamExt};
     let db = state.db.clone();
     let mut results = stream::iter(filter_queries.into_iter().map(
-        |(idx, per_filter_channel, params)| {
+        |(idx, per_filter_channel, params, result_limit)| {
             let db = db.clone();
             async move {
                 let filter_events = db.query_events(&params).await;
-                (idx, per_filter_channel, filter_events)
+                (idx, per_filter_channel, result_limit, filter_events)
             }
         },
     ))
     .buffered(FILTER_QUERY_CONCURRENCY);
 
     // Phase 3 — post-processing, strictly in filter order.
-    while let Some((idx, per_filter_channel, filter_events)) = results.next().await {
+    while let Some((idx, per_filter_channel, result_limit, filter_events)) = results.next().await {
         let filter = &filters[idx];
         let events = match filter_events {
             Ok(evs) => evs,
@@ -361,7 +374,13 @@ pub async fn handle_req(
             );
         }
 
+        let mut per_filter_sent = 0usize;
         for stored in &events {
+            if crate::api::git::access::filter_can_match_repository_discovery(filter)
+                && per_filter_sent >= result_limit
+            {
+                break;
+            }
             // Per-filter NIP-01 matching — use the current filter only, not the
             // full filter set. OR semantics across filters are handled by the outer
             // loop (each filter gets its own DB query).
@@ -388,6 +407,17 @@ pub async fn handle_req(
                 continue;
             }
 
+            if !crate::api::git::access::requester_can_discover_repository_event(
+                &state,
+                &conn.tenant,
+                &stored.event,
+                &pubkey_bytes,
+            )
+            .await
+            {
+                continue;
+            }
+
             // Dedup AFTER acceptance — an event that fails filter A's constraints
             // must remain eligible for filter B (NIP-01 OR semantics).
             if !seen_ids.insert(stored.event.id) {
@@ -399,6 +429,7 @@ pub async fn handle_req(
                 return;
             }
             total_sent += 1;
+            per_filter_sent += 1;
             if total_sent.is_multiple_of(100) {
                 tokio::task::yield_now().await;
             }
@@ -709,6 +740,16 @@ async fn handle_search_req(
                     if is_author_only_event(&stored.event, reader_pubkey_bytes) {
                         continue;
                     }
+                    if !crate::api::git::access::requester_can_discover_repository_event(
+                        state,
+                        tenant,
+                        &stored.event,
+                        reader_pubkey_bytes,
+                    )
+                    .await
+                    {
+                        continue;
+                    }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
                     // must remain eligible for filter B (NIP-01 OR semantics).
                     if !seen_ids.insert(stored.event.id) {
@@ -762,6 +803,25 @@ pub(crate) fn apply_count_fallback_limit(query: &mut EventQuery) {
 /// Return whether a COUNT fallback query exceeded its exact-count budget.
 pub(crate) fn count_fallback_exceeded(candidate_count: usize) -> bool {
     candidate_count > COUNT_FALLBACK_CANDIDATE_LIMIT as usize
+}
+
+/// Maximum rows an exact repository-discovery COUNT may inspect.
+///
+/// Unlike the ordinary fallback, repository COUNT cannot return a truncated
+/// value without leaking or lying about visibility. Reject broader filters and
+/// require the caller to add author/d-tag constraints.
+pub(crate) const REPOSITORY_DISCOVERY_COUNT_LIMIT: i64 = 20_000;
+
+/// Apply the bounded exact-count budget for repository discovery.
+pub(crate) fn apply_repository_discovery_count_limit(query: &mut EventQuery) {
+    let fetch_limit = REPOSITORY_DISCOVERY_COUNT_LIMIT + 1;
+    query.limit = Some(fetch_limit);
+    query.max_limit = Some(fetch_limit);
+}
+
+/// Return whether repository discovery COUNT exceeded its exact-count budget.
+pub(crate) fn repository_discovery_count_exceeded(candidate_count: usize) -> bool {
+    candidate_count > REPOSITORY_DISCOVERY_COUNT_LIMIT as usize
 }
 
 /// Returns `true` if all constraints in this filter can be fully represented
@@ -1383,6 +1443,22 @@ mod tests {
         ));
         assert!(count_fallback_exceeded(
             COUNT_FALLBACK_CANDIDATE_LIMIT as usize + 1
+        ));
+    }
+
+    #[test]
+    fn repository_discovery_count_fetches_one_extra_candidate() {
+        let mut query =
+            EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::nil()));
+        apply_repository_discovery_count_limit(&mut query);
+        assert_eq!(query.limit, Some(20_001));
+        assert_eq!(query.max_limit, Some(20_001));
+        assert_eq!(query.limit, Some(REPOSITORY_DISCOVERY_COUNT_LIMIT + 1));
+        assert!(!repository_discovery_count_exceeded(
+            REPOSITORY_DISCOVERY_COUNT_LIMIT as usize
+        ));
+        assert!(repository_discovery_count_exceeded(
+            REPOSITORY_DISCOVERY_COUNT_LIMIT as usize + 1
         ));
     }
 

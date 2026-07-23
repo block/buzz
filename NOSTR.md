@@ -125,6 +125,27 @@ nak req -k 39002 --tag "d=<channel-uuid>" --auth --sec <privkey> ws://localhost:
 > receive these via fan-out. Clients discover groups via historical REQ queries. Live push for
 > open-channel discovery is a future enhancement.
 
+### NIP-34 Repository Visibility
+
+Buzz repository announcements use NIP-34 kind `30617`. Repositories are public to authenticated relay members by default. To make a repository private to a channel, its current kind `30617` announcement must include exactly these Buzz extension tags:
+
+```json
+["buzz-visibility", "private"]
+["buzz-channel", "<channel-uuid>"]
+```
+
+A private announcement must contain exactly one two-element `buzz-visibility` tag and exactly one two-element `buzz-channel` tag with a valid channel UUID. The repository owner must be a current member of that channel when the announcement is published. Invalid or conflicting privacy metadata is rejected before storage.
+
+The current kind `30617` announcement is authoritative for access. A private repository can be discovered and read by:
+
+- the repository key that authored the announcement;
+- the verified owner of that key when it belongs to a Buzz-managed agent; or
+- a current member of the bound channel.
+
+Channel membership is checked live on each request, so adding or removing a member changes access on the next request. The same gate applies to kind `30617` repository announcements, relay-signed kind `30618` repository-state announcements, WebSocket `REQ`/`COUNT`/search and live fan-out, HTTP query/count/search, and all Git Smart HTTP endpoints (`info/refs`, `git-upload-pack`, and `git-receive-pack`). Unauthorized Git requests return the same `404 repository not found` response as an absent repository so callers cannot use the endpoint to enumerate private repositories.
+
+The `buzz-visibility` tag is an explicit opt-in. Existing announcements without `["buzz-visibility", "private"]` keep their previous public-read behavior, including announcements that already use `buzz-channel` to bind push policy. Changing read visibility does not implicitly change that existing push binding.
+
 ### Membership Notifications
 
 The relay emits relay-signed notifications when members are added or removed:

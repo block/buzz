@@ -3,6 +3,7 @@ import {
   FolderGit2,
   GitCommit,
   GitPullRequest,
+  LockKeyhole,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
@@ -434,6 +435,13 @@ export function ProjectGridCard({
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">
               {project.name}
             </span>
+            {project.visibility === "private" ? (
+              <LockKeyhole
+                aria-label="Private project"
+                className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70"
+                data-testid="project-private-indicator"
+              />
+            ) : null}
             <StatusPill status={project.status} />
           </div>
           <div className="relative z-10 flex shrink-0 items-center gap-1">
@@ -506,6 +514,13 @@ export function ProjectListRow({
               <span className={PROJECT_LIST_ROW_TITLE_CLASS}>
                 {project.name}
               </span>
+              {project.visibility === "private" ? (
+                <LockKeyhole
+                  aria-label="Private project"
+                  className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70"
+                  data-testid="project-private-indicator"
+                />
+              ) : null}
               <StatusPill status={project.status} />
             </div>
             <p className={PROJECT_LIST_ROW_PREVIEW_CLASS}>
@@ -575,8 +590,15 @@ export function ProjectRailRow({
           <FolderGit2 className="h-3.5 w-3.5 text-muted-foreground" />
         </span>
         <div className="min-w-0 flex-1">
-          <span className="block min-w-0 truncate text-xs font-semibold text-foreground">
-            {project.name}
+          <span className="flex min-w-0 items-center gap-1.5 text-xs font-semibold text-foreground">
+            <span className="min-w-0 truncate">{project.name}</span>
+            {project.visibility === "private" ? (
+              <LockKeyhole
+                aria-label="Private project"
+                className="h-3 w-3 shrink-0 text-muted-foreground/70"
+                data-testid="project-private-indicator"
+              />
+            ) : null}
           </span>
           {/* Cap the bar so its right edge always lands at least one avatar
               slot (24px + 6px gap) short of the section edge, keeping it
