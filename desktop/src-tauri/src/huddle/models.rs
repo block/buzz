@@ -1,8 +1,9 @@
 //! Model download manager for STT (Parakeet family) and TTS (Pocket TTS) models.
 //!
 //! The STT model is selectable via the `STT_MODELS` registry (issue #2478):
-//! the English Parakeet TDT-CTC 110M default, or the multilingual Parakeet TDT
-//! 0.6B v3, chosen by `BUZZ_STT_MODEL` / system locale in `selected_stt_model`.
+//! the English Parakeet TDT-CTC 110M default, multilingual Parakeet TDT 0.6B
+//! v3, or SenseVoiceSmall, chosen by `BUZZ_STT_MODEL` / system locale in
+//! `selected_stt_model`.
 //!
 //! Mental model:
 //!   app launch → start_stt_download (background) → ~/.buzz/models/<selected>/
@@ -111,9 +112,9 @@ const MAX_TTS_FILE_BYTES: u64 = 100 * 1024 * 1024;
 //
 // Historically the huddle STT model was hard-pinned to an English-only build,
 // so non-English speech transcribed as garbage (issue #2478). The registry
-// makes the model selectable: the English default stays the default, and a
-// multilingual model is picked automatically for non-English locales (or
-// forced with the `BUZZ_STT_MODEL` env override). Adding a model is pure data
+// makes the model selectable: the English default stays the default, and each
+// supported system locale maps to a model that actually covers its language
+// (or is forced with the `BUZZ_STT_MODEL` env override). Adding a model is data
 // here plus, for a new sherpa-onnx model family, one match arm in `stt.rs`.
 
 /// Attribution sidecar filename written next to every STT model's files.
@@ -127,6 +128,8 @@ pub enum SttFamily {
     NemoCtc,
     /// NeMo transducer: encoder + decoder + joiner (e.g. Parakeet TDT 0.6B v3).
     Transducer,
+    /// Single-file SenseVoice model with language auto-detection and ITN.
+    SenseVoice,
 }
 
 /// One selectable speech-to-text model. `STT_MODELS` is the single source of
@@ -152,12 +155,12 @@ pub struct SttModel {
     pub family: SttFamily,
     /// Manifest version — bump to force re-download of this model.
     pub version: &'static str,
-    /// CC-BY-4.0 §3(a)(1) attribution written next to the model bytes.
+    /// Model-specific license and attribution notice written next to the bytes.
     pub license_text: &'static str,
     /// Human-readable language coverage (About dialog / logs).
     pub languages: &'static str,
-    /// `true` when multilingual — used by the non-English locale auto-select.
-    pub multilingual: bool,
+    /// Primary locale tags that may automatically select this model.
+    pub auto_select_languages: &'static [&'static str],
 }
 
 /// Registry of selectable STT models. Index 0 is the default (English).
@@ -180,17 +183,13 @@ static STT_MODELS: &[SttModel] = &[
         version: "2",
         license_text: STT_EN_LICENSE_TEXT,
         languages: "English",
-        multilingual: false,
+        auto_select_languages: &["en"],
     },
     // NVIDIA Parakeet TDT 0.6B v3 (multilingual, int8) — packaged for
     // sherpa-onnx by k2-fsa. Transducer family (encoder/decoder/joiner). Auto
-    // language-ID + punctuation across 25 European languages. This is the
-    // multilingual default for non-English locales (issue #2478).
-    //
-    // Coverage note: Parakeet v3 covers European languages only. CJK/Korean
-    // (the concrete case in #2478) is not covered by this model; the registry
-    // makes adding a CJK model (e.g. SenseVoice-Small) a follow-up — one data
-    // entry, no engine change beyond a family already handled here.
+    // language-ID + punctuation across 25 European languages. Locale selection
+    // is restricted to those languages instead of treating it as a universal
+    // non-English fallback (issue #2478).
     //
     // Checksum: upstream publishes no SHA-256, so this hash was computed from
     // the k2-fsa `asr-models` release archive
@@ -218,7 +217,29 @@ static STT_MODELS: &[SttModel] = &[
                     German, Greek, Hungarian, Italian, Latvian, Lithuanian, \
                     Maltese, Polish, Portuguese, Romanian, Russian, Slovak, \
                     Slovenian, Spanish, Swedish, Ukrainian",
-        multilingual: true,
+        auto_select_languages: &[
+            "bg", "hr", "cs", "da", "nl", "et", "fi", "fr", "de", "el", "hu", "it", "lv", "lt",
+            "mt", "pl", "pt", "ro", "ru", "sk", "sl", "es", "sv", "uk",
+        ],
+    },
+    // SenseVoiceSmall int8 — packaged for sherpa-onnx by k2-fsa. This covers
+    // the Korean case reported in #2478 as well as Chinese, Cantonese, and
+    // Japanese. The English locale intentionally keeps the smaller Parakeet
+    // English default; SenseVoice remains available through BUZZ_STT_MODEL.
+    SttModel {
+        id: "sensevoice",
+        dir_name: "sensevoice-small",
+        download_url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/\
+             sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+        archive_subdir: "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+        archive_sha256: Some("7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e"),
+        max_download_bytes: 250 * 1024 * 1024,
+        model_files: &["model.int8.onnx", "tokens.txt"],
+        family: SttFamily::SenseVoice,
+        version: "1",
+        license_text: STT_SENSEVOICE_LICENSE_TEXT,
+        languages: "Chinese, Cantonese, English, Japanese, Korean (auto-detected)",
+        auto_select_languages: &["zh", "yue", "ja", "ko"],
     },
 ];
 
@@ -233,8 +254,8 @@ fn stt_model_by_id(id: &str) -> Option<&'static SttModel> {
 }
 
 /// Files that must be present for a model to be "ready": its model files plus
-/// the Buzz-written attribution sidecar (the upstream archives ship no LICENSE,
-/// so readiness requires the local CC-BY-4.0 notice to travel with the bytes).
+/// the Buzz-written model-specific license sidecar. This keeps the applicable
+/// notice next to the bytes even when an upstream archive also ships LICENSE.
 fn stt_expected_files(model: &SttModel) -> Vec<&'static str> {
     let mut files = model.model_files.to_vec();
     files.push(STT_LICENSE_FILE_NAME);
@@ -245,7 +266,7 @@ fn stt_expected_files(model: &SttModel) -> Vec<&'static str> {
 ///
 /// Precedence (issue #2478 options 2 + 3):
 ///   1. `override_id` (from `BUZZ_STT_MODEL`) when it names a known model.
-///   2. a non-English locale → the multilingual model.
+///   2. a locale covered by a registered model → that model.
 ///   3. otherwise the English default.
 ///
 /// Pure and dependency-free so it is unit-testable without touching disk/env.
@@ -274,10 +295,11 @@ pub fn select_stt_model(override_id: Option<&str>, locale: Option<&str>) -> &'st
             .next()
             .unwrap_or("")
             .to_ascii_lowercase();
-        if !lang.is_empty() && lang != "en" {
-            if let Some(model) = STT_MODELS.iter().find(|m| m.multilingual) {
-                return model;
-            }
+        if let Some(model) = STT_MODELS
+            .iter()
+            .find(|model| model.auto_select_languages.contains(&lang.as_str()))
+        {
+            return model;
         }
     }
     default_stt_model()
@@ -341,6 +363,20 @@ unmodified.
 
 Provided \"AS IS\", without warranty of any kind, express or implied. See the
 license text for full warranty disclaimer.
+";
+
+/// FunASR Model Open Source License 1.1 notice for SenseVoiceSmall.
+const STT_SENSEVOICE_LICENSE_TEXT: &str = "\
+SenseVoiceSmall
+Copyright (C) 2023-2028 Alibaba Group. All rights reserved.
+
+Licensed under the FunASR Model Open Source License Agreement, Version 1.1.
+Full license: https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE
+
+Original model: https://github.com/FunAudioLLM/SenseVoice
+Converted to ONNX with int8 quantization by the sherpa-onnx project
+(https://github.com/k2-fsa/sherpa-onnx); Buzz ships this conversion unmodified.
+The upstream archive also includes its own LICENSE pointer.
 ";
 
 // ── Pocket TTS model ──────────────────────────────────────────────────────────
@@ -998,10 +1034,9 @@ impl ModelManager {
             ));
         }
 
-        // Write the CC-BY-4.0 attribution sidecar before the atomic install,
-        // so it lands in the final model dir as part of the same rename. The
-        // upstream tarball ships no LICENSE/NOTICE, so we provide it ourselves
-        // per §3(a)(1) (license must travel with Shared material).
+        // Write the model-specific license sidecar before the atomic install,
+        // so it lands in the final directory as part of the same rename. Some
+        // upstream archives also include their own LICENSE.
         let license_path = extracted_subdir.join(STT_LICENSE_FILE_NAME);
         if let Err(e) = tokio::fs::write(&license_path, model.license_text).await {
             let _ = tokio::fs::remove_dir_all(&temp_dir).await;

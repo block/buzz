@@ -464,6 +464,8 @@ fn stt_worker(
     //   Transducer  — `encoder/decoder/joiner.int8.onnx`, e.g. Parakeet 0.6B v3
     //                 (multilingual). See k2-fsa/sherpa-onnx offline-transducer
     //                 NeMo examples.
+    //   SenseVoice  — single `model.int8.onnx`, automatic language detection,
+    //                 and inverse text normalization.
     //
     // `tokens.txt` is shared by every family and lives on the parent config.
     use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
@@ -508,6 +510,20 @@ fn stt_worker(
             cfg.model_config.transducer.encoder = Some(encoder.to_string_lossy().into_owned());
             cfg.model_config.transducer.decoder = Some(decoder.to_string_lossy().into_owned());
             cfg.model_config.transducer.joiner = Some(joiner.to_string_lossy().into_owned());
+        }
+        SttFamily::SenseVoice => {
+            let model_path = model_dir.join("model.int8.onnx");
+            if !model_path.exists() {
+                eprintln!(
+                    "buzz-desktop: STT model.int8.onnx not found at {} — STT disabled",
+                    model_dir.display()
+                );
+                drain_until_shutdown(audio_rx, &shutdown);
+                return;
+            }
+            cfg.model_config.sense_voice.model = Some(model_path.to_string_lossy().into_owned());
+            cfg.model_config.sense_voice.language = Some("auto".to_string());
+            cfg.model_config.sense_voice.use_itn = true;
         }
     }
     cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());

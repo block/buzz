@@ -165,16 +165,31 @@ fn defaults_to_english_without_override_or_locale() {
     assert_eq!(select_stt_model(None, None).id, "parakeet-en");
     assert_eq!(select_stt_model(None, Some("en-US")).id, "parakeet-en");
     assert_eq!(select_stt_model(None, Some("en")).id, "parakeet-en");
-    assert!(!select_stt_model(None, None).multilingual);
+    assert_eq!(select_stt_model(None, None).auto_select_languages, &["en"]);
 }
 
 #[test]
-fn non_english_locale_selects_multilingual_model() {
+fn supported_european_locale_selects_parakeet_v3() {
     for locale in ["de-DE", "uk_UA", "fr", "es-ES", "pl_PL.UTF-8"] {
         let model = select_stt_model(None, Some(locale));
-        assert!(model.multilingual, "locale {locale} should be multilingual");
         assert_eq!(model.id, "parakeet-v3", "locale {locale}");
     }
+}
+
+#[test]
+fn cjk_locales_select_sensevoice() {
+    for locale in ["zh-CN", "ja_JP", "ko-KR", "yue_HK.UTF-8"] {
+        assert_eq!(
+            select_stt_model(None, Some(locale)).id,
+            "sensevoice",
+            "locale {locale}"
+        );
+    }
+}
+
+#[test]
+fn unsupported_locale_does_not_select_an_incompatible_multilingual_model() {
+    assert_eq!(select_stt_model(None, Some("ar-SA")).id, "parakeet-en");
 }
 
 #[test]
@@ -190,6 +205,10 @@ fn explicit_override_wins_over_locale() {
     assert_eq!(
         select_stt_model(Some("PARAKEET-V3"), None).id,
         "parakeet-v3"
+    );
+    assert_eq!(
+        select_stt_model(Some("SENSEVOICE"), Some("de-DE")).id,
+        "sensevoice"
     );
 }
 
@@ -214,7 +233,9 @@ fn registry_invariants_hold() {
         default_stt_model().archive_sha256.is_some(),
         "English default must ship a pinned SHA-256"
     );
-    assert!(STT_MODELS.iter().any(|model| model.multilingual));
+    assert!(STT_MODELS
+        .iter()
+        .any(|model| model.auto_select_languages.len() > 1));
     for (index, model) in STT_MODELS.iter().enumerate() {
         assert!(!model.model_files.is_empty(), "{} has no files", model.id);
         assert!(model.max_download_bytes > 0, "{} has no size cap", model.id);
@@ -224,6 +245,14 @@ fn registry_invariants_hold() {
                 "duplicate model id {}",
                 model.id
             );
+            for language in model.auto_select_languages {
+                assert!(
+                    !other.auto_select_languages.contains(language),
+                    "locale {language} is auto-selected by both {} and {}",
+                    model.id,
+                    other.id
+                );
+            }
         }
     }
 }
@@ -259,5 +288,21 @@ fn readiness_uses_per_model_expected_files() {
     for file in stt_expected_files(model) {
         std::fs::write(dir.join(file), b"x").expect("write");
     }
+    assert!(slot.is_ready(temp.path()));
+}
+
+#[test]
+fn sensevoice_readiness_uses_single_model_file() {
+    let model = stt_model_by_id("sensevoice").expect("SenseVoice registered");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let slot = ModelSlot::new(model.dir_name, stt_expected_files(model), model.version);
+    let dir = temp.path().join(model.dir_name);
+    std::fs::create_dir_all(&dir).expect("create dir");
+    std::fs::write(dir.join(MANIFEST_FILENAME), model.version).expect("manifest");
+    std::fs::write(dir.join("model.int8.onnx"), b"x").expect("model");
+    std::fs::write(dir.join("tokens.txt"), b"x").expect("tokens");
+    assert!(!slot.is_ready(temp.path()));
+
+    std::fs::write(dir.join(STT_LICENSE_FILE_NAME), b"x").expect("license");
     assert!(slot.is_ready(temp.path()));
 }
