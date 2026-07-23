@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
-import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
+import {
+  applyCommunity,
+  autoConnectDefaultRelayEnabled,
+  getDefaultRelayUrl,
+} from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
@@ -96,14 +100,16 @@ export function useCommunityInit(
       if (!activeCommunity) {
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
+          const autoConnectDefaultRelay =
+            await autoConnectDefaultRelayEnabled();
 
-          // Signed builds carry a reviewed production relay. Treat that as the
-          // user's first community so first-run onboarding proceeds directly
-          // from machine setup into profile/team setup. Local development keeps
-          // the explicit add-a-community flow for ws://localhost defaults.
+          // Internal builds explicitly opt into treating their reviewed default
+          // relay as the first community. Public builds retain community
+          // selection even when BUZZ_RELAY_URL is overridden at runtime.
           if (
             isSharedIdentity ||
-            shouldAutoConnectDefaultRelay(defaultRelayUrl)
+            (autoConnectDefaultRelay &&
+              shouldAutoConnectDefaultRelay(defaultRelayUrl))
           ) {
             const identity = await getIdentity();
             if (cancelled) return;

@@ -211,12 +211,19 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     cd desktop/src-tauri
     echo "=== Clean build (no flag) → expect false ==="
     env -u BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT \
+      -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
       BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=false \
       cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
-    echo "=== Internal build (flag set) → expect true ==="
+    env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    echo "=== Internal build (flags set) → expect true ==="
     BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT=1 \
       BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=true \
       cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)

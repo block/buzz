@@ -415,6 +415,7 @@ type E2eConfig = {
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   identity?: TestIdentity;
 };
 
@@ -9792,6 +9793,8 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "auto_connect_default_relay_enabled":
+        return activeConfig?.autoConnectDefaultRelay ?? false;
       case "get_legacy_workspace_storage":
         return {
           workspaces: null,
