@@ -36,6 +36,7 @@ type AppSidebarPinnedHeaderProps = {
 };
 
 type AppSidebarPrimaryMenuProps = {
+  agentDraftCount: number;
   homeBadgeCount: number;
   onSelectAgents: () => void;
   onSelectHome: () => void;
@@ -81,6 +82,7 @@ export function AppSidebarPinnedHeader({
 }
 
 export function AppSidebarPrimaryMenu({
+  agentDraftCount,
   homeBadgeCount,
   onSelectAgents,
   onSelectHome,
@@ -154,6 +156,14 @@ export function AppSidebarPrimaryMenu({
             <Bot className="h-4 w-4" />
             <SidebarMenuLabel>Agents</SidebarMenuLabel>
           </SidebarMenuButton>
+          {agentDraftCount > 0 ? (
+            <SidebarMenuBadge
+              className="right-2 rounded-full bg-primary/15 px-1.5 text-2xs text-primary peer-data-[active=true]/menu-button:bg-sidebar-active-foreground/20 peer-data-[active=true]/menu-button:text-sidebar-active-foreground"
+              data-testid="sidebar-agent-draft-count"
+            >
+              {Math.min(agentDraftCount, 99)}
+            </SidebarMenuBadge>
+          ) : null}
         </SidebarMenuItem>
         <FeatureGate feature="workflows">
           <SidebarMenuItem>

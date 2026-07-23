@@ -17,6 +17,10 @@ import {
   saveActiveAgentTurnsForCommunity,
   restoreActiveAgentTurnsForCommunity,
 } from "@/features/agents/activeAgentTurnsStore";
+import {
+  initAgentManagementDraftStore,
+  resetAgentManagementDraftStore,
+} from "@/features/agents/agentManagementDraftStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
@@ -38,6 +42,7 @@ function resetCommunityState(): void {
   resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
+  resetAgentManagementDraftStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
   resetSidebarRelayConnectionCardState();
@@ -203,6 +208,10 @@ export function useCommunityInit(
           const identity = await getIdentity();
           if (cancelled) return;
           initDraftStore(identity.pubkey, activeCommunity.relayUrl);
+          initAgentManagementDraftStore(
+            identity.pubkey,
+            activeCommunity.relayUrl,
+          );
         } catch (err) {
           if (cancelled) return;
           console.error(

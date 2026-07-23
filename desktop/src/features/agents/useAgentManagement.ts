@@ -8,10 +8,14 @@ import {
 } from "./agentManagement";
 import { subscribeAgentManagementRequests } from "./observerRelayStore";
 import {
-  placeAcceptedRequest,
-  takeNextQueuedRequest,
-  type QueuedAgentManagementRequest,
-} from "./agentManagementQueue";
+  enqueueAgentManagementDraft,
+  peekPendingAgentManagementDraft,
+  removeAgentManagementDraft,
+  requestAgentManagementDraftReview,
+  useAgentManagementDraftCount,
+  useAgentManagementReviewRequestVersion,
+  type PendingAgentManagementDraft,
+} from "./agentManagementDraftStore";
 import {
   managedAgentsQueryKey,
   personasQueryKey,
@@ -37,6 +41,7 @@ import type {
   CreatePersonaInput,
   UpdatePersonaInput,
 } from "@/shared/api/types";
+import { toast } from "sonner";
 
 function updateInputFromRequest(
   request: Extract<AgentManagementRequest, { action: "update" }>,
@@ -71,30 +76,30 @@ export function useAgentManagement() {
   const createPersonaMutation = useCreatePersonaMutation();
   const updatePersonaMutation = useUpdatePersonaMutation();
   const createAgentMutation = useCreateManagedAgentMutation();
-  const [request, setRequest] = React.useState<AgentManagementRequest | null>(
-    null,
-  );
+  const [activeDraft, setActiveDraft] =
+    React.useState<PendingAgentManagementDraft | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const createdAgentAttachment = useCreatedAgentChannelAttachment();
   const seenRequestIds = React.useRef(new Set<string>());
-  const pendingRequestId = React.useRef<string | null>(null);
-  const sourceAgentPubkey = React.useRef<string | null>(null);
   const managedAgentsRef = React.useRef(managedAgentsQuery.data);
   const channelsRef = React.useRef(channelsQuery.data);
   const bufferedRequestsRef = React.useRef<
     Array<{ agentPubkey: string; request: AgentManagementRequest }>
   >([]);
-  const queuedRequestsRef = React.useRef<QueuedAgentManagementRequest[]>([]);
+  const pendingDraftCount = useAgentManagementDraftCount();
+  const reviewRequestVersion = useAgentManagementReviewRequestVersion();
+  const request = activeDraft?.request ?? null;
+  const sourceAgentPubkey = activeDraft?.agentPubkey ?? null;
 
-  // Promote the next queued draft into the visible dialog. Assumes no draft is
-  // currently pending (call only after dismiss clears the active one).
-  const showNextQueuedRequest = React.useEffectEvent(() => {
-    const nextInQueue = takeNextQueuedRequest(queuedRequestsRef.current);
-    if (!nextInQueue) return;
-    pendingRequestId.current = nextInQueue.request.requestId;
-    sourceAgentPubkey.current = nextInQueue.agentPubkey;
-    setRequest(nextInQueue.request);
-  });
+  // Promote the oldest persisted draft into the visible dialog. The store stays
+  // authoritative so a missed dialog still has a sidebar entry point.
+  const showNextPendingDraft = React.useCallback(() => {
+    if (activeDraft) return;
+    const nextDraft = peekPendingAgentManagementDraft();
+    if (!nextDraft) return;
+    setError(null);
+    setActiveDraft(nextDraft);
+  }, [activeDraft]);
 
   const acceptOwnedRequest = React.useEffectEvent(
     (agentPubkey: string, next: AgentManagementRequest) => {
@@ -111,17 +116,20 @@ export function useAgentManagement() {
       }
       seenRequestIds.current.add(next.requestId);
       setError(null);
-      if (
-        placeAcceptedRequest(pendingRequestId.current !== null) === "show"
-      ) {
-        pendingRequestId.current = next.requestId;
-        sourceAgentPubkey.current = agentPubkey;
-        setRequest(next);
-      } else {
-        // A review dialog is already open. Queue this draft so it surfaces once
-        // the owner resolves the current one, rather than dropping it.
-        queuedRequestsRef.current.push({ agentPubkey, request: next });
+      const didEnqueue = enqueueAgentManagementDraft(agentPubkey, next);
+      if (didEnqueue) {
+        toast("Agent draft ready", {
+          action: {
+            label: "Review",
+            onClick: requestAgentManagementDraftReview,
+          },
+          description:
+            next.action === "create"
+              ? `Review ${next.request.displayName}.`
+              : `Review changes for ${next.request.agentName}.`,
+        });
       }
+      showNextPendingDraft();
     },
   );
 
@@ -183,7 +191,7 @@ export function useAgentManagement() {
     const targetChannel = (channelsQuery.data ?? []).find(
       (channel) => channel.id === channelId,
     );
-    const requestingPubkey = sourceAgentPubkey.current?.toLowerCase();
+    const requestingPubkey = sourceAgentPubkey?.toLowerCase();
     if (
       !targetChannel?.isMember ||
       !requestingPubkey ||
@@ -249,7 +257,7 @@ export function useAgentManagement() {
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
-      dismiss();
+      resolveActiveDraft();
       return true;
     } catch (cause) {
       setError(
@@ -271,7 +279,7 @@ export function useAgentManagement() {
         queryClient.invalidateQueries({ queryKey: personasQueryKey }),
         queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey }),
       ]);
-      dismiss();
+      resolveActiveDraft();
       return true;
     } catch (cause) {
       setError(
@@ -281,14 +289,27 @@ export function useAgentManagement() {
     }
   }
 
-  function dismiss() {
-    pendingRequestId.current = null;
-    sourceAgentPubkey.current = null;
-    setRequest(null);
-    // Surface the next queued draft (if any) so a burst of concurrent drafts is
-    // reviewed one at a time instead of the extras being lost.
-    showNextQueuedRequest();
+  function clearActiveDraft(removeFromStore: boolean) {
+    const requestId = activeDraft?.request.requestId;
+    if (removeFromStore && requestId) {
+      removeAgentManagementDraft(requestId);
+    }
+    setActiveDraft(null);
+    setError(null);
   }
+
+  function resolveActiveDraft() {
+    clearActiveDraft(true);
+  }
+
+  function dismiss() {
+    clearActiveDraft(true);
+  }
+
+  React.useEffect(() => {
+    if (pendingDraftCount === 0 && reviewRequestVersion === 0) return;
+    showNextPendingDraft();
+  }, [pendingDraftCount, reviewRequestVersion, showNextPendingDraft]);
 
   const createInitialValues = React.useMemo(
     () =>

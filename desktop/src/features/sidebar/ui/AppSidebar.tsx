@@ -1,5 +1,6 @@
 // biome-ignore format: keep compact to stay within file size limit
 import * as React from "react";
+import { FilePenLine } from "lucide-react";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -46,6 +47,7 @@ import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { SidebarCompactActionCard } from "@/shared/ui/sidebar-action-card";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
@@ -87,6 +89,7 @@ type AppSidebarProps = {
   currentPubkey?: string;
   fallbackDisplayName?: string;
   homeBadgeCount: number;
+  pendingAgentDraftCount: number;
   isAddCommunityOpen?: boolean;
   isLoading: boolean;
   isCreatingChannel: boolean;
@@ -140,6 +143,7 @@ type AppSidebarProps = {
   ) => void;
   onRemoveCommunity: (id: string) => void;
   onCreateAgent: () => void;
+  onReviewAgentDraft: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -179,6 +183,7 @@ export function AppSidebar({
   currentPubkey,
   fallbackDisplayName,
   homeBadgeCount,
+  pendingAgentDraftCount,
   isAddCommunityOpen,
   isLoading,
   isCreatingChannel,
@@ -207,6 +212,7 @@ export function AppSidebar({
   onUpdateCommunity,
   onRemoveCommunity,
   onCreateAgent,
+  onReviewAgentDraft,
   onSelectAgents,
   onSelectProjects,
   onSelectPulse,
@@ -592,6 +598,7 @@ export function AppSidebar({
               data-testid="sidebar-scroll-content"
             >
               <AppSidebarPrimaryMenu
+                agentDraftCount={pendingAgentDraftCount}
                 homeBadgeCount={homeBadgeCount}
                 onSelectAgents={onSelectAgents}
                 onSelectHome={onSelectHome}
@@ -870,6 +877,28 @@ export function AppSidebar({
               <div className="mb-2 group-data-[collapsible=icon]:hidden">
                 <SidebarUpdateCard
                   onDismiss={() => setIsSidebarUpdateCardDismissed(true)}
+                />
+              </div>
+            ) : null}
+            {pendingAgentDraftCount > 0 ? (
+              <div className="mb-2 group-data-[collapsible=icon]:hidden">
+                <SidebarCompactActionCard
+                  actionAriaLabel="Review pending agent draft"
+                  actionTestId="sidebar-agent-draft-review"
+                  description={
+                    pendingAgentDraftCount === 1
+                      ? "Review requested changes"
+                      : `${pendingAgentDraftCount} requests awaiting review`
+                  }
+                  icon={<FilePenLine aria-hidden="true" className="h-5 w-5" />}
+                  onAction={onReviewAgentDraft}
+                  role="alert"
+                  testId="sidebar-agent-draft-card"
+                  title={
+                    pendingAgentDraftCount === 1
+                      ? "Agent draft ready"
+                      : "Agent drafts ready"
+                  }
                 />
               </div>
             ) : null}
