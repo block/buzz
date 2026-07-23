@@ -1,6 +1,5 @@
 import { cn } from "@/shared/lib/cn";
 import { Input } from "@/shared/ui/input";
-import { Textarea } from "@/shared/ui/textarea";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
@@ -30,7 +29,6 @@ export function EditAgentAdvancedFields({
   provider,
   requiredEnvKeys,
   selectedRuntimeId,
-  systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
   onAgentCommandChange,
@@ -38,7 +36,6 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange,
   onParallelismChange,
   onAutoRestartChange,
-  onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
@@ -66,7 +63,6 @@ export function EditAgentAdvancedFields({
   provider?: string;
   requiredEnvKeys: readonly string[];
   selectedRuntimeId: string;
-  systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
   onAgentCommandChange: (value: string) => void;
@@ -74,7 +70,6 @@ export function EditAgentAdvancedFields({
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
-  onSystemPromptChange: (value: string) => void;
 }) {
   return (
     <div className="space-y-5 pt-2">
@@ -244,30 +239,6 @@ export function EditAgentAdvancedFields({
             id="edit-agent-acp-command"
             onChange={(event) => onAcpCommandChange(event.target.value)}
             value={acpCommand}
-          />
-        </div>
-      </div>
-
-      {/* System prompt override */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-system-prompt"
-        >
-          System prompt override
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div className={PERSONA_FIELD_SHELL_CLASS}>
-          <Textarea
-            className={cn(
-              "min-h-24 resize-y px-3 py-3 leading-5",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-system-prompt"
-            onChange={(event) => onSystemPromptChange(event.target.value)}
-            placeholder="Leave blank to send no ACP system prompt"
-            value={systemPrompt}
           />
         </div>
       </div>
