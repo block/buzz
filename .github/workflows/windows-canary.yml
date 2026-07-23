@@ -1,0 +1,161 @@
+name: Windows Canary
+
+# Produces an unsigned Windows NSIS installer from any ref without creating
+# a tag, GitHub Release, or auto-updater artifact. The installer is available
+# only as a short-lived GitHub Actions artifact for explicit testing.
+#
+# Design notes vs. signed-macos-canary.yml:
+#   - Accepts a `ref` input (default: main) so pre-merge branches can be
+#     tested. The macOS canary requires main because it runs OIDC
+#     signing/notarization; this job is unsigned, contents: read only, and
+#     zero secrets — building arbitrary refs is safe and is the entire point.
+#   - No `Require main` guard for the same reason.
+#   - No mesh-llm: release-windows doesn't build it.
+#   - pnpm store restore/save pattern mirrors ci.yml:149-196. This is safe
+#     because this job is contents:read and artifact-only (unsigned). The
+#     release.yml Windows job explicitly disables pnpm caching because that
+#     job is contents:write feeding a signed installer — a poisoning vector
+#     (see release.yml:747-750). GitHub cache scoping means PR-branch caches
+#     can never restore into the main-branch scope.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag, or SHA to build (default: main)"
+        required: false
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows canary
+    if: github.repository == 'block/buzz'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      # Rust cache covering both the workspace sidecar build and the Tauri
+      # crate build. shared-key scoped to windows-canary-release so canary
+      # runs warm each other without colliding with CI's debug-profile key
+      # (CI windows job does clippy/check, not --release).
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            .
+            desktop/src-tauri
+          shared-key: windows-canary-release
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24.14.1
+          # Disable setup-node's built-in cache: we manage the pnpm store cache
+          # explicitly below (restore before install, save after) to mirror the
+          # pattern used by ci.yml and to keep caching logic consistent across
+          # all three canary workflows.
+          package-manager-cache: false
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+        with:
+          version: 11.4.0
+
+      - name: Get pnpm store directory
+        id: pnpm-cache
+        shell: bash
+        run: echo "STORE_PATH=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore pnpm store cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install desktop dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Derive canary version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_VERSION=$(node -p "require('./desktop/package.json').version")
+          if ! [[ "$BASE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Desktop version '$BASE_VERSION' is not semver"
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-test.${GITHUB_RUN_NUMBER}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building canary version $VERSION from $GITHUB_SHA"
+
+      - name: Patch canary version
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri && cargo update --workspace
+
+      - name: Generate non-updating bundle config
+        shell: bash
+        run: |
+          cat > desktop/src-tauri/tauri.canary.conf.json <<'JSON'
+          {
+            "bundle": {
+              "createUpdaterArtifacts": false
+            }
+          }
+          JSON
+
+      - name: Build sidecars
+        shell: bash
+        run: |
+          cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh "$TARGET"
+
+      - name: Build Windows NSIS installer (unsigned)
+        shell: bash
+        run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --config src-tauri/tauri.canary.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+
+      - name: Locate NSIS installer
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE_DIR="desktop/src-tauri/target/${TARGET}/release/bundle"
+          EXE=$(find "$BUNDLE_DIR/nsis" -name '*.exe' -type f | head -1)
+          if [[ -z "$EXE" ]]; then
+            echo "::error::No NSIS installer found in $BUNDLE_DIR/nsis"
+            exit 1
+          fi
+          echo "exe=$EXE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Windows canary installer
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-windows-canary-${{ github.sha }}
+          path: ${{ steps.artifact.outputs.exe }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Save pnpm store cache
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
