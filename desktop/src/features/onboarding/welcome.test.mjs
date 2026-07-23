@@ -332,6 +332,31 @@ test("ensureStarterChannels resumes when one starter channel is missing", async 
   assert.equal(ensureCalls, 1);
 });
 
+test("ensureStarterChannels succeeds without a full starter set (customized community)", async () => {
+  // An established community renamed/privatized its starter channels: the
+  // ensure command returns whatever this member can see, and a partial (or
+  // empty) starter match must not throw — joiner onboarding is best-effort.
+  const renamedGeneral = makeChannel({
+    id: "general-channel",
+    name: "town-square",
+    visibility: "open",
+  });
+  let ensureCalls = 0;
+
+  const result = await ensureStarterChannels({
+    getChannels: async () => [renamedGeneral],
+    ensureStarterChannels: async () => {
+      ensureCalls += 1;
+      return [renamedGeneral];
+    },
+  });
+
+  assert.equal(result.generalChannel, null);
+  assert.equal(result.welcomeChannel, null);
+  assert.deepEqual(result.channels, [renamedGeneral]);
+  assert.equal(ensureCalls, 1);
+});
+
 test("isWelcomeExperienceChannel matches legacy Welcome and starter welcome-everyone", () => {
   assert.equal(isWelcomeExperienceChannel(makeChannel()), true);
   assert.equal(
