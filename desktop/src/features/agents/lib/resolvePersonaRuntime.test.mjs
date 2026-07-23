@@ -33,6 +33,46 @@ test("resolvePersonaRuntime — undefined personaRuntimeId also returns defaultR
   });
 });
 
+test("resolvePersonaRuntime — hidden defaults are skipped for runtime-less personas", () => {
+  const result = resolvePersonaRuntime(null, runtimes, goose, false, ["goose"]);
+  assert.deepEqual(result, {
+    runtime: claude,
+    warnings: [],
+    isOverridden: false,
+  });
+});
+
+test("resolvePersonaRuntime — explicitly pinned hidden runtimes remain available", () => {
+  const result = resolvePersonaRuntime("goose", runtimes, claude, false, [
+    "goose",
+  ]);
+  assert.deepEqual(result, {
+    runtime: goose,
+    warnings: [],
+    isOverridden: false,
+  });
+});
+
+test("resolvePersonaRuntime — hidden fallback is replaced when a pinned runtime is unavailable", () => {
+  const result = resolvePersonaRuntime("unknown-rt", runtimes, goose, false, [
+    "goose",
+  ]);
+  assert.equal(result.runtime, claude);
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /Claude/);
+  assert.equal(result.isOverridden, true);
+});
+
+test("resolvePersonaRuntime — no implicit fallback remains when every runtime is hidden", () => {
+  const result = resolvePersonaRuntime(null, runtimes, goose, false, [
+    "goose",
+    "claude",
+  ]);
+  assert.equal(result.runtime, null);
+  assert.equal(result.warnings.length, 1);
+  assert.equal(result.isOverridden, false);
+});
+
 test("resolvePersonaRuntime — no personaRuntimeId and no defaultRuntime returns null with warning", () => {
   const result = resolvePersonaRuntime(null, runtimes, null);
   assert.equal(result.runtime, null);
