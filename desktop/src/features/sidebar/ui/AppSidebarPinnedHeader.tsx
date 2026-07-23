@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FilePenLine,
+  FolderGit2,
+  Inbox,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -38,6 +45,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   agentDraftCount: number;
   homeBadgeCount: number;
+  onSelectAgentDrafts: () => void;
   onSelectAgents: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
@@ -84,6 +92,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   agentDraftCount,
   homeBadgeCount,
+  onSelectAgentDrafts,
   onSelectAgents,
   onSelectHome,
   onSelectProjects,
@@ -155,6 +164,17 @@ export function AppSidebarPrimaryMenu({
           >
             <Bot className="h-4 w-4" />
             <SidebarMenuLabel>Agents</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-agent-drafts"
+            onClick={onSelectAgentDrafts}
+            tooltip="Drafts"
+            type="button"
+          >
+            <FilePenLine className="h-4 w-4" />
+            <SidebarMenuLabel>Drafts</SidebarMenuLabel>
           </SidebarMenuButton>
           {agentDraftCount > 0 ? (
             <SidebarMenuBadge

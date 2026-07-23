@@ -1,6 +1,7 @@
 // biome-ignore format: keep compact to stay within file size limit
 import * as React from "react";
 import { FilePenLine } from "lucide-react";
+import { toast } from "sonner";
 import { FeatureGate } from "@/shared/features";
 import { SidebarDndContext } from "@/features/sidebar/ui/SidebarDnd";
 
@@ -551,6 +552,14 @@ export function AppSidebar({
     [assignChannel, onBrowseChannels],
   );
 
+  const handleSelectAgentDrafts = React.useCallback(() => {
+    if (pendingAgentDraftCount > 0) {
+      onReviewAgentDraft();
+      return;
+    }
+    toast("No pending agent drafts");
+  }, [onReviewAgentDraft, pendingAgentDraftCount]);
+
   return (
     <Sidebar
       className="!border-r-0"
@@ -600,6 +609,7 @@ export function AppSidebar({
               <AppSidebarPrimaryMenu
                 agentDraftCount={pendingAgentDraftCount}
                 homeBadgeCount={homeBadgeCount}
+                onSelectAgentDrafts={handleSelectAgentDrafts}
                 onSelectAgents={onSelectAgents}
                 onSelectHome={onSelectHome}
                 onSelectProjects={onSelectProjects}
