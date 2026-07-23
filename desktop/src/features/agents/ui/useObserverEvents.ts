@@ -144,9 +144,10 @@ export function useLoadArchivedObserverEvents(
   // Reset per-channel paging state when channelId changes. Backfill state is
   // identity-level (not per-channel) and must NOT be reset here — the backfill
   // index covers all channels and only needs to run once per identity mount.
-  // Only the cursor, exhaustion flag, fetching lock, and channel token are
-  // channel-scoped. activeChannelId is updated here so in-flight reads from
-  // the old channel can detect they are stale and discard their results.
+  // Only the cursor, exhaustion flag, fetching lock, channel label, and
+  // resetGeneration are channel-scoped. resetGeneration is incremented by
+  // applyChannelReset so in-flight reads from any prior reset (including
+  // A→B→A) detect staleness and discard their results.
   // biome-ignore lint/correctness/useExhaustiveDependencies: channelId is the intentional reset key; ps is a stable ref excluded from deps by convention; setHasOlderArchived is a stable React state setter
   React.useEffect(() => {
     applyChannelReset(ps, channelId);
@@ -267,7 +268,7 @@ export function useLoadArchivedObserverEvents(
     ps.backfillPromise = promise;
   }, [enabled, hasSubscription]);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref; all per-page state (isFetching, cursor, hasOlderArchived, activeChannelId) is read from the ref rather than React state, so this callback is intentionally stable across exhaustion/channel changes
+  // biome-ignore lint/correctness/useExhaustiveDependencies: ps is a stable ref; all per-page state (isFetching, cursor, hasOlderArchived, resetGeneration) is read from the ref rather than React state, so this callback is intentionally stable across exhaustion/channel changes
   const fetchOlderArchived = React.useCallback(async () => {
     if (
       !enabled ||
@@ -280,11 +281,12 @@ export function useLoadArchivedObserverEvents(
       return;
     }
 
-    // Snapshot the channelId at the start of this request. Every shared-state
-    // write below re-checks requestChannelId === ps.activeChannelId first — if
-    // they differ, a channel switch happened while we were awaiting async I/O
-    // and we discard results rather than corrupting the new channel's state.
-    const requestChannelId = channelId;
+    // Snapshot the reset generation at the start of this request. Every
+    // shared-state write below rechecks requestGeneration === ps.resetGeneration
+    // first. A mismatch means at least one channel switch occurred while we
+    // were awaiting async I/O — even A→B→A is detected because each switch
+    // increments resetGeneration. Channel ID is kept only as the query input.
+    const requestGeneration = ps.resetGeneration;
 
     // Await backfill completion before reading the channel index. This
     // guarantees the index is populated before the first paginated read, so
@@ -294,30 +296,27 @@ export function useLoadArchivedObserverEvents(
       await ps.backfillPromise;
     }
 
-    // Re-check after awaiting: channel may have switched or archive exhausted
-    // while we were waiting for backfill.
-    if (!ps.hasOlderArchived || requestChannelId !== ps.activeChannelId) {
+    // Re-check after awaiting: generation may have advanced (channel switched)
+    // or archive exhausted while we were waiting for backfill.
+    if (!ps.hasOlderArchived || requestGeneration !== ps.resetGeneration) {
       return;
     }
 
-    // Acquire the fetch lock under this request's channel token. The finally
-    // block only releases the lock if the token still matches — so a stale
-    // in-flight request from channel A cannot clear the lock that channel B
-    // acquired after the switch.
+    // Acquire the fetch lock under this request's generation. The finally
+    // block only releases the lock if the generation still matches — so a stale
+    // in-flight request cannot clear the lock that belongs to a later reset.
     ps.isFetching = true;
     try {
       const before = ps.cursor ?? undefined;
-      const events = await readArchivedObserverEventsForChannel(
-        requestChannelId,
-        {
-          before: before ?? null,
-          limit: ARCHIVED_EVENTS_PAGE_SIZE,
-        },
-      );
+      const events = await readArchivedObserverEventsForChannel(channelId, {
+        before: before ?? null,
+        limit: ARCHIVED_EVENTS_PAGE_SIZE,
+      });
 
-      // Discard result if the channel changed while the Tauri read was in
-      // flight. The new channel will start its own read with a null cursor.
-      if (requestChannelId !== ps.activeChannelId) {
+      // Discard result if the generation advanced while the Tauri read was in
+      // flight (channel switch, including A→B→A). The new channel will start
+      // its own read with a null cursor.
+      if (requestGeneration !== ps.resetGeneration) {
         return;
       }
 
@@ -333,11 +332,11 @@ export function useLoadArchivedObserverEvents(
         await ingestArchivedObserverEvents(events);
       }
 
-      // Re-check token after ingestArchivedObserverEvents: ingestion decrypts
-      // each frame asynchronously and may take time. If a channel switch
-      // occurred during that await, discard all remaining shared-state writes
-      // — exhaustion and React mirror — for the new channel.
-      if (requestChannelId !== ps.activeChannelId) {
+      // Re-check generation after ingestArchivedObserverEvents: ingestion
+      // decrypts each frame asynchronously and may take time. If a channel
+      // switch occurred during that await (including A→B→A), discard all
+      // remaining shared-state writes — exhaustion and React mirror.
+      if (requestGeneration !== ps.resetGeneration) {
         return;
       }
 
@@ -350,10 +349,9 @@ export function useLoadArchivedObserverEvents(
       console.error("[useLoadArchivedObserverEvents] fetch failed:", error);
     } finally {
       // Only release the fetch lock if this request still owns it. If the
-      // channel switched while we were in flight, ps.activeChannelId no longer
-      // matches our requestChannelId — releasing the lock here would steal B's
-      // in-flight read lock and allow concurrent fetches for B.
-      if (requestChannelId === ps.activeChannelId) {
+      // generation advanced (any channel switch including A→B→A), the new
+      // channel acquired its own lock — releasing here would steal it.
+      if (requestGeneration === ps.resetGeneration) {
         ps.isFetching = false;
       }
     }

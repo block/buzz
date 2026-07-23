@@ -33,10 +33,15 @@ export interface ArchivePagingState {
    *  so switching channels triggers a fresh hydration pass. */
   initialHydrationDone: boolean;
   /** The channelId that this paging state is currently scoped to.
-   *  Captured by fetchOlderArchived at request start; compared on resolution
-   *  to detect and discard cursor/exhaustion writes from in-flight reads that
-   *  completed after a channel switch. */
+   *  Kept for diagnostics only; NOT used as a generation token (see
+   *  resetGeneration). Channel equality is not a unique request identifier:
+   *  A→B→A makes old-A channel checks pass again. */
   activeChannelId: string | null;
+  /** Monotonically increasing counter incremented by applyChannelReset.
+   *  Each fetch snapshots this value at request start and checks it again
+   *  after every async boundary — a mismatch means a channel switch occurred
+   *  mid-flight (even A→B→A), and results are discarded. */
+  resetGeneration: number;
 }
 
 /**
@@ -54,6 +59,7 @@ export function createArchivePagingState(): ArchivePagingState {
     cursor: null,
     initialHydrationDone: false,
     activeChannelId: null,
+    resetGeneration: 0,
   };
   state.backfillPromise = new Promise<void>((resolve) => {
     state.backfillResolve = resolve;
@@ -64,10 +70,16 @@ export function createArchivePagingState(): ArchivePagingState {
 /**
  * Reset per-channel paging state when the viewed channel changes.
  *
- * Only cursor, exhaustion flag, fetch lock, and channel token are
- * channel-scoped. Backfill state is identity-level (the index covers ALL
+ * Only cursor, exhaustion flag, fetch lock, channel label, and generation token
+ * are channel-scoped. Backfill state is identity-level (the index covers ALL
  * channels and needs to run only once per identity mount), so it is
  * intentionally NOT touched here.
+ *
+ * `resetGeneration` is incremented on every call. In-flight fetches snapshot
+ * the generation at start and recheck it after every async boundary — a
+ * mismatch (including A→B→A) means the request is stale, so results are
+ * discarded. Channel ID is retained for diagnostics only; it does NOT serve
+ * as the generation token.
  *
  * Called by the useEffect([channelId]) in useLoadArchivedObserverEvents.
  * Exported so tests can verify the reset semantics without a React runtime.
@@ -81,6 +93,7 @@ export function applyChannelReset(
   state.hasOlderArchived = true;
   state.initialHydrationDone = false;
   state.activeChannelId = newChannelId;
+  state.resetGeneration += 1;
 }
 
 /**

@@ -3,20 +3,30 @@
  * useLoadArchivedObserverEvents.
  *
  * These tests mount the REAL production hook (including its useEffect wiring,
- * fetchOlderArchived closure, runHydrationLoop call, and requestChannelId token
+ * fetchOlderArchived closure, runHydrationLoop call, and resetGeneration token
  * checks) against a mocked Tauri IPC bridge and a real QueryClientProvider.
  * They fail if any of the following is removed from the production hook:
  *   - the hydration effect
- *   - the requestChannelId token checks (post-Tauri-read AND post-ingest)
+ *   - the resetGeneration checks (post-backfill, post-Tauri-read, post-ingest)
  *   - the generation-aware isFetching clear in finally
  *
- * Two regressions:
+ * Three regressions:
  *   (a) exhausted-A → switch-to-B: B must read from a null cursor and ingest
- *       its rows. Fails at dfb2d0385 (before fix) and passes after.
- *   (b) deferred-I/O race: A is in flight (Tauri read deferred), switch to B,
- *       resolve A's 1-row short ingest — A must NOT mark B exhausted, and B's
- *       eager loop must continue past page 1 toward its budget. Fails at
- *       dfb2d0385 (before post-ingest token fix) and passes after.
+ *       its rows. GREEN at dfb2d0385 (stale-closure was fixed in round 1).
+ *       Fails at the pre-round-1 head where ps.hasOlderArchived was read from
+ *       React state, not the ref.
+ *   (b) deferred-I/O race (A→B): A is in flight (decrypt deferred), switch to B,
+ *       resolve A's 1-row short ingest — A must NOT mark B exhausted or steal B's
+ *       fetch lock, and B's eager loop must continue past page 1. Fails at
+ *       dfb2d0385 (post-ingest token missing). Lock theft is asserted by calling
+ *       fetchOlderArchived concurrently while B holds the lock: with correct
+ *       protection the concurrent call is rejected (read count doesn't jump);
+ *       without it, A's stale finally clears the lock and the concurrent call
+ *       would start a duplicate read.
+ *   (c) A→B→A: old-A's in-flight decrypt completes after the user returns to A.
+ *       Old-A's generation no longer matches (each reset increments the counter),
+ *       so it must not mark fresh-A exhausted or steal fresh-A's lock. Fails
+ *       when resetGeneration is replaced with a channel-string equality check.
  *
  * ── DOM shim ─────────────────────────────────────────────────────────────────
  * react-dom/client requires a minimal DOM; node has none. We install the same
@@ -262,14 +272,20 @@ function makeArchivedRow(seq, channelId = "chan-1") {
 
 /**
  * Mount useLoadArchivedObserverEvents in a real React tree with a QueryClient
- * pre-seeded with the identity. Returns { unmount, rerender(channelId) }.
+ * pre-seeded with the identity. Returns { unmount, render(channelId),
+ * getFetchOlderArchived() }.
  *
- * The hook itself is opaque to the harness — we only observe side-effects
- * (ingestArchivedObserverEvents writing to the store) and the IPC call log.
+ * getFetchOlderArchived() returns the latest fetchOlderArchived function from
+ * the hook's return value, captured on each render. Tests can call it directly
+ * to probe lock behaviour without going through the hydration loop.
  */
 function mountHook(_initialChannelId, queryClient) {
+  // Capture the latest hook return values so tests can call fetchOlderArchived.
+  const hookReturnRef = { current: null };
+
   function HarnessComponent({ channelId }) {
-    useLoadArchivedObserverEvents(true, channelId);
+    const result = useLoadArchivedObserverEvents(true, channelId);
+    hookReturnRef.current = result;
     return null;
   }
 
@@ -290,6 +306,7 @@ function mountHook(_initialChannelId, queryClient) {
 
   return {
     render,
+    getFetchOlderArchived: () => hookReturnRef.current?.fetchOlderArchived,
     unmount: async () => {
       await act(async () => {
         root.unmount();
@@ -330,17 +347,18 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
   /**
    * Regression (a): exhausted channel A → switch to channel B.
    *
-   * The original stale-closure bug: fetchOlderArchived captured hasOlderArchived
-   * from React state (false for exhausted A). After the switch, React state was
-   * still false while ps.hasOlderArchived had been reset to true. The hydration
-   * loop called fetchOlderArchived up to 10 times, each returning immediately at
-   * the !ps.hasOlderArchived guard — B never got a read.
+   * The original stale-closure bug (pre-round-1): fetchOlderArchived captured
+   * hasOlderArchived from React state (false for exhausted A). After the switch,
+   * React state was still false while ps.hasOlderArchived had been reset to true.
+   * The hydration loop called fetchOlderArchived up to 10 times, each returning
+   * immediately at the !ps.hasOlderArchived guard — B never got a read.
    *
    * After the fix (reading ps.hasOlderArchived from the ref), B gets at least
    * one read from a null cursor and its rows are ingested.
    *
-   * VERIFIED: this test fails at dfb2d0385 (pre-fix) — B ingested 0 rows.
-   * After the fix it passes — B ingests its rows.
+   * PROVENANCE: this test is GREEN at dfb2d0385 (the stale-closure was already
+   * fixed in round 1). It would be red at the pre-round-1 head (884ed9ba2)
+   * where hasOlderArchived was captured from React state in the closure.
    */
   it("test_exhausted_channel_A_switch_to_B_hook_reads_B_from_null_cursor", async () => {
     // Channel A: 1 page of 1 row (short page → exhausted immediately).
@@ -413,29 +431,50 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
   });
 
   /**
-   * Regression (b): deferred-I/O race — A's exhaustion write after its ingest.
+   * Regression (b): deferred-I/O race — A→B: A's stale writes after ingest AND
+   * lock theft via stale finally.
    *
-   * The post-ingest token bug at dfb2d0385: fetchOlderArchived for channel A
-   * checked the channel token BEFORE ingestArchivedObserverEvents but NOT after.
-   * If A's decrypt completed after a channel switch, A resumed past the ingestion
-   * await and wrote ps.hasOlderArchived=false (short-page exhaustion) and cleared
-   * ps.isFetching in finally — both using the NEW channel B's paging state.
+   * Two protections are under test independently:
+   *
+   * 1. Post-ingest exhaustion write (post-ingest token check):
+   *    The bug at dfb2d0385: fetchOlderArchived for A checked the token BEFORE
+   *    ingestArchivedObserverEvents but NOT after. A's deferred decrypt resumed
+   *    after the channel switch, wrote ps.hasOlderArchived=false (short-page
+   *    exhaustion) for B's paging state, and B's eager loop stopped after 1 page.
+   *    Removing the post-ingest token check causes bCallCount==1.
+   *
+   * 2. Lock theft via generation-gated finally:
+   *    If the generation guard in finally is removed, stale A's finally runs
+   *    ps.isFetching=false while B holds the lock. We probe this directly:
+   *    after resolving stale A (while B's first read is in flight), we call
+   *    fetchOlderArchived() on B ourselves. With the correct guard, B holds
+   *    the lock and the concurrent call returns immediately (bCallCount stays
+   *    at 1 for now). Without it (stale A stole the lock), the concurrent call
+   *    acquires the lock and starts an extra Tauri read (bCallCount jumps to 2
+   *    prematurely, with concurrent in-flight reads — the assertion catches this
+   *    because it fires BEFORE B's deferred first read resolves).
    *
    * Precise race sequence:
-   *   1. A's Tauri read returns 1 row (short page). A sets cursor, enters ingest.
+   *   1. Mount on chan-a. A's Tauri read returns 1 row. Cursor set. Ingest starts.
    *   2. A's decrypt is DEFERRED (aDecryptDeferred).
    *   3. Switch to channel B.
-   *   4. B's Tauri read is ALSO DEFERRED (bFirstReadDeferred).
-   *   5. Resolve A's decrypt → A finishes ingest, hits short-page branch:
-   *      - at dfb2d0385: writes ps.hasOlderArchived=false, clears ps.isFetching
-   *      - after fix: post-ingest token check fails, writes are discarded
-   *   6. Resolve B's first Tauri read → B ingests 200 rows.
-   *   7. B loop check: ps.hasOlderArchived?
-   *      - at dfb2d0385: false (A corrupted it) → loop exits, bCallCount == 1
-   *      - after fix: true → loop continues to page 2+, bCallCount >= 2
+   *   4. B's hydration loop starts. B's first Tauri read is ALSO DEFERRED.
+   *   5. Resolve A's decrypt → A finishes ingest, hits post-ingest check.
+   *      - At dfb2d0385 (no post-ingest check): writes ps.hasOlderArchived=false.
+   *        Also, if finally is unguarded, ps.isFetching=false (lock stolen).
+   *      - After fix: both writes discarded (generation mismatch).
+   *   6. LOCK PROBE (while B's first read is still deferred):
+   *      call fetchOlderArchived() directly. Must return without starting a new
+   *      Tauri read (B holds the lock; bCallCount must still be 1).
+   *   7. Resolve B's first Tauri read → B ingests 200 rows.
+   *   8. B loop continues: bCallCount >= 2.
    *
-   * VERIFIED: this test fails at dfb2d0385 (bCallCount == 1, loop exits after
-   * first B page) and passes after the post-ingest token check is added.
+   * VERIFIED: removing the post-ingest token check causes bCallCount<2 (step 8).
+   * Removing just the finally generation guard causes bCallCount>=2 but the lock
+   * probe at step 6 catches the theft: bCallCount jumps to 2 before B's deferred
+   * first read resolves (duplicate concurrent read started while B is in flight).
+   *
+   * RED at dfb2d0385 (bCallCount==1). GREEN at current head.
    */
   it("test_deferred_A_ingest_cannot_exhaust_B_or_steal_B_lock", async () => {
     let resolveADecrypt;
@@ -496,7 +535,7 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
     });
 
     const qc = makeQueryClient();
-    const { render, unmount } = mountHook("chan-a", qc);
+    const { render, getFetchOlderArchived, unmount } = mountHook("chan-a", qc);
 
     // Step 1-2: Mount on chan-a. A's Tauri read completes (1 row), cursor set,
     // ingest starts and blocks at A's decrypt.
@@ -513,21 +552,46 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
       await new Promise((r) => setTimeout(r, 20));
     });
 
-    // Step 5: Resolve A's decrypt first. At dfb2d0385 this writes
-    // ps.hasOlderArchived=false and clears ps.isFetching.
-    // After fix this is a no-op (token mismatch discards the writes).
+    // B's first read must have been attempted (bCallCount >= 1).
+    assert.ok(
+      bCallCount >= 1,
+      `B must have started its first read before the lock probe — got bCallCount=${bCallCount}`,
+    );
+    const bCallCountBeforeAResolve = bCallCount;
+
+    // Step 5: Resolve A's decrypt. At dfb2d0385 this writes
+    // ps.hasOlderArchived=false (if no post-ingest check) and/or clears
+    // ps.isFetching (if finally is unguarded).
     resolveADecrypt();
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
     });
 
-    // Step 6: Now resolve B's first Tauri read.
+    // Step 6: LOCK PROBE — B still holds the lock (B's first read is deferred).
+    // Call fetchOlderArchived directly. With correct protection, B's lock is
+    // intact and this call returns immediately without a Tauri read — bCallCount
+    // must NOT increase. If A stole the lock, this call acquires it and starts
+    // a new Tauri read before B's deferred first read resolves (bCallCount jumps).
+    const fetchFn = getFetchOlderArchived();
+    if (fetchFn) {
+      await act(async () => {
+        await fetchFn();
+      });
+    }
+
+    assert.equal(
+      bCallCount,
+      bCallCountBeforeAResolve,
+      `Lock probe must not start a new B read while B holds the lock (bCallCount=${bCallCount}, expected ${bCallCountBeforeAResolve}). If A's stale finally cleared the lock, this concurrent call would start a duplicate read.`,
+    );
+
+    // Step 7: Now resolve B's first Tauri read.
     resolveBFirstRead();
 
     // Let B's loop run.
     await settle(10);
 
-    // Step 7: B must have made at least 2 Tauri reads.
+    // Step 8: B must have made at least 2 Tauri reads.
     // At dfb2d0385: A corrupted ps.hasOlderArchived=false before B's first page
     // resolved, so after B's first page, the loop checks and exits. bCallCount==1.
     // After fix: A's write was discarded, ps.hasOlderArchived is still true,
@@ -546,6 +610,178 @@ describe("useLoadArchivedObserverEvents — mounted hook lifecycle regressions",
         "B's archive must only contain B-channel events",
       );
     }
+
+    await unmount();
+  });
+
+  /**
+   * Regression (c): A→B→A — old-A's stale in-flight request must not corrupt
+   * fresh-A's paging state when the user returns to channel A.
+   *
+   * The gap in the channel-string equality check (af45fbf05): using
+   * `requestChannelId === ps.activeChannelId` as the ownership test fails when
+   * the user navigates A→B→A. Old-A's request sees `ps.activeChannelId === "A"`
+   * after the second return to A — so every check passes. Old-A can mark fresh-A
+   * exhausted and its finally releases fresh-A's lock.
+   *
+   * With resetGeneration each applyChannelReset() call increments the counter,
+   * so A(gen=1) → B(gen=2) → A(gen=3): old-A snapshotted gen=1, which never
+   * equals gen=3, so all writes are discarded regardless of channel name.
+   *
+   * Race sequence:
+   *   1. Mount on chan-a (gen=1). A's Tauri read = 1 row (short page). Ingest
+   *      starts. A's decrypt is DEFERRED.
+   *   2. Switch to chan-b (gen=2). B's paging starts.
+   *   3. Switch BACK to chan-a (gen=3). Fresh-A's hydration starts. Fresh-A's
+   *      first Tauri read is DEFERRED (freshAReadDeferred).
+   *   4. Resolve old-A's decrypt. Old-A hits short-page branch.
+   *      - Without generation: old-A sees ps.activeChannelId==="chan-a", writes
+   *        ps.hasOlderArchived=false and clears ps.isFetching.
+   *      - With generation: gen=1 !== gen=3, writes discarded.
+   *   5. LOCK PROBE: call fetchOlderArchived directly. Fresh-A holds the lock
+   *      (its deferred read is in flight). With correct protection the probe
+   *      returns immediately (freshACallCount unchanged). Without it (old-A's
+   *      finally stole the lock), the probe starts a duplicate read.
+   *   6. Resolve fresh-A's first read (full page). Fresh-A loop continues.
+   *   7. Assert freshACallCount >= 2 (fresh-A ran past page 1).
+   *
+   * VERIFIED: this test is RED when activeChannelId string equality replaces
+   * resetGeneration (old-A passes every check, marks fresh-A exhausted at step 4).
+   * GREEN at current head.
+   */
+  it("test_A_B_A_old_request_cannot_corrupt_fresh_A_state", async () => {
+    let resolveOldADecrypt;
+    const oldADecryptDeferred = new Promise((resolve) => {
+      resolveOldADecrypt = resolve;
+    });
+
+    let resolveFreshAFirstRead;
+    const freshAFirstReadDeferred = new Promise((resolve) => {
+      resolveFreshAFirstRead = resolve;
+    });
+
+    const PAGE_SIZE = 200;
+    const makePage = (channelId, offset) =>
+      Array.from({ length: PAGE_SIZE }, (_, i) =>
+        makeArchivedRow(offset + i, channelId),
+      );
+
+    let oldADecryptStarted = false;
+    // Track calls per channel / phase. We only care about chan-a reads on fresh-A.
+    let freshACallCount = 0;
+    // After we switch back to A (gen=3), track reads for that phase.
+    let onFreshA = false;
+
+    setIpcHandler("list_save_subscriptions", async () =>
+      makeOwnerPSubResponse(),
+    );
+    setIpcHandler("read_unindexed_observer_rows", async () => []);
+    setIpcHandler("index_observer_channel_id", async () => null);
+    setIpcHandler("read_archived_observer_events_for_channel", async (args) => {
+      if (args.channelId === "chan-a") {
+        if (!onFreshA) {
+          // Old-A's read: 1 row = short page.
+          return [JSON.stringify(makeArchivedRow(1, "chan-a"))];
+        }
+        // Fresh-A's reads.
+        freshACallCount++;
+        if (freshACallCount === 1) {
+          // Defer fresh-A's first read.
+          await freshAFirstReadDeferred;
+          return makePage("chan-a", 200).map((r) => JSON.stringify(r)); // full
+        }
+        if (freshACallCount <= 4)
+          return makePage("chan-a", freshACallCount * 200).map((r) =>
+            JSON.stringify(r),
+          );
+        return [JSON.stringify(makeArchivedRow(9999, "chan-a"))]; // exhaust
+      }
+      if (args.channelId === "chan-b") {
+        // B gets one short page (we don't care about B's progress here).
+        return [JSON.stringify(makeArchivedRow(50, "chan-b"))];
+      }
+      return [];
+    });
+    setIpcHandler("decrypt_observer_event", async (args) => {
+      try {
+        const event = JSON.parse(args.eventJson);
+        const parsed = JSON.parse(event.content);
+        if (parsed.channelId === "chan-a" && !oldADecryptStarted && !onFreshA) {
+          oldADecryptStarted = true;
+          await oldADecryptDeferred; // block OLD A's decrypt
+        }
+        return parsed;
+      } catch {
+        return { kind: "telemetry", channelId: null };
+      }
+    });
+
+    const qc = makeQueryClient();
+    const { render, getFetchOlderArchived, unmount } = mountHook("chan-a", qc);
+
+    // Step 1: Mount on chan-a (gen=1). Old-A's Tauri read returns 1 row.
+    // Ingest starts, decrypt blocks.
+    await render("chan-a");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // Step 2: Switch to chan-b (gen=2).
+    await render("chan-b");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Step 3: Switch back to chan-a (gen=3). Fresh-A hydration starts.
+    onFreshA = true;
+    await render("chan-a");
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 20));
+    });
+
+    // Fresh-A must have started its first (deferred) read.
+    assert.ok(
+      freshACallCount >= 1,
+      `fresh-A must have started its first read — got freshACallCount=${freshACallCount}`,
+    );
+    const freshACountBeforeOldResolve = freshACallCount;
+
+    // Step 4: Resolve old-A's decrypt. Without generation check, old-A's
+    // post-ingest branch writes ps.hasOlderArchived=false (marks fresh-A
+    // exhausted) and its finally clears ps.isFetching (steals fresh-A's lock).
+    resolveOldADecrypt();
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Step 5: LOCK PROBE — fresh-A holds the lock (first read deferred).
+    // A concurrent fetchOlderArchived call must be rejected (lock held).
+    // If old-A stole the lock, this probe starts a duplicate read (freshACallCount
+    // jumps before the deferred first read resolves).
+    const fetchFn = getFetchOlderArchived();
+    if (fetchFn) {
+      await act(async () => {
+        await fetchFn();
+      });
+    }
+
+    assert.equal(
+      freshACallCount,
+      freshACountBeforeOldResolve,
+      `Lock probe must not start a new fresh-A read while fresh-A holds the lock (freshACallCount=${freshACallCount}, expected ${freshACountBeforeOldResolve}). Old-A's stale finally stole the lock (A→B→A channel-string equality bug).`,
+    );
+
+    // Step 6: Resolve fresh-A's first read (full page). Loop continues.
+    resolveFreshAFirstRead();
+    await settle(10);
+
+    // Step 7: Fresh-A must have made at least 2 reads (loop continued past page 1).
+    // Without generation check, old-A wrote ps.hasOlderArchived=false before
+    // fresh-A's first page resolved, causing the loop to exit — freshACallCount==1.
+    assert.ok(
+      freshACallCount >= 2,
+      `fresh-A must read at least 2 pages — got ${freshACallCount}. Old-A's stale writes (A→B→A) would leave freshACallCount==1.`,
+    );
 
     await unmount();
   });
