@@ -1,6 +1,10 @@
 import type { RelayEvent, ThreadCursor } from "@/shared/api/types";
 import { getThreadReplies } from "@/shared/api/tauri";
 import {
+  collectMessageIdsForAuxBackfill,
+  fetchStructuralAuxForMessages,
+} from "@/features/messages/lib/auxBackfill";
+import {
   channelWindowThreadSummaries,
   type ChannelWindowStore,
 } from "@/features/messages/lib/channelWindowStore";
@@ -12,7 +16,16 @@ import {
 
 const THREAD_PAGE_LIMIT = 200;
 const MAX_THREAD_PAGES = 50;
-const MAX_FLATTEN_ROOTS = 40;
+
+type FlattenTimelineFetchDeps = {
+  getThreadReplies: typeof getThreadReplies;
+  fetchStructuralAuxForMessages: typeof fetchStructuralAuxForMessages;
+};
+
+const defaultFetchDeps: FlattenTimelineFetchDeps = {
+  getThreadReplies,
+  fetchStructuralAuxForMessages,
+};
 
 /**
  * Fetch reply bodies for roots that the channel window only surfaces as
@@ -22,13 +35,13 @@ const MAX_FLATTEN_ROOTS = 40;
 export async function fetchFlattenTimelineReplies(
   channelId: string,
   rootIds: readonly string[],
+  deps: FlattenTimelineFetchDeps = defaultFetchDeps,
 ): Promise<RelayEvent[]> {
   const replies: RelayEvent[] = [];
-  const cappedRoots = rootIds.slice(0, MAX_FLATTEN_ROOTS);
-  for (const rootId of cappedRoots) {
+  for (const rootId of rootIds) {
     let cursor: ThreadCursor | null = null;
     for (let page = 0; page < MAX_THREAD_PAGES; page += 1) {
-      const response = await getThreadReplies(rootId, channelId, {
+      const response = await deps.getThreadReplies(rootId, channelId, {
         limit: THREAD_PAGE_LIMIT,
         cursor,
       });
@@ -41,7 +54,24 @@ export async function fetchFlattenTimelineReplies(
       cursor = response.nextCursor;
     }
   }
-  return replies;
+
+  const messageIds = [
+    ...new Set([...rootIds, ...collectMessageIdsForAuxBackfill(replies)]),
+  ];
+  let structuralAux: RelayEvent[] = [];
+  try {
+    structuralAux = await deps.fetchStructuralAuxForMessages(
+      channelId,
+      messageIds,
+    );
+  } catch (error) {
+    console.error(
+      "Failed to backfill flattened timeline structural aux for channel",
+      channelId,
+      error,
+    );
+  }
+  return sortMessages([...replies, ...structuralAux]);
 }
 
 /** Roots that have a relay thread summary and therefore hidden reply bodies. */
