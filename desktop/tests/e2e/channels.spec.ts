@@ -2682,6 +2682,130 @@ test("Activity All excludes generic channel traffic", async ({ page }) => {
   ).toHaveCount(0);
 });
 
+test("Activity unread-only hides reminders and drafts from mixed All", async ({
+  page,
+}) => {
+  const draftKey = `channel:${GENERAL_CHANNEL_ID}`;
+  await page.addInitScript(
+    ({ draftStoreKey, draftStorageKey, featureKey }) => {
+      const overrides = JSON.parse(
+        window.localStorage.getItem(featureKey) ?? "{}",
+      ) as Record<string, boolean>;
+      window.localStorage.setItem(
+        featureKey,
+        JSON.stringify({ ...overrides, activity: true }),
+      );
+
+      const timestamp = new Date().toISOString();
+      window.localStorage.setItem(
+        draftStoreKey,
+        JSON.stringify({
+          [draftStorageKey]: {
+            channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+            content: "Finish the mixed Activity test",
+            createdAt: timestamp,
+            pendingImeta: [],
+            selectionEnd: 30,
+            selectionStart: 30,
+            spoileredAttachmentUrls: [],
+            status: "active",
+            updatedAt: timestamp,
+          },
+        }),
+      );
+    },
+    {
+      draftStorageKey: draftKey,
+      draftStoreKey: `buzz-drafts.v2:ws://localhost:3000:${MOCK_IDENTITY_PUBKEY}`,
+      featureKey: FEATURE_OVERRIDES_STORAGE_KEY,
+    },
+  );
+  await page.goto("/");
+  await page.waitForFunction(() => {
+    const win = window as MockFeedWindow;
+    return typeof win.__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__ === "function";
+  });
+
+  const reminderId = "activity-unread-only-reminder";
+  const messageId = "activity-unread-only-message";
+  await page.evaluate(
+    async ({
+      channelId,
+      currentPubkey,
+      messageId,
+      reminderId,
+      senderPubkey,
+    }) => {
+      const now = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id: reminderId,
+          pubkey: currentPubkey,
+          created_at: now - 120,
+          kind: 30300,
+          tags: [
+            ["d", reminderId],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: "mock-general-alice",
+              channelId,
+              preview: "Due reminder in mixed Activity",
+              authorPubkey: senderPubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+
+      const pushFeedItem = (window as MockFeedWindow)
+        .__BUZZ_E2E_PUSH_MOCK_FEED_ITEM__;
+      if (!pushFeedItem) throw new Error("Mock feed helper is not installed.");
+      pushFeedItem({
+        category: "mention",
+        channel_id: channelId,
+        channel_name: "general",
+        channel_type: "stream",
+        content: "Unread message in mixed Activity",
+        created_at: now,
+        id: messageId,
+        kind: 9,
+        pubkey: senderPubkey,
+        tags: [
+          ["h", channelId],
+          ["p", currentPubkey],
+        ],
+      });
+    },
+    {
+      channelId: GENERAL_CHANNEL_ID,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      messageId,
+      reminderId,
+      senderPubkey: TEST_IDENTITIES.alice.pubkey,
+    },
+  );
+
+  const messageRow = page.getByTestId(`home-inbox-item-${messageId}`);
+  const reminderRow = page.getByTestId(`home-all-reminders-${reminderId}`);
+  const draftRow = page.getByTestId(`home-all-drafts-${draftKey}`);
+  await expect(messageRow).toBeVisible();
+  await expect(reminderRow).toBeVisible();
+  await expect(draftRow).toBeVisible();
+
+  await page.getByTestId("inbox-options-trigger").click();
+  await page.getByRole("switch", { name: "Show unread only" }).click();
+
+  await expect(messageRow).toBeVisible();
+  await expect(reminderRow).toHaveCount(0);
+  await expect(draftRow).toHaveCount(0);
+});
+
 test("Activity All keeps its filter when opening a due reminder", async ({
   page,
 }) => {
