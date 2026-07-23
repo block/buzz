@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isServiceRestartClose,
+  isWebSocketClose,
   shouldRefuseConnect,
   shouldScheduleReconnect,
 } from "./relayReconnectPolicy.ts";
@@ -80,4 +82,26 @@ test("keep-alive alone is enough to schedule", () => {
 test("shouldRefuseConnect mirrors terminal", () => {
   assert.equal(shouldRefuseConnect({ terminal: false }), false);
   assert.equal(shouldRefuseConnect({ terminal: true }), true);
+});
+
+test("only a close frame with code 1012 is a service restart", () => {
+  assert.equal(isWebSocketClose({ type: "Close" }), true);
+  assert.equal(isWebSocketClose({ type: "Error" }), false);
+  assert.equal(
+    isServiceRestartClose({
+      type: "Close",
+      data: { code: 1012, reason: "relay restarting" },
+    }),
+    true,
+  );
+  assert.equal(
+    isServiceRestartClose({ type: "Close", data: { code: 1000 } }),
+    false,
+  );
+  assert.equal(isServiceRestartClose({ type: "Close" }), false);
+  assert.equal(
+    isServiceRestartClose({ type: "Error", data: { code: 1012 } }),
+    false,
+  );
+  assert.equal(isServiceRestartClose(null), false);
 });

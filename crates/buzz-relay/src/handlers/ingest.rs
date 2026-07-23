@@ -2039,7 +2039,11 @@ async fn ingest_event_inner(
         });
         if create_name
             .as_ref()
-            .map(|n| n.trim().is_empty())
+            .map(|n| {
+                buzz_core::channel::canonical_channel_name(n)
+                    .trim()
+                    .is_empty()
+            })
             .unwrap_or(true)
         {
             return Err(IngestError::Rejected(
@@ -2082,6 +2086,7 @@ async fn ingest_event_inner(
 
         if let Some(client_uuid) = channel_id {
             let name = create_name.unwrap_or_default();
+            let name = buzz_core::channel::canonical_channel_name(&name);
 
             let description = event.tags.iter().find_map(|t| {
                 if t.kind().to_string() == "about" {
@@ -2099,7 +2104,7 @@ async fn ingest_event_inner(
                 .create_channel_with_id(
                     tenant.community(),
                     client_uuid,
-                    &name,
+                    name,
                     channel_type,
                     visibility,
                     description.as_deref(),

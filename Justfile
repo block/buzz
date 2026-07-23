@@ -6,9 +6,10 @@ desktop_dir := "desktop"
 desktop_tauri_manifest := "desktop/src-tauri/Cargo.toml"
 web_dir := "web"
 
-# Opt-in mesh-llm. Off by default so `just dev`/`just staging` skip ~420 extra
-# crates + the llama.cpp native runtime build and stay fast to iterate on.
-# Turn on to test mesh compute features: `just mesh=1 dev` / `just mesh=1 staging`.
+# Opt-in mesh-llm. Off by default so `just dev`/`just staging`/`just production`
+# skip ~420 extra crates + the llama.cpp native runtime build and stay fast to
+# iterate on. Turn on to test mesh compute features: `just mesh=1 dev` /
+# `just mesh=1 staging` / `just mesh=1 production`.
 mesh := ""
 
 # Reset only the current standalone desktop instance before launch.
@@ -210,12 +211,19 @@ desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     cd desktop/src-tauri
     echo "=== Clean build (no flag) → expect false ==="
     env -u BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT \
+      -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
       BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=false \
       cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
-    echo "=== Internal build (flag set) → expect true ==="
+    env -u BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=false \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
+    echo "=== Internal build (flags set) → expect true ==="
     BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT=1 \
       BUZZ_TEST_EXPECTED_OBSERVER_ARCHIVE_DEFAULT=true \
       cargo test observer_archive_default_enabled_matches_expected -- --ignored --nocapture
+    BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1 \
+      BUZZ_TEST_EXPECTED_AUTO_CONNECT_DEFAULT_RELAY=true \
+      cargo test compiled_flag_matches_expected -- --ignored --nocapture
     echo "Both compiled states verified."
 
 # Build the full desktop Tauri app locally (unsigned, for testing)
@@ -515,6 +523,33 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
     trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
     echo "Starting staging on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
+    pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
+
+# Run the desktop app against the production relay (installs deps + builds agent tools automatically)
+production *ARGS: bootstrap _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    pnpm install  # unconditional: production must always start with a clean dep tree
+    cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
+    FEATURES=()
+    if [[ -n "{{mesh}}" ]]; then
+        FEATURES=(--features mesh-llm)
+        export MESH_LLM_NATIVE_RUNTIME_CACHE_DIR="$(./scripts/ensure-mesh-native-runtime.sh)"
+    fi
+    # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
+    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
+    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
+    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    cd {{desktop_dir}}
+    export BUZZ_RELAY_URL="wss://buzz.block.builderlab.xyz"
+    source ../scripts/instance-env.sh
+    # Ctrl+C kills the Tauri app before its in-process sweep finishes, leaking
+    # agent workers. Reap this instance's agents on exit as a backstop.
+    INSTANCE_ID=$(node -e "console.log(JSON.parse(process.env.BUZZ_TAURI_CONFIG).identifier)")
+    trap '../scripts/cleanup-instance-agents.sh "$INSTANCE_ID" || true' EXIT
+    echo "Starting production on Vite port ${BUZZ_VITE_PORT}, relay ${BUZZ_RELAY_URL}"
     pnpm exec tauri dev ${FEATURES[@]+"${FEATURES[@]}"} --config "$BUZZ_TAURI_CONFIG" {{ARGS}}
 
 # Run the desktop frontend dev server (port derived from worktree)
