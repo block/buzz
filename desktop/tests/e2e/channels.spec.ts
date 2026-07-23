@@ -2867,6 +2867,80 @@ test("Activity All keeps its filter when opening a due reminder", async ({
   await expect(page.getByTestId("home-inbox-list")).toBeVisible();
 });
 
+test("Activity reminder rows and detail identify DM context", async ({
+  page,
+}) => {
+  await page.addInitScript((key) => {
+    const overrides = JSON.parse(
+      window.localStorage.getItem(key) ?? "{}",
+    ) as Record<string, boolean>;
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({ ...overrides, activity: true }),
+    );
+  }, FEATURE_OVERRIDES_STORAGE_KEY);
+  await page.goto("/");
+
+  const reminderId = "activity-dm-reminder";
+  const dmChannelId = "f48efb06-0c93-5025-aac9-2e646bb6bfa8";
+  await page.evaluate(
+    async ({ authorPubkey, channelId, currentPubkey, reminderId }) => {
+      const now = Math.floor(Date.now() / 1_000);
+      window.__BUZZ_E2E_SEED_MOCK_REMINDERS__?.([
+        {
+          id: reminderId,
+          pubkey: currentPubkey,
+          created_at: now - 300,
+          kind: 30300,
+          tags: [
+            ["d", reminderId],
+            ["not_before", String(now - 60)],
+          ],
+          content: JSON.stringify({
+            target: {
+              eventId: "mock-dm-alice",
+              channelId,
+              preview: "Follow up with Alice",
+              authorPubkey,
+            },
+            status: "pending",
+          }),
+          sig: "mocksig".repeat(20).slice(0, 128),
+        },
+      ]);
+      await window.__BUZZ_E2E_QUERY_CLIENT__?.invalidateQueries({
+        queryKey: ["reminders"],
+      });
+    },
+    {
+      authorPubkey: TEST_IDENTITIES.alice.pubkey,
+      channelId: dmChannelId,
+      currentPubkey: MOCK_IDENTITY_PUBKEY,
+      reminderId,
+    },
+  );
+
+  await expect(
+    page.getByTestId(`home-all-reminders-${reminderId}`),
+  ).toContainText("In DM with alice-tyler");
+
+  await page.getByTestId("inbox-filter-trigger").click();
+  await page.getByRole("menuitemradio", { name: "Reminders" }).click();
+  const reminderRow = page.getByTestId(`home-reminder-item-${reminderId}`);
+  await expect(
+    reminderRow.getByText("DM with alice-tyler", { exact: true }),
+  ).toBeVisible();
+  await reminderRow.getByRole("button").click();
+
+  const detail = page.getByTestId("home-reminder-detail");
+  await expect(
+    detail.getByText("DM with alice-tyler", { exact: true }),
+  ).toBeVisible();
+  await expect(detail.getByText("#alice-tyler", { exact: true })).toHaveCount(
+    0,
+  );
+});
+
 test("home inbox source action navigates to the channel message", async ({
   page,
 }) => {

@@ -100,6 +100,13 @@ function formatRelativeTime(timestamp: number): string {
   return `in ${Math.floor(diff / 86400)}d`;
 }
 
+function formatReminderSourceLocation(source: ReminderSource): string {
+  if (!source.channel) return source.channelLabel;
+  return source.channel.channelType === "dm"
+    ? `DM with ${source.channelLabel}`
+    : `#${source.channelLabel}`;
+}
+
 function ReminderRow({
   isSelected = false,
   presentation = "card",
@@ -189,7 +196,9 @@ function ReminderRow({
               {source.authorLabel}
             </span>
             <span className="shrink-0">in</span>
-            <span className="truncate">{source.channelLabel}</span>
+            <span className="truncate">
+              {formatReminderSourceLocation(source)}
+            </span>
           </div>
         ) : null}
         <p className="max-w-full truncate text-sm font-medium">
@@ -437,10 +446,7 @@ export function ReminderDetailPane({
                 {source.authorLabel}
               </span>
               <span>in</span>
-              <span>
-                {source.channel?.channelType === "dm" ? "" : "#"}
-                {source.channelLabel}
-              </span>
+              <span>{formatReminderSourceLocation(source)}</span>
             </div>
           ) : null}
 
