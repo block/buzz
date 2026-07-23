@@ -1,22 +1,30 @@
 import * as React from "react";
-import { Check, Copy, KeyRound, ShieldX } from "lucide-react";
+import { Check, Copy, KeyRound, ShieldX, Ticket } from "lucide-react";
 
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { nsecToNpub, pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { InviteRedeemForm } from "./InviteRedeemForm";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type MembershipDeniedProps = {
-  onChangeKey?: () => void;
-  onImportKey?: (nsec: string) => Promise<void>;
+  /** The relay that denied membership — used as the target for bare-code invites. */
+  activeRelayUrl: string;
+  onBack: () => void;
+  onChangeCommunity: () => void;
+  onImportKey: (nsec: string) => Promise<void>;
   onRetry: () => void;
   pubkey: string;
 };
 
 export function MembershipDenied({
-  onChangeKey,
+  activeRelayUrl,
+  onBack,
+  onChangeCommunity,
   onImportKey,
   onRetry,
   pubkey,
@@ -39,12 +47,14 @@ export function MembershipDenied({
   const [nsecInput, setNsecInput] = React.useState("");
   const previewNpub = React.useMemo(() => nsecToNpub(nsecInput), [nsecInput]);
   const trimmedNsec = nsecInput.trim();
-  const canImportKey = typeof onImportKey === "function";
   const isValidNsec = previewNpub !== null;
+
+  const [isInviteFormOpen, setIsInviteFormOpen] = React.useState(false);
+  const communityOnboarding = useCommunityOnboarding();
 
   const handleCopy = React.useCallback(async () => {
     try {
-      await navigator.clipboard.writeText(npub);
+      await writeTextToClipboard(npub);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -53,10 +63,6 @@ export function MembershipDenied({
   }, [npub]);
 
   const handleImportKey = React.useCallback(async () => {
-    if (!onImportKey) {
-      return;
-    }
-
     if (!previewNpub) {
       setImportError(
         "That doesn't look like a valid nsec. Paste an nsec1 key.",
@@ -77,6 +83,18 @@ export function MembershipDenied({
       setIsImportingKey(false);
     }
   }, [onImportKey, previewNpub, trimmedNsec]);
+
+  const handleInviteRedeem = React.useCallback(
+    (relayWsUrl: string, code: string, policyReceipt?: string) => {
+      communityOnboarding.start({
+        source: "membership-recovery",
+        relayUrl: relayWsUrl,
+        inviteCode: code,
+        policyReceipt,
+      });
+    },
+    [communityOnboarding],
+  );
 
   return (
     <div
@@ -135,7 +153,15 @@ export function MembershipDenied({
         </div>
 
         <div className="mt-6 flex flex-col gap-2">
-          {isImportFormOpen ? (
+          {isInviteFormOpen ? (
+            <InviteRedeemForm
+              defaultRelayUrl={activeRelayUrl}
+              error={null}
+              isRedeeming={false}
+              onCancel={() => setIsInviteFormOpen(false)}
+              onRedeem={handleInviteRedeem}
+            />
+          ) : isImportFormOpen ? (
             <form
               className="flex flex-col gap-3"
               onSubmit={(event) => {
@@ -224,25 +250,45 @@ export function MembershipDenied({
               <Button className="w-full" onClick={onRetry} type="button">
                 Try again
               </Button>
-              {onChangeKey || canImportKey ? (
-                <button
-                  className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                  data-testid="membership-denied-change-key"
-                  onClick={() => {
-                    if (onChangeKey) {
-                      onChangeKey();
-                      return;
-                    }
-
-                    setImportError(null);
-                    setIsImportFormOpen(true);
-                  }}
+              <div className="flex gap-2">
+                <Button
+                  className="flex-1 text-muted-foreground hover:text-accent-foreground"
+                  onClick={onBack}
                   type="button"
+                  variant="ghost"
                 >
-                  <KeyRound className="h-4 w-4" />
-                  Use a different key
-                </button>
-              ) : null}
+                  Back
+                </Button>
+                <Button
+                  className="flex-1 text-muted-foreground hover:text-accent-foreground"
+                  onClick={onChangeCommunity}
+                  type="button"
+                  variant="ghost"
+                >
+                  Change community
+                </Button>
+              </div>
+              <button
+                className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                data-testid="membership-denied-redeem-invite"
+                onClick={() => setIsInviteFormOpen(true)}
+                type="button"
+              >
+                <Ticket className="h-4 w-4" />
+                Have an invite?
+              </button>
+              <button
+                className="flex w-full items-center justify-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                data-testid="membership-denied-change-key"
+                onClick={() => {
+                  setImportError(null);
+                  setIsImportFormOpen(true);
+                }}
+                type="button"
+              >
+                <KeyRound className="h-4 w-4" />
+                Use a different key
+              </button>
             </>
           )}
         </div>

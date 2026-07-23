@@ -52,6 +52,22 @@ See:
 
 The chart fails at `helm install` / `helm template` time with a clear message if any of these are missing or malformed (see `templates/_validate.tpl`).
 
+## Device pairing relay
+
+The chart can run Buzz's stateless pairing WebSocket relay as an independent
+Deployment and Service using the same image as the main relay:
+
+```yaml
+pairingRelay:
+  enabled: true
+  url: wss://pairing.example.com
+```
+
+`pairingRelay.url` is advertised in the main relay's NIP-11 document so Buzz
+clients connect directly to the dedicated endpoint. The chart does not create
+an Ingress or HTTPRoute for the pairing Service; route the public hostname to
+`<release>-buzz-pairing:5000` with your platform's ingress configuration.
+
 ## HA (production)
 
 `replicaCount > 1` hard-requires Redis:
@@ -61,6 +77,30 @@ The chart fails at `helm install` / `helm template` time with a clear message if
 It does **not** require ReadWriteMany git storage. Git ref/object state is object-store-backed (each request hydrates an ephemeral repo from S3-compatible storage; writer serialization is the object-store pointer CAS — see `docs/git-on-object-storage.md`), and repo-name uniqueness lives in Postgres. Each replica can use its own `ReadWriteOnce` volume; no shared filesystem is needed.
 
 The chart **template-fails** if the Redis invariant is broken at `replicaCount > 1`. No silent degradation.
+
+### Relay autoscaling
+
+The optional HPA scales the relay on the larger recommendation from CPU or
+average active WebSockets per pod:
+
+```yaml
+autoscaling:
+  enabled: true
+  minReplicas: 5
+  maxReplicas: 15
+  targetCPUUtilizationPercentage: 65
+  websocketMetricEnabled: true
+  websocketMetricName: buzz_ws_connections_active
+  targetWebsocketConnections: 5000
+```
+
+CPU scaling requires Kubernetes Metrics Server. Set `websocketMetricEnabled: false`
+for a CPU-only HPA. WebSocket scaling additionally requires a custom-metrics
+adapter (for example Prometheus Adapter) configured to expose the relay's
+`buzz_ws_connections_active` gauge as a pod metric with the name in
+`websocketMetricName`. The chart creates the HPA but deliberately does not
+install or configure a cluster-wide metrics adapter. Scale-down is gradual by
+default so long-lived WebSocket connections have time to drain.
 
 ## Upgrades
 

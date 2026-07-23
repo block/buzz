@@ -89,8 +89,11 @@ pub enum AcpError {
     #[error("Idle timeout — no agent activity for {0:?}")]
     IdleTimeout(std::time::Duration),
 
-    #[error("Hard turn timeout exceeded")]
-    HardTimeout,
+    #[error("Hard turn timeout exceeded (silence {silence:?})")]
+    HardTimeout { silence: std::time::Duration },
+
+    #[error("Agent did not stop within {0:?} after cancellation")]
+    CancelDrainTimeout(std::time::Duration),
 
     #[error("Request timeout — agent did not respond within {0:?}")]
     Timeout(std::time::Duration),
@@ -116,6 +119,17 @@ fn agent_error_from_json(error: &serde_json::Value) -> AcpError {
         None => error.to_string(),
     };
     AcpError::AgentError { code, message }
+}
+
+fn build_initialize_params() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": 2,
+        "clientCapabilities": build_client_capabilities(),
+        "clientInfo": {
+            "name": "buzz-acp",
+            "version": env!("CARGO_PKG_VERSION")
+        },
+    })
 }
 
 /// ACP client that owns an agent subprocess and communicates over its stdio.
@@ -188,6 +202,171 @@ pub struct AcpClient {
     goose_usage: UsageTracker,
 }
 
+/// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
+/// collisions.  When both sides have an object for the same key, the merge recurses so
+/// unrelated nested keys from `base` are preserved.
+fn deep_merge(
+    base: &mut serde_json::Map<String, serde_json::Value>,
+    overlay: serde_json::Map<String, serde_json::Value>,
+) {
+    for (k, overlay_val) in overlay {
+        match base.get_mut(&k) {
+            Some(serde_json::Value::Object(base_obj))
+                if matches!(overlay_val, serde_json::Value::Object(_)) =>
+            {
+                // Both sides are objects — recurse to preserve unrelated nested keys.
+                if let serde_json::Value::Object(overlay_obj) = overlay_val {
+                    deep_merge(base_obj, overlay_obj);
+                }
+            }
+            _ => {
+                // Scalar, array, type mismatch, or new key — overlay wins.
+                base.insert(k, overlay_val);
+            }
+        }
+    }
+}
+
+/// Build the merged `CODEX_CONFIG` environment-variable value for a Codex agent spawn.
+///
+/// Returns `Some(json_string)` when `has_generated_codex_config` is true (Buzz injected a
+/// `CODEX_CONFIG` entry via `codex_network_env()`), `None` otherwise.
+///
+/// # Merge contract (when `has_generated_codex_config` is true)
+///
+/// 1. **Persona base** — the first `CODEX_CONFIG` value in `extra_env` is taken as
+///    the base object (all keys preserved, recursively).  When there is no persona entry,
+///    the generated entry serves as the base.
+/// 2. **Generated overlay** — all subsequent `CODEX_CONFIG` entries are deep-merged into
+///    the base so unrelated nested persona keys survive.
+/// 3. **Parent-env precedence** — if `parent_codex_config` is `Some`, its keys are
+///    deep-merged into the result (parent wins on colliding keys at every nesting level;
+///    unrelated keys from either side survive).
+/// 4. **Forced overlay** — `sandbox_workspace_write.network_access = true` is applied
+///    last so relay access is guaranteed regardless of operator / persona config.
+///
+/// When `has_generated_codex_config` is false, the function returns `None` and the
+/// caller handles any persona-supplied `CODEX_CONFIG` with ordinary operator-wins
+/// semantics (no merging, no sandbox widening).
+///
+/// # Errors
+///
+/// Returns `Err(AcpError::Protocol)` when `has_generated_codex_config` is true and any
+/// `CODEX_CONFIG` value is not valid JSON or is not a JSON object, or when
+/// `sandbox_workspace_write` is present but not an object after all merges.
+pub(crate) fn build_codex_config_env(
+    extra_env: &[(String, String)],
+    parent_codex_config: Option<&str>,
+    has_generated_codex_config: bool,
+) -> Result<Option<String>, AcpError> {
+    // Without an explicit Buzz-generated overlay signal, skip the merge entirely.
+    // Any persona CODEX_CONFIG is handled by the caller with operator-wins semantics.
+    if !has_generated_codex_config {
+        return Ok(None);
+    }
+
+    // Collect all CODEX_CONFIG entries from extra_env in order.
+    let codex_entries: Vec<&str> = extra_env
+        .iter()
+        .filter(|(k, _)| k == "CODEX_CONFIG")
+        .map(|(_, v)| v.as_str())
+        .collect();
+
+    if codex_entries.is_empty() {
+        // has_generated_codex_config is true but no entry in extra_env — shouldn't
+        // happen in practice, but treat as no-op rather than panic.
+        return Ok(None);
+    }
+
+    // Parse all entries; first one is the persona base (or the generated entry if no
+    // persona CODEX_CONFIG was set), rest are additional generated entries.
+    let mut parsed_entries: Vec<serde_json::Map<String, serde_json::Value>> = Vec::new();
+    for (i, raw) in codex_entries.iter().enumerate() {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(serde_json::Value::Object(obj)) => parsed_entries.push(obj),
+            Ok(_) => {
+                let source = if i == 0 { "persona" } else { "generated" };
+                return Err(AcpError::Protocol(format!(
+                    "CODEX_CONFIG {source} value is valid JSON but not an object"
+                )));
+            }
+            Err(e) => {
+                let source = if i == 0 { "persona" } else { "generated" };
+                return Err(AcpError::Protocol(format!(
+                    "CODEX_CONFIG {source} value is not valid JSON: {e}"
+                )));
+            }
+        }
+    }
+
+    // Start from first entry, deep-merge remaining entries.
+    let mut base = parsed_entries.remove(0);
+    for overlay in parsed_entries {
+        deep_merge(&mut base, overlay);
+    }
+
+    // Deep-merge parent env (parent wins on colliding keys at every nesting level).
+    if let Some(parent_raw) = parent_codex_config {
+        match serde_json::from_str::<serde_json::Value>(parent_raw) {
+            Ok(serde_json::Value::Object(parent_obj)) => {
+                deep_merge(&mut base, parent_obj);
+            }
+            Ok(_) => {
+                return Err(AcpError::Protocol(
+                    "CODEX_CONFIG in parent environment is valid JSON but not an object".into(),
+                ));
+            }
+            Err(e) => {
+                return Err(AcpError::Protocol(format!(
+                    "CODEX_CONFIG in parent environment is not valid JSON: {e}"
+                )));
+            }
+        }
+    }
+
+    // Force sandbox_workspace_write.network_access = true (our invariant, always wins).
+    let sws_entry = base
+        .entry("sandbox_workspace_write")
+        .or_insert_with(|| serde_json::json!({}));
+    match sws_entry {
+        serde_json::Value::Object(sws_obj) => {
+            sws_obj.insert("network_access".to_string(), serde_json::Value::Bool(true));
+        }
+        other => {
+            return Err(AcpError::Protocol(format!(
+                "CODEX_CONFIG sandbox_workspace_write is not an object (got {}); \
+                 cannot set network_access=true",
+                other
+            )));
+        }
+    }
+
+    Ok(Some(serde_json::Value::Object(base).to_string()))
+}
+
+fn build_client_capabilities() -> serde_json::Value {
+    serde_json::json!({
+        // Signal to ACP adapters that Buzz can hand users to terminal-native
+        // auth flows. Adapters decide which auth methods to expose; Buzz does
+        // not hardcode vendor login commands from this capability.
+        "auth": {
+            "terminal": true
+        },
+        // Signal to goose that we handle `_goose/unstable/session/update`
+        // notifications. Without this the custom notification is suppressed
+        // on goose's side and usage data is never emitted.
+        "_meta": {
+            "goose": {
+                "customNotifications": true
+            },
+            // Non-standard extension used by claude-agent-acp to advertise the
+            // exact terminal login argv for subscription auth. Unknown `_meta`
+            // keys are ignored by other adapters.
+            "terminal-auth": true
+        }
+    })
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -220,11 +399,17 @@ impl AcpClient {
 
     /// Spawn the agent binary as a subprocess and connect to its stdio pipes.
     ///
+    /// `has_generated_codex_config` must be true when `codex_network_env()` successfully
+    /// injected a `CODEX_CONFIG` entry into `extra_env`.  The spawn path uses it to
+    /// trigger the recursive merge + forced `network_access=true` in
+    /// `build_codex_config_env`.  Pass `false` for test spawns and non-Codex agents.
+    ///
     /// After spawning, call [`initialize`](Self::initialize) before any other method.
     pub async fn spawn(
         command: &str,
         args: &[String],
         extra_env: &[(String, String)],
+        has_generated_codex_config: bool,
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
@@ -239,11 +424,40 @@ impl AcpClient {
             .kill_on_drop(true);
 
         // Per-persona env vars (e.g., GOOSE_PROVIDER, BUZZ_AGENT_PROVIDER).
-        // Only injected if not already set in parent env (operator precedence).
+        // For most keys, operator precedence wins: skip injection if already set
+        // in the parent environment.
+        //
+        // CODEX_CONFIG is handled specially via build_codex_config_env:
+        //   • has_generated_codex_config=true: merge all CODEX_CONFIG entries + parent
+        //     recursively and force network_access=true.
+        //   • has_generated_codex_config=false: return None; any persona-supplied
+        //     CODEX_CONFIG falls through to the normal operator-wins loop below.
+        let has_codex_config = extra_env.iter().any(|(k, _)| k == "CODEX_CONFIG");
+        let parent_codex_config = if has_generated_codex_config && has_codex_config {
+            std::env::var("CODEX_CONFIG").ok()
+        } else {
+            None
+        };
+        let codex_config_value = build_codex_config_env(
+            extra_env,
+            parent_codex_config.as_deref(),
+            has_generated_codex_config,
+        )?;
+        // When the merge path was not taken (None returned), any persona CODEX_CONFIG
+        // entry falls through to the standard operator-wins treatment below.
+        let codex_merge_active = codex_config_value.is_some();
+
         for (key, value) in extra_env {
+            if key == "CODEX_CONFIG" && codex_merge_active {
+                // Handled by build_codex_config_env; skip here to avoid double-setting.
+                continue;
+            }
             if std::env::var(key).is_err() {
                 cmd.env(key, value);
             }
+        }
+        if let Some(merged) = codex_config_value {
+            cmd.env("CODEX_CONFIG", merged);
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
@@ -321,26 +535,18 @@ impl AcpClient {
     pub async fn initialize(&mut self) -> Result<serde_json::Value, AcpError> {
         // Requesting version 2 is an intentional temporary pin — we are squatting
         // on ACP v2 ahead of the upstream ACP RFD. Revisit when that RFD merges.
-        let params = serde_json::json!({
-            "protocolVersion": 2,
-            "clientCapabilities": {
-                // Signal to goose that we handle `_goose/unstable/session/update`
-                // notifications. Without this the custom notification is suppressed
-                // on goose's side and usage data is never emitted.
-                "_meta": {
-                    "goose": {
-                        "customNotifications": true
-                    }
-                }
-            },
-            "clientInfo": {
-                "name": "buzz-acp",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        });
+        let params = build_initialize_params();
         let result = self.send_request("initialize", params).await?;
         tracing::debug!(target: "acp::init", "initialize response: {result}");
         Ok(result)
+    }
+
+    /// Send the ACP `authenticate` request for an adapter-advertised method.
+    pub async fn authenticate(&mut self, method_id: &str) -> Result<serde_json::Value, AcpError> {
+        let params = serde_json::json!({
+            "methodId": method_id,
+        });
+        self.send_request("authenticate", params).await
     }
 
     /// Send `session/new` and return the full response alongside the session ID.
@@ -389,6 +595,24 @@ impl AcpClient {
             .session_new_full(cwd, mcp_servers, system_prompt)
             .await?
             .session_id)
+    }
+
+    /// Send Goose's custom system-prompt request after `session/new`.
+    pub async fn session_set_goose_system_prompt(
+        &mut self,
+        session_id: &str,
+        text: &str,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.send_request(
+            "_goose/unstable/session/system-prompt/set",
+            serde_json::json!({
+                "sessionId": session_id,
+                "mode": "append",
+                "key": "buzz",
+                "text": text,
+            }),
+        )
+        .await
     }
 
     /// Send `session/set_config_option` (stable ACP path).
@@ -480,7 +704,13 @@ impl AcpClient {
         }
 
         let result = self
-            .read_until_response_with_idle_timeout(session_id, id, idle_timeout, hard_deadline)
+            .read_until_response_with_idle_timeout(
+                session_id,
+                id,
+                idle_timeout,
+                hard_deadline,
+                max_duration,
+            )
             .await;
 
         // On timeout errors, leave current_hard_deadline set so cancel_with_cleanup
@@ -490,7 +720,7 @@ impl AcpClient {
                 self.last_prompt_id = None;
                 self.current_hard_deadline = None;
             }
-            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
+            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout { .. }) => {
                 // Leave last_prompt_id and current_hard_deadline set —
                 // caller will invoke cancel_with_cleanup.
             }
@@ -638,6 +868,12 @@ impl AcpClient {
     /// cancellation look broken. This variant gives the agent a short chance to
     /// acknowledge cancellation, then returns a timeout so the caller can respawn
     /// the agent process and actually stop the work.
+    ///
+    /// The `grace` window is a cleanup deadline, not the turn's real max-turn
+    /// wall clock — a bounded drain that expires maps to
+    /// [`AcpError::CancelDrainTimeout`], never [`AcpError::HardTimeout`], so
+    /// callers can distinguish "agent didn't stop in time" from a genuine
+    /// configured hard-cap breach.
     pub async fn cancel_with_cleanup_grace(
         &mut self,
         session_id: &str,
@@ -645,8 +881,13 @@ impl AcpClient {
     ) -> Result<StopReason, AcpError> {
         let _ = self.current_hard_deadline.take();
         let hard_deadline = tokio::time::Instant::now() + grace;
-        self.cancel_with_cleanup_until(session_id, hard_deadline)
+        match self
+            .cancel_with_cleanup_until(session_id, hard_deadline)
             .await
+        {
+            Err(AcpError::HardTimeout { .. }) => Err(AcpError::CancelDrainTimeout(grace)),
+            other => other,
+        }
     }
 
     async fn cancel_with_cleanup_until(
@@ -684,12 +925,16 @@ impl AcpClient {
         // The separate hard_deadline bounds agents that keep producing output
         // but ignore cancellation.
         let cleanup_idle = std::time::Duration::from_secs(30);
+        let remaining = hard_deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
         let result = self
             .read_until_response_with_idle_timeout(
                 session_id,
                 prompt_id,
                 cleanup_idle,
                 hard_deadline,
+                remaining,
             )
             .await?;
         self.parse_stop_reason(&result)
@@ -952,6 +1197,7 @@ impl AcpClient {
         expected_id: u64,
         idle_timeout: std::time::Duration,
         hard_deadline: tokio::time::Instant,
+        max_duration: std::time::Duration,
     ) -> Result<serde_json::Value, AcpError> {
         use tokio::time::Instant;
 
@@ -970,7 +1216,10 @@ impl AcpClient {
         let mut pending_steer: Option<(u64, tokio::sync::oneshot::Sender<crate::pool::SteerAck>)> =
             None;
 
-        let mut idle_deadline = Instant::now() + idle_timeout;
+        let now = Instant::now();
+        let mut idle_deadline = now + idle_timeout;
+        let mut hard_deadline = hard_deadline;
+        let mut last_activity_at = now;
 
         loop {
             // Determine which deadline fires first BEFORE sleeping — this is
@@ -1001,8 +1250,9 @@ impl AcpClient {
                     tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
                     return Err(AcpError::IdleTimeout(idle_timeout));
                 } else {
-                    tracing::warn!("hard turn timeout exceeded");
-                    return Err(AcpError::HardTimeout);
+                    let silence = Instant::now().saturating_duration_since(last_activity_at);
+                    tracing::warn!("hard turn timeout exceeded (silence {silence:?})");
+                    return Err(AcpError::HardTimeout { silence });
                 }
             }
 
@@ -1096,8 +1346,9 @@ impl AcpClient {
                         tracing::warn!("idle timeout ({idle_timeout:?}) — no agent activity");
                         return Err(AcpError::IdleTimeout(idle_timeout));
                     } else {
-                        tracing::warn!("hard turn timeout exceeded");
-                        return Err(AcpError::HardTimeout);
+                        let silence = Instant::now().saturating_duration_since(last_activity_at);
+                        tracing::warn!("hard turn timeout exceeded (silence {silence:?})");
+                        return Err(AcpError::HardTimeout { silence });
                     }
                 }
             };
@@ -1158,9 +1409,9 @@ impl AcpClient {
                     };
                     self.observe("acp_read", msg.clone());
 
-                    // Only reset the idle clock on lines that parse as valid JSON.
-                    // Malformed lines (skipped above) don't count as real agent activity.
-                    idle_deadline = Instant::now() + idle_timeout;
+                    let activity_now = Instant::now();
+                    idle_deadline = activity_now + idle_timeout;
+                    last_activity_at = activity_now;
 
                     // Steer response routing must come BEFORE the prompt
                     // response check: a steer response is a regular
@@ -1186,6 +1437,15 @@ impl AcpClient {
                                             crate::pool::SteerError::AgentError { code, message },
                                         )
                                     } else {
+                                        let renew_now = Instant::now();
+                                        let new_deadline = renew_now + max_duration;
+                                        if new_deadline > hard_deadline {
+                                            hard_deadline = new_deadline;
+                                            self.current_hard_deadline = Some(new_deadline);
+                                            tracing::info!(
+                                                "steer success: renewed hard deadline ({max_duration:?} from now)"
+                                            );
+                                        }
                                         crate::pool::SteerAck::Success
                                     };
                                     let _ = ack_tx.send(ack);
@@ -1214,11 +1474,10 @@ impl AcpClient {
                         match method {
                             "session/update" => {
                                 if self.handle_session_update(&msg) {
-                                    // Belt-and-suspenders — general reset already fired
-                                    // above, this is defense-in-depth in case the general
-                                    // reset is later narrowed.
+                                    let activity_now = Instant::now();
+                                    idle_deadline = activity_now + idle_timeout;
+                                    last_activity_at = activity_now;
                                     tracing::debug!("idle clock reset: tool call started");
-                                    idle_deadline = Instant::now() + idle_timeout;
                                 }
                             }
                             "_goose/unstable/session/update" => {
@@ -1876,13 +2135,7 @@ mod tests {
             "method": "initialize",
             "params": {
                 "protocolVersion": 2,
-                "clientCapabilities": {
-                    "_meta": {
-                        "goose": {
-                            "customNotifications": true
-                        }
-                    }
-                },
+                "clientCapabilities": build_client_capabilities(),
                 "clientInfo": {
                     "name": "buzz-acp",
                     "version": "0.1.0"
@@ -1895,6 +2148,11 @@ mod tests {
             Some("buzz-acp")
         );
         assert!(msg["params"]["clientCapabilities"].is_object());
+        assert_eq!(
+            msg["params"]["clientCapabilities"]["auth"]["terminal"].as_bool(),
+            Some(true),
+            "terminal auth capability must be advertised so adapters can expose terminal login methods"
+        );
         assert_eq!(
             msg["params"]["clientCapabilities"]["_meta"]["goose"]["customNotifications"].as_bool(),
             Some(true),
@@ -2316,7 +2574,9 @@ mod tests {
 
     #[test]
     fn hard_timeout_error_display() {
-        let err = AcpError::HardTimeout;
+        let err = AcpError::HardTimeout {
+            silence: std::time::Duration::from_secs(120),
+        };
         let msg = err.to_string();
         assert!(
             msg.contains("Hard turn timeout"),
@@ -2325,7 +2585,7 @@ mod tests {
     }
 
     async fn spawn_script(script: &str) -> AcpClient {
-        AcpClient::spawn("bash", &["-c".into(), script.into()], &[])
+        AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
     }
@@ -2333,13 +2593,15 @@ mod tests {
     #[tokio::test]
     async fn idle_timeout_fires_on_silent_process() {
         let mut client = spawn_script("sleep 10").await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let max_dur = std::time::Duration::from_secs(30);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
                 std::time::Duration::from_millis(100),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(
@@ -2351,7 +2613,8 @@ mod tests {
     #[tokio::test]
     async fn hard_timeout_fires_when_deadline_is_immediate() {
         let mut client = spawn_script("while true; do echo 'noise'; sleep 0.01; done").await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1);
+        let max_dur = std::time::Duration::from_millis(1);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2359,23 +2622,46 @@ mod tests {
                 999,
                 std::time::Duration::from_secs(60),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(
-            matches!(result, Err(AcpError::HardTimeout)),
+            matches!(result, Err(AcpError::HardTimeout { .. })),
             "expected HardTimeout, got {result:?}"
+        );
+    }
+
+    /// `cancel_with_cleanup_grace`'s bounded drain deadline must map to
+    /// [`AcpError::CancelDrainTimeout`], never [`AcpError::HardTimeout`] —
+    /// the two share an underlying deadline mechanism but must not share
+    /// classification, since callers dead-letter a real `HardTimeout` and
+    /// must not dead-letter a drain that simply ran past its grace window.
+    #[tokio::test]
+    async fn cancel_with_cleanup_grace_maps_expiry_to_cancel_drain_timeout() {
+        // Agent ignores `session/cancel` on stdin and keeps producing noise
+        // forever — never drains within the grace window.
+        let mut client = spawn_script("while true; do echo 'noise'; sleep 0.01; done").await;
+        client.last_prompt_id = Some(999);
+        let grace = std::time::Duration::from_millis(200);
+        let result = client
+            .cancel_with_cleanup_grace("test-session", grace)
+            .await;
+        assert!(
+            matches!(result, Err(AcpError::CancelDrainTimeout(g)) if g == grace),
+            "expected CancelDrainTimeout({grace:?}), got {result:?}"
         );
     }
 
     #[tokio::test]
     async fn idle_resets_on_stdout_activity() {
         // Send valid JSON (session/update notifications) to reset the idle timer.
-        // Non-JSON lines no longer reset idle (Finding #6 hardening).
+        // Non-JSON lines no longer reset idle — only valid JSON notifications do.
         let mut client = spawn_script(
             r#"for i in $(seq 1 10); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_thought_chunk","content":{"text":"thinking"}}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2383,6 +2669,7 @@ mod tests {
                 999,
                 std::time::Duration::from_millis(200),
                 hard_deadline,
+                max_dur,
             )
             .await;
         let elapsed = start.elapsed();
@@ -2397,13 +2684,15 @@ mod tests {
         let mut client =
             spawn_script(r#"echo '{"jsonrpc":"2.0","id":42,"result":{"stopReason":"end_turn"}}'"#)
                 .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 42,
                 std::time::Duration::from_secs(2),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(result.is_ok());
@@ -2414,13 +2703,15 @@ mod tests {
     async fn agent_exit_detected_as_eof() {
         let mut client = spawn_script("exit 0").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 999,
                 std::time::Duration::from_secs(2),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(matches!(result, Err(AcpError::AgentExited)));
@@ -2442,13 +2733,15 @@ mod tests {
             sleep 1
         "#;
         let mut client = spawn_script(script).await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
             .read_until_response_with_idle_timeout(
                 "test",
                 0,
                 std::time::Duration::from_secs(3),
                 hard_deadline,
+                max_dur,
             )
             .await;
         assert!(result.is_ok(), "expected Ok response, got {result:?}");
@@ -2459,9 +2752,10 @@ mod tests {
     async fn idle_fires_before_hard_when_idle_is_shorter() {
         let mut client = spawn_script("sleep 10").await;
         let idle = std::time::Duration::from_millis(100);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let result = client
-            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline, max_dur)
             .await;
         assert!(
             matches!(result, Err(AcpError::IdleTimeout(_))),
@@ -2508,11 +2802,11 @@ mod tests {
         let idle = std::time::Duration::from_secs(60); // idle ≫ hard
         let start = std::time::Instant::now();
         let result = client
-            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("test", 999, idle, hard_deadline, hard)
             .await;
         let elapsed = start.elapsed();
         assert!(
-            matches!(result, Err(AcpError::HardTimeout)),
+            matches!(result, Err(AcpError::HardTimeout { .. })),
             "expected HardTimeout under gapless valid-JSON stream, got {result:?} (elapsed {elapsed:?})"
         );
         // Must fire close to the hard deadline, not late. Without the
@@ -2563,7 +2857,8 @@ mod tests {
             r#"for i in $(seq 1 20); do echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"keepalive"}}}'; sleep 0.05; done; sleep 10"#,
         )
         .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2571,6 +2866,7 @@ mod tests {
                 999,
                 std::time::Duration::from_millis(100),
                 hard_deadline,
+                max_dur,
             )
             .await;
         let elapsed = start.elapsed();
@@ -2597,7 +2893,8 @@ mod tests {
             r#"echo '{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"tool_call","title":"long_running","kind":"shell"}}}'; sleep 0.08; sleep 10"#,
         )
         .await;
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let start = std::time::Instant::now();
         let result = client
             .read_until_response_with_idle_timeout(
@@ -2605,6 +2902,7 @@ mod tests {
                 999,
                 std::time::Duration::from_millis(200),
                 hard_deadline,
+                max_dur,
             )
             .await;
         let elapsed = start.elapsed();
@@ -2653,6 +2951,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goose_system_prompt_request_uses_append_contract() {
+        let script = r#"
+            read -t 2 REQ
+            echo '{"jsonrpc":"2.0","id":0,"result":{"_receivedRequest":'"$REQ"'}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        let result = client
+            .session_set_goose_system_prompt("ses_goose", "Be terse")
+            .await
+            .expect("custom request succeeds");
+        let received = &result["_receivedRequest"];
+        assert_eq!(
+            received["method"],
+            "_goose/unstable/session/system-prompt/set"
+        );
+        assert_eq!(received["params"]["sessionId"], "ses_goose");
+        assert_eq!(received["params"]["mode"], "append");
+        assert_eq!(received["params"]["key"], "buzz");
+        assert_eq!(received["params"]["text"], "Be terse");
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_preserves_method_not_found_for_fallback() {
+        let script = r#"
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"Method not found"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(matches!(
+            client
+                .session_set_goose_system_prompt("ses_goose", "Be terse")
+                .await,
+            Err(AcpError::AgentError { code: -32601, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn goose_system_prompt_preserves_invalid_params_as_error() {
+        let script = r#"
+            read -t 2 _REQ
+            echo '{"jsonrpc":"2.0","id":0,"error":{"code":-32602,"message":"Invalid params"}}'
+            sleep 1
+        "#;
+        let mut client = spawn_script(script).await;
+        assert!(matches!(
+            client
+                .session_set_goose_system_prompt("ses_goose", "Be terse")
+                .await,
+            Err(AcpError::AgentError { code: -32602, .. })
+        ));
+    }
+
+    #[tokio::test]
     async fn session_new_full_omits_system_prompt_when_none() {
         // When system_prompt is None, the field should not appear in params.
         let script = r#"
@@ -2688,7 +3041,7 @@ mod tests {
     /// which is fine — these tests don't read from the agent, they just
     /// feed JSON into the parser.
     async fn spawn_inert_client() -> AcpClient {
-        AcpClient::spawn("cat", &[], &[])
+        AcpClient::spawn("cat", &[], &[], false)
             .await
             .expect("spawn cat as inert client")
     }
@@ -2835,9 +3188,10 @@ mod tests {
         // be matched (the script writes nothing); the read loop will
         // exit via IdleTimeout shortly after the steer arm fires.
         let idle = std::time::Duration::from_millis(500);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let max_dur = std::time::Duration::from_secs(5);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let read_result = client
-            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
         send_task.await.expect("send_task should complete");
 
@@ -2902,9 +3256,10 @@ mod tests {
         // the script so the read loop exits via idle timeout after the
         // steer response is routed to ack.
         let idle = std::time::Duration::from_secs(2);
-        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(10);
+        let hard_deadline = tokio::time::Instant::now() + max_dur;
         let read_result = client
-            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline)
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
             .await;
         send_task.await.expect("send_task should complete");
 
@@ -2922,6 +3277,67 @@ mod tests {
 
         // Ack must be Success: the steer response (id=0) was routed to
         // pending_steer.ack_tx.
+        let ack = ack_rx
+            .await
+            .expect("ack oneshot must have received a SteerAck");
+        match ack {
+            crate::pool::SteerAck::Success => {}
+            other => panic!("expected SteerAck::Success, got {other:?}"),
+        }
+    }
+
+    /// Steer-success renewal keeps the turn alive past the original hard
+    /// deadline. This is the red-on-old/green-on-new test for the core bug
+    /// fix (acp.rs:1440-1444): without renewal, the read loop returns
+    /// `HardTimeout` before the prompt response arrives.
+    ///
+    /// Timeline:
+    ///   t≈0:    read loop starts, `hard_deadline = now + 1s`
+    ///   t≈0.5s: script emits steer response (id=0) → Success renewal
+    ///           moves `hard_deadline` to `now + 3s` (≈3.5s from start)
+    ///   t≈1.5s: script emits prompt response (id=999) → `Ok`
+    ///
+    /// Old code: `HardTimeout` at t≈1s (before prompt response).
+    /// New code: deadline renewed at t≈0.5s → prompt response at t≈1.5s → `Ok`.
+    #[tokio::test]
+    async fn steer_success_renews_hard_deadline_and_survives_past_original() {
+        let script = "sleep 0.5; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{\"stopReason\":\"end_turn\"}}'; \
+                      sleep 1; \
+                      echo '{\"jsonrpc\":\"2.0\",\"id\":999,\"result\":{\"done\":true}}'";
+        let mut client = spawn_script(script).await;
+
+        let update = session_info_update_msg(Some(serde_json::json!("run-99")));
+        let _ = client.handle_session_update(&update);
+
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::channel::<crate::pool::SteerRequest>(1);
+        client.install_steer_rx(steer_rx);
+
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<crate::pool::SteerAck>();
+        let send_task = tokio::spawn(async move {
+            steer_tx
+                .send(crate::pool::SteerRequest {
+                    prompt_blocks: vec!["steer body".into()],
+                    ack_tx,
+                })
+                .await
+                .expect("steer_tx send should succeed");
+        });
+
+        let idle = std::time::Duration::from_secs(10);
+        let max_dur = std::time::Duration::from_secs(3);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let result = client
+            .read_until_response_with_idle_timeout("sess-test", 999, idle, hard_deadline, max_dur)
+            .await;
+        send_task.await.expect("send_task should complete");
+
+        assert!(
+            result.is_ok(),
+            "expected Ok (prompt response after renewed deadline), got {result:?}"
+        );
+        assert_eq!(result.unwrap()["done"], serde_json::json!(true));
+
         let ack = ack_rx
             .await
             .expect("ack oneshot must have received a SteerAck");
@@ -3048,5 +3464,237 @@ mod tests {
             }
             other => panic!("expected AgentError, got {other:?}"),
         }
+    }
+
+    // ── build_codex_config_env ────────────────────────────────────────────────
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    const GENERATED: &str = r#"{"sandbox_workspace_write":{"network_access":true}}"#;
+
+    #[test]
+    fn build_codex_config_env_returns_none_when_no_codex_config_in_extra_env() {
+        // Non-Codex agents: extra_env has no CODEX_CONFIG → None regardless of signal.
+        let extra = env(&[("GOOSE_PROVIDER", "openai")]);
+        let result = build_codex_config_env(&extra, None, false).unwrap();
+        assert_eq!(
+            result, None,
+            "no CODEX_CONFIG in extra_env must return None"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_generated_only_single_entry_with_signal_true_merges_with_parent() {
+        // No persona: Buzz injects one CODEX_CONFIG; signal=true.
+        // Parent may have its own CODEX_CONFIG — deep_merge applies, network_access forced.
+        let extra = env(&[("CODEX_CONFIG", GENERATED)]);
+        let parent =
+            r#"{"some_operator_key":"val","sandbox_workspace_write":{"operator_key":"keep"}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // network_access forced true even though only one entry in extra_env.
+        assert_eq!(
+            v["sandbox_workspace_write"]["network_access"], true,
+            "network_access must be forced true with signal=true"
+        );
+        // Operator key preserved via deep_merge.
+        assert_eq!(
+            v["sandbox_workspace_write"]["operator_key"], "keep",
+            "operator nested key must survive"
+        );
+        assert_eq!(
+            v["some_operator_key"], "val",
+            "operator top-level key must survive"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_persona_only_signal_false_returns_none() {
+        // Persona set CODEX_CONFIG; Buzz did not inject a generated overlay (signal=false).
+        // Must return None — no merging, no sandbox widening.
+        let persona = r#"{"some_feature":"on"}"#;
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let result = build_codex_config_env(&extra, None, false).unwrap();
+        assert_eq!(
+            result, None,
+            "persona-only CODEX_CONFIG with signal=false must return None"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_returns_none_for_persona_only_no_generated_overlay() {
+        // Alias: same scenario as above, confirms the old count-based path no longer exists.
+        let persona = r#"{"some_feature":"on"}"#;
+        let extra = env(&[("CODEX_CONFIG", persona)]);
+        let result = build_codex_config_env(&extra, None, false).unwrap();
+        assert_eq!(
+            result, None,
+            "persona-only CODEX_CONFIG with signal=false must return None"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_sets_network_access_from_scratch() {
+        // Persona + generated overlay, signal=true: network_access is forced true.
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+    }
+
+    #[test]
+    fn build_codex_config_env_persona_keys_survive_merge() {
+        // Persona has CODEX_CONFIG with unrelated keys; generated overlay must
+        // force network_access=true without erasing persona keys.
+        let persona_cfg = r#"{"some_feature":{"enabled":true}}"#;
+        // Config::from_args appends generated AFTER persona env vars.
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let merged = build_codex_config_env(&extra, None, true).unwrap().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(
+            v["some_feature"]["enabled"], true,
+            "persona key must survive merge"
+        );
+        assert_eq!(
+            v["sandbox_workspace_write"]["network_access"], true,
+            "network_access must be forced true"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_nested_persona_keys_survive_when_parent_has_same_top_level_key() {
+        // Persona has sandbox_workspace_write.persona_only; parent has
+        // sandbox_workspace_write.parent_only.  A flat top-level spread would drop
+        // persona_only.  deep_merge must preserve both nested keys, and
+        // network_access must be forced true last.
+        let persona_cfg = r#"{"sandbox_workspace_write":{"persona_only":"keep_me"}}"#;
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let parent = r#"{"sandbox_workspace_write":{"parent_only":"also_here"}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // Both nested keys survive — no flat-spread drop.
+        assert_eq!(
+            v["sandbox_workspace_write"]["persona_only"], "keep_me",
+            "nested persona key must survive when parent has the same top-level key"
+        );
+        assert_eq!(
+            v["sandbox_workspace_write"]["parent_only"], "also_here",
+            "nested parent key must be present"
+        );
+        // Forced last.
+        assert_eq!(
+            v["sandbox_workspace_write"]["network_access"], true,
+            "network_access must be forced true"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_parent_env_wins_on_collisions_persona_keys_survive() {
+        // Parent env has CODEX_CONFIG with some keys; persona has different keys.
+        // Parent wins on collision; unrelated persona keys survive.
+        // network_access is always forced true.
+        let persona_cfg = r#"{"persona_key":"persona_val","shared_key":"persona_version"}"#;
+        // Config::from_args appends generated AFTER persona env vars.
+        let extra = env(&[("CODEX_CONFIG", persona_cfg), ("CODEX_CONFIG", GENERATED)]);
+        let parent = r#"{"parent_key":"parent_val","shared_key":"parent_version"}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // Parent-only key present
+        assert_eq!(
+            v["parent_key"], "parent_val",
+            "parent-only key must be present"
+        );
+        // Unrelated persona key survives (no collision with parent)
+        assert_eq!(
+            v["persona_key"], "persona_val",
+            "unrelated persona key must survive"
+        );
+        // Collision: parent wins
+        assert_eq!(
+            v["shared_key"], "parent_version",
+            "parent must win on colliding key"
+        );
+        // network_access always true (forced last)
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+    }
+
+    #[test]
+    fn build_codex_config_env_parent_has_existing_sandbox_other_keys_survive() {
+        // Parent env has sandbox_workspace_write with extra keys; after merge
+        // those extra keys survive alongside network_access=true.
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let parent =
+            r#"{"sandbox_workspace_write":{"network_access":false,"other_sandbox_key":"val"}}"#;
+        let merged = build_codex_config_env(&extra, Some(parent), true)
+            .unwrap()
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // network_access forced true even though parent set false
+        assert_eq!(v["sandbox_workspace_write"]["network_access"], true);
+        // other_sandbox_key survives (parent's sws merged, then network_access forced)
+        assert_eq!(v["sandbox_workspace_write"]["other_sandbox_key"], "val");
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_invalid_persona_json() {
+        // Bad persona JSON + generated overlay, signal=true → parse error before merging.
+        let extra = env(&[("CODEX_CONFIG", "not-json"), ("CODEX_CONFIG", GENERATED)]);
+        let result = build_codex_config_env(&extra, None, true);
+        assert!(result.is_err(), "invalid persona JSON must return Err");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("CODEX_CONFIG"),
+            "error must mention CODEX_CONFIG"
+        );
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_non_object_persona_json() {
+        // Non-object persona JSON + generated overlay, signal=true → parse error.
+        let extra = env(&[("CODEX_CONFIG", "[1,2,3]"), ("CODEX_CONFIG", GENERATED)]);
+        let result = build_codex_config_env(&extra, None, true);
+        assert!(result.is_err(), "non-object persona JSON must return Err");
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_invalid_parent_json() {
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        let result = build_codex_config_env(&extra, Some("bad-json"), true);
+        assert!(result.is_err(), "invalid parent env JSON must return Err");
+    }
+
+    #[test]
+    fn build_codex_config_env_errors_on_non_object_sandbox_workspace_write() {
+        // sandbox_workspace_write must be an object for network_access forcing.
+        // If the parent env sets it to a non-object scalar, deep_merge replaces
+        // our object with the scalar, and the force step must fail clearly.
+        let persona = r#"{}"#;
+        let extra = env(&[("CODEX_CONFIG", persona), ("CODEX_CONFIG", GENERATED)]);
+        // Parent replaces the object with a scalar — deep_merge: scalar overlay wins.
+        let parent = r#"{"sandbox_workspace_write": 42}"#;
+        let result = build_codex_config_env(&extra, Some(parent), true);
+        assert!(
+            result.is_err(),
+            "non-object sandbox_workspace_write must return Err"
+        );
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("sandbox_workspace_write"),
+            "error must mention sandbox_workspace_write"
+        );
     }
 }

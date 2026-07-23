@@ -134,6 +134,9 @@ pub fn finish_spawn(
     child: std::process::Child,
     log_path: std::path::PathBuf,
     spawn_config_hash: u64,
+    setup_mode: bool,
+    adapter_availability: Option<super::AcpAvailabilityStatus>,
+    start_nonce: String,
     agent_name: &str,
 ) -> super::ManagedAgentProcess {
     let job = create_job_for_child(child.id());
@@ -147,6 +150,9 @@ pub fn finish_spawn(
         child,
         log_path,
         spawn_config_hash,
+        setup_mode,
+        adapter_availability,
+        start_nonce,
         job,
     }
 }

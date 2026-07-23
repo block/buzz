@@ -1,5 +1,5 @@
 import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { invokeTauri, signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import type {
   RelayEvent,
@@ -34,8 +34,15 @@ export type RelayMembershipLookup = {
    * be treated as a denial by onboarding.
    */
   snapshotFound: boolean;
+  membershipRequired: boolean;
   membership: RelayMember | null;
 };
+
+export function shouldWarnMissingMembershipSnapshot(
+  lookup: RelayMembershipLookup | undefined,
+): boolean {
+  return lookup?.membershipRequired === true && !lookup.snapshotFound;
+}
 
 export function relayMembersFromEvent(event: RelayEvent): RelayMember[] {
   const seen = new Set<string>();
@@ -68,14 +75,20 @@ export function relayMembersFromEvent(event: RelayEvent): RelayMember[] {
 export function relayMembershipLookupFromEvent(
   event: RelayEvent | null,
   pubkey: string,
+  membershipRequired = event !== null,
 ): RelayMembershipLookup {
   if (!event) {
-    return { snapshotFound: false, membership: null };
+    return {
+      snapshotFound: false,
+      membershipRequired,
+      membership: null,
+    };
   }
 
   const normalizedPubkey = normalizePubkey(pubkey);
   return {
     snapshotFound: true,
+    membershipRequired,
     membership:
       relayMembersFromEvent(event).find(
         (member) => normalizePubkey(member.pubkey) === normalizedPubkey,
@@ -92,17 +105,33 @@ async function fetchMembershipListEvent(): Promise<RelayEvent | null> {
   return events[events.length - 1] ?? null;
 }
 
+/** Loads the NIP-43 snapshot only when the relay advertises membership support. */
+export async function loadRelayMembershipLookup(
+  pubkey: string,
+  membershipRequired: boolean,
+  fetchSnapshot: () => Promise<RelayEvent | null> = fetchMembershipListEvent,
+): Promise<RelayMembershipLookup> {
+  if (!membershipRequired) {
+    return relayMembershipLookupFromEvent(null, pubkey, false);
+  }
+  return relayMembershipLookupFromEvent(await fetchSnapshot(), pubkey, true);
+}
+
 export async function listRelayMembers(): Promise<RelayMember[]> {
   const event = await fetchMembershipListEvent();
   return event ? relayMembersFromEvent(event) : [];
 }
 
+async function relayRequiresMembership(): Promise<boolean> {
+  return invokeTauri<boolean>("relay_requires_membership");
+}
+
 export async function getMyRelayMembershipLookup(): Promise<RelayMembershipLookup> {
-  const [{ pubkey }, event] = await Promise.all([
+  const [{ pubkey }, membershipRequired] = await Promise.all([
     getIdentity(),
-    fetchMembershipListEvent(),
+    relayRequiresMembership(),
   ]);
-  return relayMembershipLookupFromEvent(event, pubkey);
+  return loadRelayMembershipLookup(pubkey, membershipRequired);
 }
 
 export async function getMyRelayMembership(): Promise<RelayMember | null> {

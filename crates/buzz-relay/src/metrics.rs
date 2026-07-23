@@ -14,7 +14,7 @@
 //! recorded by [`track_metrics`] middleware on the app router. Buzz-specific
 //! metrics are recorded inline at their call sites.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{MatchedPath, Request},
@@ -22,6 +22,7 @@ use axum::{
     response::Response,
 };
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use metrics_util::MetricKindMask;
 
 /// HTTP latency buckets (milliseconds) — only for `http_request_latency_ms`.
 const LATENCY_BUCKETS_MS: [f64; 11] = [
@@ -30,6 +31,27 @@ const LATENCY_BUCKETS_MS: [f64; 11] = [
 
 /// Seconds-scale buckets for internal processing histograms (event, search, audit).
 const DURATION_BUCKETS_S: [f64; 10] = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 5.0];
+
+/// Seconds-scale buckets for Git hydration and pack streams.
+const GIT_DURATION_BUCKETS_S: [f64; 13] = [
+    0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+
+/// Byte buckets for hydrated repositories and streamed clone/fetch responses.
+const GIT_BYTES_BUCKETS: [f64; 9] = [
+    0.0,
+    64.0 * 1024.0,
+    1024.0 * 1024.0,
+    10.0 * 1024.0 * 1024.0,
+    50.0 * 1024.0 * 1024.0,
+    100.0 * 1024.0 * 1024.0,
+    250.0 * 1024.0 * 1024.0,
+    500.0 * 1024.0 * 1024.0,
+    1024.0 * 1024.0 * 1024.0,
+];
+
+/// Pack-count buckets bounded by the manifest's maximum pack count.
+const GIT_PACK_BUCKETS: [f64; 9] = [0.0, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0];
 
 /// Integer-count buckets for fan-out recipient histograms.
 const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0, 1000.0];
@@ -41,15 +63,75 @@ const FANOUT_BUCKETS: [f64; 9] = [0.0, 1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 500.0,
 ///
 /// Must be called from within a Tokio runtime.
 /// Panics if a recorder is already installed or the port is in use.
-pub fn install(port: u16) {
+pub fn install(port: u16, gauge_idle_timeout_secs: u64) {
     let (recorder, exporter) = PrometheusBuilder::new()
         .with_http_listener(([0, 0, 0, 0], port))
+        // Remove gauge series that the relay intentionally stops emitting.
+        .idle_timeout(
+            MetricKindMask::GAUGE,
+            Some(Duration::from_secs(gauge_idle_timeout_secs)),
+        )
         // Per-metric buckets: ms for HTTP latency, seconds for internal processing.
         .set_buckets_for_metric(
             Matcher::Full("http_request_latency_ms".to_owned()),
             &LATENCY_BUCKETS_MS,
         )
         .expect("valid ms bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_hydrate_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git hydration duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_upload_pack_stream_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git stream duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_cache_populate_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git cache population duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_cache_population_wait_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git cache population wait bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_compaction_seconds".to_owned()),
+            &GIT_DURATION_BUCKETS_S,
+        )
+        .expect("valid git compaction duration bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_hydrate_bytes".to_owned()),
+            &GIT_BYTES_BUCKETS,
+        )
+        .expect("valid git hydration byte bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_upload_pack_stream_bytes".to_owned()),
+            &GIT_BYTES_BUCKETS,
+        )
+        .expect("valid git stream byte bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_compaction_bytes".to_owned()),
+            &GIT_BYTES_BUCKETS,
+        )
+        .expect("valid git compaction byte bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_hydrate_packs".to_owned()),
+            &GIT_PACK_BUCKETS,
+        )
+        .expect("valid git pack-count bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_compaction_packs_before".to_owned()),
+            &GIT_PACK_BUCKETS,
+        )
+        .expect("valid git compaction input pack-count bucket boundaries")
+        .set_buckets_for_metric(
+            Matcher::Full("buzz_git_pack_compaction_packs_after".to_owned()),
+            &GIT_PACK_BUCKETS,
+        )
+        .expect("valid git compaction output pack-count bucket boundaries")
         .set_buckets_for_metric(Matcher::Suffix("_seconds".to_owned()), &DURATION_BUCKETS_S)
         .expect("valid seconds bucket boundaries")
         .set_buckets_for_metric(

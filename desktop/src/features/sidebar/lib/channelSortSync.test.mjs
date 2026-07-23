@@ -10,7 +10,7 @@ function makeStore(groups = {}) {
 
 // ─── destroy() must cancel pending publish, not flush ─────────────────────────
 
-// Regression guard for the workspace-switch cross-relay publish vector:
+// Regression guard for the community-switch cross-relay publish vector:
 // change a sort mode in relay A → destroy() is called (relayUrl dep change) →
 // no publish should fire. The scoped localStorage write is durable; when the
 // user returns to relay A the seed-publish path handles it.

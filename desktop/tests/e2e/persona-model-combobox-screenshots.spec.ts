@@ -36,10 +36,11 @@ async function openNewPersonaDialog(page: import("@playwright/test").Page) {
   });
 
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "New agent" }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   const dialog = page.getByTestId("persona-dialog");
   await expect(dialog).toBeVisible({ timeout: 8_000 });
+  await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
   return dialog;
 }
 

@@ -15,6 +15,10 @@ void main() {
         WidgetHelpers.testable(child: const PairingPage()),
       );
 
+      expect(
+        find.image(const AssetImage('assets/images/buzz-icon.png')),
+        findsOneWidget,
+      );
       expect(find.text('Welcome to Buzz'), findsOneWidget);
       expect(find.text('Scan QR Code'), findsOneWidget);
       expect(find.text('or paste pairing code'), findsOneWidget);

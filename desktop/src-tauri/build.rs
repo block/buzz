@@ -15,6 +15,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_RELAY_RECONNECT_CMD");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT");
     println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT");
+    println!("cargo:rerun-if-env-changed=BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY");
     println!("cargo:rustc-check-cfg=cfg(buzz_updater_enabled)");
 
     if let Ok(relay_url) = std::env::var("BUZZ_RELAY_URL") {
@@ -89,6 +90,13 @@ fn main() {
         println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AGENT_METRIC_ARCHIVE_DEFAULT=1");
     }
 
+    // Presence-only release capability: internal desktop builds opt into
+    // auto-connecting their configured default relay on first run. OSS builds
+    // leave this unset and retain explicit community selection.
+    if std::env::var("BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY").is_ok() {
+        println!("cargo:rustc-env=BUZZ_DESKTOP_BUILD_AUTO_CONNECT_DEFAULT_RELAY=1");
+    }
+
     let updater_public_key = std::env::var("BUZZ_UPDATER_PUBLIC_KEY")
         .ok()
         .map(|value| value.trim().to_string())
@@ -117,5 +125,13 @@ fn main() {
         );
     }
 
-    tauri_build::build()
+    tauri_build::try_build(
+        tauri_build::Attributes::new().plugin(
+            "websocket",
+            tauri_build::InlinedPlugin::new()
+                .commands(&["connect", "send", "disconnect", "disconnect_all"])
+                .default_permission(tauri_build::DefaultPermissionRule::AllowAllCommands),
+        ),
+    )
+    .expect("failed to build Tauri application");
 }

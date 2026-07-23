@@ -9,6 +9,7 @@ export const KIND_NIP29_DELETE_EVENT = 9005;
 // the mod queue only; commands (9040–9044) are relay-validated and never stored.
 // Tag shapes are pinned by buzz-sdk builders + relay moderation_commands.rs.
 export const KIND_REPORT = 1984;
+export const KIND_PRODUCT_FEEDBACK = 42000;
 export const KIND_MODERATION_BAN = 9040;
 export const KIND_MODERATION_UNBAN = 9041;
 export const KIND_MODERATION_TIMEOUT = 9042;
@@ -54,9 +55,6 @@ export const KIND_MANAGED_AGENT = 30177;
 export const KIND_USER_STATUS = 30315;
 export const KIND_AGENT_OBSERVER_FRAME = 24200;
 export const KIND_AGENT_TURN_METRIC = 44200;
-export const KIND_MESH_STATUS_REPORT = 24620;
-export const KIND_MESH_CONNECT_REQUEST = 24621;
-export const KIND_MESH_CALL_ME_NOW = 24622;
 export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;

@@ -1,0 +1,3 @@
+# Corporate-proxy CA is machine/environment-specific and often internal.
+# Regenerate locally (see build-and-deploy.sh); never commit.
+proxy-ca.pem

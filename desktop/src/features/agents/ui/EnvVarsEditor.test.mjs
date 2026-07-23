@@ -72,6 +72,17 @@ test("toRows_file_satisfied_key_excluded_from_rows", () => {
   assert.equal(rows[0].key, "USER_VAR");
 });
 
+test("toRows_topLevelApiKey_excludedFromAdvancedRows", () => {
+  const value = { ANTHROPIC_API_KEY: "sk-local", USER_VAR: "hello" };
+  const rows = toRows(value, new Set(["ANTHROPIC_API_KEY"]));
+
+  assert.deepEqual(
+    rows.map((row) => row.key),
+    ["USER_VAR"],
+    "the top-level API key must not duplicate as an Advanced env row",
+  );
+});
+
 // ── Invariant 2: emit preserves required-key values ───────────────────────
 //
 // We test this via the pure helpers: build a row list (normal vars only),
@@ -451,7 +462,7 @@ test("inheritedRows_masked_secret_local_override_shows_masked_build_value", () =
 test("inheritedRows_structured_keys_excluded_from_generic_rows", () => {
   // BUZZ_AGENT_PROVIDER, BUZZ_AGENT_MODEL, BUZZ_AGENT_THINKING_EFFORT must
   // be excluded from bakedGenericRows (they go to structured fields instead).
-  // This mirrors the BAKED_STRUCTURED_KEYS filter in GlobalAgentConfigSettingsCard.
+  // This mirrors the BAKED_STRUCTURED_KEYS filter in AgentDefaultsSettingsCard.
   const STRUCTURED = new Set([
     "BUZZ_AGENT_PROVIDER",
     "BUZZ_AGENT_MODEL",
@@ -483,13 +494,13 @@ test("inheritedRows_structured_keys_excluded_from_generic_rows", () => {
 test("getBakedProviderInheritLabel_known_provider_returns_friendly_name", () => {
   const options = [
     { id: "anthropic", label: "Anthropic" },
-    { id: "databricks_v2", label: "Databricks v2 (AI Gateway)" },
+    { id: "databricks_v2", label: "Databricks v2" },
     { id: "openai", label: "OpenAI" },
   ];
   const label = getBakedProviderInheritLabel("databricks_v2", options);
   assert.equal(
     label,
-    "Databricks v2 (AI Gateway) (inherited from build)",
+    "Databricks v2 (inherited from build)",
     "known provider id must resolve to friendly label",
   );
 });

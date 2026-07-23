@@ -113,7 +113,7 @@ export function SoundPicker({
                   <span>{name}</span>
                   <span className="flex items-center gap-2">
                     {name === recommended ? (
-                      <span className="text-2xs uppercase tracking-wide text-muted-foreground">
+                      <span className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                         rec.
                       </span>
                     ) : null}

@@ -35,7 +35,8 @@ import { SyntaxHighlightedCode } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import {
   type RepoSourceHeaderControls,
-  RepoSourceToggle,
+  RepoSourceDropdown,
+  RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
 
@@ -574,7 +575,7 @@ function FileContentPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-10 items-center gap-1 border-border/50 border-b bg-muted/20 px-3">
+      <div className="flex min-h-14 items-center gap-1 border-border/50 border-b bg-muted/20 px-3 py-3">
         <BreadcrumbButton onClick={() => onOpenPath("")}>
           Files
         </BreadcrumbButton>
@@ -717,15 +718,25 @@ export function RepositoryFilesPanel({
     }
     return (
       <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-        <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
+          <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
             compact
+            createBranchDisabled={sourceControls.createBranchDisabled}
+            createBranchTitle={sourceControls.createBranchTitle}
+            deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+            deleteBranchTitle={sourceControls.deleteBranchTitle}
             onBranchChange={sourceControls.onBranchChange}
+            onCreateBranch={sourceControls.onCreateBranch}
+            onDeleteBranch={sourceControls.onDeleteBranch}
+            onTagChange={sourceControls.onTagChange}
+            selectedTag={sourceControls.selectedTag}
+            tagOptions={sourceControls.tagOptions}
           />
           <div className="ml-auto flex shrink-0 items-center">
-            <RepoSourceToggle controls={sourceControls} />
+            <RepoSyncActionButton controls={sourceControls} />
           </div>
         </div>
         <div className="p-4 text-sm text-muted-foreground">{stateMessage}</div>
@@ -747,14 +758,26 @@ export function RepositoryFilesPanel({
 
   return (
     <div className="overflow-hidden rounded-xl border border-border/60 bg-card">
-      <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+      <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
         {sourceControls ? (
-          <RepositoryBranchDropdown
-            branch={sourceControls.branch}
-            branchOptions={sourceControls.branchOptions}
-            compact
-            onBranchChange={sourceControls.onBranchChange}
-          />
+          <>
+            <RepoSourceDropdown controls={sourceControls} />
+            <RepositoryBranchDropdown
+              branch={sourceControls.branch}
+              branchOptions={sourceControls.branchOptions}
+              compact
+              createBranchDisabled={sourceControls.createBranchDisabled}
+              createBranchTitle={sourceControls.createBranchTitle}
+              deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+              deleteBranchTitle={sourceControls.deleteBranchTitle}
+              onBranchChange={sourceControls.onBranchChange}
+              onCreateBranch={sourceControls.onCreateBranch}
+              onDeleteBranch={sourceControls.onDeleteBranch}
+              onTagChange={sourceControls.onTagChange}
+              selectedTag={sourceControls.selectedTag}
+              tagOptions={sourceControls.tagOptions}
+            />
+          </>
         ) : (
           <BreadcrumbButton onClick={() => setCurrentPath("")}>
             Files
@@ -781,7 +804,7 @@ export function RepositoryFilesPanel({
         })}
         {sourceControls ? (
           <div className="ml-auto flex shrink-0 items-center">
-            <RepoSourceToggle controls={sourceControls} />
+            <RepoSyncActionButton controls={sourceControls} />
           </div>
         ) : null}
       </div>

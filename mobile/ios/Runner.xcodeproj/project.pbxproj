@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */ = {isa = PBXBuildFile; fileRef = 1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */; };
 		331C808B294A63AB00263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C807B294A618700263BE5 /* RunnerTests.swift */; };
+		331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C809A294A618700263BE5 /* MediaSanitizer.swift */; };
+		331C809D294A63AB00263BE5 /* UIKitEncoded.png in Resources */ = {isa = PBXBuildFile; fileRef = 331C809C294A618700263BE5 /* UIKitEncoded.png */; };
+		331C809F294A63AB00263BE5 /* UIKitEncoded.jpg in Resources */ = {isa = PBXBuildFile; fileRef = 331C809E294A618700263BE5 /* UIKitEncoded.jpg */; };
 		33ADD70AB275E0EC81295559 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 8906419FB4E98B4B12B7A56F /* Pods_Runner.framework */; };
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		42C129326CE4E1B8E617B9CD /* Pods_RunnerTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CD6B899582D0416ADBD8A68F /* Pods_RunnerTests.framework */; };
@@ -47,6 +50,9 @@
 		1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = GeneratedPluginRegistrant.m; sourceTree = "<group>"; };
 		30CE81D3D1E0B195EF2A6390 /* Pods-Runner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-Runner.release.xcconfig"; path = "Target Support Files/Pods-Runner/Pods-Runner.release.xcconfig"; sourceTree = "<group>"; };
 		331C807B294A618700263BE5 /* RunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerTests.swift; sourceTree = "<group>"; };
+		331C809A294A618700263BE5 /* MediaSanitizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaSanitizer.swift; sourceTree = "<group>"; };
+		331C809C294A618700263BE5 /* UIKitEncoded.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = UIKitEncoded.png; sourceTree = "<group>"; };
+		331C809E294A618700263BE5 /* UIKitEncoded.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = UIKitEncoded.jpg; sourceTree = "<group>"; };
 		331C8081294A63A400263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = AppFrameworkInfo.plist; path = Flutter/AppFrameworkInfo.plist; sourceTree = "<group>"; };
 		42F36AA401015EC51F984FEA /* Pods-RunnerTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.debug.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.debug.xcconfig"; sourceTree = "<group>"; };
@@ -93,8 +99,18 @@
 			isa = PBXGroup;
 			children = (
 				331C807B294A618700263BE5 /* RunnerTests.swift */,
+				331C80A0294A618700263BE5 /* Fixtures */,
 			);
 			path = RunnerTests;
+			sourceTree = "<group>";
+		};
+		331C80A0294A618700263BE5 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				331C809E294A618700263BE5 /* UIKitEncoded.jpg */,
+				331C809C294A618700263BE5 /* UIKitEncoded.png */,
+			);
+			path = Fixtures;
 			sourceTree = "<group>";
 		};
 		746EA2D40EB8F35E67C48311 /* Pods */ = {
@@ -153,6 +169,7 @@
 				1498D2321E8E86230040F4C2 /* GeneratedPluginRegistrant.h */,
 				1498D2331E8E89220040F4C2 /* GeneratedPluginRegistrant.m */,
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
+				331C809A294A618700263BE5 /* MediaSanitizer.swift */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -256,6 +273,8 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				331C809F294A63AB00263BE5 /* UIKitEncoded.jpg in Resources */,
+				331C809D294A63AB00263BE5 /* UIKitEncoded.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -381,6 +400,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
+				331C809B294A63AB00263BE5 /* MediaSanitizer.swift in Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);
@@ -496,8 +516,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
+				COMPRESS_PNG_FILES = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -514,8 +536,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
+				COMPRESS_PNG_FILES = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -530,8 +554,10 @@
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				CODE_SIGN_STYLE = Automatic;
+				COMPRESS_PNG_FILES = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
+				STRIP_PNG_TEXT = NO;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = "$(BUNDLE_IDENTIFIER).RunnerTests";
 				PRODUCT_NAME = "$(TARGET_NAME)";

@@ -117,6 +117,10 @@ export type Identity = {
    *  the user must unlock the keyring externally and relaunch.
    *  Mutually exclusive with `lost`. */
   locked?: boolean;
+  /** True when the boot-time Phase 2 reset attempted a wipe but verification
+   *  failed. Identity resolution was skipped; the sentinel is preserved so
+   *  the next relaunch retries the wipe automatically. */
+  resetFailed?: boolean;
 };
 
 export type Profile = {
@@ -183,83 +187,22 @@ export type UserStatus = {
 
 export type UserStatusLookup = Record<string, UserStatus | null>;
 
-export type ProjectRepoCommit = {
-  hash: string;
-  shortHash: string;
-  authorName: string;
-  authorEmail: string;
-  timestamp: number;
-  subject: string;
-};
-
-export type ProjectRepoFile = {
-  path: string;
-  kind: string;
-  size: number | null;
-  previewContent: string | null;
-  lastChangedAt: number | null;
-  latestCommit: ProjectRepoCommit | null;
-};
-
-export type ProjectRepoContributor = {
-  name: string;
-  email: string;
-  commitCount: number;
-  lastCommitAt: number;
-};
-
-export type ProjectRepoSnapshot = {
-  latestCommit: ProjectRepoCommit | null;
-  commits: ProjectRepoCommit[];
-  files: ProjectRepoFile[];
-  contributors: ProjectRepoContributor[];
-};
-
-export type ProjectRepoDiffFile = {
-  path: string;
-  additions: number;
-  deletions: number;
-  patch: string;
-  /** True when the patch was cut off at the backend's per-file line cap. */
-  truncated: boolean;
-};
-
-export type ProjectRepoDiff = {
-  files: ProjectRepoDiffFile[];
-  additions: number;
-  deletions: number;
-};
-
-export type ProjectLocalRepoSnapshot = {
-  path: string;
-  snapshot: ProjectRepoSnapshot;
-};
-
-export type ProjectLocalRepository = {
-  name: string;
-  path: string;
-};
-
-export type ProjectRepoSyncStatus = {
-  localPath: string | null;
-  localBranch: string | null;
-  localHead: string | null;
-  localShortHead: string | null;
-  remoteBranch: string | null;
-  remoteHead: string | null;
-  remoteShortHead: string | null;
-  aheadCount: number;
-  behindCount: number;
-  hasUncommittedChanges: boolean;
-  hasUntrackedFiles: boolean;
-  canPush: boolean;
-  pushBlockReason: string | null;
-};
-
-export type ProjectRepoPushResult = {
-  pushed: boolean;
-  message: string;
-};
+export type {
+  ProjectLocalRepository,
+  ProjectLocalRepoSnapshot,
+  ProjectRepoBranchResult,
+  ProjectRepoCommit,
+  ProjectRepoContributor,
+  ProjectRepoCloneResult,
+  ProjectRepoDiff,
+  ProjectRepoDiffFile,
+  ProjectRepoFile,
+  ProjectRepoMergeResult,
+  ProjectRepoPullResult,
+  ProjectRepoPushResult,
+  ProjectRepoSnapshot,
+  ProjectRepoSyncStatus,
+} from "./projectGitTypes";
 
 export type RelayEvent = {
   id: string;
@@ -371,6 +314,27 @@ export type RelayAgent = {
   respondToAllowlist: string[];
 };
 
+export type ManagedAgentRuntimeLifecycle =
+  | "starting"
+  | "listening"
+  | "waking"
+  | "ready"
+  | "failed"
+  | "stopped";
+
+export type ManagedAgentRuntimeStatus = {
+  pubkey: string;
+  /** Exact submitted descriptor, present only on startup reconcile results. */
+  requestedRelayUrl?: string;
+  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
+  relayUrl: string;
+  localSetup: boolean;
+  lifecycle: ManagedAgentRuntimeLifecycle;
+  pid: number | null;
+  error: string | null;
+  logPath: string | null;
+};
+
 export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -379,6 +343,7 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */
@@ -420,7 +385,6 @@ export type ManagedAgent = {
    * Always `false` for stopped agents.
    */
   needsRestart: boolean;
-  mcpToolsets: string | null;
   /** Per-agent env vars. Layered on top of persona envVars. */
   envVars: Record<string, string>;
   status: "running" | "stopped" | "deployed" | "not_deployed";
@@ -473,6 +437,8 @@ export type RelayMeshConfig = {
 export type CreateManagedAgentInput = {
   name: string;
   personaId?: string;
+  /** Team this instance was deployed from; controls runtime team instructions. */
+  teamId?: string;
   relayUrl?: string;
   acpCommand?: string;
   agentCommand?: string;
@@ -493,7 +459,6 @@ export type CreateManagedAgentInput = {
   avatarUrl?: string;
   model?: string;
   provider?: string;
-  mcpToolsets?: string;
   envVars?: Record<string, string>;
   spawnAfterCreate?: boolean;
   startOnAppLaunch?: boolean;
@@ -543,11 +508,27 @@ export type ControlResultFrame = {
   modelId?: string;
 };
 
+export type GitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  installInstructionsUrl: string;
+  installHint: string;
+};
+
 export type AcpAvailabilityStatus =
   | "available"
   | "adapter_missing"
+  | "adapter_outdated"
   | "cli_missing"
   | "not_installed";
+
+/** Authentication/login status for a CLI-based ACP runtime. */
+export type AuthStatus =
+  | { status: "logged_in" }
+  | { status: "logged_out" }
+  | { status: "config_invalid"; diagnostic: string }
+  | { status: "not_applicable" }
+  | { status: "unknown" };
 
 export type AcpRuntimeCatalogEntry = {
   id: string;
@@ -558,10 +539,22 @@ export type AcpRuntimeCatalogEntry = {
   binaryPath: string | null;
   defaultArgs: string[];
   mcpCommand: string | null;
+  /** Environment variable used to apply the initial model, when supported. */
+  modelEnvVar: string | null;
+  /** Environment variable used to apply the selected LLM provider, when supported. */
+  providerEnvVar: string | null;
+  /** Environment variable used to apply thinking effort, when supported. */
+  thinkingEnvVar: string | null;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
   underlyingCliPath: string | null;
+  /** True when an npm adapter step is pending but Node.js / npm is absent. */
+  nodeRequired: boolean;
+  /** Login/auth status for CLI-based runtimes. */
+  authStatus: AuthStatus;
+  /** Hint for completing authentication; null when not applicable or already logged in. */
+  loginHint: string | null;
 };
 
 /** An AcpRuntimeCatalogEntry that is confirmed available — command and binaryPath are non-null. */
@@ -584,6 +577,26 @@ export type InstallStepResult = {
 export type InstallRuntimeResult = {
   success: boolean;
   steps: InstallStepResult[];
+  restartedCount: number;
+  failedRestartCount: number;
+};
+
+export type AcpAuthMethod = {
+  id: string;
+  name: string;
+  description: string | null;
+  type: string | null;
+  args: string[];
+  command: string[];
+  meta: unknown | null;
+};
+
+export type AcpAuthMethodsResult = {
+  methods: AcpAuthMethod[];
+};
+
+export type ConnectAcpRuntimeResult = {
+  launched: boolean;
 };
 
 export type CommandAvailability = {
@@ -664,7 +677,10 @@ export type ConfigSourceReport = {
   envVars: ConfigTierStatus;
   configFile: ConfigTierStatus;
   configFilePath: string | null;
+  mcpConfigFilePath: string | null;
 };
+
+export type ExtensionEntry = { name: string; kind: string; enabled: boolean };
 
 export type NormalizedConfig = {
   model: NormalizedField | null;
@@ -682,6 +698,7 @@ export type RuntimeConfigSurface = {
   isPreSpawn: boolean;
   normalized: NormalizedConfig;
   advanced: ConfigField[];
+  extensions: ExtensionEntry[];
   sources: ConfigSourceReport;
 };
 
@@ -691,7 +708,6 @@ export type UpdateManagedAgentInput = {
   model?: string | null;
   provider?: string | null;
   systemPrompt?: string | null;
-  mcpToolsets?: string | null;
   /** Absent = don't touch. Present = replace the env_vars map entirely. */
   envVars?: Record<string, string>;
   parallelism?: number;
@@ -738,21 +754,19 @@ export type AgentPersona = {
   /** NIP-AP behavioral defaults (wire shape). Null/empty = unset. */
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
-  mcpToolsets: string | null;
   parallelism: number | null;
   createdAt: string;
   updatedAt: string;
 };
 
 /**
- * NIP-AP behavioral quad for a definition, sent as one group: absent = don't
- * touch the stored quad (legacy callers), present = replace all four as a
+ * NIP-AP behavioral group for a definition, sent as one group: absent = don't
+ * touch the stored behavior group (legacy callers), present = replace the fields as a
  * unit. Mirrors `PersonaBehaviorRequest`.
  */
 export type PersonaBehaviorInput = {
   respondTo?: RespondToMode;
   respondToAllowlist?: string[];
-  mcpToolsets?: string;
   parallelism?: number;
 };
 
@@ -786,6 +800,7 @@ export type AgentTeam = {
   id: string;
   name: string;
   description: string | null;
+  instructions: string | null;
   personaIds: string[];
   isBuiltin: boolean;
   /** Absolute path to the team's backing directory (if directory-backed). */
@@ -803,6 +818,7 @@ export type AgentTeam = {
 export type CreateTeamInput = {
   name: string;
   description?: string;
+  instructions?: string;
   personaIds: string[];
 };
 
@@ -810,6 +826,7 @@ export type UpdateTeamInput = {
   id: string;
   name: string;
   description?: string;
+  instructions?: string;
   personaIds: string[];
 };
 // ── Channel Template types ─────────────────────────────────────────────────────
@@ -997,4 +1014,20 @@ export type GlobalAgentConfig = {
   provider: string | null;
   /** Global fallback model identifier. Null = no global default. */
   model: string | null;
+  /** Preferred ACP runtime for agents without a persona-specific runtime. */
+  preferred_runtime: string | null;
+};
+
+/**
+ * Result returned by `set_global_agent_config`.
+ *
+ * Mirrors the Rust `GlobalAgentConfigSaveResult` struct.
+ */
+export type GlobalAgentConfigSaveResult = {
+  /** The persisted global config (after strip-on-write). */
+  config: GlobalAgentConfig;
+  /** Number of local agents successfully stopped and restarted. */
+  restarted_count: number;
+  /** Number of agents whose stop succeeded but respawn failed. */
+  failed_restart_count: number;
 };

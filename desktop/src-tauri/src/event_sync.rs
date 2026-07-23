@@ -39,9 +39,10 @@ pub fn spawn_event_sync(app: tauri::AppHandle, owner_keys: nostr::Keys) {
 
 /// Reconcile `personas.json` into the persona-event retention store.
 ///
-/// Must run AFTER `migrate_packs_to_teams` (depends on field renames being
-/// complete) and AFTER the persisted identity is resolved (it signs every
-/// retained event with the owner's keys).
+/// Must run AFTER `fold_personas_into_agent_store` and
+/// `detach_directory_backed_teams` (depends on field renames and store
+/// unification being complete) and AFTER the persisted identity is resolved
+/// (it signs every retained event with the owner's keys).
 ///
 /// Per-record reconcile: for each non-builtin persona it compares the freshly
 /// serialized event content against the retained row at the same coordinate
@@ -85,7 +86,7 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
     use crate::managed_agents::{
         persona_events::{build_persona_event, monotonic_created_at, persona_d_tag},
         retention::{get_retained_event, open_retention_db, retain_event, RetainedEvent},
-        PersonaRecord,
+        AgentDefinition,
     };
     use buzz_core_pkg::kind::KIND_PERSONA;
     use nostr::JsonUtil;
@@ -97,7 +98,7 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
     // (run_event_sync runs after run_boot_migrations, so the fold has
     // already happened) never reach this path with personas.json present —
     // but read it as a fallback for one release in case the fold errored.
-    let records: Vec<PersonaRecord> = {
+    let records: Vec<AgentDefinition> = {
         let personas_path = base_dir.join("personas.json");
         if personas_path.exists() {
             let content = std::fs::read_to_string(&personas_path)
@@ -116,7 +117,7 @@ fn migrate_personas_in_dir(base_dir: &Path, keys: &nostr::Keys) -> Result<u32, S
                     .map_err(|e| format!("failed to parse managed-agents.json: {e}"))?;
             all.iter()
                 .filter(|record| record.pubkey.is_empty())
-                .filter_map(|record| record.to_persona_view())
+                .filter_map(|record| record.to_definition_view())
                 .collect()
         }
     };

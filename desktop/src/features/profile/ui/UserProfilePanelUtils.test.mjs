@@ -26,7 +26,6 @@ function agent(overrides = {}) {
     systemPrompt: "Old prompt",
     avatarUrl: "app-avatar://old",
     model: "old-model",
-    mcpToolsets: null,
     envVars: { OLD_KEY: "1" },
     status: "stopped",
     pid: null,

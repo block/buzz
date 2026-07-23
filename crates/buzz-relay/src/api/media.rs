@@ -1,7 +1,8 @@
 //! Blossom-compatible media upload, retrieval, and existence check handlers.
 //!
 //! Routes:
-//!   PUT  /media/upload          — BUD-02 upload (auth required)
+//!   PUT  /upload                — BUD-02 exact-byte upload (auth required)
+//!   PUT  /media/upload          — temporary media-only legacy alias
 //!   GET  /media/{sha256_ext}    — BUD-01 serve blob
 //!   HEAD /media/{sha256_ext}    — BUD-01 existence check
 
@@ -35,7 +36,31 @@ pub(crate) struct AuthenticatedUpload {
     /// this HTTP door), identical to the WS door in `router.rs` and the bridge
     /// door in `bridge.rs`. Server-resolved, never client-supplied.
     tenant: TenantContext,
+    route_mode: UploadRouteMode,
     _upload_permit: UploadPermit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UploadRouteMode {
+    Upload,
+    LegacyMedia,
+}
+
+fn should_stream_as_video(sniff: &[u8]) -> bool {
+    infer::get(sniff).is_some_and(|kind| kind.mime_type() == "video/mp4")
+        || buzz_media::looks_like_iso_bmff(sniff)
+}
+
+fn upload_route_mode(path: &str) -> Result<UploadRouteMode, MediaError> {
+    match path {
+        "/upload" => Ok(UploadRouteMode::Upload),
+        "/media/upload" => Ok(UploadRouteMode::LegacyMedia),
+        _ => Err(MediaError::NotFound),
+    }
+}
+
+struct MediaReadAuth {
+    tenant: TenantContext,
 }
 
 const MEDIA_UPLOAD_RATE_WINDOW: Duration = Duration::from_secs(60);
@@ -141,6 +166,8 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
             .await
             .map_err(|_| MediaError::NotFound)?;
 
+        let route_mode = upload_route_mode(parts.uri.path())?;
+
         // 2. Extract and validate Blossom auth event against the bound host.
         let auth_event = extract_blossom_auth(headers)?;
         // Use the permissive window (3600s) here because we don't know the
@@ -204,6 +231,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUpload {
         Ok(AuthenticatedUpload {
             auth_event,
             tenant,
+            route_mode,
             _upload_permit: upload_permit,
         })
     }
@@ -255,7 +283,7 @@ async fn upload_attribution(
     })
 }
 
-/// PUT /media/upload — Blossom BUD-02 upload.
+/// PUT `/upload` or the temporary media-only `/media/upload` alias.
 ///
 /// Auth is validated via the [`AuthenticatedUpload`] extractor BEFORE the body
 /// is read, preventing unauthenticated clients from forcing body buffering.
@@ -267,7 +295,8 @@ async fn upload_attribution(
 /// Expects:
 ///   - `Authorization: Nostr <base64(kind:24242 event)>` — Blossom auth
 ///   - `X-SHA-256: <hex>` — Required per BUD-11
-///   - `Content-Type: video/mp4` — routes to video validation path; all other types use image path
+///   - `Content-Type` is advisory only; a bounded body prefix selects the
+///     streaming video path from actual bytes
 ///   - Raw binary body (the file bytes)
 ///
 /// Returns a [`BlobDescriptor`] JSON on success.
@@ -279,14 +308,34 @@ pub async fn upload_blob(
     headers: HeaderMap,
     body: axum::body::Body,
 ) -> Result<Json<BlobDescriptor>, MediaError> {
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
     let attribution = upload_attribution(&state, &auth, &headers).await;
 
-    let mut descriptor = if content_type.starts_with("video/") {
+    if auth.route_mode == UploadRouteMode::LegacyMedia {
+        metrics::counter!("buzz_media_legacy_upload_route_total").increment(1);
+    }
+
+    // Probe actual bytes without trusting Content-Type. Keep the chunks used
+    // for the bounded probe and replay them into the selected pipeline so the
+    // stored/hash-verified body remains byte-identical.
+    use futures_util::StreamExt;
+    const SNIFF_BYTES: usize = 4096;
+    let mut source = body.into_data_stream();
+    let mut replay_chunks = Vec::new();
+    let mut sniff = Vec::with_capacity(SNIFF_BYTES);
+    while sniff.len() < SNIFF_BYTES {
+        match source.next().await {
+            Some(Ok(chunk)) => {
+                let needed = SNIFF_BYTES - sniff.len();
+                sniff.extend_from_slice(&chunk[..chunk.len().min(needed)]);
+                replay_chunks.push(chunk);
+            }
+            Some(Err(error)) => return Err(MediaError::Io(error.to_string())),
+            None => break,
+        }
+    }
+    let replay = futures_util::stream::iter(replay_chunks.into_iter().map(Ok)).chain(source);
+
+    let mut descriptor = if should_stream_as_video(&sniff) {
         // Video path: stream body directly to disk — never fully buffered in RAM.
         let content_length = headers
             .get("content-length")
@@ -297,7 +346,7 @@ pub async fn upload_blob(
             &state.config.media,
             &auth.tenant,
             &auth.auth_event,
-            body.into_data_stream(),
+            replay,
             content_length,
             attribution,
         )
@@ -305,15 +354,15 @@ pub async fn upload_blob(
     } else {
         // Non-video path: buffer the body (bounded by the larger of the image
         // and generic-file caps), then decide image-vs-generic by sniffed MIME.
-        // Images go through the thumbnailing pipeline; everything else (docs,
-        // archives, audio, text, data) takes the generic file path and is
-        // served as a download.
+        // Images go through the thumbnailing pipeline; non-media attachments
+        // (docs, archives, text, data) take the generic file path and are
+        // served as downloads. Recognized audio/video cannot fall through it.
         let max = state
             .config
             .media
             .max_image_bytes
             .max(state.config.media.max_file_bytes);
-        let bytes = axum::body::to_bytes(body, max as usize)
+        let bytes = axum::body::to_bytes(axum::body::Body::from_stream(replay), max as usize)
             .await
             .map_err(|_| MediaError::FileTooLarge { size: 0, max })?;
 
@@ -332,6 +381,11 @@ pub async fn upload_blob(
                 attribution,
             )
             .await?
+        } else if auth.route_mode == UploadRouteMode::LegacyMedia {
+            let mime = infer::get(&bytes)
+                .map(|kind| kind.mime_type().to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            return Err(MediaError::DisallowedContentType(mime));
         } else {
             buzz_media::process_file_upload(
                 &state.media_storage,
@@ -358,27 +412,33 @@ pub async fn upload_blob(
         }
         _ => "other",
     };
-    metrics::counter!("buzz_media_uploads_total", "mime" => mime_label.to_owned()).increment(1);
+    metrics::counter!(
+        "buzz_media_uploads_total",
+        "mime" => mime_label.to_owned(),
+        "community" => auth.tenant.host().to_owned()
+    )
+    .increment(1);
 
     // Audit via bounded channel — same pattern as event audit.
-    let desc = descriptor.clone();
-    if let Err(e) = state
-        .audit_tx
-        .send(NewAuditEntry {
-            community_id: auth.tenant.community(),
-            action: AuditAction::MediaUploaded,
-            actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
-            object_id: Some(desc.sha256.clone()),
-            detail: serde_json::json!({
-                "sha256": desc.sha256,
-                "size": desc.size,
-                "mime": desc.mime_type,
-            }),
-        })
-        .await
-    {
-        tracing::error!("Media audit channel closed — entry lost: {e}");
-        metrics::counter!("buzz_audit_send_errors_total").increment(1);
+    if let Some(audit_tx) = &state.audit_tx {
+        let desc = descriptor.clone();
+        if let Err(e) = audit_tx
+            .send(NewAuditEntry {
+                community_id: auth.tenant.community(),
+                action: AuditAction::MediaUploaded,
+                actor_pubkey: Some(auth.auth_event.pubkey.to_bytes().to_vec()),
+                object_id: Some(desc.sha256.clone()),
+                detail: serde_json::json!({
+                    "sha256": desc.sha256,
+                    "size": desc.size,
+                    "mime": desc.mime_type,
+                }),
+            })
+            .await
+        {
+            tracing::error!("Media audit channel closed — entry lost: {e}");
+            metrics::counter!("buzz_audit_send_errors_total").increment(1);
+        }
     }
 
     Ok(Json(descriptor))
@@ -424,6 +484,42 @@ async fn bind_media_read_tenant(
     crate::tenant::bind_community(&state.db, raw_host)
         .await
         .map_err(|_| MediaError::NotFound)
+}
+
+async fn authenticate_media_read(
+    state: &AppState,
+    headers: &HeaderMap,
+    sha256_ext: &str,
+) -> Result<MediaReadAuth, MediaError> {
+    let tenant = bind_media_read_tenant(state, headers).await?;
+
+    if !state.config.require_media_get_auth {
+        return Ok(MediaReadAuth { tenant });
+    }
+
+    let auth_event = extract_blossom_auth(headers)?;
+    let sha256 = sha256_ext.split('.').next().unwrap_or(sha256_ext);
+    buzz_media::auth::verify_blossom_get_auth(&auth_event, sha256, Some(tenant.host()), 3600)?;
+
+    let auth_tag = headers.get("x-auth-tag").and_then(|v| v.to_str().ok());
+    crate::api::relay_members::enforce_relay_membership(
+        state,
+        tenant.community(),
+        auth_event.pubkey.as_bytes(),
+        auth_tag,
+    )
+    .await
+    .map_err(|_| MediaError::RelayMembershipRequired)?;
+
+    Ok(MediaReadAuth { tenant })
+}
+
+fn blob_cache_control(require_auth: bool) -> &'static str {
+    if require_auth {
+        "private, max-age=31536000, immutable"
+    } else {
+        "public, max-age=31536000, immutable"
+    }
 }
 
 /// Whether a path-segment extension is a safe token.
@@ -511,14 +607,30 @@ pub async fn get_blob(
     req_headers: HeaderMap,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
-    let tenant = bind_media_read_tenant(&state, &req_headers).await?;
+    let media_auth = authenticate_media_read(&state, &req_headers, &sha256_ext).await?;
+    serve_blob_for_tenant(&state, &media_auth.tenant, &sha256_ext, &req_headers).await
+}
+
+/// Serve a validated blob from an already-authorized tenant context.
+///
+/// This is the common byte-serving mechanism for Blossom reads and narrowly
+/// scoped internal readers. Callers must establish their own authorization
+/// before entering this function; the tenant is never derived from client input.
+pub(crate) async fn serve_blob_for_tenant(
+    state: &AppState,
+    tenant: &TenantContext,
+    sha256_ext: &str,
+    req_headers: &HeaderMap,
+) -> Result<Response, MediaError> {
+    validate_media_path(sha256_ext)?;
+    let cache_control = blob_cache_control(state.config.require_media_get_auth);
 
     // Sidecar gate FIRST — reject before any blob I/O. Storage is not authoritative.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
-        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(&sha256_ext);
+        let parent_hash = sha256_ext.strip_suffix(".thumb.jpg").unwrap_or(sha256_ext);
         let _ = state
             .media_storage
-            .read_sidecar_mime(&tenant, parent_hash)
+            .read_sidecar_mime(tenant, parent_hash)
             .await
             .ok_or(MediaError::NotFound)?;
         "image/jpeg".to_string()
@@ -527,14 +639,14 @@ pub async fn get_blob(
         // the sidecar's canonical extension — sidecar is authoritative.
         let sidecar_mime = state
             .media_storage
-            .read_sidecar_mime(&tenant, &sha256_ext)
+            .read_sidecar_mime(tenant, sha256_ext)
             .await
             .ok_or(MediaError::NotFound)?;
         if sha256_ext.contains('.') {
             let requested_ext = sha256_ext.rsplit('.').next().unwrap_or("");
             let sidecar = state
                 .media_storage
-                .get_sidecar(&tenant, sha256_ext.split('.').next().unwrap_or(&sha256_ext))
+                .get_sidecar(tenant, sha256_ext.split('.').next().unwrap_or(sha256_ext))
                 .await
                 .map_err(|_| MediaError::NotFound)?;
             if requested_ext != sidecar.ext {
@@ -554,7 +666,7 @@ pub async fn get_blob(
         "attachment"
     };
 
-    let key = resolve_s3_key(&state.media_storage, &tenant, &sha256_ext).await?;
+    let key = resolve_s3_key(&state.media_storage, tenant, sha256_ext).await?;
 
     // Parse optional Range header.
     let range_header = req_headers
@@ -563,8 +675,7 @@ pub async fn get_blob(
         .map(|s| s.to_owned());
 
     // Extract single-range value, if present. Multi-range (comma-separated) is
-    // unsupported — we ignore it and serve the full body per RFC 9110 §14.2:
-    // "A server MAY ignore the Range header field."
+    // unsupported — we ignore it and serve the full body per RFC 9110 §14.2.
     let single_range = range_header.filter(|r| !r.contains(','));
 
     match single_range {
@@ -582,7 +693,7 @@ pub async fn get_blob(
                 .header(header::CONTENT_TYPE, &content_type)
                 .header(header::CONTENT_LENGTH, total.to_string())
                 .header(header::CONTENT_DISPOSITION, disposition)
-                .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                .header(header::CACHE_CONTROL, cache_control)
                 .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
                 .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                 .header(header::ACCEPT_RANGES, "bytes")
@@ -591,7 +702,7 @@ pub async fn get_blob(
             Ok(resp)
         }
         Some(range_str) => {
-            // Single-range request — HEAD first to get total size without loading the blob.
+            // S3-native single-range response, capped to bound request memory.
             let total = state
                 .media_storage
                 .head_with_metadata(&key)
@@ -599,7 +710,6 @@ pub async fn get_blob(
                 .ok_or(MediaError::NotFound)?
                 .size;
 
-            // Parse range: "bytes=START-END", "bytes=START-", or "bytes=-N" (suffix).
             let parsed = parse_byte_range(&range_str, total);
             match parsed {
                 Some((start, end)) => {
@@ -611,13 +721,10 @@ pub async fn get_blob(
                             .map_err(|_| MediaError::Internal);
                     }
 
-                    // Clamp end to total-1, then cap chunk size.
                     let end = end.min(total.saturating_sub(1));
                     let end = end
                         .min(start.saturating_add(MAX_RANGE_CHUNK - 1))
                         .min(total.saturating_sub(1));
-
-                    // S3-native range GET — never loads the full blob into RAM.
                     let chunk = state.media_storage.get_range(&key, start, end).await?;
                     let content_range = format!("bytes {start}-{end}/{total}");
 
@@ -628,7 +735,7 @@ pub async fn get_blob(
                         .header(header::CONTENT_LENGTH, chunk.len().to_string())
                         .header(header::CONTENT_DISPOSITION, disposition)
                         .header(header::ACCEPT_RANGES, "bytes")
-                        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+                        .header(header::CACHE_CONTROL, cache_control)
                         .header(header::CONTENT_SECURITY_POLICY, "default-src 'none'")
                         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
                         .body(axum::body::Body::from(chunk))
@@ -694,7 +801,10 @@ pub async fn head_blob(
     Path(sha256_ext): Path<String>,
 ) -> Result<Response, MediaError> {
     validate_media_path(&sha256_ext)?;
-    let tenant = bind_media_read_tenant(&state, &headers).await?;
+    let require_media_get_auth = state.config.require_media_get_auth;
+    let media_auth = authenticate_media_read(&state, &headers, &sha256_ext).await?;
+    let tenant = media_auth.tenant;
+    let cache_control = blob_cache_control(require_media_get_auth);
 
     // Sidecar gate FIRST — reject before any blob I/O.
     let content_type = if sha256_ext.ends_with(".thumb.jpg") {
@@ -735,7 +845,7 @@ pub async fn head_blob(
                     ("content-type", content_type.as_str()),
                     ("content-length", size_str.as_str()),
                     ("accept-ranges", "bytes"),
-                    ("cache-control", "public, max-age=31536000, immutable"),
+                    ("cache-control", cache_control),
                 ],
             )
                 .into_response())
@@ -802,13 +912,47 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
+    use axum::{
+        body::Body,
+        http::{header, Request, StatusCode},
+    };
+    use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
+    use tower::ServiceExt;
     use uuid::Uuid;
 
     const VALID_HASH: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
+    #[test]
+    fn upload_routes_distinguish_standard_and_legacy_modes() {
+        assert_eq!(
+            upload_route_mode("/upload").expect("standard upload route"),
+            UploadRouteMode::Upload
+        );
+        assert_eq!(
+            upload_route_mode("/media/upload").expect("legacy upload route"),
+            UploadRouteMode::LegacyMedia
+        );
+        assert!(matches!(
+            upload_route_mode("/media"),
+            Err(MediaError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn proprietary_iso_bmff_brand_still_uses_video_pipeline() {
+        let bytes = b"\x00\x00\x00\x18ftypPRIV\x00\x00\x00\x00isommp42";
+        assert!(infer::get(bytes).is_none());
+        assert!(should_stream_as_video(bytes));
+    }
+
     async fn test_state() -> Arc<AppState> {
+        test_state_with_media_get_auth(false).await
+    }
+
+    async fn test_state_with_media_get_auth(require_media_get_auth: bool) -> Arc<AppState> {
         let mut config = crate::config::Config::from_env().expect("default config loads");
         config.require_relay_membership = false;
+        config.require_media_get_auth = require_media_get_auth;
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.media_uploads_per_minute = 1;
         config.media_max_concurrent_uploads = 2;
@@ -816,6 +960,9 @@ mod tests {
 
         let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
         let db = buzz_db::Db::from_pool(pool.clone());
+        db.ensure_configured_community("relay.example")
+            .await
+            .expect("seed relay.example community for host-bound media tests");
         let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("redis pool");
@@ -845,6 +992,148 @@ mod tests {
             media_storage,
         );
         Arc::new(state)
+    }
+
+    async fn media_get_auth_router(require_media_get_auth: bool) -> axum::Router {
+        let state = test_state_with_media_get_auth(require_media_get_auth).await;
+        axum::Router::new()
+            .route(
+                "/media/{sha256_ext}",
+                axum::routing::get(get_blob).head(head_blob),
+            )
+            .with_state(state)
+    }
+
+    fn media_get_auth_header(keys: &Keys, tags: Vec<Tag>) -> String {
+        let event = EventBuilder::new(Kind::from(24242), "Get media")
+            .tags(tags)
+            .sign_with_keys(keys)
+            .expect("sign get auth");
+        format!(
+            "Nostr {}",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+        )
+    }
+
+    fn media_get_tags_for(host: &str, sha256: Option<&str>) -> Vec<Tag> {
+        let now = Timestamp::now().as_secs();
+        let expiration = (now + 300).to_string();
+        let mut tags = vec![
+            Tag::parse(["t", "get"]).expect("t tag"),
+            Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+            Tag::parse(["server", host]).expect("server tag"),
+        ];
+        if let Some(sha256) = sha256 {
+            tags.push(Tag::parse(["x", sha256]).expect("x tag"));
+        }
+        tags
+    }
+
+    fn media_request(method: &str, auth: Option<String>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(format!("/media/{VALID_HASH}.jpg"))
+            .header(header::HOST, "relay.example");
+        if let Some(auth) = auth {
+            builder = builder.header(header::AUTHORIZATION, auth);
+        }
+        builder.body(Body::empty()).expect("request")
+    }
+
+    #[tokio::test]
+    async fn media_get_auth_flag_off_allows_unauthenticated_read_until_sidecar_gate() {
+        let response = media_get_auth_router(false)
+            .await
+            .oneshot(media_request("GET", None))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn media_get_auth_flag_on_rejects_unauthenticated_get_and_head_before_sidecar_gate() {
+        for method in ["GET", "HEAD"] {
+            let response = media_get_auth_router(true)
+                .await
+                .oneshot(media_request(method, None))
+                .await
+                .expect("response");
+
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{method}");
+        }
+    }
+
+    #[tokio::test]
+    async fn media_get_auth_flag_on_valid_server_scoped_token_reaches_sidecar_gate() {
+        let keys = Keys::generate();
+        let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+        let response = media_get_auth_router(true)
+            .await
+            .oneshot(media_request("GET", Some(auth)))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn media_get_auth_flag_on_rejects_upload_verb_wrong_server_and_wrong_x() {
+        let keys = Keys::generate();
+        let now = Timestamp::now().as_secs();
+        let expiration = (now + 300).to_string();
+        let cases = [
+            vec![
+                Tag::parse(["t", "upload"]).expect("t tag"),
+                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                Tag::parse(["server", "relay.example"]).expect("server tag"),
+            ],
+            vec![
+                Tag::parse(["t", "get"]).expect("t tag"),
+                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                Tag::parse(["server", "evil.example"]).expect("server tag"),
+            ],
+            vec![
+                Tag::parse(["t", "get"]).expect("t tag"),
+                Tag::parse(["expiration", &expiration]).expect("expiration tag"),
+                Tag::parse(["x", &"f".repeat(64)]).expect("x tag"),
+            ],
+        ];
+
+        for tags in cases {
+            let auth = media_get_auth_header(&keys, tags);
+            let response = media_get_auth_router(true)
+                .await
+                .oneshot(media_request("GET", Some(auth)))
+                .await
+                .expect("response");
+
+            assert_ne!(response.status(), StatusCode::NOT_FOUND);
+            assert!(
+                response.status() == StatusCode::UNAUTHORIZED
+                    || response.status() == StatusCode::FORBIDDEN,
+                "unexpected status {}",
+                response.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn media_get_auth_flag_on_accepts_range_header_only_after_auth() {
+        let keys = Keys::generate();
+        let auth = media_get_auth_header(&keys, media_get_tags_for("relay.example", None));
+        let mut request = media_request("GET", Some(auth));
+        request
+            .headers_mut()
+            .insert(header::RANGE, "bytes=0-0".parse().expect("range header"));
+
+        let response = media_get_auth_router(true)
+            .await
+            .oneshot(request)
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

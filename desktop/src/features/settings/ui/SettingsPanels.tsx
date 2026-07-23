@@ -1,21 +1,23 @@
 import { useMemo, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
   BellRing,
   Bot,
   Check,
+  ChevronDown,
   Cpu,
   Download,
   FlaskConical,
   Keyboard,
   LayoutTemplate,
   LockKeyhole,
+  MessagesSquare,
   MonitorCog,
   Moon,
   ShieldAlert,
   Smartphone,
   Smile,
-  Stethoscope,
   Sun,
   SunMoon,
   UserRound,
@@ -26,12 +28,26 @@ import type {
   NotificationSettings,
 } from "@/features/notifications/hooks";
 import type { SoundName, SoundSlot } from "@/features/notifications/lib/sound";
-import { RelayMembersSettingsCard } from "@/features/relay-members/ui/RelayMembersSettingsCard";
+import { CommunityMembersSettingsCard } from "@/features/community-members/ui/CommunityMembersSettingsCard";
 import { CustomEmojiSettingsCard } from "@/features/custom-emoji/ui/CustomEmojiSettingsCard";
 import { LocalArchiveSettingsCard } from "@/features/local-archive/ui/LocalArchiveSettingsCard";
+import {
+  setThreadViewMode,
+  useThreadViewMode,
+  type ThreadViewMode,
+} from "@/features/channels/lib/threadViewModePreference";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/shared/ui/dropdown-menu";
 import {
   ACCENT_COLORS,
+  isBuzzTheme,
   NEUTRAL_ACCENT,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
@@ -61,6 +77,10 @@ import { MobilePairingCard } from "./MobilePairingCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
+import { ActiveAgentCommunitiesSettingsCard } from "./ActiveAgentCommunitiesSettingsCard";
+import { AgentDefaultsSettingsCard } from "./AgentDefaultsSettingsCard";
+import { HostedCommunitiesSettingsCard } from "./HostedCommunitiesSettingsCard";
+import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -74,13 +94,13 @@ export type SettingsSection =
   | "compute"
   | "appearance"
   | "shortcuts"
-  | "relay-members"
+  | "hosted-communities"
+  | "community-members"
   | "moderation"
   | "custom-emoji"
   | "local-archive"
   | "mobile"
-  | "updates"
-  | "doctor";
+  | "updates";
 
 export const DEFAULT_SETTINGS_SECTION: SettingsSection = "profile";
 
@@ -93,13 +113,13 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "compute",
   "appearance",
   "shortcuts",
-  "relay-members",
+  "hosted-communities",
+  "community-members",
   "moderation",
   "custom-emoji",
   "local-archive",
   "mobile",
   "updates",
-  "doctor",
 ];
 
 export function isSettingsSection(value: unknown): value is SettingsSection {
@@ -176,8 +196,13 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     icon: Keyboard,
   },
   {
-    value: "relay-members",
-    label: "Relay Access",
+    value: "hosted-communities",
+    label: "Hosted communities",
+    icon: MessagesSquare,
+  },
+  {
+    value: "community-members",
+    label: "Community access",
     icon: LockKeyhole,
   },
   {
@@ -187,13 +212,13 @@ export const settingsSections: SettingsSectionDescriptor[] = [
   },
   {
     value: "custom-emoji",
-    label: "Custom Emoji",
+    label: "Custom emoji",
     icon: Smile,
     featureGate: "custom-emoji",
   },
   {
     value: "local-archive",
-    label: "Local Archive",
+    label: "Local archive",
     icon: Archive,
   },
   {
@@ -205,12 +230,6 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "updates",
     label: "Updates",
     icon: Download,
-  },
-  {
-    value: "doctor",
-    label: "Doctor",
-    icon: Stethoscope,
-    featureGate: "doctor",
   },
 ];
 
@@ -378,16 +397,35 @@ function SingleThemeTile({
 
 type AppearanceMode = "system" | "light" | "dark";
 
+// Reveal/hide motion for the accent picker: a small translate + opacity fade.
+// The picker sits below the theme grid and reads as tucking up behind it, so
+// it enters from above (slides *down* into place when a non-Buzz theme reveals
+// it) and exits upward (slides up behind the grid when Buzz hides it). No
+// height/scale — height collapse clipped the swatches behind the grid's bottom
+// fade (the "white bar"). Snappier than the modal 0.2s since this is a small
+// settings control, sharing the modal/ProfileSettingsCard easing curve.
+const ACCENT_PICKER_TRANSITION = {
+  duration: 0.16,
+  ease: [0.23, 1, 0.32, 1] as const,
+};
+
 function ThemeSettingsCard() {
   const {
     setTheme,
     selectedThemeName,
+    themeName,
     isDark,
     accentColor,
     setAccentColor,
     followSystem,
     setFollowSystem,
   } = useTheme();
+
+  // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
+  // so the accent picker is hidden while a Buzz theme is active. `themeName` is
+  // the effective theme, so this also covers System mode resolving to Buzz.
+  const accentPickerHidden = isBuzzTheme(themeName);
+  const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
   const { pairedLight, lightOnly, darkOnly } = useThemeCategories();
@@ -522,15 +560,19 @@ function ThemeSettingsCard() {
               "linear-gradient(to bottom, hsl(var(--background)), hsl(var(--background) / 0))",
           }}
         />
-        {/* Bottom fade */}
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
-          style={{
-            background:
-              "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
-          }}
-        />
+        {/* Bottom fade — hidden while the accent picker is visible so its
+            near-white gradient (Buzz light) can't mask the swatches below it
+            (the "white bar"). Kept only when the picker is hidden. */}
+        {accentPickerHidden ? (
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-3"
+            style={{
+              background:
+                "linear-gradient(to top, hsl(var(--background)), hsl(var(--background) / 0))",
+            }}
+          />
+        ) : null}
         <div className="max-h-[430px] overflow-y-auto rounded-lg pt-2">
           <div className="flex flex-wrap gap-4 p-1">
             {selectedMode === "system" &&
@@ -572,41 +614,168 @@ function ThemeSettingsCard() {
         </div>
       </div>
 
-      {/* Accent color picker */}
-      <div className="shrink-0 px-1 pb-2">
-        <h3 className="mb-2 text-sm font-medium">Accent color</h3>
-        <div className="flex flex-wrap gap-2 p-1">
-          {ACCENT_COLORS.map((color) => {
-            const isNeutral = color.value === NEUTRAL_ACCENT;
-            const swatchColor = isNeutral
-              ? "hsl(var(--foreground))"
-              : color.value;
-            const checkClassName =
-              isNeutral && isDark ? "text-black" : "text-white";
+      {/* Accent color picker — hidden for Buzz themes (pinned neutral accent).
+          Reveal/hide with the translate-up + opacity fade defined by
+          ACCENT_PICKER_TRANSITION above. Reduced motion skips the transition
+          and just renders/unrenders. */}
+      {shouldReduceMotion ? (
+        accentPickerHidden ? null : (
+          <AccentPickerContent
+            accentColor={accentColor}
+            isDark={isDark}
+            setAccentColor={setAccentColor}
+          />
+        )
+      ) : (
+        <AnimatePresence initial={false}>
+          {accentPickerHidden ? null : (
+            <motion.div
+              animate={{ opacity: 1, y: 0 }}
+              className="will-change-[opacity,transform]"
+              exit={{ opacity: 0, y: -10 }}
+              initial={{ opacity: 0, y: -10 }}
+              key="accent-picker"
+              transition={ACCENT_PICKER_TRANSITION}
+            >
+              <AccentPickerContent
+                accentColor={accentColor}
+                isDark={isDark}
+                setAccentColor={setAccentColor}
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
+      )}
 
-            return (
-              <button
-                className={cn(
-                  "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
-                  accentColor === color.value &&
-                    "ring-2 ring-ring ring-offset-2 ring-offset-background",
-                )}
-                data-testid={`accent-color-${color.name.toLowerCase()}`}
-                key={color.value}
-                onClick={() => setAccentColor(color.value)}
-                style={{ backgroundColor: swatchColor }}
-                title={color.name}
-                type="button"
-              >
-                {accentColor === color.value && (
-                  <Check className={cn("h-4 w-4", checkClassName)} />
-                )}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      <ThreadLayoutSetting />
     </section>
+  );
+}
+
+const THREAD_VIEW_MODE_OPTIONS: {
+  value: ThreadViewMode;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "focus",
+    label: "Focus",
+    description: "Threads open over the channel, full width",
+  },
+  {
+    value: "split",
+    label: "Split",
+    description: "Threads open in a side panel next to the channel",
+  },
+];
+
+/**
+ * Thread layout picker. Uses the same dropdown radio group vocabulary as the
+ * other enumerated Settings rows (e.g. {@link SoundPicker}) so each option can
+ * carry its own description.
+ */
+function ThreadLayoutSetting() {
+  const threadViewMode = useThreadViewMode();
+  const activeOption =
+    THREAD_VIEW_MODE_OPTIONS.find(
+      (option) => option.value === threadViewMode,
+    ) ?? THREAD_VIEW_MODE_OPTIONS[0];
+
+  return (
+    <SettingsOptionGroup className="mt-8">
+      <SettingsOptionRow>
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Thread layout</p>
+          <p className="text-sm font-normal text-muted-foreground">
+            {activeOption.description}
+          </p>
+        </div>
+        <DropdownMenu modal={false}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              className="h-7 min-w-28 justify-between gap-1.5 rounded-full border border-border/50 bg-muted/45 px-2.5 text-xs font-medium text-foreground shadow-none hover:bg-muted/70"
+              data-testid="thread-layout-trigger"
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              <span className="truncate">{activeOption.label}</span>
+              <ChevronDown className="h-4 w-4 text-muted-foreground" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-72">
+            <DropdownMenuRadioGroup
+              onValueChange={(next) =>
+                setThreadViewMode(next as ThreadViewMode)
+              }
+              value={threadViewMode}
+            >
+              {THREAD_VIEW_MODE_OPTIONS.map((option) => (
+                <DropdownMenuRadioItem
+                  data-testid={`thread-layout-${option.value}`}
+                  key={option.value}
+                  value={option.value}
+                >
+                  <span className="flex min-w-0 flex-col">
+                    <span className="font-medium">{option.label}</span>
+                    <span className="text-2xs text-muted-foreground">
+                      {option.description}
+                    </span>
+                  </span>
+                </DropdownMenuRadioItem>
+              ))}
+            </DropdownMenuRadioGroup>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SettingsOptionRow>
+    </SettingsOptionGroup>
+  );
+}
+
+/** Accent swatch grid — shared by the animated and reduced-motion reveal paths. */
+function AccentPickerContent({
+  accentColor,
+  isDark,
+  setAccentColor,
+}: {
+  accentColor: string;
+  isDark: boolean;
+  setAccentColor: (value: string) => void;
+}) {
+  return (
+    <div className="shrink-0 px-1 pb-2 pt-1">
+      <h3 className="mb-2 text-sm font-medium">Accent color</h3>
+      <div className="flex flex-wrap gap-2 p-1">
+        {ACCENT_COLORS.map((color) => {
+          const isNeutral = color.value === NEUTRAL_ACCENT;
+          const swatchColor = isNeutral
+            ? "hsl(var(--foreground))"
+            : color.value;
+          const checkClassName =
+            isNeutral && isDark ? "text-black" : "text-white";
+
+          return (
+            <button
+              className={cn(
+                "flex h-7 w-7 items-center justify-center rounded-full border border-border/50 transition-transform hover:scale-110",
+                accentColor === color.value &&
+                  "ring-2 ring-ring ring-offset-2 ring-offset-background",
+              )}
+              data-testid={`accent-color-${color.name.toLowerCase()}`}
+              key={color.value}
+              onClick={() => setAccentColor(color.value)}
+              style={{ backgroundColor: swatchColor }}
+              title={color.name}
+              type="button"
+            >
+              {accentColor === color.value && (
+                <Check className={cn("h-4 w-4", checkClassName)} />
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -642,7 +811,14 @@ export function renderSettingsSection(
     case "experimental":
       return <ExperimentalFeaturesCard />;
     case "agents":
-      return <PreventSleepSettingsCard />;
+      return (
+        <div className="space-y-12">
+          <PreventSleepSettingsCard />
+          <DoctorSettingsPanel />
+          <ActiveAgentCommunitiesSettingsCard />
+          <AgentDefaultsSettingsCard />
+        </div>
+      );
     case "channel-templates":
       return <ChannelTemplatesSettingsCard />;
     case "compute":
@@ -651,8 +827,12 @@ export function renderSettingsSection(
       return <ThemeSettingsCard />;
     case "shortcuts":
       return <KeyboardShortcutsCard />;
-    case "relay-members":
-      return <RelayMembersSettingsCard currentPubkey={props.currentPubkey} />;
+    case "hosted-communities":
+      return <HostedCommunitiesSettingsCard />;
+    case "community-members":
+      return (
+        <CommunityMembersSettingsCard currentPubkey={props.currentPubkey} />
+      );
     case "moderation":
       return <ModerationQueueCard />;
     case "custom-emoji":
@@ -663,8 +843,6 @@ export function renderSettingsSection(
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":
       return <UpdateChecker />;
-    case "doctor":
-      return <DoctorSettingsPanel />;
     default: {
       const exhaustiveCheck: never = section;
       return exhaustiveCheck;

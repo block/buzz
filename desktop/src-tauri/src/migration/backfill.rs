@@ -22,7 +22,7 @@ use crate::managed_agents::{
 /// - **Fail loudly per record**: a record that cannot be backfilled (slug
 ///   collision) is logged and skipped; the rest proceed.
 /// - **No behavior change**: the definition snapshots the record's own
-///   values (prompt present-even-if-empty via `to_persona_view`'s
+///   values (prompt present-even-if-empty via `to_definition_view`'s
 ///   `unwrap_or_default`, env COPIED so later instances inherit a working
 ///   config, quad copied to the definition defaults) and the record gains
 ///   `persona_source_version` = the new definition's content hash, so
@@ -105,9 +105,8 @@ fn backfill_standalone_agents_in_dir(base_dir: &Path) -> Result<usize, String> {
         // fields are the author's intent; copy them up.
         view_source.definition_respond_to = Some(record.respond_to.as_str().to_string());
         view_source.definition_respond_to_allowlist = record.respond_to_allowlist.clone();
-        view_source.definition_mcp_toolsets = record.mcp_toolsets.clone();
         view_source.definition_parallelism = Some(record.parallelism);
-        let Some(persona_view) = view_source.to_persona_view() else {
+        let Some(persona_view) = view_source.to_definition_view() else {
             eprintln!(
                 "buzz-desktop: standalone-backfill: agent {} produced no persona view — skipped",
                 record.pubkey

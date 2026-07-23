@@ -35,6 +35,9 @@ allow = [
     "MPL-2.0",
     "BSL-1.0",
     "Unlicense",
+    # minicbor's permissive, OSI-approved license. Used for strict App Attest
+    # assertion CBOR parsing and also transitively by appattest.
+    "BlueOak-1.0.0",
     # bzip2/libbzip2's permissive BSD-like license. New via desktop zip/bzip2
     # transitive deps; compatible with Apache-2.0 distribution.
     "bzip2-1.0.6",

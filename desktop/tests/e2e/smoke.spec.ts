@@ -96,6 +96,21 @@ test("loads the app shell with mocked channels", async ({ page }) => {
   await expect(page.getByTestId("dm-list")).toContainText("alice-tyler");
 });
 
+async function chooseSharedComputeProvider(
+  page: import("@playwright/test").Page,
+) {
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
+  const provider = page.locator("#persona-llm-provider");
+  await expect(provider).toBeVisible({ timeout: 10_000 });
+  await provider.press("Enter");
+  await page
+    .getByRole("menuitemradio", {
+      exact: true,
+      name: "Buzz shared compute",
+    })
+    .click();
+}
+
 test("creates a new mocked stream", async ({ page }) => {
   const channelName = `release-notes-${Date.now()}`;
 
@@ -111,6 +126,86 @@ test("creates a new mocked stream", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toContainText(channelName);
 });
 
+test("Buzz shared compute explains automatic model selection", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.evaluate(() => {
+    (
+      window as Window & {
+        __BUZZ_E2E_SET_MESH__?: (mesh: {
+          models?: Array<{ id: string; name: string | null }>;
+        }) => void;
+      }
+    ).__BUZZ_E2E_SET_MESH__?.({ models: [] });
+  });
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await chooseSharedComputeProvider(page);
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          (window as Window & { __BUZZ_E2E_COMMANDS__?: string[] })
+            .__BUZZ_E2E_COMMANDS__ ?? [],
+      ),
+    )
+    .toContain("discover_agent_models");
+  await expect(page.locator("#persona-model")).toContainText("Automatic");
+  await expect(
+    page.getByText(
+      "Buzz will choose an available shared model when the agent starts.",
+    ),
+  ).toBeVisible();
+  await expect(page.locator("#persona-custom-model")).toHaveCount(0);
+});
+
+test("create agent persists Buzz shared compute with auto model", async ({
+  page,
+}) => {
+  const agentName = `Shared compute agent ${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByTestId("open-agents-view").click();
+  await page.getByTestId("new-agent-card").click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.locator("#persona-display-name").fill(agentName);
+
+  await chooseSharedComputeProvider(page);
+
+  const model = page.locator("#persona-model");
+  await expect(model).toContainText("Automatic");
+  await page.getByTestId("persona-dialog-submit").click();
+  await expect(
+    page.getByRole("heading", { name: "Agent created" }),
+  ).toBeVisible({ timeout: 10_000 });
+
+  const createPayload = await page.evaluate((name) => {
+    const log = (
+      window as Window & {
+        __BUZZ_E2E_COMMAND_LOG__?: Array<{
+          command: string;
+          payload: unknown;
+        }>;
+      }
+    ).__BUZZ_E2E_COMMAND_LOG__;
+    return log
+      ?.filter((entry) => entry.command === "create_managed_agent")
+      .map((entry) => entry.payload as { input?: Record<string, unknown> })
+      .find((payload) => payload.input?.name === name)?.input;
+  }, agentName);
+
+  expect(createPayload).toMatchObject({
+    agentCommand: "buzz-agent",
+    model: "auto",
+    provider: "relay-mesh",
+    spawnAfterCreate: true,
+    startOnAppLaunch: true,
+  });
+});
+
 test("create agent supports parallelism and system prompt overrides", async ({
   page,
 }) => {
@@ -119,7 +214,7 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await page.locator("#persona-display-name").fill(agentName);
   await page
@@ -127,7 +222,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .fill("You are concise and parallelize independent work.");
 
   // The buzz-agent runtime auto-selects once the ACP runtime catalog loads;
-  // the LLM provider field renders after that.
+  // Customize reveals the per-agent LLM provider and model fields.
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
   const llmProvider = page.locator("#persona-llm-provider");
   await expect(llmProvider).toBeVisible({ timeout: 10_000 });
   await llmProvider.press("Enter");
@@ -140,23 +236,13 @@ test("create agent supports parallelism and system prompt overrides", async ({
     .getByRole("button", { name: "Custom model...", exact: true })
     .click();
   await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
-  // Supply a credential so the agent can actually run (create is no longer
-  // blocked by a missing key, but we include it for a realistic test).
-  // The required ANTHROPIC_API_KEY amber row appears in the EnvVarsEditor
-  // (Advanced auto-expands when required keys are present).
-  await page
-    .getByLabel("Value for ANTHROPIC_API_KEY")
-    .fill("sk-test-api-key-for-e2e");
+  await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
 
-  // Fix 3 (auto-open Advanced when required keys appear) may have already
-  // opened the section; only click to open if it is currently collapsed.
   const advancedToggle = page.getByRole("button", {
     name: "Advanced",
     exact: true,
   });
-  if ((await advancedToggle.getAttribute("aria-expanded")) === "false") {
-    await advancedToggle.click();
-  }
+  await advancedToggle.click();
   // Parallelism is above the env-vars editor in the Advanced section; filling
   // the required API-key row may have scrolled the dialog past it. Scroll back.
   await page
@@ -165,8 +251,8 @@ test("create agent supports parallelism and system prompt overrides", async ({
   await expect(page.locator("#persona-parallelism")).toBeVisible();
   await page.locator("#persona-parallelism").fill("3");
 
-  // The start-after-create toggle defaults ON, so submitting mints a running
-  // instance whose behavioral quad resolves from the definition.
+  // Submitting mints a running instance whose behavioral quad resolves from
+  // the definition (agents always start after creation).
   await page.getByTestId("persona-dialog-submit").click();
 
   await expect(
@@ -234,7 +320,9 @@ test("inbox feed shows channel and agent activity sections", async ({
   );
 });
 
-test("inbox agent hover only exposes message action", async ({ page }) => {
+test("inbox agent hover hides actions without agent access", async ({
+  page,
+}) => {
   await page.goto("/");
 
   await selectHomeInboxFilter(page, "Agents");
@@ -252,7 +340,7 @@ test("inbox agent hover only exposes message action", async ({ page }) => {
     profilePopover.getByTestId(
       `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
     ),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await expect(
     profilePopover.getByTestId(
       `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
@@ -468,6 +556,23 @@ test("sends a mocked channel message", async ({ page }) => {
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-timeline")).toContainText(message);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const row = Array.from(
+          document.querySelectorAll<HTMLElement>("[data-message-id]"),
+        ).at(-1);
+        const composer = document.querySelector<HTMLElement>(
+          '[data-testid="message-composer"]',
+        );
+        if (!row || !composer) return Number.NEGATIVE_INFINITY;
+        return (
+          composer.getBoundingClientRect().top -
+          row.getBoundingClientRect().bottom
+        );
+      }),
+    )
+    .toBeGreaterThanOrEqual(0);
 });
 
 test("supports multiline drafts with Ctrl+Enter and sends with Enter", async ({

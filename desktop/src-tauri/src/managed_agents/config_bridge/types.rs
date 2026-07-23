@@ -123,6 +123,7 @@ pub struct ConfigSourceReport {
     pub env_vars: ConfigTierStatus,
     pub config_file: ConfigTierStatus,
     pub config_file_path: Option<String>,
+    pub mcp_config_file_path: Option<String>,
 }
 
 /// Full config surface returned to the frontend.
@@ -134,6 +135,7 @@ pub struct RuntimeConfigSurface {
     pub is_pre_spawn: bool,
     pub normalized: NormalizedConfig,
     pub advanced: Vec<ConfigField>,
+    pub extensions: Vec<ExtensionEntry>,
     pub sources: ConfigSourceReport,
 }
 

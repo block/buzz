@@ -47,20 +47,16 @@ class _MentionSuggestions extends StatelessWidget {
           return ListTile(
             dense: true,
             visualDensity: VisualDensity.compact,
-            leading: CircleAvatar(
+            leading: AvatarImage(
+              imageUrl: avatarUrl,
               radius: 14,
               backgroundColor: context.colors.primaryContainer,
-              backgroundImage: avatarUrl != null
-                  ? NetworkImage(avatarUrl)
-                  : null,
-              child: avatarUrl == null
-                  ? Text(
-                      name[0].toUpperCase(),
-                      style: context.textTheme.labelSmall?.copyWith(
-                        color: context.colors.onPrimaryContainer,
-                      ),
-                    )
-                  : null,
+              fallback: Text(
+                name[0].toUpperCase(),
+                style: context.textTheme.labelSmall?.copyWith(
+                  color: context.colors.onPrimaryContainer,
+                ),
+              ),
             ),
             title: Text(name, style: context.textTheme.bodyMedium),
             subtitle: _MentionSuggestionInfo.build(
@@ -80,7 +76,7 @@ class _MentionSuggestions extends StatelessWidget {
 
 /// The secondary info line under a mention suggestion — mirrors desktop's
 /// `MentionAutocomplete` subtitle: bot icon + "agent" (or an "admin" badge
-/// for human admins), then "owned by …" / "not in channel".
+/// for human admins), then "managed by …" / "not in channel".
 abstract final class _MentionSuggestionInfo {
   static Widget? build(
     BuildContext context, {
@@ -97,9 +93,9 @@ abstract final class _MentionSuggestionInfo {
 
     final String? detail;
     if (ownerLabel != null && notInChannel) {
-      detail = 'owned by $ownerLabel \u00b7 not in channel';
+      detail = 'managed by $ownerLabel \u00b7 not in channel';
     } else if (ownerLabel != null) {
-      detail = 'owned by $ownerLabel';
+      detail = 'managed by $ownerLabel';
     } else if (notInChannel) {
       detail = 'not in channel';
     } else {

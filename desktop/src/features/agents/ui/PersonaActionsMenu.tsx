@@ -1,6 +1,12 @@
-import { BookUser, CopyPlus, Ellipsis, Pencil, Trash2 } from "lucide-react";
+import {
+  CopyPlus,
+  EllipsisVertical,
+  Pencil,
+  Share2,
+  Trash2,
+} from "lucide-react";
 
-import type { AgentPersona } from "@/shared/api/types";
+import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,6 +19,7 @@ export function PersonaActionsMenu({
   isActionPending,
   isPending,
   persona,
+  linkedAgent,
   onDuplicate,
   onEdit,
   onShare,
@@ -22,14 +29,19 @@ export function PersonaActionsMenu({
   isActionPending: boolean;
   isPending: boolean;
   persona: AgentPersona;
+  /** Profile agent instance linked to this definition, if one exists. */
+  linkedAgent: ManagedAgent | undefined;
   onDuplicate: (persona: AgentPersona) => void;
   onEdit: (persona: AgentPersona) => void;
-  onShare: (persona: AgentPersona) => void;
+  onShare: (
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) => void;
   onDeactivate: (persona: AgentPersona) => void;
   onDelete: (persona: AgentPersona) => void;
 }) {
   const disabled = isActionPending || isPending;
-  const canEdit = !persona.isBuiltIn && !persona.sourceTeam;
+  const canEdit = !persona.sourceTeam;
 
   return (
     <DropdownMenu modal={false}>
@@ -39,17 +51,13 @@ export function PersonaActionsMenu({
           className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
           type="button"
         >
-          <Ellipsis className="h-4 w-4" />
+          <EllipsisVertical className="h-4 w-4" />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
         onCloseAutoFocus={(event) => event.preventDefault()}
       >
-        <DropdownMenuItem disabled={disabled} onClick={() => onShare(persona)}>
-          <BookUser className="h-4 w-4" />
-          Catalog options
-        </DropdownMenuItem>
         {canEdit ? (
           <DropdownMenuItem disabled={disabled} onClick={() => onEdit(persona)}>
             <Pencil className="h-4 w-4" />
@@ -62,6 +70,13 @@ export function PersonaActionsMenu({
         >
           <CopyPlus className="h-4 w-4" />
           Duplicate
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          disabled={disabled}
+          onClick={() => onShare(persona, linkedAgent)}
+        >
+          <Share2 className="h-4 w-4" />
+          Share
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         {persona.sourceTeam ? (
@@ -83,7 +98,7 @@ export function PersonaActionsMenu({
             }}
           >
             <Trash2 className="h-4 w-4" />
-            Remove from My Agents
+            Delete
           </DropdownMenuItem>
         )}
       </DropdownMenuContent>

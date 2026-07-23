@@ -31,7 +31,7 @@ test("composer renders a custom emoji inline", async ({ page }) => {
   await expect(input.locator("img[data-custom-emoji]")).toHaveCount(1);
 });
 
-test("settings card splits My emoji from read-only Workspace emoji", async ({
+test("settings card splits My emoji from read-only Community emoji", async ({
   page,
 }) => {
   await page.goto("/");
@@ -49,11 +49,11 @@ test("settings card splits My emoji from read-only Workspace emoji", async ({
     mine.getByRole("button", { name: "Remove :buzz:" }),
   ).toBeVisible();
 
-  const workspace = card.getByTestId("custom-emoji-workspace");
-  await expect(workspace).toContainText(":narf:");
+  const community = card.getByTestId("custom-emoji-community");
+  await expect(community).toContainText(":narf:");
   // No remove button for someone else's emoji.
   await expect(
-    workspace.getByRole("button", { name: /^Remove :/ }),
+    community.getByRole("button", { name: /^Remove :/ }),
   ).toHaveCount(0);
 });
 

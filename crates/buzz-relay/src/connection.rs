@@ -14,13 +14,13 @@ use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext};
+use buzz_auth::{generate_challenge, AuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
 use crate::handlers;
 use crate::protocol::{ClientMessage, RelayMessage};
-use crate::state::AppState;
+use crate::state::{run_registered_community_connection, AppState};
 use buzz_pubsub::EventTopic;
 
 /// Maximum time a new socket may hold a connection slot without completing NIP-42 auth.
@@ -121,6 +121,31 @@ pub async fn handle_connection(
     addr: SocketAddr,
     tenant: TenantContext,
 ) {
+    let conn_id = Uuid::new_v4();
+    let cancel = CancellationToken::new();
+    let community_id = tenant.community();
+    let registry = Arc::clone(&state.community_connections);
+    let check_state = Arc::clone(&state);
+    let run_state = Arc::clone(&state);
+    run_registered_community_connection(
+        &registry,
+        conn_id,
+        community_id,
+        cancel.clone(),
+        move || async move { check_state.db.is_community_active(community_id).await },
+        move || handle_active_connection(socket, run_state, addr, tenant, conn_id, cancel),
+    )
+    .await;
+}
+
+async fn handle_active_connection(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    addr: SocketAddr,
+    tenant: TenantContext,
+    conn_id: Uuid,
+    cancel: CancellationToken,
+) {
     let permit = match state.conn_semaphore.clone().try_acquire_owned() {
         Ok(p) => p,
         Err(_) => {
@@ -129,9 +154,7 @@ pub async fn handle_connection(
         }
     };
 
-    let conn_id = Uuid::new_v4();
     let challenge = generate_challenge();
-    let cancel = CancellationToken::new();
 
     let (tx, rx) = mpsc::channel::<WsMessage>(state.config.send_buffer_size);
     // Control channel for Pong/Close — small capacity, guaranteed delivery
@@ -157,7 +180,11 @@ pub async fn handle_connection(
     });
 
     info!(conn_id = %conn_id, addr = %addr, "WebSocket connection established");
-    metrics::counter!("buzz_ws_connections_total").increment(1);
+    metrics::counter!(
+        "buzz_ws_connections_total",
+        "community" => conn.tenant.host().to_owned()
+    )
+    .increment(1);
 
     let challenge_msg = RelayMessage::auth_challenge(&challenge);
     if tx
@@ -468,6 +495,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
     };
 
+    if !enforce_ws_admission(&msg, &conn, &state).await {
+        return;
+    }
+
     match msg {
         ClientMessage::Auth(event) => {
             // Auth is synchronous in the WS loop — no span context is lost.
@@ -510,7 +541,8 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(RelayMessage::notice(
+                    conn.send(request_rejection_message(
+                        Some(&sub_id),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -548,6 +580,100 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
+        }
+    }
+}
+
+fn request_rejection_message(sub_id: Option<&str>, reason: &str) -> String {
+    match sub_id {
+        Some(sub_id) => RelayMessage::closed(sub_id, reason),
+        None => RelayMessage::notice(reason),
+    }
+}
+
+async fn enforce_ws_admission(
+    msg: &ClientMessage,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
+    let is_event = matches!(msg, ClientMessage::Event(_));
+    if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
+        return true;
+    }
+
+    let (pubkey, is_agent) = {
+        let auth = conn.auth_state.read().await;
+        match &*auth {
+            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
+            _ => return true,
+        }
+    };
+
+    let limits = &state.auth.config().rate_limits;
+    let (ws_window_secs, ws_limit) =
+        crate::admission::ws_admission_budget(limits.human_ws_events_per_sec);
+    let ws_result = crate::admission::check_principal(
+        state.admission_rate_limiter.as_ref(),
+        &conn.tenant,
+        &pubkey,
+        LimitType::WsEvents,
+        ws_window_secs,
+        ws_limit,
+    )
+    .await;
+    let sub_id = match msg {
+        ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
+        _ => None,
+    };
+    if !send_admission_result(conn, ws_result, sub_id) {
+        return false;
+    }
+
+    if is_event {
+        let message_limit = if is_agent {
+            limits.agent_standard_messages_per_min
+        } else {
+            limits.human_messages_per_min
+        };
+        let message_result = crate::admission::check_principal(
+            state.admission_rate_limiter.as_ref(),
+            &conn.tenant,
+            &pubkey,
+            LimitType::Messages,
+            60,
+            message_limit,
+        )
+        .await;
+        if !send_admission_result(conn, message_result, None) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn send_admission_result(
+    conn: &ConnectionState,
+    result: Result<(), crate::admission::AdmissionError>,
+    sub_id: Option<&str>,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
+            conn.send(request_rejection_message(
+                sub_id,
+                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+            ));
+            false
+        }
+        Err(crate::admission::AdmissionError::Unavailable) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
+            conn.send(request_rejection_message(
+                sub_id,
+                "rate-limited: shared admission unavailable",
+            ));
+            false
         }
     }
 }
@@ -644,6 +770,19 @@ mod tests {
                 other => panic!("unexpected websocket message in test: {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn req_rejections_are_subscription_scoped() {
+        let reason = "rate-limited: too many concurrent requests";
+        let closed: serde_json::Value =
+            serde_json::from_str(&request_rejection_message(Some("history-123"), reason))
+                .expect("parse CLOSED");
+        assert_eq!(closed, serde_json::json!(["CLOSED", "history-123", reason]));
+
+        let notice: serde_json::Value =
+            serde_json::from_str(&request_rejection_message(None, reason)).expect("parse NOTICE");
+        assert_eq!(notice, serde_json::json!(["NOTICE", reason]));
     }
 
     #[tokio::test]

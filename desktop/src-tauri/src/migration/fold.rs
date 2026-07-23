@@ -7,7 +7,7 @@ use std::path::Path;
 ///
 /// One-way, versioned by presence: runs only while `personas.json` exists.
 /// Each persona becomes a key-less definition record
-/// ([`PersonaRecord::into_agent_record`]) appended to `managed-agents.json`
+/// ([`AgentDefinition::into_agent_record`]) appended to `managed-agents.json`
 /// via the definition-preserving save; the old file is renamed to
 /// `personas.json.bak` so a second boot is a no-op and the data survives for
 /// manual recovery. Built-ins are skipped — `merge_personas` regenerates them

@@ -1,21 +1,21 @@
-use std::{
-    collections::{BTreeMap, HashSet},
-    path::PathBuf,
-};
+use std::collections::{BTreeMap, HashSet};
 
 use nostr::Keys;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
+use super::agent_model_process::run_agent_models_command;
+use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
+
 use crate::{
     app_state::AppState,
     managed_agents::{
-        build_managed_agent_summary, current_instance_id, default_agent_workdir,
-        discovery_env_with_baked_floor, find_managed_agent_mut, known_acp_runtime,
-        load_managed_agents, load_personas, managed_agent_avatar_url, missing_command_message,
-        normalize_agent_args, resolve_command, save_managed_agents, sync_managed_agent_processes,
-        try_regenerate_nest, AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest,
-        UpdateManagedAgentResponse, DEFAULT_ACP_COMMAND,
+        build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
+        find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
+        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
+        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
+        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -47,7 +47,7 @@ pub async fn get_agent_models(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         let record = records
@@ -220,6 +220,51 @@ pub async fn discover_agent_models(
     }
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
     let merged_env = discovery_env_with_baked_floor(merged_env);
+
+    // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
+    // client endpoint is started only after a live target is selected.
+    #[cfg(feature = "mesh-llm")]
+    if input.provider.as_deref().map(str::trim)
+        == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
+    {
+        let events = crate::relay::query_relay(
+            &state,
+            &[
+                crate::mesh_llm::mesh_status_filter(),
+                crate::mesh_llm::relay_membership_filter(),
+            ],
+        )
+        .await
+        .map_err(|error| format!("Buzz shared compute model discovery failed: {error}"))?;
+        let availability = crate::mesh_llm::availability_from_events(events);
+        if availability.models.is_empty() {
+            return Err(availability.reason.unwrap_or_else(|| {
+                "No live Buzz shared compute models are available".to_string()
+            }));
+        }
+        return Ok(AgentModelsResponse {
+            agent_name: crate::managed_agents::RELAY_MESH_PROVIDER_ID.to_string(),
+            agent_version: "relay-availability".to_string(),
+            models: availability
+                .models
+                .into_iter()
+                .map(|model| AgentModelInfo {
+                    id: model.id,
+                    name: model.name,
+                    description: None,
+                })
+                .collect(),
+            agent_default_model: None,
+            selected_model: None,
+            supports_switching: true,
+        });
+    }
+    #[cfg(not(feature = "mesh-llm"))]
+    if input.provider.as_deref().map(str::trim)
+        == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID)
+    {
+        return Err("Buzz shared compute is not available in this build".to_string());
+    }
 
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
@@ -441,14 +486,23 @@ async fn discover_openai_compatible_models(
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    if !is_openai_compatible_provider(provider) {
+    let relay_mesh = provider.map(str::trim) == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID);
+    if !relay_mesh && !is_openai_compatible_provider(provider) {
         return Ok(None);
     }
 
-    let api_key = env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
-        .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?;
+    let api_key = if relay_mesh {
+        crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER.to_string()
+    } else {
+        env_or_process_value(env, "OPENAI_COMPAT_API_KEY")
+            .ok_or_else(|| "config: OPENAI_COMPAT_API_KEY required".to_string())?
+    };
     let redaction_env = redaction_env_with_value(env, "OPENAI_COMPAT_API_KEY", &api_key);
-    let url = openai_compatible_models_url_for_discovery(env);
+    let url = if relay_mesh {
+        format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL)
+    } else {
+        openai_compatible_models_url_for_discovery(env)
+    };
     let response = client
         .get(&url)
         .bearer_auth(&api_key)
@@ -713,75 +767,6 @@ async fn discover_databricks_models(
     }))
 }
 
-async fn run_agent_models_command(
-    resolved_acp: PathBuf,
-    agent_command: String,
-    agent_args: Vec<String>,
-    persisted_model: Option<String>,
-    merged_env: BTreeMap<String, String>,
-) -> Result<AgentModelsResponse, String> {
-    // Clone the env map for redaction below — `merged_env` is moved
-    // into the spawn_blocking closure and we still need the values to
-    // scrub any user-supplied secrets that the child surfaces in stderr.
-    let env_for_redaction = merged_env.clone();
-
-    // Use spawn_blocking because the desktop Tauri crate doesn't enable
-    // tokio's `process` feature. std::process::Command is synchronous
-    // but fine for a short-lived subprocess (~2-5s).
-    let output = tokio::task::spawn_blocking(move || {
-        let mut cmd = std::process::Command::new(&resolved_acp);
-        if let Some(home) = default_agent_workdir() {
-            cmd.current_dir(home);
-        }
-        if let Some(ref path) = crate::managed_agents::login_shell_path() {
-            cmd.env("PATH", path);
-        }
-        cmd.arg("models")
-            .arg("--json")
-            .env("BUZZ_ACP_AGENT_COMMAND", &agent_command)
-            .env("BUZZ_ACP_AGENT_ARGS", agent_args.join(","));
-        if let Some(meta) = known_acp_runtime(&agent_command) {
-            for (key, value) in meta.default_env {
-                if std::env::var(key).is_err() {
-                    cmd.env(key, value);
-                }
-            }
-        }
-        // Mirror runtime spawn: internal builds may bake provider/model
-        // defaults. User-provided env below still wins.
-        crate::managed_agents::build_buzz_agent_provider_defaults(&mut cmd);
-        // User env layering — written LAST so it overrides any Buzz-set env above.
-        for (k, v) in &merged_env {
-            cmd.env(k, v);
-        }
-        cmd.stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output()
-            .map_err(|e| format!("failed to spawn buzz-acp models: {e}"))
-    })
-    .await
-    .map_err(|e| format!("model discovery task failed: {e}"))?
-    .map_err(|e: String| e)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Scrub any user-supplied env values before surfacing stderr to
-        // the frontend — persona/agent env_vars may carry API keys that
-        // a failing child process echoed back.
-        let stderr_redacted =
-            crate::managed_agents::redact_env_values_in(stderr.as_ref(), &env_for_redaction);
-        return Err(format!(
-            "buzz-acp models failed (exit {}): {stderr_redacted}",
-            output.status.code().unwrap_or(-1)
-        ));
-    }
-
-    let raw: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("failed to parse model JSON: {e}"))?;
-
-    Ok(normalize_agent_models(&raw, persisted_model))
-}
-
 /// Update mutable fields on an existing managed agent record.
 ///
 /// Does NOT auto-restart the agent. Runtime config changes (system prompt,
@@ -794,7 +779,7 @@ pub async fn update_managed_agent(
     state: State<'_, AppState>,
 ) -> Result<UpdateManagedAgentResponse, String> {
     // Phase 1: local save (synchronous, under lock)
-    let (summary, sync_params) = {
+    let (summary, sync_params, rollback) = {
         let _store_guard = state
             .managed_agents_store_lock
             .lock()
@@ -807,10 +792,11 @@ pub async fn update_managed_agent(
         let (_, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;
+        let previous_record = record.clone();
 
         let mut name_changed = false;
         if let Some(name_update) = input.name {
@@ -828,13 +814,6 @@ pub async fn update_managed_agent(
         }
         if let Some(prompt_update) = input.system_prompt {
             record.system_prompt = prompt_update;
-        }
-        if let Some(toolsets_update) = input.mcp_toolsets {
-            record.mcp_toolsets = toolsets_update
-                .as_deref()
-                .map(str::trim)
-                .filter(|v| !v.is_empty())
-                .map(str::to_string);
         }
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
@@ -878,6 +857,21 @@ pub async fn update_managed_agent(
         if let Some(env_vars) = input.env_vars {
             crate::managed_agents::validate_user_env_keys(&env_vars)?;
             record.env_vars = env_vars;
+        }
+
+        // Native provider/model fields are authoritative. Keep the typed marker
+        // derived for new records while retaining legacy typed records for
+        // non-native providers.
+        if record.provider.as_deref() == Some(crate::managed_agents::RELAY_MESH_PROVIDER_ID) {
+            let model_ref = record
+                .model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(crate::managed_agents::RELAY_MESH_AUTO_MODEL_ID)
+                .to_string();
+            record.model = Some(model_ref.clone());
+            record.relay_mesh = Some(crate::managed_agents::RelayMeshConfig { model_ref });
         }
 
         // Inbound author gate: merge patch onto current values, then validate
@@ -946,37 +940,39 @@ pub async fn update_managed_agent(
             let personas = load_personas(&app).unwrap_or_default();
             build_managed_agent_summary(&app, record, &runtimes, &personas)?
         };
-        (summary, sync_params)
+        let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
+        (summary, sync_params, rollback)
     }; // lock dropped here
 
     try_regenerate_nest(&app);
 
-    // Phase 2: relay profile sync (async, best-effort, outside lock)
-    let profile_sync_error =
-        if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
-            match sync_managed_agent_profile(
-                &state,
-                &relay_url,
-                &agent_keys,
-                &display_name,
-                avatar_url.as_deref(),
-                auth_tag.as_deref(),
-            )
-            .await
-            {
-                Ok(()) => None,
-                Err(e) => {
-                    eprintln!("buzz-desktop: relay profile sync failed after rename: {e}");
-                    Some(e)
-                }
-            }
-        } else {
-            None
-        };
+    // Phase 2: relay profile sync (async, outside lock). A rename is committed
+    // only when this succeeds; otherwise restore the complete pre-edit record
+    // so Desktop and the relay keep one authoritative name.
+    if let Some((agent_keys, relay_url, display_name, avatar_url, auth_tag)) = sync_params {
+        if let Err(sync_error) = sync_managed_agent_profile(
+            &state,
+            &relay_url,
+            &agent_keys,
+            &display_name,
+            avatar_url.as_deref(),
+            auth_tag.as_deref(),
+        )
+        .await
+        {
+            let rollback = rollback.ok_or_else(|| {
+                "missing local rollback state after relay profile sync failure".to_string()
+            })?;
+            rollback_failed_agent_update(&app, &state, &summary.pubkey, rollback)?;
+            return Err(format!(
+                "Agent rename failed because its relay profile could not be updated. No changes were saved: {sync_error}"
+            ));
+        }
+    }
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,
-        profile_sync_error,
+        profile_sync_error: None,
     })
 }
 
@@ -986,7 +982,7 @@ pub async fn update_managed_agent(
 ///
 /// Merges models from both ACP paths (stable configOptions + unstable SessionModelState),
 /// deduplicates by ID (stable takes precedence), and returns a unified list.
-fn normalize_agent_models(
+pub(super) fn normalize_agent_models(
     raw: &serde_json::Value,
     persisted_model: Option<String>,
 ) -> AgentModelsResponse {

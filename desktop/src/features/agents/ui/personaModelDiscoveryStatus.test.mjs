@@ -25,6 +25,40 @@ test("model discovery status names missing OpenAI-compatible credentials", () =>
   assert.match(status?.message ?? "", /OpenAI models/);
 });
 
+test("Buzz shared compute names the empty state and next action", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("no Buzz shared compute serving members are available"),
+    "relay-mesh",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /No members are sharing compute/);
+  assert.match(status?.message ?? "", /Settings > Compute/);
+});
+
+test("Buzz shared compute distinguishes relay lookup failures", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Buzz shared compute model discovery failed: relay offline"),
+    "relay-mesh",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /couldn't check shared compute/);
+  assert.match(status?.message ?? "", /relay connection/);
+});
+
+test("Buzz shared compute names a missing relay member roster", () => {
+  const status = formatModelDiscoveryErrorStatus(
+    new Error("Buzz shared compute is waiting for the current member roster"),
+    "relay-mesh",
+  );
+
+  assert.equal(status?.tone, "warning");
+  assert.match(status?.message ?? "", /waiting for the relay's member roster/);
+  assert.match(status?.message ?? "", /membership configuration/);
+  assert.doesNotMatch(status?.message ?? "", /relay connection/);
+});
+
 test("model discovery status stays quiet for missing Databricks defaults", () => {
   const status = formatModelDiscoveryErrorStatus(
     new Error("config: DATABRICKS_HOST required"),

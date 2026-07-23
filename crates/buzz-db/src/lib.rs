@@ -9,6 +9,8 @@
 //! - No FK references to partitioned tables.
 //! - Uses `sqlx::query()` (runtime) not `sqlx::query!()` (compile-time).
 
+/// Explicit deployment-global admin report reads.
+pub mod admin_moderation;
 /// API token storage and lookup.
 pub mod api_token;
 /// Relay-scoped archived identity persistence (NIP-IA).
@@ -31,12 +33,20 @@ pub mod migration;
 pub mod moderation;
 /// Monthly table partition management.
 pub mod partition;
+/// Buzz product-feedback sidecar persistence.
+pub mod product_feedback;
+/// Community-scoped push lease and durable wake-outbox persistence.
+pub mod push;
 /// Reaction persistence.
 pub mod reaction;
 /// Relay-level membership persistence (NIP-43).
 pub mod relay_members;
+/// Replica freshness fence for keyset-cursor read routing.
+pub mod replica_fence;
 /// Thread metadata persistence.
 pub mod thread;
+/// Per-community usage rollup queries for Prometheus gauges.
+pub mod usage;
 /// User profile persistence.
 pub mod user;
 /// Workflow, run, and approval persistence.
@@ -46,12 +56,39 @@ pub use error::{DbError, Result};
 pub use event::{EventQuery, ReactionEventInsertOutcome};
 
 use chrono::{DateTime, Utc};
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, QueryBuilder, Row};
+use sqlx::postgres::{PgConnection, PgPoolOptions};
+use sqlx::{Connection, PgPool, QueryBuilder, Row};
 use std::time::Duration;
 use uuid::Uuid;
 
 use buzz_core::{CommunityId, StoredEvent};
+
+fn event_replacement_lock_key(
+    community_id: CommunityId,
+    kind: i32,
+    pubkey: &[u8],
+    coordinate: Option<&[u8]>,
+) -> i64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let kind_bytes = kind.to_le_bytes();
+    for bytes in [
+        community_id.as_uuid().as_bytes().as_slice(),
+        kind_bytes.as_slice(),
+        pubkey,
+    ] {
+        for byte in bytes {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    if let Some(coordinate) = coordinate {
+        for byte in coordinate {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash as i64
+}
 
 /// Extract p-tag mentions from an event and insert into the `event_mentions` table.
 ///
@@ -135,6 +172,19 @@ pub struct Db {
     pub(crate) pool: PgPool,
     /// Maximum connections configured for this pool (from [`DbConfig::max_connections`]).
     pub(crate) max_connections: u32,
+    /// Optional read-replica pool (from [`DbConfig::read_database_url`]).
+    ///
+    /// `None` means no replica is configured and every read routes to the
+    /// writer pool — the pre-replica behavior. Only lag-tolerant reads may
+    /// route here (see [`Db::read`]); locks, transactions, and anything
+    /// consistency-critical stays on `pool`.
+    pub(crate) read_pool: Option<PgPool>,
+    /// Freshness fence gating cursor-page routing to the replica.
+    ///
+    /// Starts closed; a background probe ([`replica_fence::run_probe`])
+    /// advances it after each verified writer→replica LSN handshake. When
+    /// closed or stale, every cursor page routes to the writer.
+    pub(crate) fence: std::sync::Arc<replica_fence::ReplicaFence>,
 }
 
 /// Snapshot of Postgres connection pool utilisation.
@@ -148,11 +198,36 @@ pub struct DbPoolStats {
     pub max: u32,
 }
 
+/// Owns the detached Postgres session holding the relay usage-metrics advisory lock.
+///
+/// The connection deliberately does not return to the main pool: session advisory
+/// locks must remain bound to this exact physical connection, and the poller
+/// pings it before each leader-only collection tick.
+pub struct UsageMetricsLeader {
+    connection: PgConnection,
+}
+
+impl UsageMetricsLeader {
+    /// Returns whether the lock-owning session is still reachable.
+    ///
+    /// Bounded to 5 seconds — a blackholed connection (no RST) would otherwise
+    /// stall the entire poller tick until the OS TCP timeout.
+    pub async fn is_live(&mut self) -> bool {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.connection.ping())
+            .await
+            .is_ok_and(|r| r.is_ok())
+    }
+}
+
 /// Configuration for the Postgres connection pool.
 #[derive(Debug, Clone)]
 pub struct DbConfig {
     /// Postgres connection URL (usually sourced from `DATABASE_URL`).
     pub database_url: String,
+    /// Optional read-replica connection URL (usually sourced from
+    /// `READ_DATABASE_URL`, e.g. an Aurora `cluster-ro-` endpoint). `None`
+    /// disables replica routing: [`Db::read`] falls back to the writer pool.
+    pub read_database_url: Option<String>,
     /// Maximum number of connections in the pool.
     pub max_connections: u32,
     /// Minimum number of idle connections to maintain.
@@ -172,6 +247,7 @@ impl Default for DbConfig {
     fn default() -> Self {
         Self {
             database_url: "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string(), // sadscan:disable np.postgres.1
+            read_database_url: None,
             max_connections: 20,
             min_connections: 2,
             acquire_timeout_secs: 3,
@@ -210,6 +286,17 @@ pub struct CreatedCommunityRecord {
     pub host: String,
 }
 
+/// Result of atomically creating a community with its initial owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateCommunityWithOwnerResult {
+    /// The community was created, or an identical retried create found it.
+    Created(CreatedCommunityRecord),
+    /// The host already belongs to another owner.
+    HostExists,
+    /// The intended owner already owns the maximum number of communities.
+    LimitReached,
+}
+
 /// Community row returned by operator-plane ownership reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedCommunityRecord {
@@ -219,6 +306,28 @@ pub struct OwnedCommunityRecord {
     pub host: String,
     /// When the community row was created.
     pub created_at: DateTime<Utc>,
+    /// When the community was archived; absent while active.
+    pub archived_at: Option<DateTime<Utc>>,
+}
+
+/// Community row returned by an owner-authorized archive operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchivedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Reserved canonical host.
+    pub host: String,
+    /// Durable first-archive timestamp.
+    pub archived_at: DateTime<Utc>,
+}
+
+/// Community row returned by an owner-authorized unarchive operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnarchivedCommunityRecord {
+    /// Stable server-resolved community id.
+    pub id: CommunityId,
+    /// Reserved canonical host restored to active admission.
+    pub host: String,
 }
 
 /// Token summary returned by [`Db::list_active_tokens`].
@@ -240,19 +349,54 @@ pub struct TokenSummary {
 
 impl Db {
     /// Creates a new `Db` by connecting a Postgres pool with the given config.
+    ///
+    /// When `config.read_database_url` is set, a second pool with the same
+    /// sizing is connected to it for lag-tolerant reads (see [`Db::read`]).
+    ///
+    /// The writer pool arms the commit-time `created_at` floor guard
+    /// (migration 0021) on every connection by setting the
+    /// `buzz.created_at_floor` GUC — this is what makes the replica fence
+    /// proof hold for every insert path that goes through this pool.
     pub async fn new(config: &DbConfig) -> Result<Self> {
-        let pool = PgPoolOptions::new()
+        let pool = Self::connect_pool(config, &config.database_url, true).await?;
+        let read_pool = match &config.read_database_url {
+            Some(url) => Some(Self::connect_pool(config, url, false).await?),
+            None => None,
+        };
+        Ok(Self {
+            pool,
+            max_connections: config.max_connections,
+            read_pool,
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+        })
+    }
+
+    /// Connect one pool with the sizing knobs from `config`.
+    ///
+    /// `arm_floor_guard` sets the `buzz.created_at_floor` session GUC on
+    /// every connection, arming the deferred commit-time trigger from
+    /// migration 0021. Writer pools must arm it; replica pools are read-only
+    /// so the trigger never fires there.
+    async fn connect_pool(config: &DbConfig, url: &str, arm_floor_guard: bool) -> Result<PgPool> {
+        let mut options = PgPoolOptions::new()
             .max_connections(config.max_connections)
             .min_connections(config.min_connections)
             .acquire_timeout(Duration::from_secs(config.acquire_timeout_secs))
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
-            .idle_timeout(Duration::from_secs(config.idle_timeout_secs))
-            .connect(&config.database_url)
-            .await?;
-        Ok(Self {
-            pool,
-            max_connections: config.max_connections,
-        })
+            .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
+        if arm_floor_guard {
+            options = options.after_connect(|conn, _meta| {
+                Box::pin(async move {
+                    // `SET` cannot take bind parameters; `set_config` can.
+                    sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
+                        .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                        .execute(conn)
+                        .await?;
+                    Ok(())
+                })
+            });
+        }
+        Ok(options.connect(url).await?)
     }
 
     /// Creates a `Db` from an existing `PgPool` (useful in tests).
@@ -260,7 +404,76 @@ impl Db {
         Self {
             max_connections: pool.options().get_max_connections(),
             pool,
+            read_pool: None,
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         }
+    }
+
+    /// Creates a `Db` from distinct writer and read pools (useful in tests,
+    /// where a second database stands in for a lagged replica).
+    ///
+    /// The fence starts closed; tests that want cursor pages served by the
+    /// fake replica must open it via
+    /// [`replica_fence::ReplicaFence::force_open_for_tests`] (see
+    /// [`Db::fence`]).
+    pub fn from_pools(pool: PgPool, read_pool: PgPool) -> Self {
+        Self {
+            max_connections: pool.options().get_max_connections(),
+            pool,
+            read_pool: Some(read_pool),
+            fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
+        }
+    }
+
+    /// The freshness fence gating replica routing (see [`replica_fence`]).
+    pub fn fence(&self) -> &std::sync::Arc<replica_fence::ReplicaFence> {
+        &self.fence
+    }
+
+    /// Verify the floor guard end-to-end, then spawn the background fence
+    /// probe. Returns `Ok(false)` when no replica is configured.
+    ///
+    /// Ordering matters (Perci, PR #2084 review): this must run **after**
+    /// the migration decision. On a relay with `BUZZ_AUTO_MIGRATE` off, the
+    /// writer pool arms the GUC regardless, but if migration 0021 has not
+    /// been applied there is no trigger enforcing it — and an LSN probe
+    /// would open the fence over an unenforced floor. So the probe is gated
+    /// on an unconditional two-part verification against the live schema:
+    /// catalog shape ([`replica_fence::verify_floor_guard_catalog`]) and
+    /// observed semantics through this exact pool
+    /// ([`replica_fence::verify_floor_guard_behavior`]).
+    ///
+    /// On any verification failure the probe is never spawned and the fence
+    /// stays closed: every cursor page routes to the writer. The relay keeps
+    /// serving — degraded capacity, never holes.
+    pub async fn spawn_fence_probe(&self) -> Result<bool> {
+        let Some(read_pool) = &self.read_pool else {
+            return Ok(false);
+        };
+        replica_fence::verify_floor_guard_catalog(&self.pool).await?;
+        replica_fence::verify_floor_guard_behavior(&self.pool).await?;
+        tokio::spawn(replica_fence::run_probe(
+            self.pool.clone(),
+            read_pool.clone(),
+            std::sync::Arc::clone(&self.fence),
+        ));
+        Ok(true)
+    }
+
+    /// The pool for lag-tolerant reads: the read replica when configured,
+    /// otherwise the writer pool.
+    ///
+    /// Routing contract — a query may use this pool only when a stale (bounded
+    /// replication lag) result is acceptable to its caller. Keyset-cursor
+    /// pagination over immutable history qualifies; head-of-channel fetches,
+    /// auth/membership checks, locks, and anything inside a transaction do not.
+    pub fn read(&self) -> &PgPool {
+        self.read_pool.as_ref().unwrap_or(&self.pool)
+    }
+
+    /// Whether a distinct read-replica pool is configured.
+    pub fn has_read_pool(&self) -> bool {
+        self.read_pool.is_some()
     }
 
     /// Run pending database migrations.
@@ -286,6 +499,148 @@ impl Db {
         }
     }
 
+    /// Pool utilisation stats for the read-replica pool, when configured.
+    pub fn read_pool_stats(&self) -> Option<DbPoolStats> {
+        self.read_pool.as_ref().map(|p| DbPoolStats {
+            size: p.size(),
+            idle: p.num_idle() as u32,
+            max: self.max_connections,
+        })
+    }
+
+    /// Try to acquire the detached session advisory lock for relay usage metrics.
+    ///
+    /// The returned guard owns the exact connection that acquired the lock. It is
+    /// detached from the shared pool so a stable leader neither returns a locked
+    /// session to other callers nor permanently consumes a pool slot. Dropping the
+    /// guard closes the connection and releases the session-scoped lock.
+    pub async fn try_lock_usage_metrics(
+        &self,
+        lock_key: i64,
+    ) -> Result<Option<UsageMetricsLeader>> {
+        let mut connection = self.pool.acquire().await?;
+        let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_key)
+            .fetch_one(&mut *connection)
+            .await?;
+        if acquired {
+            Ok(Some(UsageMetricsLeader {
+                connection: connection.detach(),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// List reports for the deployment-global read-only admin plane.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn admin_list_reports(
+        &self,
+        community_id: Option<Uuid>,
+        status: Option<&str>,
+        report_type: Option<&str>,
+        target_kind: Option<&str>,
+        after: Option<DateTime<Utc>>,
+        before: Option<DateTime<Utc>>,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+        limit: i64,
+    ) -> Result<Vec<admin_moderation::AdminReport>> {
+        admin_moderation::list_reports(
+            &self.pool,
+            community_id,
+            status,
+            report_type,
+            target_kind,
+            after,
+            before,
+            cursor,
+            limit,
+        )
+        .await
+    }
+
+    /// Fetch one report for the deployment-global read-only admin plane.
+    pub async fn admin_get_report(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<admin_moderation::AdminReport>> {
+        admin_moderation::get_report(&self.pool, id).await
+    }
+
+    /// List feedback for the deployment-global read-only admin plane.
+    pub async fn admin_list_feedback(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<admin_moderation::AdminFeedback>> {
+        admin_moderation::list_feedback(&self.pool, limit).await
+    }
+
+    /// Fetch one feedback submission for the deployment-global admin plane.
+    pub async fn admin_get_feedback(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<admin_moderation::AdminFeedback>> {
+        admin_moderation::get_feedback(&self.pool, id).await
+    }
+
+    /// Return total number of communities on this relay.
+    pub async fn usage_community_count(&self) -> Result<i64> {
+        usage::community_count(&self.pool).await
+    }
+
+    /// Return per-community user counts split by human/agent.
+    pub async fn usage_user_counts(&self) -> Result<Vec<usage::CommunityUserCounts>> {
+        usage::user_counts(&self.pool).await
+    }
+
+    /// Return per-community channel counts by type.
+    pub async fn usage_channel_counts(&self) -> Result<Vec<usage::CommunityChannelCount>> {
+        usage::channel_counts(&self.pool).await
+    }
+
+    /// Return per-community kind=9 message counts.
+    pub async fn usage_message_counts(&self) -> Result<Vec<usage::CommunityMessageCount>> {
+        usage::message_counts(&self.pool).await
+    }
+
+    /// Return per-community relay-member counts by role.
+    pub async fn usage_relay_member_counts(&self) -> Result<Vec<usage::CommunityMemberCount>> {
+        usage::relay_member_counts(&self.pool).await
+    }
+
+    /// Return per-community workflow counts by status.
+    pub async fn usage_workflow_counts(&self) -> Result<Vec<usage::CommunityWorkflowCount>> {
+        usage::workflow_counts(&self.pool).await
+    }
+
+    /// Return per-community git-repo counts.
+    pub async fn usage_git_repo_counts(&self) -> Result<Vec<usage::CommunityGitRepoCount>> {
+        usage::git_repo_counts(&self.pool).await
+    }
+
+    /// Return per-community distinct active-user counts for a given SQL interval.
+    ///
+    /// `interval_sql` must be a trusted literal such as `"1 day"` or `"7 days"`.
+    pub async fn usage_active_user_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveUsers>> {
+        usage::active_user_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return per-community active-channel counts for a given SQL interval.
+    pub async fn usage_active_channel_counts(
+        &self,
+        interval_sql: &'static str,
+    ) -> Result<Vec<usage::CommunityActiveChannels>> {
+        usage::active_channel_counts(&self.pool, interval_sql).await
+    }
+
+    /// Return all community id → host mappings.
+    pub async fn usage_community_hosts(&self) -> Result<Vec<usage::CommunityHost>> {
+        usage::community_hosts(&self.pool).await
+    }
+
     /// Begin a database transaction for atomic multi-statement operations.
     ///
     /// Returns a `'static` transaction because `PgPool` is `Arc`-backed internally.
@@ -307,6 +662,7 @@ impl Db {
             SELECT id, host
             FROM communities
             WHERE lower(host) = lower($1)
+              AND archived_at IS NULL
             "#,
         )
         .bind(normalized_host)
@@ -325,6 +681,35 @@ impl Db {
         .transpose()
     }
 
+    /// Returns whether a community id still exists in the active lifecycle state.
+    pub async fn is_community_active(&self, community_id: CommunityId) -> Result<bool> {
+        let active = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM communities WHERE id = $1 AND archived_at IS NULL)",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active)
+    }
+
+    /// Returns a community by host regardless of lifecycle state. Operator-plane only.
+    pub async fn lookup_community_by_host_for_management(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        let row = sqlx::query("SELECT id, host FROM communities WHERE lower(host) = lower($1)")
+            .bind(normalized_host)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(|row| {
+            Ok(CommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+            })
+        })
+        .transpose()
+    }
+
     /// Lists communities where `owner_pubkey` currently holds the `owner` role.
     ///
     /// This is an operator-plane helper, not a tenant-scoped data-plane read:
@@ -336,7 +721,7 @@ impl Db {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let rows = sqlx::query(
             r#"
-            SELECT c.id, c.host, c.created_at
+            SELECT c.id, c.host, c.created_at, c.archived_at
             FROM communities c
             JOIN relay_members rm ON rm.community_id = c.id
             WHERE rm.pubkey = $1
@@ -353,10 +738,12 @@ impl Db {
                 let id: Uuid = row.try_get("id")?;
                 let host: String = row.try_get("host")?;
                 let created_at: DateTime<Utc> = row.try_get("created_at")?;
+                let archived_at: Option<DateTime<Utc>> = row.try_get("archived_at")?;
                 Ok(OwnedCommunityRecord {
                     id: CommunityId::from_uuid(id),
                     host,
                     created_at,
+                    archived_at,
                 })
             })
             .collect()
@@ -378,6 +765,7 @@ impl Db {
             SELECT host
             FROM communities
             WHERE id = $1
+              AND archived_at IS NULL
             "#,
         )
         .bind(community_id.as_uuid())
@@ -468,18 +856,24 @@ impl Db {
 
     /// Atomically creates a community and its initial owner.
     ///
-    /// Returns the existing row when the normalized host already has the same
-    /// current owner, making ambiguous create retries naturally idempotent.
-    /// Returns `None` when the host exists with a different (or missing) owner.
-    /// The initial host and owner inserts share one transaction, so callers
-    /// never observe a partially provisioned community or rotate an owner.
+    /// Holds a per-owner advisory lock while enforcing the ownership limit.
+    /// Identical create retries return the original record; host collisions and
+    /// limit failures remain distinguishable to the operator API.
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
         owner_pubkey: &str,
-    ) -> Result<Option<CreatedCommunityRecord>> {
+    ) -> Result<CreateCommunityWithOwnerResult> {
         let owner_pubkey = owner_pubkey.to_ascii_lowercase();
         let mut tx = self.pool.begin().await?;
+
+        // Serialize on the owner pubkey so concurrent creates to the same
+        // owner cannot both pass the ownership count check.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(relay_members::owner_count_advisory_lock_key(&owner_pubkey))
+            .execute(&mut *tx)
+            .await?;
+
         let row = sqlx::query(
             r#"
             INSERT INTO communities (host)
@@ -495,6 +889,20 @@ impl Db {
         let (id, host) = if let Some(row) = row {
             let id: Uuid = row.try_get("id")?;
             let host: String = row.try_get("host")?;
+
+            // Enforce the limit before inserting the new owner row.
+            let owned_count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM relay_members WHERE pubkey = $1 AND role = 'owner'",
+            )
+            .bind(&owner_pubkey)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            if owned_count >= relay_members::MAX_COMMUNITIES_PER_OWNER {
+                tx.rollback().await?;
+                return Ok(CreateCommunityWithOwnerResult::LimitReached);
+            }
+
             sqlx::query(
                 "INSERT INTO relay_members (community_id, pubkey, role, added_by) VALUES ($1, $2, 'owner', NULL)",
             )
@@ -512,6 +920,7 @@ impl Db {
                 WHERE lower(c.host) = lower($1)
                   AND lower(rm.pubkey) = lower($2)
                   AND rm.role = 'owner'
+                  AND c.archived_at IS NULL
                 "#,
             )
             .bind(normalized_host)
@@ -520,16 +929,80 @@ impl Db {
             .await?;
             let Some(existing) = existing else {
                 tx.rollback().await?;
-                return Ok(None);
+                return Ok(CreateCommunityWithOwnerResult::HostExists);
             };
             (existing.try_get("id")?, existing.try_get("host")?)
         };
 
         tx.commit().await?;
-        Ok(Some(CreatedCommunityRecord {
-            id: CommunityId::from_uuid(id),
-            host,
-        }))
+        Ok(CreateCommunityWithOwnerResult::Created(
+            CreatedCommunityRecord {
+                id: CommunityId::from_uuid(id),
+                host,
+            },
+        ))
+    }
+
+    /// Idempotently archives a community when the asserted pubkey is its current owner.
+    pub async fn archive_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+        protected_deployment_host: &str,
+    ) -> Result<Option<ArchivedCommunityRecord>> {
+        let row = sqlx::query(
+            r#"UPDATE communities c
+               SET archived_at = COALESCE(c.archived_at, now())
+               FROM relay_members rm
+               WHERE lower(c.host) = lower($1)
+                 AND rm.community_id = c.id
+                 AND lower(rm.pubkey) = lower($2)
+                 AND rm.role = 'owner'
+                 AND lower(c.host) <> lower($3)
+               RETURNING c.id, c.host, c.archived_at"#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .bind(protected_deployment_host)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ArchivedCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+                archived_at: row.try_get("archived_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Idempotently restores a community when the asserted pubkey is its current owner.
+    pub async fn unarchive_community_owned_by(
+        &self,
+        normalized_host: &str,
+        owner_pubkey: &str,
+    ) -> Result<Option<UnarchivedCommunityRecord>> {
+        let row = sqlx::query(
+            r#"UPDATE communities c
+               SET archived_at = NULL
+               FROM relay_members rm
+               WHERE lower(c.host) = lower($1)
+                 AND rm.community_id = c.id
+                 AND lower(rm.pubkey) = lower($2)
+                 AND rm.role = 'owner'
+               RETURNING c.id, c.host"#,
+        )
+        .bind(normalized_host)
+        .bind(owner_pubkey)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(UnarchivedCommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+            })
+        })
+        .transpose()
     }
 
     /// Returns the community that owns a channel, if the channel exists.
@@ -747,6 +1220,161 @@ impl Db {
         event::get_events_by_ids(&self.pool, community_id, ids).await
     }
 
+    /// Exclusively claim a batch of due matcher jobs from one community.
+    pub async fn claim_due_push_match_batch(
+        &self,
+        limit: i64,
+        lease_until: DateTime<Utc>,
+    ) -> Result<Option<push::ClaimedMatchBatch>> {
+        push::claim_due_match_batch(&self.pool, limit, lease_until).await
+    }
+
+    /// Load active endpoint-enabled leases eligible for push matching.
+    pub async fn active_push_match_leases(
+        &self,
+        community: CommunityId,
+    ) -> Result<Vec<push::MatchLease>> {
+        push::active_match_leases(&self.pool, community).await
+    }
+
+    /// Complete matcher jobs from one claimed batch while the fence holds.
+    pub async fn complete_push_match_batch(
+        &self,
+        community: CommunityId,
+        claim_id: uuid::Uuid,
+        event_ids: &[Vec<u8>],
+    ) -> Result<u64> {
+        push::complete_match_batch(&self.pool, community, claim_id, event_ids).await
+    }
+
+    /// Release fenced matcher claims from one batch for retry.
+    pub async fn retry_push_match_batch(
+        &self,
+        community: CommunityId,
+        claim_id: uuid::Uuid,
+        event_ids: &[Vec<u8>],
+        next: DateTime<Utc>,
+    ) -> Result<u64> {
+        push::retry_match_batch(&self.pool, community, claim_id, event_ids, next).await
+    }
+
+    /// Delete exhausted matcher jobs (periodic sweep, off the claim path).
+    pub async fn reap_exhausted_push_matches(&self) -> Result<u64> {
+        push::reap_exhausted_matches(&self.pool).await
+    }
+
+    /// Idempotently enqueue a wake for a matched lease and event.
+    pub async fn enqueue_push_wake(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        wake: push::NewWake<'_>,
+    ) -> Result<push::EnqueueWakeOutcome> {
+        push::enqueue_wake(&self.pool, community, author, installation_id, wake).await
+    }
+
+    /// Set-wise [`Self::enqueue_push_wake`]: one transaction per batch.
+    pub async fn enqueue_push_wakes(
+        &self,
+        community: CommunityId,
+        requests: &[push::WakeRequest],
+    ) -> Result<Vec<push::EnqueueWakeOutcome>> {
+        push::enqueue_wakes(&self.pool, community, requests).await
+    }
+
+    /// Exclusively claim due wake jobs for one community.
+    pub async fn claim_due_push_wakes(
+        &self,
+        community: CommunityId,
+        limit: i64,
+        lease_until: DateTime<Utc>,
+    ) -> Result<Vec<push::ClaimedWake>> {
+        push::claim_due_wakes(&self.pool, community, limit, lease_until).await
+    }
+
+    /// Revalidate a wake's claim, source event, and current lease before send.
+    pub async fn revalidate_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<push::RevalidateWakeOutcome> {
+        push::revalidate_wake_for_send(&self.pool, community, id, claim_id).await
+    }
+
+    /// Mark a fenced wake claim delivered.
+    pub async fn complete_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<bool> {
+        push::complete_wake(&self.pool, community, id, claim_id).await
+    }
+
+    /// Release a fenced wake claim for retry at the supplied time.
+    pub async fn retry_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+        next: DateTime<Utc>,
+    ) -> Result<bool> {
+        push::retry_wake(&self.pool, community, id, claim_id, next).await
+    }
+
+    /// Mark a fenced wake claim terminally failed.
+    pub async fn fail_push_wake(
+        &self,
+        community: CommunityId,
+        id: Uuid,
+        claim_id: Uuid,
+    ) -> Result<bool> {
+        push::fail_wake(&self.pool, community, id, claim_id).await
+    }
+
+    /// Disable an endpoint only if the specified lease generation is current.
+    pub async fn disable_push_endpoint(
+        &self,
+        community: CommunityId,
+        author: &[u8],
+        installation_id: &str,
+        generation: i64,
+    ) -> Result<bool> {
+        push::disable_endpoint_generation(
+            &self.pool,
+            community,
+            author,
+            installation_id,
+            generation,
+        )
+        .await
+    }
+
+    /// Atomically persist a validated kind:30350 event and its effective lease.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn accept_push_lease_event(
+        &self,
+        community: CommunityId,
+        event: &nostr::Event,
+        installation_id: &str,
+        version: push::LeaseVersion<'_>,
+        active: Option<push::ActiveLease<'_>>,
+        max_active_leases: i64,
+    ) -> Result<push::AcceptLeaseOutcome> {
+        push::accept_lease_event(
+            &self.pool,
+            community,
+            event,
+            installation_id,
+            version,
+            active,
+            max_active_leases,
+        )
+        .await
+    }
+
     /// Atomically insert an event AND its thread metadata in a single transaction.
     pub async fn insert_event_with_thread_metadata(
         &self,
@@ -928,6 +1556,17 @@ impl Db {
         channel::is_member(&self.pool, community_id, channel_id, pubkey).await
     }
 
+    /// Return the active (channel, pubkey) membership pairs among the given
+    /// sets, in one statement.
+    pub async fn membership_pairs(
+        &self,
+        community_id: CommunityId,
+        channel_ids: &[Uuid],
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<(Uuid, Vec<u8>)>> {
+        channel::membership_pairs(&self.pool, community_id, channel_ids, pubkeys).await
+    }
+
     /// Returns all active members of a channel.
     pub async fn get_members(
         &self,
@@ -1082,15 +1721,6 @@ impl Db {
         channel::get_member_role(&self.pool, community_id, channel_id, pubkey).await
     }
 
-    /// Bump the TTL deadline for an ephemeral channel after a new message.
-    pub async fn bump_ttl_deadline(
-        &self,
-        community_id: CommunityId,
-        channel_id: Uuid,
-    ) -> Result<()> {
-        channel::bump_ttl_deadline(&self.pool, community_id, channel_id).await
-    }
-
     /// Archive ephemeral channels whose TTL deadline has passed.
     pub async fn reap_expired_ephemeral_channels(
         &self,
@@ -1154,7 +1784,11 @@ impl Db {
     }
 
     /// Ensure a user record exists (upsert).
-    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<()> {
+    ///
+    /// Returns `true` if a new row was inserted (first time), `false` if it
+    /// already existed. Callers use the `true` return to increment
+    /// `buzz_users_created_total`.
+    pub async fn ensure_user(&self, community_id: CommunityId, pubkey: &[u8]) -> Result<bool> {
         user::ensure_user(&self.pool, community_id, pubkey).await
     }
 
@@ -1353,6 +1987,20 @@ impl Db {
     }
 
     /// Fetch replies under a root event.
+    ///
+    /// Routing: the head fetch (`cursor: None`) always reads the writer.
+    /// Cursor-bearing pages may read the replica pool when one is configured
+    /// AND the freshness fence is open ([`replica_fence`]). Thread pagination
+    /// walks forward from oldest to newest, so a replica page is served only
+    /// when it is provably complete:
+    ///
+    /// - an under-`limit` page is a candidate terminal page — the client
+    ///   treats it as EOF, so it is re-run on the writer to keep the EOF
+    ///   decision authoritative (a lagged replica could truncate the tail);
+    /// - a full page whose newest row exceeds the fence could straddle a row
+    ///   the replica has not replayed (commit order is not `created_at`
+    ///   order), so it is also re-run on the writer. Only a full page that
+    ///   sits entirely at or below the fence is served from the replica.
     pub async fn get_thread_replies(
         &self,
         community_id: CommunityId,
@@ -1361,6 +2009,26 @@ impl Db {
         limit: u32,
         cursor: Option<&[u8]>,
     ) -> Result<Vec<thread::ThreadReply>> {
+        if cursor.is_some() && self.has_read_pool() && self.fence.verified_through().is_some() {
+            let replies = thread::get_thread_replies(
+                self.read(),
+                community_id,
+                root_event_id,
+                depth_limit,
+                limit,
+                cursor,
+            )
+            .await?;
+            let full = replies.len() >= limit as usize;
+            let below_fence = replies
+                .last()
+                .is_some_and(|tail| self.fence.covers(tail.created_at));
+            if full && below_fence {
+                return Ok(replies);
+            }
+            // Candidate terminal page, or page reaching above the fence —
+            // verify against the writer.
+        }
         thread::get_thread_replies(
             &self.pool,
             community_id,
@@ -1382,6 +2050,16 @@ impl Db {
     }
 
     /// One channel window: top-level rows + summaries + server `has_more`.
+    ///
+    /// Routing: the head fetch (`cursor: None`) always reads the writer — it
+    /// must include just-committed events. A cursor-bearing page scrolls
+    /// *backward* into history bounded above by the cursor timestamp
+    /// (`created_at < ts`, or `= ts` with the id tiebreak), so it may read
+    /// the replica when one is configured AND the freshness fence covers the
+    /// cursor timestamp: every row the page could contain is then provably
+    /// replayed on the replica ([`replica_fence`]). Pages whose cursor
+    /// reaches above the fence — the freshest sliver of history — stay on
+    /// the writer.
     pub async fn get_channel_window(
         &self,
         community_id: CommunityId,
@@ -1390,15 +2068,11 @@ impl Db {
         cursor: Option<(DateTime<Utc>, Vec<u8>)>,
         kind_filter: Option<&[u32]>,
     ) -> Result<thread::ChannelWindow> {
-        thread::get_channel_window(
-            &self.pool,
-            community_id,
-            channel_id,
-            limit,
-            cursor,
-            kind_filter,
-        )
-        .await
+        let pool = match &cursor {
+            Some((ts, _)) if self.has_read_pool() && self.fence.covers(*ts) => self.read(),
+            _ => &self.pool,
+        };
+        thread::get_channel_window(pool, community_id, channel_id, limit, cursor, kind_filter).await
     }
 
     /// Look up a single thread_metadata row by event_id.
@@ -2265,6 +2939,30 @@ impl Db {
         relay_members::add_relay_member(&self.pool, community, pubkey, role, added_by).await
     }
 
+    /// Claims relay membership via an invite and atomically persists the
+    /// accepted policy version when a policy is configured.
+    pub async fn claim_relay_membership(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        role: &str,
+        policy_version: Option<&str>,
+    ) -> Result<bool> {
+        relay_members::claim_relay_membership(&self.pool, community, pubkey, role, policy_version)
+            .await
+    }
+
+    /// Returns whether a member has persisted acceptance evidence for a policy version.
+    pub async fn has_join_policy_acceptance(
+        &self,
+        community: CommunityId,
+        pubkey: &str,
+        policy_version: &str,
+    ) -> Result<bool> {
+        relay_members::has_join_policy_acceptance(&self.pool, community, pubkey, policy_version)
+            .await
+    }
+
     /// Removes a relay member from `community` atomically, refusing to delete the owner.
     pub async fn remove_relay_member(
         &self,
@@ -2303,12 +3001,48 @@ impl Db {
         relay_members::bootstrap_owner(&self.pool, community, owner_pubkey).await
     }
 
+    /// Atomically transfers ownership of `community` to `new_owner_pubkey`,
+    /// demoting the previous owner(s) to `member`. Verifies
+    /// `expected_owner_pubkey` matches the current owner inside the same
+    /// transaction to prevent stale-owner races.
+    pub async fn transfer_ownership(
+        &self,
+        community: CommunityId,
+        new_owner_pubkey: &str,
+        expected_owner_pubkey: &str,
+    ) -> Result<relay_members::TransferResult> {
+        relay_members::transfer_ownership(
+            &self.pool,
+            community,
+            new_owner_pubkey,
+            expected_owner_pubkey,
+        )
+        .await
+    }
+
     /// Migrates existing `pubkey_allowlist` entries into `relay_members` for `community`.
     ///
     /// Idempotent — uses `ON CONFLICT DO NOTHING`. Returns the number of rows
     /// inserted, or 0 if the `pubkey_allowlist` table doesn't exist.
     pub async fn backfill_from_allowlist(&self, community: CommunityId) -> Result<u64> {
         relay_members::backfill_from_allowlist(&self.pool, community).await
+    }
+
+    /// Sidecar an accepted product-feedback event, idempotent by event id.
+    pub async fn insert_product_feedback(
+        &self,
+        community: CommunityId,
+        feedback: product_feedback::NewProductFeedback<'_>,
+    ) -> Result<Uuid> {
+        product_feedback::insert(&self.pool, community, feedback).await
+    }
+
+    /// List product feedback across the deployment, newest first.
+    pub async fn list_product_feedback(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<product_feedback::ProductFeedbackRecord>> {
+        product_feedback::list(&self.pool, limit).await
     }
 
     /// Insert a tenant-scoped NIP-56 report row, idempotent by report event id.
@@ -2581,31 +3315,13 @@ impl Db {
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
             .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
 
-        // Stable advisory-lock key: hash (kind, pubkey, channel_id) to i64.
-        // Uses FNV-1a for determinism — Rust's DefaultHasher is NOT stable across processes.
-        // Collisions cause extra serialization, not incorrect behavior.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
-            for b in community_id.as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3); // FNV prime
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            if let Some(ch) = channel_id {
-                for b in ch.as_bytes() {
-                    h ^= *b as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
-            }
-            h as i64
-        };
+        // Collisions only cause extra serialization; they cannot change behavior.
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            channel_id.as_ref().map(|id| id.as_bytes().as_slice()),
+        );
 
         let mut tx = self.pool.begin().await?;
 
@@ -2713,12 +3429,191 @@ impl Db {
         ))
     }
 
+    /// Returns whether the relay-authored NIP-43 snapshot is absent or differs
+    /// from the canonical membership rows for `community_id`.
+    ///
+    /// Snapshot and canonical rows are compared directly rather than by
+    /// timestamp: relay membership events use whole-second Nostr timestamps,
+    /// and multiple mutations within one second must still be repaired.
+    pub async fn nip43_membership_snapshot_needs_reconciliation(
+        &self,
+        community_id: CommunityId,
+        relay_pubkey: &nostr::PublicKey,
+    ) -> Result<bool> {
+        let snapshot = self
+            .query_events(&crate::event::EventQuery {
+                kinds: Some(vec![buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32]),
+                pubkey: Some(relay_pubkey.to_bytes().to_vec()),
+                global_only: true,
+                limit: Some(1),
+                ..crate::event::EventQuery::for_community(community_id)
+            })
+            .await?
+            .into_iter()
+            .next();
+        let members = self.list_relay_members(community_id).await?;
+
+        let Some(snapshot) = snapshot else {
+            return Ok(true);
+        };
+        let mut snapshot_members = snapshot
+            .event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.first().map(String::as_str) == Some("member") && parts.len() >= 3)
+                    .then(|| (parts[1].to_ascii_lowercase(), parts[2].clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut canonical_members = members
+            .into_iter()
+            .map(|member| (member.pubkey.to_ascii_lowercase(), member.role))
+            .collect::<Vec<_>>();
+        snapshot_members.sort_unstable();
+        canonical_members.sort_unstable();
+
+        Ok(snapshot_members != canonical_members)
+    }
+
+    /// Atomically publish a NIP-43 membership snapshot under a single
+    /// transaction-scoped advisory lock.
+    ///
+    /// This method acquires the per-community snapshot lock, reads the
+    /// current membership, builds the event, and replaces the prior snapshot
+    /// — all inside one transaction on one database connection. This
+    /// prevents the stale-snapshot race where a concurrent publication reads
+    /// older state and overwrites a newer snapshot by arrival order.
+    ///
+    pub async fn publish_nip43_membership_locked(
+        &self,
+        community_id: CommunityId,
+        relay_keypair: &nostr::Keys,
+    ) -> Result<(StoredEvent, bool, usize)> {
+        use nostr::{EventBuilder, Kind, Tag};
+
+        let kind_i32 = buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32;
+        let pubkey_bytes = relay_keypair.public_key().to_bytes();
+
+        let lock_key =
+            event_replacement_lock_key(community_id, kind_i32, pubkey_bytes.as_slice(), None);
+
+        let mut tx = self.pool.begin().await?;
+
+        // Acquire the per-community snapshot lock BEFORE reading members.
+        // This serializes the entire read-build-write cycle: a concurrent
+        // publication will block here until our transaction commits, then
+        // read the updated membership state.
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(&mut *tx)
+            .await?;
+
+        // Read current members inside the locked transaction.
+        let rows = sqlx::query(
+            "SELECT pubkey, role FROM relay_members \
+             WHERE community_id = $1 ORDER BY created_at ASC",
+        )
+        .bind(community_id.as_uuid())
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let member_count = rows.len();
+
+        // Build the NIP-43 event from the locked member rows.
+        let mut tags: Vec<Tag> = Vec::with_capacity(member_count + 1);
+        // NIP-70 protected-event marker.
+        tags.push(Tag::parse(["-"]).map_err(|e| {
+            crate::error::DbError::InvalidData(format!("failed to build '-' tag: {e}"))
+        })?);
+        for row in &rows {
+            let pubkey: String = row.try_get("pubkey")?;
+            let role: String = row.try_get("role")?;
+            tags.push(Tag::parse(["member", &pubkey, &role]).map_err(|e| {
+                crate::error::DbError::InvalidData(format!("failed to build member tag: {e}"))
+            })?);
+        }
+
+        let event = EventBuilder::new(Kind::Custom(kind_i32 as u16), "")
+            .tags(tags)
+            .sign_with_keys(relay_keypair)
+            .map_err(|e| {
+                crate::error::DbError::InvalidData(format!("failed to sign kind:13534: {e}"))
+            })?;
+
+        let created_at_secs = event.created_at.as_secs() as i64;
+        let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
+            .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
+        let sig_bytes = event.sig.serialize();
+        let tags_json = serde_json::to_value(&event.tags)?;
+        let received_at = chrono::Utc::now();
+        let d_tag = crate::event::extract_d_tag(&event);
+
+        // Soft-delete prior snapshots — unconditional, the relay is authoritative.
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 \
+             AND channel_id IS NULL \
+             AND deleted_at IS NULL",
+        )
+        .bind(community_id.as_uuid())
+        .bind(kind_i32)
+        .bind(pubkey_bytes.as_slice())
+        .execute(&mut *tx)
+        .await?;
+
+        let insert_result = sqlx::query(
+            "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(community_id.as_uuid())
+        .bind(event.id.as_bytes().as_slice())
+        .bind(pubkey_bytes.as_slice())
+        .bind(created_at)
+        .bind(kind_i32)
+        .bind(&tags_json)
+        .bind(&event.content)
+        .bind(sig_bytes.as_slice())
+        .bind(received_at)
+        .bind::<Option<Uuid>>(None)
+        .bind(d_tag.as_deref())
+        .execute(&mut *tx)
+        .await?;
+
+        let was_inserted = insert_result.rows_affected() > 0;
+        if !was_inserted {
+            tx.rollback().await?;
+            return Ok((
+                StoredEvent::with_received_at(event, received_at, None, false),
+                false,
+                member_count,
+            ));
+        }
+
+        tx.commit().await?;
+
+        if let Err(e) = crate::insert_mentions(&self.pool, community_id, &event, None).await {
+            tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
+        }
+
+        Ok((
+            StoredEvent::with_received_at(event, received_at, None, true),
+            true,
+            member_count,
+        ))
+    }
+
     /// Atomically replace a NIP-33 parameterized replaceable event (kind 30000–39999).
     ///
     /// Keeps only the event with the highest `created_at` per `(kind, pubkey, d_tag)`.
     /// Same-second ties are broken by lowest event `id` (deterministic ordering).
-    /// The entire check → soft-delete → insert runs in a single transaction with
-    /// an advisory lock to prevent concurrent-insert races.
+    /// The entire check → retire old payload → insert runs in a single transaction
+    /// with an advisory lock to prevent concurrent-insert races. NIP-RS read-state
+    /// coordinates hard-delete the superseded payload and preserve a compact
+    /// ordering watermark. Buzz mesh status coordinates also hard-delete their
+    /// superseded heartbeat payload because only the live head has product
+    /// value; other NIP-33 kinds retain soft-deleted history.
     ///
     /// **Channel policy:** NIP-33 replacement keys on `(kind, pubkey, d_tag)` globally —
     /// `channel_id` is NOT part of the replacement key. This matches the Nostr spec:
@@ -2743,28 +3638,12 @@ impl Db {
         let created_at = chrono::DateTime::from_timestamp(created_at_secs, 0)
             .ok_or(DbError::InvalidTimestamp(created_at_secs))?;
 
-        // Stable advisory-lock key: FNV-1a over (kind, pubkey, d_tag).
-        // Same algorithm as replace_addressable_event — deterministic across processes.
-        let lock_key = {
-            let mut h: u64 = 0xcbf29ce484222325; // FNV offset basis
-            for b in community_id.as_uuid().as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in kind_i32.to_le_bytes() {
-                h ^= b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in pubkey_bytes.as_slice() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            for b in d_tag.as_bytes() {
-                h ^= *b as u64;
-                h = h.wrapping_mul(0x100000001b3);
-            }
-            h as i64
-        };
+        let lock_key = event_replacement_lock_key(
+            community_id,
+            kind_i32,
+            pubkey_bytes.as_slice(),
+            Some(d_tag.as_bytes()),
+        );
 
         let mut tx = self.pool.begin().await?;
 
@@ -2773,7 +3652,44 @@ impl Db {
             .execute(&mut *tx)
             .await?;
 
-        // Check for existing event with same (kind, pubkey, d_tag).
+        let d_tag_count = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().is_some_and(|part| part == "d"))
+            .count();
+        let has_exact_d_tag = event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() >= 2 && parts[0] == "d" && parts[1] == d_tag
+        });
+        let read_state_t_tag_count = event
+            .tags
+            .iter()
+            .filter(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "t" && parts[1] == "read-state"
+            })
+            .count();
+        let is_nip_rs = kind_i32 == buzz_core::kind::KIND_READ_STATE as i32
+            && d_tag_count == 1
+            && has_exact_d_tag
+            && d_tag.strip_prefix("read-state:").is_some_and(|slot| {
+                slot.len() == 32
+                    && slot
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            && read_state_t_tag_count == 1;
+        let is_buzz_mesh_status = kind_i32 == buzz_core::kind::KIND_BOOKMARK_SET as i32
+            && d_tag.starts_with("buzz-mesh-member-status:")
+            && event.tags.iter().any(|tag| {
+                let parts = tag.as_slice();
+                parts.len() == 2 && parts[0] == "k" && parts[1] == "buzz-mesh-status"
+            });
+        let hard_delete_superseded = is_nip_rs || is_buzz_mesh_status;
+
+        // Check the live head and, for NIP-RS, the compact historical ordering
+        // watermark. The watermark remains after a NIP-09 coordinate deletion,
+        // preventing a previously accepted signed blob from being resurrected.
         let existing: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = sqlx::query_as(
             "SELECT created_at, id FROM events \
              WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL \
@@ -2785,32 +3701,78 @@ impl Db {
         .bind(d_tag)
         .fetch_optional(&mut *tx)
         .await?;
-
-        // Stale-write protection: reject if incoming is not newer.
-        let incoming_id = event.id.as_bytes().as_slice();
-        if let Some((existing_ts, existing_id)) = existing {
-            let dominated = created_at < existing_ts
-                || (created_at == existing_ts && incoming_id >= existing_id.as_slice());
-            if dominated {
-                tx.rollback().await?;
-                let received_at = chrono::Utc::now();
-                return Ok((
-                    StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
-                    false,
-                ));
-            }
-
-            // Soft-delete the older event(s).
-            sqlx::query(
-                "UPDATE events SET deleted_at = NOW() \
-                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL",
+        let watermark: Option<(chrono::DateTime<chrono::Utc>, Vec<u8>)> = if is_nip_rs {
+            sqlx::query_as(
+                "SELECT created_at, event_id FROM parameterized_event_watermarks \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4",
             )
             .bind(community_id.as_uuid())
             .bind(kind_i32)
             .bind(pubkey_bytes.as_slice())
             .bind(d_tag)
-            .execute(&mut *tx)
-            .await?;
+            .fetch_optional(&mut *tx)
+            .await?
+        } else {
+            None
+        };
+
+        // Stale-write protection: reject if either durable ordering source
+        // dominates the incoming tuple. Equal timestamps use lowest event id.
+        let incoming_id = event.id.as_bytes().as_slice();
+        let dominated =
+            existing
+                .iter()
+                .chain(watermark.iter())
+                .any(|(accepted_ts, accepted_id)| {
+                    created_at < *accepted_ts
+                        || (created_at == *accepted_ts && incoming_id >= accepted_id.as_slice())
+                });
+        if dominated {
+            tx.rollback().await?;
+            let received_at = chrono::Utc::now();
+            return Ok((
+                StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
+                false,
+            ));
+        }
+
+        if existing.is_some() {
+            if is_nip_rs {
+                // Migration 0011 rejects regex-coordinate hard deletes from
+                // pre-fix writers. Authorize only this corrected NIP-RS delete,
+                // transaction-locally so pooled connections cannot leak it.
+                sqlx::query("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let statement = if hard_delete_superseded {
+                "DELETE FROM events \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            } else {
+                "UPDATE events SET deleted_at = NOW() \
+                 WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 AND deleted_at IS NULL"
+            };
+            sqlx::query(statement)
+                .bind(community_id.as_uuid())
+                .bind(kind_i32)
+                .bind(pubkey_bytes.as_slice())
+                .bind(d_tag)
+                .execute(&mut *tx)
+                .await?;
+
+            if hard_delete_superseded {
+                if let Some((_, existing_id)) = &existing {
+                    // Event first, mentions second: migration 0009's live-event
+                    // fence uses this global lock order to avoid deadlocks.
+                    sqlx::query(
+                        "DELETE FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+                    )
+                    .bind(community_id.as_uuid())
+                    .bind(existing_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
         }
 
         // Insert the new event inside the transaction.
@@ -2845,6 +3807,24 @@ impl Db {
                 StoredEvent::with_received_at(event.clone(), received_at, channel_id, false),
                 false,
             ));
+        }
+
+        if is_nip_rs {
+            sqlx::query(
+                "INSERT INTO parameterized_event_watermarks \
+                     (community_id, kind, pubkey, d_tag, created_at, event_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6) \
+                 ON CONFLICT (community_id, kind, pubkey, d_tag) DO UPDATE SET \
+                     created_at = EXCLUDED.created_at, event_id = EXCLUDED.event_id",
+            )
+            .bind(community_id.as_uuid())
+            .bind(kind_i32)
+            .bind(pubkey_bytes.as_slice())
+            .bind(d_tag)
+            .bind(created_at)
+            .bind(incoming_id)
+            .execute(&mut *tx)
+            .await?;
         }
 
         tx.commit().await?;
@@ -2945,13 +3925,16 @@ mod tests {
     //! channels, that fail-closed chain would go blind.
     use super::*;
     use buzz_core::CommunityId;
-    use sqlx::PgPool;
+    use sqlx::postgres::PgPoolOptions;
+    use sqlx::{Acquire, PgPool};
     use uuid::Uuid;
 
     const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
 
     async fn setup_db() -> Db {
-        let pool = PgPool::connect(TEST_DB_URL)
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let pool = PgPool::connect(&database_url)
             .await
             .expect("connect to test DB");
         Db::from_pool(pool)
@@ -2967,6 +3950,742 @@ mod tests {
             .await
             .expect("insert community");
         id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_rs_replacement_hard_deletes_payload_and_watermark_rejects_replay() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("read-state:{}", "a".repeat(32));
+        let tags = vec![
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ];
+        let base = Timestamp::now().as_secs();
+        let old = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "old")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign old");
+        let new = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "new")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign new");
+
+        assert!(
+            db.replace_parameterized_event(community, &old, &d_tag, None)
+                .await
+                .expect("insert old")
+                .1
+        );
+        assert!(
+            db.replace_parameterized_event(community, &new, &d_tag, None)
+                .await
+                .expect("replace with new")
+                .1
+        );
+
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count NIP-RS rows");
+        assert_eq!(rows, 1, "superseded payload must be physically deleted");
+
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("simulate NIP-09 coordinate deletion");
+
+        assert!(
+            !db.replace_parameterized_event(community, &old, &d_tag, None)
+                .await
+                .expect("replay old")
+                .1
+        );
+        let live: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count live NIP-RS rows");
+        assert_eq!(live, 0, "watermark must block stale resurrection");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mesh_status_replacement_keeps_one_physical_row() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = "buzz-mesh-member-status:owner-test";
+        let tags = vec![
+            Tag::parse(["d", d_tag]).expect("d tag"),
+            Tag::parse(["k", "buzz-mesh-status"]).expect("k tag"),
+        ];
+        let base = Timestamp::now().as_secs();
+        for (offset, content) in [(0, "running"), (1, "running-again"), (2, "stopped")] {
+            let event = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_BOOKMARK_SET as u16),
+                content,
+            )
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base + offset))
+            .sign_with_keys(&keys)
+            .expect("sign mesh status");
+            assert!(
+                db.replace_parameterized_event(community, &event, d_tag, None)
+                    .await
+                    .expect("replace mesh status")
+                    .1
+            );
+        }
+
+        let (rows, live): (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
+             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count mesh status rows");
+        assert_eq!((rows, live), (1, 1));
+
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() \
+             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("simulate old relay soft delete");
+        let rows_after_legacy_delete: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events \
+             WHERE community_id=$1 AND kind=30003 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count rows after old relay soft delete");
+        assert_eq!(
+            rows_after_legacy_delete, 0,
+            "migration trigger must purge soft-deleted mesh status"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn duplicate_nip_rs_discriminator_tags_keep_legacy_retention() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+
+        for (case, tags) in [
+            (
+                "duplicate-d",
+                vec![
+                    Tag::parse(["d", &format!("read-state:{}", "c".repeat(32))])
+                        .expect("first d tag"),
+                    Tag::parse(["d", &format!("read-state:{}", "d".repeat(32))])
+                        .expect("second d tag"),
+                    Tag::parse(["t", "read-state"]).expect("t tag"),
+                ],
+            ),
+            (
+                "duplicate-t",
+                vec![
+                    Tag::parse(["d", &format!("read-state:{}", "e".repeat(32))]).expect("d tag"),
+                    Tag::parse(["t", "read-state"]).expect("first t tag"),
+                    Tag::parse(["t", "read-state"]).expect("second t tag"),
+                ],
+            ),
+        ] {
+            let d_tag = tags
+                .iter()
+                .find_map(|tag| {
+                    let parts = tag.as_slice();
+                    (parts.first().is_some_and(|part| part == "d") && parts.len() >= 2)
+                        .then(|| parts[1].clone())
+                })
+                .expect("first d-tag value");
+            let old = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+                format!("{case}-old"),
+            )
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign old event");
+            let new = EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+                format!("{case}-new"),
+            )
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign new event");
+
+            assert!(
+                db.replace_parameterized_event(community, &old, &d_tag, None)
+                    .await
+                    .expect("insert old event")
+                    .1
+            );
+            assert!(
+                db.replace_parameterized_event(community, &new, &d_tag, None)
+                    .await
+                    .expect("replace with new event")
+                    .1
+            );
+
+            let (rows, live): (i64, i64) = sqlx::query_as(
+                "SELECT count(*), count(*) FILTER (WHERE deleted_at IS NULL) FROM events \
+                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+            )
+            .bind(community.as_uuid())
+            .bind(keys.public_key().to_bytes())
+            .bind(&d_tag)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count retained rows");
+            assert_eq!((rows, live), (2, 1), "{case} must retain legacy history");
+
+            let watermarks: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM parameterized_event_watermarks \
+                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+            )
+            .bind(community.as_uuid())
+            .bind(keys.public_key().to_bytes())
+            .bind(&d_tag)
+            .fetch_one(&db.pool)
+            .await
+            .expect("count watermarks");
+            assert_eq!(watermarks, 0, "{case} must not create a watermark");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn nip_rs_hard_delete_fence_fails_closed_and_scopes_opt_in_to_transaction() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let base = Timestamp::now().as_secs();
+        let conforming_d = format!("read-state:{}", "6".repeat(32));
+        let conforming = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "fenced-conforming",
+        )
+        .tags(vec![
+            Tag::parse(["d", conforming_d.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base))
+        .sign_with_keys(&keys)
+        .expect("sign conforming event");
+        assert!(
+            db.replace_parameterized_event(community, &conforming, &conforming_d, None)
+                .await
+                .expect("insert conforming event")
+                .1
+        );
+        sqlx::query(
+            "INSERT INTO event_mentions \
+             (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("6".repeat(64))
+        .bind(conforming.id.as_bytes().as_slice())
+        .bind(conforming.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert mention");
+
+        // Model ce10's first destructive statement. RAISE aborts the transaction,
+        // so its later mention delete and incoming insert can never commit.
+        let mut old_writer = db.pool.begin().await.expect("begin old-writer tx");
+        let rejected = sqlx::query(
+            "DELETE FROM events WHERE community_id=$1 AND kind=30078 \
+             AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&conforming_d)
+        .execute(&mut *old_writer)
+        .await;
+        assert!(rejected.is_err(), "old-writer hard delete must be rejected");
+        old_writer.rollback().await.expect("rollback rejected tx");
+        let preserved: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM events WHERE community_id=$1 AND id=$2), \
+                    (SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2)",
+        )
+        .bind(community.as_uuid())
+        .bind(conforming.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count preserved payload and mention");
+        assert_eq!(preserved, (1, 1));
+
+        let nonconforming_d = format!("read-state:{}", "7".repeat(32));
+        let nonconforming = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16),
+            "fenced-nonconforming",
+        )
+        .tags(vec![
+            Tag::parse(["d", nonconforming_d.as_str()]).expect("first d tag"),
+            Tag::parse(["d", "other"]).expect("second d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ])
+        .custom_created_at(Timestamp::from(base + 1))
+        .sign_with_keys(&keys)
+        .expect("sign nonconforming event");
+        assert!(
+            db.replace_parameterized_event(community, &nonconforming, &nonconforming_d, None,)
+                .await
+                .expect("insert nonconforming event")
+                .1
+        );
+        let rejected_nonconforming = sqlx::query(
+            "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
+        )
+        .bind(community.as_uuid())
+        .bind(nonconforming.id.as_bytes().as_slice())
+        .bind(nonconforming.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await;
+        assert!(
+            rejected_nonconforming.is_err(),
+            "fence must cover a nonconforming OLD row at a regex coordinate"
+        );
+
+        let unrelated_d = format!("read-state:{}", "8".repeat(32));
+        let unrelated = EventBuilder::new(Kind::Custom(30023), "unrelated")
+            .tags(vec![Tag::parse(["d", unrelated_d.as_str()]).expect("d tag")])
+            .custom_created_at(Timestamp::from(base + 2))
+            .sign_with_keys(&keys)
+            .expect("sign unrelated event");
+        assert!(
+            db.replace_parameterized_event(community, &unrelated, &unrelated_d, None)
+                .await
+                .expect("insert unrelated event")
+                .1
+        );
+        let unrelated_delete = sqlx::query(
+            "DELETE FROM events WHERE community_id=$1 AND id=$2 AND created_at=to_timestamp($3)",
+        )
+        .bind(community.as_uuid())
+        .bind(unrelated.id.as_bytes().as_slice())
+        .bind(unrelated.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("delete unrelated event");
+        assert_eq!(unrelated_delete.rows_affected(), 1);
+
+        // Check both transaction exits on one physical session; pool selection
+        // cannot accidentally hide a leaked session-local authorization value.
+        let mut conn = db.pool.acquire().await.expect("acquire dedicated session");
+        for commit in [true, false] {
+            let mut tx = conn.begin().await.expect("begin GUC transaction");
+            let value: String =
+                sqlx::query_scalar("SELECT set_config('buzz.nip_rs_hard_delete', 'on', true)")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .expect("set transaction-local GUC");
+            assert_eq!(value, "on");
+            if commit {
+                tx.commit().await.expect("commit GUC transaction");
+            } else {
+                tx.rollback().await.expect("rollback GUC transaction");
+            }
+            let leaked: Option<String> = sqlx::query_scalar(
+                "SELECT NULLIF(current_setting('buzz.nip_rs_hard_delete', true), '')",
+            )
+            .fetch_one(&mut *conn)
+            .await
+            .expect("read GUC after transaction");
+            assert_ne!(leaked.as_deref(), Some("on"));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn database_guard_covers_legacy_writer_and_nip09_deletion() {
+        use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
+
+        let db = setup_db().await;
+        let community = CommunityId::from_uuid(make_community(&db.pool).await);
+        let keys = Keys::generate();
+        let d_tag = format!("read-state:{}", "b".repeat(32));
+        let tags = vec![
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["t", "read-state"]).expect("t tag"),
+        ];
+        let base = Timestamp::now().as_secs();
+        let a = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "A")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base))
+            .sign_with_keys(&keys)
+            .expect("sign A");
+        let x = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "X")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base + 1))
+            .sign_with_keys(&keys)
+            .expect("sign X");
+        let b = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "B")
+            .tags(tags.clone())
+            .custom_created_at(Timestamp::from(base + 2))
+            .sign_with_keys(&keys)
+            .expect("sign B");
+        let c = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_READ_STATE as u16), "C")
+            .tags(tags)
+            .custom_created_at(Timestamp::from(base + 3))
+            .sign_with_keys(&keys)
+            .expect("sign C");
+
+        async fn legacy_insert(
+            pool: &PgPool,
+            community: CommunityId,
+            event: &nostr::Event,
+            d_tag: &str,
+        ) -> std::result::Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
+            sqlx::query(
+                "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, content, sig, received_at, d_tag) \
+                 VALUES ($1, $2, $3, to_timestamp($4), $5, $6, $7, $8, NOW(), $9) ON CONFLICT DO NOTHING",
+            )
+            .bind(community.as_uuid())
+            .bind(event.id.as_bytes().as_slice())
+            .bind(event.pubkey.to_bytes())
+            .bind(event.created_at.as_secs() as f64)
+            .bind(buzz_core::kind::KIND_READ_STATE as i32)
+            .bind(serde_json::to_value(&event.tags).expect("serialize tags"))
+            .bind(&event.content)
+            .bind(event.sig.serialize().as_slice())
+            .bind(d_tag)
+            .execute(pool)
+            .await
+        }
+
+        legacy_insert(&db.pool, community, &a, &d_tag)
+            .await
+            .expect("legacy insert A");
+        let duplicate = legacy_insert(&db.pool, community, &a, &d_tag)
+            .await
+            .expect("legacy duplicate A remains idempotent");
+        assert_eq!(duplicate.rows_affected(), 0);
+
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("c".repeat(64))
+        .bind(a.id.as_bytes().as_slice())
+        .bind(a.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert live mention");
+
+        // Emulate the pre-PR replacement path after migration 0007: soft-delete
+        // the live row, then insert B without any application watermark write.
+        sqlx::query(
+            "UPDATE events SET deleted_at=NOW() \
+             WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .execute(&db.pool)
+        .await
+        .expect("legacy soft-delete A");
+        let mentions_after_delete: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(a.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count mentions after delete");
+        assert_eq!(mentions_after_delete, 0);
+
+        let stale_mention = sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("d".repeat(64))
+        .bind(a.id.as_bytes().as_slice())
+        .bind(a.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("stale post-commit mention is skipped");
+        assert_eq!(stale_mention.rows_affected(), 0);
+
+        legacy_insert(&db.pool, community, &b, &d_tag)
+            .await
+            .expect("legacy insert B");
+        let duplicate_b = legacy_insert(&db.pool, community, &b, &d_tag)
+            .await
+            .expect("live duplicate B is skipped");
+        assert_eq!(duplicate_b.rows_affected(), 0);
+
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("e".repeat(64))
+        .bind(b.id.as_bytes().as_slice())
+        .bind(b.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert B mention");
+
+        // Exercise the new Rust hard-delete path independently. An in-flight
+        // mention holds KEY SHARE on B, so replacement by C must block, then
+        // complete after the mention commits and remove both B and its mention.
+        let mut rust_mention_tx = db
+            .pool
+            .begin()
+            .await
+            .expect("begin Rust mention transaction");
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind("e".repeat(64))
+        .bind(b.id.as_bytes().as_slice())
+        .bind(b.created_at.as_secs() as f64)
+        .execute(&mut *rust_mention_tx)
+        .await
+        .expect("hold B live-event key-share lock");
+
+        let replace_db = db.clone();
+        let replace_d_tag = d_tag.clone();
+        let replace_c = c.clone();
+        let replace_task = tokio::spawn(async move {
+            replace_db
+                .replace_parameterized_event(community, &replace_c, &replace_d_tag, None)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !replace_task.is_finished(),
+            "Rust hard delete should wait for mention lock"
+        );
+        rust_mention_tx
+            .commit()
+            .await
+            .expect("release Rust mention lock");
+        let replaced = tokio::time::timeout(std::time::Duration::from_secs(2), replace_task)
+            .await
+            .expect("Rust hard delete deadlocked with mention insert")
+            .expect("replacement task panicked")
+            .expect("replace B with C");
+        assert!(replaced.1, "C must replace B");
+        let b_mentions: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM event_mentions WHERE community_id=$1 AND event_id=$2",
+        )
+        .bind(community.as_uuid())
+        .bind(b.id.as_bytes().as_slice())
+        .fetch_one(&db.pool)
+        .await
+        .expect("count B mentions after Rust replacement");
+        assert_eq!(b_mentions, 0);
+
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078)",
+        )
+        .bind(community.as_uuid())
+        .bind("f".repeat(64))
+        .bind(c.id.as_bytes().as_slice())
+        .bind(c.created_at.as_secs() as f64)
+        .execute(&db.pool)
+        .await
+        .expect("insert C mention");
+
+        // Exercise legacy UPDATE-trigger deletion with the same barrier. While
+        // deletion waits on C's KEY SHARE lock, an exact replay must already be
+        // a zero-row trigger no-op; it must not wait for deletion or resurrect C.
+        let mut legacy_mention_tx = db
+            .pool
+            .begin()
+            .await
+            .expect("begin legacy mention transaction");
+        sqlx::query(
+            "INSERT INTO event_mentions \
+                 (community_id, pubkey_hex, event_id, event_created_at, event_kind) \
+             VALUES ($1, $2, $3, to_timestamp($4), 30078) ON CONFLICT DO NOTHING",
+        )
+        .bind(community.as_uuid())
+        .bind("f".repeat(64))
+        .bind(c.id.as_bytes().as_slice())
+        .bind(c.created_at.as_secs() as f64)
+        .execute(&mut *legacy_mention_tx)
+        .await
+        .expect("hold C live-event key-share lock");
+
+        let delete_pool = db.pool.clone();
+        let delete_pubkey = keys.public_key().to_bytes();
+        let delete_d_tag = d_tag.clone();
+        let delete_task = tokio::spawn(async move {
+            sqlx::query(
+                "UPDATE events SET deleted_at=NOW() \
+                 WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3 AND deleted_at IS NULL",
+            )
+            .bind(community.as_uuid())
+            .bind(delete_pubkey)
+            .bind(delete_d_tag)
+            .execute(&delete_pool)
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !delete_task.is_finished(),
+            "legacy delete should wait for mention lock"
+        );
+
+        let replay_while_delete_waits = legacy_insert(&db.pool, community, &c, &d_tag)
+            .await
+            .expect("concurrent exact C replay is skipped");
+        assert_eq!(replay_while_delete_waits.rows_affected(), 0);
+
+        legacy_mention_tx
+            .commit()
+            .await
+            .expect("release legacy mention lock");
+        tokio::time::timeout(std::time::Duration::from_secs(2), delete_task)
+            .await
+            .expect("legacy delete deadlocked with mention insert")
+            .expect("delete task panicked")
+            .expect("legacy NIP-09 delete C");
+
+        let payloads: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count retained payloads");
+        assert_eq!(
+            payloads, 0,
+            "legacy soft deletes must not retain NIP-RS payloads"
+        );
+
+        // Opposite commit order: deletion has committed before exact replay.
+        // Equality remains an observable zero-row no-op, never a resurrection.
+        let replay_c = legacy_insert(&db.pool, community, &c, &d_tag)
+            .await
+            .expect("post-delete exact C replay is skipped");
+        assert_eq!(replay_c.rows_affected(), 0);
+        let payloads_after_exact_replay: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM events WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("count payloads after exact replay");
+        assert_eq!(payloads_after_exact_replay, 0);
+
+        let replay = legacy_insert(&db.pool, community, &x, &d_tag).await;
+        assert!(
+            replay.is_err(),
+            "database guard must reject A < X < C replay"
+        );
+
+        let watermark: (chrono::DateTime<chrono::Utc>, Vec<u8>) = sqlx::query_as(
+            "SELECT created_at, event_id FROM parameterized_event_watermarks \
+             WHERE community_id=$1 AND kind=30078 AND pubkey=$2 AND d_tag=$3",
+        )
+        .bind(community.as_uuid())
+        .bind(keys.public_key().to_bytes())
+        .bind(&d_tag)
+        .fetch_one(&db.pool)
+        .await
+        .expect("read C watermark");
+        assert_eq!(watermark.0.timestamp(), base as i64 + 3);
+        assert_eq!(watermark.1, c.id.as_bytes().as_slice());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn test_usage_metrics_lock_has_single_owner_and_releases_on_drop() {
+        let database_url =
+            std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into());
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("connect to test DB");
+        let first = Db::from_pool(pool.clone());
+        let second = Db::from_pool(pool);
+        let key = 0x4255_5A5A_4D45_5452;
+
+        let mut leader = first
+            .try_lock_usage_metrics(key)
+            .await
+            .expect("first lock attempt")
+            .expect("first database handle becomes leader");
+        assert!(leader.is_live().await, "lock owner remains reachable");
+        assert!(
+            second
+                .try_lock_usage_metrics(key)
+                .await
+                .expect("second lock attempt")
+                .is_none(),
+            "another session cannot become leader while the guard exists"
+        );
+
+        drop(leader);
+        assert!(
+            second
+                .try_lock_usage_metrics(key)
+                .await
+                .expect("lock attempt after leader drop")
+                .is_some(),
+            "dropping the detached session releases its advisory lock"
+        );
     }
 
     #[tokio::test]
@@ -3011,8 +4730,10 @@ mod tests {
         let created = db
             .create_community_with_owner(&host, owner)
             .await
-            .expect("create community")
-            .expect("new host");
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
         assert_eq!(created.host, host);
         let owner_role: Option<String> = sqlx::query_scalar(
             "SELECT role FROM relay_members WHERE community_id = $1 AND pubkey = $2",
@@ -3027,15 +4748,18 @@ mod tests {
         let retry = db
             .create_community_with_owner(&host.to_ascii_uppercase(), owner)
             .await
-            .expect("same-owner retry")
-            .expect("existing same-owner community");
-        assert_eq!(retry, created, "retry returns the original row");
+            .expect("same-owner retry");
+        assert_eq!(
+            retry,
+            CreateCommunityWithOwnerResult::Created(created.clone()),
+            "retry returns the original row"
+        );
 
         let collision = db
             .create_community_with_owner(&host, other)
             .await
             .expect("collision result");
-        assert!(collision.is_none());
+        assert_eq!(collision, CreateCommunityWithOwnerResult::HostExists);
         let roles: Vec<(String, String)> = sqlx::query_as(
             "SELECT pubkey, role FROM relay_members WHERE community_id = $1 ORDER BY pubkey",
         )
@@ -3052,7 +4776,114 @@ mod tests {
             .create_community_with_owner(&host, owner)
             .await
             .expect("post-rotation retry");
-        assert!(post_rotation_retry.is_none());
+        assert_eq!(
+            post_rotation_retry,
+            CreateCommunityWithOwnerResult::HostExists
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unarchive_community_owned_by_restores_admission_idempotently() {
+        let db = setup_db().await;
+        let host = format!("unarchive-{}.example", Uuid::new_v4().simple());
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let outsider = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let created = db
+            .create_community_with_owner(&host, &owner)
+            .await
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+
+        let archived = db
+            .archive_community_owned_by(&host, &owner, "protected.example")
+            .await
+            .expect("archive community")
+            .expect("owned community");
+        assert_eq!(archived.id, created.id);
+        assert!(
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("active lookup")
+                .is_none(),
+            "archived communities must fail admission"
+        );
+        assert!(db
+            .unarchive_community_owned_by(&host, &outsider)
+            .await
+            .expect("wrong-owner unarchive")
+            .is_none());
+        assert!(db
+            .unarchive_community_owned_by("missing.example", &owner)
+            .await
+            .expect("unknown-host unarchive")
+            .is_none());
+
+        let restored = db
+            .unarchive_community_owned_by(&host.to_ascii_uppercase(), &owner)
+            .await
+            .expect("unarchive community")
+            .expect("owned community");
+        assert_eq!(restored.id, created.id);
+        assert_eq!(restored.host, host);
+        assert_eq!(
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("restored lookup")
+                .expect("active community")
+                .id,
+            created.id
+        );
+        assert_eq!(
+            db.get_relay_member(created.id, &owner)
+                .await
+                .expect("owner lookup")
+                .expect("owner remains")
+                .role,
+            "owner"
+        );
+
+        let retry = db
+            .unarchive_community_owned_by(&host, &owner)
+            .await
+            .expect("idempotent retry")
+            .expect("owned community");
+        assert_eq!(retry, restored);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_enforces_per_owner_limit() {
+        let db = setup_db().await;
+        let owner = format!("{:064x}", Uuid::new_v4().as_u128());
+
+        // Create 3 communities for this owner (the max).
+        for i in 0..3 {
+            let host = format!("limit-test-{}-{}.example", i, Uuid::new_v4().simple());
+            assert!(matches!(
+                db.create_community_with_owner(&host, &owner)
+                    .await
+                    .expect("create community"),
+                CreateCommunityWithOwnerResult::Created(_)
+            ));
+        }
+
+        let host = format!("limit-test-3-{}.example", Uuid::new_v4().simple());
+        assert_eq!(
+            db.create_community_with_owner(&host, &owner)
+                .await
+                .expect("create community call"),
+            CreateCommunityWithOwnerResult::LimitReached
+        );
+        assert!(
+            db.lookup_community_by_host(&host)
+                .await
+                .expect("look up rolled-back fresh host")
+                .is_none(),
+            "limit rejection must roll back the fresh community row"
+        );
     }
 
     #[tokio::test]
@@ -3066,13 +4897,10 @@ mod tests {
             db.create_community_with_owner(&host, owner),
             db.create_community_with_owner(&host, owner),
         );
-        let first = first
-            .expect("first concurrent create")
-            .expect("first result");
-        let second = second
-            .expect("second concurrent create")
-            .expect("second result");
+        let first = first.expect("first concurrent create");
+        let second = second.expect("second concurrent create");
 
+        assert!(matches!(first, CreateCommunityWithOwnerResult::Created(_)));
         assert_eq!(first, second, "conflict loser re-reads the winning row");
     }
 
@@ -3105,8 +4933,13 @@ mod tests {
         let community_a = CommunityId::from_uuid(make_community(&db.pool).await);
         let community_b = CommunityId::from_uuid(make_community(&db.pool).await);
         let community_c = CommunityId::from_uuid(make_community(&db.pool).await);
-        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        // Unique per run: `list_communities_owned_by` is keyed only by pubkey,
+        // so a shared fixed pubkey picks up communities leaked by sibling
+        // ignored tests running against the same database.
+        let owner = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let owner = owner.as_str();
+        let other = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let other = other.as_str();
 
         db.bootstrap_owner(community_a, owner)
             .await
@@ -3381,5 +5214,892 @@ mod tests {
             groups_a_after.is_empty(),
             "A's reaction must be gone after A removes it"
         );
+    }
+
+    // ---- Read-replica routing ------------------------------------------------
+    //
+    // These tests pin the routing contract of `Db::read()` and the two routed
+    // methods. A second scratch database stands in for the replica; the
+    // fixtures are deliberately DIVERGENT (rows that exist in only one of the
+    // two databases) so every assertion observes which pool actually served
+    // the query instead of trusting the routing code's word for it.
+
+    async fn admin_url() -> String {
+        std::env::var("TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.into())
+    }
+
+    /// Create a fresh scratch database on the same server and run migrations.
+    /// Returns (pool, db_name); callers should `drop_scratch_db` when done.
+    async fn create_scratch_db(admin: &PgPool, prefix: &str) -> (PgPool, String) {
+        let name = format!("{}_{}", prefix, Uuid::new_v4().simple());
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE {name}")))
+            .execute(admin)
+            .await
+            .expect("create scratch db");
+        let base = admin_url().await;
+        // Swap the database path segment of the admin URL for the scratch name.
+        let scratch_url = {
+            let idx = base.rfind('/').expect("db url has a path segment");
+            format!("{}/{}", &base[..idx], name)
+        };
+        let pool = PgPool::connect(&scratch_url)
+            .await
+            .expect("connect scratch db");
+        migration::run_migrations(&pool)
+            .await
+            .expect("migrate scratch db");
+        (pool, name)
+    }
+
+    async fn drop_scratch_db(admin: &PgPool, pool: PgPool, name: &str) {
+        pool.close().await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {name} WITH (FORCE)"
+        )))
+        .execute(admin)
+        .await;
+    }
+
+    /// Insert identical community + channel rows into a database so the same
+    /// (community, channel) ids resolve in both writer and replica.
+    async fn seed_community_channel(
+        pool: &PgPool,
+        community: Uuid,
+        channel: Uuid,
+        author: &nostr::Keys,
+    ) {
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community)
+            .bind(format!("replica-routing-{}.example", community.simple()))
+            .execute(pool)
+            .await
+            .expect("insert community");
+        crate::channel::create_channel_with_id(
+            pool,
+            CommunityId::from_uuid(community),
+            channel,
+            &format!("replica-routing-{channel}"),
+            crate::channel::ChannelType::Stream,
+            crate::channel::ChannelVisibility::Open,
+            None,
+            author.public_key().to_bytes().as_slice(),
+            None,
+        )
+        .await
+        .expect("create channel");
+    }
+
+    fn signed_event_at(keys: &nostr::Keys, content: &str, secs: u64) -> nostr::Event {
+        nostr::EventBuilder::new(nostr::Kind::Custom(9), content)
+            .custom_created_at(nostr::Timestamp::from(secs))
+            .sign_with_keys(keys)
+            .expect("sign event")
+    }
+
+    async fn insert_top_level(pool: &PgPool, community: Uuid, channel: Uuid, ev: &nostr::Event) {
+        let ts =
+            chrono::DateTime::from_timestamp(ev.created_at.as_secs() as i64, 0).expect("valid ts");
+        event::insert_event_with_thread_metadata(
+            pool,
+            CommunityId::from_uuid(community),
+            ev,
+            Some(channel),
+            Some(event::ThreadMetadataParams {
+                event_id: ev.id.as_bytes(),
+                event_created_at: ts,
+                channel_id: channel,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect("insert top-level event");
+    }
+
+    async fn insert_thread_reply(
+        pool: &PgPool,
+        community: Uuid,
+        channel: Uuid,
+        root: &nostr::Event,
+        reply: &nostr::Event,
+    ) {
+        let reply_ts = chrono::DateTime::from_timestamp(reply.created_at.as_secs() as i64, 0)
+            .expect("valid ts");
+        let root_ts = chrono::DateTime::from_timestamp(root.created_at.as_secs() as i64, 0)
+            .expect("valid ts");
+        event::insert_event_with_thread_metadata(
+            pool,
+            CommunityId::from_uuid(community),
+            reply,
+            Some(channel),
+            Some(event::ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: reply_ts,
+                channel_id: channel,
+                parent_event_id: Some(root.id.as_bytes()),
+                parent_event_created_at: Some(root_ts),
+                root_event_id: Some(root.id.as_bytes()),
+                root_event_created_at: Some(root_ts),
+                depth: 1,
+                broadcast: false,
+            }),
+        )
+        .await
+        .expect("insert reply");
+    }
+
+    /// Composite thread cursor: 8-byte BE seconds + raw event id.
+    fn thread_cursor(reply: &crate::thread::ThreadReply) -> Vec<u8> {
+        let mut cur = reply.created_at.timestamp().to_be_bytes().to_vec();
+        cur.extend_from_slice(&reply.event_id);
+        cur
+    }
+
+    #[tokio::test]
+    async fn read_falls_back_to_writer_when_no_replica_configured() {
+        // Pure wiring test — connect_lazy never touches the network.
+        let pool = sqlx::PgPool::connect_lazy(TEST_DB_URL).expect("lazy pool");
+        let db = Db::from_pool(pool);
+        assert!(!db.has_read_pool());
+        assert!(
+            std::ptr::eq(db.read(), &db.pool),
+            "read() must be the writer pool when no replica is configured"
+        );
+        assert!(db.read_pool_stats().is_none());
+    }
+
+    /// Channel window: head fetch (no cursor) reads the WRITER; cursor pages
+    /// read the REPLICA. Divergent fixtures prove which pool served each.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_window_routes_head_to_writer_and_cursor_pages_to_replica() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "routing_w").await;
+        let (replica, rname) = create_scratch_db(&admin, "routing_r").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        // Shared history (both databases): m1 < m2 < m3.
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2", base + 10);
+        let m3 = signed_event_at(&author, "m3", base + 20);
+        for pool in [&writer, &replica] {
+            for ev in [&m1, &m2, &m3] {
+                insert_top_level(pool, community, channel, ev).await;
+            }
+        }
+        // Lag: the newest event exists only on the writer.
+        let fresh = signed_event_at(&author, "fresh-writer-only", base + 30);
+        insert_top_level(&writer, community, channel, &fresh).await;
+        // Marker: exists only on the "replica" (unphysical for a real replica,
+        // but it makes replica-served pages unambiguous).
+        let marker = signed_event_at(&author, "replica-only-marker", base + 5);
+        insert_top_level(&replica, community, channel, &marker).await;
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        // Open the fence through "now": the fixture's history is far in the
+        // past, so every cursor falls below the fence and routing is
+        // eligible. Fence-gating itself is pinned by the fence tests below.
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Head fetch (cursor: None) → writer: sees `fresh`, never `marker`.
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head window");
+        let head_contents: Vec<String> = head
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.content.clone())
+            .collect();
+        assert_eq!(
+            head_contents,
+            vec!["fresh-writer-only".to_string(), "m3".to_string()],
+            "head fetch must be served by the writer"
+        );
+
+        // Cursor page → replica: sees `marker`, never `fresh`.
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+        let page2 = db
+            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("cursor window");
+        let page2_contents: Vec<String> = page2
+            .rows
+            .iter()
+            .map(|r| r.stored_event.event.content.clone())
+            .collect();
+        assert_eq!(
+            page2_contents,
+            vec![
+                "m2".to_string(),
+                "replica-only-marker".to_string(),
+                "m1".to_string()
+            ],
+            "cursor page must be served by the replica"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Thread replies: head fetch reads the writer; a FULL cursor page is
+    /// served by the replica; an UNDER-limit cursor page (candidate terminal
+    /// page) is re-run on the writer so a lagged replica can never truncate
+    /// the tail into a false EOF.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_replies_cursor_pages_route_to_replica_with_writer_terminal_verification() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "routing_tw").await;
+        let (replica, rname) = create_scratch_db(&admin, "routing_tr").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let root = signed_event_at(&author, "root", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &root).await;
+        }
+
+        // Writer holds replies r1..r5; the lagged replica only has r1..r3.
+        let replies: Vec<nostr::Event> = (1..=5)
+            .map(|i| signed_event_at(&author, &format!("r{i}"), base + 10 * i as u64))
+            .collect();
+        for reply in &replies {
+            insert_thread_reply(&writer, community, channel, &root, reply).await;
+        }
+        for reply in &replies[..3] {
+            insert_thread_reply(&replica, community, channel, &root, reply).await;
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        // Open the fence through "now" — fixture history is far in the past.
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let cid = CommunityId::from_uuid(community);
+
+        // Page 1 (no cursor) → writer.
+        let page1 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("page 1");
+        let contents: Vec<&str> = page1
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["r1", "r2"], "head page from writer");
+
+        // Page 2: replica serves a FULL page (r3 exists there) — but wait:
+        // replica has r1..r3, page after r2 with limit 2 returns only [r3]
+        // (under limit) → terminal-verification re-runs on the writer, which
+        // returns [r3, r4]. A lag-truncated EOF must never surface.
+        let cur2 = thread_cursor(page1.last().expect("page 1 non-empty"));
+        let page2 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, Some(&cur2))
+            .await
+            .expect("page 2");
+        let contents: Vec<&str> = page2
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["r3", "r4"],
+            "under-limit replica page must be re-verified on the writer"
+        );
+
+        // Full-page replica serve: with limit 1, the page after r2 is [r3] —
+        // exactly `limit` rows, so the replica result stands. Prove it came
+        // from the replica with a replica-only divergent reply.
+        let ghost = signed_event_at(&author, "replica-only-ghost", base + 25);
+        insert_thread_reply(&replica, community, channel, &root, &ghost).await;
+        let page_replica = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur2))
+            .await
+            .expect("full replica page");
+        let contents: Vec<&str> = page_replica
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["replica-only-ghost"],
+            "a full cursor page must be served by the replica"
+        );
+
+        // Same query with no replica configured reads the writer and cannot
+        // see the ghost.
+        let db_writer_only = Db::from_pool(writer.clone());
+        let page_writer = db_writer_only
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur2))
+            .await
+            .expect("writer-only page");
+        let contents: Vec<&str> = page_writer
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(contents, vec!["r3"], "unset replica falls back to writer");
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Channel DESC scrollback, out-of-order commit adversary: the replica is
+    /// missing a MIDDLE row (`m2`) because a transaction with an older
+    /// client-signed `created_at` committed late and has not replayed yet.
+    /// The replica's cursor page would be `[m1]` — silently skipping `m2`
+    /// forever, since the next cursor advances past it. The fence must route
+    /// any cursor above it to the writer.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn channel_cursor_above_fence_stays_on_writer_preventing_middle_hole() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "fence_cw").await;
+        let (replica, rname) = create_scratch_db(&admin, "fence_cr").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let m1 = signed_event_at(&author, "m1", base);
+        let m2 = signed_event_at(&author, "m2-late-commit", base + 10);
+        let m3 = signed_event_at(&author, "m3", base + 20);
+        let m4 = signed_event_at(&author, "m4", base + 30);
+        for ev in [&m1, &m2, &m3, &m4] {
+            insert_top_level(&writer, community, channel, ev).await;
+        }
+        // Replica replayed everything EXCEPT the late-committed m2.
+        for ev in [&m1, &m3, &m4] {
+            insert_top_level(&replica, community, channel, ev).await;
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        let cid = CommunityId::from_uuid(community);
+
+        // Head page (writer): [m4, m3]; cursor lands on m3 (base+20).
+        let head = db
+            .get_channel_window(cid, channel, 2, None, None)
+            .await
+            .expect("head window");
+        let cursor = head.next_cursor.expect("has_more implies next_cursor");
+
+        // Fence closed → cursor page must come from the writer: m2 present.
+        let contents = |w: &thread::ChannelWindow| -> Vec<String> {
+            w.rows
+                .iter()
+                .map(|r| r.stored_event.event.content.clone())
+                .collect()
+        };
+        let page_closed = db
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .await
+            .expect("cursor page, fence closed");
+        assert_eq!(
+            contents(&page_closed),
+            vec!["m2-late-commit".to_string(), "m1".to_string()],
+            "fence closed: cursor pages route to the writer"
+        );
+
+        // Fence open but BELOW the cursor timestamp (covers base+5 only):
+        // the cursor (base+20) is not covered → writer again.
+        db.fence().force_open_for_tests(
+            chrono::DateTime::from_timestamp(base as i64 + 5, 0).expect("ts"),
+        );
+        let page_below = db
+            .get_channel_window(cid, channel, 10, Some(cursor.clone()), None)
+            .await
+            .expect("cursor page, fence below cursor");
+        assert_eq!(
+            contents(&page_below),
+            vec!["m2-late-commit".to_string(), "m1".to_string()],
+            "cursor above the fence must stay on the writer"
+        );
+
+        // Counterfactual pinning the hazard: were the fence (wrongly) open
+        // through now, the replica would serve the page WITHOUT m2 — the
+        // permanent-skip hole this fence exists to prevent.
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let page_hazard = db
+            .get_channel_window(cid, channel, 10, Some(cursor), None)
+            .await
+            .expect("cursor page, fence wrongly open");
+        assert_eq!(
+            contents(&page_hazard),
+            vec!["m1".to_string()],
+            "fixture models the inversion: an over-open fence would skip m2"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Thread ASC pagination, out-of-order commit adversary: the replica
+    /// holds a FULL page whose newest row (`r4`) has a later key than a
+    /// not-yet-replayed row (`r3`). The old under-limit check alone would
+    /// serve `[r4]` and the client cursor would advance past `r3` forever.
+    /// The fence rule (full AND tail ≤ fence) must send that page to the
+    /// writer instead.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn thread_full_replica_page_above_fence_is_reverified_on_writer() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (writer, wname) = create_scratch_db(&admin, "fence_tw").await;
+        let (replica, rname) = create_scratch_db(&admin, "fence_tr").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&writer, community, channel, &author).await;
+        seed_community_channel(&replica, community, channel, &author).await;
+
+        let base = 1_700_000_000u64;
+        let root = signed_event_at(&author, "root", base);
+        for pool in [&writer, &replica] {
+            insert_top_level(pool, community, channel, &root).await;
+        }
+        let replies: Vec<nostr::Event> = (1..=4)
+            .map(|i| signed_event_at(&author, &format!("r{i}"), base + 10 * i as u64))
+            .collect();
+        for reply in &replies {
+            insert_thread_reply(&writer, community, channel, &root, reply).await;
+        }
+        // Replica replayed r1, r2, r4 — the late-committed r3 is missing.
+        for reply in [&replies[0], &replies[1], &replies[3]] {
+            insert_thread_reply(&replica, community, channel, &root, reply).await;
+        }
+
+        let db = Db::from_pools(writer.clone(), replica.clone());
+        let cid = CommunityId::from_uuid(community);
+
+        // Fence covers r2 (base+20) but not r3/r4.
+        db.fence().force_open_for_tests(
+            chrono::DateTime::from_timestamp(base as i64 + 20, 0).expect("ts"),
+        );
+
+        // Page after r2 with limit 1: the replica would return the FULL page
+        // [r4] — but its tail is above the fence, so the writer re-runs it
+        // and returns [r3]. No skip.
+        let page1 = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 2, None)
+            .await
+            .expect("head page");
+        let cur = thread_cursor(page1.last().expect("head page non-empty"));
+        let page = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur))
+            .await
+            .expect("cursor page");
+        let contents: Vec<&str> = page
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["r3"],
+            "a full replica page above the fence must be re-run on the writer"
+        );
+
+        // Counterfactual: an over-open fence would serve the replica's [r4],
+        // skipping r3 permanently.
+        db.fence().force_open_for_tests(chrono::Utc::now());
+        let hazard = db
+            .get_thread_replies(cid, root.id.as_bytes(), Some(10), 1, Some(&cur))
+            .await
+            .expect("hazard page");
+        let contents: Vec<&str> = hazard
+            .iter()
+            .map(|r| r.stored_event.event.content.as_str())
+            .collect();
+        assert_eq!(
+            contents,
+            vec!["r4"],
+            "fixture models the inversion: an over-open fence would skip r3"
+        );
+
+        drop_scratch_db(&admin, replica, &rname).await;
+        drop_scratch_db(&admin, writer, &wname).await;
+    }
+
+    /// Commit-time floor guard (migration 0021), exact held-transaction
+    /// adversary: a channel-bearing row whose `created_at` is older than the
+    /// floor at COMMIT time must abort the transaction — the guard runs
+    /// inside commit processing with `clock_timestamp()`, so holding the
+    /// transaction open cannot outrun it. channel_id-NULL rows are
+    /// structurally exempt, and sessions without the GUC are unaffected.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn created_at_floor_guard_aborts_old_channel_rows_at_commit() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, name) = create_scratch_db(&admin, "floor_guard").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&pool, community, channel, &author).await;
+
+        let insert_raw = |ev: nostr::Event, channel_id: Option<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.expect("begin");
+                // Arm the guard for this transaction only (the relay's
+                // writer pool arms it per connection; tests are explicit).
+                sqlx::query("SELECT set_config('buzz.created_at_floor', $1, true)")
+                    .bind(crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("arm guard");
+                sqlx::query(
+                    "INSERT INTO events (community_id, id, pubkey, created_at, kind, tags, \
+                     content, sig, received_at, channel_id) \
+                     VALUES ($1, $2, $3, to_timestamp($4), 9, '[]', $5, $6, NOW(), $7)",
+                )
+                .bind(community)
+                .bind(ev.id.as_bytes().as_slice())
+                .bind(ev.pubkey.to_bytes().as_slice())
+                .bind(ev.created_at.as_secs() as f64)
+                .bind(&ev.content)
+                .bind(ev.sig.serialize().as_slice())
+                .bind(channel_id)
+                .execute(&mut *tx)
+                .await
+                .expect("insert inside tx (guard is deferred to commit)");
+                // Hold the transaction "open" past the insert, then commit —
+                // the deferred guard must still see the stale created_at.
+                sqlx::query("SELECT pg_sleep(0.05)")
+                    .execute(&mut *tx)
+                    .await
+                    .expect("hold tx");
+                tx.commit().await
+            }
+        };
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
+
+        // Old channel-bearing row → COMMIT aborts with check_violation.
+        let old = signed_event_at(&author, "old-held-tx", now_secs - floor - 60);
+        let err = insert_raw(old, Some(channel))
+            .await
+            .expect_err("below-floor channel row must abort at COMMIT");
+        let code = match &err {
+            sqlx::Error::Database(db_err) => db_err.code().map(|c| c.to_string()),
+            other => panic!("expected database error, got {other:?}"),
+        };
+        assert_eq!(
+            code.as_deref(),
+            Some("23514"),
+            "guard raises check_violation"
+        );
+
+        // Fresh channel-bearing row → commits.
+        let fresh = signed_event_at(&author, "fresh", now_secs);
+        insert_raw(fresh, Some(channel))
+            .await
+            .expect("fresh row commits under the armed guard");
+
+        // Old row WITHOUT a channel (push lease / profile shapes) →
+        // structurally exempt, commits.
+        let old_global = signed_event_at(&author, "old-global", now_secs - floor - 60);
+        insert_raw(old_global, None)
+            .await
+            .expect("channel_id-NULL rows are exempt from the floor");
+
+        // Unarmed session (no GUC) → guard inert; backfills stay possible
+        // (and must hold the fence closed, per the migration header).
+        let old_backfill = signed_event_at(&author, "old-backfill", now_secs - floor - 60);
+        insert_top_level(&pool, community, channel, &old_backfill).await;
+
+        drop_scratch_db(&admin, pool, &name).await;
+    }
+
+    /// The armed writer pool (`Db::new`) must enforce the floor end-to-end
+    /// through the public insert APIs, and the session GUC must be verifiably
+    /// set on pooled connections.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn armed_pool_rejects_old_channel_inserts_through_public_api() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, name) = create_scratch_db(&admin, "floor_pool").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&seed_pool, community, channel, &author).await;
+
+        // Connect a Db the production way: after_connect arms the guard.
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let scratch_url = format!("{}/{}", &base[..idx], name);
+        let db = Db::new(&DbConfig {
+            database_url: scratch_url,
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db");
+        let cid = CommunityId::from_uuid(community);
+
+        // Perci nit: assert the effective session value, not the intent.
+        let effective: String = sqlx::query_scalar("SHOW buzz.created_at_floor")
+            .fetch_one(&db.pool)
+            .await
+            .expect("SHOW guard GUC");
+        assert_eq!(
+            effective,
+            crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string(),
+            "writer pool must arm the floor guard on every connection"
+        );
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
+
+        // insert_event (single INSERT, autocommit): old channel row rejected.
+        let old = signed_event_at(&author, "old-direct", now_secs - floor - 60);
+        let err = event::insert_event(&db.pool, cid, &old, Some(channel))
+            .await
+            .expect_err("armed pool must reject below-floor channel inserts");
+        assert!(
+            err.to_string().contains("below the replica-fence floor"),
+            "unexpected error: {err}"
+        );
+
+        // insert_event_with_thread_metadata (multi-statement tx): same.
+        let old2 = signed_event_at(&author, "old-thread-meta", now_secs - floor - 90);
+        let ts = chrono::DateTime::from_timestamp(old2.created_at.as_secs() as i64, 0)
+            .expect("valid ts");
+        let err = event::insert_event_with_thread_metadata(
+            &db.pool,
+            cid,
+            &old2,
+            Some(channel),
+            Some(event::ThreadMetadataParams {
+                event_id: old2.id.as_bytes(),
+                event_created_at: ts,
+                channel_id: channel,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: true,
+            }),
+        )
+        .await
+        .expect_err("armed pool must reject below-floor thread-metadata inserts");
+        assert!(
+            err.to_string().contains("below the replica-fence floor"),
+            "unexpected error: {err}"
+        );
+
+        // Fresh events pass through both APIs.
+        let fresh = signed_event_at(&author, "fresh-direct", now_secs);
+        event::insert_event(&db.pool, cid, &fresh, Some(channel))
+            .await
+            .expect("fresh insert passes the armed guard");
+
+        drop_scratch_db(&admin, seed_pool, &name).await;
+        // db pool still holds connections to the dropped DB; close it.
+        db.pool.close().await;
+    }
+
+    /// `spawn_fence_probe` must verify the floor guard before letting the
+    /// probe run — catalog shape AND observed behavior — and refuse on
+    /// sabotage. This is the production gate for a relay running with
+    /// `BUZZ_AUTO_MIGRATE` off: an armed GUC with no enforcing trigger must
+    /// never yield an open fence.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn fence_probe_refuses_to_start_without_verified_floor_guard() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (seed_pool, wname) = create_scratch_db(&admin, "fence_gate_w").await;
+        let (replica_pool, rname) = create_scratch_db(&admin, "fence_gate_r").await;
+        seed_pool.close().await;
+        replica_pool.close().await;
+
+        let base = admin_url().await;
+        let idx = base.rfind('/').expect("db url has a path segment");
+        let db = Db::new(&DbConfig {
+            database_url: format!("{}/{}", &base[..idx], wname),
+            read_database_url: Some(format!("{}/{}", &base[..idx], rname)),
+            max_connections: 2,
+            ..DbConfig::default()
+        })
+        .await
+        .expect("connect armed Db with replica");
+
+        // Healthy schema: verification passes, probe starts.
+        assert!(
+            db.spawn_fence_probe().await.expect("verification passes"),
+            "probe must start on a verified schema"
+        );
+
+        // Sabotage A: catalog-shaped no-op — same trigger, gutted function
+        // body. Catalog check alone would pass; behavior check must refuse.
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION events_created_at_floor_guard() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("gut the guard function");
+        let err = db
+            .spawn_fence_probe()
+            .await
+            .expect_err("inert guard body must refuse the probe");
+        assert!(
+            err.to_string().contains("floor guard is inert"),
+            "unexpected error: {err}"
+        );
+
+        // Sabotage B: trigger dropped entirely (the BUZZ_AUTO_MIGRATE=off /
+        // 0021-unapplied shape). Catalog check must refuse.
+        sqlx::query("DROP TRIGGER events_created_at_floor ON events")
+            .execute(&db.pool)
+            .await
+            .expect("drop the guard trigger");
+        let err = db
+            .spawn_fence_probe()
+            .await
+            .expect_err("missing trigger must refuse the probe");
+        assert!(
+            err.to_string().contains("missing or mis-shaped"),
+            "unexpected error: {err}"
+        );
+
+        // In both refusal states the fence never opened.
+        assert!(
+            db.fence().verified_through().is_none(),
+            "fence must remain closed when verification refuses the probe"
+        );
+
+        db.pool.close().await;
+        if let Some(rp) = &db.read_pool {
+            rp.close().await;
+        }
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {wname} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+        let _ = sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE IF EXISTS {rname} WITH (FORCE)"
+        )))
+        .execute(&admin)
+        .await;
+    }
+
+    /// The `UPDATE OF` arm of the floor guard (Perci's second structural
+    /// hole): an old row legitimately admitted with `channel_id` NULL must
+    /// not be movable into keyset windows, and a channel row's `created_at`
+    /// must not be movable below the fence — through raw SQL, at COMMIT.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn floor_guard_blocks_updates_that_move_rows_below_the_fence() {
+        let admin = PgPool::connect(&admin_url().await)
+            .await
+            .expect("connect admin");
+        let (pool, name) = create_scratch_db(&admin, "floor_upd").await;
+
+        let author = nostr::Keys::generate();
+        let community = Uuid::new_v4();
+        let channel = Uuid::new_v4();
+        seed_community_channel(&pool, community, channel, &author).await;
+
+        let now_secs = chrono::Utc::now().timestamp() as u64;
+        let floor = crate::replica_fence::CREATED_AT_FLOOR_SECS as u64;
+
+        // Seed via unarmed session: one old channel-NULL row, one fresh
+        // channel row.
+        let old_null = signed_event_at(&author, "old-null", now_secs - floor - 120);
+        insert_top_level(&pool, community, channel, &old_null).await;
+        sqlx::query("UPDATE events SET channel_id = NULL WHERE community_id = $1 AND id = $2")
+            .bind(community)
+            .bind(old_null.id.as_bytes().as_slice())
+            .execute(&pool)
+            .await
+            .expect("detach channel (unarmed seed)");
+        let fresh = signed_event_at(&author, "fresh-row", now_secs);
+        insert_top_level(&pool, community, channel, &fresh).await;
+
+        // Armed transaction, deferred to COMMIT (the production shape).
+        let run_armed_update = |sql: &'static str, id: Vec<u8>, age: Option<u64>| {
+            let pool = pool.clone();
+            async move {
+                let mut tx = pool.begin().await.expect("begin");
+                sqlx::query("SELECT set_config('buzz.created_at_floor', $1, true)")
+                    .bind(crate::replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .expect("arm guard");
+                let q = sqlx::query(sql).bind(community).bind(id);
+                let q = match age {
+                    Some(a) => q.bind(a as f64),
+                    None => q,
+                };
+                q.execute(&mut *tx)
+                    .await
+                    .expect("update inside tx (deferred)");
+                tx.commit().await
+            }
+        };
+
+        // channel-NULL → channel-bearing on an old row: COMMIT must abort.
+        let err = run_armed_update(
+            "UPDATE events SET channel_id = community_id WHERE community_id = $1 AND id = $2",
+            old_null.id.as_bytes().to_vec(),
+            None,
+        )
+        .await
+        .expect_err("moving an old channel-NULL row into a channel must abort at COMMIT");
+        assert!(
+            matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
+            "unexpected error: {err}"
+        );
+
+        // created_at rewrite below the floor on a channel row: COMMIT must abort.
+        let err = run_armed_update(
+            "UPDATE events SET created_at = clock_timestamp() - make_interval(secs => $3::double precision) \
+             WHERE community_id = $1 AND id = $2",
+            fresh.id.as_bytes().to_vec(),
+            Some(floor + 120),
+        )
+        .await
+        .expect_err("rewriting created_at below the floor must abort at COMMIT");
+        assert!(
+            matches!(&err, sqlx::Error::Database(e) if e.code().as_deref() == Some("23514")),
+            "unexpected error: {err}"
+        );
+
+        drop_scratch_db(&admin, pool, &name).await;
     }
 }

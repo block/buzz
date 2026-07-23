@@ -13,6 +13,7 @@ const FeatureDefinitionSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   description: z.string(),
+  defaultEnabled: z.boolean().optional(),
   platforms: z.array(FeaturePlatformSchema).optional(),
 });
 

@@ -1,7 +1,7 @@
 /**
  * Build NIP-30 `["emoji", shortcode, url]` tags for the custom shortcodes that
  * actually appear in an outgoing message body. Pure + testable; the resolved
- * emoji list comes from the workspace palette (see `customEmoji.ts`).
+ * emoji list comes from the community palette (see `customEmoji.ts`).
  *
  * Mirrors how @mentions become `p` tags: the tag set is derived from the final
  * content at send time so the event is self-contained — any NIP-30 client can

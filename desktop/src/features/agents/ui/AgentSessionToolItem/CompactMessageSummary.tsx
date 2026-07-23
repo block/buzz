@@ -13,6 +13,7 @@ import { useTranscriptBubbleOverflow } from "../activityRenderClasses/useTranscr
 import { compactSummaryTone } from "./CompactToolSummaryRow";
 import type { SentMessageLink } from "./messageLinks";
 import { SentMessageContextDialog } from "./SentMessageContextDialog";
+import { useSentMessageBody } from "./useSentMessageBody";
 
 export function CompactMessageSummary({
   args,
@@ -46,6 +47,7 @@ export function CompactMessageSummary({
   timestamp: string;
 }) {
   const [detailsOpen, setDetailsOpen] = React.useState(false);
+  const resolvedContent = useSentMessageBody(messageLink, preview);
   const variant = useAgentSessionTranscriptVariant();
   const { goChannel } = useAppNavigation();
   const { openProfilePanel } = useProfilePanel();
@@ -159,7 +161,7 @@ export function CompactMessageSummary({
           >
             <Markdown
               className={isCompactPreview ? "text-xs leading-4" : "leading-5"}
-              content={preview || "Message content unavailable."}
+              content={resolvedContent || "Message content unavailable."}
             />
             {hasBubbleOverflow ? (
               <span

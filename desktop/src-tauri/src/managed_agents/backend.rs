@@ -410,13 +410,40 @@ pub fn validate_provider_config(config: &serde_json::Value) -> Result<(), String
 
 /// Enumerate PATH for buzz-backend-* executables. Returns (id, path) pairs.
 /// Only includes files that are executable. Does NOT execute any binaries.
+///
+/// On macOS, GUI apps inherit a minimal PATH from launchd (`/usr/bin:/bin:/usr/sbin:/sbin`)
+/// which excludes both the app bundle's `Contents/MacOS/` dir and `~/.local/bin`.
+/// We augment the search with those directories so bundled and user-installed providers
+/// are always discovered regardless of how the desktop was launched.
 pub fn discover_provider_candidates() -> Vec<(String, PathBuf)> {
     let prefix = "buzz-backend-";
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
 
     let path_var = std::env::var_os("PATH").unwrap_or_default();
-    for dir in std::env::split_paths(&path_var) {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(&path_var).collect();
+
+    // Prepend the exe parent dir (Contents/MacOS/ in a .app bundle) so bundled
+    // providers are found even when the process PATH is minimal.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let parent_buf = parent.to_path_buf();
+            if !dirs.contains(&parent_buf) {
+                dirs.insert(0, parent_buf);
+            }
+        }
+    }
+
+    // Also include ~/.local/bin — the conventional location for user-installed
+    // provider binaries (symlinks created by install scripts).
+    if let Some(home) = dirs::home_dir() {
+        let local_bin = home.join(".local").join("bin");
+        if !dirs.contains(&local_bin) {
+            dirs.push(local_bin);
+        }
+    }
+
+    for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };

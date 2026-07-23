@@ -12,19 +12,22 @@ import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import {
   mergeObserverEventWindows,
+  observerEventScrollId,
   scopeByChannel,
 } from "@/features/agents/ui/agentSessionPanelLayout";
+import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
   useArchivedChannelEvents,
   useObserverEvents,
 } from "@/features/agents/ui/useObserverEvents";
+import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
+import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cancelManagedAgentTurn } from "@/shared/api/agentControl";
 import type { Channel } from "@/shared/api/types";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
-import { useStickToBottom } from "@/shared/hooks/useStickToBottom";
 import { useNow } from "@/shared/lib/useNow";
 import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
 import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
@@ -103,10 +106,11 @@ export function AgentSessionThreadPanel({
   const canStopCurrentTurn = isWorking && canInterruptTurn;
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
 
-  const { ref: scrollRef, onScroll } = useStickToBottom<HTMLDivElement>();
+  const scrollRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null);
   const topSentinelRef = React.useRef<HTMLDivElement>(null);
   const now = useNow(1000);
-  const { events } = useObserverEvents(isLive, agent.pubkey);
+  const { connectionState, events } = useObserverEvents(isLive, agent.pubkey);
   const scopedEvents = React.useMemo(
     () => scopeByChannel(events, sessionChannelId),
     [events, sessionChannelId],
@@ -150,6 +154,66 @@ export function AgentSessionThreadPanel({
     sentinelRef: topSentinelRef,
   });
   const rawFeedScopeKey = `${agent.pubkey}:${sessionChannelId ?? "all"}`;
+  const [rawFeedState, setRawFeedState] = React.useState(() => ({
+    scopeKey: rawFeedScopeKey,
+    show: false,
+  }));
+  const showRawFeed =
+    rawFeedState.scopeKey === rawFeedScopeKey && rawFeedState.show;
+  const handleRawFeedChange = React.useCallback(
+    (checked: boolean) => {
+      setRawFeedState({ scopeKey: rawFeedScopeKey, show: checked });
+    },
+    [rawFeedScopeKey],
+  );
+
+  // --- Transcript block ids for default Activity mode ---
+  // Derive the same display-block keys the inner AgentSessionTranscriptList
+  // renders as `data-message-id` so useAnchoredScroll anchors on real DOM rows
+  // instead of raw event ids (which live in a disjoint namespace and cause
+  // per-event floor writes → flicker + jump-to-tail).
+  //
+  // latestLiveSessionId is omitted: it only affects boundary `labelState`,
+  // never keys (agentSessionTranscriptGrouping.ts:557-574), so we avoid
+  // subscribing to the observer store from the outer panel.
+  const transcriptBlockIds = React.useMemo(
+    () => (showRawFeed ? [] : deriveTranscriptBlockIds(combinedHeaderEvents)),
+    [combinedHeaderEvents, showRawFeed],
+  );
+
+  // Stabilize the id array by VALUE so the hook's restoration effect (keyed on
+  // the `messages` reference) does not fire on every raw event when the block
+  // id sequence is unchanged. useStableArrayShallow shallow-compares with
+  // Object.is on each string element.
+  const stableTranscriptBlockIds = useStableArrayShallow(transcriptBlockIds);
+
+  // Map to {id} objects only when the stabilized array reference changes.
+  const transcriptScrollMessages = React.useMemo(
+    () => stableTranscriptBlockIds.map((id) => ({ id })),
+    [stableTranscriptBlockIds],
+  );
+
+  // Raw-mode ids: keyed on (seq, timestamp) — matches RawEventRail's
+  // data-message-id. seq resets on agent restart so bare seq can collide;
+  // observerEventScrollId disambiguates.
+  const rawScrollMessages = React.useMemo(
+    () =>
+      combinedHeaderEvents.map((event) => ({
+        id: observerEventScrollId(event),
+      })),
+    [combinedHeaderEvents],
+  );
+
+  const { onScroll } = useAnchoredScroll({
+    // Fold view mode into the reset key so toggling raw ↔ transcript
+    // re-initializes the anchor (clean re-pin) instead of carrying an anchor
+    // across disjoint id namespaces.
+    channelId: `${rawFeedScopeKey}:${showRawFeed ? "raw" : "transcript"}`,
+    contentRef,
+    isLoading: connectionState === "connecting",
+    messages: showRawFeed ? rawScrollMessages : transcriptScrollMessages,
+    scrollContainerRef: scrollRef,
+  });
   // Scope label input: prefer the passed channel's name; when the pane is
   // channel-scoped without a full Channel object (#1380's channelId prop),
   // resolve the name from the channels cache.
@@ -173,18 +237,6 @@ export function AgentSessionThreadPanel({
       ? `#${scopeChannelName}`
       : "1 channel"
     : "All channels";
-  const [rawFeedState, setRawFeedState] = React.useState(() => ({
-    scopeKey: rawFeedScopeKey,
-    show: false,
-  }));
-  const showRawFeed =
-    rawFeedState.scopeKey === rawFeedScopeKey && rawFeedState.show;
-  const handleRawFeedChange = React.useCallback(
-    (checked: boolean) => {
-      setRawFeedState({ scopeKey: rawFeedScopeKey, show: checked });
-    },
-    [rawFeedScopeKey],
-  );
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
   async function handleInterruptTurn() {
@@ -333,7 +385,7 @@ export function AgentSessionThreadPanel({
                 canStopCurrentTurn
                   ? "Interrupt the current ACP turn without stopping the agent process."
                   : isWorking
-                    ? "Only locally managed agents can be interrupted from this workspace."
+                    ? "Only locally managed agents can be interrupted from this community."
                     : "Available while the agent is working."
               }
             >
@@ -408,20 +460,22 @@ export function AgentSessionThreadPanel({
         panelPadding
       >
         <div ref={topSentinelRef} aria-hidden className="h-px" />
-        <ManagedAgentSessionPanel
-          agent={agent}
-          channelId={sessionChannelId}
-          className="border-0 bg-transparent px-0 py-2 shadow-none"
-          emptyDescription={
-            sessionChannelId
-              ? `Mention ${agent.name} in the channel to see its work here.`
-              : `Mention ${agent.name} in any channel to see its work here.`
-          }
-          profiles={profiles}
-          rawLayout="exclusive"
-          showHeader={false}
-          showRaw={showRawFeed}
-        />
+        <div ref={contentRef}>
+          <ManagedAgentSessionPanel
+            agent={agent}
+            channelId={sessionChannelId}
+            className="border-0 bg-transparent px-0 py-2 shadow-none"
+            emptyDescription={
+              sessionChannelId
+                ? `Mention ${agent.name} in the channel to see its work here.`
+                : `Mention ${agent.name} in any channel to see its work here.`
+            }
+            profiles={profiles}
+            rawLayout="exclusive"
+            showHeader={false}
+            showRaw={showRawFeed}
+          />
+        </div>
       </AuxiliaryPanelBody>
     </AuxiliaryPanel>
   );

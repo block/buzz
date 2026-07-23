@@ -94,6 +94,7 @@ export function useAppNavigation() {
     (
       projectId: string,
       behavior?: NavigationBehavior & {
+        commitHash?: string;
         pullRequestId?: string;
         issueId?: string;
       },
@@ -105,6 +106,9 @@ export function useAppNavigation() {
             projectId,
           },
           search: {
+            ...(behavior?.commitHash
+              ? { commitHash: behavior.commitHash }
+              : {}),
             ...(behavior?.pullRequestId
               ? { pullRequestId: behavior.pullRequestId }
               : {}),
@@ -181,6 +185,17 @@ export function useAppNavigation() {
           replace: options?.replace,
           resetScroll: options?.messageId ? true : undefined,
         },
+      ),
+    [commitNavigation],
+  );
+
+  const goNewMessage = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/messages/new",
+        },
+        behavior,
       ),
     [commitNavigation],
   );
@@ -284,6 +299,7 @@ export function useAppNavigation() {
     goChannel,
     goForumPost,
     goHome,
+    goNewMessage,
     goProject,
     goProjects,
     goPulse,

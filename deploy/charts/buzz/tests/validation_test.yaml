@@ -37,7 +37,7 @@ tests:
       replicaCount: 3
     asserts:
       - failedTemplate:
-          errorPattern: "replicaCount=3 requires Redis"
+          errorPattern: "minimum replica count 3 requires Redis"
 
   - it: fails when ingress and httproute both enabled
     set:

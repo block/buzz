@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   deriveLatestSessionId,
+  observerEventScrollId,
   resolveDisplayEvents,
   resolveRawRailLayout,
   scopeByChannel,
@@ -99,4 +100,21 @@ test("resolveRawRailLayout renders the rail exclusively when toggled on in exclu
 
 test("resolveRawRailLayout renders the rail beside the transcript in responsive layout", () => {
   assert.deepEqual(resolveRawRailLayout(true, "responsive"), { mode: "side" });
+});
+
+// ---- observerEventScrollId ----
+// seq is process-local (buzz-acp's ObserverHandle) and resets to 1 on every
+// agent restart while timestamp keeps climbing, so seq alone is not unique
+// across an agent's combined observer history — pair it with timestamp,
+// the same identity mergeObserverEventWindows dedups on above.
+
+test("observerEventScrollId combines seq and timestamp", () => {
+  const event = { seq: 1, timestamp: "2026-07-13T21:00:00.000Z" };
+  assert.equal(observerEventScrollId(event), "1:2026-07-13T21:00:00.000Z");
+});
+
+test("observerEventScrollId returns distinct ids for same seq across a restart", () => {
+  const before = { seq: 1, timestamp: "2026-07-13T20:00:00.000Z" };
+  const after = { seq: 1, timestamp: "2026-07-13T21:00:00.000Z" };
+  assert.notEqual(observerEventScrollId(before), observerEventScrollId(after));
 });

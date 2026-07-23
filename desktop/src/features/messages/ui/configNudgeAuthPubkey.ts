@@ -8,22 +8,25 @@ import type { TimelineMessage } from "@/features/messages/types";
  * The card is enabled ONLY when:
  *   1. `message.kind === KIND_STREAM_MESSAGE` — restricts to the setup-listener
  *      wire format.
- *   2. `message.signerPubkey` is set and is a known agent — authenticates
- *      against the raw event signer (NOT `message.pubkey`, which is the
- *      tag-attributed display author and can be spoofed via `actor`/`p` tags).
+ *   2. `message.signerPubkey` is set and passes `isKnownAgentPubkey` —
+ *      authenticates against the raw event signer (NOT `message.pubkey`,
+ *      which may be a relay-delegated display author). The caller's predicate
+ *      combines the community-wide known-agent baseline
+ *      (`useKnownAgentPubkeys`) with any surface-local signals such as the
+ *      signer profile's `isAgent` flag.
  *
  * Extracting this predicate as a pure helper lets tests exercise the exact
- * signer-vs-attributed-author distinction with a real `TimelineMessage` from
+ * signer-vs-delegated-author distinction with a real `TimelineMessage` from
  * `formatTimelineMessages`, without a full React render harness.
  */
 export function getConfigNudgeAuthorPubkey(
   message: Pick<TimelineMessage, "kind" | "signerPubkey">,
-  resolvedAgentPubkeys: ReadonlySet<string>,
+  isKnownAgentPubkey: (pubkey: string) => boolean,
 ): string | undefined {
   if (
     message.kind === KIND_STREAM_MESSAGE &&
     message.signerPubkey &&
-    resolvedAgentPubkeys.has(message.signerPubkey)
+    isKnownAgentPubkey(message.signerPubkey)
   ) {
     return message.signerPubkey;
   }

@@ -6,15 +6,16 @@ import { HuddleIndicator } from "@/features/huddle/components/HuddleIndicator";
 import { buildHuddleChannelName } from "@/features/huddle/lib/huddleChannelName";
 import {
   useAvailableAcpRuntimes,
-  useBackendProvidersQuery,
   useManagedAgentsQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useChannelMembersQuery } from "@/features/channels/hooks";
 import { canStartHuddleInChannel } from "@/features/channels/lib/huddleAvailability";
 import type { Channel } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { Button } from "@/shared/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -58,7 +59,6 @@ export function ChannelMembersBar({
   const queryClient = useQueryClient();
   const membersQuery = useChannelMembersQuery(channel.id);
   const providersQuery = useAvailableAcpRuntimes();
-  const backendProvidersQuery = useBackendProvidersQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const relayAgentsQuery = useRelayAgentsQuery();
   const members = membersQuery.data ?? [];
@@ -171,32 +171,42 @@ export function ChannelMembersBar({
       </DropdownMenu>
     ) : (
       <div className="flex items-center gap-[6px]">
-        <Button
-          aria-label={`View channel members (${memberCount})`}
-          className="h-8 px-2.5"
-          data-testid="channel-members-trigger"
-          onClick={onToggleMembers}
-          type="button"
-          variant="outline"
-        >
-          <Users />
-          <span className="min-w-[1ch] text-sm font-medium tabular-nums">
-            {memberCount}
-          </span>
-        </Button>
+        <Tooltip disableHoverableContent>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label={`View channel members (${memberCount})`}
+              className="h-8 px-2.5"
+              data-testid="channel-members-trigger"
+              onClick={onToggleMembers}
+              type="button"
+              variant="outline"
+            >
+              <Users />
+              <span className="min-w-[1ch] text-sm font-medium tabular-nums">
+                {memberCount}
+              </span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Channel members</TooltipContent>
+        </Tooltip>
 
         {huddleIndicator}
 
-        <Button
-          aria-label="Manage channel"
-          data-testid="channel-management-trigger"
-          onClick={onManageChannel}
-          size="icon"
-          type="button"
-          variant="outline"
-        >
-          <Settings2 />
-        </Button>
+        <Tooltip disableHoverableContent>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="Manage channel"
+              data-testid="channel-management-trigger"
+              onClick={onManageChannel}
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <EllipsisVertical />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Channel settings</TooltipContent>
+        </Tooltip>
       </div>
     );
 
@@ -205,9 +215,13 @@ export function ChannelMembersBar({
       {controls}
 
       <AddChannelBotDialog
-        backendProviders={backendProvidersQuery.data ?? []}
-        backendProvidersLoading={backendProvidersQuery.isLoading}
         channelId={channel.id}
+        onCreateAgent={() => {
+          requestOpenCreateAgent({
+            channelId: channel.id,
+            channelName: channel.name,
+          });
+        }}
         onOpenChange={setIsAddBotOpen}
         open={isAddBotOpen}
         providers={providers}

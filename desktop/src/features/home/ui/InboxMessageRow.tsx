@@ -1,9 +1,13 @@
 import * as React from "react";
 
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import type { InboxContextMessage } from "@/features/home/lib/inbox";
+import { toTimelineMessage } from "@/features/home/lib/inboxViewHelpers";
 import { formatTimeWithoutDayPeriod } from "@/features/messages/lib/dateFormatters";
 import type { TimelineMessage } from "@/features/messages/types";
+import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
+import { MessageAgentOwner } from "@/features/messages/ui/MessageAgentOwner";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
@@ -17,27 +21,13 @@ export type InboxDisplayMessage = InboxContextMessage & {
   depth: number;
 };
 
-function toTimelineMessage(message: InboxDisplayMessage): TimelineMessage {
-  return {
-    id: message.id,
-    author: message.authorLabel,
-    avatarUrl: message.avatarUrl,
-    body: message.content,
-    createdAt: 0,
-    depth: message.depth,
-    pubkey: message.authorPubkey,
-    reactions: message.reactions ?? [],
-    tags: message.tags,
-    time: message.timeLabel ?? message.fullTimestampLabel,
-  };
-}
-
 type InboxMessageRowProps = {
   agentPubkeys?: ReadonlySet<string>;
   canReply: boolean;
   /** Channel UUID for "Copy link" — passed straight through to MessageActionBar. */
   channelId?: string | null;
   isContinuation?: boolean;
+  isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
   onSelectReplyTarget: (message: InboxDisplayMessage) => void;
@@ -53,6 +43,7 @@ export function InboxMessageRow({
   canReply,
   channelId = null,
   isContinuation = false,
+  isFirst = false,
   isFocusHighlightVisible,
   message,
   onSelectReplyTarget,
@@ -76,8 +67,21 @@ export function InboxMessageRow({
     errorMessage: reactionErrorMessage,
     select: handleReactionSelect,
   } = useReactionHandler(timelineMessage, onToggleReaction);
-  const isAuthorAgent =
-    agentPubkeys?.has(normalizePubkey(message.authorPubkey)) === true;
+  // "Is this pubkey an agent" = the community-scoped baseline every surface
+  // shares plus this surface's extras passed via `agentPubkeys` (HomeView
+  // folds feed-profile `isAgent` flags in). Mirrors MessageRow's predicate.
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const isKnownAgentPubkey = React.useCallback(
+    (pubkey: string) => {
+      const normalized = normalizePubkey(pubkey);
+      return (
+        knownAgentPubkeys.has(normalized) ||
+        agentPubkeys?.has(normalized) === true
+      );
+    },
+    [agentPubkeys, knownAgentPubkeys],
+  );
+  const isAuthorAgent = isKnownAgentPubkey(message.authorPubkey);
   const profileRole = isAuthorAgent ? "bot" : undefined;
   const hoverTimestampLabel = formatTimeWithoutDayPeriod(
     message.timeLabel ?? message.fullTimestampLabel,
@@ -101,6 +105,7 @@ export function InboxMessageRow({
           "group/message relative z-10 mx-1 flex gap-2.5 rounded-2xl px-2 py-1 transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
           isContinuation ? "items-center" : "items-start",
         )}
+        data-message-id={message.id}
         data-testid={
           message.isSelected
             ? "home-inbox-selected-message"
@@ -108,7 +113,12 @@ export function InboxMessageRow({
         }
       >
         {canReply || canToggleReactions ? (
-          <div className="absolute right-2 top-1 z-10 sm:top-0 sm:-translate-y-1/2">
+          <div
+            className={cn(
+              "absolute right-2 top-1 z-10",
+              !isFirst && "sm:top-0 sm:-translate-y-1/2",
+            )}
+          >
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}
@@ -170,6 +180,12 @@ export function InboxMessageRow({
                   {message.authorLabel}
                 </span>
               </UserProfilePopover>
+              {message.isAgent ? (
+                <MessageAgentOwner
+                  ownerLabel={message.ownerLabel}
+                  ownerPubkey={message.ownerPubkey}
+                />
+              ) : null}
               <p className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground/55">
                 {message.fullTimestampLabel}
               </p>
@@ -182,6 +198,14 @@ export function InboxMessageRow({
                 "max-w-full text-left text-sm text-foreground",
                 emojiOnly &&
                   "text-4xl leading-tight [&_p]:leading-tight [&_img[data-custom-emoji]]:h-[1.45em] [&_img[data-custom-emoji]]:align-middle [&_button:has(img[data-custom-emoji])]:align-middle",
+              )}
+              // Only pass the author pubkey for agent-authored messages so
+              // config-nudge cards can authenticate the sender. Uses the
+              // raw event signer (signerPubkey), not a relay-delegated display
+              // author, because the agent itself must have signed the card.
+              configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
+                timelineMessage,
+                isKnownAgentPubkey,
               )}
               content={message.content}
               customEmoji={customEmoji}

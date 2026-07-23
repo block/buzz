@@ -12,6 +12,17 @@ describe("resolveEnabled (preview-only)", () => {
     assert.equal(resolveEnabled("workflows", { workflows: true }), true);
   });
 
+  it("uses an enabled manifest default when no override exists", () => {
+    assert.equal(resolveEnabled("defaultOnFeature", {}, true), true);
+  });
+
+  it("lets an explicit opt-out override an enabled default", () => {
+    assert.equal(
+      resolveEnabled("defaultOnFeature", { defaultOnFeature: false }, true),
+      false,
+    );
+  });
+
   it("returns false when user explicitly opts out", () => {
     assert.equal(resolveEnabled("workflows", { workflows: false }), false);
   });

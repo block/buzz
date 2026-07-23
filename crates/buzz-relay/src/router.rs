@@ -12,6 +12,7 @@ use axum::{
     Router,
 };
 use serde_json::json;
+use tower::ServiceExt;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::services::ServeDir;
@@ -35,6 +36,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .max_image_bytes
         .max(state.config.media.max_video_bytes) as usize;
     let media_router = Router::new()
+        .route("/upload", put(api::media::upload_blob))
         .route("/media/upload", put(api::media::upload_blob))
         .route(
             "/media/{sha256_ext}",
@@ -46,6 +48,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     let git_router = api::git::git_router(state.clone());
 
     let git_policy_router = api::git::git_policy_router(state.clone());
+
+    let admin_enabled = state.config.admin.is_some();
+    let admin_web_dir = state
+        .config
+        .admin
+        .as_ref()
+        .and_then(|config| config.web_dir.clone());
+    let admin_router = admin_enabled
+        .then(|| Router::new().nest("/api/admin/v1", api::admin::router(state.clone())));
 
     let api_router = Router::new()
         // WebSocket + NIP-11
@@ -65,11 +76,38 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(api::operator::list_owned_communities).post(api::operator::provision_community),
         )
         .route(
+            "/operator/communities/archive",
+            post(api::operator::archive_community),
+        )
+        .route(
+            "/operator/communities/unarchive",
+            post(api::operator::unarchive_community),
+        )
+        .route(
             "/operator/communities/availability",
             get(api::operator::community_availability),
         )
+        .route(
+            "/operator/communities/transfer",
+            post(api::operator::transfer_community),
+        )
         // Relay invites: mint (owner/admin) + claim (membership-gate exempt)
         .route("/api/invites", post(api::invites::mint_invite))
+        .route("/api/join-policy", get(api::invites::join_policy))
+        // Policy documents as standalone pages — desktop opens these in the
+        // system browser instead of rendering the Markdown in-app.
+        .route(
+            "/api/join-policy/terms",
+            get(api::invites::join_policy_terms),
+        )
+        .route(
+            "/api/join-policy/privacy",
+            get(api::invites::join_policy_privacy),
+        )
+        .route(
+            "/api/invites/accept-policy",
+            post(api::invites::accept_policy),
+        )
         .route("/api/invites/claim", post(api::invites::claim_invite))
         // Moderation queue reads (NIP-98 auth + mod-authz gate, L6)
         .route("/moderation/reports", get(api::bridge::moderation_reports))
@@ -80,6 +118,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Webhook trigger (secret-authenticated, no NIP-98)
         .route("/hooks/{id}", post(api::bridge::workflow_webhook))
+        // Mesh demo echo probe — testbed-only; 404 unless BUZZ_MESH=on and
+        // BUZZ_MESH_DEMO_ECHO=on (see api::mesh_demo).
+        .route("/_mesh/demo/echo", post(api::mesh_demo::demo_echo))
         // Huddle audio WebSocket route
         .route(
             "/huddle/{channel_id}/audio",
@@ -95,45 +136,52 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(media_router)
         .merge(git_router)
         .merge(git_policy_router);
+    if let Some(admin_router) = admin_router {
+        merged = merged.merge(admin_router);
+    }
 
-    // When BUZZ_WEB_DIR is set, serve the SPA as a fallback for unmatched routes.
-    if let Some(ref web_dir) = state.config.web_dir {
-        let index_path = web_dir.join("index.html");
-        let spa_fallback = ServeDir::new(web_dir).not_found_service(tower::service_fn(
-            move |req: axum::extract::Request| {
-                let index = index_path.clone();
-                async move {
-                    let path = req.uri().path();
-                    // Reserved API prefixes must 404 normally, not serve index.html.
-                    let reserved = path.starts_with("/api/")
-                        || path.starts_with("/media/")
-                        || path.starts_with("/operator/")
-                        || path.starts_with("/git/")
-                        || path.starts_with("/internal/")
-                        || path.starts_with("/.well-known/")
-                        || path.starts_with("/huddle/")
-                        || path == "/health"
-                        || path == "/_liveness"
-                        || path == "/_readiness"
-                        || path == "/_status"
-                        || path == "/info";
-                    // Files with extensions (e.g. /assets/missing.js) should 404.
-                    // Exception: /invite/<code> — invite codes contain a "."
-                    // (payload.mac separator) but are SPA routes, not files.
-                    let has_ext = !path.starts_with("/invite/")
-                        && path.rsplit('/').next().is_some_and(|seg| seg.contains('.'));
-                    if reserved || has_ext {
-                        Ok(StatusCode::NOT_FOUND.into_response())
-                    } else {
-                        // SPA client-side route → serve index.html
-                        match tokio::fs::read(&index).await {
-                            Ok(body) => Ok(axum::response::Html(body).into_response()),
-                            Err(_) => Ok(StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+    // Serve both bundles from one fallback. The admin host is checked first so
+    // it can never fall through to the public web bundle.
+    let web_dir = state.config.web_dir.clone();
+    if admin_web_dir.is_some() || web_dir.is_some() {
+        let admin_index = admin_web_dir.as_ref().map(|dir| dir.join("index.html"));
+        let admin_files = admin_web_dir.map(ServeDir::new);
+        let web_index = web_dir.as_ref().map(|dir| dir.join("index.html"));
+        let web_files = web_dir.map(ServeDir::new);
+        let serve_git_web_gui = state.config.serve_git_web_gui;
+        let fallback_state = state.clone();
+        let spa_fallback = tower::service_fn(move |req: axum::extract::Request| {
+            let admin_index = admin_index.clone();
+            let admin_files = admin_files.clone();
+            let web_index = web_index.clone();
+            let web_files = web_files.clone();
+            let state = fallback_state.clone();
+            async move {
+                let path = req.uri().path();
+                let admin_host = api::admin::is_admin_host(&state, req.headers());
+                if admin_host {
+                    if let (Some(index), Some(files)) = (admin_index, admin_files) {
+                        if path.starts_with("/assets/") {
+                            return files.oneshot(req).await.map(IntoResponse::into_response);
+                        }
+                        if is_admin_spa_path(path) {
+                            return Ok(read_spa_index(&index).await);
                         }
                     }
+                    return Ok(StatusCode::NOT_FOUND.into_response());
                 }
-            },
-        ));
+
+                if let (Some(index), Some(files)) = (web_index, web_files) {
+                    if path.starts_with("/assets/") {
+                        return files.oneshot(req).await.map(IntoResponse::into_response);
+                    }
+                    if should_serve_spa(path, serve_git_web_gui) {
+                        return Ok(read_spa_index(&index).await);
+                    }
+                }
+                Ok(StatusCode::NOT_FOUND.into_response())
+            }
+        });
         merged = merged.fallback_service(spa_fallback);
     }
 
@@ -141,6 +189,34 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn(track_metrics))
         .layer(TraceLayer::new_for_http())
         .layer(build_cors_layer(&state.config.cors_origins))
+}
+
+fn is_admin_spa_path(path: &str) -> bool {
+    path == "/"
+        || path == "/reports"
+        || path.starts_with("/reports/")
+        || path == "/feedback"
+        || path.starts_with("/feedback/")
+}
+
+fn is_invite_landing_path(path: &str) -> bool {
+    path.strip_prefix("/invite/")
+        .is_some_and(|code| !code.is_empty() && !code.contains('/'))
+}
+
+fn should_serve_spa(path: &str, serve_git_web_gui: bool) -> bool {
+    is_invite_landing_path(path) || (serve_git_web_gui && is_git_web_gui_path(path))
+}
+
+fn is_git_web_gui_path(path: &str) -> bool {
+    path == "/" || path == "/repos" || path.starts_with("/repos/")
+}
+
+async fn read_spa_index(index: &std::path::Path) -> axum::response::Response {
+    match tokio::fs::read(index).await {
+        Ok(body) => axum::response::Html(body).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Build the health-only router for K8s probes (port 8080 in CAKE).
@@ -151,6 +227,7 @@ pub fn build_health_router(state: Arc<AppState>) -> Router {
         .route("/_liveness", get(liveness_handler))
         .route("/_readiness", get(readiness_handler))
         .route("/_status", get(status_handler))
+        .route("/_mesh", get(mesh_status_handler))
         .with_state(state)
 }
 
@@ -175,6 +252,25 @@ async fn nip11_or_ws_handler(
         .get(axum::http::header::HOST)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+
+    // `/` is an explicit relay route, so it never reaches the SPA fallback.
+    // Short-circuit the exact admin authority here and never let it serve the
+    // public web bundle, NIP-11 document, or WebSocket endpoint.
+    if api::admin::is_admin_host(&state, &headers) {
+        if !accept.contains("text/html") {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        let Some(index) = state
+            .config
+            .admin
+            .as_ref()
+            .and_then(|config| config.web_dir.as_ref())
+            .map(|dir| dir.join("index.html"))
+        else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        return read_spa_index(&index).await;
+    }
 
     if accept.contains("application/nostr+json") {
         return Json(nip11_document(&state, raw_host).await).into_response();
@@ -201,17 +297,31 @@ async fn nip11_or_ws_handler(
         }
     };
 
+    let max_frame_bytes = state.config.max_frame_bytes;
     match WebSocketUpgrade::from_request(req, &state).await {
-        Ok(ws) => ws
-            .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
-            .into_response(),
+        Ok(ws) => {
+            // Shutting down: refuse new sockets instead of accepting a
+            // connection onto a dying pod. Readiness already returns 503, but
+            // that only stops K8s routing — direct and in-flight upgrades
+            // still reach here during the pre-drain grace window. Clients
+            // treat the refusal as a normal dial failure and retry, landing
+            // on a healthy pod.
+            if state.shutting_down.load(Ordering::Relaxed) {
+                return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
+            }
+            limit_relay_websocket(ws, max_frame_bytes)
+                .on_upgrade(move |socket| handle_connection(socket, state, addr, tenant))
+                .into_response()
+        }
         Err(_) => {
-            // Browser requesting HTML and web UI is configured → serve SPA.
-            if let Some(ref dir) = state.config.web_dir {
-                if accept.contains("text/html") {
-                    let index = dir.join("index.html");
-                    if let Ok(body) = tokio::fs::read(&index).await {
-                        return axum::response::Html(body).into_response();
+            // Browser requesting HTML and Git web GUI is enabled → serve SPA.
+            if state.config.serve_git_web_gui {
+                if let Some(ref dir) = state.config.web_dir {
+                    if accept.contains("text/html") {
+                        let index = dir.join("index.html");
+                        if let Ok(body) = tokio::fs::read(&index).await {
+                            return axum::response::Html(body).into_response();
+                        }
                     }
                 }
             }
@@ -219,6 +329,16 @@ async fn nip11_or_ws_handler(
             Json(nip11_document(&state, raw_host).await).into_response()
         }
     }
+}
+
+fn limit_relay_websocket<F>(
+    ws: WebSocketUpgrade<F>,
+    max_frame_bytes: usize,
+) -> WebSocketUpgrade<F> {
+    // recv_loop keeps the application-level check as defense in depth, but
+    // parser limits must be set before tungstenite assembles the message.
+    ws.max_message_size(max_frame_bytes)
+        .max_frame_size(max_frame_bytes)
 }
 
 async fn health_handler() -> impl IntoResponse {
@@ -273,6 +393,18 @@ async fn status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse
     }))
 }
 
+/// `/_mesh` — live mesh status: peer table, connection/phi state, per-peer
+/// counters, fence-rejection totals. Mesh-off reports `{"enabled": false}` so
+/// operators can distinguish "off" from "on with zero peers".
+async fn mesh_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.mesh() {
+        Some(handle) => Json(serde_json::to_value(handle.status()).unwrap_or_else(
+            |e| json!({"enabled": true, "error": format!("status serialize: {e}")}),
+        )),
+        None => Json(json!({"enabled": false})),
+    }
+}
+
 /// Build a CORS layer from the configured origins list.
 fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
     if cors_origins.is_empty() {
@@ -297,4 +429,102 @@ fn build_cors_layer(cors_origins: &[String]) -> CorsLayer {
         .allow_origin(AllowOrigin::list(origins))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any)
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{routing::get, Router};
+    use futures_util::SinkExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    use super::*;
+
+    #[test]
+    fn invite_landing_path_requires_exactly_one_nonempty_code_segment() {
+        assert!(is_invite_landing_path("/invite/payload.mac"));
+        assert!(!is_invite_landing_path("/invite/"));
+        assert!(!is_invite_landing_path("/invite/code/extra"));
+        assert!(!is_invite_landing_path("/repos"));
+        assert!(!is_invite_landing_path("/"));
+    }
+
+    #[test]
+    fn git_web_gui_paths_are_explicit() {
+        assert!(is_git_web_gui_path("/"));
+        assert!(is_git_web_gui_path("/repos"));
+        assert!(is_git_web_gui_path("/repos/example"));
+        assert!(!is_git_web_gui_path("/repository"));
+        assert!(!is_git_web_gui_path("/arbitrary"));
+        assert!(!is_git_web_gui_path("/api/invites"));
+    }
+
+    #[test]
+    fn invite_is_always_served_but_git_gui_requires_opt_in() {
+        assert!(should_serve_spa("/invite/payload.mac", false));
+        assert!(should_serve_spa("/invite/payload.mac", true));
+        assert!(!should_serve_spa("/", false));
+        assert!(!should_serve_spa("/repos/example", false));
+        assert!(should_serve_spa("/", true));
+        assert!(should_serve_spa("/repos/example", true));
+        assert!(!should_serve_spa("/arbitrary", true));
+    }
+
+    async fn handler_receives_message_with_limit(limit: usize, size: usize) -> bool {
+        let (received_tx, mut received_rx) = mpsc::unbounded_channel();
+        let app = Router::new().route(
+            "/",
+            get(move |ws: WebSocketUpgrade| {
+                let received_tx = received_tx.clone();
+                async move {
+                    limit_relay_websocket(ws, limit).on_upgrade(move |mut socket| async move {
+                        let _ = received_tx.send(matches!(socket.recv().await, Some(Ok(_))));
+                    })
+                }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test WebSocket listener");
+        let addr = listener.local_addr().expect("test listener address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test WebSocket server");
+        });
+
+        let (mut client, _) = connect_async(format!("ws://{addr}/"))
+            .await
+            .expect("connect test WebSocket client");
+        client
+            .send(Message::Text("x".repeat(size).into()))
+            .await
+            .expect("send test WebSocket message");
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), received_rx.recv())
+            .await
+            .expect("server should process the test message")
+            .expect("server should report whether it received the message");
+
+        server.abort();
+        let _ = server.await;
+
+        received
+    }
+
+    #[tokio::test]
+    async fn relay_websocket_parser_rejects_oversized_messages_before_handler_reads_them() {
+        let limit = 64;
+
+        assert!(
+            handler_receives_message_with_limit(limit, limit).await,
+            "messages at the relay limit should still reach the handler"
+        );
+        assert!(
+            !handler_receives_message_with_limit(limit, limit + 1).await,
+            "oversized messages must be rejected by the WebSocket parser before the handler sees them"
+        );
+    }
 }

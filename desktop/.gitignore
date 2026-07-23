@@ -12,6 +12,7 @@ node_modules
 dist
 dist-ssr
 playwright-report
+playwright-report.json
 test-results
 *.local
 playwright-report

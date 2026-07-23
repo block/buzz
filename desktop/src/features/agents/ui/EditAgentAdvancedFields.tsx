@@ -6,7 +6,7 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import type { AgentPersona } from "@/shared/api/types";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
@@ -19,16 +19,15 @@ export function EditAgentAdvancedFields({
   disabled,
   envVars,
   fileSatisfiedEnvKeys,
+  hiddenEnvKeys = [],
   focusKey,
   inheritedEnvVars,
   inheritHarness,
   linkedPersona,
-  mcpToolsets,
   model,
   modelTuningRuntimeId,
   parallelism,
   provider,
-  relayUrl,
   requiredEnvKeys,
   selectedRuntimeId,
   systemPrompt,
@@ -37,9 +36,7 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
-  onMcpToolsetsChange,
   onParallelismChange,
-  onRelayUrlChange,
   onAutoRestartChange,
   onSystemPromptChange,
 }: {
@@ -50,12 +47,12 @@ export function EditAgentAdvancedFields({
   disabled: boolean;
   envVars: EnvVarsValue;
   fileSatisfiedEnvKeys: readonly string[];
+  hiddenEnvKeys?: readonly string[];
   /** When set, EnvVarsEditor scrolls and focuses this key's input on mount. */
   focusKey?: string;
   inheritedEnvVars: Record<string, string>;
   inheritHarness: boolean;
   linkedPersona: AgentPersona | null;
-  mcpToolsets: string;
   /** Active LLM model — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   model?: string;
   /**
@@ -67,7 +64,6 @@ export function EditAgentAdvancedFields({
   parallelism: string;
   /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   provider?: string;
-  relayUrl: string;
   requiredEnvKeys: readonly string[];
   selectedRuntimeId: string;
   systemPrompt: string;
@@ -76,9 +72,7 @@ export function EditAgentAdvancedFields({
   onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
-  onMcpToolsetsChange: (value: string) => void;
   onParallelismChange: (value: string) => void;
-  onRelayUrlChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
@@ -191,39 +185,6 @@ export function EditAgentAdvancedFields({
         </div>
       </div>
 
-      {/* MCP toolsets */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-mcp-toolsets"
-        >
-          MCP toolsets
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-mcp-toolsets"
-            onChange={(event) => onMcpToolsetsChange(event.target.value)}
-            placeholder="default,canvas,forums,dms,media"
-            value={mcpToolsets}
-          />
-        </div>
-        <p className="text-xs text-muted-foreground">
-          Comma-separated list of toolsets to expose via BUZZ_TOOLSETS.
-        </p>
-      </div>
-
       {/* Parallelism */}
       <div className="space-y-1.5">
         <label
@@ -254,35 +215,10 @@ export function EditAgentAdvancedFields({
         </div>
       </div>
 
-      {/* Relay URL */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-relay-url"
-        >
-          Relay URL
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-relay-url"
-            onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Leave blank to use the workspace relay"
-            value={relayUrl}
-          />
-        </div>
-      </div>
+      {/* Relay URL: intentionally no editor. The legacy per-record relay pin
+          is ignored (#2122 agents-everywhere) — agents always run on the
+          active community relay — so offering a knob here would advertise a
+          setting with no effect. The stored field is preserved untouched. */}
 
       {/* ACP command */}
       <div className="space-y-1.5">
@@ -340,6 +276,7 @@ export function EditAgentAdvancedFields({
       <EnvVarsEditor
         disabled={disabled}
         fileSatisfiedKeys={fileSatisfiedEnvKeys}
+        hiddenKeys={hiddenEnvKeys}
         focusKey={focusKey}
         helperText="Per-agent env vars. Override the template's vars on collision."
         inheritedFrom={inheritedEnvVars}

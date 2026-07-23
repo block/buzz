@@ -15,6 +15,7 @@
 //! discovery table. Ensures known providers always have their canonical
 //! `mcp_command`; unknown/custom agents are left untouched.
 
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
@@ -44,7 +45,7 @@ const SHARED_AGENT_DIRS: &[&str] = &["agents/teams"];
 /// `xyz.block.buzz.app.developer`. This is the authoritative dev/prod
 /// discriminator shared by `run_boot_migrations`, `sync_shared_agent_data`,
 /// and `reconcile_target_dir`.
-fn is_dev_data_dir_name(name: &str) -> bool {
+pub(crate) fn is_dev_data_dir_name(name: &str) -> bool {
     name == CANONICAL_DEV_IDENTIFIER
         || name
             .strip_prefix(CANONICAL_DEV_IDENTIFIER)
@@ -55,7 +56,7 @@ fn canonical_dev_data_dir(current: &Path) -> Option<PathBuf> {
     current.parent().map(|p| p.join(CANONICAL_DEV_IDENTIFIER))
 }
 
-fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
+pub(crate) fn legacy_app_data_dir(current: &Path) -> Option<PathBuf> {
     let name = current.file_name()?.to_str()?;
     let legacy_name = if name.starts_with(CANONICAL_DEV_IDENTIFIER) {
         name.replacen(CANONICAL_DEV_IDENTIFIER, LEGACY_CANONICAL_DEV_IDENTIFIER, 1)
@@ -119,6 +120,15 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// readers — reader-first loses a launch (stale harness/`mcp_command` until
 /// the next boot).
 pub fn run_boot_migrations(app: &tauri::AppHandle) {
+    run_boot_migrations_inner(app, false);
+}
+
+/// Entry point when a completed reset must suppress dev-nest re-import.
+pub fn run_boot_migrations_after_reset(app: &tauri::AppHandle) {
+    run_boot_migrations_inner(app, true);
+}
+
+fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
     // Initialize the process-lifetime nest directory before any filesystem
     // operation that calls nest_dir(). The discriminator matches the existing
     // pattern used by reconcile_target_dir: dev instances have an app-data-dir
@@ -139,8 +149,10 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // ensures the dev nest boots with the correct workspace on its first launch,
     // matching what the prod nest had configured. Skip-if-dest-exists so it is
     // idempotent and never clobbers a value the dev nest already set explicitly.
-    if is_dev {
-        migrate_dev_repos_dir();
+    // Uses the composed helper so the gate + migration run through the same
+    // code path that the behavioral test exercises.
+    if let (Some(home), Some(dev_nest)) = (dirs::home_dir(), crate::managed_agents::nest_dir()) {
+        maybe_migrate_dev_repos_dir(is_dev, reset_completed, &home, &dev_nest);
     }
 
     migrate_legacy_app_data_dir(app);
@@ -155,8 +167,6 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     if is_dev {
         crate::managed_agents::migrate_agent_keys_to_dev_service(app);
     }
-    migrate_packs_to_teams(app);
-    reconcile_persona_team_dirs(app);
     migrate_persona_provider_to_runtime(app);
     reconcile_legacy_command_names(app);
     // Fold personas.json into the unified store HERE: after the JSON-level
@@ -166,14 +176,13 @@ pub fn run_boot_migrations(app: &tauri::AppHandle) {
     // Post-fold readers of the runtime map (`load_persona_runtimes`) fall
     // back to the unified store's definitions.
     fold_personas_into_agent_store(app);
+    refresh_builtin_agent_avatars(app);
     // B5: manufacture definitions for standalone agents AFTER the fold (so
     // pre-existing definition slugs are present for collision checks) and
     // before event sync republishes — the backfilled link is what flips the
     // 30177 projection to its slim shape.
     backfill_standalone_agents(app);
-    if let Err(e) = crate::managed_agents::sync_team_personas(app) {
-        eprintln!("buzz-desktop: sync-team-personas: {e}");
-    }
+    detach_directory_backed_teams(app);
     reconcile_provider_mcp_commands(app);
     reconcile_databricks_v1_to_v2(app);
     materialize_agent_runtimes(app);
@@ -276,6 +285,14 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
     if !legacy.exists() {
         return false;
     }
+    // A deliberate dev reset pre-creates this marker to opt out of every
+    // production/legacy nest import. Normal first-run migration still copies
+    // `.sprout` before `migrate_dev_nest()` writes the marker later in boot.
+    if current.file_name().is_some_and(|name| name == ".buzz-dev")
+        && current.join(DEV_NEST_MIGRATED_SENTINEL).exists()
+    {
+        return false;
+    }
     for name in LEGACY_NEST_KNOWLEDGE {
         let src = legacy.join(name);
         if !src.exists() {
@@ -318,23 +335,27 @@ fn migrate_legacy_nest_at(legacy: &Path, current: &Path) -> bool {
 /// also copies into `~/.buzz-dev` and could otherwise set the sentinel early.
 const DEV_NEST_MIGRATED_SENTINEL: &str = ".dev-nest-migrated";
 
-/// Copy the `.repos-dir` dotfile from `~/.buzz` → `~/.buzz-dev`, non-destructively.
-///
-/// Must be called on dev builds BEFORE `resolve_repos_at_boot()` reads the
-/// dotfile, so the dev nest boots with the correct workspace configuration on
-/// its first launch. Skip-if-dest-exists so it is idempotent and never
-/// overwrites a value set directly by the dev nest.
-fn migrate_dev_repos_dir() {
-    let Some(home) = dirs::home_dir() else {
-        return;
-    };
+/// Returns true when `migrate_dev_repos_dir` should run: dev build AND no
+/// completed reset this boot (a completed reset means the dev nest was just
+/// wiped — re-importing from prod would undo the sign-out).
+pub(crate) fn should_migrate_dev_repos_dir(is_dev: bool, reset_completed: bool) -> bool {
+    is_dev && !reset_completed
+}
+
+/// Injectable core: copy `.repos-dir` from `<home>/.buzz/` into `dev_nest`,
+/// non-destructively. Extracted so tests can inject temp paths without
+/// touching `dirs::home_dir()` or the global `nest_dir()` OnceLock.
+pub(crate) fn migrate_dev_repos_dir_at(home: &Path, dev_nest: &Path) {
     let src = home.join(".buzz").join(".repos-dir");
     if !src.exists() {
         return;
     }
-    let Some(dev_nest) = crate::managed_agents::nest_dir() else {
+    // This is a one-time migration. The full dev-nest migration writes the
+    // same sentinel, and a deliberate dev reset pre-creates it to keep the
+    // next launch from importing production workspace state again.
+    if dev_nest.join(DEV_NEST_MIGRATED_SENTINEL).exists() {
         return;
-    };
+    }
     let dst = dev_nest.join(".repos-dir");
     // Skip if the dev nest already has its own .repos-dir.
     if dst.exists() {
@@ -342,7 +363,7 @@ fn migrate_dev_repos_dir() {
     }
     // Ensure the dev nest directory itself exists — this migration runs before
     // ensure_nest() in the boot sequence, so the directory may not yet exist.
-    if let Err(e) = std::fs::create_dir_all(&dev_nest) {
+    if let Err(e) = std::fs::create_dir_all(dev_nest) {
         eprintln!(
             "buzz-desktop: dev-nest-migration: failed to create dev nest {}: {e}",
             dev_nest.display()
@@ -355,6 +376,21 @@ fn migrate_dev_repos_dir() {
             dst.display()
         ),
         Err(e) => eprintln!("buzz-desktop: dev-nest-migration: failed to migrate .repos-dir: {e}"),
+    }
+}
+
+/// Composed gate + migration: applies `should_migrate_dev_repos_dir` and, if
+/// the gate passes, runs the injectable migration core. This is the seam that
+/// `run_boot_migrations_inner` calls with real paths — a future mis-wired flag
+/// or inverted gate breaks tests at this level, not just the predicate.
+pub(crate) fn maybe_migrate_dev_repos_dir(
+    is_dev: bool,
+    reset_completed: bool,
+    home: &Path,
+    dev_nest: &Path,
+) {
+    if should_migrate_dev_repos_dir(is_dev, reset_completed) {
+        migrate_dev_repos_dir_at(home, dev_nest);
     }
 }
 
@@ -475,6 +511,243 @@ fn patch_json_records(
             }
         }
     }
+}
+
+struct LegacyBuiltInAvatar<'a> {
+    persona_id: &'a str,
+    data_url_sha256: &'a str,
+    // Catalog-created agents persist the blob descriptor for the PNG after
+    // `sanitize_image_for_upload` re-encodes it, not the decoded source bytes.
+    sanitized_media_sha256: &'a str,
+    persona_content_hash: &'a str,
+}
+
+const LEGACY_BUILTIN_AVATARS: &[LegacyBuiltInAvatar<'static>] = &[
+    LegacyBuiltInAvatar {
+        persona_id: "builtin:fizz",
+        data_url_sha256: "2771b8c9c46aa3c8ac1c4d2acfa23fa9ba35b79c4b1694554e923081e3b8b4d0",
+        sanitized_media_sha256: "1a4964ff4cf6c499df1a77a941c211c7d1e7ef755f1c395bc9a3b0f2878114a6",
+        persona_content_hash: "b36381d042c8eb5c786a1a692c7ba5a47ae129b9972a1473b64d8fe03f4817c1",
+    },
+    LegacyBuiltInAvatar {
+        persona_id: "builtin:honey",
+        data_url_sha256: "1979e54ef77fc94ec688170bd74dade35c563e7fcc82bb0714c672dfb018eab9",
+        sanitized_media_sha256: "0e0ed9a35d4050bdd290aa8138d5ab811f222549f6acc3cee40a7feb65933e1f",
+        persona_content_hash: "9c9b6b11f1cdd56ba645de02213c562e59c3690bf3f217f74a85df8e6575fd06",
+    },
+    LegacyBuiltInAvatar {
+        persona_id: "builtin:bumble",
+        data_url_sha256: "c08cf3b8b4c3f8721df6143367ababdebae8f913b9c654401ba74bb3d233655b",
+        sanitized_media_sha256: "9f798c61f8965b80beb808f505feb0a5b33726545188ea8212cc9ab22d05f0b6",
+        persona_content_hash: "544a73f9106a3c8848b0f308b7a8b6f95077ac8deccdb9ed5552caa833d66c95",
+    },
+];
+
+struct LegacyAvatarMatch<'a> {
+    persona_id: String,
+    metadata: &'a LegacyBuiltInAvatar<'a>,
+    was_uploaded: bool,
+}
+
+/// Refresh the prior seeded avatar on built-in definitions and linked agent
+/// instances while preserving any avatar the user customized. Matching by the
+/// exact data URL or content-addressed upload digest makes the migration
+/// idempotent and avoids relying on timestamps or other persona fields the
+/// user may also have edited.
+fn refresh_builtin_agent_avatars(app: &tauri::AppHandle) {
+    let Ok(dir) = app.path().app_data_dir() else {
+        return;
+    };
+    let path = dir.join("agents/managed-agents.json");
+    if path.exists() {
+        refresh_builtin_agent_avatars_in_file(
+            &path,
+            LEGACY_BUILTIN_AVATARS,
+            &crate::util::now_iso(),
+        );
+    }
+}
+
+fn refresh_builtin_agent_avatars_in_file(
+    path: &Path,
+    legacy_avatars: &[LegacyBuiltInAvatar<'_>],
+    now: &str,
+) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut records) = serde_json::from_str::<Vec<serde_json::Value>>(&contents) else {
+        eprintln!(
+            "buzz-desktop: refresh-builtin-agent-avatars: invalid JSON in {}",
+            path.display()
+        );
+        return;
+    };
+
+    // Definitions must be migrated first so linked instances can advance from
+    // the exact old persona hash to the exact new one. Only advance an instance
+    // that was in sync before migration; a genuinely drifted instance keeps its
+    // old source version and therefore keeps its out-of-date indicator.
+    let mut persona_version_updates = std::collections::HashMap::new();
+    let mut changed = false;
+    for record in &mut records {
+        let Some(legacy_match) = legacy_avatar_match(record, legacy_avatars) else {
+            continue;
+        };
+        let persona_id = legacy_match.persona_id.clone();
+        let is_definition = record
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(str::is_empty)
+            && record.get("slug").and_then(serde_json::Value::as_str) == Some(&persona_id);
+        if !is_definition {
+            continue;
+        }
+        let old_version = persona_version_from_record(record);
+        if !replace_builtin_avatar(record, &persona_id, now) {
+            continue;
+        }
+        changed = true;
+        if let (Some(old_version), Some(new_version)) =
+            (old_version, persona_version_from_record(record))
+        {
+            persona_version_updates.insert(persona_id, (old_version, new_version));
+        }
+    }
+
+    for record in &mut records {
+        let Some(legacy_match) = legacy_avatar_match(record, legacy_avatars) else {
+            continue;
+        };
+        let persona_id = legacy_match.persona_id.clone();
+        let legacy_avatar = record
+            .get("avatar_url")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let is_linked_instance = record
+            .get("pubkey")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|pubkey| !pubkey.is_empty())
+            && record.get("persona_id").and_then(serde_json::Value::as_str) == Some(&persona_id);
+        if !is_linked_instance {
+            continue;
+        }
+        let version_update = persona_version_updates
+            .get(&persona_id)
+            .cloned()
+            .or_else(|| {
+                legacy_avatar.as_deref().and_then(|legacy_avatar| {
+                    built_in_persona_version_update(&legacy_match, legacy_avatar, now)
+                })
+            });
+        if !replace_builtin_avatar(record, &persona_id, now) {
+            continue;
+        }
+        changed = true;
+        if let Some((old_version, new_version)) = version_update {
+            let source_was_current = record
+                .get("persona_source_version")
+                .and_then(serde_json::Value::as_str)
+                == Some(old_version.as_str());
+            if source_was_current {
+                record["persona_source_version"] = serde_json::Value::String(new_version);
+            }
+        }
+    }
+
+    if changed {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&records) {
+            if let Err(e) = crate::managed_agents::atomic_write_json_restricted(path, &bytes) {
+                eprintln!("buzz-desktop: refresh-builtin-agent-avatars: {e}");
+            }
+        }
+    }
+}
+
+fn legacy_avatar_match<'a>(
+    record: &serde_json::Value,
+    legacy_avatars: &'a [LegacyBuiltInAvatar<'a>],
+) -> Option<LegacyAvatarMatch<'a>> {
+    let persona_id = record
+        .get("persona_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| record.get("slug").and_then(serde_json::Value::as_str))?;
+    let metadata = legacy_avatars
+        .iter()
+        .find(|legacy| legacy.persona_id == persona_id)?;
+    let current_avatar = record
+        .get("avatar_url")
+        .and_then(serde_json::Value::as_str)?;
+    let matches_data_url =
+        hex::encode(Sha256::digest(current_avatar.as_bytes())) == metadata.data_url_sha256;
+    let matches_uploaded_media = uploaded_media_sha256(current_avatar)
+        .is_some_and(|sha256| sha256 == metadata.sanitized_media_sha256);
+    (matches_data_url || matches_uploaded_media).then(|| LegacyAvatarMatch {
+        persona_id: persona_id.to_string(),
+        metadata,
+        was_uploaded: matches_uploaded_media,
+    })
+}
+
+fn uploaded_media_sha256(avatar_url: &str) -> Option<String> {
+    let url = url::Url::parse(avatar_url).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    let filename = url.path_segments()?.next_back()?;
+    let (sha256, extension) = filename.rsplit_once('.')?;
+    (!extension.is_empty()
+        && sha256.len() == 64
+        && sha256.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    .then(|| sha256.to_string())
+}
+
+fn persona_version_from_record(record: &serde_json::Value) -> Option<String> {
+    let record: crate::managed_agents::ManagedAgentRecord =
+        serde_json::from_value(record.clone()).ok()?;
+    let definition = record.to_definition_view()?;
+    Some(crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(&definition),
+    ))
+}
+
+fn built_in_persona_version_update(
+    legacy_match: &LegacyAvatarMatch<'_>,
+    legacy_avatar: &str,
+    now: &str,
+) -> Option<(String, String)> {
+    let mut current =
+        crate::managed_agents::built_in_persona_definition(&legacy_match.persona_id, now)?;
+    let new_version = crate::managed_agents::persona_events::persona_content_hash(
+        &crate::managed_agents::persona_events::persona_event_content(&current),
+    );
+    let old_version = if legacy_match.was_uploaded {
+        legacy_match.metadata.persona_content_hash.to_string()
+    } else {
+        current.avatar_url = Some(legacy_avatar.to_string());
+        crate::managed_agents::persona_events::persona_content_hash(
+            &crate::managed_agents::persona_events::persona_event_content(&current),
+        )
+    };
+    Some((old_version, new_version))
+}
+
+fn replace_builtin_avatar(record: &mut serde_json::Value, persona_id: &str, now: &str) -> bool {
+    let Some(replacement) = crate::managed_agents::built_in_persona_avatar_url(persona_id) else {
+        return false;
+    };
+    let Some(record) = record.as_object_mut() else {
+        return false;
+    };
+    record.insert(
+        "avatar_url".to_string(),
+        serde_json::Value::String(replacement.to_string()),
+    );
+    record.insert(
+        "updated_at".to_string(),
+        serde_json::Value::String(now.to_string()),
+    );
+    true
 }
 
 /// Create symlinks for shared agent data files from the current (worktree)
@@ -690,294 +963,6 @@ pub fn sync_shared_agent_data(app: &tauri::AppHandle) {
         eprintln!(
             "buzz-desktop: shared-agent-sync: {synced} item(s) linked to {}",
             canonical_dir.display()
-        );
-    }
-}
-
-fn reconcile_team_dirs_in_file(path: &Path, target_dir: &Path) {
-    // Build per-component so the persisted value uses native separators on
-    // every platform, matching fresh writes (agents.rs builds the same path as
-    // base.join("teams").join(id)). A single join("agents/teams") would embed a
-    // literal '/' on Windows, persisting a mixed-separator path into the store.
-    let target_teams = target_dir.join("agents").join("teams");
-    patch_json_records(path, |obj| {
-        // Handle both old field name and new field name
-        let field_name = if obj.contains_key("persona_team_dir") {
-            "persona_team_dir"
-        } else if obj.contains_key("persona_pack_path") {
-            "persona_pack_path"
-        } else {
-            return false;
-        };
-        let team_path = match obj.get(field_name).and_then(|v| v.as_str()) {
-            Some(p) => p,
-            None => return false,
-        };
-        let team_path = Path::new(team_path);
-        // Extract the team ID from the path (component after "teams" or "packs")
-        let mut found_dir = false;
-        let mut team_id: Option<&std::ffi::OsStr> = None;
-        for component in team_path.components() {
-            if found_dir {
-                team_id = Some(component.as_os_str());
-                break;
-            }
-            if component.as_os_str() == "teams" || component.as_os_str() == "packs" {
-                found_dir = true;
-            }
-        }
-        let Some(id) = team_id else {
-            return false;
-        };
-        let expected = target_teams.join(id);
-        if team_path == expected {
-            // Value already correct — still normalize the legacy field name so
-            // stores converge on `persona_team_dir` (runtime reads either via
-            // serde alias).
-            if field_name == "persona_pack_path" {
-                if let Some(val) = obj.remove("persona_pack_path") {
-                    obj.insert("persona_team_dir".to_string(), val);
-                    return true;
-                }
-            }
-            return false;
-        }
-        // Rewriting to a path that does not exist on disk makes things worse
-        // than leaving a stale-but-working path in place. fs::metadata follows
-        // symlinks, so a valid symlinked install passes; a dangling symlink
-        // fails with NotFound.
-        if let Err(e) = std::fs::metadata(&expected) {
-            eprintln!(
-                "buzz-desktop: team-dir-reconcile: {:?}: {:?} expected at {:?} — {e}, leaving as-is",
-                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                team_path,
-                expected,
-            );
-            return false;
-        }
-        let Some(expected_str) = expected.to_str() else {
-            eprintln!(
-                "buzz-desktop: team-dir-reconcile: {:?}: expected path {:?} is not valid UTF-8, leaving as-is",
-                obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-                expected,
-            );
-            return false;
-        };
-        eprintln!(
-            "buzz-desktop: team-dir-reconcile: {:?}: {:?} → {:?}",
-            obj.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
-            team_path,
-            expected,
-        );
-        // Always write the new field name
-        obj.remove("persona_pack_path");
-        obj.insert(
-            "persona_team_dir".to_string(),
-            serde_json::Value::String(expected_str.to_owned()),
-        );
-        true
-    });
-}
-
-/// Select the data directory to reconcile against.
-///
-/// Dev instances — identified by the data-dir name starting with
-/// `CANONICAL_DEV_IDENTIFIER` (covers the canonical dir itself and any
-/// worktree variant like `xyz.block.buzz.app.dev.mybranch`) — share
-/// `agents/managed-agents.json` and `agents/teams` via symlinks to the
-/// canonical dev dir, so they should normalize against that canonical dir.
-///
-/// Release builds must reconcile their own data dir — keying off the canonical
-/// dev dir's mere existence would leave release records permanently stale on
-/// developer machines, where that dir is always present.
-fn reconcile_target_dir(current_dir: &Path) -> PathBuf {
-    let is_dev_instance = current_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(is_dev_data_dir_name);
-    if is_dev_instance {
-        match canonical_dev_data_dir(current_dir) {
-            Some(dir) if dir.exists() => dir,
-            _ => current_dir.to_path_buf(),
-        }
-    } else {
-        current_dir.to_path_buf()
-    }
-}
-
-/// Reconcile `persona_team_dir` (and legacy `persona_pack_path`) values in
-/// managed-agents.json to point to the correct `agents/teams/` prefix.
-///
-/// Fixes two classes of stale paths:
-/// - Worktree dev instances whose records point at a sibling data dir rather
-///   than the canonical dev dir (dev instances share managed-agents.json and
-///   agents/teams via symlinks, so they all reconcile against the canonical dir).
-/// - Legacy paths left by historical renames: `agents/packs/` → `agents/teams/`
-///   (the packs→teams consolidation) and bundle-id `xyz.block.sprout.app` →
-///   `xyz.block.buzz.app` (the sprout→buzz rename, which moved the app data dir).
-///
-/// Release builds reconcile their own data dir — choosing the canonical dev dir
-/// whenever it exists would leave release files permanently stale on developer
-/// machines.
-pub fn reconcile_persona_team_dirs(app: &tauri::AppHandle) {
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    // Single-dir on purpose: unlike reconcile_legacy_command_names and
-    // reconcile_provider_mcp_commands, which patch both [current, canonical],
-    // path rewrites are target-dependent — a dual pass through a dev
-    // instance's symlinked store would write worktree-local paths into the
-    // shared canonical file.
-    let target_dir = reconcile_target_dir(&current_dir);
-    let path = target_dir.join("agents/managed-agents.json");
-    if !path.exists() {
-        return;
-    }
-    reconcile_team_dirs_in_file(&path, &target_dir);
-}
-
-/// One-time migration from packs to teams.
-///
-/// Runs on app launch if `agents/packs/` exists or if any record in
-/// `managed-agents.json` still uses the old `persona_pack_path` field name.
-/// Steps (in order, each individually idempotent):
-///
-/// 1. Rename `agents/packs/` → `agents/teams/` on disk
-/// 2. Rewrite `personas.json`: `source_pack` → `source_team`, `source_pack_persona_slug` → `source_team_persona_slug`
-/// 3. Rewrite `managed-agents.json`: `persona_pack_path` → `persona_team_dir` (with `/packs/` → `/teams/` path fix), `persona_name_in_pack` → `persona_name_in_team`
-pub fn migrate_packs_to_teams(app: &tauri::AppHandle) {
-    use crate::managed_agents::MigrationReport;
-
-    let Ok(current_dir) = app.path().app_data_dir() else {
-        return;
-    };
-    let target_dir = reconcile_target_dir(&current_dir);
-
-    let packs_dir = target_dir.join("agents/packs");
-    let teams_dir = target_dir.join("agents/teams");
-    let personas_path = target_dir.join("agents/personas.json");
-    let agents_path = target_dir.join("agents/managed-agents.json");
-
-    // Check if migration is needed: packs dir exists OR agents JSON has old field names
-    let packs_dir_exists = packs_dir.exists() && !packs_dir.is_symlink();
-    let has_old_fields = agents_path.exists()
-        && std::fs::read_to_string(&agents_path)
-            .map(|c| c.contains("persona_pack_path"))
-            .unwrap_or(false);
-    let personas_has_old_fields = personas_path.exists()
-        && std::fs::read_to_string(&personas_path)
-            .map(|c| c.contains("\"source_pack\""))
-            .unwrap_or(false);
-
-    if !packs_dir_exists && !has_old_fields && !personas_has_old_fields {
-        return;
-    }
-
-    let mut report = MigrationReport {
-        packs_migrated: 0,
-        personas_updated: 0,
-        agents_updated: 0,
-        errors: Vec::new(),
-    };
-
-    // Step 1: Rename directory agents/packs/ → agents/teams/
-    if packs_dir_exists {
-        if teams_dir.exists() {
-            // Merge: move contents from packs into teams, skip conflicts
-            if let Ok(entries) = std::fs::read_dir(&packs_dir) {
-                for entry in entries.flatten() {
-                    let dest = teams_dir.join(entry.file_name());
-                    if !dest.exists() {
-                        if let Err(e) = std::fs::rename(entry.path(), &dest) {
-                            report
-                                .errors
-                                .push(format!("failed to move {:?}: {e}", entry.file_name()));
-                        } else {
-                            report.packs_migrated += 1;
-                        }
-                    }
-                }
-            }
-            // Remove packs dir only if empty (external tools like ai-rules
-            // may have recreated symlinks here between migration runs)
-            let _ = std::fs::remove_dir(&packs_dir);
-        } else {
-            // Simple rename
-            if let Some(parent) = teams_dir.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            match std::fs::rename(&packs_dir, &teams_dir) {
-                Ok(_) => {
-                    if let Ok(entries) = std::fs::read_dir(&teams_dir) {
-                        report.packs_migrated = entries.count();
-                    }
-                }
-                Err(e) => {
-                    report
-                        .errors
-                        .push(format!("failed to rename packs → teams: {e}"));
-                    eprintln!("buzz-desktop: packs→teams migration: directory rename failed: {e}");
-                    return;
-                }
-            }
-        }
-    }
-
-    // Step 2: Rewrite personas.json field names
-    if personas_path.exists() {
-        patch_json_records(&personas_path, |obj| {
-            let mut changed = false;
-            if let Some(val) = obj.remove("source_pack") {
-                obj.insert("source_team".to_string(), val);
-                changed = true;
-            }
-            if let Some(val) = obj.remove("source_pack_persona_slug") {
-                obj.insert("source_team_persona_slug".to_string(), val);
-                changed = true;
-            }
-            if changed {
-                report.personas_updated += 1;
-            }
-            changed
-        });
-    }
-
-    // Step 3: Rewrite managed-agents.json field names and paths
-    if agents_path.exists() {
-        patch_json_records(&agents_path, |obj| {
-            let mut changed = false;
-            if let Some(val) = obj.remove("persona_pack_path") {
-                // Also fix the path: replace /packs/ with /teams/
-                let new_val = if let Some(s) = val.as_str() {
-                    serde_json::Value::String(s.replace("/packs/", "/teams/"))
-                } else {
-                    val
-                };
-                obj.insert("persona_team_dir".to_string(), new_val);
-                changed = true;
-            }
-            if let Some(val) = obj.remove("persona_name_in_pack") {
-                obj.insert("persona_name_in_team".to_string(), val);
-                changed = true;
-            }
-            if changed {
-                report.agents_updated += 1;
-            }
-            changed
-        });
-    }
-
-    if report.packs_migrated > 0 || report.personas_updated > 0 || report.agents_updated > 0 {
-        eprintln!(
-            "buzz-desktop: packs→teams migration complete: {} dirs, {} personas, {} agents{}",
-            report.packs_migrated,
-            report.personas_updated,
-            report.agents_updated,
-            if report.errors.is_empty() {
-                String::new()
-            } else {
-                format!(" ({} errors)", report.errors.len())
-            }
         );
     }
 }
@@ -1385,6 +1370,8 @@ pub use fold::fold_personas_into_agent_store;
 use fold::load_persona_runtimes;
 mod backfill;
 pub use backfill::backfill_standalone_agents;
+mod detach;
+pub use detach::detach_directory_backed_teams;
 
 #[cfg(test)]
 #[path = "migration_test_support.rs"]
@@ -1393,6 +1380,10 @@ mod test_support;
 #[cfg(test)]
 #[path = "migration_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "migration_avatar_tests.rs"]
+mod avatar_tests;
 
 #[cfg(test)]
 #[path = "migration_command_tests.rs"]

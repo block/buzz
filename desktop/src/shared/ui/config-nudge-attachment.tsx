@@ -35,24 +35,38 @@ function requirementKey(
       return `cli_login:${req.probe_args.join(",")}:${index}`;
     case "cli_config_invalid":
       return `cli_config_invalid:${req.probe_args.join(",")}:${index}`;
+    case "git_bash":
+      return `git_bash:${index}`;
   }
 }
 
 /**
  * Returns true when every requirement in the nudge is a `cli_login` surface.
  * Non-authOnly all-cli_login cards (at least one install-state row) route to
- * Doctor — install/login problems can't be fixed in Edit Agent. AuthOnly cards
+ * Agent runtimes — install/login problems can't be fixed in Edit Agent. AuthOnly cards
  * (every row is `availability === "available"`) are purely informational and
  * do not route anywhere.
  */
+function hasGitBashRequirement(
+  reqs: ConfigNudgePayload["requirements"],
+): boolean {
+  return reqs.some((r) => r.surface === "git_bash");
+}
+
 function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
   return reqs.length > 0 && reqs.every((r) => r.surface === "cli_login");
 }
 
+export function shouldOpenDoctor(
+  reqs: ConfigNudgePayload["requirements"],
+): boolean {
+  return isAllCliLogin(reqs) || hasGitBashRequirement(reqs);
+}
+
 /**
  * Returns true when the card is all-cli_login AND every requirement is in the
- * `available` state (tooling installed, just needs login). In this case Doctor
- * has no auth functionality and is a misleading dead-end — the card becomes
+ * `available` state (tooling installed, just needs login). In this case Agent
+ * runtimes has no auth functionality and is a misleading dead-end — the card becomes
  * purely informational (no trigger, no CTA, no pointer/hover affordance).
  */
 function isAuthOnly(reqs: ConfigNudgePayload["requirements"]): boolean {
@@ -93,6 +107,8 @@ function cliLoginMessage(
       return `${harness} CLI is missing`;
     case "adapter_missing":
       return `${harness} ACP adapter isn't installed`;
+    case "adapter_outdated":
+      return `${harness} ACP adapter is outdated — reinstall required`;
     case "available":
       // Tooling is present but authentication is needed — fall back to
       // the backend-supplied copy which has the exact login command.
@@ -124,7 +140,7 @@ function firstFocusTarget(
  * Mirrors `firstFocusTarget` but operates on one row — used so per-row
  * Edit Agent CTAs focus the field that row describes, not the first editable
  * field on the card.
- * Returns `undefined` for `cli_login` requirements (Doctor, not Edit Agent).
+ * Returns `undefined` for `cli_login` requirements (Agent runtimes, not Edit Agent).
  */
 export function focusTargetForRequirement(
   req: ConfigNudgePayload["requirements"][number],
@@ -147,23 +163,17 @@ export function focusTargetForRequirement(
  * the system.
  *
  * Routing:
- * (A) When ALL requirements are `cli_login` in an install state
- *     (`not_installed` / `cli_missing` / `adapter_missing`): the card trigger
- *     opens Settings → Doctor. A card-level "Open Doctor →" label in
- *     `AttachmentActions` confirms the action at rest.
- * (A-auth) When ALL requirements are `cli_login` with `availability ===
- *     "available"` (tooling installed, just needs login): Doctor has no auth
- *     functionality and would be a misleading dead-end. The card is purely
- *     informational — no trigger, no CTA, no pointer/hover affordance. The
- *     inline copy (`setup_copy`) already tells the user the exact command.
- * (B) Otherwise (mixed card), the card trigger opens Edit Agent as the
- *     card-level fallback. Each row carries its own inline CTA sharing one
- *     right edge so the actions are clearly paired with their requirement:
- *     - `cli_login` rows in an install state → "Open Doctor →" (Doctor).
- *     - `cli_login` rows with `availability === "available"` → no per-row CTA.
- *     - `env_key` / `normalized_field` rows → "Edit Agent →" (Edit Agent).
- *     The `AttachmentActions` column is omitted on mixed cards — per-row CTAs
- *     replace it.
+ * (A) Any card with a `git_bash` requirement, or one whose requirements are all
+ *     install-state `cli_login`, opens Settings → Agent runtimes. A card-level
+ *     Agent runtimes label in `AttachmentActions` confirms the action at rest.
+ * (A-auth) A card whose requirements are all available `cli_login` surfaces is
+ *     purely informational: Agent runtimes cannot authenticate a CLI, and `setup_copy`
+ *     already gives the needed command.
+ * (B) Other mixed cards open Edit Agent as the card-level fallback. Their rows
+ *     carry inline CTAs for the matching destination: install-state `cli_login`
+ *     opens Agent runtimes; `env_key` and `normalized_field` open Edit Agent. A
+ *     `git_bash` row is covered by the card-level Agent runtimes route, so it does not
+ *     render a redundant row action.
  */
 export function ConfigNudgeCard({
   className,
@@ -176,6 +186,7 @@ export function ConfigNudgeCard({
   const { onOpenSettings } = useAppShell();
 
   const allCliLogin = isAllCliLogin(nudge.requirements);
+  const opensDoctor = shouldOpenDoctor(nudge.requirements);
   const authOnly = isAuthOnly(nudge.requirements);
   const allConfigInvalid = isAllConfigInvalid(nudge.requirements);
   // Any card that is purely informational (auth-only or all-config-invalid)
@@ -185,10 +196,10 @@ export function ConfigNudgeCard({
   const openDoctor = () => {
     if (!onOpenSettings) {
       console.warn(
-        "[ConfigNudgeCard] onOpenSettings is null — Doctor deep-link unavailable on this surface",
+        "[ConfigNudgeCard] onOpenSettings is null — Agent runtimes deep-link unavailable on this surface",
       );
     }
-    onOpenSettings?.("doctor");
+    onOpenSettings?.("agents");
   };
 
   const openEditAgent = (focus?: EditAgentFocusTarget) => {
@@ -197,10 +208,9 @@ export function ConfigNudgeCard({
   };
 
   const handleOpen = () => {
-    if (allCliLogin) {
-      // (A) Non-authOnly install-state all-cli_login card — route to Doctor.
-      // AuthOnly cards never mount this trigger, so this branch only runs for
-      // install-state cards where Doctor is the correct destination.
+    if (shouldOpenDoctor(nudge.requirements)) {
+      // Git Bash and install-state CLI requirements both resolve in Agent runtimes.
+      // Informational-only cards never mount this trigger.
       openDoctor();
     } else {
       // (B) Mixed card — card-level fallback: focus the first editable field.
@@ -209,7 +219,7 @@ export function ConfigNudgeCard({
   };
 
   const handleOpenDoctor = (e: React.MouseEvent) => {
-    // (B) Per-row Doctor CTA — stop propagation so the card trigger doesn't
+    // (B) Per-row Agent runtimes CTA — stop propagation so the card trigger doesn't
     // double-fire to Edit Agent on mixed cards.
     e.stopPropagation();
     openDoctor();
@@ -256,20 +266,21 @@ export function ConfigNudgeCard({
           ))}
         </div>
       </AttachmentContent>
-      {/* (A) Install-state all-cli_login card only — single card-level CTA
-          confirming the action at rest. Informational-only cards have no CTA;
-          mixed cards render per-row CTAs instead. */}
-      {allCliLogin && !informationalOnly && (
+      {/* (A) Agent-runtime-routed cards have one card-level CTA. Informational-only
+          cards have none; other mixed cards render their own row CTAs. */}
+      {opensDoctor && !informationalOnly && (
         <AttachmentActions className="items-end self-end">
-          <span className="text-xs text-muted-foreground">Open Doctor →</span>
+          <span className="text-xs text-muted-foreground">
+            Open Agent runtimes →
+          </span>
         </AttachmentActions>
       )}
       {/* Informational-only cards are purely informational — no trigger, no routing. */}
       {!informationalOnly && (
         <AttachmentTrigger
           aria-label={
-            allCliLogin
-              ? `Open Doctor settings for ${nudge.agent_name}`
+            opensDoctor
+              ? `Open Agent runtimes settings for ${nudge.agent_name}`
               : `Open Edit Agent for ${nudge.agent_name}`
           }
           onClick={handleOpen}
@@ -343,11 +354,11 @@ function RequirementRow({
           <span className="flex-1 [overflow-wrap:anywhere]">
             {cliLoginMessage(requirement)}
           </span>
-          {/* (B) Per-row Doctor CTA — shown only on mixed cards where the
+          {/* (B) Per-row Agent runtimes CTA — shown only on mixed cards where the
               card-level trigger opens Edit Agent (not auth-only cards). When
-              allCliLogin is true the card trigger already routes to Doctor; the
+              allCliLogin is true the card trigger already routes to Agent runtimes; the
               per-row button is redundant and is suppressed. Also suppressed for
-              `available` cli_login rows — Doctor has no auth functionality and
+              `available` cli_login rows — Agent runtimes has no auth functionality and
               the setup_copy already provides the exact login command.
               stopPropagation prevents double-fire on mixed cards where both
               card and row CTAs are visible. */}
@@ -357,14 +368,22 @@ function RequirementRow({
               onClick={onOpenDoctor}
               type="button"
             >
-              Open Doctor →
+              Open Agent runtimes →
             </button>
           )}
         </div>
       );
+    case "git_bash":
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            Git for Windows is required for buzz-agent shell tools
+          </span>
+        </div>
+      );
     case "cli_config_invalid": {
       // Config-invalid rows are purely informational — the user must edit an
-      // external file. No Doctor CTA (Doctor can't repair ~/.codex/config.toml)
+      // external file. No Agent runtimes CTA (Buzz can't repair ~/.codex/config.toml)
       // and no Edit Agent CTA (the field isn't managed by Buzz).
       const cli = requirement.probe_args[0] ?? "the CLI";
       const configFile = `~/.${cli}/config.toml`;

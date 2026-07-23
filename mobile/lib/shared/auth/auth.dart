@@ -1,4 +1,4 @@
 export 'auth_provider.dart';
-export '../workspace/workspace.dart';
-export '../workspace/workspace_provider.dart';
-export '../workspace/workspace_storage.dart';
+export '../community/community.dart';
+export '../community/community_provider.dart';
+export '../community/community_storage.dart';

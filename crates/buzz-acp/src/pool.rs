@@ -20,11 +20,11 @@
 //! `AcpClient` is NOT Clone — ownership moves out on claim and back on return.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::timeout;
 use uuid::Uuid;
 
@@ -40,6 +40,10 @@ use crate::queue::{
 };
 use crate::relay::{ChannelInfo, RestClient};
 
+/// Window within which agent activity before a hard-cap death qualifies
+/// the turn as "recently active" (eligible for requeue instead of dead-letter).
+const RECENT_ACTIVITY_WINDOW: Duration = Duration::from_secs(60);
+
 // FlushBatch and BatchEvent derive Clone (added in queue.rs) so we can store
 // a recoverable copy in TaskMeta for panic recovery in Queue mode.
 
@@ -47,6 +51,8 @@ use crate::relay::{ChannelInfo, RestClient};
 pub struct TaskMeta {
     pub agent_index: usize,
     pub channel_id: Option<Uuid>,
+    /// Identifies terminal events when the task panics before returning a result.
+    pub turn_id: String,
     /// Clone of batch for Queue mode panic recovery.
     pub recoverable_batch: Option<FlushBatch>,
     /// Control signal for the in-flight prompt task.
@@ -89,6 +95,13 @@ pub struct SessionState {
     /// channel_id → rendered NIP-AE core prompt section, populated once at
     /// session creation per Tyler's spec (no mid-session refresh).
     pub core_sections: HashMap<Uuid, String>,
+    /// channel_id → rendered `[Channel Canvas]` metadata section.
+    ///
+    /// Populated once before session creation (same lifecycle as `core_sections`).
+    /// Absent when the channel has no canvas, the canvas content is blank, or the
+    /// fetch fails — all fail open. Cleared on session invalidation alongside
+    /// `core_sections` so the next session picks up any canvas change.
+    pub canvas_sections: HashMap<Uuid, String>,
 }
 
 impl SessionState {
@@ -110,6 +123,7 @@ impl SessionState {
     pub fn invalidate_channel(&mut self, channel_id: &Uuid) -> bool {
         self.turn_counts.remove(channel_id);
         self.core_sections.remove(channel_id);
+        self.canvas_sections.remove(channel_id);
         self.sessions.remove(channel_id).is_some()
     }
 
@@ -120,6 +134,7 @@ impl SessionState {
         self.heartbeat_session = None;
         self.heartbeat_turn_count = 0;
         self.core_sections.clear();
+        self.canvas_sections.clear();
     }
 
     #[cfg(test)]
@@ -127,6 +142,7 @@ impl SessionState {
         self.sessions.contains_key(channel_id)
             || self.turn_counts.contains_key(channel_id)
             || self.core_sections.contains_key(channel_id)
+            || self.canvas_sections.contains_key(channel_id)
     }
 }
 
@@ -144,9 +160,48 @@ pub struct OwnedAgent {
     /// desktop reader to distinguish a genuine runtime override from a stale
     /// session whose persona model was edited. Reset on spawn/restart.
     pub model_overridden: bool,
+    /// Normalized agent name from initialize (`agentInfo.name`/`serverInfo.name`).
+    pub agent_name: String,
+    /// Whether Goose accepted its custom system-prompt method. `None` probes on
+    /// the first session; method-not-found is cached as `Some(false)` so legacy
+    /// user-message framing is used for this process thereafter.
+    pub goose_system_prompt_supported: Option<bool>,
     /// Protocol version reported by the agent in its initialize response.
-    /// Agents declaring >= 2 support `systemPrompt` in session/new.
     pub protocol_version: u32,
+}
+
+fn has_system_prompt_support(
+    protocol_version: u32,
+    agent_name: &str,
+    goose_system_prompt_supported: Option<bool>,
+) -> bool {
+    if agent_name == "goose" {
+        goose_system_prompt_supported == Some(true)
+    } else {
+        protocol_version >= 2
+    }
+}
+
+fn session_new_system_prompt(
+    is_goose: bool,
+    protocol_version: u32,
+    prompt: Option<&str>,
+) -> Option<&str> {
+    if is_goose || protocol_version < 2 {
+        None
+    } else {
+        prompt
+    }
+}
+
+impl OwnedAgent {
+    pub(crate) fn has_system_prompt_support(&self) -> bool {
+        has_system_prompt_support(
+            self.protocol_version,
+            &self.agent_name,
+            self.goose_system_prompt_supported,
+        )
+    }
 }
 
 /// Pool of agents with take-and-return ownership semantics.
@@ -166,6 +221,8 @@ pub struct AgentPool {
 pub struct PromptResult {
     pub agent: OwnedAgent,
     pub source: PromptSource,
+    /// Identifies the completed turn for observer terminal events.
+    pub turn_id: String,
     pub outcome: PromptOutcome,
     /// Present on failure in Queue mode, for requeue.
     pub batch: Option<FlushBatch>,
@@ -333,22 +390,95 @@ pub enum SteerAck {
     PromptCompletedNeutral,
 }
 
+/// Whether a turn was cut by the idle clock or the hard wall-clock cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutKind {
+    /// No ACP wire activity for `idle_timeout` seconds.
+    Idle,
+    /// Turn ran for `max_turn_duration` seconds of wall-clock time.
+    /// `recently_active` is true when the agent produced output within
+    /// `RECENT_ACTIVITY_WINDOW` of the hard-cap firing.
+    Hard { recently_active: bool },
+}
+
 /// Outcome of a prompt task.
 #[allow(dead_code)]
 pub enum PromptOutcome {
     Ok(StopReason),
     Error(AcpError),
     AgentExited,
-    Timeout,
+    Timeout(TimeoutKind),
     /// Intentional cancel via `!cancel` command or interrupt mode.
     /// Agent is healthy — no respawn, no retry penalty.
     Cancelled,
+    /// The agent did not stop within `grace` after `session/cancel` was sent
+    /// for a control-signal cancellation (steer fallback, interrupt, or
+    /// explicit stop). Distinct from [`TimeoutKind::Hard`]: this is a bounded
+    /// cleanup deadline, not the turn's configured max-turn wall clock, so it
+    /// must never be reported or dead-lettered as a hard-cap breach. The
+    /// agent process is uncertain — treated as poisoned and respawned, same
+    /// as a hard timeout, but the triggering batch's fate follows the
+    /// `CancelReason` on the batch (steer/interrupt requeue, explicit cancel
+    /// drops) rather than the hard-cap's unconditional dead-letter.
+    CancelDrainTimeout(Duration),
 }
 
 /// Immutable config subset shared (via `Arc`) by all spawned prompt tasks.
 ///
 /// Built once from `Config` at startup. Avoids cloning the full config
 /// into every task.
+/// Shared channel-metadata resolver for startup-known and dynamically joined channels.
+///
+/// Successful lazy lookups are cached for every consumer (author gate, prompt
+/// context, canvas, and setup mode). Unknown metadata is never cached as a
+/// non-DM: callers can fail closed and a later event retries resolution.
+#[derive(Debug, Clone)]
+pub struct ChannelInfoResolver {
+    cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
+    rest_client: RestClient,
+}
+
+impl ChannelInfoResolver {
+    pub fn new(
+        startup: std::collections::HashMap<Uuid, ChannelInfo>,
+        rest_client: RestClient,
+    ) -> Self {
+        let cache = startup
+            .into_iter()
+            .filter_map(|(id, info)| {
+                (info.channel_type != "unknown").then_some((
+                    id,
+                    PromptChannelInfo {
+                        name: info.name,
+                        channel_type: info.channel_type,
+                    },
+                ))
+            })
+            .collect();
+        Self {
+            cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            rest_client,
+        }
+    }
+
+    pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        if let Some(info) = self
+            .cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned())
+        {
+            return Some(info);
+        }
+
+        let info = fetch_channel_info(channel_id, &self.rest_client).await?;
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(channel_id, info.clone());
+        }
+        Some(info)
+    }
+}
+
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
@@ -360,6 +490,7 @@ pub struct PromptContext {
     pub turn_liveness_interval: Duration,
     pub dedup_mode: DedupMode,
     pub system_prompt: Option<String>,
+    pub team_instructions: Option<String>,
     pub heartbeat_prompt: Option<String>,
     /// Base prompt content, or `None` if `--no-base-prompt` was passed.
     ///
@@ -371,8 +502,8 @@ pub struct PromptContext {
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
-    /// Channel metadata from discovery (name, type). Read-only after startup.
-    pub channel_info: std::collections::HashMap<Uuid, ChannelInfo>,
+    /// Shared channel metadata for startup-known and dynamically joined channels.
+    pub channel_info: ChannelInfoResolver,
     /// Max messages to include in thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
@@ -394,6 +525,10 @@ pub struct PromptContext {
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
+    /// Relay URL this harness is connected to. Rides in observer payloads that
+    /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
+    /// mirroring the `managed_agent_runtime_lifecycle` frames.
+    pub relay_url: String,
 }
 
 impl AgentPool {
@@ -650,6 +785,13 @@ const CONTEXT_FETCH_RETRY_DELAY: Duration = Duration::from_millis(500);
 /// Timeout for model-switch requests (`session/set_config_option`, `session/set_model`).
 const MODEL_SWITCH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Bounded grace window for the post-cancel drain after a control-signal
+/// cancellation (steer fallback, interrupt, or explicit stop). This is a
+/// cleanup deadline, not the turn's configured max-turn wall clock — see
+/// [`AcpClient::cancel_with_cleanup_grace`] and
+/// [`classify_control_cancel_failure`].
+const CONTROL_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
 /// Timeout for permission-mode requests (`session/set_config_option` with `configId: "mode"`).
 const PERMISSION_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -663,30 +805,58 @@ async fn create_session_and_apply_model(
     agent: &mut OwnedAgent,
     ctx: &PromptContext,
     agent_core: Option<&str>,
+    agent_canvas: Option<&str>,
 ) -> Result<String, AcpError> {
-    // Combine base_prompt + system_prompt + agent core into a single
-    // systemPrompt value for the session/new request. Only sent when the agent
-    // declares protocol version >= 2 (supports systemPrompt); legacy agents
-    // ignore it and receive the same content as user-message sections via
-    // `format_prompt`. Core already carries its own `[Agent Memory — core]`
-    // header from `engram_fetch::build_core_section`, so we just append it.
-    let combined_system_prompt: Option<String> = if agent.protocol_version >= 2 {
+    // Build base_prompt + system_prompt + agent core + canvas metadata into a
+    // single prompt. Standard protocol-v2 agents receive it in `session/new`;
+    // Goose receives it through the custom request below. Legacy agents receive
+    // the same content as user-message sections via `format_prompt`. Core carries
+    // its own `[Agent Memory — core]` header, and canvas carries its own
+    // `[Channel Canvas]` header; both are appended with a blank-line separator.
+    let is_goose = agent.agent_name == "goose";
+    let combined_system_prompt = with_canvas(
         with_core(
-            framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+            with_team(
+                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                ctx.team_instructions.as_deref(),
+            ),
             agent_core,
-        )
-    } else {
-        None
-    };
+        ),
+        agent_canvas,
+    );
 
     let resp = agent
         .acp
         .session_new_full(
             &ctx.cwd,
             ctx.mcp_servers.clone(),
-            combined_system_prompt.as_deref(),
+            session_new_system_prompt(
+                is_goose,
+                agent.protocol_version,
+                combined_system_prompt.as_deref(),
+            ),
         )
         .await?;
+
+    if is_goose && agent.goose_system_prompt_supported != Some(false) {
+        if let Some(prompt) = combined_system_prompt.as_deref() {
+            match agent
+                .acp
+                .session_set_goose_system_prompt(&resp.session_id, prompt)
+                .await
+            {
+                Ok(_) => agent.goose_system_prompt_supported = Some(true),
+                Err(AcpError::AgentError { code: -32601, .. }) => {
+                    agent.goose_system_prompt_supported = Some(false);
+                    tracing::warn!(
+                        target: "pool::session",
+                        "Goose does not support its system-prompt extension; using user-message framing"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
 
     // Populate model capabilities on first session creation.
     if agent.model_capabilities.is_none() {
@@ -741,6 +911,9 @@ async fn create_session_and_apply_model(
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
+            // Pair identity for the desktop session-config cache, which is
+            // keyed by (agent, relay) like the lifecycle frames.
+            "relayUrl": ctx.relay_url,
         }),
     );
 
@@ -927,6 +1100,24 @@ pub(crate) fn prepend_base_for_legacy(
     }
 }
 
+/// Prepend the `[Channel Canvas]` section to the legacy initial-message body.
+///
+/// Protocol-v2 agents already receive the canvas in `systemPrompt`; only
+/// legacy (protocol_version < 2) agents need it injected here so it arrives
+/// before the first prompt — the same "every turn" semantics as per-turn core.
+/// Heartbeats never have an initial_message, so the caller is responsible for
+/// not passing a canvas when `source` is `Heartbeat`.
+pub(crate) fn prepend_canvas_for_legacy(
+    protocol_version: u32,
+    agent_canvas: Option<&str>,
+    body: &str,
+) -> String {
+    match agent_canvas {
+        Some(canvas) if protocol_version < 2 => format!("{canvas}\n\n{body}"),
+        _ => body.to_string(),
+    }
+}
+
 /// Frame the `session/new` `systemPrompt` so each present prompt carries its own
 /// header, keeping the base/persona boundary recoverable downstream.
 ///
@@ -985,6 +1176,21 @@ fn workspace_section(cwd: &str) -> Option<String> {
     }
 }
 
+/// Append the team-owned instruction section after `[System]` and before core memory.
+fn with_team(prompt: Option<String>, instructions: Option<&str>) -> Option<String> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (prompt, instructions) {
+        (Some(prompt), Some(instructions)) => {
+            Some(format!("{prompt}\n\n[Team Instructions]\n{instructions}"))
+        }
+        (None, Some(instructions)) => Some(format!("[Team Instructions]\n{instructions}")),
+        (Some(prompt), None) => Some(prompt),
+        (None, None) => None,
+    }
+}
+
 /// Append the agent's core memory section onto the framed system prompt.
 ///
 /// Core already carries its own `[Agent Memory — core]` header from
@@ -995,6 +1201,20 @@ fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
         (Some(framed), Some(core)) => Some(format!("{framed}\n\n{core}")),
         (Some(framed), None) => Some(framed),
         (None, Some(core)) => Some(core.to_string()),
+        (None, None) => None,
+    }
+}
+
+/// Append the `[Channel Canvas]` metadata section onto the accumulated system prompt.
+///
+/// The canvas section already carries its `[Channel Canvas]` header (from
+/// `render_canvas_section`), so it is joined with a blank-line separator.
+/// Either side may be absent.
+fn with_canvas(prompt: Option<String>, canvas: Option<&str>) -> Option<String> {
+    match (prompt, canvas) {
+        (Some(prompt), Some(canvas)) => Some(format!("{prompt}\n\n{canvas}")),
+        (Some(prompt), None) => Some(prompt),
+        (None, Some(canvas)) => Some(canvas.to_string()),
         (None, None) => None,
     }
 }
@@ -1014,6 +1234,7 @@ fn with_core(framed: Option<String>, core: Option<&str>) -> Option<String> {
 /// On the happy path the read loop has already called `take()`, so this is a no-op.
 fn send_prompt_result(
     result_tx: &mpsc::UnboundedSender<PromptResult>,
+    turn_id: &str,
     mut agent: OwnedAgent,
     source: PromptSource,
     outcome: PromptOutcome,
@@ -1023,6 +1244,7 @@ fn send_prompt_result(
     let _ = result_tx.send(PromptResult {
         agent,
         source,
+        turn_id: turn_id.to_owned(),
         outcome,
         batch,
     });
@@ -1047,21 +1269,23 @@ pub async fn run_prompt_task(
     ctx: Arc<PromptContext>,
     result_tx: mpsc::UnboundedSender<PromptResult>,
     control_rx: Option<tokio::sync::oneshot::Receiver<ControlSignal>>,
+    turn_id: String,
 ) {
     // Is this a channel prompt or a heartbeat?
     let source = match &batch {
         Some(b) => PromptSource::Channel(b.channel_id),
         None => PromptSource::Heartbeat,
     };
-    let turn_id = uuid::Uuid::new_v4().to_string();
     let observer_channel_id = match &source {
         PromptSource::Channel(channel_id) => Some(*channel_id),
         PromptSource::Heartbeat => None,
     };
-    agent.acp.set_observer_context(observer::context_for(
+    let turn_started_at = chrono::Utc::now().to_rfc3339();
+    agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         None,
-        Some(turn_id.clone()),
+        turn_id.clone(),
+        turn_started_at.clone(),
     ));
     let triggering_event_ids: Vec<String> = batch
         .as_ref()
@@ -1078,6 +1302,45 @@ pub async fn run_prompt_task(
         }),
     );
 
+    // Emits `turn_completed` on any exit path. Captures observer handle and
+    // metadata now, before the agent is moved into PromptResult. It must be
+    // declared before `liveness_guard`: Rust drops locals in reverse order, so
+    // liveness is aborted before completion makes the turn terminal.
+    let _turn_guard = TurnCompletionGuard::new(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer_channel_id,
+        turn_id.clone(),
+    );
+
+    // Start liveness with `turn_started`, not the final session/prompt call:
+    // session creation, context fetches, and an initial message can themselves
+    // take longer than the desktop's bounded prune pause. This future is pinned
+    // for the whole task and dropped with the turn on every exit path.
+    //
+    // `liveness_state` is shared with `LivenessGuard`: see its docs for why a
+    // bare `abort()` alone cannot prevent a `turn_liveness` frame emitted after
+    // `turn_completed`. Once the session resolves below, `set_session_id`
+    // updates the same shared state so later ticks stop carrying `None`.
+    let liveness_state = Arc::new(Mutex::new(LivenessState {
+        closed: false,
+        session_id: None,
+    }));
+    let liveness = run_turn_liveness(
+        agent.acp.observer_handle(),
+        agent.acp.observer_agent_index(),
+        observer::context_for_turn(
+            observer_channel_id,
+            None,
+            turn_id.clone(),
+            turn_started_at.clone(),
+        ),
+        ctx.turn_liveness_interval,
+        Arc::clone(&liveness_state),
+    );
+    let liveness_handle = tokio::spawn(liveness);
+    let liveness_guard = LivenessGuard::new(liveness_handle, liveness_state);
+
     // Collects event IDs up front. On drop (any exit path — normal, early
     // return, or panic), spawns best-effort cleanup of both 👀 and 💬.
     // See `ReactionGuard` docs for ordering guarantees and known edge cases.
@@ -1086,15 +1349,6 @@ pub async fn run_prompt_task(
         .map(|b| b.events.iter().map(|be| be.event.id.to_hex()).collect())
         .unwrap_or_default();
     let _reaction_guard = ReactionGuard::new(ctx.rest_client.clone(), reaction_ids.clone());
-
-    // Emits `turn_completed` on any exit path. Captures observer handle and
-    // metadata now, before the agent is moved into PromptResult.
-    let _turn_guard = TurnCompletionGuard::new(
-        agent.acp.observer_handle(),
-        agent.acp.observer_agent_index(),
-        observer_channel_id,
-        turn_id.clone(),
-    );
 
     //
     // Core memory is delivered inside the system prompt the harness already
@@ -1160,10 +1414,54 @@ pub async fn run_prompt_task(
         }
     }
 
+    // Canvas metadata fetch — same lifecycle as core: once per new channel session,
+    // never for heartbeats, cached until session invalidation.
+    //
+    // DM check: use startup channel_info first; lazy-fetch only when missing.
+    // A confirmed DM never receives a canvas section. If the channel type cannot
+    // be determined (metadata absent and lazy fetch fails/unknown), skip the canvas
+    // rather than assuming non-DM — failing closed on DM ambiguity is safer.
+    //
+    // I3 lifecycle: hold the fetched section in a local `pending_canvas` and
+    // commit it to `canvas_sections` only after session creation succeeds. This
+    // prevents a stale revision A surviving a failed create and being re-used by
+    // the next attempt after the canvas was cleared.
+    let mut pending_canvas: Option<(Uuid, String)> = None;
+    if let PromptSource::Channel(cid) = &source {
+        let is_new_channel_session = !agent.state.sessions.contains_key(cid);
+        if is_new_channel_session && !agent.state.canvas_sections.contains_key(cid) {
+            // Resolve DM status: prefer the startup cache, lazy-fetch as fallback.
+            // Unknown → treat as DM (fail-closed).
+            let is_dm = ctx
+                .channel_info
+                .resolve(*cid)
+                .await
+                .map(|ci| ci.channel_type == "dm")
+                .unwrap_or(true);
+            if !is_dm {
+                if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
+                    pending_canvas = Some((*cid, section));
+                }
+            }
+        }
+    }
+
     // The core section to fold into the system prompt for this turn's session.
     // Channel-scoped; heartbeats carry no owner core.
     let agent_core: Option<String> = match &source {
         PromptSource::Channel(cid) => agent.state.core_sections.get(cid).cloned(),
+        PromptSource::Heartbeat => None,
+    };
+
+    // The canvas metadata section — channel-scoped, absent for heartbeats/DMs.
+    // Prefer the committed cache; fall back to pending (for new sessions being created now).
+    let agent_canvas: Option<String> = match &source {
+        PromptSource::Channel(cid) => agent
+            .state
+            .canvas_sections
+            .get(cid)
+            .cloned()
+            .or_else(|| pending_canvas.as_ref().map(|(_, s)| s.clone())),
         PromptSource::Heartbeat => None,
     };
 
@@ -1173,7 +1471,13 @@ pub async fn run_prompt_task(
                 (sid.clone(), false)
             } else {
                 // Create new session with model application.
-                match create_session_and_apply_model(&mut agent, &ctx, agent_core.as_deref()).await
+                match create_session_and_apply_model(
+                    &mut agent,
+                    &ctx,
+                    agent_core.as_deref(),
+                    agent_canvas.as_deref(),
+                )
+                .await
                 {
                     Ok(sid) => {
                         tracing::info!(
@@ -1181,12 +1485,17 @@ pub async fn run_prompt_task(
                             "created session {sid} for channel {cid}"
                         );
                         agent.state.sessions.insert(*cid, sid.clone());
+                        // Commit canvas only after session creation succeeds (I3).
+                        if let Some((pending_cid, section)) = pending_canvas.take() {
+                            agent.state.canvas_sections.insert(pending_cid, section);
+                        }
                         (sid, true)
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::AgentExited,
@@ -1195,8 +1504,11 @@ pub async fn run_prompt_task(
                         return;
                     }
                     Err(e) => {
+                        // Session creation failed; pending canvas was never committed,
+                        // so the next retry will re-fetch a fresh revision.
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::Error(e),
@@ -1211,7 +1523,7 @@ pub async fn run_prompt_task(
             if let Some(sid) = &agent.state.heartbeat_session {
                 (sid.clone(), false)
             } else {
-                match create_session_and_apply_model(&mut agent, &ctx, None).await {
+                match create_session_and_apply_model(&mut agent, &ctx, None, None).await {
                     Ok(sid) => {
                         tracing::info!(
                             target: "pool::session",
@@ -1225,6 +1537,7 @@ pub async fn run_prompt_task(
                         agent.state.invalidate_all();
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::AgentExited,
@@ -1235,6 +1548,7 @@ pub async fn run_prompt_task(
                     Err(e) => {
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::Error(e),
@@ -1246,11 +1560,15 @@ pub async fn run_prompt_task(
             }
         }
     };
-    agent.acp.set_observer_context(observer::context_for(
+    agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         Some(session_id.clone()),
-        Some(turn_id.clone()),
+        turn_id.clone(),
+        turn_started_at,
     ));
+    // Backfill liveness's shared session ID so ticks after this point carry
+    // it too, matching every other observer frame for this turn.
+    liveness_guard.set_session_id(session_id.clone());
     agent.acp.observe(
         "session_resolved",
         serde_json::json!({
@@ -1269,8 +1587,27 @@ pub async fn run_prompt_task(
             // For agents with systemPrompt support (protocol_version >= 2),
             // base_prompt is delivered via the system role in session/new.
             // Legacy agents receive it via [Base] in the user message instead.
-            let init_msg =
-                prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, initial_msg);
+            // Canvas is also injected here for legacy agents: protocol-v2 agents
+            // already have it in systemPrompt; legacy agents need it before the
+            // first prompt, matching the "every turn" per-turn delivery semantics.
+            let init_msg = prepend_base_for_legacy(
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
+                ctx.base_prompt,
+                initial_msg,
+            );
+            let init_msg = prepend_canvas_for_legacy(
+                if agent.has_system_prompt_support() {
+                    2
+                } else {
+                    1
+                },
+                agent_canvas.as_deref(),
+                &init_msg,
+            );
             let init_result = agent
                 .acp
                 .session_prompt_with_idle_timeout(
@@ -1292,6 +1629,7 @@ pub async fn run_prompt_task(
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::AgentExited,
@@ -1317,6 +1655,7 @@ pub async fn run_prompt_task(
                             agent.state.invalidate_all();
                             send_prompt_result(
                                 &result_tx,
+                                &turn_id,
                                 agent,
                                 source,
                                 PromptOutcome::AgentExited,
@@ -1334,25 +1673,28 @@ pub async fn run_prompt_task(
                     }
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
                 }
-                Err(AcpError::HardTimeout) => {
+                Err(AcpError::HardTimeout { silence }) => {
+                    let recently_active = silence < RECENT_ACTIVITY_WINDOW;
                     tracing::error!(
                         target: "pool::session",
-                        "hard timeout ({}s cap) during initial_message for channel {cid} — agent process is unrecoverable",
+                        "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) during initial_message for channel {cid} — agent process is unrecoverable",
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                     return;
@@ -1365,6 +1707,7 @@ pub async fn run_prompt_task(
                     agent.state.invalidate(&source);
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::Error(e),
@@ -1383,18 +1726,22 @@ pub async fn run_prompt_task(
     // follows as a second block.
     let mut slash_command: Option<String> = None;
     let prompt_sections: Vec<String> = if let Some(text) = prompt_text {
-        // Pre-built prompt (heartbeat or legacy path) — a single block.
+        // Heartbeats create their session before this point, so a Goose method-not-found
+        // probe has already selected the correct framing for this process.
+        let text = prepend_base_for_legacy(
+            if agent.has_system_prompt_support() {
+                2
+            } else {
+                1
+            },
+            ctx.base_prompt,
+            &text,
+        );
         vec![text]
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = match ctx.channel_info.get(&b.channel_id) {
-            Some(ci) => Some(PromptChannelInfo {
-                name: ci.name.clone(),
-                channel_type: ci.channel_type.clone(),
-            }),
-            None => fetch_channel_info(b.channel_id, &ctx.rest_client).await,
-        };
+        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
@@ -1428,9 +1775,11 @@ pub async fn run_prompt_task(
                 channel_info: channel_info.as_ref(),
                 conversation_context: conversation_context.as_ref(),
                 profile_lookup: profile_lookup.as_ref(),
-                has_system_prompt_support: agent.protocol_version >= 2,
+                has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
+                team_instructions: ctx.team_instructions.as_deref(),
+                agent_canvas: agent_canvas.as_deref(),
             },
         )
     } else {
@@ -1439,6 +1788,7 @@ pub async fn run_prompt_task(
         tracing::error!("run_prompt_task: no batch and no prompt_text — returning agent");
         send_prompt_result(
             &result_tx,
+            &turn_id,
             agent,
             source,
             PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
@@ -1474,22 +1824,6 @@ pub async fn run_prompt_task(
     // the main loop can cancel, interrupt, or rotate it. Heartbeats
     // (control_rx=None) take the simple await path — they are not controllable.
     //
-    // The liveness future emits `turn_liveness` pings on an interval and never
-    // resolves; it rides every prompt-await path as a non-winning select arm so
-    // a turn stays alive on the desktop while it runs. Built from a captured
-    // observer handle (not `&agent.acp`) because the prompt holds `&mut agent.acp`.
-    let liveness = run_turn_liveness(
-        agent.acp.observer_handle(),
-        agent.acp.observer_agent_index(),
-        observer::context_for(
-            observer_channel_id,
-            Some(session_id.clone()),
-            Some(turn_id.clone()),
-        ),
-        ctx.turn_liveness_interval,
-    );
-    tokio::pin!(liveness);
-
     let prompt_result = match control_rx {
         None => {
             // Heartbeat / non-cancellable path.
@@ -1501,7 +1835,6 @@ pub async fn run_prompt_task(
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
-                _ = &mut liveness => unreachable!("liveness future never resolves"),
             }
         }
         Some(rx) => {
@@ -1513,7 +1846,6 @@ pub async fn run_prompt_task(
                     ctx.idle_timeout,
                     ctx.max_turn_duration,
                 ) => result,
-                _ = &mut liveness => unreachable!("liveness future never resolves"),
                 mode = rx => {
                     let control_signal = mode.unwrap_or(ControlSignal::Cancel);
                     // Land the model switch before any cancel/requeue work: setting
@@ -1530,10 +1862,7 @@ pub async fn run_prompt_task(
                         // Prompt is genuinely in-flight — cancel it.
                         match agent
                             .acp
-                            .cancel_with_cleanup_grace(
-                                &session_id,
-                                std::time::Duration::from_secs(5),
-                            )
+                            .cancel_with_cleanup_grace(&session_id, CONTROL_CANCEL_GRACE)
                             .await
                         {
                             Ok(stop_reason) => {
@@ -1554,6 +1883,7 @@ pub async fn run_prompt_task(
                                 .await;
                                 send_prompt_result(
                                     &result_tx,
+                                    &turn_id,
                                     agent,
                                     source,
                                     PromptOutcome::Cancelled,
@@ -1561,35 +1891,21 @@ pub async fn run_prompt_task(
                                 );
                                 return;
                             }
-                            Err(AcpError::AgentExited) => {
-                                agent.state.invalidate_all();
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
-
-                                let usage = agent.acp.take_turn_usage();
-                                publish_agent_turn_metric(
+                            Err(error) => {
+                                // Single production arm: classify the error→outcome
+                                // and outcome→batch-fate boundary once via the seam
+                                // shared with tests, then invalidate/publish/send once.
+                                let failure = classify_control_cancel_failure(
                                     &ctx,
-                                    usage,
-                                    observer_channel_id,
-                                    &session_id,
-                                    &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
-                                )
-                                .await;
-                                send_prompt_result(
-                                    &result_tx,
-                                    agent,
-                                    source,
-                                    PromptOutcome::AgentExited,
-                                    retry_batch,
+                                    error,
+                                    control_signal,
+                                    batch,
                                 );
-                                return;
-                            }
-                            Err(AcpError::IdleTimeout(_) | AcpError::HardTimeout) => {
-                                // Cancel drain timed out — agent state uncertain.
-                                agent.state.invalidate(&source);
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
+                                if failure.invalidate_all {
+                                    agent.state.invalidate_all();
+                                } else {
+                                    agent.state.invalidate(&source);
+                                }
 
                                 let usage = agent.acp.take_turn_usage();
                                 publish_agent_turn_metric(
@@ -1603,34 +1919,11 @@ pub async fn run_prompt_task(
                                 .await;
                                 send_prompt_result(
                                     &result_tx,
-                                    agent,
-                                    source,
-                                    PromptOutcome::Timeout,
-                                    retry_batch,
-                                );
-                                return;
-                            }
-                            Err(e) => {
-                                agent.state.invalidate(&source);
-                                let retry_batch =
-                                    requeue_cancelled_batch(&ctx, control_signal, batch);
-
-                                let usage = agent.acp.take_turn_usage();
-                                publish_agent_turn_metric(
-                                    &ctx,
-                                    usage,
-                                    observer_channel_id,
-                                    &session_id,
                                     &turn_id,
-                                    Some(buzz_core::agent_turn_metric::StopReason::Error),
-                                )
-                                .await;
-                                send_prompt_result(
-                                    &result_tx,
                                     agent,
                                     source,
-                                    PromptOutcome::Error(e),
-                                    retry_batch,
+                                    failure.outcome,
+                                    failure.retry_batch,
                                 );
                                 return;
                             }
@@ -1681,6 +1974,7 @@ pub async fn run_prompt_task(
                         .await;
                         send_prompt_result(
                             &result_tx,
+                            &turn_id,
                             agent,
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
@@ -1743,6 +2037,7 @@ pub async fn run_prompt_task(
 
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::Ok(stop_reason),
@@ -1764,6 +2059,7 @@ pub async fn run_prompt_task(
             .await;
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::AgentExited,
@@ -1797,9 +2093,10 @@ pub async fn run_prompt_task(
                     // session state will be discarded with the old agent.
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                 }
@@ -1822,6 +2119,7 @@ pub async fn run_prompt_task(
                     .await;
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
                         PromptOutcome::AgentExited,
@@ -1846,18 +2144,20 @@ pub async fn run_prompt_task(
                     .await;
                     send_prompt_result(
                         &result_tx,
+                        &turn_id,
                         agent,
                         source,
-                        PromptOutcome::Timeout,
+                        PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
                     );
                 }
             }
         }
-        Err(AcpError::HardTimeout) => {
+        Err(AcpError::HardTimeout { silence }) => {
+            let recently_active = silence < RECENT_ACTIVITY_WINDOW;
             tracing::error!(
                 target: "pool::prompt",
-                "hard timeout ({}s cap) — agent process is unrecoverable, invalidating all sessions",
+                "hard timeout ({}s cap, silence {silence:?}, recently_active={recently_active}) — agent process is unrecoverable, invalidating all sessions",
                 ctx.max_turn_duration.as_secs()
             );
             agent.state.invalidate_all();
@@ -1873,9 +2173,10 @@ pub async fn run_prompt_task(
             .await;
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
-                PromptOutcome::Timeout,
+                PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                 requeue_batch_if_queue(&ctx, batch),
             );
         }
@@ -1899,6 +2200,7 @@ pub async fn run_prompt_task(
             .await;
             send_prompt_result(
                 &result_tx,
+                &turn_id,
                 agent,
                 source,
                 PromptOutcome::Error(e),
@@ -1932,7 +2234,10 @@ where
 /// Uses `CONTEXT_FETCH_TIMEOUT` with one retry on failure. Returns `None` on
 /// persistent failure (graceful degradation — prompt will lack channel name and
 /// DM detection).
-async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<PromptChannelInfo> {
+pub(crate) async fn fetch_channel_info(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<PromptChannelInfo> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let d_tag = SingleLetterTag::lowercase(Alphabet::D);
@@ -1954,25 +2259,14 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
                 let ev = events.first()?;
                 let tags = ev.get("tags")?.as_array()?;
                 let mut name = None;
-                let mut is_hidden = false;
-                let mut is_private = false;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
-                        match arr.first().and_then(|v| v.as_str()) {
-                            Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                            Some("hidden") => is_hidden = true,
-                            Some("private") => is_private = true,
-                            _ => {}
+                        if arr.first().and_then(|v| v.as_str()) == Some("name") {
+                            name = arr.get(1).and_then(|v| v.as_str());
                         }
                     }
                 }
-                let channel_type = if is_hidden {
-                    "dm".to_string()
-                } else if is_private {
-                    "private".to_string()
-                } else {
-                    "stream".to_string()
-                };
+                let channel_type = crate::relay::channel_type_from_tags(tags);
                 Some(PromptChannelInfo {
                     name: name.unwrap_or("unknown").to_string(),
                     channel_type,
@@ -1995,6 +2289,200 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
         }
     })
     .await
+}
+
+/// Fetch the latest canvas event for `channel_id` and return a rendered
+/// `[Channel Canvas]` metadata section, or `None` if absent/blank/error.
+///
+/// Failure modes (all fail open — no crash, no block):
+/// * relay returns no event → `None`
+/// * latest event's content is blank → `None` (cleared canvas; older revisions
+///   are NOT resurrected)
+/// * malformed JSON array, missing fields, bad event ID, bad timestamp →
+///   logged at `warn`; returns `None`
+/// * REST error or timeout → returns `None`
+///
+/// Called at most once per new channel session; the result is cached in
+/// `SessionState::canvas_sections` and cleared on session invalidation.
+async fn fetch_canvas_section(channel_id: Uuid, rest: &RestClient) -> Option<String> {
+    use nostr::{Alphabet, SingleLetterTag};
+
+    let h_tag = SingleLetterTag::lowercase(Alphabet::H);
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16))
+        .custom_tags(h_tag, [channel_id.to_string()])
+        .limit(1);
+
+    const CANVAS_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    let json = match tokio::time::timeout(
+        CANVAS_FETCH_TIMEOUT,
+        rest.query(std::slice::from_ref(&filter)),
+    )
+    .await
+    {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_id,
+                "canvas query failed: {e} — emitting no section"
+            );
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_id,
+                timeout_ms = CANVAS_FETCH_TIMEOUT.as_millis() as u64,
+                "canvas fetch timed out — emitting no section"
+            );
+            return None;
+        }
+    };
+
+    let events = match json.as_array() {
+        Some(arr) => arr,
+        None => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_id,
+                "canvas query response is not a JSON array — emitting no section"
+            );
+            return None;
+        }
+    };
+
+    canvas_section_from_query_response(events, &channel_id.to_string())
+}
+
+/// Parse a canvas query response array and render a `[Channel Canvas]` section.
+///
+/// Extracted as a pure function so tests can exercise the parsing/validation
+/// logic without async machinery or relay connectivity.
+///
+/// Returns `None` on: empty array, blank content, malformed/partial event JSON
+/// (requires a complete, structurally valid Nostr event), or an out-of-range
+/// `created_at` timestamp. Never falls back to epoch or raw integers.
+pub(crate) fn canvas_section_from_query_response(
+    events: &[serde_json::Value],
+    channel_uuid: &str,
+) -> Option<String> {
+    let raw = events.first()?;
+
+    // Deserialise as a complete Nostr Event. Partial objects (missing pubkey,
+    // sig, kind, or tags) are rejected here rather than trusted implicitly.
+    let event = match serde_json::from_value::<nostr::Event>(raw.clone()) {
+        Ok(ev) => ev,
+        Err(err) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_uuid,
+                %err,
+                "canvas query returned a malformed event — emitting no section",
+            );
+            return None;
+        }
+    };
+
+    // Verify the event's id and signature agree with its content.
+    // A structurally complete but tampered event must not supply trusted metadata.
+    if let Err(err) = event.verify() {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            %err,
+            "canvas event failed signature verification — emitting no section",
+        );
+        return None;
+    }
+
+    // Validate kind: must be KIND_CANVAS (40100).
+    if event.kind != nostr::Kind::Custom(buzz_core::kind::KIND_CANVAS as u16) {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            kind = %event.kind.as_u16(),
+            "canvas event has unexpected kind — emitting no section",
+        );
+        return None;
+    }
+
+    // Validate h-tag: must carry the channel UUID we queried.
+    // The REST boundary filters by #h, but we verify here to prevent a
+    // misbehaving relay from injecting a different channel's canvas.
+    let h_tag_matches = event.tags.iter().any(|tag| {
+        let v = tag.as_slice();
+        v.len() >= 2 && v[0] == "h" && v[1] == channel_uuid
+    });
+    if !h_tag_matches {
+        tracing::warn!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            "canvas event is missing expected h-tag — emitting no section",
+        );
+        return None;
+    }
+
+    // Blank content means the canvas was cleared; do not fall back to older events.
+    if event.content.trim().is_empty() {
+        tracing::debug!(
+            target: "canvas::fetch",
+            channel = %channel_uuid,
+            "latest canvas event has blank content — emitting no section"
+        );
+        return None;
+    }
+
+    let id = event.id.to_hex();
+
+    // Convert the Nostr timestamp to a UTC RFC3339 string with Z suffix.
+    // Use checked conversion: a u64 that exceeds i64::MAX (e.g. Timestamp::max())
+    // wraps silently with `as i64`, producing a negative value that chrono would
+    // accept as a date in 1969. Reject out-of-range values explicitly instead.
+    let ts_secs = match i64::try_from(event.created_at.as_secs()) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_uuid,
+                "canvas event created_at overflows i64 — emitting no section",
+            );
+            return None;
+        }
+    };
+    let timestamp = match chrono::DateTime::from_timestamp(ts_secs, 0) {
+        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        None => {
+            tracing::warn!(
+                target: "canvas::fetch",
+                channel = %channel_uuid,
+                ts_secs,
+                "canvas event has out-of-range created_at — emitting no section",
+            );
+            return None;
+        }
+    };
+
+    tracing::info!(
+        target: "canvas::fetch",
+        channel = %channel_uuid,
+        event_id = %id,
+        "injected channel canvas metadata section into system prompt"
+    );
+    Some(render_canvas_section(&id, &timestamp, channel_uuid))
+}
+
+/// Render the `[Channel Canvas]` metadata section string.
+///
+/// Pure function — kept separate so unit tests can exercise rendering
+/// without async machinery or relay connectivity.
+pub(crate) fn render_canvas_section(event_id: &str, timestamp: &str, channel_uuid: &str) -> String {
+    format!(
+        "[Channel Canvas]\n\
+         Canvas revision (event ID): {event_id}\n\
+         Last modified: {timestamp}\n\
+         Fetch current content with: buzz canvas get --channel {channel_uuid}"
+    )
 }
 
 /// Fetch conversation context (thread or DM) for a batch before prompting.
@@ -2512,6 +3000,60 @@ fn requeue_cancelled_batch(
     })
 }
 
+/// Result of classifying a failed [`AcpClient::cancel_with_cleanup_grace`]
+/// call: the [`PromptOutcome`] to report and the triggering batch's fate,
+/// decided together so tests cross the exact error→outcome→batch-fate
+/// boundary the production `Err(error)` arm uses.
+struct ControlCancelFailure {
+    outcome: PromptOutcome,
+    retry_batch: Option<FlushBatch>,
+    /// `AgentExited` invalidates every session on the agent; every other
+    /// failure invalidates only the source that triggered this turn.
+    invalidate_all: bool,
+}
+
+/// Classify a failed control-signal cancellation (steer fallback, interrupt,
+/// or explicit stop) into the [`PromptOutcome`] to report and the triggering
+/// batch's fate. This is the single production seam used by the `Err(error)`
+/// arm of the control-cancel branch in [`run_prompt_task`] — the boundary
+/// this exists to keep singular, so regressions there are regression-tested.
+///
+/// [`AcpError::CancelDrainTimeout`] is the expected, common case: the agent
+/// didn't stop within its bounded grace window. [`AcpError::HardTimeout`] is
+/// not expected here — [`AcpClient::cancel_with_cleanup_grace`] translates its
+/// own drain-deadline `HardTimeout` into `CancelDrainTimeout` before
+/// returning — but for defense in depth an unexpected `HardTimeout` at this
+/// bounded cancellation boundary must never regain real hard-cap/dead-letter
+/// classification, so it maps to `CancelDrainTimeout(CONTROL_CANCEL_GRACE)`
+/// rather than `Timeout(Hard)`.
+fn classify_control_cancel_failure(
+    ctx: &PromptContext,
+    error: AcpError,
+    signal: ControlSignal,
+    batch: Option<FlushBatch>,
+) -> ControlCancelFailure {
+    let (outcome, invalidate_all) = match error {
+        AcpError::AgentExited => (PromptOutcome::AgentExited, true),
+        AcpError::IdleTimeout(_) => (PromptOutcome::Timeout(TimeoutKind::Idle), false),
+        AcpError::CancelDrainTimeout(grace) => (PromptOutcome::CancelDrainTimeout(grace), false),
+        // Defense in depth: this bounded cancellation API is documented to
+        // translate its own HardTimeout into CancelDrainTimeout, so this arm
+        // should be unreachable in practice. If it ever fires anyway, still
+        // report the truthful non-hard outcome rather than the real hard-cap
+        // (which would dead-letter the batch and claim the configured cap).
+        AcpError::HardTimeout { .. } => (
+            PromptOutcome::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+            false,
+        ),
+        other => (PromptOutcome::Error(other), false),
+    };
+    ControlCancelFailure {
+        outcome,
+        retry_batch: requeue_cancelled_batch(ctx, signal, batch),
+        invalidate_all,
+    }
+}
+
 /// Log a stop reason at the appropriate tracing level.
 fn log_stop_reason(source: &PromptSource, stop_reason: &StopReason) {
     let label = match source {
@@ -2600,23 +3142,29 @@ impl Drop for ReactionGuard {
 
 // Periodically emits a `turn_liveness` observer event while a turn is in-flight,
 // so the desktop can prune turns whose host died without unwinding (kill -9 /
-// crash) far sooner than the no-activity backstop. Runs as a non-resolving
-// `select!` arm in `run_prompt_task`: it lives and dies with the prompt future,
-// so emission stops on every exit path (complete / cancel / error / panic) with
-// no separate teardown to forget.
+// crash) far sooner than the no-activity backstop. `run_prompt_task` runs it in
+// a background task from `turn_started` until `LivenessGuard` drops, covering
+// session setup as well as the final prompt call. When `interval` is zero,
+// liveness is disabled and the future parks forever without emitting.
 //
-// Takes a captured `ObserverHandle` rather than `&agent.acp` because the prompt
-// future holds `&mut agent.acp` for its whole duration — a second borrow would
-// not compile.
+// `state` is the other half of `LivenessGuard`'s shutdown mutex (see its
+// docs): held here across the check-then-emit, so a `LivenessGuard::drop`
+// racing an in-flight tick either observes `state.closed == true` and skips
+// the emit, or is blocked on the same lock until this tick's emit has
+// already landed. Either way `turn_completed` cannot pass a live
+// `turn_liveness` frame on the wire — the race is closed, not narrowed.
 //
-// This future never resolves; callers must race it against the prompt and rely
-// on drop for teardown. When `interval` is zero, liveness is disabled and the
-// future parks forever without emitting.
+// `context`'s `session_id` starts `None` (liveness begins before session
+// creation) and is filled in from `state.session_id` on each tick — set once
+// by `run_prompt_task` after session resolution — so pings emitted for the
+// remainder of the turn carry the real session, matching every other
+// observer frame for this turn instead of a permanent `None`.
 async fn run_turn_liveness(
     observer: Option<observer::ObserverHandle>,
     agent_index: Option<usize>,
-    context: observer::ObserverContext,
+    mut context: observer::ObserverContext,
     interval: Duration,
+    state: Arc<Mutex<LivenessState>>,
 ) {
     let Some(observer) = observer else {
         return std::future::pending::<()>().await;
@@ -2631,12 +3179,83 @@ async fn run_turn_liveness(
     ticker.tick().await;
     loop {
         ticker.tick().await;
+        // Nothing awaitable between the lock and the emit: `LivenessGuard::drop`
+        // takes this same lock before its `abort()`, so the guard can only ever
+        // observe this tick fully emitted or not yet started — never mid-emit.
+        let guard = match state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.closed {
+            return;
+        }
+        context.session_id = guard.session_id.clone();
         observer.emit(
             "turn_liveness",
             agent_index,
             &context,
             serde_json::json!({}),
         );
+        drop(guard);
+    }
+}
+
+/// Shared shutdown/session state between `run_turn_liveness` and its
+/// `LivenessGuard`. A single lock covers both fields so a tick's
+/// check-session/emit and a guard's set-closed/abort can never interleave.
+struct LivenessState {
+    closed: bool,
+    session_id: Option<String>,
+}
+
+/// Owns the background liveness task for one `run_prompt_task` invocation.
+///
+/// Dropping the guard aborts the non-resolving task, so liveness covers all
+/// pre-prompt setup yet cannot survive a completed, cancelled, or panicked turn.
+///
+/// `abort()` alone leaves a race: tokio's cooperative cancellation only takes
+/// effect at the next `.await` point inside the aborted task, so a tick that
+/// has already passed its await and is mid-`observer.emit` when `drop` runs
+/// can still complete that emit — a `turn_liveness` frame lands on the wire
+/// after `turn_completed`, reviving a finished turn's badge for up to the
+/// desktop's bounded prune-pause window. `state` shares a lock with
+/// `run_turn_liveness`'s check-then-emit (see its docs): setting `closed`
+/// and aborting under the same lock the emitter holds during its tick means
+/// `drop` either sees the flag land before that tick's lock is taken (emit
+/// skipped) or blocks until the in-flight emit under the lock has finished
+/// (then aborts, so there is no next tick) — no interleaving emits a frame
+/// after this guard has dropped.
+struct LivenessGuard {
+    handle: JoinHandle<()>,
+    state: Arc<Mutex<LivenessState>>,
+}
+
+impl LivenessGuard {
+    fn new(handle: JoinHandle<()>, state: Arc<Mutex<LivenessState>>) -> Self {
+        Self { handle, state }
+    }
+
+    /// Record the turn's session ID once known, so subsequent liveness ticks
+    /// stamp it on the emitted `turn_liveness` frame instead of `None`.
+    fn set_session_id(&self, session_id: String) {
+        let mut guard = match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        guard.session_id = Some(session_id);
+    }
+}
+
+impl Drop for LivenessGuard {
+    fn drop(&mut self) {
+        {
+            let mut guard = match self.state.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            guard.closed = true;
+        }
+        self.handle.abort();
     }
 }
 
@@ -3031,7 +3650,7 @@ async fn clear_reactions(rest: crate::relay::RestClient, event_ids: Vec<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
     use serde_json::json;
 
     // These pin the initial_message dispatch path (run_prompt_task, ~line 855):
@@ -3056,10 +3675,105 @@ mod tests {
     }
 
     #[test]
+    fn goose_uses_system_prompt_only_after_custom_method_succeeds() {
+        assert!(!has_system_prompt_support(2, "goose", None));
+        assert!(!has_system_prompt_support(2, "goose", Some(false)));
+        assert!(has_system_prompt_support(2, "goose", Some(true)));
+        assert!(has_system_prompt_support(1, "goose", Some(true)));
+        assert!(has_system_prompt_support(2, "buzz-agent", None));
+        assert_eq!(
+            session_new_system_prompt(true, 2, Some("instructions")),
+            None
+        );
+        assert_eq!(
+            session_new_system_prompt(false, 2, Some("instructions")),
+            Some("instructions")
+        );
+        assert_eq!(
+            session_new_system_prompt(false, 1, Some("instructions")),
+            None
+        );
+    }
+
+    #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
         // No base_prompt configured: nothing to prepend regardless of version.
         let composed = prepend_base_for_legacy(1, None, "hello channel");
         assert_eq!(composed, "hello channel");
+    }
+
+    // ── prepend_canvas_for_legacy ─────────────────────────────────────────────
+
+    #[test]
+    fn test_initial_message_legacy_agent_gets_canvas_prepended() {
+        // Legacy agents (protocol_version < 2) receive the canvas section before
+        // the initial-message body so it arrives before the first prompt.
+        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00Z\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let composed = prepend_canvas_for_legacy(1, Some(canvas), "do the thing");
+        assert!(
+            composed.starts_with("[Channel Canvas]"),
+            "canvas must precede the body"
+        );
+        assert!(
+            composed.ends_with("do the thing"),
+            "body must follow the canvas"
+        );
+        assert!(
+            composed.contains("\n\ndo the thing"),
+            "canvas and body separated by blank line"
+        );
+    }
+
+    #[test]
+    fn test_initial_message_modern_agent_omits_canvas_from_body() {
+        // Protocol-v2 agents receive canvas in systemPrompt; it must NOT be
+        // duplicated in the initial-message user turn.
+        let canvas = "[Channel Canvas]\nsome section";
+        let composed = prepend_canvas_for_legacy(2, Some(canvas), "do the thing");
+        assert_eq!(
+            composed, "do the thing",
+            "modern agent initial message must not contain canvas"
+        );
+        assert!(
+            !composed.contains("[Channel Canvas]"),
+            "canvas must be absent from modern agent initial message"
+        );
+    }
+
+    #[test]
+    fn test_initial_message_legacy_agent_no_canvas_is_unchanged() {
+        // No canvas present: body passes through unmodified.
+        let composed = prepend_canvas_for_legacy(1, None, "do the thing");
+        assert_eq!(composed, "do the thing");
+    }
+
+    #[test]
+    fn test_initial_message_legacy_canvas_and_base_compose_correctly() {
+        // Verify the full composition order when both base and canvas are present:
+        // [Base] → canvas section → initial-message body.
+        let canvas = "[Channel Canvas]\ncanvas content";
+        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing");
+        let full = prepend_canvas_for_legacy(1, Some(canvas), &base_composed);
+        assert!(
+            full.starts_with("[Channel Canvas]"),
+            "canvas must be first in composed message"
+        );
+        assert!(
+            full.contains("[Base]"),
+            "base must be present in composed message"
+        );
+        assert!(
+            full.ends_with("do the thing"),
+            "body must be last in composed message"
+        );
+        // Order: canvas → base → body
+        let canvas_pos = full.find("[Channel Canvas]").unwrap();
+        let base_pos = full.find("[Base]").unwrap();
+        let body_pos = full.find("do the thing").unwrap();
+        assert!(
+            canvas_pos < base_pos && base_pos < body_pos,
+            "order must be: canvas → base → body"
+        );
     }
 
     // Pin the session/new systemPrompt framing: each present prompt carries its
@@ -3716,10 +4430,243 @@ mod tests {
         assert_eq!(*s.turn_counts.get(&ch_b).unwrap(), 3);
     }
 
+    // ── requeue_cancelled_batch ────────────────────────────────────────────
+    // Table-driven pin of the `ControlSignal` → `CancelReason` ownership that
+    // decides whether a cancel-drain-expiry batch is merged into the next
+    // flush or dropped outright. `Cancel`/`Rotate` must return `None` — a
+    // regression here would silently fall through to
+    // `unwrap_or(CancelReason::Steer)` at the requeue site and preserve a
+    // batch that should have been discarded.
+
+    fn one_event_batch(channel_id: Uuid) -> FlushBatch {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), "test")
+            .sign_with_keys(&keys)
+            .unwrap();
+        FlushBatch {
+            channel_id,
+            events: vec![crate::queue::BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        }
+    }
+
+    #[test]
+    fn test_requeue_cancelled_batch_maps_control_signal_to_cancel_reason() {
+        let cases = [
+            (ControlSignal::Steer, Some(CancelReason::Steer)),
+            (ControlSignal::Interrupt, Some(CancelReason::Interrupt)),
+            (
+                ControlSignal::SwitchModel("gpt-5".into()),
+                Some(CancelReason::Interrupt),
+            ),
+            (ControlSignal::Cancel, None),
+            (ControlSignal::Rotate, None),
+        ];
+        let mut ctx = make_prompt_context_no_owner();
+        ctx.dedup_mode = DedupMode::Queue;
+
+        for (signal, expected_reason) in cases {
+            let channel_id = Uuid::new_v4();
+            let batch = one_event_batch(channel_id);
+            let result = requeue_cancelled_batch(&ctx, signal.clone(), Some(batch));
+            match expected_reason {
+                Some(reason) => {
+                    let batch = result
+                        .unwrap_or_else(|| panic!("{signal:?} must preserve the batch, got None"));
+                    assert_eq!(
+                        batch.cancel_reason,
+                        Some(reason),
+                        "{signal:?} must stamp {reason:?}"
+                    );
+                }
+                None => assert!(
+                    result.is_none(),
+                    "{signal:?} must drop the batch, got {result:?}"
+                ),
+            }
+        }
+    }
+
+    // ── classify_control_cancel_failure ─────────────────────────────────────
+    // Table-driven pin of the single production seam used by the
+    // `Err(error)` arm in `run_prompt_task`'s control-cancel branch. Crosses
+    // the exact error→outcome AND outcome→batch-fate boundary in one call,
+    // so a regression to the old per-arm duplication (or to routing an
+    // unexpected HardTimeout back through the real hard-cap path) fails
+    // here rather than only in independently-manufactured unit tests.
+
+    /// Assert `outcome` is the expected `PromptOutcome` variant. `PromptOutcome`
+    /// has no `PartialEq` (it wraps `AcpError`, which isn't `PartialEq`), so
+    /// this matches by shape instead of deriving equality onto the whole enum.
+    fn assert_outcome_matches(outcome: &PromptOutcome, expected: &str) {
+        let label = match outcome {
+            PromptOutcome::AgentExited => "AgentExited",
+            PromptOutcome::Timeout(TimeoutKind::Idle) => "Timeout(Idle)",
+            PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "Timeout(Hard)",
+            PromptOutcome::CancelDrainTimeout(_) => "CancelDrainTimeout",
+            PromptOutcome::Error(_) => "Error",
+            PromptOutcome::Cancelled => "Cancelled",
+            PromptOutcome::Ok(_) => "Ok",
+        };
+        assert_eq!(
+            label, expected,
+            "got outcome shape {label}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn test_classify_control_cancel_failure_crosses_error_outcome_and_batch_fate() {
+        let ctx = {
+            let mut ctx = make_prompt_context_no_owner();
+            ctx.dedup_mode = DedupMode::Queue;
+            ctx
+        };
+
+        struct Case {
+            name: &'static str,
+            error: fn() -> AcpError,
+            signal: ControlSignal,
+            expected_outcome: &'static str,
+            batch_preserved: bool,
+            expected_reason: Option<CancelReason>,
+            invalidate_all: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "CancelDrainTimeout + Steer preserves batch with Steer reason",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Steer,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + Cancel drops the batch",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Cancel,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + Interrupt preserves batch with Interrupt reason",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Interrupt,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Interrupt),
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + Rotate drops the batch",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::Rotate,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: false,
+            },
+            Case {
+                name: "CancelDrainTimeout + SwitchModel preserves batch with Interrupt reason",
+                error: || AcpError::CancelDrainTimeout(CONTROL_CANCEL_GRACE),
+                signal: ControlSignal::SwitchModel("gpt-5".to_string()),
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Interrupt),
+                invalidate_all: false,
+            },
+            Case {
+                name: "unexpected HardTimeout cannot become Timeout(Hard)",
+                error: || AcpError::HardTimeout {
+                    silence: Duration::from_secs(300),
+                },
+                signal: ControlSignal::Steer,
+                expected_outcome: "CancelDrainTimeout",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+            Case {
+                name: "AgentExited requests all-session invalidation and preserves via Steer",
+                error: || AcpError::AgentExited,
+                signal: ControlSignal::Steer,
+                expected_outcome: "AgentExited",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: true,
+            },
+            Case {
+                name: "AgentExited + Cancel still drops the batch",
+                error: || AcpError::AgentExited,
+                signal: ControlSignal::Cancel,
+                expected_outcome: "AgentExited",
+                batch_preserved: false,
+                expected_reason: None,
+                invalidate_all: true,
+            },
+            Case {
+                name: "IdleTimeout maps to Timeout(Idle)",
+                error: || AcpError::IdleTimeout(Duration::from_secs(30)),
+                signal: ControlSignal::Steer,
+                expected_outcome: "Timeout(Idle)",
+                batch_preserved: true,
+                expected_reason: Some(CancelReason::Steer),
+                invalidate_all: false,
+            },
+        ];
+
+        for case in cases {
+            let channel_id = Uuid::new_v4();
+            let batch = one_event_batch(channel_id);
+            let failure = classify_control_cancel_failure(
+                &ctx,
+                (case.error)(),
+                case.signal.clone(),
+                Some(batch),
+            );
+            assert_outcome_matches(&failure.outcome, case.expected_outcome);
+            assert_eq!(
+                failure.invalidate_all, case.invalidate_all,
+                "{}: invalidate_all mismatch",
+                case.name
+            );
+            match case.expected_reason {
+                Some(reason) => {
+                    let batch = failure
+                        .retry_batch
+                        .unwrap_or_else(|| panic!("{}: batch must be preserved", case.name));
+                    assert_eq!(
+                        batch.cancel_reason,
+                        Some(reason),
+                        "{}: cancel_reason mismatch",
+                        case.name
+                    );
+                }
+                None => assert!(
+                    failure.retry_batch.is_none(),
+                    "{}: batch must be dropped, got {:?}",
+                    case.name,
+                    failure.retry_batch
+                ),
+            }
+            assert_eq!(
+                case.batch_preserved,
+                case.expected_reason.is_some(),
+                "{}: test table internally inconsistent",
+                case.name
+            );
+        }
+    }
+
     // ── turn liveness emission ───────────────────────────────────────────────
-    // `run_turn_liveness` is raced against a "prompt" future the same way
-    // `run_prompt_task` does it: the prompt wins the select and the liveness
-    // future is dropped. We assert what the observer saw.
 
     fn liveness_count(handle: &observer::ObserverHandle) -> usize {
         handle
@@ -3729,47 +4676,174 @@ mod tests {
             .count()
     }
 
+    fn open_liveness_state() -> Arc<Mutex<LivenessState>> {
+        Arc::new(Mutex::new(LivenessState {
+            closed: false,
+            session_id: None,
+        }))
+    }
+
     #[tokio::test(start_paused = true)]
-    async fn test_liveness_fires_while_prompt_pends_then_stops() {
+    async fn test_liveness_stops_before_completion_frame() {
         let observer = observer::ObserverHandle::in_process();
-        let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness = run_turn_liveness(
-            Some(observer.clone()),
-            Some(0),
-            context,
-            Duration::from_secs(10),
+        let context =
+            observer::context_for_turn(None, None, "t-1".into(), "2026-07-14T21:00:00Z".into());
+        let completion_context = observer::context_for(None, None, Some("t-1".into()));
+        let completion_observer = observer.clone();
+        let completion_handle = tokio::spawn(async move {
+            let state = open_liveness_state();
+            let _liveness_guard = LivenessGuard::new(
+                tokio::spawn(run_turn_liveness(
+                    Some(observer.clone()),
+                    Some(0),
+                    context,
+                    Duration::from_secs(10),
+                    Arc::clone(&state),
+                )),
+                state,
+            );
+            tokio::time::sleep(Duration::from_secs(25)).await;
+            observer.emit(
+                "turn_completed",
+                Some(0),
+                &completion_context,
+                serde_json::json!({}),
+            );
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::advance(Duration::from_secs(25)).await;
+        completion_handle.await.unwrap();
+        tokio::task::yield_now().await;
+
+        let events = completion_observer.snapshot();
+        let completion_index = events
+            .iter()
+            .position(|event| event.kind == "turn_completed")
+            .expect("turn must complete");
+        assert!(
+            events[..completion_index]
+                .iter()
+                .all(|event| event.kind != "turn_liveness"
+                    || event.turn_id.as_deref() == Some("t-1")),
+            "pre-completion liveness must belong to the active turn"
         );
-        tokio::pin!(liveness);
+        assert!(
+            events[completion_index + 1..]
+                .iter()
+                .all(|event| event.kind != "turn_liveness"),
+            "liveness must be aborted before a completion frame is emitted"
+        );
+    }
 
-        // Prompt pends for 25s, then completes — first liveness tick at 10s,
-        // second at 20s, so the observer must see exactly two pings.
-        tokio::select! {
-            biased;
-            () = tokio::time::sleep(Duration::from_secs(25)) => {}
-            _ = &mut liveness => unreachable!("liveness future never resolves"),
-        }
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_fires_until_guard_drops() {
+        let observer = observer::ObserverHandle::in_process();
+        let started_at = "2026-07-14T21:00:00Z".to_string();
+        let context = observer::context_for_turn(None, None, "t-1".into(), started_at.clone());
+        let state = open_liveness_state();
+        let guard = LivenessGuard::new(
+            tokio::spawn(run_turn_liveness(
+                Some(observer.clone()),
+                Some(0),
+                context,
+                Duration::from_secs(10),
+                Arc::clone(&state),
+            )),
+            state,
+        );
+        tokio::task::yield_now().await;
 
+        // First liveness tick at 10s and the second at 20s.
+        tokio::time::advance(Duration::from_secs(25)).await;
+        tokio::task::yield_now().await;
         assert_eq!(liveness_count(&observer), 2);
 
-        // The turn carried the live turn_id on each ping.
         let pings: Vec<_> = observer
             .snapshot()
             .into_iter()
             .filter(|e| e.kind == "turn_liveness")
             .collect();
-        assert!(pings.iter().all(|e| e.turn_id.as_deref() == Some("t-1")));
+        assert!(pings
+            .iter()
+            .all(|event| event.turn_id.as_deref() == Some("t-1")));
+        assert!(pings
+            .iter()
+            .all(|event| event.started_at.as_deref() == Some(&started_at)));
+        assert!(pings
+            .iter()
+            .all(|event| event.payload == serde_json::json!({})));
+        assert_eq!(
+            serde_json::to_value(&pings[0]).unwrap()["startedAt"],
+            started_at,
+            "turn start must serialize in the observer envelope"
+        );
 
-        // After the prompt wins the select, the liveness future is dropped —
-        // advancing the clock further produces no new pings.
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        // The guard is owned by `run_prompt_task`; dropping it aborts liveness
+        // so completed, cancelled, and errored turns cannot emit late pings.
+        drop(guard);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(60)).await;
+        tokio::task::yield_now().await;
         assert_eq!(liveness_count(&observer), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_backfills_session_id_after_resolution() {
+        let observer = observer::ObserverHandle::in_process();
+        let context =
+            observer::context_for_turn(None, None, "t-1".into(), "2026-07-14T21:00:00Z".into());
+        let state = open_liveness_state();
+        let guard = LivenessGuard::new(
+            tokio::spawn(run_turn_liveness(
+                Some(observer.clone()),
+                Some(0),
+                context,
+                Duration::from_secs(10),
+                Arc::clone(&state),
+            )),
+            state,
+        );
+        tokio::task::yield_now().await;
+
+        // First tick at 10s fires before the session resolves — must carry
+        // no session ID, matching every other pre-resolution observer frame.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+        guard.set_session_id("sess-1".to_string());
+
+        // Second tick at 20s fires after resolution — must carry it.
+        tokio::time::advance(Duration::from_secs(10)).await;
+        tokio::task::yield_now().await;
+
+        let pings: Vec<_> = observer
+            .snapshot()
+            .into_iter()
+            .filter(|e| e.kind == "turn_liveness")
+            .collect();
+        assert_eq!(pings.len(), 2);
+        assert_eq!(
+            pings[0].session_id, None,
+            "pre-resolution ping must not carry a session ID"
+        );
+        assert_eq!(
+            pings[1].session_id.as_deref(),
+            Some("sess-1"),
+            "post-resolution ping must carry the resolved session ID"
+        );
     }
 
     #[tokio::test(start_paused = true)]
     async fn test_liveness_disabled_when_interval_zero_emits_nothing() {
         let observer = observer::ObserverHandle::in_process();
         let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness = run_turn_liveness(Some(observer.clone()), Some(0), context, Duration::ZERO);
+        let liveness = run_turn_liveness(
+            Some(observer.clone()),
+            Some(0),
+            context,
+            Duration::ZERO,
+            open_liveness_state(),
+        );
         tokio::pin!(liveness);
 
         tokio::select! {
@@ -3786,7 +4860,13 @@ mod tests {
         // A turn that never started has no observer handle — the future must
         // park without emitting or panicking.
         let context = observer::context_for(None, None, Some("t-1".into()));
-        let liveness = run_turn_liveness(None, None, context, Duration::from_secs(10));
+        let liveness = run_turn_liveness(
+            None,
+            None,
+            context,
+            Duration::from_secs(10),
+            open_liveness_state(),
+        );
         tokio::pin!(liveness);
 
         tokio::select! {
@@ -3795,6 +4875,88 @@ mod tests {
             _ = &mut liveness => unreachable!("handle-less liveness future never resolves"),
         }
         // No observer to assert against — reaching here without panic is the test.
+    }
+
+    // These two tests pin the shutdown mechanism itself (F1), not timing.
+    // The existing paused-clock tests above only prove liveness stops
+    // *eventually* after a guard drop — under `tokio::time::pause`, the
+    // scheduler never actually interleaves a drop with an in-flight emit, so
+    // they cannot catch a real cross-thread race between `LivenessGuard::drop`
+    // and `run_turn_liveness`'s tick. These assert the two halves of the
+    // contract directly: the check gates the emit with the flag pre-set (no
+    // `LivenessGuard` involved), and `drop` cannot return while the shared
+    // lock is held by an in-flight tick (real OS threads, no cooperative
+    // scheduling to serialize the race away).
+
+    #[tokio::test(start_paused = true)]
+    async fn test_liveness_emits_nothing_once_closed_flag_is_set() {
+        let observer = observer::ObserverHandle::in_process();
+        let context =
+            observer::context_for_turn(None, None, "t-1".into(), "2026-07-14T21:00:00Z".into());
+        // Set directly, bypassing `LivenessGuard` — isolates the read side of
+        // the contract: the check under the lock must gate the emit on its own.
+        let state = Arc::new(Mutex::new(LivenessState {
+            closed: true,
+            session_id: None,
+        }));
+        let liveness = run_turn_liveness(
+            Some(observer.clone()),
+            Some(0),
+            context,
+            Duration::from_secs(10),
+            state,
+        );
+        tokio::time::timeout(Duration::from_secs(60), liveness)
+            .await
+            .expect("run_turn_liveness must return once closed, not park forever");
+
+        assert_eq!(
+            liveness_count(&observer),
+            0,
+            "the pre-set closed flag must suppress every tick's emit"
+        );
+    }
+
+    #[test]
+    fn test_liveness_guard_drop_blocks_while_emit_lock_is_held() {
+        // Standing in for a tick that has already entered its critical
+        // section: hold the shared lock before the guard drops.
+        let state = Arc::new(Mutex::new(LivenessState {
+            closed: false,
+            session_id: None,
+        }));
+        let held = state.lock().unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let handle = rt.spawn(std::future::pending::<()>());
+        let guard = LivenessGuard::new(handle, Arc::clone(&state));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(guard);
+            tx.send(()).unwrap();
+        });
+
+        // While the emit lock is held, `drop` cannot have completed: it takes
+        // the same lock before it sets the flag and aborts. A bounded timeout
+        // proves non-completion by construction of the lock, not the clock —
+        // `recv_timeout` returning `Timeout` here only holds because the
+        // mutex is genuinely contended; it cannot pass by scheduling luck.
+        assert_eq!(
+            rx.recv_timeout(Duration::from_millis(200)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "drop must block while the tick's emit lock is held"
+        );
+
+        // Release the lock — drop can now acquire it, set the flag, and abort.
+        drop(held);
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("drop must complete once the emit lock is released");
+        drop_thread.join().unwrap();
+        assert!(
+            state.lock().unwrap().closed,
+            "closed flag must be set by the time drop has returned"
+        );
     }
 
     // ── steer_rx invariant tests ──────────────────────────────────────────
@@ -3818,9 +4980,14 @@ mod tests {
     /// `install_steer_rx` does not panic.
     #[tokio::test]
     async fn test_send_prompt_result_clears_steer_rx_on_early_return() {
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
-            .await
-            .expect("failed to spawn test agent");
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
         let mut agent = OwnedAgent {
             index: 0,
             acp,
@@ -3828,6 +4995,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             protocol_version: 2,
         };
 
@@ -3842,6 +5011,7 @@ mod tests {
         let source = PromptSource::Heartbeat;
         send_prompt_result(
             &result_tx,
+            "test-turn-id",
             agent,
             source,
             PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
@@ -3868,9 +5038,14 @@ mod tests {
     /// and the next `install_steer_rx` does not panic.
     #[tokio::test]
     async fn test_send_prompt_result_is_noop_when_steer_rx_already_consumed() {
-        let acp = AcpClient::spawn("bash", &["-c".to_string(), "sleep 10".to_string()], &[])
-            .await
-            .expect("failed to spawn test agent");
+        let acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
         let agent = OwnedAgent {
             index: 0,
             acp,
@@ -3878,6 +5053,8 @@ mod tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             protocol_version: 2,
         };
 
@@ -3892,6 +5069,7 @@ mod tests {
         let source = PromptSource::Heartbeat;
         send_prompt_result(
             &result_tx,
+            "test-turn-id",
             agent,
             source,
             PromptOutcome::Ok(StopReason::EndTurn),
@@ -4102,6 +5280,7 @@ mod tests {
             turn_liveness_interval: Duration::ZERO,
             dedup_mode: DedupMode::Drop,
             system_prompt: None,
+            team_instructions: None,
             heartbeat_prompt: None,
             base_prompt: None,
             cwd: ".".to_string(),
@@ -4111,7 +5290,15 @@ mod tests {
                 keys: agent_keys.clone(),
                 auth_tag_json: None,
             },
-            channel_info: std::collections::HashMap::new(),
+            channel_info: ChannelInfoResolver::new(
+                std::collections::HashMap::new(),
+                RestClient {
+                    http: reqwest::Client::new(),
+                    base_url: "http://127.0.0.1:0".to_string(),
+                    keys: agent_keys.clone(),
+                    auth_tag_json: None,
+                },
+            ),
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
@@ -4119,6 +5306,315 @@ mod tests {
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            relay_url: "ws://127.0.0.1:3000".to_string(),
         }
+    }
+
+    // ── render_canvas_section ────────────────────────────────────────────────
+
+    #[test]
+    fn test_render_canvas_section_produces_exact_shape() {
+        let id = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        let ts = "2024-01-15T10:30:00+00:00";
+        let uuid = "00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let section = render_canvas_section(id, ts, uuid);
+        assert_eq!(
+            section,
+            "[Channel Canvas]\n\
+             Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\n\
+             Last modified: 2024-01-15T10:30:00+00:00\n\
+             Fetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae"
+        );
+    }
+
+    // ── with_canvas ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_canvas_appends_to_existing_prompt() {
+        let result = with_canvas(Some("base content".into()), Some("[Channel Canvas]\nstuff"));
+        assert_eq!(result.unwrap(), "base content\n\n[Channel Canvas]\nstuff");
+    }
+
+    #[test]
+    fn test_with_canvas_returns_canvas_alone_when_no_prompt() {
+        let result = with_canvas(None, Some("[Channel Canvas]\nstuff"));
+        assert_eq!(result.unwrap(), "[Channel Canvas]\nstuff");
+    }
+
+    #[test]
+    fn test_with_canvas_returns_prompt_alone_when_no_canvas() {
+        let result = with_canvas(Some("base content".into()), None);
+        assert_eq!(result.unwrap(), "base content");
+    }
+
+    #[test]
+    fn test_with_canvas_returns_none_when_both_absent() {
+        let result = with_canvas(None, None);
+        assert!(result.is_none());
+    }
+
+    // ── canvas_sections cache invalidation ───────────────────────────────────
+
+    #[test]
+    fn test_invalidate_channel_clears_canvas_section() {
+        let ch = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.sessions.insert(ch, "sess".into());
+        s.canvas_sections
+            .insert(ch, "[Channel Canvas]\nrev abc".into());
+
+        s.invalidate_channel(&ch);
+
+        assert!(!s.canvas_sections.contains_key(&ch));
+        assert!(!s.sessions.contains_key(&ch));
+    }
+
+    #[test]
+    fn test_invalidate_all_clears_canvas_sections() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.canvas_sections.insert(ch_a, "canvas-a".into());
+        s.canvas_sections.insert(ch_b, "canvas-b".into());
+        s.sessions.insert(ch_a, "sess-a".into());
+
+        s.invalidate_all();
+
+        assert!(s.canvas_sections.is_empty());
+        assert!(s.sessions.is_empty());
+    }
+
+    #[test]
+    fn test_invalidate_channel_leaves_other_channels_canvas_intact() {
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.sessions.insert(ch_a, "sess-a".into());
+        s.sessions.insert(ch_b, "sess-b".into());
+        s.canvas_sections.insert(ch_a, "canvas-a".into());
+        s.canvas_sections.insert(ch_b, "canvas-b".into());
+
+        s.invalidate_channel(&ch_a);
+
+        assert!(!s.canvas_sections.contains_key(&ch_a));
+        assert_eq!(s.canvas_sections.get(&ch_b).unwrap(), "canvas-b");
+    }
+
+    #[test]
+    fn test_has_channel_state_true_when_only_canvas_section_present() {
+        let ch = Uuid::new_v4();
+        let mut s = SessionState::default();
+        s.canvas_sections.insert(ch, "canvas".into());
+        assert!(s.has_channel_state(&ch));
+    }
+
+    // ── canvas_section_from_query_response ───────────────────────────────────
+
+    const CHANNEL_UUID: &str = "00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+
+    /// Build a real, cryptographically signed Nostr canvas event for tests.
+    ///
+    /// Includes the correct kind (40100) and an `h` tag carrying `CHANNEL_UUID`
+    /// so all structural and content validations pass.
+    fn make_canvas_event_value(content: &str) -> serde_json::Value {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let event = EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), content)
+            .tags([h_tag])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        serde_json::to_value(&event).expect("serialise")
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_happy_path() {
+        let ev = make_canvas_event_value("# Team instructions\nBe helpful.");
+        let id = ev["id"].as_str().unwrap().to_string();
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        let section = result.expect("expected Some");
+        assert!(section.contains(&id), "section must contain the event id");
+        assert!(section.contains("buzz canvas get --channel"));
+        assert!(section.contains(CHANNEL_UUID));
+        assert!(section.starts_with("[Channel Canvas]"));
+        // Timestamp must use Z suffix, not +00:00
+        assert!(section.contains('Z'), "timestamp must use Z suffix");
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_empty_array_returns_none() {
+        let result = canvas_section_from_query_response(&[], CHANNEL_UUID);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_blank_content_returns_none() {
+        let ev = make_canvas_event_value("   ");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "blank content must return None (cleared canvas)"
+        );
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_empty_content_returns_none() {
+        let ev = make_canvas_event_value("");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(result.is_none());
+    }
+
+    /// A bare JSON object with a plausible-looking id but missing pubkey/sig/kind/tags
+    /// must be rejected — not silently accepted with partial metadata.
+    #[test]
+    fn test_canvas_section_from_query_response_partial_object_returns_none() {
+        let partial = serde_json::json!({
+            "id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+            "created_at": 1705312200_i64,
+            "content": "some instructions"
+        });
+        let result = canvas_section_from_query_response(&[partial], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "partial event object (missing pubkey/sig/kind/tags) must return None"
+        );
+    }
+
+    /// A JSON object that looks like an event but has `created_at` as a string
+    /// must be rejected — the nostr::Event parser enforces integer type.
+    #[test]
+    fn test_canvas_section_from_query_response_string_timestamp_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let mut ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([h_tag])
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        // Corrupt created_at to a string value.
+        ev["created_at"] = serde_json::Value::String("2026-03-15T16:30:00+00:00".into());
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "string created_at must be rejected by nostr::Event deserialiser"
+        );
+    }
+
+    /// A JSON object that looks like an event but is missing `created_at`
+    /// must be rejected — nostr::Event requires the field.
+    #[test]
+    fn test_canvas_section_from_query_response_missing_timestamp_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let mut ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([h_tag])
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        ev.as_object_mut().unwrap().remove("created_at");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "missing created_at must be rejected by nostr::Event deserialiser"
+        );
+    }
+
+    /// An event with a timestamp at Timestamp::max() (u64::MAX) must return None.
+    ///
+    /// `u64::MAX as i64` wraps to -1, which chrono silently accepts as
+    /// 1969-12-31T23:59:59Z. The checked i64::try_from must reject it first.
+    #[test]
+    fn test_canvas_section_from_query_response_timestamp_max_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([h_tag])
+                .custom_created_at(Timestamp::max())
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "Timestamp::max() (u64::MAX) must return None — not wrap to 1969"
+        );
+    }
+
+    /// A structurally complete but tampered event (content altered after signing)
+    /// must be rejected by event.verify().
+    #[test]
+    fn test_canvas_section_from_query_response_tampered_event_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let mut ev = serde_json::to_value(
+            EventBuilder::new(
+                Kind::Custom(buzz_core::kind::KIND_CANVAS as u16),
+                "original",
+            )
+            .tags([h_tag])
+            .sign_with_keys(&keys)
+            .expect("sign"),
+        )
+        .expect("serialise");
+        // Tamper the content after signing — id and sig no longer agree.
+        ev["content"] = serde_json::Value::String("injected instructions".into());
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(
+            result.is_none(),
+            "tampered event must fail verify() and return None"
+        );
+    }
+
+    /// An event with the wrong kind (not 40100) must be rejected.
+    #[test]
+    fn test_canvas_section_from_query_response_wrong_kind_returns_none() {
+        let keys = Keys::generate();
+        let h_tag = Tag::parse(["h", CHANNEL_UUID]).expect("h tag");
+        let ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(9), "content")
+                .tags([h_tag])
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(result.is_none(), "wrong kind must return None");
+    }
+
+    /// An event missing the expected h-tag (or carrying a different channel UUID)
+    /// must be rejected.
+    #[test]
+    fn test_canvas_section_from_query_response_wrong_h_tag_returns_none() {
+        let keys = Keys::generate();
+        let wrong_h = Tag::parse(["h", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"]).expect("h tag");
+        let ev = serde_json::to_value(
+            EventBuilder::new(Kind::Custom(buzz_core::kind::KIND_CANVAS as u16), "content")
+                .tags([wrong_h])
+                .sign_with_keys(&keys)
+                .expect("sign"),
+        )
+        .expect("serialise");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        assert!(result.is_none(), "mismatched h-tag must return None");
+    }
+
+    #[test]
+    fn test_canvas_section_from_query_response_timestamp_uses_z_suffix() {
+        let ev = make_canvas_event_value("instructions");
+        let result = canvas_section_from_query_response(&[ev], CHANNEL_UUID);
+        let section = result.expect("valid event must produce a section");
+        assert!(
+            section.contains('Z'),
+            "RFC3339 timestamp must use Z suffix, not +00:00"
+        );
+        assert!(
+            !section.contains("+00:00"),
+            "timestamp must not use +00:00 offset"
+        );
     }
 }

@@ -26,6 +26,15 @@ use crate::filter::SubscriptionRule;
 /// Override via `--idle-timeout` / `BUZZ_ACP_IDLE_TIMEOUT`.
 pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 
+/// Default absolute wall-clock cap per agent turn (2 hours).
+/// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
+pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
+
+/// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
+/// meaningless and risks arithmetic overflow when deriving the in-flight
+/// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
+pub(crate) const MAX_TURN_DURATION_CEILING_SECS: u64 = 604_800;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("failed to parse nostr keys: {0}")]
@@ -167,6 +176,18 @@ impl std::fmt::Display for PermissionMode {
 )]
 pub struct ModelsArgs {
     /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Output structured JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Shared agent-spawn flags for lightweight local ACP helper subcommands.
+#[derive(Debug, Parser)]
+pub struct AuthAgentArgs {
+    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -178,10 +199,36 @@ pub struct ModelsArgs {
         value_delimiter = ','
     )]
     pub agent_args: Vec<String>,
+}
+
+/// CLI args for `buzz-acp auth-methods` — query adapter-advertised login methods.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp auth-methods",
+    about = "Query adapter-advertised ACP authentication methods"
+)]
+pub struct AuthMethodsArgs {
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
 
     /// Output structured JSON instead of human-readable text.
     #[arg(long)]
     pub json: bool,
+}
+
+/// CLI args for `buzz-acp authenticate` — start an adapter-owned login flow.
+#[derive(Debug, Parser)]
+#[command(
+    name = "buzz-acp authenticate",
+    about = "Start an adapter-owned ACP authentication flow"
+)]
+pub struct AuthenticateArgs {
+    #[command(flatten)]
+    pub agent: AuthAgentArgs,
+
+    /// Adapter-advertised auth method id to invoke.
+    #[arg(long)]
+    pub method_id: String,
 }
 
 #[derive(Debug, Parser)]
@@ -220,7 +267,7 @@ pub struct CliArgs {
     pub idle_timeout: Option<u64>,
 
     /// Absolute wall-clock cap per turn (safety valve).
-    #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value = "3600")]
+    #[arg(long, env = "BUZZ_ACP_MAX_TURN_DURATION", default_value_t = DEFAULT_MAX_TURN_DURATION_SECS)]
     pub max_turn_duration: u64,
 
     /// Deprecated: alias for --idle-timeout. If both set, --idle-timeout wins.
@@ -413,18 +460,17 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_ALLOWED_RESPOND_TO", value_delimiter = ',')]
     pub allowed_respond_to: Option<Vec<String>>,
 
-    /// Path to a persona pack directory. Used with --persona-name to configure
-    /// the agent from a .persona.md pack instead of CLI flags.
-    #[arg(long, env = "BUZZ_ACP_PERSONA_PACK")]
-    pub persona_pack: Option<PathBuf>,
-
-    /// Name of the persona within the pack to use. Required when --persona-pack is set.
-    #[arg(long, env = "BUZZ_ACP_PERSONA_NAME")]
-    pub persona_name: Option<String>,
+    /// Team-owned instructions layered after `[System]` and before agent memory.
+    #[arg(long, env = "BUZZ_ACP_TEAM_INSTRUCTIONS")]
+    pub team_instructions: Option<String>,
 
     /// Publish encrypted ACP observer frames over the relay.
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
+
+    /// Connect and subscribe before starting the ACP/LLM subprocess pool.
+    #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
+    pub lazy_pool: bool,
 }
 
 /// Merged NIP-01 subscription filter for a single channel.
@@ -453,6 +499,8 @@ pub struct Config {
     pub turn_liveness_secs: u64,
     pub heartbeat_prompt: Option<String>,
     pub system_prompt: Option<String>,
+    /// Team-owned instructions layered separately from the agent system prompt.
+    pub team_instructions: Option<String>,
     pub initial_message: Option<String>,
     pub subscribe_mode: SubscribeMode,
     pub dedup_mode: DedupMode,
@@ -485,8 +533,16 @@ pub struct Config {
     /// Per-persona env vars to inject at agent spawn time (e.g., GOOSE_PROVIDER, GOOSE_MODEL, BUZZ_AGENT_MODEL).
     /// Populated from persona pack resolution. Empty when no pack is configured.
     pub persona_env_vars: Vec<(String, String)>,
+    /// Whether `codex_network_env()` successfully injected a `CODEX_CONFIG` entry into
+    /// `persona_env_vars`.  When true, `AcpClient::spawn` merges all `CODEX_CONFIG` entries
+    /// and forces `sandbox_workspace_write.network_access = true` via `build_codex_config_env`.
+    /// When false (non-Codex agents or rejected relay URL), the helper returns None and
+    /// any persona-supplied `CODEX_CONFIG` is handled with ordinary operator-wins semantics.
+    pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
+    pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
     /// Replaces the old REST-based owner lookup.
     pub agent_owner: Option<String>,
@@ -567,62 +623,57 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
     }
 }
 
-/// Build `-c` flag pairs that enable network access and allowlist the relay hostname
-/// in Codex's network sandbox.
+/// Build the `CODEX_CONFIG` environment variable that enables full outbound
+/// network access in Codex's macOS Seatbelt sandbox.
 ///
 /// Codex sandboxes MCP subprocesses (including `buzz-cli`) behind a Seatbelt sandbox
-/// that blocks all outbound network by default, plus a managed proxy with a domain
-/// allowlist. Without these flags, `buzz-cli` requests to the relay are blocked before
-/// they reach WARP or any other outbound network path.
+/// that blocks all outbound network by default. Without this env var, `buzz-cli`
+/// requests are blocked before they can reach the relay WebSocket.
 ///
-/// Returns `["-c", "sandbox_workspace_write.network_access=true", "-c",
-/// "network_proxy.mode=\"full\"", "-c", "network_proxy.domains.\"<host>\"=\"allow\""]`
-/// for Codex agents, or an empty vec for non-Codex agents or when the hostname cannot
-/// be parsed from the relay URL.
+/// Returns `Some(("CODEX_CONFIG", "{\"sandbox_workspace_write\":{\"network_access\":true}}"))` for
+/// Codex agents, or `None` for non-Codex agents or when the relay URL cannot be parsed.
 ///
-/// The flags form a layered defense:
-/// - `sandbox_workspace_write.network_access=true` opens the Seatbelt sandbox gate so
-///   outbound TCP/TLS connections are allowed at the OS level
-/// - `network_proxy.mode="full"` enables the managed proxy for all outbound traffic
-/// - `network_proxy.domains."<host>"="allow"` adds the relay hostname to the allowlist
+/// The env var is forwarded by the `@agentclientprotocol/codex-acp` adapter (1.x) as a
+/// session-level config override (via `CODEX_CONFIG` → `thread/start config`), which is
+/// equivalent to the TOML override `sandbox_workspace_write.network_access = true`.
+/// That sets `NetworkSandboxPolicy::Enabled`, causing the Seatbelt policy to include
+/// `(allow network-outbound)` — full outbound TCP/TLS at the OS level.
 ///
-/// Handles `ws://`, `wss://`, `http://`, and `https://` schemes. Port is stripped —
-/// Codex's domain allowlist matches on hostname only.
-pub fn codex_network_args(agent_command: &str, relay_url: &str) -> Vec<String> {
+/// URL validation is preserved as a guard: injection is skipped when the relay URL cannot
+/// be parsed, avoiding accidental sandbox widening for malformed configs.
+///
+/// Handles `ws://`, `wss://`, `http://`, and `https://` schemes.
+pub fn codex_network_env(agent_command: &str, relay_url: &str) -> Option<(String, String)> {
     match normalize_agent_command_identity(agent_command).as_str() {
         "codex" | "codex-acp" => {}
-        _ => return vec![],
+        _ => return None,
     }
 
-    // Use the `url` crate so ws://, wss://, http://, https:// are all handled
-    // correctly. On parse failure, skip injection rather than panicking.
+    // Validate the relay URL before injecting broader network access. On parse failure,
+    // skip injection rather than panicking or widening the sandbox unconditionally.
     let host = match Url::parse(relay_url) {
         Ok(u) => match u.host_str() {
             Some(h) => h.to_owned(),
             None => {
                 tracing::warn!(
                     relay_url,
-                    "codex network allowlist: no host in relay URL — skipping injection"
+                    "codex network config: no host in relay URL — skipping injection"
                 );
-                return vec![];
+                return None;
             }
         },
         Err(e) => {
-            tracing::warn!(relay_url, error = %e, "codex network allowlist: failed to parse relay URL — skipping injection");
-            return vec![];
+            tracing::warn!(relay_url, error = %e, "codex network config: failed to parse relay URL — skipping injection");
+            return None;
         }
     };
 
-    tracing::debug!(host, "injecting codex network allowlist for host");
+    tracing::debug!(host, "injecting CODEX_CONFIG network_access for relay host");
 
-    vec![
-        "-c".into(),
-        "sandbox_workspace_write.network_access=true".into(),
-        "-c".into(),
-        "network_proxy.mode=\"full\"".into(),
-        "-c".into(),
-        format!("network_proxy.domains.\"{host}\"=\"allow\""),
-    ]
+    Some((
+        "CODEX_CONFIG".into(),
+        "{\"sandbox_workspace_write\":{\"network_access\":true}}".into(),
+    ))
 }
 
 pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<String> {
@@ -695,7 +746,7 @@ impl Config {
             .replace_range(.., &"0".repeat(args.private_key.len()));
         args.private_key.clear();
 
-        let mut system_prompt = if let Some(text) = args.system_prompt {
+        let system_prompt = if let Some(text) = args.system_prompt {
             Some(text)
         } else if let Some(ref path) = args.system_prompt_file {
             Some(std::fs::read_to_string(path)?)
@@ -753,25 +804,14 @@ impl Config {
 
         let agent_command = args.agent_command;
 
-        // Finding #49a — agent_command must not be empty.
         if agent_command.trim().is_empty() {
             return Err(ConfigError::ConfigFile(
                 "agent_command must not be empty".into(),
             ));
         }
 
-        let mut agent_args = normalize_agent_args(&agent_command, args.agent_args);
+        let agent_args = normalize_agent_args(&agent_command, args.agent_args);
 
-        // Prepend Codex network allowlist flags so buzz-cli (an MCP subprocess)
-        // can reach the relay through Codex's sandbox proxy. No-op for non-Codex agents.
-        let network_args = codex_network_args(&agent_command, &args.relay_url);
-        if !network_args.is_empty() {
-            let mut merged = network_args;
-            merged.extend(agent_args);
-            agent_args = merged;
-        }
-
-        // Finding #49b — warn on invalid UUIDs in --channels.
         if let Some(ref channels) = args.channels {
             for ch in channels {
                 if ch.parse::<Uuid>().is_err() {
@@ -783,7 +823,6 @@ impl Config {
             }
         }
 
-        // Finding #49c — cap heartbeat interval at 86400s (24h).
         let heartbeat_interval = if args.heartbeat_interval > 86400 {
             tracing::warn!(
                 interval = args.heartbeat_interval,
@@ -839,14 +878,19 @@ impl Config {
             if raw == 0 {
                 tracing::warn!("max turn duration of 0 is invalid — using 60s minimum");
                 60
+            } else if raw > MAX_TURN_DURATION_CEILING_SECS {
+                return Err(ConfigError::ConfigFile(format!(
+                    "max_turn_duration ({}s) exceeds ceiling ({}s / 7 days)",
+                    raw, MAX_TURN_DURATION_CEILING_SECS
+                )));
             } else {
                 raw
             }
         };
 
-        // Finding #20 — idle_timeout must be strictly less than max_turn_duration.
-        // If idle_timeout >= max_turn_duration, the absolute wall-clock cap would
-        // fire before the idle timeout ever could, making idle_timeout a dead letter.
+        // idle_timeout must be strictly less than max_turn_duration. If idle_timeout
+        // >= max_turn_duration, the absolute wall-clock cap would fire before the idle
+        // timeout ever could, making idle_timeout a dead letter.
         if idle_timeout_secs >= max_turn_duration_secs {
             return Err(ConfigError::ConfigFile(format!(
                 "idle_timeout ({}s) must be less than max_turn_duration ({}s)",
@@ -896,52 +940,21 @@ impl Config {
             Vec::new()
         };
 
-        //
-        // Precedence: CLI/env args > persona values > built-in defaults.
-        // Persona fills in what's missing. Explicit flags always win.
-        let (persona_system_prompt, persona_model, persona_env_vars) =
-            match (&args.persona_pack, &args.persona_name) {
-                (Some(pack_dir), Some(name)) => {
-                    let pack = buzz_persona::resolve::resolve_pack(pack_dir).map_err(|e| {
-                        ConfigError::ConfigFile(format!(
-                            "failed to resolve pack {}: {e}",
-                            pack_dir.display()
-                        ))
-                    })?;
-                    let persona = pack
-                        .personas
-                        .into_iter()
-                        .find(|p| p.name == *name)
-                        .ok_or_else(|| {
-                            ConfigError::ConfigFile(format!(
-                                "persona '{name}' not found in pack {}",
-                                pack_dir.display()
-                            ))
-                        })?;
-                    (
-                        Some(persona.system_prompt),
-                        persona.model,
-                        persona.runtime_env_vars,
-                    )
-                }
-                (Some(_), None) => {
-                    return Err(ConfigError::ConfigFile(
-                        "--persona-pack requires --persona-name".into(),
-                    ));
-                }
-                (None, Some(_)) => {
-                    return Err(ConfigError::ConfigFile(
-                        "--persona-name requires --persona-pack".into(),
-                    ));
-                }
-                (None, None) => (None, None, vec![]),
-            };
+        // Spawned desktop agents now carry a complete instance snapshot. Team
+        // instructions arrive independently so they can be layered at runtime.
+        let mut persona_env_vars = Vec::new();
+        let model = args.model;
 
-        // Apply persona defaults: CLI/env wins, persona fills gaps.
-        if system_prompt.is_none() {
-            system_prompt = persona_system_prompt;
-        }
-        let model = args.model.or(persona_model);
+        // Inject CODEX_CONFIG so the @agentclientprotocol/codex-acp adapter (1.x)
+        // opens the Seatbelt network sandbox for buzz-cli (an MCP subprocess). No-op
+        // for non-Codex agents or unparseable relay URLs.
+        let has_generated_codex_config =
+            if let Some(network_env) = codex_network_env(&agent_command, &args.relay_url) {
+                persona_env_vars.push(network_env);
+                true
+            } else {
+                false
+            };
 
         validate_multiple_event_handling(args.multiple_event_handling, args.dedup)?;
 
@@ -958,6 +971,12 @@ impl Config {
             turn_liveness_secs,
             heartbeat_prompt,
             system_prompt,
+            team_instructions: args
+                .team_instructions
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
             initial_message: args.initial_message,
             subscribe_mode: args.subscribe,
             dedup_mode: args.dedup,
@@ -978,7 +997,9 @@ impl Config {
             respond_to_allowlist,
             allowed_respond_to,
             persona_env_vars,
+            has_generated_codex_config,
             relay_observer: args.relay_observer,
+            lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
             base_prompt_content,
@@ -1051,7 +1072,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
         )));
     }
 
-    // Finding #49d — warn when Config mode has no rules; agent will receive nothing.
     if config.rules.is_empty() {
         tracing::warn!(
             path = %path.display(),
@@ -1082,7 +1102,6 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
             }
             // Fail fast: parse the expression at load time so typos don't
             // silently produce dead rules at runtime.
-            // Finding #34 — store the compiled AST so match_event never re-parses.
             match evalexpr::build_operator_tree(expr) {
                 Ok(node) => {
                     rule.compiled_filter = Some(Arc::new(node));
@@ -1104,9 +1123,7 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
                 )));
             }
         }
-        // Initialise the consecutive-timeout counter (finding #25).
-        // Deserialization leaves it at default (new Arc<AtomicU32::new(0)>)
-        // but we set it explicitly here for clarity.
+        // Deserialization leaves consecutive_timeouts at its zero default; reset explicitly.
         rule.consecutive_timeouts = Arc::new(AtomicU32::new(0));
     }
 
@@ -1322,12 +1339,13 @@ mod tests {
             agent_args: vec!["acp".into()],
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
-            max_turn_duration_secs: 3600,
+            max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
             heartbeat_prompt: None,
             system_prompt: None,
+            team_instructions: None,
             initial_message: None,
             subscribe_mode: mode,
             dedup_mode: DedupMode::Queue,
@@ -1348,7 +1366,9 @@ mod tests {
             respond_to_allowlist: HashSet::new(),
             allowed_respond_to: Vec::new(),
             persona_env_vars: vec![],
+            has_generated_codex_config: false,
             relay_observer: false,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -1510,133 +1530,100 @@ mod tests {
         );
     }
 
-    // --- codex_network_args tests ---
+    // --- codex_network_env tests ---
+
+    const CODEX_CONFIG_JSON: &str = "{\"sandbox_workspace_write\":{\"network_access\":true}}";
 
     #[test]
-    fn codex_network_args_wss_url() {
-        let args = codex_network_args("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
+    fn codex_network_env_wss_url() {
+        let result = codex_network_env("codex-acp", "wss://sprout-oss.stage.blox.sqprod.co");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"sprout-oss.stage.blox.sqprod.co\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_ws_url() {
-        let args = codex_network_args("codex-acp", "ws://localhost:3000");
+    fn codex_network_env_ws_url() {
+        let result = codex_network_env("codex-acp", "ws://localhost:3000");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"localhost\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_https_url() {
-        let args = codex_network_args("codex-acp", "https://relay.example.com/path");
+    fn codex_network_env_https_url() {
+        let result = codex_network_env("codex-acp", "https://relay.example.com/path");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_http_url_with_port() {
-        let args = codex_network_args("codex-acp", "http://relay.example.com:8080/query");
+    fn codex_network_env_http_url_with_port() {
+        let result = codex_network_env("codex-acp", "http://relay.example.com:8080/query");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_bare_codex_command() {
-        // "codex" (not "codex-acp") should also get the args.
-        let args = codex_network_args("codex", "wss://relay.example.com");
+    fn codex_network_env_bare_codex_command() {
+        // "codex" (not "codex-acp") should also get the env var.
+        let result = codex_network_env("codex", "wss://relay.example.com");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_full_path_codex_command() {
+    fn codex_network_env_full_path_codex_command() {
         // Full path like /usr/local/bin/codex-acp should be normalized.
-        let args = codex_network_args("/usr/local/bin/codex-acp", "wss://relay.example.com");
+        let result = codex_network_env("/usr/local/bin/codex-acp", "wss://relay.example.com");
         assert_eq!(
-            args,
-            vec![
-                "-c",
-                "sandbox_workspace_write.network_access=true",
-                "-c",
-                "network_proxy.mode=\"full\"",
-                "-c",
-                "network_proxy.domains.\"relay.example.com\"=\"allow\"",
-            ]
+            result,
+            Some(("CODEX_CONFIG".to_string(), CODEX_CONFIG_JSON.to_string()))
         );
     }
 
     #[test]
-    fn codex_network_args_non_codex_agent_returns_empty() {
-        assert!(codex_network_args("goose", "wss://relay.example.com").is_empty());
-        assert!(codex_network_args("claude-agent-acp", "wss://relay.example.com").is_empty());
-        assert!(codex_network_args("buzz-agent", "wss://relay.example.com").is_empty());
+    fn codex_network_env_non_codex_agent_returns_none() {
+        assert!(codex_network_env("goose", "wss://relay.example.com").is_none());
+        assert!(codex_network_env("claude-agent-acp", "wss://relay.example.com").is_none());
+        assert!(codex_network_env("buzz-agent", "wss://relay.example.com").is_none());
     }
 
     #[test]
-    fn codex_network_args_includes_sandbox_network_access() {
-        // The sandbox gate must be the first flag pair — without it, the Seatbelt
-        // sandbox blocks outbound connections before the proxy can intercept them.
-        let args = codex_network_args("codex-acp", "wss://relay.example.com");
-        assert_eq!(args.len(), 6, "expected 3 flag pairs (6 elements)");
-        assert_eq!(args[0], "-c");
-        assert_eq!(args[1], "sandbox_workspace_write.network_access=true");
+    fn codex_network_env_includes_sandbox_network_access() {
+        // The JSON value must set sandbox_workspace_write.network_access=true — without
+        // it, the Seatbelt sandbox blocks outbound connections in the 1.x adapter.
+        let result = codex_network_env("codex-acp", "wss://relay.example.com");
+        let (key, val) = result.expect("expected Some for valid codex + valid url");
+        assert_eq!(key, "CODEX_CONFIG");
+        assert!(
+            val.contains("\"sandbox_workspace_write\""),
+            "JSON must contain sandbox_workspace_write"
+        );
+        assert!(
+            val.contains("\"network_access\":true"),
+            "JSON must set network_access=true"
+        );
     }
 
     #[test]
-    fn codex_network_args_empty_relay_url_returns_empty() {
-        // Empty string fails Url::parse — graceful empty return.
-        assert!(codex_network_args("codex-acp", "").is_empty());
+    fn codex_network_env_empty_relay_url_returns_none() {
+        // Empty string fails Url::parse — graceful None return.
+        assert!(codex_network_env("codex-acp", "").is_none());
     }
 
     #[test]
-    fn codex_network_args_schemeless_string_returns_empty() {
-        // A bare string with no scheme fails Url::parse — graceful empty return.
-        assert!(codex_network_args("codex-acp", "not-a-url").is_empty());
+    fn codex_network_env_schemeless_string_returns_none() {
+        // A bare string with no scheme fails Url::parse — graceful None return.
+        assert!(codex_network_env("codex-acp", "not-a-url").is_none());
     }
 
     #[test]
@@ -2048,6 +2035,20 @@ channels = "ALL"
     }
 
     #[test]
+    fn lazy_pool_defaults_off() {
+        let key = "0".repeat(64);
+        assert!(!CliArgs::parse_from(["buzz-acp", "--private-key", &key]).lazy_pool);
+    }
+
+    #[test]
+    fn lazy_pool_cli_flag_enables_deferred_startup() {
+        let key = "0".repeat(64);
+        let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
+        assert!(args.is_err(), "bool flags do not take an explicit value");
+        assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
     fn test_summary_includes_agents_and_heartbeat() {
         let config = test_config(SubscribeMode::Mentions);
         let s = config.summary();
@@ -2259,7 +2260,7 @@ channels = "ALL"
             "summary should include {expected_idle}: {summary}"
         );
         assert!(
-            summary.contains("max_turn=3600s"),
+            summary.contains(&format!("max_turn={DEFAULT_MAX_TURN_DURATION_SECS}s")),
             "summary should include max_turn: {summary}"
         );
     }
@@ -2464,13 +2465,10 @@ channels = "ALL"
             "test precondition: idle must be >= max_turn to trigger guard"
         );
 
-        // And the valid case:
-        let idle_valid = 900u64;
-        let max_turn_valid = 3600u64;
-        assert!(
-            idle_valid < max_turn_valid,
-            "default idle (900) must be less than default max_turn (3600)"
-        );
+        // And the valid case (const assertion so clippy doesn't flag it):
+        const {
+            assert!(DEFAULT_IDLE_TIMEOUT_SECS < DEFAULT_MAX_TURN_DURATION_SECS);
+        }
     }
 
     // --- BUZZ_ACP_ALLOWED_RESPOND_TO gate ---
@@ -2654,5 +2652,58 @@ channels = "ALL"
             result.is_ok(),
             "from_args should accept any mode when allowed list is unset: {result:?}"
         );
+    }
+
+    // --- max_turn_duration ceiling gate ---
+
+    #[test]
+    fn max_turn_duration_at_ceiling_is_accepted() {
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--max-turn-duration",
+            &MAX_TURN_DURATION_CEILING_SECS.to_string(),
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_ok(),
+            "from_args should accept max_turn_duration at the ceiling: {result:?}"
+        );
+    }
+
+    #[test]
+    fn max_turn_duration_above_ceiling_is_rejected() {
+        let over = MAX_TURN_DURATION_CEILING_SECS + 1;
+        let args = CliArgs::try_parse_from([
+            "buzz-acp",
+            "--private-key",
+            TEST_PRIVATE_KEY,
+            "--max-turn-duration",
+            &over.to_string(),
+        ])
+        .expect("clap should parse args");
+        let result = Config::from_args(args);
+
+        assert!(
+            result.is_err(),
+            "from_args should reject max_turn_duration above the ceiling"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("exceeds ceiling"),
+            "error should mention 'exceeds ceiling': {msg}"
+        );
+    }
+
+    #[test]
+    fn max_turn_duration_ceiling_cannot_overflow_in_flight_deadline() {
+        // The in-flight deadline is max_turn + 100s buffer (IN_FLIGHT_DEADLINE_BUFFER_SECS).
+        // Verify that even at the ceiling, this addition cannot overflow u64.
+        const {
+            assert!(MAX_TURN_DURATION_CEILING_SECS < u64::MAX - 100);
+        }
     }
 }

@@ -10,6 +10,7 @@ import type { PersonaDialogState } from "@/features/agents/ui/personaDialogState
 
 export function UserProfilePersonaDialogs({
   createError,
+  instanceCount,
   isPending,
   personaDialogState,
   personaToDelete,
@@ -22,6 +23,8 @@ export function UserProfilePersonaDialogs({
   onSubmit,
 }: {
   createError: Error | null;
+  /** Number of managed-agent instances backed by the persona being deleted. */
+  instanceCount: number;
   isPending: boolean;
   personaDialogState: PersonaDialogState | null;
   personaToDelete: AgentPersona | null;
@@ -54,6 +57,7 @@ export function UserProfilePersonaDialogs({
         title={personaDialogState?.title ?? "Agent"}
       />
       <PersonaDeleteDialog
+        instanceCount={instanceCount}
         onConfirm={onConfirmDelete}
         onOpenChange={(open) => {
           if (!open) {

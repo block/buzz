@@ -26,6 +26,7 @@ import { AgentConfigPanel } from "./AgentConfigPanel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
 import { ManagedAgentLogPanel } from "./ManagedAgentLogPanel";
 import { PubKey } from "@/shared/ui/PubKey";
+import { SubsectionLabel } from "@/shared/ui/PageHeader";
 
 export function ManagedAgentRow({
   agent,
@@ -85,7 +86,7 @@ export function ManagedAgentRow({
   // When the harness recovered a meaningful error string from the agent's
   // log tail (Max's seam in `managed_agents/storage.rs`), promote it to
   // user-visible copy below the process detail. Specifically renders the
-  // friendly "Relay mesh denied this agent — check your relay membership."
+  // friendly "Community access denied this agent — check its community membership."
   // for auth failures so the user knows it's a membership thing, not a
   // crash. Generic exits stay verbatim so we don't lie about other failures.
   const friendlyError = friendlyAgentLastError(
@@ -358,9 +359,7 @@ function StatusBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
-        Status
-      </p>
+      <SubsectionLabel className="lg:hidden">Status</SubsectionLabel>
       <AgentStatusBadge
         isWorking={isWorking}
         presenceLoaded={presenceLoaded}
@@ -394,9 +393,7 @@ function RuntimeBlock({
 }) {
   return (
     <div className="space-y-1 lg:pt-0.5">
-      <p className="text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground lg:hidden">
-        Runtime
-      </p>
+      <SubsectionLabel className="lg:hidden">Runtime</SubsectionLabel>
       <p className="truncate font-mono text-xs text-foreground">
         {agent.agentCommand}
       </p>

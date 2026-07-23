@@ -8,7 +8,7 @@
  *   "0"  → user explicitly disabled
  *   null → no explicit choice yet (default-on seeding may still fire)
  *
- * Device-level localStorage — intentionally not reset on workspace switch
+ * Device-level localStorage — intentionally not reset on community switch
  * (the archive subscription itself is identity-scoped in SQLite; this flag
  * is just the UI gate that prevents re-seeding after an explicit opt-out).
  */

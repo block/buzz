@@ -270,16 +270,14 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
   // Open the Agents view, click New > New agent to open the persona dialog.
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
-  // Scope all env-vars queries to the dialog: GlobalAgentConfigSettingsCard
+  // Scope all env-vars queries to the dialog: AgentDefaultsSettingsCard
   // also renders an EnvVarsEditor in the background settings pane (introduced
   // by this branch), so page-wide testid queries would match both.
   const dialog = page.getByRole("dialog");
 
-  // The default runtime is buzz-agent — Advanced auto-expands on open so the
-  // model-tuning knobs are immediately reachable.  The env-vars editor is
-  // already visible; no click needed to expand.
+  await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
   await expect(dialog.getByTestId("env-vars-editor")).toBeVisible();
   // Initially empty (no rows — buzz-agent with no provider has no required keys).
   await expect(dialog.getByTestId("env-vars-key")).toHaveCount(0);
@@ -317,31 +315,24 @@ test("persona model options follow the selected LLM provider", async ({
 
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   const provider = page.locator("#persona-runtime");
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
   const llmProvider = page.locator("#persona-llm-provider");
   const model = page.locator("#persona-model");
   await expect(provider).toContainText("Buzz Agent (default)");
   await expect(llmProvider).toBeVisible();
   await expect(model).toBeVisible();
-  // Without live discovery, the only static option is "Default model".
-  await expect(model).toContainText("Default model");
+  // Custom mode requires a model selection until a provider is chosen.
+  await expect(model).toContainText("Choose a model");
 
-  // Switch to OpenAI — OPENAI_COMPAT_API_KEY appears as an amber required row
-  // in the EnvVarsEditor (Advanced auto-expands when a required key is missing).
   await selectDropdownOption(page, llmProvider, "OpenAI");
   const dialog = page.getByRole("dialog");
-  // Advanced is now expanded and the editor is visible.
-  await expect(dialog.getByTestId("env-vars-editor")).toBeVisible();
-  // The required amber row for OPENAI_COMPAT_API_KEY is present.
-  const openAiRequiredRow = dialog.locator(
-    '[data-testid="env-vars-required-key"]',
-    {
-      hasText: "OPENAI_COMPAT_API_KEY",
-    },
-  );
-  await expect(openAiRequiredRow).toBeVisible();
+  await expect(dialog.getByLabel("OpenAI API Key")).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: "Advanced", exact: true }),
+  ).toHaveAttribute("aria-expanded", "false");
   await expect(model).toBeVisible();
   // OpenAI requires an explicit model, so "Default model" is filtered out.
   // The combobox offers only "Custom model..." — verify it is present and selectable.
@@ -350,22 +341,15 @@ test("persona model options follow the selected LLM provider", async ({
     .getByRole("button", { name: "Custom model...", exact: true })
     .click();
 
-  // Switch to Anthropic — ANTHROPIC_API_KEY amber row appears; OPENAI_COMPAT_API_KEY gone.
   await selectDropdownOption(page, llmProvider, "Anthropic");
-  const anthropicRequiredRow = dialog.locator(
-    '[data-testid="env-vars-required-key"]',
-    {
-      hasText: "ANTHROPIC_API_KEY",
-    },
-  );
-  await expect(anthropicRequiredRow).toBeVisible();
+  await expect(dialog.getByLabel("Anthropic API Key")).toBeVisible();
+  await expect(dialog.getByLabel("OpenAI API Key")).not.toBeVisible();
   await expect(model).toBeVisible();
 
-  // Switch to Default (no explicit provider) — required rows disappear,
-  // model resets to "Default model".
-  // Provider blank option was renamed from "Default" to "Select a provider\u2026"
-  // by the global-provider label change in this branch (getDefaultLlmProviderLabel).
-  await selectDropdownOption(page, llmProvider, "Select a provider\u2026");
-  await expect(model).toBeVisible();
-  await expect(model).toContainText("Default model");
+  // Switch back to inherited defaults — per-agent provider, credential, and
+  // model controls disappear together.
+  await page.getByRole("tab", { name: "Use agent defaults" }).click();
+  await expect(llmProvider).not.toBeVisible();
+  await expect(dialog.getByLabel("Anthropic API Key")).not.toBeVisible();
+  await expect(model).not.toBeVisible();
 });

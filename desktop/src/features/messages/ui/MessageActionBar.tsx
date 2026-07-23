@@ -116,7 +116,7 @@ function MoreActionsMenu({
 
   return (
     <>
-      <DropdownMenu open={open} onOpenChange={onOpenChange}>
+      <DropdownMenu modal={false} open={open} onOpenChange={onOpenChange}>
         <Tooltip>
           <TooltipTrigger asChild>
             <DropdownMenuTrigger asChild>

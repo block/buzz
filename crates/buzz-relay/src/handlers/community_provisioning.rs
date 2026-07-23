@@ -28,9 +28,9 @@
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{info, warn};
 
-use buzz_core::tenant::normalize_host;
+use buzz_core::tenant::{normalize_host, TenantContext};
 use url::{Host, Url};
 
 use crate::state::AppState;
@@ -201,6 +201,34 @@ pub(crate) fn normalize_candidate_host(host: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
+/// Publish the event-backed membership view after owner persistence.
+///
+/// Provisioning is already committed when this runs. Publication therefore
+/// remains best-effort, matching every other membership mutation path: turning
+/// a stored success into an HTTP failure would make create-only retries report
+/// a misleading conflict while leaving clients without a repair path.
+async fn publish_membership_snapshot_if_required(
+    state: &Arc<AppState>,
+    community: buzz_core::CommunityId,
+    host: &str,
+) {
+    if !state.config.require_relay_membership {
+        return;
+    }
+
+    let tenant = TenantContext::resolved(community, host);
+    if let Err(error) =
+        crate::handlers::side_effects::publish_nip43_membership_list(&tenant, state).await
+    {
+        warn!(
+            community = %community,
+            host,
+            error = %error,
+            "community provisioned but NIP-43 membership snapshot publication failed"
+        );
+    }
+}
+
 /// Validate and execute a relay-operator community provisioning request.
 ///
 /// The caller is an HTTP operator endpoint, not the Nostr event ingest path.
@@ -253,12 +281,23 @@ pub async fn provision_community(
         let owner_hex = initial_owner.as_deref().ok_or_else(|| {
             "initial_owner_pubkey is required when create_only is true".to_string()
         })?;
-        let record = state
+        let record = match state
             .db
             .create_community_with_owner(&request.host, owner_hex)
             .await
             .map_err(|e| format!("failed to create community: {e}"))?
-            .ok_or_else(|| "community already exists".to_string())?;
+        {
+            buzz_db::CreateCommunityWithOwnerResult::Created(record) => record,
+            buzz_db::CreateCommunityWithOwnerResult::HostExists => {
+                return Err("community already exists".to_string());
+            }
+            buzz_db::CreateCommunityWithOwnerResult::LimitReached => {
+                return Err(
+                    "limit_reached: owner already owns the maximum number of communities"
+                        .to_string(),
+                );
+            }
+        };
 
         info!(
             operator = %operator_hex,
@@ -267,6 +306,7 @@ pub async fn provision_community(
             owner = %owner_hex,
             "community created via operator endpoint"
         );
+        publish_membership_snapshot_if_required(state, record.id, &record.host).await;
         return Ok(ProvisionCommunityResponse {
             community_id: record.id.to_string(),
             host: record.host,
@@ -290,6 +330,7 @@ pub async fn provision_community(
             .bootstrap_owner(record.id, owner_hex)
             .await
             .map_err(|e| format!("community provisioned but owner bootstrap failed: {e}"))?;
+        publish_membership_snapshot_if_required(state, record.id, &record.host).await;
     }
 
     info!(

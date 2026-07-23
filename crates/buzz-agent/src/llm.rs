@@ -21,6 +21,7 @@ const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
+const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
@@ -52,7 +53,7 @@ impl Llm {
     pub fn new(cfg: &Config) -> Result<Self, AgentError> {
         let http = Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(cfg.llm_timeout)
+            .read_timeout(cfg.llm_timeout)
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
         let auth = build_token_source(cfg)?;
@@ -91,9 +92,10 @@ impl Llm {
             }
             Provider::OpenAi | Provider::Databricks => {
                 self.openai_request(cfg, effective_model, |use_responses| {
-                    // Normalize effort for model-specific availability (per-model table; max is
-                    // already rejected at startup for pure OpenAI, but other per-model corrections
-                    // like none→minimal on gpt-5 base still apply).
+                    // Normalize effort for model-specific availability. Startup no longer rejects
+                    // `max` for pure OpenAI/Databricks; this per-model table is the single authority
+                    // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
+                    // models, and still applies corrections like none→minimal on the gpt-5 base.
                     let e = effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                     if use_responses {
                         (
@@ -112,7 +114,7 @@ impl Llm {
             Provider::DatabricksV2 => {
                 self.databricks_v2_request(cfg, effective_model, |route| match route {
                     DatabricksV2Route::OpenAiResponses => {
-                        // OpenAI Responses path: normalize effort (max → xhigh, per-model table).
+                        // OpenAI Responses path: normalize effort against the per-model table.
                         let e =
                             effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                         (
@@ -129,7 +131,7 @@ impl Llm {
                         )
                     }
                     DatabricksV2Route::MlflowChatCompletions => {
-                        // MLflow Chat path (OpenAI-shaped): normalize effort (max → xhigh, per-model table).
+                        // MLflow Chat path (OpenAI-shaped): normalize effort against the per-model table.
                         let e =
                             effort.map(|ef| normalize_effort_for_openai_route(ef, effective_model));
                         (
@@ -1025,12 +1027,35 @@ fn is_retryable_transport_error(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
 }
 
+/// Build the terminal `AgentError::Llm` for a `post()` exit that has given up
+/// retrying — persistent retryable status, transport failure, or a body-read
+/// break. `detail` carries the specific cause (status/body, or the transport
+/// error text); `elapsed` and `attempts` are the cumulative cost of every
+/// attempt made on this call, including the retries that failed before this
+/// one. When cumulative time crosses `STALL_NOTICE_THRESHOLD`, this also logs
+/// a `tracing::warn!` so a slow-building outage is visible in logs even
+/// before an operator reads the returned error text.
+fn terminal_llm_error(elapsed: std::time::Duration, attempts: u32, detail: &str) -> AgentError {
+    if elapsed >= STALL_NOTICE_THRESHOLD {
+        tracing::warn!(
+            cumulative_stall = ?elapsed,
+            attempts,
+            "llm: cumulative stall {elapsed:?} across {attempts} attempts ({detail})"
+        );
+    }
+    AgentError::Llm(format!(
+        "{detail} (cumulative {elapsed:?}, {attempts} attempt{})",
+        if attempts == 1 { "" } else { "s" },
+    ))
+}
+
 async fn post<F>(http: &Client, url: &str, body: &Value, apply: F) -> Result<Value, AgentError>
 where
     F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
 {
     let body_bytes =
         serde_json::to_vec(body).map_err(|e| AgentError::Llm(format!("serialize: {e}")))?;
+    let call_start = std::time::Instant::now();
     for attempt in 0..MAX_RETRIES {
         let resp = match apply(
             http.post(url)
@@ -1052,7 +1077,11 @@ where
                     backoff_with_jitter(attempt).await;
                     continue;
                 }
-                return Err(AgentError::Llm(format!("transport: {e}")));
+                return Err(terminal_llm_error(
+                    call_start.elapsed(),
+                    attempt + 1,
+                    &format!("transport: {e}"),
+                ));
             }
         };
         let status = resp.status();
@@ -1061,19 +1090,32 @@ where
         // the two are indistinguishable at the HTTP-status layer. The caller's
         // retry loop keys off `LlmAuth` and refreshes once; the per-call guard
         // bounds a pure-authz 403 to one wasted refresh before it propagates.
+        // Not a stall path: auth failures are not surfaced through
+        // terminal_llm_error, they resolve on the next call after refresh.
         if status == 401 || status == 403 {
             return Err(AgentError::LlmAuth(read_error_body(resp).await));
         }
-        if (status.is_server_error() || status == 429) && attempt + 1 < MAX_RETRIES {
-            tracing::warn!(
-                attempt = attempt + 1,
-                max_attempts = MAX_RETRIES,
-                %status,
-                "llm: retryable status, retrying"
-            );
-            backoff_with_jitter(attempt).await;
-            continue;
+        if status.is_server_error() || status == 429 || status.as_u16() == 499 {
+            if attempt + 1 < MAX_RETRIES {
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = MAX_RETRIES,
+                    %status,
+                    "llm: retryable status, retrying"
+                );
+                backoff_with_jitter(attempt).await;
+                continue;
+            }
+            let body = read_error_body(resp).await;
+            return Err(terminal_llm_error(
+                call_start.elapsed(),
+                attempt + 1,
+                &format!("exhausted retries: {status}: {body}"),
+            ));
         }
+        // Not a stall path: the model is misconfigured, not the transport or
+        // upstream capacity — no retry was attempted, so cumulative duration
+        // would be misleading.
         if status == 404 {
             return Err(AgentError::LlmModelNotFound(format!(
                 "{status}: {}",
@@ -1106,12 +1148,18 @@ where
                     buf.extend_from_slice(&chunk);
                 }
                 Ok(None) => break,
-                Err(e) => return Err(AgentError::Llm(format!("read: {e}"))),
+                Err(e) => {
+                    return Err(terminal_llm_error(
+                        call_start.elapsed(),
+                        attempt + 1,
+                        &format!("body read: {e}"),
+                    ));
+                }
             }
         }
         return serde_json::from_slice(&buf).map_err(|e| AgentError::Llm(format!("json: {e}")));
     }
-    Err(AgentError::Llm("exhausted retries".into()))
+    unreachable!("loop always returns on its final iteration (attempt + 1 == MAX_RETRIES)");
 }
 
 /// Build the `TokenSource` for the configured provider.
@@ -1172,6 +1220,7 @@ mod tests {
     use crate::config::{Config, HookServers, OpenAiApi, Provider};
     use crate::types::{HistoryItem, ToolCall, ToolResult, ToolResultContent};
     use std::time::Duration;
+    use tracing_subscriber::layer::SubscriberExt;
 
     fn cfg(provider: Provider) -> Config {
         Config {
@@ -1983,6 +2032,24 @@ mod tests {
     }
 
     #[test]
+    fn dbv2_openai_route_max_effort_passes_through_for_gpt5_6() {
+        let normalized =
+            crate::config::normalize_effort_for_openai_route(ThinkingEffort::Max, "gpt-5.6-sol");
+        let body = responses_body(
+            &cfg_responses(),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "gpt-5.6-sol",
+            Some(normalized),
+        );
+        assert_eq!(
+            body["reasoning"]["effort"], "max",
+            "DBv2 GPT-5.6 route must serialize max to the Responses API"
+        );
+    }
+
+    #[test]
     fn dbv2_mlflow_route_max_effort_clamped_to_xhigh_in_openai_body() {
         // DBv2 MLflow route (unknown model): max → clamped to xhigh by normalize_effort_for_openai_route.
         // Unknown models pass through after the max→xhigh clamp.
@@ -2167,6 +2234,268 @@ mod tests {
             accepts.load(Ordering::SeqCst) >= 2,
             "server should have seen at least 2 connection attempts, saw {}",
             accepts.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A 499 response is retried and the call succeeds on the second attempt.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_retries_499_and_succeeds() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                let n = accepts_srv.fetch_add(1, Ordering::SeqCst);
+                // Read the full request headers before responding.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                if n == 0 {
+                    // First attempt: respond with 499.
+                    let resp = "HTTP/1.1 499 Client Closed Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                    continue;
+                }
+                // Subsequent attempts: 200 OK with a tiny JSON body.
+                let body = "{\"ok\":true}";
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let out = post(&client, &url, &serde_json::json!({}), |b| b)
+            .await
+            .expect("post should succeed after 499 retry");
+        assert_eq!(out, serde_json::json!({ "ok": true }));
+        assert!(
+            accepts.load(Ordering::SeqCst) >= 2,
+            "server must see at least 2 attempts (got {})",
+            accepts.load(Ordering::SeqCst)
+        );
+    }
+
+    /// When all MAX_RETRIES attempts return 499 the error includes "exhausted retries".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn post_exhausts_retries_on_persistent_499() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/x", listener.local_addr().unwrap());
+        let accepts = Arc::new(AtomicU32::new(0));
+        let accepts_srv = accepts.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut sock, _) = match listener.accept().await {
+                    Ok(p) => p,
+                    Err(_) => return,
+                };
+                accepts_srv.fetch_add(1, Ordering::SeqCst);
+                // Read the full request headers before responding.
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => buf.extend_from_slice(&tmp[..k]),
+                    }
+                }
+                // Always 499.
+                let resp = "HTTP/1.1 499 Client Closed Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let err = post(&client, &url, &serde_json::json!({}), |b| b)
+            .await
+            .unwrap_err();
+        match &err {
+            AgentError::Llm(msg) => {
+                assert!(
+                    msg.contains("exhausted retries") && msg.contains("499"),
+                    "expected 'exhausted retries' + '499' in error, got: {msg}"
+                );
+                assert!(
+                    msg.contains("cumulative") && msg.contains("3 attempts"),
+                    "expected cumulative duration + exact attempt count, got: {msg}"
+                );
+            }
+            other => panic!("expected AgentError::Llm, got: {other:?}"),
+        }
+        assert_eq!(
+            accepts.load(Ordering::SeqCst),
+            MAX_RETRIES,
+            "server must see exactly MAX_RETRIES attempts — 499 must be retried"
+        );
+    }
+
+    /// `terminal_llm_error` below `STALL_NOTICE_THRESHOLD` carries the detail
+    /// and attempt count but no stall-specific text — this is the common case
+    /// (a handful of quick retries), not an outage.
+    #[test]
+    fn terminal_llm_error_below_threshold_carries_detail_no_stall_claim() {
+        let err = terminal_llm_error(Duration::from_secs(2), 3, "exhausted retries: 499: body");
+        match err {
+            AgentError::Llm(msg) => {
+                assert!(msg.contains("cumulative 2s"), "must carry duration: {msg}");
+                assert!(
+                    msg.contains("3 attempts"),
+                    "must carry attempt count: {msg}"
+                );
+                assert!(
+                    msg.contains("exhausted retries") && msg.contains("499"),
+                    "must preserve detail: {msg}"
+                );
+            }
+            other => panic!("expected Llm, got: {other:?}"),
+        }
+    }
+
+    /// Above `STALL_NOTICE_THRESHOLD`, the error still carries the same
+    /// detail/duration/count — the threshold only gates the extra
+    /// `tracing::warn!` (not separately assertable here), not the error text.
+    /// Singular "1 attempt" (not "1 attempts") confirms the pluralization.
+    #[test]
+    fn terminal_llm_error_above_threshold_uses_singular_attempt() {
+        let err = terminal_llm_error(Duration::from_secs(301), 1, "transport: connection reset");
+        match err {
+            AgentError::Llm(msg) => {
+                assert!(
+                    msg.contains("cumulative 301s"),
+                    "must carry duration: {msg}"
+                );
+                assert!(msg.contains("1 attempt"), "must carry count: {msg}");
+                assert!(
+                    !msg.contains("1 attempts"),
+                    "singular for count of 1: {msg}"
+                );
+            }
+            other => panic!("expected Llm, got: {other:?}"),
+        }
+    }
+
+    /// Captures `tracing::warn!` events emitted during a scoped subscriber
+    /// so a test can assert on the stall-notice threshold without a real
+    /// sleep or a global logger.
+    struct StallWarnCapture {
+        count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    struct StallWarnVisitor {
+        saw_cumulative_stall: bool,
+        saw_attempts: bool,
+    }
+
+    impl tracing::field::Visit for StallWarnVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, _value: &dyn std::fmt::Debug) {
+            match field.name() {
+                "cumulative_stall" => self.saw_cumulative_stall = true,
+                "attempts" => self.saw_attempts = true,
+                _ => {}
+            }
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, _value: u64) {
+            if field.name() == "attempts" {
+                self.saw_attempts = true;
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for StallWarnCapture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if *event.metadata().level() != tracing::Level::WARN {
+                return;
+            }
+            let mut visitor = StallWarnVisitor {
+                saw_cumulative_stall: false,
+                saw_attempts: false,
+            };
+            event.record(&mut visitor);
+            if visitor.saw_cumulative_stall && visitor.saw_attempts {
+                self.count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    /// Runs `f` under a scoped subscriber that only counts `WARN` events
+    /// carrying both `cumulative_stall` and `attempts` fields — the shape
+    /// `terminal_llm_error`'s stall notice emits. Returns that count.
+    fn count_stall_warnings(f: impl FnOnce()) -> usize {
+        let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(StallWarnCapture {
+            count: count.clone(),
+        });
+        tracing::subscriber::with_default(subscriber, f);
+        count.load(Ordering::SeqCst)
+    }
+
+    /// Below `STALL_NOTICE_THRESHOLD`, `terminal_llm_error` must not emit the
+    /// stall warning at all — otherwise every ordinary retry-exhaustion would
+    /// falsely read as an outage. This is mutation-sensitive: deleting the
+    /// threshold branch, weakening `>=` to `>` at the boundary, or an
+    /// always-warn mutation are all caught by pairing this with the 300s case
+    /// below.
+    #[test]
+    fn terminal_llm_error_below_threshold_emits_no_stall_warning() {
+        let warnings = count_stall_warnings(|| {
+            let _ = terminal_llm_error(Duration::from_secs(299), 3, "exhausted retries: 499");
+        });
+        assert_eq!(warnings, 0, "no stall warning below STALL_NOTICE_THRESHOLD");
+    }
+
+    /// At `STALL_NOTICE_THRESHOLD`, `terminal_llm_error` must emit exactly
+    /// one stall warning carrying the duration and attempt count — the
+    /// never-warn mutation is caught here; combined with the 299s case above,
+    /// a deleted branch or an always-warn mutation are caught by whichever
+    /// assertion it violates.
+    #[test]
+    fn terminal_llm_error_at_threshold_emits_one_stall_warning() {
+        let warnings = count_stall_warnings(|| {
+            let _ = terminal_llm_error(Duration::from_secs(300), 5, "transport: connection reset");
+        });
+        assert_eq!(
+            warnings, 1,
+            "exactly one stall warning with duration+attempts fields at threshold"
         );
     }
 

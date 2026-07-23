@@ -6,20 +6,36 @@ import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../shared/relay/nostr_models.dart';
 
+const _desktopPairingAuthChallengeGrace = Duration(seconds: 3);
+const _pairingAuthOkTimeout = Duration(seconds: 8);
+
 /// Ephemeral WebSocket connection for NIP-AB pairing.
 ///
 /// Uses ephemeral keys for NIP-42 auth (not the stored user keys).
 /// Single-use — disposed after the pairing session completes.
+class PairingAuthException implements Exception {
+  final String message;
+
+  const PairingAuthException(this.message);
+
+  @override
+  String toString() => 'PairingAuthException: $message';
+}
+
 class PairingSocket {
   final String _wsUrl;
   final String _ephemeralPrivkey;
   final void Function(List<dynamic> message) _onMessage;
   final void Function(Object? error) _onDisconnected;
+  final Duration _authChallengeTimeout;
+  final Duration _authResponseTimeout;
+  final WebSocketChannel Function(Uri uri) _channelFactory;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
   Completer<void>? _authCompleter;
-  Timer? _authTimeout;
+  Timer? _authChallengeTimer;
+  Timer? _authResponseTimer;
   String? _pendingAuthEventId;
   bool _connected = false;
 
@@ -28,54 +44,52 @@ class PairingSocket {
     required String ephemeralPrivkey,
     required void Function(List<dynamic> message) onMessage,
     required void Function(Object? error) onDisconnected,
+    Duration authChallengeTimeout = _desktopPairingAuthChallengeGrace,
+    Duration authResponseTimeout = _pairingAuthOkTimeout,
+    WebSocketChannel Function(Uri uri) channelFactory =
+        WebSocketChannel.connect,
   }) : _wsUrl = wsUrl,
        _ephemeralPrivkey = ephemeralPrivkey,
        _onMessage = onMessage,
-       _onDisconnected = onDisconnected;
+       _onDisconnected = onDisconnected,
+       _authChallengeTimeout = authChallengeTimeout,
+       _authResponseTimeout = authResponseTimeout,
+       _channelFactory = channelFactory;
 
   bool get isConnected => _connected;
 
-  /// Connect and authenticate via NIP-42.
+  /// Connect and answer a NIP-42 challenge when the relay requires one.
   Future<void> connect() async {
-    try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
-      await _channel!.ready;
-    } catch (e) {
-      _onDisconnected(e);
-      return;
-    }
+    _channel = _channelFactory(Uri.parse(_wsUrl));
+    await _channel!.ready;
 
     _authCompleter = Completer<void>();
 
     _subscription = _channel!.stream.listen(
       _handleRawMessage,
-      onError: (Object error) {
-        _failAuth(error);
-        _onDisconnected(error);
-      },
-      onDone: () {
-        _failAuth(null);
-        _onDisconnected(null);
-      },
+      onError: _failAuth,
+      onDone: () => _failAuth(null),
     );
 
-    // Wait for auth with 8s timeout.
-    _authTimeout = Timer(const Duration(seconds: 8), () {
-      if (_authCompleter != null && !_authCompleter!.isCompleted) {
-        _authCompleter!.completeError(
-          TimeoutException('NIP-42 auth timed out'),
-        );
+    // Dedicated pairing relays may be open and send no NIP-42 challenge.
+    _authChallengeTimer = Timer(_authChallengeTimeout, () {
+      if (_pendingAuthEventId == null &&
+          _authCompleter != null &&
+          !_authCompleter!.isCompleted) {
+        _authCompleter!.complete();
       }
     });
 
     try {
       await _authCompleter!.future;
-      _authTimeout?.cancel();
       _connected = true;
-    } catch (e) {
-      _authTimeout?.cancel();
+    } catch (error) {
       await disconnect();
-      _onDisconnected(e);
+      _onDisconnected(error);
+      rethrow;
+    } finally {
+      _authChallengeTimer?.cancel();
+      _authResponseTimer?.cancel();
     }
   }
 
@@ -105,7 +119,8 @@ class PairingSocket {
     _connected = false;
     _subscription?.cancel();
     _subscription = null;
-    _authTimeout?.cancel();
+    _authChallengeTimer?.cancel();
+    _authResponseTimer?.cancel();
     final channel = _channel;
     _channel = null;
     if (channel != null) {
@@ -118,12 +133,19 @@ class PairingSocket {
     _subscription?.cancel();
     _channel?.sink.close();
     _channel = null;
-    _authTimeout?.cancel();
+    _authChallengeTimer?.cancel();
+    _authResponseTimer?.cancel();
   }
 
   void _failAuth(Object? error) {
+    final authError = error ?? Exception('Connection closed');
     if (_authCompleter != null && !_authCompleter!.isCompleted) {
-      _authCompleter!.completeError(error ?? Exception('Connection closed'));
+      _authCompleter!.completeError(authError);
+      return;
+    }
+    if (_connected) {
+      unawaited(disconnect());
+      _onDisconnected(authError);
     }
   }
 
@@ -155,6 +177,14 @@ class PairingSocket {
     if (data.length < 2) return;
     final challenge = data[1] as String;
 
+    _authChallengeTimer?.cancel();
+    _authResponseTimer?.cancel();
+    _authResponseTimer = Timer(_authResponseTimeout, () {
+      _failAuth(
+        const PairingAuthException('Relay did not confirm authentication'),
+      );
+    });
+
     try {
       // Build NIP-42 auth event (kind:22242) with ephemeral keys.
       final tags = <List<String>>[
@@ -184,6 +214,7 @@ class PairingSocket {
 
     if (_pendingAuthEventId != null && eventId == _pendingAuthEventId) {
       _pendingAuthEventId = null;
+      _authResponseTimer?.cancel();
       if (accepted) {
         if (_authCompleter != null && !_authCompleter!.isCompleted) {
           _authCompleter!.complete();
@@ -192,7 +223,7 @@ class PairingSocket {
         final message = data.length > 3
             ? data[3] as String
             : 'Auth rejected by relay';
-        _failAuth(Exception(message));
+        _failAuth(PairingAuthException(message));
       }
       return;
     }

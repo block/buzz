@@ -16,14 +16,16 @@ pub mod identity_archive;
 pub mod imeta;
 /// Transport-neutral event ingestion pipeline.
 pub mod ingest;
-/// Mesh hole-punch signaling: validate membership + emit paired call-me-now.
-pub mod mesh_signaling;
 /// Community moderation authorization seam (capability helper).
 pub mod moderation_authz;
 /// Community moderation command handler (kinds 9040–9044).
 pub mod moderation_commands;
 /// Relay-signed moderation notice DMs.
 pub mod moderation_notices;
+/// Product-feedback validation + deployment sidecar persistence.
+pub mod product_feedback;
+#[allow(dead_code, missing_docs)]
+pub mod push_lease;
 /// NIP-43 relay membership admin command handler (kinds 9030–9032).
 pub mod relay_admin;
 /// NIP-56 report (kind:1984) validation + moderation queue persistence.

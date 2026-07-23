@@ -2,7 +2,7 @@
  * Quota-aware localStorage writes with pure-cache eviction recovery.
  *
  * The desktop webview caps localStorage at ~5 MB per origin. Writers of
- * load-bearing state (read-state, workspaces) must not leak QuotaExceededError
+ * load-bearing state (read-state, communities) must not leak QuotaExceededError
  * into React click/render paths. On a failed write this evicts snapshot caches
  * — safe to drop, they repaint from the relay — and retries the write once.
  */

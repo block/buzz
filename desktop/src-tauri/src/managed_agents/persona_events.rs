@@ -1,4 +1,4 @@
-//! Serialize `PersonaRecord` ↔ kind:30175 persona events and publish/fetch via relay.
+//! Serialize `AgentDefinition` ↔ kind:30175 persona events and publish/fetch via relay.
 //!
 //! Persona events are NIP-33 parameterized replaceable events keyed by
 //! `(pubkey, kind, d_tag)` where `d_tag` is the plaintext persona slug.
@@ -9,7 +9,7 @@ use buzz_core_pkg::kind::KIND_PERSONA;
 use nostr::{EventBuilder, Kind, Tag};
 use serde::{Deserialize, Serialize};
 
-use super::{ManagedAgentRecord, PersonaRecord};
+use super::{AgentDefinition, ManagedAgentRecord};
 use crate::app_state::AppState;
 
 /// The JSON body stored in a persona event's content field.
@@ -47,12 +47,10 @@ pub struct PersonaEventContent {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub respond_to_allowlist: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_toolsets: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parallelism: Option<u32>,
 }
 
-/// Derive the d-tag (persona slug) from a `PersonaRecord`.
+/// Derive the d-tag (persona slug) from a `AgentDefinition`.
 ///
 /// Uses `source_team_persona_slug` if available, otherwise falls back to `id`,
 /// then normalizes to the NIP-AP slug grammar (`^[a-z0-9][a-z0-9_-]{0,63}$`,
@@ -64,7 +62,7 @@ pub struct PersonaEventContent {
 ///
 /// Both the outbound publish and the inbound match key route through this fn,
 /// so the normalized value is consistent in both directions and cannot drift.
-pub fn persona_d_tag(record: &PersonaRecord) -> String {
+pub fn persona_d_tag(record: &AgentDefinition) -> String {
     let raw = record
         .source_team_persona_slug
         .as_deref()
@@ -128,10 +126,10 @@ pub fn monotonic_created_at(prior_head_created_at: Option<i64>) -> nostr::Timest
     nostr::Timestamp::from(now.max(floor) as u64)
 }
 
-/// Build a kind:30175 event from a `PersonaRecord`.
+/// Build a kind:30175 event from a `AgentDefinition`.
 ///
 /// Returns an unsigned `EventBuilder` — the caller signs and submits.
-pub fn build_persona_event(record: &PersonaRecord) -> Result<EventBuilder, String> {
+pub fn build_persona_event(record: &AgentDefinition) -> Result<EventBuilder, String> {
     // Single projection point — persona_event_content owns the field mapping
     // (and the hash-stability rules that come with it).
     let content = persona_event_content(record);
@@ -157,10 +155,10 @@ pub fn build_persona_delete(d_tag: &str, owner_pubkey_hex: &str) -> Result<Event
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(vec![tag]))
 }
 
-/// Parse a kind:30175 event back into a `PersonaRecord`.
+/// Parse a kind:30175 event back into a `AgentDefinition`.
 ///
 /// The event's d-tag becomes the persona ID and slug.
-pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String> {
+pub fn persona_from_event(event: &nostr::Event) -> Result<AgentDefinition, String> {
     let d_tag = event
         .tags
         .iter()
@@ -179,7 +177,7 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
 
     let created_at = event.created_at.to_human_datetime();
 
-    Ok(PersonaRecord {
+    Ok(AgentDefinition {
         id: d_tag.clone(),
         display_name: content.display_name,
         avatar_url: content.avatar_url,
@@ -195,7 +193,6 @@ pub fn persona_from_event(event: &nostr::Event) -> Result<PersonaRecord, String>
         env_vars: BTreeMap::new(),
         respond_to: content.respond_to,
         respond_to_allowlist: content.respond_to_allowlist,
-        mcp_toolsets: content.mcp_toolsets,
         parallelism: content.parallelism,
         created_at: created_at.clone(),
         updated_at: created_at,
@@ -259,6 +256,20 @@ pub async fn flush_pending_events(
         let event = nostr::Event::from_json(&current.raw_event)
             .map_err(|e| format!("failed to parse retained event '{}': {e}", current.d_tag))?;
 
+        // NIP-IA requests are freshness-checked by the relay (±120s on
+        // `created_at`), so a request retained while the relay was
+        // unreachable would be permanently stale. Re-sign with a fresh
+        // timestamp at publish time; kind, tags, and content are preserved,
+        // and `mark_synced` below still compares against the retained row's
+        // original `created_at`/`content`, which are untouched.
+        let is_archive_request =
+            buzz_core_pkg::kind::is_identity_archive_request_kind(current.kind);
+        let event = if is_archive_request {
+            resign_with_fresh_timestamp(&event, state)?
+        } else {
+            event
+        };
+
         if crate::relay::submit_signed_event(&event, state)
             .await
             .is_err()
@@ -284,6 +295,29 @@ pub async fn flush_pending_events(
     Ok(flushed)
 }
 
+/// Re-sign a retained event with the current owner keys and a fresh
+/// `created_at`, preserving kind, tags, and content.
+///
+/// Used for relay-freshness-checked kinds (NIP-IA 9035/9036) that would
+/// otherwise go permanently stale sitting in the retention store while the
+/// relay is unreachable. `.allow_self_tagging()` mirrors
+/// `events::build_archive_identity_request` — nostr strips `p` tags matching
+/// the signer by default, which would corrupt a self-targeted request.
+///
+/// Synchronous; the `state.keys` guard is dropped on return, so callers may
+/// `.await` afterwards.
+fn resign_with_fresh_timestamp(
+    event: &nostr::Event,
+    state: &AppState,
+) -> Result<nostr::Event, String> {
+    let keys = state.signing_keys()?;
+    nostr::EventBuilder::new(event.kind, event.content.clone())
+        .tags(event.tags.iter().cloned())
+        .allow_self_tagging()
+        .sign_with_keys(&keys)
+        .map_err(|e| format!("failed to re-sign retained event: {e}"))
+}
+
 /// SHA-256 (lowercase hex) of a persona's canonical content JSON.
 ///
 /// The drift indicator compares this digest, not event timestamps, to decide
@@ -298,10 +332,10 @@ pub fn persona_content_hash(content: &PersonaEventContent) -> String {
     hex::encode(digest)
 }
 
-/// Project a `PersonaRecord` onto the content fields published in persona
+/// Project a `AgentDefinition` onto the content fields published in persona
 /// events and engrams. Centralizes the field mapping so a new persona field is
 /// added in exactly one place.
-pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
+pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
     PersonaEventContent {
         display_name: record.display_name.clone(),
         avatar_url: record.avatar_url.clone(),
@@ -314,13 +348,12 @@ pub fn persona_event_content(record: &PersonaRecord) -> PersonaEventContent {
         provider: record.provider.clone(),
         name_pool: record.name_pool.clone(),
         // NIP-AP behavioral defaults: live since the create-path unification
-        // (B5) — carried on PersonaRecord in wire shape and copied verbatim.
+        // (B5) — carried on AgentDefinition in wire shape and copied verbatim.
         // Quad-absent records serialize identically to the reserved era, so
         // persona_content_hash is stable across the activation (guarded by
         // `quad_absent_definition_hash_stable_across_activation`).
         respond_to: record.respond_to.clone(),
         respond_to_allowlist: record.respond_to_allowlist.clone(),
-        mcp_toolsets: record.mcp_toolsets.clone(),
         parallelism: record.parallelism,
     }
 }
@@ -368,7 +401,7 @@ pub fn persona_field_with_record_fallback(
 /// `Some`. Env vars are deliberately absent: `record.env_vars` holds agent
 /// overrides only, and the live persona env is merged underneath at read
 /// time (spawn / readiness / deploy) — never snapshotted.
-pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
+pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
     PersonaSnapshot {
         system_prompt: Some(persona.system_prompt.clone()),
         model: persona.model.clone(),
@@ -397,7 +430,7 @@ pub fn persona_snapshot(persona: &PersonaRecord) -> PersonaSnapshot {
 /// The two fields (`model`, `provider`) are independent: a persona that sets only
 /// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
 pub fn persona_snapshot_with_agent_config_fallback(
-    persona: &PersonaRecord,
+    persona: &AgentDefinition,
     current_agent_model: Option<&str>,
     current_agent_provider: Option<&str>,
 ) -> PersonaSnapshot {
@@ -433,7 +466,7 @@ pub fn persona_snapshot_with_agent_config_fallback(
 /// Deliberately does NOT touch `updated_at`: persistence stamps are the
 /// caller's concern, and `spawn_config_hash` (which applies this to a clone)
 /// must stay pure.
-pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &PersonaRecord) {
+pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
     let snapshot = persona_snapshot_with_agent_config_fallback(
         persona,
         record.model.as_deref(),    // fallback: record.model
@@ -445,6 +478,25 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &Persona
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
+    // Drop a stale create-time harness pin when the definition names a
+    // different known runtime; custom commands stay pinned.
+    if let Some(def_runtime) = persona
+        .runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .and_then(crate::managed_agents::known_acp_runtime_exact)
+    {
+        if let Some(pin_runtime) = record
+            .agent_command_override
+            .as_deref()
+            .and_then(crate::managed_agents::known_acp_runtime)
+        {
+            if !std::ptr::eq(pin_runtime, def_runtime) {
+                record.agent_command_override = None;
+            }
+        }
+    }
     // env_vars stay overrides-only. Self-heal records written before the env
     // refresh: persona env used to be baked into `record.env_vars`, turning
     // inherited values into pseudo-overrides that shadow later persona edits.

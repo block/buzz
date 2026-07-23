@@ -6,6 +6,7 @@ type RawIdentity = {
   display_name: string;
   lost?: boolean;
   locked?: boolean;
+  reset_failed?: boolean;
 };
 
 function fromRawIdentity(raw: RawIdentity): Identity {
@@ -14,6 +15,7 @@ function fromRawIdentity(raw: RawIdentity): Identity {
     displayName: raw.display_name,
     lost: raw.lost === true,
     locked: raw.locked === true,
+    resetFailed: raw.reset_failed === true,
   };
 }
 
@@ -35,4 +37,15 @@ export async function persistCurrentIdentity(): Promise<Identity> {
   return fromRawIdentity(
     await invokeTauri<RawIdentity>("persist_current_identity"),
   );
+}
+
+/**
+ * Wipe all local Buzz state (keychain, App Support, WebKit, nest, OAuth cache,
+ * CLI symlinks) and relaunch into first-run onboarding.
+ *
+ * The app restarts after this call completes. Callers should keep the pending
+ * state until the process exits and only handle errors (e.g. display a toast).
+ */
+export async function signOut(): Promise<void> {
+  await invokeTauri("sign_out");
 }

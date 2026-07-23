@@ -6,6 +6,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../../shared/clipboard_utils.dart';
 import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../../shared/utils/string_utils.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
@@ -334,7 +335,7 @@ class _InfoRow extends StatelessWidget {
   }
 }
 
-class _ProfileAvatar extends HookWidget {
+class _ProfileAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
 
@@ -342,30 +343,14 @@ class _ProfileAvatar extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final failed = useState(false);
-
-    useEffect(() {
-      failed.value = false;
-      return null;
-    }, [avatarUrl]);
-
-    final url = avatarUrl;
-    final showImage = url != null && !failed.value;
-
     return AspectRatio(
       aspectRatio: 1,
       child: ClipRRect(
         borderRadius: BorderRadius.circular(20),
-        child: showImage
-            ? Image.network(
-                url,
-                fit: BoxFit.cover,
-                errorBuilder: (_, _, _) {
-                  failed.value = true;
-                  return _AvatarFallback(initial: initial);
-                },
-              )
-            : _AvatarFallback(initial: initial),
+        child: AvatarImageContent(
+          imageUrl: avatarUrl,
+          fallback: _AvatarFallback(initial: initial),
+        ),
       ),
     );
   }

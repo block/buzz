@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import type { Channel } from "@/shared/api/types";
+import type { CreateChannelInput } from "@/features/sidebar/lib/useCreateChannelForm";
 import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 
 const ChannelBrowserDialog = React.lazy(async () => {
@@ -21,7 +22,9 @@ type AppShellOverlaysProps = {
   channels: Channel[];
   currentPubkey?: string;
   isChannelManagementOpen: boolean;
+  isCreatingBrowseChannel?: boolean;
   onBrowseChannelJoin: (channelId: string) => Promise<void>;
+  onBrowseChannelCreate?: (input: CreateChannelInput) => Promise<void>;
   onBrowseDialogOpenChange: (open: boolean) => void;
   onChannelManagementOpenChange: (open: boolean) => void;
   onDeleteActiveChannel: () => void;
@@ -34,7 +37,9 @@ export function AppShellOverlays({
   channels,
   currentPubkey,
   isChannelManagementOpen,
+  isCreatingBrowseChannel,
   onBrowseChannelJoin,
+  onBrowseChannelCreate,
   onBrowseDialogOpenChange,
   onChannelManagementOpenChange,
   onDeleteActiveChannel,
@@ -67,6 +72,8 @@ export function AppShellOverlays({
           <ChannelBrowserDialog
             channels={channels}
             channelTypeFilter={renderedBrowseDialogType ?? browseDialogType}
+            isCreatingChannel={isCreatingBrowseChannel}
+            onCreateChannel={onBrowseChannelCreate}
             onJoinChannel={onBrowseChannelJoin}
             onOpenChange={onBrowseDialogOpenChange}
             onSelectChannel={onSelectChannel}

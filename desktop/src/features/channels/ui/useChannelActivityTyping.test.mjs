@@ -8,7 +8,10 @@ import {
   resetAgentWorkingSignal,
 } from "../../agents/agentWorkingSignal.ts";
 import { resetActiveAgentTurnsStore } from "../../agents/activeAgentTurnsStore.ts";
-import { channelScopedBotTypingPubkeyKey } from "./useChannelActivityTyping.ts";
+import {
+  channelScopedBotTypingPubkeyKey,
+  mergeMemberAgentFlagsIntoProfiles,
+} from "./useChannelActivityTyping.ts";
 
 const AGENT =
   "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234";
@@ -71,5 +74,85 @@ describe("thread-only bot typing regression", () => {
     const state = getAgentWorkingState(AGENT, "chan-1");
     assert.equal(state.working, true);
     assert.equal(state.source, "typing");
+  });
+});
+
+describe("mergeMemberAgentFlagsIntoProfiles", () => {
+  it("flags a role-only bot member (no isAgent) as an agent", () => {
+    const merged = mergeMemberAgentFlagsIntoProfiles({}, [
+      { pubkey: AGENT, role: "bot", isAgent: false },
+    ]);
+
+    assert.equal(merged[AGENT]?.isAgent, true);
+    assert.equal(merged[AGENT]?.displayName, null);
+    assert.equal(merged[AGENT]?.avatarUrl, null);
+    assert.equal(merged[AGENT]?.nip05Handle, null);
+    assert.equal(merged[AGENT]?.ownerPubkey, null);
+  });
+
+  it("flags an isAgent-only member (non-bot role) as an agent", () => {
+    const merged = mergeMemberAgentFlagsIntoProfiles({}, [
+      { pubkey: AGENT, role: "member", isAgent: true },
+    ]);
+
+    assert.equal(merged[AGENT]?.isAgent, true);
+  });
+
+  it("normalises member pubkeys so lookups by normalised key hit", () => {
+    const merged = mergeMemberAgentFlagsIntoProfiles({}, [
+      { pubkey: ` ${AGENT.toUpperCase()}`, role: "bot", isAgent: false },
+    ]);
+
+    assert.equal(merged[AGENT]?.isAgent, true);
+  });
+
+  it("returns the same reference when no member carries an agent flag", () => {
+    const profiles = {
+      [AGENT]: {
+        displayName: "Human",
+        avatarUrl: null,
+        nip05Handle: null,
+        ownerPubkey: null,
+      },
+    };
+
+    assert.equal(
+      mergeMemberAgentFlagsIntoProfiles(profiles, undefined),
+      profiles,
+    );
+    assert.equal(mergeMemberAgentFlagsIntoProfiles(profiles, []), profiles);
+    assert.equal(
+      mergeMemberAgentFlagsIntoProfiles(profiles, [
+        { pubkey: AGENT_2, role: "member", isAgent: false },
+      ]),
+      profiles,
+    );
+  });
+
+  it("preserves existing profile fields and does not mutate the input", () => {
+    const profiles = {
+      [AGENT]: {
+        displayName: "Deploy Bot",
+        name: "deploybot",
+        avatarUrl: "https://example.com/a.png",
+        nip05Handle: "deploy@example.com",
+        ownerPubkey: AGENT_2,
+      },
+    };
+
+    const merged = mergeMemberAgentFlagsIntoProfiles(profiles, [
+      { pubkey: AGENT, role: "bot", isAgent: false },
+    ]);
+
+    assert.notEqual(merged, profiles);
+    assert.deepEqual(merged[AGENT], {
+      displayName: "Deploy Bot",
+      name: "deploybot",
+      avatarUrl: "https://example.com/a.png",
+      nip05Handle: "deploy@example.com",
+      ownerPubkey: AGENT_2,
+      isAgent: true,
+    });
+    assert.equal(profiles[AGENT].isAgent, undefined);
   });
 });

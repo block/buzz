@@ -57,9 +57,33 @@ class PairingState {
   );
 }
 
+typedef PairingSocketFactory =
+    PairingSocket Function({
+      required String wsUrl,
+      required String ephemeralPrivkey,
+      required void Function(List<dynamic> message) onMessage,
+      required void Function(Object? error) onDisconnected,
+    });
+
 class PairingNotifier extends Notifier<PairingState> {
+  final PairingSocketFactory _socketFactory;
   PairingSocket? _socket;
   Timer? _sessionTimeout;
+
+  PairingNotifier({PairingSocketFactory? socketFactory})
+    : _socketFactory = socketFactory ?? _createPairingSocket;
+
+  static PairingSocket _createPairingSocket({
+    required String wsUrl,
+    required String ephemeralPrivkey,
+    required void Function(List<dynamic> message) onMessage,
+    required void Function(Object? error) onDisconnected,
+  }) => PairingSocket(
+    wsUrl: wsUrl,
+    ephemeralPrivkey: ephemeralPrivkey,
+    onMessage: onMessage,
+    onDisconnected: onDisconnected,
+  );
 
   @override
   PairingState build() => const PairingState();
@@ -171,20 +195,21 @@ class PairingNotifier extends Notifier<PairingState> {
       );
 
       // 4. Connect to relay with ephemeral keys.
-      _socket = PairingSocket(
+      final socket = _socketFactory(
         wsUrl: relayWsUrl,
         ephemeralPrivkey: _ephemeralPrivkey!,
         onMessage: _handleRelayMessage,
         onDisconnected: _handleDisconnected,
       );
-      await _socket!.connect();
+      _socket = socket;
+      await socket.connect();
 
-      if (!_socket!.isConnected) {
-        throw Exception('Failed to connect to pairing relay');
+      if (!socket.isConnected) {
+        throw StateError('Pairing socket did not reach the connected state');
       }
 
       // 5. Subscribe for kind:24134 events tagged to our ephemeral pubkey.
-      _socket!.subscribe('pair', 24134, _ephemeralPubkey!);
+      socket.subscribe('pair', 24134, _ephemeralPubkey!);
 
       // 6. Wait briefly for EOSE, then send offer.
       // (In practice, we send the offer immediately — the relay will buffer it.)
@@ -244,10 +269,17 @@ class PairingNotifier extends Notifier<PairingState> {
         message.contains('Connection refused') ||
         message.contains('Network is unreachable') ||
         message.contains('No route to host') ||
-        message.contains('Failed to connect') ||
-        message.contains('Null check operator used on a null value')) {
+        message.contains('Failed to connect')) {
       return 'Could not reach the pairing relay. Check your internet '
           'connection and VPN, then try again.';
+    }
+    if (error is PairingAuthException) {
+      return 'The pairing relay rejected authentication. Try creating a new '
+          'pairing code.';
+    }
+    if (error is StateError ||
+        message.contains('Null check operator used on a null value')) {
+      return 'Pairing stopped because of an internal error. Please try again.';
     }
     if (message.contains('HandshakeException') ||
         message.contains('CERTIFICATE_VERIFY_FAILED')) {
@@ -434,16 +466,16 @@ class PairingNotifier extends Notifier<PairingState> {
       // Send complete only after credentials are validated.
       _sendComplete(true);
 
-      // Store as workspace and switch to it.
-      final workspace = Workspace.create(
-        name: Workspace.nameFromUrl(relayUrl),
+      // Store as community and switch to it.
+      final community = Community.create(
+        name: Community.nameFromUrl(relayUrl),
         relayUrl: relayUrl,
         pubkey: pubkey,
         nsec: nsec,
       );
       await ref
           .read(authProvider.notifier)
-          .authenticateWithWorkspace(workspace);
+          .authenticateWithCommunity(community);
 
       _cleanup();
       state = const PairingState(status: PairingStatus.success);
@@ -532,16 +564,16 @@ class PairingNotifier extends Notifier<PairingState> {
     state = const PairingState(status: PairingStatus.connecting);
 
     try {
-      final workspace = _parseLegacyInput(rawInput);
+      final community = _parseLegacyInput(rawInput);
 
       await _validateCredentials(
-        relayUrl: workspace.relayUrl,
-        nsec: workspace.nsec,
+        relayUrl: community.relayUrl,
+        nsec: community.nsec,
       );
 
       await ref
           .read(authProvider.notifier)
-          .authenticateWithWorkspace(workspace);
+          .authenticateWithCommunity(community);
       state = const PairingState(status: PairingStatus.success);
     } on FormatException catch (e) {
       state = PairingState(
@@ -590,7 +622,7 @@ class PairingNotifier extends Notifier<PairingState> {
     }
   }
 
-  Workspace _parseLegacyInput(String raw) {
+  Community _parseLegacyInput(String raw) {
     var payload = raw.trim();
 
     if (payload.startsWith('buzz://')) {
@@ -611,8 +643,8 @@ class PairingNotifier extends Notifier<PairingState> {
 
     _validateRelayUrl(relayUrl);
 
-    return Workspace.create(
-      name: Workspace.nameFromUrl(relayUrl),
+    return Community.create(
+      name: Community.nameFromUrl(relayUrl),
       relayUrl: relayUrl,
       pubkey: decoded['pubkey'] as String?,
       nsec: decoded['nsec'] as String?,

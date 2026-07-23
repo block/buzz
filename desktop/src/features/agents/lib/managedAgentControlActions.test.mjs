@@ -19,7 +19,6 @@ function agent(overrides = {}) {
     parallelism: 1,
     systemPrompt: null,
     model: "hf://demo/model.gguf",
-    mcpToolsets: null,
     envVars: {},
     status: "stopped",
     pid: null,

@@ -8,10 +8,11 @@ import {
   type RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import { closeWebSocket } from "@/shared/api/relayWebSocketClose";
-
-const AUTH_TIMEOUT_MS = 8_000;
-const HISTORY_TIMEOUT_MS = 8_000;
-const PUBLISH_TIMEOUT_MS = 8_000;
+import {
+  AUTH_TIMEOUT_MS,
+  HISTORY_TIMEOUT_MS,
+  PUBLISH_TIMEOUT_MS,
+} from "@/shared/api/relayClientSession";
 
 type PendingHistory = {
   events: RelayEvent[];
@@ -27,9 +28,9 @@ type PendingPublish = {
 };
 
 /**
- * Minimal relay session for inactive-workspace observation (and the rail's
+ * Minimal relay session for inactive-community observation (and the rail's
  * cross-relay "mark all as read" publish). It never reads or mutates the
- * active workspace backend relay URL; callers pass an explicit URL and should
+ * active community backend relay URL; callers pass an explicit URL and should
  * disconnect as soon as their polling batch finishes.
  */
 export class ReadOnlyRelayClient {

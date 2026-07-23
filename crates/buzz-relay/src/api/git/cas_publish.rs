@@ -9,14 +9,16 @@
 //! 3. Snapshots refs + HEAD off the workspace (the receive-pack's published
 //!    state, by which point the pre-receive hook has enforced fast-forward /
 //!    branch-protection against the parent's refs).
-//! 4. Captures the new objects as a pack via `git pack-objects --revs
-//!    --stdout` over `(refs_after) --not (refs_before-tips)` (§Push step 1–2).
-//!    Empty pack (refs-only push that doesn't introduce objects) is allowed
-//!    and stored with no `new_pack_keys`.
+//! 4. Normally captures the new objects as a delta pack via `git pack-objects
+//!    --revs --stdout` over `(refs_after) --not (refs_before-tips)` (§Push
+//!    step 1–2). Before the manifest reaches its pack cap, compaction instead
+//!    captures the complete `refs_after` closure into bounded replacement
+//!    packs. Empty output for a ref-less repository is allowed.
 //! 5. `put_pack` (content-addressed, create-only, idempotent — §Push step 2).
 //!    The key is derived from `sha256(bytes)` by the store layer.
-//! 6. Composes `m_after` (parent packs ∪ new pack, parent digest, new refs)
-//!    via `Manifest::compose`-equivalent inline construction (§Push step 5).
+//! 6. Composes `m_after`: normal pushes use parent packs ∪ new pack;
+//!    compaction replaces the pack list with the newly captured full closure.
+//!    Both retain the parent digest and post-push refs (§Push step 5).
 //! 7. `put_manifest` (content-addressed, create-only, idempotent — §Push
 //!    step 6).
 //! 8. `put_pointer(IfMatch(e) | IfNoneMatchStar)` — the CAS (§Push step 7).
@@ -59,9 +61,10 @@
 //!   serialization is the CAS. Adding a per-repo mutex would hide the
 //!   exact contention `Inv_NoFork` proves safe.
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 use tokio::io::AsyncWriteExt;
@@ -69,10 +72,18 @@ use tokio::process::Command;
 use tracing::{debug, warn};
 
 use crate::api::git::manifest::{
-    pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_REFS,
+    pointer_key, Manifest, ManifestError, MANIFEST_VERSION, MAX_MANIFEST_PACKS, MAX_MANIFEST_REFS,
+    PACK_COMPACTION_THRESHOLD,
 };
 use crate::api::git::store::{CasOutcome, ETag, GitStore, Precond, StoreError};
 use buzz_core::TenantContext;
+
+const PACK_CAPTURE_TIMEOUT: Duration = Duration::from_secs(300);
+const PACK_COMPACTION_OPERATION_TIMEOUT: Duration = Duration::from_secs(600);
+const PACK_OBJECTS_WINDOW_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
+const PACK_OBJECTS_WINDOW: &str = "10";
+const MAX_COMPACTION_OBJECTS: u64 = 1_000_000;
+static PACK_COMPACTION_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Errors `cas_publish` surfaces. Distinguished so `finalize_push` can map
 /// each to the right HTTP status (the spec's 412 → 409 mapping is here).
@@ -141,6 +152,37 @@ pub struct PublishLimits {
     pub max_pack_bytes: u64,
     /// Maximum total hydrated bytes allowed for the resulting repo.
     pub max_repo_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PublishOptions {
+    limits: PublishLimits,
+    compaction_threshold: usize,
+}
+
+struct CompactedPack {
+    pack_path: PathBuf,
+    idx_path: PathBuf,
+    pack_bytes: u64,
+}
+
+struct CompactedPacks {
+    _tempdir: TempDir,
+    packs: Vec<CompactedPack>,
+    total_pack_bytes: u64,
+}
+
+struct CompactionObservation {
+    started_at: Instant,
+    packs_before: usize,
+    packs_after: usize,
+    compacted_bytes: u64,
+}
+
+struct PreparedCompaction {
+    pack_keys: Vec<String>,
+    packs_after: usize,
+    compacted_bytes: u64,
 }
 
 /// Outcome of a successful CAS. Carries the composed manifest so the
@@ -225,15 +267,16 @@ impl ParentState {
 /// HEAD or no HEAD yields an empty string.
 async fn snapshot_workspace_state(
     repo_path: &Path,
+    scratch_dir: &Path,
 ) -> Result<(BTreeMap<String, String>, String), CasError> {
     const MAX_REF_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
 
-    let refs_stdout_tmp = tempfile::NamedTempFile::new()
+    let refs_stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout tempfile: {e}")))?;
     let refs_stdout_file = refs_stdout_tmp
         .reopen()
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stdout reopen: {e}")))?;
-    let refs_stderr_tmp = tempfile::NamedTempFile::new()
+    let refs_stderr_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("for-each-ref stderr tempfile: {e}")))?;
     let refs_stderr_file = refs_stderr_tmp
         .reopen()
@@ -309,6 +352,34 @@ async fn snapshot_workspace_state(
     Ok((refs, head))
 }
 
+fn resolve_published_head(
+    refs: &BTreeMap<String, String>,
+    observed_head: String,
+    parent_head: &str,
+) -> String {
+    let is_published_branch =
+        |name: &str| name.starts_with("refs/heads/") && refs.contains_key(name);
+    if is_published_branch(&observed_head) {
+        return observed_head;
+    }
+    if is_published_branch(parent_head) {
+        return parent_head.to_string();
+    }
+    for preferred in ["refs/heads/main", "refs/heads/master"] {
+        if refs.contains_key(preferred) {
+            return preferred.to_string();
+        }
+    }
+    if let Some(branch) = refs.keys().find(|name| name.starts_with("refs/heads/")) {
+        return branch.clone();
+    }
+    if !observed_head.is_empty() {
+        observed_head
+    } else {
+        parent_head.to_string()
+    }
+}
+
 fn digest_from_pack_key(key: &str) -> Result<String, CasError> {
     key.strip_prefix("packs/")
         .filter(|digest| digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
@@ -325,9 +396,11 @@ async fn write_idx_sidecar(
     store: &GitStore,
     pack_key: &str,
     pack_bytes: &[u8],
+    scratch_dir: &Path,
 ) -> Result<(), CasError> {
     let pack_digest = digest_from_pack_key(pack_key)?;
-    let tempdir = TempDir::new().map_err(|e| CasError::PackCapture(format!("idx tempdir: {e}")))?;
+    let tempdir = TempDir::new_in(scratch_dir)
+        .map_err(|e| CasError::PackCapture(format!("idx tempdir in {scratch_dir:?}: {e}")))?;
     let pack_path = tempdir.path().join(format!("pack-{pack_digest}.pack"));
     tokio::fs::write(&pack_path, pack_bytes)
         .await
@@ -357,6 +430,41 @@ async fn write_idx_sidecar(
     Ok(())
 }
 
+async fn wait_for_git_child(
+    child: &mut tokio::process::Child,
+    stdin_bytes: &[u8],
+    operation: &str,
+) -> Result<std::process::ExitStatus, CasError> {
+    let result = tokio::time::timeout(PACK_CAPTURE_TIMEOUT, async {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| CasError::PackCapture(format!("{operation} stdin closed")))?;
+        stdin
+            .write_all(stdin_bytes)
+            .await
+            .map_err(|e| CasError::PackCapture(format!("{operation} stdin write: {e}")))?;
+        drop(stdin);
+        child
+            .wait()
+            .await
+            .map_err(|e| CasError::PackCapture(format!("{operation} wait: {e}")))
+    })
+    .await;
+    match result {
+        Ok(status) => status,
+        Err(_) => {
+            if let Err(error) = child.kill().await {
+                warn!(operation, error = %error, "timed-out git pack-objects could not be killed");
+            }
+            Err(CasError::PackCapture(format!(
+                "{operation} timed out after {} seconds",
+                PACK_CAPTURE_TIMEOUT.as_secs()
+            )))
+        }
+    }
+}
+
 /// Capture the objects this push introduced as a single pack.
 ///
 /// Runs `git pack-objects --revs --stdout` reading rev-spec lines from
@@ -380,6 +488,7 @@ async fn capture_pack(
     refs_before: &BTreeMap<String, String>,
     refs_after: &BTreeMap<String, String>,
     max_pack_bytes: u64,
+    scratch_dir: &Path,
 ) -> Result<Option<Vec<u8>>, CasError> {
     // Build rev-spec stdin: positive new tips, negative old tips.
     // Deduplicate against the same-oid case — no point feeding `X ^X`.
@@ -401,47 +510,44 @@ async fn capture_pack(
         stdin_lines.push('\n');
     }
 
-    let stdout_tmp = tempfile::NamedTempFile::new()
+    let stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("pack-objects stdout tempfile: {e}")))?;
     let stdout_file = stdout_tmp
         .reopen()
         .map_err(|e| CasError::PackCapture(format!("pack-objects stdout reopen: {e}")))?;
-    let stderr_tmp = tempfile::NamedTempFile::new()
+    let stderr_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
         .map_err(|e| CasError::PackCapture(format!("pack-objects stderr tempfile: {e}")))?;
     let stderr_file = stderr_tmp
         .reopen()
         .map_err(|e| CasError::PackCapture(format!("pack-objects stderr reopen: {e}")))?;
 
+    let window_memory_arg = format!("--window-memory={PACK_OBJECTS_WINDOW_MEMORY_BYTES}");
     let mut cmd = Command::new("git");
-    cmd.args(["pack-objects", "--revs", "--stdout", "-q"])
-        .current_dir(repo_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
+    cmd.args([
+        "pack-objects",
+        "--revs",
+        "--stdout",
+        "-q",
+        "--threads=1",
+        "--window",
+        PACK_OBJECTS_WINDOW,
+        &window_memory_arg,
+    ])
+    .current_dir(repo_path)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::from(stdout_file))
+    .stderr(Stdio::from(stderr_file))
+    .kill_on_drop(true);
     super::transport::harden_git_env(&mut cmd);
     let mut child = cmd
         .spawn()
         .map_err(|e| CasError::PackCapture(format!("pack-objects spawn: {e}")))?;
-    {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| CasError::PackCapture("pack-objects stdin closed".into()))?;
-        stdin
-            .write_all(stdin_lines.as_bytes())
-            .await
-            .map_err(|e| CasError::PackCapture(format!("pack-objects stdin write: {e}")))?;
-        // Drop closes stdin → EOF.
-    }
-    let out = child
-        .wait_with_output()
-        .await
-        .map_err(|e| CasError::PackCapture(format!("pack-objects wait: {e}")))?;
-    if !out.status.success() {
+    let status = wait_for_git_child(&mut child, stdin_lines.as_bytes(), "pack-objects").await?;
+    if !status.success() {
         let stderr = read_prefix(stderr_tmp.path(), 64 * 1024).await;
         return Err(CasError::PackCapture(format!(
             "pack-objects failed: status={:?} stderr={}",
-            out.status.code(),
+            status.code(),
             stderr
         )));
     }
@@ -461,6 +567,311 @@ async fn capture_pack(
         .await
         .map_err(|e| CasError::PackCapture(format!("pack-objects stdout read: {e}")))?;
     Ok(Some(pack_bytes))
+}
+
+fn should_compact(parent_pack_count: usize, threshold: usize) -> bool {
+    parent_pack_count >= threshold
+}
+
+async fn acquire_compaction_permit() -> Result<tokio::sync::SemaphorePermit<'static>, CasError> {
+    tokio::time::timeout(PACK_CAPTURE_TIMEOUT, PACK_COMPACTION_SEMAPHORE.acquire())
+        .await
+        .map_err(|_| {
+            CasError::PackCapture(format!(
+                "timed out waiting {} seconds for pack compaction capacity",
+                PACK_CAPTURE_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(|_| CasError::PackCapture("pack compaction capacity closed".into()))
+}
+
+fn compacted_pack_set_is_usable(parent_pack_count: usize, compacted_pack_count: usize) -> bool {
+    compacted_pack_count < parent_pack_count
+        || (parent_pack_count >= MAX_MANIFEST_PACKS && compacted_pack_count <= MAX_MANIFEST_PACKS)
+}
+
+async fn enforce_compaction_object_limit(
+    repo_path: &Path,
+    scratch_dir: &Path,
+) -> Result<(), CasError> {
+    const MAX_COUNT_OBJECTS_OUTPUT_BYTES: u64 = 64 * 1024;
+
+    let stdout_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
+        .map_err(|e| CasError::PackCapture(format!("count-objects stdout tempfile: {e}")))?;
+    let stdout_file = stdout_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("count-objects stdout reopen: {e}")))?;
+    let stderr_tmp = tempfile::NamedTempFile::new_in(scratch_dir)
+        .map_err(|e| CasError::PackCapture(format!("count-objects stderr tempfile: {e}")))?;
+    let stderr_file = stderr_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("count-objects stderr reopen: {e}")))?;
+    let mut cmd = Command::new("git");
+    cmd.args(["count-objects", "-v"])
+        .current_dir(repo_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(true);
+    super::transport::harden_git_env(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CasError::PackCapture(format!("count-objects spawn: {e}")))?;
+    let status = wait_for_git_child(&mut child, &[], "count-objects").await?;
+    if !status.success() {
+        return Err(CasError::PackCapture(format!(
+            "count-objects failed: status={:?} stderr={}",
+            status.code(),
+            read_prefix(stderr_tmp.path(), MAX_COUNT_OBJECTS_OUTPUT_BYTES).await
+        )));
+    }
+    let output_len = tokio::fs::metadata(stdout_tmp.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("count-objects stdout metadata: {e}")))?
+        .len();
+    if output_len > MAX_COUNT_OBJECTS_OUTPUT_BYTES {
+        return Err(CasError::ResourceLimit(format!(
+            "count-objects output is {output_len} bytes (max {MAX_COUNT_OBJECTS_OUTPUT_BYTES})"
+        )));
+    }
+    let output = tokio::fs::read_to_string(stdout_tmp.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("read count-objects output: {e}")))?;
+    let parse_count = |name: &str| -> Result<u64, CasError> {
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix(name))
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .ok_or_else(|| CasError::PackCapture(format!("count-objects omitted {name:?}")))
+    };
+    let loose = parse_count("count:")?;
+    let packed = parse_count("in-pack:")?;
+    let object_count = loose
+        .checked_add(packed)
+        .ok_or_else(|| CasError::ResourceLimit("compaction object count overflowed u64".into()))?;
+    if object_count > MAX_COMPACTION_OBJECTS {
+        return Err(CasError::ResourceLimit(format!(
+            "repository has {object_count} objects (compaction max {MAX_COMPACTION_OBJECTS})"
+        )));
+    }
+    Ok(())
+}
+
+/// Capture the complete object closure reachable from the post-push refs.
+///
+/// Unlike [`capture_pack`], this writes one or more bounded packs into a
+/// private tempdir and supplies no negative revisions. The resulting pack set
+/// can therefore replace the parent manifest's pack list rather than extending
+/// it. Old object-store packs remain immutable and are not deleted.
+async fn capture_compacted_packs(
+    repo_path: &Path,
+    refs_after: &BTreeMap<String, String>,
+    limits: PublishLimits,
+    scratch_dir: &Path,
+) -> Result<CompactedPacks, CasError> {
+    let tempdir = TempDir::new_in(scratch_dir)
+        .map_err(|e| CasError::PackCapture(format!("compaction tempdir: {e}")))?;
+    if refs_after.is_empty() {
+        return Ok(CompactedPacks {
+            _tempdir: tempdir,
+            packs: Vec::new(),
+            total_pack_bytes: 0,
+        });
+    }
+    enforce_compaction_object_limit(repo_path, scratch_dir).await?;
+
+    let mut stdin_lines = String::new();
+    let mut seen_oids = BTreeSet::new();
+    for oid in refs_after.values() {
+        if seen_oids.insert(oid) {
+            stdin_lines.push_str(oid);
+            stdin_lines.push('\n');
+        }
+    }
+
+    let output_base = tempdir.path().join("compact");
+    let output_base_str = output_base
+        .to_str()
+        .ok_or_else(|| CasError::PackCapture("compaction path is not valid utf-8".into()))?;
+    let max_pack_arg = format!("--max-pack-size={}", limits.max_pack_bytes);
+    let window_memory_arg = format!("--window-memory={PACK_OBJECTS_WINDOW_MEMORY_BYTES}");
+    let stdout_tmp = tempfile::NamedTempFile::new_in(tempdir.path())
+        .map_err(|e| CasError::PackCapture(format!("compaction stdout tempfile: {e}")))?;
+    let stdout_file = stdout_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("compaction stdout reopen: {e}")))?;
+    let stderr_tmp = tempfile::NamedTempFile::new_in(tempdir.path())
+        .map_err(|e| CasError::PackCapture(format!("compaction stderr tempfile: {e}")))?;
+    let stderr_file = stderr_tmp
+        .reopen()
+        .map_err(|e| CasError::PackCapture(format!("compaction stderr reopen: {e}")))?;
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "pack-objects",
+        "--revs",
+        "-q",
+        "--threads=1",
+        "--window",
+        PACK_OBJECTS_WINDOW,
+        &window_memory_arg,
+        &max_pack_arg,
+        output_base_str,
+    ])
+    .current_dir(repo_path)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::from(stdout_file))
+    .stderr(Stdio::from(stderr_file))
+    .kill_on_drop(true);
+    super::transport::harden_git_env(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| CasError::PackCapture(format!("compaction pack-objects spawn: {e}")))?;
+    let status = wait_for_git_child(
+        &mut child,
+        stdin_lines.as_bytes(),
+        "compaction pack-objects",
+    )
+    .await?;
+    if !status.success() {
+        return Err(CasError::PackCapture(format!(
+            "compaction pack-objects failed: status={:?} stderr={}",
+            status.code(),
+            read_prefix(stderr_tmp.path(), 64 * 1024).await
+        )));
+    }
+
+    let mut pack_paths = Vec::new();
+    let mut entries = tokio::fs::read_dir(tempdir.path())
+        .await
+        .map_err(|e| CasError::PackCapture(format!("read compacted pack directory: {e}")))?;
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| CasError::PackCapture(format!("read compacted pack entry: {e}")))?
+    {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("pack") {
+            pack_paths.push(path);
+        }
+    }
+    pack_paths.sort();
+    if pack_paths.len() > MAX_MANIFEST_PACKS {
+        return Err(CasError::ResourceLimit(format!(
+            "compaction produced {} packs (max {MAX_MANIFEST_PACKS})",
+            pack_paths.len()
+        )));
+    }
+
+    let mut packs = Vec::with_capacity(pack_paths.len());
+    let mut total_pack_bytes = 0u64;
+    for pack_path in pack_paths {
+        let pack_bytes = tokio::fs::metadata(&pack_path)
+            .await
+            .map_err(|e| CasError::PackCapture(format!("stat compacted pack: {e}")))?
+            .len();
+        if pack_bytes > limits.max_pack_bytes {
+            return Err(CasError::ResourceLimit(format!(
+                "compacted pack is {pack_bytes} bytes (max {})",
+                limits.max_pack_bytes
+            )));
+        }
+        total_pack_bytes = total_pack_bytes
+            .checked_add(pack_bytes)
+            .ok_or_else(|| CasError::ResourceLimit("compacted byte count overflowed u64".into()))?;
+        if total_pack_bytes > limits.max_repo_bytes {
+            return Err(CasError::ResourceLimit(format!(
+                "compacted repo needs {total_pack_bytes} bytes (max {})",
+                limits.max_repo_bytes
+            )));
+        }
+        let idx_path = pack_path.with_extension("idx");
+        let idx_bytes = tokio::fs::metadata(&idx_path)
+            .await
+            .map_err(|e| CasError::PackCapture(format!("stat compacted idx: {e}")))?
+            .len();
+        if idx_bytes > limits.max_pack_bytes {
+            return Err(CasError::ResourceLimit(format!(
+                "compacted idx is {idx_bytes} bytes (max {})",
+                limits.max_pack_bytes
+            )));
+        }
+        packs.push(CompactedPack {
+            pack_path,
+            idx_path,
+            pack_bytes,
+        });
+    }
+
+    Ok(CompactedPacks {
+        _tempdir: tempdir,
+        packs,
+        total_pack_bytes,
+    })
+}
+
+async fn upload_compacted_packs(
+    store: &GitStore,
+    compacted: &CompactedPacks,
+) -> Result<Vec<String>, CasError> {
+    let mut pack_keys = Vec::with_capacity(compacted.packs.len());
+    for pack in &compacted.packs {
+        let pack_bytes = tokio::fs::read(&pack.pack_path)
+            .await
+            .map_err(|e| CasError::PackCapture(format!("read compacted pack: {e}")))?;
+        if u64::try_from(pack_bytes.len()).unwrap_or(u64::MAX) != pack.pack_bytes {
+            return Err(CasError::PackCapture(
+                "compacted pack changed after size validation".into(),
+            ));
+        }
+        let pack_key = store.put_pack(&pack_bytes).await?;
+        let pack_digest = digest_from_pack_key(&pack_key)?;
+        match tokio::fs::read(&pack.idx_path).await {
+            Ok(idx_bytes) => {
+                if let Err(error) = store.put_idx(&pack_digest, &idx_bytes).await {
+                    warn!(
+                        pack_key = %pack_key,
+                        error = %error,
+                        "failed to write compacted git pack idx sidecar; push will continue"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    pack_key = %pack_key,
+                    error = %error,
+                    "failed to read compacted git pack idx sidecar; push will continue"
+                );
+            }
+        }
+        pack_keys.push(pack_key);
+    }
+    pack_keys.sort();
+    pack_keys.dedup();
+    Ok(pack_keys)
+}
+
+async fn prepare_compaction(
+    store: &GitStore,
+    repo_path: &Path,
+    refs_after: &BTreeMap<String, String>,
+    limits: PublishLimits,
+    scratch_dir: &Path,
+    packs_before: usize,
+) -> Result<PreparedCompaction, CasError> {
+    let compacted = capture_compacted_packs(repo_path, refs_after, limits, scratch_dir).await?;
+    let packs_after = compacted.packs.len();
+    if !compacted_pack_set_is_usable(packs_before, packs_after) {
+        return Err(CasError::ResourceLimit(format!(
+            "compaction did not reduce pack count (before {packs_before}, after {packs_after})"
+        )));
+    }
+    let compacted_bytes = compacted.total_pack_bytes;
+    let pack_keys = upload_compacted_packs(store, &compacted).await?;
+    Ok(PreparedCompaction {
+        pack_keys,
+        packs_after,
+        compacted_bytes,
+    })
 }
 
 async fn read_prefix(path: &Path, max_bytes: u64) -> String {
@@ -517,6 +928,23 @@ fn compose_after(
     }
 }
 
+fn compose_compacted_after(
+    parent_digest: Option<String>,
+    head: String,
+    refs: BTreeMap<String, String>,
+    mut compacted_pack_keys: Vec<String>,
+) -> Manifest {
+    compacted_pack_keys.sort();
+    compacted_pack_keys.dedup();
+    Manifest {
+        version: MANIFEST_VERSION,
+        head,
+        refs,
+        packs: compacted_pack_keys,
+        parent: parent_digest,
+    }
+}
+
 /// Derive `manifests/<sha256>` from a returned manifest key, surfacing the
 /// hex digest the pointer body needs.
 fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
@@ -528,6 +956,25 @@ fn digest_from_manifest_key(key: &str) -> Result<String, CasError> {
                 format!("put_manifest returned non-standard key: {key}"),
             )))
         })
+}
+
+fn record_compaction(
+    outcome: &'static str,
+    started_at: Instant,
+    packs_before: usize,
+    packs_after: Option<usize>,
+    compacted_bytes: Option<u64>,
+) {
+    metrics::counter!("buzz_git_pack_compactions_total", "outcome" => outcome).increment(1);
+    metrics::histogram!("buzz_git_pack_compaction_seconds", "outcome" => outcome)
+        .record(started_at.elapsed().as_secs_f64());
+    metrics::histogram!("buzz_git_pack_compaction_packs_before").record(packs_before as f64);
+    if let Some(packs_after) = packs_after {
+        metrics::histogram!("buzz_git_pack_compaction_packs_after").record(packs_after as f64);
+    }
+    if let Some(compacted_bytes) = compacted_bytes {
+        metrics::histogram!("buzz_git_pack_compaction_bytes").record(compacted_bytes as f64);
+    }
 }
 
 /// The function the §Push step 2–7 protocol distills to.
@@ -556,70 +1003,171 @@ pub async fn cas_publish(
     parent_state: &ParentState,
     limits: PublishLimits,
 ) -> Result<CasSuccess, CasError> {
+    cas_publish_inner(
+        store,
+        ctx,
+        repo_path,
+        owner,
+        repo,
+        parent_state,
+        PublishOptions {
+            limits,
+            compaction_threshold: PACK_COMPACTION_THRESHOLD,
+        },
+    )
+    .await
+}
+
+async fn cas_publish_inner(
+    store: &GitStore,
+    ctx: &TenantContext,
+    repo_path: &Path,
+    owner: &str,
+    repo: &str,
+    parent_state: &ParentState,
+    options: PublishOptions,
+) -> Result<CasSuccess, CasError> {
+    let limits = options.limits;
     let pkey = pointer_key(ctx.community(), owner, repo);
+
+    // Hydrated repositories are direct children of the configured Git scratch
+    // root. Reuse that parent for publication tempfiles so they remain on the
+    // mounted scratch volume without adding another independent path argument.
+    let scratch_dir = repo_path
+        .parent()
+        .ok_or_else(|| CasError::PackCapture("repository path has no scratch parent".into()))?;
 
     // Snapshot post-receive-pack state from disk. `parent_state.parent.refs`
     // are the refs the workspace was hydrated from — `pack-objects --revs`
     // below uses them as the "negative" set to produce the delta pack.
-    let (refs_after, head_observed) = snapshot_workspace_state(repo_path).await?;
+    let (refs_after, head_observed) = snapshot_workspace_state(repo_path, scratch_dir).await?;
 
-    // HEAD fallback: a bare repo serving pushes shouldn't have detached
-    // HEAD, but if `git symbolic-ref` failed (or returned empty), inherit
-    // the parent's HEAD rather than installing an empty one. `validate()`
-    // below rejects "empty after fallback" — that's the first-push +
-    // detached-HEAD case where the writer must declare a HEAD.
-    let head = if head_observed.is_empty() {
-        parent_state.parent.head.clone()
-    } else {
-        head_observed
-    };
+    // Fresh bare repositories can inherit Git's environment-dependent
+    // `master` symref even when the first push creates `main`. Publish a real
+    // branch whenever one exists so HEAD never advertises a phantom branch.
+    let head = resolve_published_head(&refs_after, head_observed, &parent_state.parent.head);
 
-    // Capture new objects as a pack (steps 1–2). The "not" set is the
-    // parent manifest's refs — i.e. the set the workspace was hydrated
-    // against — so the delta covers exactly the objects this push
-    // introduced.
-    let pack_bytes = capture_pack(
-        repo_path,
-        &parent_state.parent.refs,
-        &refs_after,
-        limits.max_pack_bytes,
-    )
-    .await?;
-    let new_pack_key = if let Some(bytes) = pack_bytes {
-        let new_pack_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        let total_bytes = limits
-            .parent_hydrated_bytes
-            .checked_add(new_pack_bytes)
-            .ok_or_else(|| CasError::ResourceLimit("repo byte count overflowed u64".into()))?;
-        if total_bytes > limits.max_repo_bytes {
-            return Err(CasError::ResourceLimit(format!(
-                "repo would need {total_bytes} hydrated bytes (max {})",
-                limits.max_repo_bytes
-            )));
+    let packs_before = parent_state.parent.packs.len();
+    let mut compaction_failure = None;
+    let mut compaction_observation = None;
+    let mut compacted_manifest = None;
+    if should_compact(packs_before, options.compaction_threshold) {
+        let started_at = Instant::now();
+        match acquire_compaction_permit().await {
+            Ok(_permit) => {
+                let operation = prepare_compaction(
+                    store,
+                    repo_path,
+                    &refs_after,
+                    limits,
+                    scratch_dir,
+                    packs_before,
+                );
+                match tokio::time::timeout(PACK_COMPACTION_OPERATION_TIMEOUT, operation).await {
+                    Ok(Ok(prepared)) => {
+                        debug!(
+                            packs_before,
+                            packs_after = prepared.packs_after,
+                            bytes = prepared.compacted_bytes,
+                            "captured compacted repository pack set"
+                        );
+                        compacted_manifest = Some(compose_compacted_after(
+                            parent_state.parent_digest.clone(),
+                            head.clone(),
+                            refs_after.clone(),
+                            prepared.pack_keys,
+                        ));
+                        compaction_observation = Some(CompactionObservation {
+                            started_at,
+                            packs_before,
+                            packs_after: prepared.packs_after,
+                            compacted_bytes: prepared.compacted_bytes,
+                        });
+                    }
+                    Ok(Err(error)) => compaction_failure = Some((started_at, error)),
+                    Err(_) => {
+                        compaction_failure = Some((
+                            started_at,
+                            CasError::PackCapture(format!(
+                                "pack compaction operation timed out after {} seconds",
+                                PACK_COMPACTION_OPERATION_TIMEOUT.as_secs()
+                            )),
+                        ));
+                    }
+                }
+            }
+            Err(error) => compaction_failure = Some((started_at, error)),
         }
-        debug!(bytes = bytes.len(), "captured push pack");
-        let pack_key = store.put_pack(&bytes).await?;
-        if let Err(e) = write_idx_sidecar(store, &pack_key, &bytes).await {
-            warn!(
-                pack_key = %pack_key,
-                error = %e,
-                "failed to write git pack idx sidecar; push will continue"
-            );
-        }
-        Some(pack_key)
-    } else {
-        debug!("no new objects in push; manifest will reuse parent packs");
-        None
-    };
+    }
+    if let Some((started_at, error)) = &compaction_failure {
+        warn!(
+            packs_before,
+            error = %error,
+            "pack compaction failed; attempting normal delta-pack publication"
+        );
+        record_compaction("fallback", *started_at, packs_before, None, None);
+    }
 
-    // Compose m_after (step 5).
-    let m_after = compose_after(
-        &parent_state.parent,
-        parent_state.parent_digest.clone(),
-        head,
-        refs_after,
-        new_pack_key,
-    );
+    let m_after = if let Some(manifest) = compacted_manifest {
+        manifest
+    } else {
+        // Capture new objects as a delta pack (steps 1–2). The "not" set is
+        // the parent manifest's refs — i.e. the set the workspace was hydrated
+        // against — so the delta covers exactly the objects this push
+        // introduced.
+        let pack_bytes = capture_pack(
+            repo_path,
+            &parent_state.parent.refs,
+            &refs_after,
+            limits.max_pack_bytes,
+            scratch_dir,
+        )
+        .await?;
+        if pack_bytes.is_some() && packs_before >= MAX_MANIFEST_PACKS {
+            let error = compaction_failure
+                .map(|(_, error)| error)
+                .unwrap_or_else(|| {
+                    CasError::ResourceLimit(format!(
+                        "repository already names {packs_before} packs and compaction failed"
+                    ))
+                });
+            metrics::counter!("buzz_git_pack_compaction_required_failures_total").increment(1);
+            return Err(error);
+        }
+        let new_pack_key = if let Some(bytes) = pack_bytes {
+            let new_pack_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            let total_bytes = limits
+                .parent_hydrated_bytes
+                .checked_add(new_pack_bytes)
+                .ok_or_else(|| CasError::ResourceLimit("repo byte count overflowed u64".into()))?;
+            if total_bytes > limits.max_repo_bytes {
+                return Err(CasError::ResourceLimit(format!(
+                    "repo would need {total_bytes} hydrated bytes (max {})",
+                    limits.max_repo_bytes
+                )));
+            }
+            debug!(bytes = bytes.len(), "captured push pack");
+            let pack_key = store.put_pack(&bytes).await?;
+            if let Err(e) = write_idx_sidecar(store, &pack_key, &bytes, scratch_dir).await {
+                warn!(
+                    pack_key = %pack_key,
+                    error = %e,
+                    "failed to write git pack idx sidecar; push will continue"
+                );
+            }
+            Some(pack_key)
+        } else {
+            debug!("no new objects in push; manifest will reuse parent packs");
+            None
+        };
+        compose_after(
+            &parent_state.parent,
+            parent_state.parent_digest.clone(),
+            head,
+            refs_after,
+            new_pack_key,
+        )
+    };
 
     // **Pre-CAS validation** (Sami #2 / Max / Dawn): refuse to commit an
     // un-clone-able manifest. `Manifest::validate` checks every refname
@@ -628,11 +1176,36 @@ pub async fn cas_publish(
     // uses on read. Failure surfaces as `CasError::ManifestInvalid`
     // (4xx-class: client/input rejected) so the caller never confuses
     // it with `ManifestReadFailed` (5xx-class: parent corrupt).
-    m_after.validate()?;
+    if let Err(error) = m_after.validate() {
+        if let Some(observation) = &compaction_observation {
+            record_compaction(
+                "validation_error",
+                observation.started_at,
+                observation.packs_before,
+                Some(observation.packs_after),
+                Some(observation.compacted_bytes),
+            );
+        }
+        return Err(error.into());
+    }
 
     // Step 6: put_manifest.
     let manifest_bytes = m_after.canonical_bytes()?;
-    let manifest_key = store.put_manifest(&manifest_bytes).await?;
+    let manifest_key = match store.put_manifest(&manifest_bytes).await {
+        Ok(key) => key,
+        Err(error) => {
+            if let Some(observation) = &compaction_observation {
+                record_compaction(
+                    "publish_error",
+                    observation.started_at,
+                    observation.packs_before,
+                    Some(observation.packs_after),
+                    Some(observation.compacted_bytes),
+                );
+            }
+            return Err(error.into());
+        }
+    };
     let manifest_digest = digest_from_manifest_key(&manifest_key)?;
 
     // Step 7: CAS the pointer.
@@ -640,15 +1213,50 @@ pub async fn cas_publish(
         Some(e) => Precond::IfMatch(e.clone()),
         None => Precond::IfNoneMatchStar,
     };
-    match store
+    let cas_outcome = match store
         .put_pointer(&pkey, manifest_digest.as_bytes(), precond)
-        .await?
+        .await
     {
-        CasOutcome::Won(_new_etag) => Ok(CasSuccess {
-            manifest: m_after,
-            manifest_key,
-        }),
+        Ok(outcome) => outcome,
+        Err(error) => {
+            if let Some(observation) = &compaction_observation {
+                record_compaction(
+                    "publish_error",
+                    observation.started_at,
+                    observation.packs_before,
+                    Some(observation.packs_after),
+                    Some(observation.compacted_bytes),
+                );
+            }
+            return Err(error.into());
+        }
+    };
+    match cas_outcome {
+        CasOutcome::Won(_new_etag) => {
+            if let Some(observation) = &compaction_observation {
+                record_compaction(
+                    "success",
+                    observation.started_at,
+                    observation.packs_before,
+                    Some(observation.packs_after),
+                    Some(observation.compacted_bytes),
+                );
+            }
+            Ok(CasSuccess {
+                manifest: m_after,
+                manifest_key,
+            })
+        }
         CasOutcome::LostRace => {
+            if let Some(observation) = &compaction_observation {
+                record_compaction(
+                    "cas_conflict",
+                    observation.started_at,
+                    observation.packs_before,
+                    Some(observation.packs_after),
+                    Some(observation.compacted_bytes),
+                );
+            }
             // Surface a typed Conflict carrying the winner so the caller
             // can reconcile the on-disk workspace without re-reading the
             // pointer. We re-GET the pointer here on the slow path; a
@@ -745,6 +1353,24 @@ mod tests {
     }
 
     #[test]
+    fn published_head_ignores_dangling_master_when_main_exists() {
+        let refs = BTreeMap::from([("refs/heads/main".to_string(), "1".repeat(40))]);
+        assert_eq!(
+            resolve_published_head(&refs, "refs/heads/master".to_string(), ""),
+            "refs/heads/main"
+        );
+    }
+
+    #[test]
+    fn published_head_preserves_an_existing_nonstandard_branch() {
+        let refs = BTreeMap::from([("refs/heads/release".to_string(), "1".repeat(40))]);
+        assert_eq!(
+            resolve_published_head(&refs, "refs/heads/release".to_string(), "refs/heads/main"),
+            "refs/heads/release"
+        );
+    }
+
+    #[test]
     fn digest_from_key_strips_prefix() {
         let k = format!("manifests/{}", "a".repeat(64));
         let d = digest_from_manifest_key(&k).unwrap();
@@ -834,6 +1460,374 @@ mod tests {
             Some(pack_key('e')),
         );
         assert_eq!(m.packs, vec![pack_key('e')]);
+    }
+
+    #[test]
+    fn compaction_starts_with_manifest_headroom() {
+        assert!(!should_compact(
+            PACK_COMPACTION_THRESHOLD - 1,
+            PACK_COMPACTION_THRESHOLD
+        ));
+        assert!(should_compact(
+            PACK_COMPACTION_THRESHOLD,
+            PACK_COMPACTION_THRESHOLD
+        ));
+        assert!(should_compact(
+            MAX_MANIFEST_PACKS,
+            PACK_COMPACTION_THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn compaction_must_reduce_before_cap_but_may_replace_at_cap() {
+        assert!(compacted_pack_set_is_usable(
+            PACK_COMPACTION_THRESHOLD,
+            PACK_COMPACTION_THRESHOLD - 1
+        ));
+        assert!(!compacted_pack_set_is_usable(
+            PACK_COMPACTION_THRESHOLD,
+            PACK_COMPACTION_THRESHOLD
+        ));
+        assert!(compacted_pack_set_is_usable(
+            MAX_MANIFEST_PACKS,
+            MAX_MANIFEST_PACKS
+        ));
+        assert!(!compacted_pack_set_is_usable(
+            MAX_MANIFEST_PACKS,
+            MAX_MANIFEST_PACKS + 1
+        ));
+    }
+
+    #[test]
+    fn compacted_manifest_replaces_parent_pack_set() {
+        let mut refs = BTreeMap::new();
+        refs.insert("refs/heads/main".into(), "1".repeat(40));
+        let manifest = compose_compacted_after(
+            Some(parent_digest()),
+            "refs/heads/main".into(),
+            refs,
+            vec![pack_key('9'), pack_key('8'), pack_key('9')],
+        );
+
+        assert_eq!(manifest.packs, vec![pack_key('8'), pack_key('9')]);
+        assert_eq!(manifest.parent, Some(parent_digest()));
+        manifest.validate().expect("compacted manifest");
+    }
+
+    #[test]
+    fn compacted_empty_repository_needs_no_packs() {
+        let manifest = compose_compacted_after(
+            Some(parent_digest()),
+            "refs/heads/main".into(),
+            BTreeMap::new(),
+            Vec::new(),
+        );
+
+        assert!(manifest.packs.is_empty());
+        manifest.validate().expect("empty compacted manifest");
+    }
+
+    async fn run_test_git(repo: &Path, args: &[&str]) -> std::process::Output {
+        let mut command = Command::new("git");
+        command.current_dir(repo).args(args);
+        super::super::transport::harden_git_env(&mut command);
+        let output = command.output().await.expect("spawn git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[tokio::test]
+    async fn full_compaction_pack_covers_current_refs() {
+        let scratch = TempDir::new().expect("scratch");
+        let repo = scratch.path().join("source");
+        tokio::fs::create_dir(&repo).await.expect("repo dir");
+        run_test_git(&repo, &["init", "--quiet", "--initial-branch=main"]).await;
+        run_test_git(&repo, &["config", "user.email", "compact@test"]).await;
+        run_test_git(&repo, &["config", "user.name", "compact"]).await;
+        tokio::fs::write(repo.join("file.txt"), b"reachable\n")
+            .await
+            .expect("file");
+        run_test_git(&repo, &["add", "file.txt"]).await;
+        run_test_git(&repo, &["commit", "--quiet", "-m", "reachable"]).await;
+        let oid = String::from_utf8(run_test_git(&repo, &["rev-parse", "HEAD"]).await.stdout)
+            .expect("oid utf8")
+            .trim()
+            .to_string();
+        let refs = BTreeMap::from([("refs/heads/main".to_string(), oid)]);
+
+        let compacted = capture_compacted_packs(
+            &repo,
+            &refs,
+            PublishLimits {
+                parent_hydrated_bytes: 0,
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+            scratch.path(),
+        )
+        .await
+        .expect("compact");
+
+        assert_eq!(compacted.packs.len(), 1);
+        assert!(compacted.total_pack_bytes > 0);
+        let idx = compacted.packs[0].idx_path.to_str().expect("idx utf8");
+        run_test_git(&repo, &["verify-pack", idx]).await;
+    }
+
+    fn probe_enabled() -> bool {
+        std::env::var("BUZZ_GIT_S3_PROBE").as_deref() == Ok("1")
+    }
+
+    fn live_store() -> GitStore {
+        let endpoint = std::env::var("BUZZ_GIT_S3_ENDPOINT")
+            .or_else(|_| std::env::var("BUZZ_S3_ENDPOINT"))
+            .unwrap_or_else(|_| "http://localhost:9000".into());
+        let access_key = std::env::var("BUZZ_GIT_S3_ACCESS_KEY")
+            .or_else(|_| std::env::var("BUZZ_S3_ACCESS_KEY"))
+            .unwrap_or_else(|_| "buzz_dev".into());
+        let secret_key = std::env::var("BUZZ_GIT_S3_SECRET_KEY")
+            .or_else(|_| std::env::var("BUZZ_S3_SECRET_KEY"))
+            .unwrap_or_else(|_| "buzz_dev_secret".into());
+        let bucket = std::env::var("BUZZ_GIT_S3_BUCKET")
+            .or_else(|_| std::env::var("BUZZ_S3_BUCKET"))
+            .unwrap_or_else(|_| "buzz-media".into());
+        let region = std::env::var("BUZZ_GIT_S3_REGION")
+            .or_else(|_| std::env::var("BUZZ_S3_REGION"))
+            .unwrap_or_else(|_| "us-east-1".into());
+        GitStore::new(&endpoint, &access_key, &secret_key, &bucket, &region).expect("connect minio")
+    }
+
+    fn tenant() -> TenantContext {
+        TenantContext::resolved(
+            buzz_core::CommunityId::from_uuid(uuid::Uuid::from_u128(1)),
+            "git.example",
+        )
+    }
+
+    #[tokio::test]
+    async fn live_cas_publish_compacts_and_rehydrates() {
+        if !probe_enabled() {
+            return;
+        }
+        let store = live_store();
+        let scratch = TempDir::new().expect("scratch");
+        let source_path = scratch.path().join("source");
+        tokio::fs::create_dir(&source_path).await.expect("repo dir");
+        run_test_git(&source_path, &["init", "--quiet", "--initial-branch=main"]).await;
+        run_test_git(&source_path, &["config", "user.email", "compact@test"]).await;
+        run_test_git(&source_path, &["config", "user.name", "compact"]).await;
+        tokio::fs::write(source_path.join("file.txt"), b"one\n")
+            .await
+            .expect("file");
+        run_test_git(&source_path, &["add", "file.txt"]).await;
+        run_test_git(&source_path, &["commit", "--quiet", "-m", "one"]).await;
+        let first_oid = String::from_utf8(
+            run_test_git(&source_path, &["rev-parse", "HEAD"])
+                .await
+                .stdout,
+        )
+        .expect("first oid utf8")
+        .trim()
+        .to_string();
+        let first_refs = BTreeMap::from([("refs/heads/main".to_string(), first_oid)]);
+        let first_pack = capture_pack(
+            &source_path,
+            &BTreeMap::new(),
+            &first_refs,
+            1024 * 1024,
+            scratch.path(),
+        )
+        .await
+        .expect("capture first")
+        .expect("first pack");
+        let first_pack_bytes = u64::try_from(first_pack.len()).expect("first pack length");
+        let first_pack_key = store.put_pack(&first_pack).await.expect("put first pack");
+        write_idx_sidecar(&store, &first_pack_key, &first_pack, scratch.path())
+            .await
+            .expect("first idx");
+
+        tokio::fs::write(source_path.join("file.txt"), b"one\ntwo\n")
+            .await
+            .expect("second file");
+        run_test_git(&source_path, &["add", "file.txt"]).await;
+        run_test_git(&source_path, &["commit", "--quiet", "-m", "two"]).await;
+        run_test_git(&source_path, &["tag", "-a", "v1", "-m", "annotated"]).await;
+        let parent_head_oid = String::from_utf8(
+            run_test_git(&source_path, &["rev-parse", "HEAD"])
+                .await
+                .stdout,
+        )
+        .expect("parent head utf8")
+        .trim()
+        .to_string();
+        let parent_tag_oid = String::from_utf8(
+            run_test_git(&source_path, &["rev-parse", "refs/tags/v1"])
+                .await
+                .stdout,
+        )
+        .expect("parent tag utf8")
+        .trim()
+        .to_string();
+        let parent_refs = BTreeMap::from([
+            ("refs/heads/main".to_string(), parent_head_oid),
+            ("refs/tags/v1".to_string(), parent_tag_oid),
+        ]);
+        let second_pack = capture_pack(
+            &source_path,
+            &first_refs,
+            &parent_refs,
+            1024 * 1024,
+            scratch.path(),
+        )
+        .await
+        .expect("capture second")
+        .expect("second pack");
+        let second_pack_bytes = u64::try_from(second_pack.len()).expect("second pack length");
+        let second_pack_key = store.put_pack(&second_pack).await.expect("put second pack");
+        write_idx_sidecar(&store, &second_pack_key, &second_pack, scratch.path())
+            .await
+            .expect("second idx");
+
+        let parent = Manifest {
+            version: MANIFEST_VERSION,
+            head: "refs/heads/main".into(),
+            refs: parent_refs,
+            packs: vec![first_pack_key, second_pack_key],
+            parent: None,
+        };
+        parent.validate().expect("parent manifest");
+        let parent_key = store
+            .put_manifest(&parent.canonical_bytes().expect("parent bytes"))
+            .await
+            .expect("put parent");
+        let parent_digest = digest_from_manifest_key(&parent_key).expect("parent digest");
+        let ctx = tenant();
+        let owner = format!("compact-{}", uuid::Uuid::new_v4());
+        let repo = "history";
+        let pkey = pointer_key(ctx.community(), &owner, repo);
+        match store
+            .put_pointer(&pkey, parent_digest.as_bytes(), Precond::IfNoneMatchStar)
+            .await
+            .expect("put pointer")
+        {
+            CasOutcome::Won(_) => {}
+            CasOutcome::LostRace => panic!("unique pointer must win"),
+        }
+        let cache_parent = scratch.path().join("cache");
+        let cache =
+            crate::api::git::pack_cache::GitPackCache::new(&cache_parent, 4 * 1024 * 1024, 1)
+                .expect("cache");
+        let (hydrated, parent_state) = crate::api::git::hydrate::hydrate_for_write(
+            &store,
+            &ctx,
+            &owner,
+            repo,
+            crate::api::git::hydrate::HydrationOptions {
+                pack_cache: &cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: 1024 * 1024,
+                max_repo_bytes: 2 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("hydrate parent");
+        assert_eq!(parent_state.parent_digest, Some(parent_digest.clone()));
+
+        tokio::fs::write(source_path.join("file.txt"), b"one\ntwo\nthree\n")
+            .await
+            .expect("third file");
+        run_test_git(&source_path, &["add", "file.txt"]).await;
+        run_test_git(&source_path, &["commit", "--quiet", "-m", "three"]).await;
+        let hydrated_path = hydrated.path().to_str().expect("hydrated path utf8");
+        run_test_git(&source_path, &["push", "--quiet", hydrated_path, "main"]).await;
+        let head_oid = String::from_utf8(
+            run_test_git(&source_path, &["rev-parse", "HEAD"])
+                .await
+                .stdout,
+        )
+        .expect("post-push head utf8")
+        .trim()
+        .to_string();
+        let limits = PublishLimits {
+            parent_hydrated_bytes: hydrated.hydrated_bytes(),
+            max_pack_bytes: 1024 * 1024,
+            max_repo_bytes: 2 * 1024 * 1024,
+        };
+
+        let test_options = PublishOptions {
+            limits,
+            compaction_threshold: 2,
+        };
+        let success = cas_publish_inner(
+            &store,
+            &ctx,
+            hydrated.path(),
+            &owner,
+            repo,
+            &parent_state,
+            test_options,
+        )
+        .await
+        .expect("compaction publish");
+        assert_eq!(success.manifest.packs.len(), 1);
+        assert_eq!(
+            success.manifest.refs.get("refs/heads/main"),
+            Some(&head_oid)
+        );
+        assert!(success.manifest.refs.contains_key("refs/tags/v1"));
+        assert_eq!(success.manifest.parent, Some(parent_digest));
+
+        let conflict = cas_publish_inner(
+            &store,
+            &ctx,
+            hydrated.path(),
+            &owner,
+            repo,
+            &parent_state,
+            test_options,
+        )
+        .await
+        .expect_err("stale parent must lose CAS");
+        assert!(matches!(conflict, CasError::Conflict { .. }));
+
+        let hydrated = crate::api::git::hydrate::hydrate_for_read(
+            &store,
+            &ctx,
+            &owner,
+            repo,
+            crate::api::git::hydrate::HydrationOptions {
+                pack_cache: &cache,
+                scratch_dir: scratch.path(),
+                max_pack_bytes: limits.max_pack_bytes,
+                max_repo_bytes: limits.max_repo_bytes,
+            },
+        )
+        .await
+        .expect("hydrate compacted")
+        .expect("repo exists");
+        let hydrated_head = String::from_utf8(
+            run_test_git(hydrated.path(), &["rev-parse", "HEAD"])
+                .await
+                .stdout,
+        )
+        .expect("hydrated head utf8")
+        .trim()
+        .to_string();
+        assert_eq!(hydrated_head, head_oid);
+        run_test_git(hydrated.path(), &["cat-file", "-e", "refs/tags/v1^{tag}"]).await;
+        assert_eq!(
+            parent_state.parent.packs.len(),
+            2,
+            "test parent must exercise pack-count reduction"
+        );
+        assert_eq!(
+            limits.parent_hydrated_bytes,
+            first_pack_bytes + second_pack_bytes
+        );
     }
 
     /// `cas_publish` must invoke `Manifest::validate()` between

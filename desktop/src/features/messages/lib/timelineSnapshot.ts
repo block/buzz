@@ -185,10 +185,12 @@ export type TimelineBodySurface = "skeleton" | "empty" | "list";
 
 export function selectTimelineBodySurface({
   deferredCount,
+  hasPersistentIntro = false,
   isLoading,
   liveCount,
 }: {
   deferredCount: number;
+  hasPersistentIntro?: boolean;
   isLoading: boolean;
   liveCount: number;
 }): TimelineBodySurface {
@@ -198,7 +200,10 @@ export function selectTimelineBodySurface({
 
   const renderState = selectDeferredListRenderState(deferredCount, liveCount);
   if (renderState === "pending") {
-    return "skeleton";
+    // A channel/DM intro is already meaningful stable content. Preserve it
+    // while React's deferred snapshot catches up to the first live message;
+    // replacing it with a skeleton makes an append look like a page reload.
+    return hasPersistentIntro ? "empty" : "skeleton";
   }
   return renderState;
 }

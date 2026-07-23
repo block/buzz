@@ -18,6 +18,8 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
   bool _usingChannelWindow = false;
   int _initVersion = 0;
   ChannelWindowStore _windowStore = const ChannelWindowStore.empty();
+  final Map<String, NostrEvent> _deepLinkEvents = {};
+  final Set<String> _retainedDeepLinkEventIds = {};
 
   ChannelMessagesNotifier(this.channelId);
 
@@ -88,10 +90,10 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
       final existing = state.value ?? const <NostrEvent>[];
       final existingIds = existing.map((event) => event.id).toSet();
-      final merged = [
+      final merged = _withDeepLinkEvents([
         ...existing,
-        ...history.where((event) => !existingIds.contains(event.id)),
-      ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+        ...history.where((event) => existingIds.add(event.id)),
+      ]);
       _lastKnownMessages = merged;
       state = AsyncData(merged);
     } catch (e, st) {
@@ -175,7 +177,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   void _handleWindowLiveEvent(NostrEvent event) {
     if (!_mergeWindowEventIntoStore(event)) return;
-    final flattened = flattenChannelWindowEvents(_windowStore);
+    final flattened = _withDeepLinkEvents(
+      flattenChannelWindowEvents(_windowStore),
+    );
     _lastKnownMessages = flattened;
     state = AsyncData(flattened);
   }
@@ -244,6 +248,62 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
 
   bool get reachedOldest => _reachedOldest;
 
+  /// Loads specific deep-link targets that may fall outside the newest window.
+  Future<void> loadEventsById(Iterable<String> eventIds) async {
+    final ids = eventIds.where((id) => id.isNotEmpty).toSet();
+    if (ids.isEmpty) return;
+    _retainedDeepLinkEventIds.addAll(ids);
+
+    final existing = state.value ?? const <NostrEvent>[];
+    for (final event in existing) {
+      if (ids.contains(event.id)) _deepLinkEvents[event.id] = event;
+    }
+    ids.removeAll(_deepLinkEvents.keys);
+    if (ids.isEmpty) return;
+
+    final events = await ref
+        .read(relaySessionProvider.notifier)
+        .fetchHistory(
+          NostrFilter(
+            kinds: EventKind.channelTimelineContentKinds,
+            ids: ids.toList(),
+            limit: ids.length,
+          ),
+        );
+    for (final event in events) {
+      if (event.channelId == channelId &&
+          _retainedDeepLinkEventIds.contains(event.id)) {
+        _deepLinkEvents[event.id] = event;
+      }
+    }
+
+    // Let the initial history load publish the complete timeline once it
+    // finishes. Publishing a target-only list here would make the UI consume
+    // its one-shot jump against a provisional ordering.
+    if (_initInFlight) return;
+    final merged = _withDeepLinkEvents(
+      state.value ?? _lastKnownMessages ?? const [],
+    );
+    _lastKnownMessages = merged;
+    state = AsyncData(merged);
+  }
+
+  /// Stops pinning deep-link-only events into subsequent window rebuilds.
+  void releaseDeepLinkEvents(Iterable<String> eventIds) {
+    for (final id in eventIds) {
+      _retainedDeepLinkEventIds.remove(id);
+      _deepLinkEvents.remove(id);
+    }
+  }
+
+  List<NostrEvent> _withDeepLinkEvents(List<NostrEvent> events) {
+    final ids = events.map((event) => event.id).toSet();
+    return [
+      ...events,
+      ..._deepLinkEvents.values.where((event) => ids.add(event.id)),
+    ]..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+  }
+
   Future<bool> fetchOlder() async {
     if (_reachedOldest || _initInFlight) return false;
 
@@ -258,7 +318,9 @@ class ChannelMessagesNotifier extends Notifier<AsyncValue<List<NostrEvent>>> {
         final page = await _fetchWindowPage(session, cursor);
         _windowStore = appendOlderChannelWindow(_windowStore, page);
         _reachedOldest = !channelWindowHasMore(_windowStore);
-        final flattened = flattenChannelWindowEvents(_windowStore);
+        final flattened = _withDeepLinkEvents(
+          flattenChannelWindowEvents(_windowStore),
+        );
         _lastKnownMessages = flattened;
         state = AsyncData(flattened);
         return page.rows.isNotEmpty || page.aux.isNotEmpty;

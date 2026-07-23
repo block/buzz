@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "push.name" . }}-migration
+  labels: {{- include "push.migrationLabels" . | nindent 4 }}
+  annotations:
+    # Hooks precede ordinary manifests. Keep this policy alive until the next
+    # release's before-hook-creation cleanup so it covers the later Job hook.
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  podSelector:
+    matchLabels: {{- include "push.migrationLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.dns.namespaceSelector | nindent 14 }}
+          podSelector:
+            matchLabels: {{- toYaml .Values.networkPolicy.dns.podSelector | nindent 14 }}
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - to:
+      {{- range .Values.networkPolicy.postgresEgressCidrs }}
+        - ipBlock: { cidr: {{ . }} }
+      {{- end }}
+      ports: [{ port: 5432, protocol: TCP }]

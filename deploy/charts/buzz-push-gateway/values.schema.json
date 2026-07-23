@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 2
+    },
+    "existingSecret": {
+      "type": "string",
+      "minLength": 1
+    },
+    "publicDeliveryUrl": {
+      "const": "https://push.buzz.xyz/v1/deliveries/apns"
+    },
+    "maxGrantLifetimeSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 31536000
+    },
+    "appAttestAppId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "httpRoute": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "parentRefs",
+        "hostnames"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "parentRefs": {
+          "type": "array"
+        },
+        "hostnames": {
+          "type": "array",
+          "contains": {
+            "const": "push.buzz.xyz"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          },
+          "then": {
+            "properties": {
+              "parentRefs": {
+                "minItems": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "networkPolicy": {
+      "type": "object",
+      "required": [
+        "enabled",
+        "apnsEgressCidrs",
+        "postgresEgressCidrs",
+        "dns"
+      ],
+      "properties": {
+        "enabled": {
+          "const": true
+        },
+        "apnsEgressCidrs": {
+          "type": "array",
+          "minItems": 1
+        },
+        "postgresEgressCidrs": {
+          "type": "array",
+          "minItems": 1
+        },
+        "dns": {
+          "type": "object",
+          "required": [
+            "namespaceSelector",
+            "podSelector"
+          ]
+        },
+        "monitoring": {
+          "type": "object",
+          "required": [
+            "enabled",
+            "namespaceSelector",
+            "podSelector"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "namespaceSelector": {
+              "type": "object"
+            },
+            "podSelector": {
+              "type": "object"
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "namespaceSelector": {
+                    "minProperties": 1
+                  },
+                  "podSelector": {
+                    "minProperties": 1
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "podMonitor": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "prometheusRule": {
+      "type": "object",
+      "required": [
+        "enabled"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "apnsRetryRatioThreshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "apnsRetryMinSamples": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "required": [
+        "repository"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^$|^sha256:[0-9a-f]{64}$"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "tag": {
+              "minLength": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "digest": {
+              "pattern": "^sha256:[0-9a-f]{64}$"
+            }
+          }
+        }
+      ]
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingSecret",
+        "databaseUrlKey",
+        "runtimeDatabaseRole",
+        "resources"
+      ],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "minLength": 1
+        },
+        "databaseUrlKey": {
+          "type": "string",
+          "minLength": 1
+        },
+        "runtimeDatabaseRole": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]{0,62}$"
+        },
+        "resources": {
+          "type": "object"
+        }
+      }
+    }
+  },
+  "required": [
+    "replicaCount",
+    "existingSecret",
+    "publicDeliveryUrl",
+    "maxGrantLifetimeSeconds",
+    "appAttestAppId",
+    "httpRoute",
+    "image",
+    "migration"
+  ],
+  "allOf": [
+    {
+      "$comment": "Scraping opt-in is coupled: a PodMonitor and its scoped 8081 ingress must be enabled together, so we never render a scraper that cannot reach the port nor an ingress hole with no scraper.",
+      "if": {
+        "properties": {
+          "podMonitor": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "podMonitor"
+        ]
+      },
+      "then": {
+        "properties": {
+          "networkPolicy": {
+            "properties": {
+              "monitoring": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            },
+            "required": [
+              "monitoring"
+            ]
+          }
+        },
+        "required": [
+          "networkPolicy"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "networkPolicy": {
+            "properties": {
+              "monitoring": {
+                "properties": {
+                  "enabled": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "enabled"
+                ]
+              }
+            },
+            "required": [
+              "monitoring"
+            ]
+          }
+        },
+        "required": [
+          "networkPolicy"
+        ]
+      },
+      "then": {
+        "properties": {
+          "podMonitor": {
+            "properties": {
+              "enabled": {
+                "const": true
+              }
+            },
+            "required": [
+              "enabled"
+            ]
+          }
+        },
+        "required": [
+          "podMonitor"
+        ]
+      }
+    }
+  ]
+}

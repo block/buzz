@@ -7,7 +7,7 @@
 //! Static template content in AGENTS.md (above the managed-section markers)
 //! and SKILL.md is refreshed when the embedded template version changes.
 
-use super::{load_managed_agents, load_personas, ManagedAgentRecord, PersonaRecord};
+use super::{load_managed_agents, load_personas, AgentDefinition, ManagedAgentRecord};
 #[cfg(test)]
 use super::{BackendKind, RespondTo};
 use crate::app_state::AppState;
@@ -50,7 +50,7 @@ const NEST_AGENTS_VERSION: u32 = 4;
 
 /// Template content version for SKILL.md.
 /// Bump this when changing `nest_skill.md` to trigger refresh on existing installs.
-const NEST_SKILL_VERSION: u32 = 3;
+const NEST_SKILL_VERSION: u32 = 4;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN BUZZ MANAGED";
 const END_MARKER: &str = "<!-- END BUZZ MANAGED -->";
@@ -549,7 +549,7 @@ fn escape_md_cell(s: &str) -> String {
 }
 
 pub fn render_dynamic_section(
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     agents: &[ManagedAgentRecord],
     relay_url: &str,
 ) -> String {

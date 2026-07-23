@@ -246,7 +246,7 @@ async fn test_video_upload_and_get() {
     let sha256 = hex::encode(Sha256::digest(&mp4));
 
     let auth = sign_blossom_auth(&keys, &sha256);
-    let url = format!("{}/media/upload", relay_http_url());
+    let url = format!("{}/upload", relay_http_url());
 
     let resp = client
         .put(&url)
@@ -280,7 +280,8 @@ async fn test_video_upload_and_get() {
 
 /// The relay ignores the Content-Type header and sniffs magic bytes. MP4
 /// uploaded with a spoofed image/jpeg header is detected as video/mp4 and
-/// accepted via the generic file path.
+/// accepted through the streaming media validator, including on the legacy
+/// compatibility route.
 #[tokio::test]
 #[ignore]
 async fn test_video_content_type_header_ignored() {

@@ -92,8 +92,52 @@ async function measureThreadSummaryGeometry(summaryRow: Locator) {
   });
 }
 
-test.beforeEach(async ({ page }) => {
-  await installMockBridge(page);
+test.beforeEach(async ({ page }, testInfo) => {
+  const mock = testInfo.title.includes("agent owner label")
+    ? {
+        searchProfiles: [
+          {
+            pubkey: TEST_IDENTITIES.alice.pubkey,
+            displayName: "alice",
+            ownerPubkey: TEST_IDENTITIES.bob.pubkey,
+            isAgent: true,
+          },
+          {
+            pubkey: TEST_IDENTITIES.bob.pubkey,
+            displayName: "bob",
+          },
+        ],
+      }
+    : undefined;
+  await installMockBridge(page, mock);
+});
+
+test("agent owner label identifies the agent and owner", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  const aliceMessage = page
+    .getByTestId("message-row")
+    .filter({ hasText: "Hey team — checking in." });
+  const ownerTreatment = aliceMessage.getByTestId("message-agent-owner");
+
+  await expect(ownerTreatment.locator("svg")).toBeVisible();
+  await expect(
+    ownerTreatment.getByText("managed by", { exact: true }),
+  ).toBeVisible();
+  await expect(ownerTreatment.locator(".font-semibold")).toHaveText("bob");
+  await expect(ownerTreatment.getByRole("button")).toHaveAccessibleName("bob");
+  await expect(ownerTreatment.locator(".sr-only")).toHaveText(
+    "Agent managed by",
+  );
+
+  const joinedRow = page
+    .getByTestId("system-message-row")
+    .filter({ hasText: "alice" })
+    .filter({ hasText: "joined the channel" });
+  await expect(joinedRow.getByTestId("message-agent-owner")).toContainText(
+    "managed bybob",
+  );
 });
 
 test("send a message and see it in timeline", async ({ page }) => {
@@ -150,15 +194,68 @@ test("long autolink wraps without widening the timeline", async ({ page }) => {
       return barBox.x + barBox.width - (timelineBox.x + timelineBox.width);
     })
     .toBeLessThanOrEqual(0);
-  // #1338 guard: hovering must un-pause the row so the upward-bleeding bar renders
+});
+
+test("markdown tables overflow wide content and fill the message when narrow", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 900, height: 600 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  const longCell = "WIDE TABLE COLUMN VALUE ".repeat(8);
+  await page.evaluate(
+    ({ wide, narrow }) => {
+      const createdAt = Math.floor(Date.now() / 1000);
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: wide,
+        createdAt,
+      });
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: narrow,
+        createdAt: createdAt + 1,
+      });
+    },
+    {
+      wide: `| ${longCell} | ${longCell} | ${longCell} |\n| --- | --- | --- |\n| ${longCell} | ${longCell} | ${longCell} |`,
+      narrow: "| NARROW TABLE | VALUE |\n| --- | --- |\n| alpha | beta |",
+    },
+  );
+
+  const wideTable = page
+    .getByTestId("message-row")
+    .filter({ hasText: "WIDE TABLE COLUMN VALUE" })
+    .locator("[data-table-block]");
+  const narrowTable = page
+    .getByTestId("message-row")
+    .filter({ hasText: "NARROW TABLE" })
+    .locator("[data-table-block]");
+  await expect(wideTable).toBeVisible();
+  await expect(narrowTable).toBeVisible();
+
   await expect
-    .poll(async () =>
-      actionBar.evaluate((bar) => {
-        const cvRow = bar.closest(".timeline-row-cv");
-        return cvRow ? getComputedStyle(cvRow).contentVisibility : "missing";
+    .poll(() =>
+      wideTable.evaluate(
+        (element) => element.scrollWidth - element.clientWidth,
+      ),
+    )
+    .toBeGreaterThan(1);
+  await expect
+    .poll(() =>
+      narrowTable.evaluate((element) => {
+        const table = element.querySelector("table");
+        return table
+          ? Math.abs(table.getBoundingClientRect().width - element.clientWidth)
+          : Number.POSITIVE_INFINITY;
       }),
     )
-    .toBe("visible");
+    .toBeLessThanOrEqual(1);
 });
 
 test("supported link previews keep the message link visible", async ({
@@ -517,7 +614,7 @@ test("day divider appears in timeline", async ({ page }) => {
   await expect(page.getByTestId("message-timeline-day-divider")).toBeVisible();
 });
 
-test("send message to DM channel", async ({ page }) => {
+test("send message to DM channel p-tags the recipient", async ({ page }) => {
   const message = `DM message ${Date.now()}`;
 
   await page.goto("/");
@@ -528,6 +625,21 @@ test("send message to DM channel", async ({ page }) => {
   await page.getByTestId("send-message").click();
 
   await expect(page.getByTestId("message-timeline")).toContainText(message);
+  await expect
+    .poll(() =>
+      page.evaluate((content) => {
+        const events = (
+          window as Window & {
+            __BUZZ_E2E_SIGNED_EVENTS__?: Array<{
+              content: string;
+              tags: string[][];
+            }>;
+          }
+        ).__BUZZ_E2E_SIGNED_EVENTS__;
+        return events?.find((event) => event.content === content)?.tags ?? [];
+      }, message),
+    )
+    .toContainEqual(["p", TEST_IDENTITIES.alice.pubkey]);
 });
 
 test("shows your avatar on your own message when profile avatar is set", async ({
@@ -1031,6 +1143,92 @@ test("thread composer is focused after clicking the reply icon", async ({
 
   await page.keyboard.type("typed-into-thread");
   await expect(threadInput).toHaveText("typed-into-thread");
+});
+
+test("thread refetch preserves a live reply and reaction received in flight", async ({
+  page,
+}) => {
+  await installMockBridge(page, { threadRepliesDelayMs: 800 });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .first();
+  const rootId = await rootMessage.getAttribute("data-message-id");
+  if (!rootId) throw new Error("Expected a thread root id.");
+
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+  const threadPanel = page.getByTestId("message-thread-panel");
+  await expect(threadPanel).toBeVisible();
+
+  const reply = `Live reply during thread fetch ${Date.now()}`;
+  const replyId = await page.evaluate(
+    async ({ channelId, content, parentEventId }) => {
+      const bridgeWindow = window as Window & {
+        __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+          command: string,
+          payload?: Record<string, unknown>,
+        ) => Promise<unknown>;
+      };
+      const invoke = bridgeWindow.__BUZZ_E2E_INVOKE_MOCK_COMMAND__;
+      if (!invoke) throw new Error("Mock Tauri invoke bridge is unavailable.");
+      const sent = (await invoke("send_channel_message", {
+        channelId,
+        content,
+        parentEventId,
+      })) as { event_id: string };
+      await invoke("add_reaction", { eventId: sent.event_id, emoji: "👍" });
+      return sent.event_id;
+    },
+    {
+      channelId: "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50",
+      content: reply,
+      parentEventId: rootId,
+    },
+  );
+
+  const replyRow = threadPanel.locator(`[data-message-id="${replyId}"]`);
+  await expect(replyRow).toContainText(reply);
+  await expect(replyRow.getByLabel("Toggle 👍 reaction")).toBeVisible();
+
+  // The delayed get_thread_replies response was snapshotted before the live
+  // events. Wait past query completion: neither cache addition may disappear.
+  await page.waitForTimeout(1_200);
+  await expect(replyRow).toContainText(reply);
+  await expect(replyRow.getByLabel("Toggle 👍 reaction")).toBeVisible();
+});
+
+test("thread reply appears after relay closes and restores its live subscription", async ({
+  page,
+}) => {
+  await installMockBridge(page, { closeChannelLiveSubscriptionOnce: true });
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+
+  const seed = `Thread CLOSED seed ${Date.now()}`;
+  await page.getByTestId("message-input").fill(seed);
+  await page.getByTestId("send-message").click();
+  await expect(page.getByTestId("message-timeline")).toContainText(seed);
+
+  const rootMessage = page
+    .getByTestId("message-timeline")
+    .getByTestId("message-row")
+    .last();
+  await rootMessage.hover();
+  await rootMessage.getByRole("button", { name: "Reply" }).click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const reply = `Thread reply after CLOSED ${Date.now()}`;
+  await threadPanel.getByTestId("message-input").fill(reply);
+  await page.waitForTimeout(1_100);
+  await threadPanel.getByTestId("send-message").click();
+
+  await expect(threadPanel).toContainText(reply);
 });
 
 test("thread composer keeps focus after sending a thread reply", async ({

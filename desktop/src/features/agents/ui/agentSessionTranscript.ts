@@ -18,6 +18,7 @@ import {
   describeSessionResolved,
   extractBlockText,
   extractContentText,
+  extractPlanText,
   extractPromptText,
   extractTriggeringEventIds,
   extractToolArgs,
@@ -113,19 +114,6 @@ function replaceItem(d: TranscriptDraft, id: string, updated: TranscriptItem) {
     d.items[idx] = updated;
   }
   d.itemsById.set(id, updated);
-}
-
-/**
- * Remove an item from the draft by id. Used when an item needs to be
- * repositioned — remove it from its current slot then push it to the tail.
- */
-function removeItem(d: TranscriptDraft, id: string) {
-  ensureMutable(d);
-  const idx = d.items.findIndex((it) => it.id === id);
-  if (idx !== -1) {
-    d.items.splice(idx, 1);
-  }
-  d.itemsById.delete(id);
 }
 
 function pushItem(d: TranscriptDraft, item: TranscriptItem) {
@@ -579,28 +567,6 @@ function upsertMetadata(
 ) {
   const existing = d.itemsById.get(id);
   if (existing?.type === "metadata") {
-    // A re-fire of a system-prompt item (acpSource "session/new") is a
-    // session-restart signal. The existing item sits at the position of the
-    // FIRST session's event, not the restart event — keeping it there would
-    // leave it before the new-session boundary divider in the display feed.
-    // Reposition it to the stream TAIL with the new event's timestamp so the
-    // display grouper can forward it to the correct (new) session run.
-    // All other metadata items (prompt-context, steer-context) replace in-place
-    // as before — they don't carry cross-session boundary semantics.
-    if (acpSource === "session/new") {
-      removeItem(d, id);
-      sealOpenMessages(d);
-      pushItem(d, {
-        ...existing,
-        sections,
-        timestamp,
-        channelId: ctx.channelId,
-        turnId: ctx.turnId ?? existing.turnId,
-        sessionId: ctx.sessionId ?? existing.sessionId,
-        acpSource,
-      });
-      return;
-    }
     replaceItem(d, id, {
       ...existing,
       sections,
@@ -905,11 +871,13 @@ export function processTranscriptEvent(
       }
     } else if (event.kind === "acp_write" && method === "session/new") {
       // The base + persona prompts ride session/new's systemPrompt, framed by
-      // the harness as [Base]/[System]. Surface them as one "System prompt" item
-      // keyed per channel-session — session/new fires once per channel-session,
-      // so a re-created session correctly replaces the prior item.
-      // turnId: null keeps it out of turn buckets; acpSource "session/new" lets
-      // the display grouper inject it before prompt-context in the prompt segment.
+      // the harness as [Base]/[System]/[Agent Memory — core]/[Channel Canvas].
+      // Each session/new event is keyed by (seq, timestamp) — the same dedup
+      // pair used by observerRelayStore — so distinct sessions each retain
+      // their own system-prompt card even across archive rebuilds where two
+      // processes may emit the same seq. turnId: null keeps it out of turn
+      // buckets; acpSource "session/new" lets the display grouper place it
+      // as a standalone card before the session's first turn.
       const params = asRecord(payload.params);
       const systemPrompt = asString(params.systemPrompt);
       if (systemPrompt) {
@@ -917,7 +885,7 @@ export function processTranscriptEvent(
         if (sections.length > 0) {
           upsertMetadata(
             d,
-            `system-prompt:${ch}`,
+            `system-prompt:${ch}:${event.seq}:${event.timestamp}`,
             "System prompt",
             sections,
             event.timestamp,
@@ -1051,7 +1019,7 @@ export function processTranscriptEvent(
           d,
           `plan:${ch}:${turnKey}`,
           "Plan",
-          extractContentText(update.content) || JSON.stringify(update, null, 2),
+          extractPlanText(update),
           event.timestamp,
           ctx,
           updateType,
@@ -1188,7 +1156,9 @@ export function processTranscriptEvent(
   };
 }
 
-export function buildTranscriptState(events: ObserverEvent[]): TranscriptState {
+export function buildTranscriptState(
+  events: readonly ObserverEvent[],
+): TranscriptState {
   let state = createEmptyTranscriptState();
   for (const event of events) {
     state = processTranscriptEvent(state, event);
@@ -1196,6 +1166,8 @@ export function buildTranscriptState(events: ObserverEvent[]): TranscriptState {
   return state;
 }
 
-export function buildTranscript(events: ObserverEvent[]): TranscriptItem[] {
+export function buildTranscript(
+  events: readonly ObserverEvent[],
+): TranscriptItem[] {
   return buildTranscriptState(events).items;
 }

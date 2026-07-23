@@ -2,7 +2,7 @@
  * Per-channel persisted message snapshots.
  *
  * A channel revisited after its React-Query cache entry is gone (app restart,
- * gcTime expiry, workspace remount) goes fully cold and holds a skeleton for a
+ * gcTime expiry, community remount) goes fully cold and holds a skeleton for a
  * relay round trip. This module persists the newest slice of each channel's
  * timeline so a revisit can paint instantly from the snapshot while the
  * history fetch revalidates behind it — the same stale-then-revalidate pattern
@@ -187,7 +187,7 @@ export function mergeHistoryOverSnapshot(input: {
 }
 
 /**
- * Removes every channel message snapshot for a relay. Called when a workspace
+ * Removes every channel message snapshot for a relay. Called when a community
  * is removed.
  */
 export function removeMessageSnapshotsForRelay(relayUrl: string): void {

@@ -13,6 +13,8 @@ type AgentIdentityCardProps = {
   label: string;
   modelLabel?: string | null;
   onClick: () => void;
+  /** Optional badge rendered below the label (e.g. "Restart required"). */
+  statusBadge?: ReactNode;
 };
 
 export function AgentIdentityCard({
@@ -24,6 +26,7 @@ export function AgentIdentityCard({
   label,
   modelLabel,
   onClick,
+  statusBadge,
 }: AgentIdentityCardProps) {
   const trimmedAvatarUrl = avatarUrl?.trim() || null;
 
@@ -70,10 +73,11 @@ export function AgentIdentityCard({
           {label}
         </span>
         {modelLabel ? (
-          <span className="min-w-0 truncate font-normal text-secondary-foreground/75">
+          <span className="min-w-0 truncate text-xs font-normal text-secondary-foreground/75">
             {modelLabel}
           </span>
         ) : null}
+        {statusBadge}
       </div>
     </div>
   );

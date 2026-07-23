@@ -5,6 +5,7 @@ import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
 } from "@/features/agents/hooks";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
 import {
   emptyResolvedTeamPersonas,
@@ -12,6 +13,7 @@ import {
 } from "@/features/agents/lib/teamPersonas";
 import {
   collectRuntimeWarnings,
+  getDefaultPersonaRuntime,
   resolvePersonaRuntime,
 } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useChannelsQuery } from "@/features/channels/hooks";
@@ -49,6 +51,7 @@ export function AddTeamToChannelDialog({
   onOpenChange,
   onDeployed,
 }: AddTeamToChannelDialogProps) {
+  const { globalConfig } = useGlobalAgentConfig();
   const channelsQuery = useChannelsQuery();
   const providersQuery = useAvailableAcpRuntimes();
   const [channelId, setChannelId] = React.useState("");
@@ -65,8 +68,13 @@ export function AddTeamToChannelDialog({
     [channelsQuery.data],
   );
 
-  const providers = providersQuery.data ?? [];
-  const defaultProvider = providers[0] ?? null;
+  const runtimes = providersQuery.data ?? [];
+  // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
+  // single-agent start path (buzz-agent → goose → first available).
+  const defaultProvider = getDefaultPersonaRuntime(
+    runtimes,
+    globalConfig.preferred_runtime,
+  );
 
   const teamPersonaResolution = React.useMemo(
     () =>
@@ -80,8 +88,8 @@ export function AddTeamToChannelDialog({
   // This dialog has no runtime selector, so the fallback is always
   // `defaultProvider` (the first available runtime).
   const runtimeWarnings = React.useMemo(
-    () => collectRuntimeWarnings(resolved, providers, defaultProvider),
-    [resolved, providers, defaultProvider],
+    () => collectRuntimeWarnings(resolved, runtimes, defaultProvider),
+    [resolved, runtimes, defaultProvider],
   );
 
   function reset() {
@@ -122,7 +130,7 @@ export function AddTeamToChannelDialog({
       const inputs = resolved.map((persona) => {
         const { runtime: personaRuntime } = resolvePersonaRuntime(
           persona.runtime,
-          providers,
+          runtimes,
           defaultProvider,
         );
         const runtimeToUse = personaRuntime ?? defaultProvider;
@@ -139,6 +147,9 @@ export function AddTeamToChannelDialog({
           avatarUrl: persona.avatarUrl ?? undefined,
           model: persona.model ?? undefined,
           personaId: persona.id,
+          teamId: team.id,
+          // One persona can be deployed under multiple teams with different instructions.
+          forceNewInstance: true,
           role,
         };
       });

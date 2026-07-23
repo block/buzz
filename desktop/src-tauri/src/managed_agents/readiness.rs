@@ -38,22 +38,20 @@
 //! it at startup.  We do not evaluate it here; it is exposed for future
 //! UI display only.
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::managed_agents::{
     agent_env::baked_build_env,
     config_bridge::read_goose_file_config,
-    discovery::{
-        classify_runtime, find_command, known_acp_runtime, resolve_command, KnownAcpRuntime,
-    },
+    discovery::{known_acp_runtime, KnownAcpRuntime},
     env_vars::merged_user_env,
     global_config::GlobalAgentConfig,
-    types::{AcpAvailabilityStatus, ManagedAgentRecord, PersonaRecord},
+    types::{AcpAvailabilityStatus, AgentDefinition, ManagedAgentRecord},
 };
 
-mod cli_probe;
+mod cli_login;
+pub(crate) mod cli_probe;
 
 // ── EffectiveAgentEnv ─────────────────────────────────────────────────────────
 
@@ -91,7 +89,7 @@ pub(crate) struct EffectiveAgentEnv {
 ///   `&GlobalAgentConfig::default()` in tests that don't need global config)
 pub(crate) fn resolve_effective_agent_env(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime: Option<&KnownAcpRuntime>,
     global: &GlobalAgentConfig,
 ) -> EffectiveAgentEnv {
@@ -136,6 +134,11 @@ pub(crate) fn resolve_effective_agent_env(
         &record.env_vars,
     );
     env.extend(user_env);
+
+    // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
+    // OpenAI-compatible transport only in the effective runtime environment.
+    #[cfg(feature = "mesh-llm")]
+    super::apply_relay_mesh_env(&mut env, effective_provider, effective_model);
 
     EffectiveAgentEnv {
         env,
@@ -190,6 +193,9 @@ pub enum Requirement {
         /// Shown verbatim in the nudge so the user can identify the problem.
         diagnostic: String,
     },
+    /// Git for Windows is missing, so buzz-agent cannot launch buzz-dev-mcp's
+    /// Bash-based shell tool. Doctor owns installation and re-checking.
+    GitBash,
 }
 
 // ── AgentReadiness ────────────────────────────────────────────────────────────
@@ -277,12 +283,12 @@ fn collect_missing_requirements(
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
-        "claude" => cli_login_requirements(
+        "claude" => cli_login::requirements(
             &["claude", "auth", "status"],
             "complete Claude Code authentication by running the Claude CLI",
             rt,
         ),
-        "codex" => cli_login_requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
         _ => vec![],
     }
 }
@@ -290,6 +296,11 @@ fn collect_missing_requirements(
 /// Requirements for buzz-agent (provider + model + provider-specific creds).
 fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
     let mut missing = Vec::new();
+
+    #[cfg(windows)]
+    if !crate::managed_agents::git_bash_available(&effective.env) {
+        missing.push(Requirement::GitBash);
+    }
 
     // Provider is required — maps to BUZZ_AGENT_PROVIDER in the effective env.
     // An empty string is treated as absent: a key set to "" is not a valid
@@ -471,83 +482,6 @@ fn goose_requirements(
     }
 
     missing
-}
-
-/// Requirements for CLI-login runtimes (claude, codex).
-///
-/// Probes the CLI's login-status command synchronously.  These probes are
-/// fast (<300ms) and the results are memoized by the caller for the session
-/// lifetime if desired.
-///
-/// Computes a granular `AcpAvailabilityStatus` by running the same
-/// classifier as Doctor (`classify_runtime`) before deciding whether to
-/// probe — this lets the nudge card distinguish "not installed" from
-/// "adapter missing" from "logged out" without a new backend probe.
-fn cli_login_requirements(
-    probe_args: &[&str],
-    setup_copy: &str,
-    runtime: &KnownAcpRuntime,
-) -> Vec<Requirement> {
-    // Resolve each adapter command to find the ACP adapter binary.
-    let adapter_result = runtime
-        .commands
-        .iter()
-        .find_map(|cmd| find_command(cmd).map(|path| (*cmd, path)));
-
-    // Check whether the underlying CLI itself (e.g. "claude", "codex") is on PATH.
-    let underlying_cli_found = runtime
-        .underlying_cli
-        .map(|cli| find_command(cli).is_some())
-        .unwrap_or(false);
-
-    let (availability, _cmd, _path) =
-        classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
-
-    match availability {
-        AcpAvailabilityStatus::Available => {
-            // Both adapter and CLI are present — probe login status.
-            // Resolve via the full login-shell PATH so the probe works in a
-            // packaged macOS DMG where the GUI PATH lacks npm/homebrew.
-            let Some(binary_path) = resolve_command(probe_args[0]) else {
-                // Unexpectedly not resolvable (race or PATH edge case).
-                return vec![Requirement::CliLogin {
-                    probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-                    setup_copy: setup_copy.to_string(),
-                    availability: AcpAvailabilityStatus::Available,
-                }];
-            };
-
-            let augmented_path = cli_probe::augmented_path();
-            let outcome =
-                cli_probe::login_probe(&binary_path, probe_args, augmented_path.as_deref());
-
-            match outcome {
-                cli_probe::ProbeOutcome::LoggedIn => vec![],
-                cli_probe::ProbeOutcome::LoggedOut => {
-                    vec![Requirement::CliLogin {
-                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-                        setup_copy: setup_copy.to_string(),
-                        availability: AcpAvailabilityStatus::Available,
-                    }]
-                }
-                cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => {
-                    vec![Requirement::CliConfigInvalid {
-                        probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-                        setup_copy: setup_copy.to_string(),
-                        diagnostic: stderr_excerpt,
-                    }]
-                }
-            }
-        }
-        // Tooling is not fully installed — emit CliLogin with the precise
-        // state so the nudge card can show the right message.  Skip the probe
-        // (can't run a missing or misconfigured CLI).
-        other => vec![Requirement::CliLogin {
-            probe_args: probe_args.iter().map(|s| s.to_string()).collect(),
-            setup_copy: setup_copy.to_string(),
-            availability: other,
-        }],
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -899,7 +833,7 @@ mod tests {
         // Use a not-installed runtime so the requirement is always emitted
         // regardless of whether codex is on the test machine's PATH.
         let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], None);
-        let reqs = cli_login_requirements(&["codex", "login", "status"], "run `codex login`", &rt);
+        let reqs = cli_login::requirements(&["codex", "login", "status"], "run `codex login`", &rt);
         // Whether codex is installed or not, the copy (if any) must not mention OPENAI_API_KEY.
         for req in &reqs {
             if let Requirement::CliLogin { setup_copy, .. } = req {
@@ -933,6 +867,7 @@ mod tests {
             mcp_hooks: false,
             underlying_cli,
             cli_install_commands: &[],
+            cli_install_commands_windows: &[],
             adapter_install_commands: &[],
             install_instructions_url: "",
             cli_install_hint: "",
@@ -950,6 +885,8 @@ mod tests {
             max_tokens_env_var: None,
             context_limit_env_var: None,
             required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 
@@ -978,7 +915,7 @@ mod tests {
             &["__buzz_nonexistent_adapter_abc123__"],
             Some("__buzz_nonexistent_cli_abc123__"),
         );
-        let reqs = cli_login_requirements(
+        let reqs = cli_login::requirements(
             &["__buzz_nonexistent_binary_abc123__", "status"],
             "install the tool first",
             &rt,
@@ -1012,7 +949,7 @@ mod tests {
         // → AdapterMissing state → no probe run → CliLogin{AdapterMissing}.
         let exe = present_binary_str();
         let rt = make_cli_runtime(&["__buzz_nonexistent_adapter_xyz789__"], Some(exe));
-        let reqs = cli_login_requirements(&[exe, "--list"], "install the adapter", &rt);
+        let reqs = cli_login::requirements(&[exe, "--list"], "install the adapter", &rt);
         assert!(
             !reqs.is_empty(),
             "adapter missing must produce a CliLogin requirement"
@@ -1039,7 +976,7 @@ mod tests {
             static_commands(vec![exe]),              // adapter found via absolute path
             Some("__buzz_nonexistent_cli_abc123__"), // underlying CLI missing
         );
-        let reqs = cli_login_requirements(&[exe, "--list"], "install the CLI", &rt);
+        let reqs = cli_login::requirements(&[exe, "--list"], "install the CLI", &rt);
         assert!(
             !reqs.is_empty(),
             "CLI missing must produce a CliLogin requirement"
@@ -1064,7 +1001,7 @@ mod tests {
         // → logged_in = true → requirements is empty (Ready).
         let exe = present_binary_str();
         let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
-        let reqs = cli_login_requirements(
+        let reqs = cli_login::requirements(
             &[exe, "--list"],
             "this should not show (probe exits 0)",
             &rt,
@@ -1085,7 +1022,8 @@ mod tests {
         // → CliLogin{Available} (tooling installed, needs login).
         let exe = present_binary_str();
         let rt = make_cli_runtime(static_commands(vec![exe]), Some(exe));
-        let reqs = cli_login_requirements(&[exe, "--buzz-probe-fail-xyz"], "run `tool login`", &rt);
+        let reqs =
+            cli_login::requirements(&[exe, "--buzz-probe-fail-xyz"], "run `tool login`", &rt);
         assert!(
             !reqs.is_empty(),
             "non-zero probe must produce a CliLogin requirement (logged out)"
@@ -1099,6 +1037,167 @@ mod tests {
                 crate::managed_agents::AcpAvailabilityStatus::Available,
                 "tooling installed, probe fails → Available (logged-out)"
             );
+        }
+    }
+
+    // ── codex readiness version gate ───────────────────────────────────────
+
+    /// Build a minimal `KnownAcpRuntime` for testing the codex version gate.
+    /// `adapter_commands` are the exact strings passed to `find_command` — use
+    /// `&["codex-acp"]` when the binary is on PATH, or `&[<absolute_path>]`
+    /// when resolving via absolute path.  `underlying_cli` is a portable
+    /// stand-in so the adapter is not misclassified as `CliMissing`.
+    fn make_codex_runtime(
+        adapter_commands: &'static [&'static str],
+        underlying_cli: Option<&'static str>,
+    ) -> KnownAcpRuntime {
+        KnownAcpRuntime {
+            id: "codex",
+            label: "Codex",
+            commands: adapter_commands,
+            aliases: &[],
+            avatar_url: "",
+            mcp_command: None,
+            mcp_hooks: false,
+            underlying_cli,
+            cli_install_commands: &[],
+            cli_install_commands_windows: &[],
+            adapter_install_commands: &[],
+            install_instructions_url: "",
+            cli_install_hint: "",
+            adapter_install_hint: "",
+            skill_dir: None,
+            supports_acp_model_switching: false,
+            config_file_path: None,
+            config_file_format: None,
+            model_env_var: None,
+            provider_env_var: None,
+            provider_locked: false,
+            default_env: &[],
+            supports_acp_native_config: false,
+            thinking_env_var: None,
+            max_tokens_env_var: None,
+            context_limit_env_var: None,
+            required_normalized_fields: &[],
+            login_hint: None,
+            auth_probe_args: None,
+        }
+    }
+
+    /// Build a temp dir containing a `codex-acp` script with the given body,
+    /// prepend it to PATH, and clear the resolve cache.  Returns the temp dir
+    /// and the original PATH string for restoration.
+    #[cfg(unix)]
+    fn setup_temp_codex_acp(script_body: &str) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("codex-acp");
+        std::fs::write(&bin, script_body).expect("write script");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod script");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), original_path);
+        std::env::set_var("PATH", &new_path);
+        crate::managed_agents::clear_resolve_cache();
+
+        (dir, original_path)
+    }
+
+    #[cfg(unix)]
+    fn leaked_adapter_commands(bin: &std::path::Path) -> &'static [&'static str] {
+        let command = Box::leak(bin.display().to_string().into_boxed_str());
+        Box::leak(vec![command as &'static str].into_boxed_slice())
+    }
+
+    /// Restore PATH and clear the resolve cache after a PATH-mutating test.
+    #[cfg(unix)]
+    fn restore_path(original: &str) {
+        std::env::set_var("PATH", original);
+        crate::managed_agents::clear_resolve_cache();
+    }
+
+    /// Codex readiness: outdated adapter (exits non-zero) → AdapterOutdated,
+    /// login probe skipped.
+    #[cfg(unix)]
+    #[test]
+    fn cli_login_requirements_codex_outdated_adapter_emits_adapter_outdated() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+
+        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
+        let exe = present_binary_str();
+        // Use the fixture's absolute adapter path here. Bare `codex-acp`
+        // intentionally prefers Buzz's managed npm shim when it exists, which
+        // would make this version-gate regression test depend on machine state.
+        let rt = make_codex_runtime(
+            leaked_adapter_commands(&dir.path().join("codex-acp")),
+            Some(exe),
+        );
+        let reqs = cli_login::requirements(
+            &[exe, "--buzz-probe-must-not-run-xyz"],
+            "run `codex login`",
+            &rt,
+        );
+
+        restore_path(&orig);
+        drop(dir);
+
+        assert!(
+            !reqs.is_empty(),
+            "outdated codex adapter must produce a requirement; got {reqs:?}"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
+                "0.x codex adapter must yield AdapterOutdated; got {availability:?}"
+            );
+        } else {
+            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
+        }
+    }
+
+    /// Codex readiness: adapter exits 0 but output is not a parseable version
+    /// → AdapterOutdated (garbage output treated as outdated, same as non-zero).
+    #[cfg(unix)]
+    #[test]
+    fn cli_login_requirements_codex_garbage_version_output_emits_adapter_outdated() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+
+        let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\necho 'not a version string'\nexit 0\n");
+        let exe = present_binary_str();
+        let rt = make_codex_runtime(
+            leaked_adapter_commands(&dir.path().join("codex-acp")),
+            Some(exe),
+        );
+        let reqs = cli_login::requirements(
+            &[exe, "--buzz-probe-must-not-run-xyz"],
+            "run `codex login`",
+            &rt,
+        );
+
+        restore_path(&orig);
+        drop(dir);
+
+        assert!(
+            !reqs.is_empty(),
+            "garbage version output must produce a requirement; got {reqs:?}"
+        );
+        if let Requirement::CliLogin {
+            ref availability, ..
+        } = reqs[0]
+        {
+            assert_eq!(
+                *availability,
+                crate::managed_agents::AcpAvailabilityStatus::AdapterOutdated,
+                "unparseable version output must yield AdapterOutdated; got {availability:?}"
+            );
+        } else {
+            panic!("expected CliLogin requirement; got {:?}", reqs[0]);
         }
     }
 
@@ -1141,6 +1240,12 @@ mod tests {
         let json = serde_json::to_value(&r).unwrap();
         assert_eq!(json["surface"], "normalized_field");
         assert_eq!(json["field"], "provider");
+    }
+
+    #[test]
+    fn git_bash_requirement_serializes_correctly() {
+        let json = serde_json::to_value(Requirement::GitBash).unwrap();
+        assert_eq!(json, serde_json::json!({ "surface": "git_bash" }));
     }
 
     #[test]
@@ -1206,7 +1311,6 @@ mod tests {
             model: None,
             provider: None,
             persona_source_version: None,
-            mcp_toolsets: None,
             env_vars,
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -1214,6 +1318,7 @@ mod tests {
             backend: Default::default(),
             backend_agent_id: None,
             provider_binary_path: None,
+            team_id: None,
             persona_team_dir: None,
             persona_name_in_team: None,
             created_at: String::new(),
@@ -1235,7 +1340,6 @@ mod tests {
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: None,
         };

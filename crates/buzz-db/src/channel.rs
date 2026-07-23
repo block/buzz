@@ -101,6 +101,11 @@ pub async fn create_channel(
         )));
     }
 
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(DbError::InvalidData("channel name is required".into()));
+    }
+
     let id = Uuid::new_v4();
 
     let mut tx = pool.begin().await?;
@@ -189,6 +194,11 @@ pub async fn create_channel_with_id(
         return Err(DbError::InvalidData(
             "channel_id must not be nil (reserved for global fan-out)".into(),
         ));
+    }
+
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(DbError::InvalidData("channel name is required".into()));
     }
 
     let mut tx = pool.begin().await?;
@@ -536,6 +546,33 @@ pub async fn is_member(
     .await?;
     let cnt: i64 = row.try_get("cnt")?;
     Ok(cnt > 0)
+}
+
+/// Return which of the given (channel, pubkey) combinations are active
+/// memberships, restricted to non-deleted channels — one statement for any
+/// batch size (T2b). Semantics per pair match [`is_member`].
+pub async fn membership_pairs(
+    pool: &PgPool,
+    community_id: CommunityId,
+    channel_ids: &[Uuid],
+    pubkeys: &[Vec<u8>],
+) -> Result<Vec<(Uuid, Vec<u8>)>> {
+    if channel_ids.is_empty() || pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT cm.channel_id, cm.pubkey FROM channel_members cm \
+         JOIN channels c ON cm.community_id = c.community_id AND cm.channel_id = c.id AND c.deleted_at IS NULL \
+         WHERE cm.community_id = $1 AND cm.channel_id = ANY($2) AND cm.pubkey = ANY($3) AND cm.removed_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(channel_ids)
+    .bind(pubkeys)
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| Ok((row.try_get("channel_id")?, row.try_get("pubkey")?)))
+        .collect()
 }
 
 /// Returns all active members of the given channel.
@@ -1014,7 +1051,7 @@ pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-    updates: ChannelUpdate,
+    mut updates: ChannelUpdate,
 ) -> Result<ChannelRecord> {
     if updates.name.is_none()
         && updates.description.is_none()
@@ -1024,6 +1061,13 @@ pub async fn update_channel(
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
         ));
+    }
+
+    if let Some(name) = updates.name.as_mut() {
+        *name = buzz_core::channel::canonical_channel_name(name).to_owned();
+        if name.is_empty() {
+            return Err(DbError::InvalidData("channel name is required".into()));
+        }
     }
 
     // Build SET clause dynamically — only include fields that are provided.
@@ -1076,9 +1120,32 @@ pub async fn update_channel(
     q = q.bind(community_id.as_uuid());
     q = q.bind(channel_id);
 
-    let result = q.execute(pool).await?;
-    if result.rows_affected() == 0 {
-        return Err(DbError::ChannelNotFound(channel_id));
+    // T1a repair: a TTL change can flip this channel's event-trigger fast
+    // path (migration 0024 reads ttl_seconds under a SHARED per-channel
+    // advisory lock). Take the same key EXCLUSIVE before the UPDATE so a
+    // concurrent event either sees the committed TTL or strictly precedes
+    // this transition — whose own deadline reset is then the latest word.
+    // Non-TTL updates don't touch the fast path and skip the lock.
+    if updates.ttl_seconds.is_some() {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "buzz_channel_ttl:{}:{}",
+                community_id.as_uuid(),
+                channel_id
+            ))
+            .execute(&mut *tx)
+            .await?;
+        let result = q.execute(&mut *tx).await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
+        tx.commit().await?;
+    } else {
+        let result = q.execute(pool).await?;
+        if result.rows_affected() == 0 {
+            return Err(DbError::ChannelNotFound(channel_id));
+        }
     }
 
     get_channel(pool, community_id, channel_id).await
@@ -1312,25 +1379,6 @@ pub async fn get_member_role(
     Ok(row.map(|r| r.try_get("role")).transpose()?)
 }
 
-/// Bump the TTL deadline for an ephemeral channel after a new message.
-///
-/// No-op for permanent channels or channels that are already archived/deleted.
-pub async fn bump_ttl_deadline(
-    pool: &PgPool,
-    community_id: CommunityId,
-    channel_id: Uuid,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE channels SET ttl_deadline = NOW() + (ttl_seconds || ' seconds')::interval \
-         WHERE community_id = $1 AND id = $2 AND ttl_seconds IS NOT NULL AND archived_at IS NULL AND deleted_at IS NULL",
-    )
-    .bind(community_id.as_uuid())
-    .bind(channel_id)
-    .execute(pool)
-    .await?;
-    Ok(())
-}
-
 /// Archive ephemeral channels whose TTL deadline has passed.
 ///
 /// Returns the `(community_id, host, channel_id)` list that was archived. Idempotent — the
@@ -1345,6 +1393,7 @@ pub async fn reap_expired_ephemeral_channels(pool: &PgPool) -> Result<Vec<Reaped
            AND ch.ttl_deadline < NOW() \
            AND ch.archived_at IS NULL \
            AND ch.deleted_at IS NULL \
+           AND c.archived_at IS NULL \
          RETURNING ch.community_id, c.host, ch.id",
     )
     .fetch_all(pool)

@@ -1,8 +1,10 @@
 import * as React from "react";
 
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
+import { useRelayOrigin } from "@/shared/lib/useRelayOrigin";
 
 import { VideoPlayer, type VideoReviewContext } from "../VideoPlayer";
+import { isRelayDownloadable } from "./mediaEntry";
 import type { ImetaEntry } from "./types";
 import { aspectRatioFromDim } from "./utils";
 
@@ -30,6 +32,17 @@ export function MarkdownVideoPlayer({
   src?: string;
 }) {
   const videoReviewContext = React.useContext(VideoReviewMarkdownContext);
+  // Download eligibility is independent of rendering as a video: only a
+  // relay-hosted `/media/` URL can pass the native `download_file` SSRF gate,
+  // so an external video renders and offers Copy Link but omits Download.
+  //
+  // Read the relay origin reactively: it resolves asynchronously and is
+  // commonly still null on first render, so a synchronous read would freeze
+  // eligibility (Download stays hidden even for a genuine relay URL). The
+  // subscription re-renders when the origin resolves and on workspace switch.
+  const relayOrigin = useRelayOrigin();
+  const downloadUrl =
+    src && isRelayDownloadable(src, relayOrigin ?? undefined) ? src : undefined;
   // Look up poster frame from imeta tags (NIP-71 `image` field).
   // Fall back to `thumb` for compatibility with older events.
   const posterUrl = entry?.image ?? entry?.thumb;
@@ -54,6 +67,8 @@ export function MarkdownVideoPlayer({
       durationSeconds={entry?.duration}
       reviewKey={src ?? resolvedSrc}
       reviewContext={resolvedReviewContext}
+      downloadUrl={downloadUrl}
+      filename={entry?.filename}
     />
   );
 }

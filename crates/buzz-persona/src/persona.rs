@@ -142,7 +142,7 @@ pub struct PersonaConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    /// Preferred ACP runtime ID (e.g., 'goose', 'claude'). Maps to PersonaRecord.runtime during
+    /// Preferred ACP runtime ID (e.g., 'goose', 'claude'). Maps to AgentDefinition.runtime during
     /// pack import.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,

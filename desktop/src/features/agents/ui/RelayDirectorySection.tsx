@@ -51,24 +51,28 @@ export function RelayDirectorySection({
 
   return (
     <section className="space-y-3">
-      <button
-        className="flex w-full items-center gap-2 text-left"
-        onClick={() => setIsExpanded((prev) => !prev)}
-        type="button"
-      >
-        {isExpanded ? (
-          <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
-        )}
-        <h3 className="text-sm font-semibold tracking-tight">
-          Relay directory
-        </h3>
-        <span className="text-sm text-muted-foreground">
-          ({otherAgents.length} other agent{otherAgents.length !== 1 ? "s" : ""}
-          )
-        </span>
-      </button>
+      <div className="space-y-1">
+        <button
+          className="flex w-full items-center gap-2 text-left"
+          onClick={() => setIsExpanded((prev) => !prev)}
+          type="button"
+        >
+          {isExpanded ? (
+            <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+          )}
+          <h2 className="text-lg font-semibold tracking-tight">
+            Agent directory
+          </h2>
+          <span className="text-sm text-muted-foreground">
+            ({otherAgents.length})
+          </span>
+        </button>
+        <p className="pl-6 text-sm text-muted-foreground">
+          View agents other members have shared in this community.
+        </p>
+      </div>
 
       {isExpanded ? (
         <>
@@ -86,7 +90,7 @@ export function RelayDirectorySection({
             <p className="px-1 py-3 text-sm text-muted-foreground">
               {searchQuery.trim()
                 ? "No agents match your search."
-                : "No other agents on this relay."}
+                : "No other agents in this community."}
             </p>
           ) : (
             <Card className="overflow-hidden">
@@ -95,7 +99,7 @@ export function RelayDirectorySection({
                   className="w-full border-collapse text-left text-sm"
                   data-testid="relay-directory-table"
                 >
-                  <thead className="bg-muted/35 text-2xs font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+                  <thead className="bg-muted/35 text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                     <tr>
                       <th className="px-4 py-3">Agent</th>
                       <th className="px-4 py-3">Status</th>

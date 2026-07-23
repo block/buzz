@@ -224,18 +224,28 @@ export function HuddleIndicator({
     }
 
     return (
-      <Button
-        aria-label="Start huddle"
-        className={className}
-        data-testid="channel-start-huddle-trigger"
-        disabled={startDisabled || isStarting}
-        onClick={() => onStart()}
-        size="icon"
-        type="button"
-        variant="outline"
-      >
-        <Headphones />
-      </Button>
+      <Tooltip disableHoverableContent>
+        <TooltipTrigger asChild>
+          <span
+            className="inline-flex"
+            data-testid="channel-huddle-tooltip-trigger"
+          >
+            <Button
+              aria-label="Start huddle"
+              className={className}
+              data-testid="channel-start-huddle-trigger"
+              disabled={startDisabled || isStarting}
+              onClick={() => onStart()}
+              size="icon"
+              type="button"
+              variant="outline"
+            >
+              <Headphones />
+            </Button>
+          </span>
+        </TooltipTrigger>
+        <TooltipContent>Huddle</TooltipContent>
+      </Tooltip>
     );
   }
 

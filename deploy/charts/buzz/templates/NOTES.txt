@@ -30,7 +30,7 @@
 ⚠ QUICKSTART / EVALUATION PROFILE
   {{ if .Values.postgresql.enabled }}- In-cluster Postgres subchart (CloudPirates){{ end }}
   {{ if .Values.redis.enabled }}- In-cluster Redis subchart (CloudPirates){{ end }}
-  {{ if .Values.minio.enabled }}- In-cluster MinIO (eval-only, single replica; bucket "{{ .Values.s3.bucket }}" created by post-install Job){{ end }}
+  {{ if .Values.minio.enabled }}- In-cluster MinIO (eval-only, single replica; bucket "{{ .Values.s3.bucket }}" created by a bundled init Job){{ end }}
   - Chart auto-generates secrets via the `lookup` pattern. This is NOT
     GitOps-safe — secrets will silently rotate under ArgoCD/Flux. For
     production, see examples/argocd-app.yaml or examples/flux-helmrelease.yaml.
@@ -61,6 +61,10 @@
 {{- end }}
 {{- if not .Values.relay.requireRelayMembership }}
   ⚠ relay.requireRelayMembership=false — relay is OPEN. Anyone can publish.
+{{- end }}
+{{- if not .Values.relay.requireMediaGetAuth }}
+  ⚠ relay.requireMediaGetAuth=false — media GET/HEAD reads are not auth-gated.
+    Keep this false only during staged client rollout.
 {{- end }}
 {{- if not .Values.migrate.autoMigrate }}
   ⚠ migrate.autoMigrate=false — relay startup will NOT run sqlx migrations.

@@ -37,7 +37,7 @@ export function sectionSortGroupKey(sectionId: string): ChannelSortGroupKey {
  *
  * When `relayUrl` is provided the key is scoped to that relay (normalized via
  * the same `normalizeRelayUrl` used by all relay-scoped local stores) so
- * preferences don't bleed across workspaces/relays.
+ * preferences don't bleed across communities/relays.
  */
 export function storageKey(pubkey: string, relayUrl?: string): string {
   if (!relayUrl) return `${STORAGE_KEY_PREFIX}:${pubkey}`;

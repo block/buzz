@@ -157,6 +157,7 @@ export function estimateRowHeight(
 // Dividers are short, fixed-height rows; reserving their true height keeps the
 // estimate honest without a content scan.
 const DIVIDER_HEIGHT = 32;
+const SYSTEM_GROUP_HEIGHT = 80;
 
 /**
  * `contain-intrinsic-size` for a `timeline-row-cv` wrapper. A credible per-row
@@ -164,16 +165,20 @@ const DIVIDER_HEIGHT = 32;
  * near its true height instead of snapping the scroll position. `auto` keeps
  * refining once the row paints.
  */
+export function estimateTimelineItemHeight(item: TimelineItem): number {
+  return item.kind === "message"
+    ? estimateRowHeight(item.entry.message, {
+        isContinuation: item.isContinuation,
+      }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
+    : item.kind === "system"
+      ? estimateRowHeight(item.entry.message)
+      : item.kind === "system-group"
+        ? SYSTEM_GROUP_HEIGHT
+        : DIVIDER_HEIGHT;
+}
+
 export function timelineRowReserveStyle(
   item: TimelineItem,
 ): React.CSSProperties {
-  const height =
-    item.kind === "message"
-      ? estimateRowHeight(item.entry.message, {
-          isContinuation: item.isContinuation,
-        }) + (item.isFollowedByContinuation ? 0 : MESSAGE_ITEM_BOTTOM_PADDING)
-      : item.kind === "system"
-        ? estimateRowHeight(item.entry.message)
-        : DIVIDER_HEIGHT;
-  return { containIntrinsicSize: `auto ${height}px` };
+  return { containIntrinsicSize: `auto ${estimateTimelineItemHeight(item)}px` };
 }

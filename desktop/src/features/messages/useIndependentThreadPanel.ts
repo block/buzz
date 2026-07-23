@@ -19,9 +19,11 @@ export function useIndependentThreadPanel(args: {
   currentPubkey: string | undefined;
   currentAvatarUrl: string | null;
   profiles: UserProfileLookup | undefined;
+  ownerProfiles: UserProfileLookup | undefined;
   members: ChannelMember[] | undefined;
   personaLookup: Map<string, string>;
   respondToLookup: Map<string, RespondToMode>;
+  relaySelfPubkey: string | null | undefined;
 }) {
   // Depend on the individual fields, NOT the `args` object — callers pass a
   // fresh object literal every render, so `[args]` never memoizes and the
@@ -46,8 +48,9 @@ export function useIndependentThreadPanel(args: {
         args.members,
         args.personaLookup,
         args.respondToLookup,
+        args.relaySelfPubkey,
+        args.ownerProfiles,
       ),
-    // biome-ignore lint/correctness/useExhaustiveDependencies: fields listed explicitly — see comment above
     [
       args.channelEvents,
       args.threadReplyEvents,
@@ -58,9 +61,11 @@ export function useIndependentThreadPanel(args: {
       args.currentPubkey,
       args.currentAvatarUrl,
       args.profiles,
+      args.ownerProfiles,
       args.members,
       args.personaLookup,
       args.respondToLookup,
+      args.relaySelfPubkey,
     ],
   );
 }

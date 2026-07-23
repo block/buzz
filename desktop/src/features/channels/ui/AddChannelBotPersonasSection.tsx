@@ -1,223 +1,180 @@
-import { Bot, Check } from "lucide-react";
+import { Check, Plus } from "lucide-react";
 
 import type { AgentPersona } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { promptPreview } from "@/shared/lib/promptPreview";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/shared/ui/tooltip";
 
-type SelectionChipButtonProps = {
-  avatarUrl?: string | null;
-  disabled: boolean;
-  label: string;
-  onClick: () => void;
-  selected: boolean;
-  children: React.ReactNode;
-};
-
-function SelectionChipButton({
-  avatarUrl,
-  disabled,
-  label,
-  onClick,
+function AgentRow({
+  persona,
   selected,
-  children,
-}: SelectionChipButtonProps) {
-  const showAvatar = avatarUrl !== undefined;
-
+  disabled,
+  inChannel,
+  onToggle,
+}: {
+  persona: AgentPersona;
+  selected: boolean;
+  disabled: boolean;
+  inChannel: boolean;
+  onToggle: () => void;
+}) {
   return (
     <button
-      aria-pressed={selected}
+      aria-pressed={inChannel ? undefined : selected}
       className={cn(
-        "inline-flex min-h-9 items-center gap-2 rounded-full border py-1.5 text-sm font-medium transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
-        showAvatar ? "pl-1.5 pr-3" : "px-3",
-        selected
-          ? "border-primary bg-primary/10 text-foreground"
-          : "border-border/80 bg-background/60 text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-        disabled && "cursor-not-allowed opacity-50",
+        "flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+        inChannel
+          ? "cursor-default text-muted-foreground"
+          : selected
+            ? "bg-accent text-accent-foreground"
+            : "hover:bg-accent/60",
+        disabled && !inChannel && "cursor-not-allowed opacity-50",
       )}
-      disabled={disabled}
-      onClick={onClick}
+      disabled={disabled || inChannel}
+      onClick={onToggle}
       type="button"
     >
-      {showAvatar ? (
-        <ProfileAvatar
-          avatarUrl={avatarUrl}
+      <ProfileAvatar
+        avatarUrl={persona.avatarUrl}
+        className="h-9 w-9 shrink-0 text-xs"
+        iconClassName="h-5 w-5"
+        label={persona.displayName}
+      />
+      <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+        {persona.displayName}
+      </span>
+      {inChannel ? (
+        <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-muted-foreground">
+          <Check className="h-4 w-4" />
+          In channel
+        </span>
+      ) : (
+        <span
+          aria-hidden
           className={cn(
-            "h-6 w-6 text-2xs",
+            "flex h-5 w-5 shrink-0 items-center justify-center rounded border",
             selected
-              ? "bg-primary/20 text-primary ring-1 ring-primary/20"
-              : "bg-background/80 text-muted-foreground ring-1 ring-border/70",
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-background",
           )}
-          iconClassName="h-4 w-4"
-          label={label}
-        />
-      ) : null}
-      {children}
+        >
+          {selected ? <Check className="h-3.5 w-3.5" /> : null}
+        </span>
+      )}
     </button>
   );
 }
 
-function RuntimeBadge({
-  label,
-  isOverridden,
-}: {
-  label: string;
-  isOverridden: boolean;
-}) {
+function CreateAgentRow({ onCreateAgent }: { onCreateAgent: () => void }) {
   return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none",
-        isOverridden
-          ? "bg-warning/15 text-warning"
-          : "bg-muted/60 text-muted-foreground",
-      )}
+    <button
+      className="flex w-full items-center gap-3 rounded-lg border border-border bg-card px-3 py-3 text-left transition-colors hover:bg-accent/50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      data-testid="add-channel-create-agent"
+      onClick={onCreateAgent}
+      type="button"
     >
-      {label}
-    </span>
+      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+        <Plus className="h-5 w-5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-foreground">
+          Create a new agent
+        </span>
+        <span className="block text-xs text-muted-foreground">
+          Give it a name, purpose, and instructions.
+        </span>
+      </span>
+    </button>
   );
 }
 
 type AddChannelBotPersonasSectionProps = {
   canToggleSelections: boolean;
-  /** Map of personaId → effective runtime label for badge display */
-  effectiveRuntimes?: ReadonlyMap<
-    string,
-    { label: string; isOverridden: boolean }
-  >;
   inChannelPersonaIds?: ReadonlySet<string>;
-  includeGeneric: boolean;
   isLoading: boolean;
-  onToggleGeneric: () => void;
+  onCreateAgent?: () => void;
   onTogglePersona: (personaId: string) => void;
   personas: AgentPersona[];
   selectedPersonaIds: readonly string[];
-  /** Whether to show the "Generic" chip. Defaults to true. */
+  // Legacy no-op props retained for the channel-template selector. Generic
+  // remains supported there but is no longer exposed by channel add flows.
+  includeGeneric?: boolean;
+  onToggleGeneric?: () => void;
   showGeneric?: boolean;
 };
 
 export function AddChannelBotPersonasSection({
   canToggleSelections,
-  effectiveRuntimes,
   inChannelPersonaIds,
-  includeGeneric,
   isLoading,
-  onToggleGeneric,
+  onCreateAgent,
   onTogglePersona,
   personas,
   selectedPersonaIds,
-  showGeneric = true,
 }: AddChannelBotPersonasSectionProps) {
+  const available = personas.filter(
+    (persona) => !inChannelPersonaIds?.has(persona.id),
+  );
+  const inChannel = personas.filter((persona) =>
+    inChannelPersonaIds?.has(persona.id),
+  );
+
   return (
-    <div className="space-y-3">
-      <div className="space-y-3">
-        <div>
-          <div className="text-sm font-medium">Agents</div>
-          <p className="text-xs text-muted-foreground">
-            Toggle as many as you want. Each selected agent is added to the
-            channel. Hover an agent to preview its role.
-          </p>
-        </div>
+    <div className="space-y-4">
+      {onCreateAgent && available.length === 0 ? (
+        <CreateAgentRow onCreateAgent={onCreateAgent} />
+      ) : null}
 
-        <TooltipProvider delayDuration={150}>
-          <div className="flex flex-wrap gap-2">
-            {showGeneric ? (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <div>
-                    <SelectionChipButton
-                      disabled={!canToggleSelections}
-                      label="Generic"
-                      onClick={onToggleGeneric}
-                      selected={includeGeneric}
-                    >
-                      <Bot
-                        className={cn(
-                          "h-4 w-4",
-                          includeGeneric ? "text-primary" : "text-current",
-                        )}
-                      />
-                      Generic
-                    </SelectionChipButton>
-                  </div>
-                </TooltipTrigger>
-                <TooltipContent className="max-w-xs text-left">
-                  Add one custom agent with a channel-specific name and prompt.
-                </TooltipContent>
-              </Tooltip>
-            ) : null}
-            {personas.map((persona) => {
-              const isSelected = selectedPersonaIds.includes(persona.id);
-              const isInChannel = inChannelPersonaIds?.has(persona.id) ?? false;
-              const runtimeBadge = effectiveRuntimes?.get(persona.id);
-              return (
-                <Tooltip key={persona.id}>
-                  <TooltipTrigger asChild>
-                    <div>
-                      <SelectionChipButton
-                        avatarUrl={persona.avatarUrl}
-                        disabled={!canToggleSelections || isInChannel}
-                        label={persona.displayName}
-                        onClick={() => onTogglePersona(persona.id)}
-                        selected={isSelected}
-                      >
-                        {persona.displayName}
-                        {runtimeBadge ? (
-                          <RuntimeBadge {...runtimeBadge} />
-                        ) : null}
-                        {isInChannel ? (
-                          <span
-                            className={cn(
-                              "inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-2xs font-medium leading-none",
-                              isSelected
-                                ? "bg-primary/15 text-primary"
-                                : "bg-muted/60 text-muted-foreground",
-                            )}
-                          >
-                            <Check className="h-4 w-4" />
-                            In channel
-                          </span>
-                        ) : null}
-                      </SelectionChipButton>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs text-left">
-                    <div className="space-y-2">
-                      <div className="flex items-center gap-2">
-                        <ProfileAvatar
-                          avatarUrl={persona.avatarUrl}
-                          className="h-7 w-7 text-2xs bg-primary-foreground/20 text-primary-foreground"
-                          iconClassName="h-4 w-4"
-                          label={persona.displayName}
-                        />
-                        <p className="font-medium">{persona.displayName}</p>
-                      </div>
-                      {isInChannel ? (
-                        <p className="text-2xs font-medium text-emerald-300">
-                          ✓ Already in this channel
-                        </p>
-                      ) : null}
-                      <p className="text-2xs text-primary-foreground">
-                        {promptPreview(persona.systemPrompt)}
-                      </p>
-                    </div>
-                  </TooltipContent>
-                </Tooltip>
-              );
-            })}
+      {isLoading ? (
+        <p className="px-3 text-sm text-muted-foreground">
+          Loading your agents…
+        </p>
+      ) : null}
+
+      {!isLoading && available.length > 0 ? (
+        <div className="space-y-1">
+          <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
+            Your agents
           </div>
-        </TooltipProvider>
+          {available.map((persona) => (
+            <AgentRow
+              disabled={!canToggleSelections}
+              inChannel={false}
+              key={persona.id}
+              onToggle={() => onTogglePersona(persona.id)}
+              persona={persona}
+              selected={selectedPersonaIds.includes(persona.id)}
+            />
+          ))}
+        </div>
+      ) : null}
 
-        {isLoading ? (
-          <p className="text-xs text-muted-foreground">Loading agents...</p>
-        ) : null}
-      </div>
+      {!isLoading && available.length === 0 && inChannel.length > 0 ? (
+        <p className="px-3 text-sm text-muted-foreground">
+          All of your agents are already in this channel.
+        </p>
+      ) : null}
+
+      {onCreateAgent && available.length > 0 ? (
+        <CreateAgentRow onCreateAgent={onCreateAgent} />
+      ) : null}
+
+      {!isLoading && inChannel.length > 0 ? (
+        <div className="space-y-1 border-t border-border pt-3">
+          <div className="px-3 pb-1 text-xs font-medium text-muted-foreground">
+            In this channel
+          </div>
+          {inChannel.map((persona) => (
+            <AgentRow
+              disabled
+              inChannel
+              key={persona.id}
+              onToggle={() => undefined}
+              persona={persona}
+              selected={false}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

@@ -12,6 +12,8 @@ const ProjectDetailScreen = React.lazy(async () => {
 export const Route = createFileRoute("/projects/$projectId")({
   component: ProjectDetailRouteComponent,
   validateSearch: (search: Record<string, unknown>) => ({
+    commitHash:
+      typeof search.commitHash === "string" ? search.commitHash : undefined,
     pullRequestId:
       typeof search.pullRequestId === "string"
         ? search.pullRequestId
@@ -23,11 +25,12 @@ export const Route = createFileRoute("/projects/$projectId")({
 function ProjectDetailRouteComponent() {
   usePreviewFeatureWarning("projects");
   const { projectId } = Route.useParams();
-  const { pullRequestId, issueId } = Route.useSearch();
+  const { commitHash, pullRequestId, issueId } = Route.useSearch();
 
   return (
     <React.Suspense fallback={<ViewLoadingFallback kind="projects" />}>
       <ProjectDetailScreen
+        commitHash={commitHash}
         issueId={issueId}
         projectId={projectId}
         pullRequestId={pullRequestId}

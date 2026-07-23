@@ -3,6 +3,7 @@ import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../custom_emoji/custom_emoji_render.dart';
 import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
@@ -279,7 +280,7 @@ class _ReactorTile extends StatelessWidget {
   }
 }
 
-class _ReactorAvatar extends HookWidget {
+class _ReactorAvatar extends StatelessWidget {
   final String? avatarUrl;
   final String initial;
 
@@ -287,21 +288,10 @@ class _ReactorAvatar extends HookWidget {
 
   @override
   Widget build(BuildContext context) {
-    final failed = useState(false);
-
-    useEffect(() {
-      failed.value = false;
-      return null;
-    }, [avatarUrl]);
-
-    final url = avatarUrl;
-    if (url == null || failed.value) {
-      return CircleAvatar(child: Text(initial));
-    }
-    return CircleAvatar(
-      backgroundImage: NetworkImage(url),
-      onBackgroundImageError: (_, _) => failed.value = true,
-      child: null,
+    return AvatarImage(
+      imageUrl: avatarUrl,
+      radius: 20,
+      fallback: Text(initial),
     );
   }
 }

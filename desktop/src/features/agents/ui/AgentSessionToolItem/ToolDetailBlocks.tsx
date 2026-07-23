@@ -97,7 +97,7 @@ function ToolCodeBlock({
 }) {
   return (
     <div className="space-y-2 overflow-hidden">
-      <h4 className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+      <h4 className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
         {label}
       </h4>
       <pre

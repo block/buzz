@@ -28,7 +28,10 @@
 import type { BlobDescriptor } from "@/shared/api/tauri";
 import { parseImetaTags } from "./parseImeta";
 
-export type ImetaMedia = BlobDescriptor;
+export type ImetaMedia = BlobDescriptor & {
+  /** Composer-only label used for attachment links; not emitted in imeta. */
+  displayLabel?: string;
+};
 
 /**
  * Project a Nostr event's imeta tags into the `BlobDescriptor[]` shape the
@@ -113,6 +116,42 @@ const BLOCK_SPOILER_DELIMITER_RE = /^\s*\|\|\s*$/;
  * file attachments from the body in edit mode.
  */
 const FILE_LINE_RE = /^\[(?:\\.|[^\]\\])*\]\(([^)\s]+)\)\s*$/;
+const LABELED_FILE_LINE_RE = /^\[((?:\\.|[^\]\\])*)\]\(([^)\s]+)\)\s*$/;
+
+function unescapeMarkdownLinkLabel(label: string): string {
+  return label.replace(/\\([\\[\]])/g, "$1");
+}
+
+/**
+ * Restore composer-only attachment labels from the durable markdown link in
+ * an existing message body. NIP-92 imeta tags preserve the attachment file
+ * metadata but not the visible link label, so edit mode must join the two
+ * representations before seeding pending attachments.
+ */
+export function restoreImetaMediaDisplayLabels(
+  body: string,
+  imetaMedia: ReadonlyArray<ImetaMedia>,
+): ImetaMedia[] {
+  if (imetaMedia.length === 0) return [];
+
+  const urls = new Set(imetaMedia.map((media) => media.url));
+  const labelsByUrl = new Map<string, string>();
+  const lines = body.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index];
+    const match = line.match(LABELED_FILE_LINE_RE);
+    const url = match?.[2];
+    if (!url || !urls.has(url) || labelsByUrl.has(url)) continue;
+
+    const label = unescapeMarkdownLinkLabel(match[1]).trim();
+    if (label) labelsByUrl.set(url, label);
+  }
+
+  return imetaMedia.map((media) => {
+    const displayLabel = labelsByUrl.get(media.url);
+    return displayLabel ? { ...media, displayLabel } : media;
+  });
+}
 
 function findTrailingBlockSpoilerMediaStart(
   lines: string[],
@@ -235,22 +274,31 @@ export function findSpoileredImetaMediaUrls(
  * Images and video use `![image|video](url)` so the renderer draws them inline.
  * Generic files use a plain `[filename](url)` link — the renderer recognises the
  * href as a local media blob with a non-media MIME and upgrades it to a file
- * card. Mime-driven so the form is correct regardless of URL suffix.
+ * card. Agent snapshot PNGs deliberately use the file-link form despite their
+ * image MIME so the renderer can upgrade them to the import/download card.
  */
 export function formatImetaMediaLine(
   { url, type, filename }: ImetaMedia,
-  options: { spoiler?: boolean } = {},
+  options: { label?: string; spoiler?: boolean } = {},
 ): string {
+  // A PNG snapshot is image/png on the wire, but it is an importable file, not
+  // inline media. Keep it on the anchor renderer's snapshot-card path.
+  const lower = filename?.toLowerCase();
+  const isSnapshotPng =
+    lower?.endsWith(".agent.png") || lower?.endsWith(".team.png");
   if (type.startsWith("video/")) {
     const line = `![video](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  if (type.startsWith("image/")) {
+  if (type.startsWith("image/") && !isSnapshotPng) {
     const line = `![image](${url})`;
     return options.spoiler ? `\n||${line}||` : `\n${line}`;
   }
-  // Generic file: plain link, label is the original filename (fallback to url tail).
-  const label = filename || url.split("/").pop() || "file";
+  // Generic file: plain link, label is the caller-provided display label when
+  // available, otherwise the original filename (falling back to the URL tail).
+  // The filename remains in imeta for download/import integrity.
+  const label =
+    options.label?.trim() || filename || url.split("/").pop() || "file";
   // Escape markdown link-label metacharacters so filenames containing `[`, `]`,
   // or `\` (e.g. `a].pdf`) still render as a FileCard with the correct label
   // rather than breaking the link or mangling the visible text.
@@ -277,6 +325,7 @@ export function buildOutgoingMessage(
   let content = body;
   for (const d of pendingImeta) {
     content += formatImetaMediaLine(d, {
+      label: d.displayLabel,
       spoiler: spoileredMediaUrls.has(d.url),
     });
   }

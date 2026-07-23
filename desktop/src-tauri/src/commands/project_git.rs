@@ -1,6 +1,8 @@
 use super::project_git_exec::{
-    build_git_auth_config, clean_branch, run_git, validate_clone_url, GitAuthConfig,
+    build_git_auth_config, clean_branch, clean_target_ref, run_git, validate_workspace_clone_url,
+    GitAuthConfig,
 };
+use super::project_git_push::push_project_local_repository_blocking;
 use super::project_repo_paths::{canonical_repos_roots, find_local_repo_dir};
 use crate::app_state::AppState;
 use serde::Serialize;
@@ -52,21 +54,33 @@ pub struct ProjectLocalRepoInfo {
 pub struct ProjectRepoSyncStatusInfo {
     pub local_path: Option<String>,
     pub local_branch: Option<String>,
+    pub local_branches: Vec<String>,
     pub local_head: Option<String>,
     pub local_short_head: Option<String>,
     pub remote_branch: Option<String>,
     pub remote_head: Option<String>,
     pub remote_short_head: Option<String>,
+    pub merge_base: Option<String>,
     pub ahead_count: usize,
     pub behind_count: usize,
     pub has_uncommitted_changes: bool,
     pub has_untracked_files: bool,
     pub can_push: bool,
     pub push_block_reason: Option<String>,
+    pub can_pull: bool,
+    pub pull_block_reason: Option<String>,
 }
 #[derive(Serialize)]
 pub struct ProjectRepoPushResult {
     pub pushed: bool,
+    pub message: String,
+    pub branch: String,
+    pub commit: String,
+    pub merge_base: Option<String>,
+}
+#[derive(Serialize)]
+pub struct ProjectRepoPullResult {
+    pub pulled: bool,
     pub message: String,
 }
 #[derive(Serialize)]
@@ -97,7 +111,7 @@ fn short_hash(hash: &str) -> String {
     hash.chars().take(7).collect()
 }
 
-fn first_output_line(output: &str) -> Option<String> {
+pub(crate) fn first_output_line(output: &str) -> Option<String> {
     output
         .lines()
         .next()
@@ -481,17 +495,39 @@ pub(crate) fn normalize_branch_option(branch: Option<&str>) -> Option<String> {
     clean_branch(branch.map(str::to_string))
 }
 
-fn compare_local_remote_status(
+pub(crate) fn compare_local_remote_status(
     repo_dir: &std::path::Path,
     clone_url: &str,
     branch_name: Option<&str>,
+    base_branch: Option<&str>,
     auth: &GitAuthConfig,
 ) -> ProjectRepoSyncStatusInfo {
     let local_branch = run_git(&["branch", "--show-current"], Some(repo_dir), auth)
         .ok()
         .and_then(|output| first_output_line(&output));
+    let local_branches = run_git(
+        &[
+            "for-each-ref",
+            "--count=200",
+            "--format=%(refname:short)",
+            "refs/heads/",
+        ],
+        Some(repo_dir),
+        auth,
+    )
+    .map(|output| {
+        output
+            .lines()
+            .filter_map(|branch| normalize_branch_option(Some(branch)))
+            .collect()
+    })
+    .unwrap_or_default();
+    // The local checkout's branch name is attacker-influencable (a hostile
+    // remote can point HEAD at a flag-shaped refname), so it must pass the
+    // same `clean_branch` validation as relay-supplied names before it is
+    // ever handed to git as an argument.
     let branch = normalize_branch_option(branch_name)
-        .or_else(|| local_branch.clone())
+        .or_else(|| normalize_branch_option(local_branch.as_deref()))
         .unwrap_or_else(|| "main".to_string());
 
     // Only rewrite the checkout's origin when it actually differs from the
@@ -507,11 +543,20 @@ fn compare_local_remote_status(
             auth,
         );
     }
-    let _ = run_git(
-        &["fetch", "--quiet", "origin", branch.as_str(), "--depth=100"],
-        Some(repo_dir),
-        auth,
-    );
+    let base_branch =
+        normalize_branch_option(base_branch).filter(|base_branch| *base_branch != branch);
+    let mut fetch_args = vec![
+        "fetch",
+        "--quiet",
+        "--depth=100",
+        "--end-of-options",
+        "origin",
+        branch.as_str(),
+    ];
+    if let Some(base_branch) = base_branch.as_deref() {
+        fetch_args.push(base_branch);
+    }
+    let _ = run_git(&fetch_args, Some(repo_dir), auth);
 
     let local_head = run_git(&["rev-parse", "HEAD"], Some(repo_dir), auth)
         .ok()
@@ -524,6 +569,30 @@ fn compare_local_remote_status(
     )
     .ok()
     .and_then(|output| first_output_line(&output));
+    // A legacy empty clone may have an unborn local `master` while the project
+    // declares `main`. Permit that mismatch only when the remote has no branch
+    // refs at all; any lookup failure is treated as non-empty (fail closed).
+    let remote_has_branches = run_git(
+        &["ls-remote", "--heads", "--end-of-options", "origin"],
+        Some(repo_dir),
+        auth,
+    )
+    .map(|output| !output.trim().is_empty())
+    .unwrap_or(true);
+    let is_first_publish = remote_head.is_none() && !remote_has_branches;
+    let merge_base = base_branch.as_deref().and_then(|base_branch| {
+        run_git(
+            &[
+                "merge-base",
+                "HEAD",
+                format!("origin/{base_branch}").as_str(),
+            ],
+            Some(repo_dir),
+            auth,
+        )
+        .ok()
+        .and_then(|output| first_output_line(&output))
+    });
     let status = run_git(&["status", "--porcelain"], Some(repo_dir), auth).unwrap_or_default();
     let has_uncommitted_changes = has_uncommitted_changes(&status);
     let has_untracked_files = has_untracked_files(&status);
@@ -558,6 +627,10 @@ fn compare_local_remote_status(
 
     let push_block_reason = if local_head.is_none() {
         Some("No local commits to push.".to_string())
+    } else if local_branch.as_deref() != Some(branch.as_str()) && !is_first_publish {
+        Some(format!(
+            "Local checkout is on a different branch than {branch}."
+        ))
     } else if has_uncommitted_changes || has_untracked_files {
         Some("Commit or discard local changes before pushing.".to_string())
     } else if behind_count > 0 {
@@ -568,20 +641,45 @@ fn compare_local_remote_status(
         None
     };
 
+    // Pulling is a fast-forward only merge of origin/<branch> into the
+    // current checkout, so it is blocked whenever that would not apply
+    // cleanly (diverged history, dirty worktree, branch mismatch).
+    let pull_block_reason = if local_head.is_none() {
+        Some("No local commits yet — clone instead of pulling.".to_string())
+    } else if remote_head.is_none() {
+        Some("Remote branch not found.".to_string())
+    } else if behind_count == 0 {
+        Some("Local branch is up to date.".to_string())
+    } else if local_branch.as_deref() != Some(branch.as_str()) {
+        Some(format!(
+            "Local checkout is on a different branch than {branch}."
+        ))
+    } else if has_uncommitted_changes {
+        Some("Commit or stash local changes before pulling.".to_string())
+    } else if ahead_count > 0 {
+        Some("Local and remote have diverged — reconcile in a terminal.".to_string())
+    } else {
+        None
+    };
+
     ProjectRepoSyncStatusInfo {
         local_path: Some(repo_dir.display().to_string()),
         local_branch,
+        local_branches,
         local_head: local_head.clone(),
         local_short_head: local_head.as_deref().map(short_hash),
         remote_branch: Some(branch),
         remote_head: remote_head.clone(),
         remote_short_head: remote_head.as_deref().map(short_hash),
+        merge_base,
         ahead_count,
         behind_count,
         has_uncommitted_changes,
         has_untracked_files,
         can_push: push_block_reason.is_none(),
         push_block_reason,
+        can_pull: pull_block_reason.is_none(),
+        pull_block_reason,
     }
 }
 
@@ -616,12 +714,13 @@ pub async fn get_project_repo_snapshot(
     target_commit: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSnapshotInfo, String> {
-    validate_clone_url(&clone_url)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
     let auth = build_git_auth_config(&state)?;
     let branch = clean_branch(default_branch);
     let base_branch = clean_branch(base_branch);
-    let target_ref = target_ref.filter(|value| value.starts_with("refs/") && !value.contains(".."));
+    let target_ref = clean_target_ref(target_ref);
     let target_commit = target_commit
+        .map(|value| value.to_ascii_lowercase())
         .filter(|value| matches!(value.len(), 40 | 64))
         .filter(|value| value.chars().all(|c| c.is_ascii_hexdigit()));
 
@@ -632,38 +731,53 @@ pub async fn get_project_repo_snapshot(
             .to_str()
             .ok_or_else(|| "temporary repository path is not UTF-8".to_string())?;
 
-        let mut clone_args = vec!["clone", "--filter=blob:none"];
-        if let Some(ref branch) = branch {
-            clone_args.push("--branch");
-            clone_args.push(branch.as_str());
-        }
-        clone_args.push(clone_url.as_str());
-        clone_args.push(repo_path);
-
-        if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
-            let has_pr_target = target_ref.is_some() || target_commit.is_some();
-            let fallback_args = if has_pr_target {
-                vec![
+        let explicit_target = target_ref.as_deref().or(target_commit.as_deref());
+        if let Some(fetch_ref) = explicit_target {
+            run_git(
+                &[
                     "clone",
                     "--filter=blob:none",
                     "--no-checkout",
                     clone_url.as_str(),
                     repo_path,
-                ]
-            } else {
-                vec!["clone", "--filter=blob:none", clone_url.as_str(), repo_path]
-            };
-            run_git(&fallback_args, None, &auth)?;
-            if has_pr_target {
-                let fetch_ref = target_ref.as_deref().or(target_commit.as_deref()).unwrap();
+                ],
+                None,
+                &auth,
+            )?;
+            run_git(
+                &["fetch", "--depth=100", "origin", fetch_ref],
+                Some(&repo_dir),
+                &auth,
+            )?;
+            if let Some(expected_commit) = target_commit.as_deref() {
+                let fetched_commit = run_git(&["rev-parse", "FETCH_HEAD"], Some(&repo_dir), &auth)
+                    .ok()
+                    .and_then(|output| first_output_line(&output))
+                    .map(|commit| commit.to_ascii_lowercase())
+                    .ok_or_else(|| "Could not resolve the requested repository ref.".to_string())?;
+                if fetched_commit != expected_commit {
+                    return Err(
+                        "The requested repository ref changed. Refresh and try again.".to_string(),
+                    );
+                }
+            }
+            run_git(
+                &["checkout", "--detach", "FETCH_HEAD"],
+                Some(&repo_dir),
+                &auth,
+            )?;
+        } else {
+            let mut clone_args = vec!["clone", "--filter=blob:none"];
+            if let Some(ref branch) = branch {
+                clone_args.push("--branch");
+                clone_args.push(branch.as_str());
+            }
+            clone_args.push(clone_url.as_str());
+            clone_args.push(repo_path);
+            if run_git(&clone_args, None, &auth).is_err() && branch.is_some() {
                 run_git(
-                    &["fetch", "--depth=100", "origin", fetch_ref],
-                    Some(&repo_dir),
-                    &auth,
-                )?;
-                run_git(
-                    &["checkout", "--detach", "FETCH_HEAD"],
-                    Some(&repo_dir),
+                    &["clone", "--filter=blob:none", clone_url.as_str(), repo_path],
+                    None,
                     &auth,
                 )?;
             }
@@ -752,10 +866,11 @@ pub async fn get_project_repo_sync_status(
     repos_dir: Option<String>,
     project_dtag: String,
     clone_url: String,
-    default_branch: Option<String>,
+    branch_name: Option<String>,
+    base_branch: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoSyncStatusInfo, String> {
-    validate_clone_url(&clone_url)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
     let auth = build_git_auth_config(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -765,26 +880,31 @@ pub async fn get_project_repo_sync_status(
             return Ok(ProjectRepoSyncStatusInfo {
                 local_path: None,
                 local_branch: None,
+                local_branches: Vec::new(),
                 local_head: None,
                 local_short_head: None,
-                remote_branch: default_branch
+                remote_branch: branch_name
                     .as_deref()
                     .and_then(|branch| normalize_branch_option(Some(branch))),
                 remote_head: None,
                 remote_short_head: None,
+                merge_base: None,
                 ahead_count: 0,
                 behind_count: 0,
                 has_uncommitted_changes: false,
                 has_untracked_files: false,
                 can_push: false,
                 push_block_reason: Some("No local checkout found.".to_string()),
+                can_pull: false,
+                pull_block_reason: Some("No local checkout found.".to_string()),
             });
         };
 
         Ok(compare_local_remote_status(
             &repo_dir,
             &clone_url,
-            default_branch.as_deref(),
+            branch_name.as_deref(),
+            base_branch.as_deref(),
             &auth,
         ))
     })
@@ -797,10 +917,42 @@ pub async fn push_project_local_repository(
     repos_dir: Option<String>,
     project_dtag: String,
     clone_url: String,
-    default_branch: Option<String>,
+    branch_name: Option<String>,
+    base_branch: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ProjectRepoPushResult, String> {
-    validate_clone_url(&clone_url)?;
+    validate_workspace_clone_url(&clone_url, &state)?;
+    let auth = build_git_auth_config(&state)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(repo_dir) =
+            find_local_repo_dir(repos_dir.as_deref(), &project_dtag, Some(&clone_url))?
+        else {
+            return Err("No local checkout found.".to_string());
+        };
+        push_project_local_repository_blocking(
+            &repo_dir,
+            clone_url,
+            branch_name,
+            base_branch,
+            &auth,
+        )
+    })
+    .await
+    .map_err(|error| format!("repo push task failed: {error}"))?
+}
+
+/// Fast-forwards the local checkout to the remote branch head. Refuses to
+/// run whenever the sync status reports the pull would not apply cleanly.
+#[tauri::command]
+pub async fn pull_project_local_repository(
+    repos_dir: Option<String>,
+    project_dtag: String,
+    clone_url: String,
+    branch_name: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ProjectRepoPullResult, String> {
+    validate_workspace_clone_url(&clone_url, &state)?;
     let auth = build_git_auth_config(&state)?;
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -810,27 +962,27 @@ pub async fn push_project_local_repository(
             return Err("No local checkout found.".to_string());
         };
         let status =
-            compare_local_remote_status(&repo_dir, &clone_url, default_branch.as_deref(), &auth);
-        if !status.can_push {
+            compare_local_remote_status(&repo_dir, &clone_url, branch_name.as_deref(), None, &auth);
+        if !status.can_pull {
             return Err(status
-                .push_block_reason
-                .unwrap_or_else(|| "Local checkout cannot be pushed.".to_string()));
+                .pull_block_reason
+                .unwrap_or_else(|| "Local checkout cannot be pulled.".to_string()));
         }
         let branch = status
             .remote_branch
             .as_deref()
-            .ok_or_else(|| "No branch selected for push.".to_string())?;
+            .ok_or_else(|| "No branch selected for pull.".to_string())?;
         run_git(
-            &["push", "origin", format!("HEAD:{branch}").as_str()],
+            &["pull", "--ff-only", "--end-of-options", "origin", branch],
             Some(&repo_dir),
             &auth,
         )?;
 
-        Ok(ProjectRepoPushResult {
-            pushed: true,
-            message: format!("Pushed {branch} to remote."),
+        Ok(ProjectRepoPullResult {
+            pulled: true,
+            message: format!("Pulled {branch} from remote."),
         })
     })
     .await
-    .map_err(|error| format!("repo push task failed: {error}"))?
+    .map_err(|error| format!("repo pull task failed: {error}"))?
 }

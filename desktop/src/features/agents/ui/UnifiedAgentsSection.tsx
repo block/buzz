@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronDown, ChevronRight, Ellipsis, OctagonX } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCw } from "lucide-react";
 
 import { formatAgentModelLabel } from "@/features/agents/lib/formatAgentModelLabel";
 import { friendlyAgentLastError } from "@/features/agents/lib/friendlyAgentLastError";
@@ -9,7 +9,7 @@ import type { AgentPersona, ManagedAgent } from "@/shared/api/types";
 import type { ProfilePanelOpenOptions } from "@/shared/context/ProfilePanelContext";
 import { useFeedbackToasts } from "@/shared/hooks/useToastEffect";
 import { useFileImportZone } from "@/shared/hooks/useFileImportZone";
-import { Button } from "@/shared/ui/button";
+import { Badge } from "@/shared/ui/badge";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,6 +24,7 @@ import { PersonaActionsMenu } from "./PersonaActionsMenu";
 import { buildUnifiedGroups, pickProfileAgent } from "./unifiedAgentGroups";
 
 type UnifiedAgentsSectionProps = {
+  defaultModel: string;
   actionErrorMessage: string | null;
   actionNoticeMessage: string | null;
   agents: ManagedAgent[];
@@ -32,7 +33,6 @@ type UnifiedAgentsSectionProps = {
   isAgentsLoading: boolean;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
-  onBulkStopRunning: () => void;
   onOpenAgentProfile: (
     pubkey: string,
     options?: ProfilePanelOpenOptions,
@@ -51,10 +51,13 @@ type UnifiedAgentsSectionProps = {
   onChooseCatalog: () => void;
   onDuplicatePersona: (persona: AgentPersona) => void;
   onEditPersona: (persona: AgentPersona) => void;
-  onSharePersona: (persona: AgentPersona) => void;
+  onSharePersona: (
+    persona: AgentPersona,
+    linkedAgent: ManagedAgent | undefined,
+  ) => void;
   onDeactivatePersona: (persona: AgentPersona) => void;
   onDeletePersona: (persona: AgentPersona) => void;
-  onImportPersonaFile: (fileBytes: number[], fileName: string) => void;
+  onImportSnapshotFile: (fileBytes: number[], fileName: string) => void;
 };
 
 const AGENT_CARD_COLUMN_CLASS = "w-full";
@@ -64,13 +67,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
   const {
     actionErrorMessage,
     actionNoticeMessage,
+    defaultModel,
     agents,
     agentsError,
     isActionPending,
     isAgentsLoading,
     startingAgentPubkey,
     startingPersonaIds,
-    onBulkStopRunning,
     onOpenAgentProfile,
     onOpenPersonaProfile,
     onStartAgent,
@@ -89,28 +92,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     onSharePersona,
     onDeactivatePersona,
     onDeletePersona,
-    onImportPersonaFile,
+    onImportSnapshotFile,
   } = props;
 
-  const runningCount = agents.filter((agent) =>
-    isManagedAgentActive(agent),
-  ).length;
   const { groups, ungrouped, unknown } = React.useMemo(
     () => buildUnifiedGroups(personas, agents),
     [personas, agents],
   );
-  const additionalPersonaAgents = React.useMemo(() => {
-    const additional: ManagedAgent[] = [];
-    for (const group of groups) {
-      const primary = pickProfileAgent(group.agents);
-      for (const agent of group.agents) {
-        if (primary?.pubkey !== agent.pubkey) {
-          additional.push(agent);
-        }
-      }
-    }
-    return additional;
-  }, [groups]);
   const [collapsed, setCollapsed] = React.useState<Set<string>>(new Set());
   const {
     fileInputRef,
@@ -118,7 +106,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
     dropHandlers,
     handleFileChange,
     openFilePicker,
-  } = useFileImportZone({ onImportFile: onImportPersonaFile });
+  } = useFileImportZone({ onImportFile: onImportSnapshotFile });
 
   function toggle(key: string) {
     setCollapsed((prev) => {
@@ -142,18 +130,17 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
       {isDragOver ? (
         <div className="pointer-events-none absolute -inset-1 z-10 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary/50 bg-background/80 backdrop-blur-sm">
           <p className="text-sm font-medium text-primary">
-            Drop .persona.md, .persona.json, .persona.png, or .zip to import
+            Drop .agent.json or .agent.png to import
           </p>
         </div>
       ) : null}
 
-      <SectionHeader
-        agentCount={agents.length}
-        fileInputRef={fileInputRef}
-        handleFileChange={handleFileChange}
-        isActionPending={isActionPending}
-        runningCount={runningCount}
-        onBulkStopRunning={onBulkStopRunning}
+      <input
+        accept=".agent.json,.agent.png"
+        className="hidden"
+        onChange={handleFileChange}
+        ref={fileInputRef}
+        type="file"
       />
 
       {isLoading ? <LoadingSkeleton /> : null}
@@ -170,6 +157,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                       isActionPending={isActionPending}
                       isPending={isPersonasPending}
                       persona={group.persona}
+                      linkedAgent={profileAgent}
                       onDeactivate={onDeactivatePersona}
                       onDelete={onDeletePersona}
                       onDuplicate={onDuplicatePersona}
@@ -178,6 +166,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
                     />
                   }
                   agent={profileAgent}
+                  defaultModel={defaultModel}
                   key={group.persona.id}
                   persona={group.persona}
                   startingAgentPubkey={startingAgentPubkey}
@@ -198,24 +187,13 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             />
           </div>
 
-          {additionalPersonaAgents.length > 0 ? (
-            <CollapsibleAgentGroup
-              agents={additionalPersonaAgents}
-              collapsed={collapsed}
-              groupKey="__additional_persona_agents__"
-              label="Additional agent instances"
-              startingAgentPubkey={startingAgentPubkey}
-              onToggle={toggle}
-              onOpenAgentProfile={onOpenAgentProfile}
-              onStartAgent={onStartAgent}
-            />
-          ) : null}
           {unknown.length > 0 ? (
             <CollapsibleAgentGroup
               agents={unknown}
               collapsed={collapsed}
+              defaultModel={defaultModel}
               groupKey="__unknown__"
-              label="Unknown Agent"
+              label="Unknown agents"
               startingAgentPubkey={startingAgentPubkey}
               onToggle={toggle}
               onOpenAgentProfile={onOpenAgentProfile}
@@ -226,6 +204,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
             <CollapsibleAgentGroup
               agents={ungrouped}
               collapsed={collapsed}
+              defaultModel={defaultModel}
               groupKey="__ungrouped__"
               label="Custom agents"
               startingAgentPubkey={startingAgentPubkey}
@@ -258,6 +237,7 @@ export function UnifiedAgentsSection(props: UnifiedAgentsSectionProps) {
 function AgentPersonaCard({
   actions,
   agent,
+  defaultModel,
   persona,
   startingAgentPubkey,
   startingPersonaIds,
@@ -268,6 +248,7 @@ function AgentPersonaCard({
 }: {
   actions?: React.ReactNode;
   agent: ManagedAgent | undefined;
+  defaultModel: string;
   persona: AgentPersona;
   startingAgentPubkey: string | null;
   startingPersonaIds: ReadonlySet<string>;
@@ -280,7 +261,10 @@ function AgentPersonaCard({
   onStartPersona: (persona: AgentPersona) => void;
 }) {
   const title = persona.displayName;
-  const modelLabel = formatAgentModelLabel(agent?.model ?? persona.model);
+  const explicitModel = agent?.model ?? persona.model;
+  const modelLabel = explicitModel?.trim()
+    ? formatAgentModelLabel(explicitModel)
+    : formatDefaultModelLabel(defaultModel);
   const isActive = agent ? isManagedAgentActive(agent) : false;
   const profileQuery = useUserProfileQuery(agent?.pubkey);
   const avatarUrl = agent
@@ -326,7 +310,7 @@ function AgentPersonaCard({
       avatarUrl={avatarUrl}
       dataTestId={`persona-agent-row-${persona.id}`}
       label={title}
-      modelLabel={agent && isActive ? modelLabel : null}
+      modelLabel={modelLabel}
       onClick={() => {
         if (agent) {
           onOpenAgentProfile(
@@ -337,17 +321,27 @@ function AgentPersonaCard({
         }
         onOpenPersonaProfile(persona);
       }}
+      statusBadge={
+        agent?.needsRestart ? (
+          <Badge className="gap-1" variant="warning">
+            <RefreshCw className="h-3 w-3" />
+            Restart required
+          </Badge>
+        ) : null
+      }
     />
   );
 }
 
 function StandaloneAgentCard({
   agent,
+  defaultModel,
   startingAgentPubkey,
   onOpenAgentProfile,
   onStartAgent,
 }: {
   agent: ManagedAgent;
+  defaultModel: string;
   startingAgentPubkey: string | null;
   onOpenAgentProfile: (
     pubkey: string,
@@ -386,15 +380,32 @@ function StandaloneAgentCard({
       avatarUrl={profileQuery.data?.avatarUrl}
       dataTestId={`managed-agent-${agent.pubkey}`}
       label={title}
-      modelLabel={isActive ? formatAgentModelLabel(agent.model) : null}
+      modelLabel={
+        agent.model?.trim()
+          ? formatAgentModelLabel(agent.model)
+          : formatDefaultModelLabel(defaultModel)
+      }
       onClick={() => {
         onOpenAgentProfile(
           agent.pubkey,
           opensRuntimeTab ? { tab: "runtime" } : undefined,
         );
       }}
+      statusBadge={
+        agent.needsRestart ? (
+          <Badge className="gap-1" variant="warning">
+            <RefreshCw className="h-3 w-3" />
+            Restart required
+          </Badge>
+        ) : null
+      }
     />
   );
+}
+
+function formatDefaultModelLabel(defaultModel: string) {
+  const model = defaultModel.trim();
+  return model ? `Default model (${model})` : "Default model";
 }
 
 function firstAvatarUrl(
@@ -405,68 +416,6 @@ function firstAvatarUrl(
     if (trimmed) return trimmed;
   }
   return null;
-}
-
-function SectionHeader({
-  agentCount,
-  fileInputRef,
-  handleFileChange,
-  isActionPending,
-  runningCount,
-  onBulkStopRunning,
-}: {
-  agentCount: number;
-  fileInputRef: React.RefObject<HTMLInputElement | null>;
-  handleFileChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  isActionPending: boolean;
-  runningCount: number;
-  onBulkStopRunning: () => void;
-}) {
-  return (
-    <div
-      className={`${AGENT_CARD_COLUMN_CLASS} flex items-center justify-between gap-3`}
-    >
-      <div>
-        <h3 className="text-sm font-semibold tracking-tight">Agents</h3>
-        <p className="text-sm text-secondary-foreground/75">
-          Agents in this workspace.
-        </p>
-      </div>
-      <input
-        accept=".md,.json,.png,.zip"
-        className="hidden"
-        onChange={handleFileChange}
-        ref={fileInputRef}
-        type="file"
-      />
-      {agentCount > 0 ? (
-        <DropdownMenu modal={false}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              aria-label="Bulk actions"
-              className="h-7 w-7"
-              size="icon"
-              variant="ghost"
-            >
-              <Ellipsis className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            align="end"
-            onCloseAutoFocus={(event) => event.preventDefault()}
-          >
-            <DropdownMenuItem
-              disabled={isActionPending || runningCount === 0}
-              onClick={onBulkStopRunning}
-            >
-              <OctagonX className="h-4 w-4" />
-              Stop all running ({runningCount})
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ) : null}
-    </div>
-  );
 }
 
 function NewAgentCard({
@@ -499,7 +448,7 @@ function NewAgentCard({
           disabled={isPersonasPending}
           onClick={onCreatePersona}
         >
-          New agent
+          Create from scratch
         </DropdownMenuItem>
         {canChooseCatalog ? (
           <DropdownMenuItem
@@ -509,8 +458,11 @@ function NewAgentCard({
             Choose from catalog
           </DropdownMenuItem>
         ) : null}
-        <DropdownMenuItem onClick={openFilePicker}>
-          Import agent file
+        <DropdownMenuItem
+          data-testid="import-agent-snapshot-menu-item"
+          onClick={openFilePicker}
+        >
+          Import agent snapshot
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -541,6 +493,7 @@ function CollapsibleAgentGroup({
   label,
   agents,
   collapsed,
+  defaultModel,
   startingAgentPubkey,
   onToggle,
   onOpenAgentProfile,
@@ -550,6 +503,7 @@ function CollapsibleAgentGroup({
   label: string;
   agents: ManagedAgent[];
   collapsed: ReadonlySet<string>;
+  defaultModel: string;
   startingAgentPubkey: string | null;
   onToggle: (key: string) => void;
   onOpenAgentProfile: (
@@ -579,6 +533,7 @@ function CollapsibleAgentGroup({
           {agents.map((agent) => (
             <StandaloneAgentCard
               agent={agent}
+              defaultModel={defaultModel}
               key={agent.pubkey}
               startingAgentPubkey={startingAgentPubkey}
               onOpenAgentProfile={onOpenAgentProfile}

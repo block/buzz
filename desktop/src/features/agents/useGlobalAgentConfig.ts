@@ -18,6 +18,7 @@ const EMPTY_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
   model: null,
+  preferred_runtime: null,
 };
 
 export const globalAgentConfigQueryKey = ["globalAgentConfig"] as const;
@@ -30,7 +31,7 @@ export function useGlobalAgentConfig(): {
     queryKey: globalAgentConfigQueryKey,
     queryFn: getGlobalAgentConfig,
     // Config is only mutated via setGlobalAgentConfig — treat as stable until
-    // explicitly invalidated by GlobalAgentConfigSettingsCard after a save.
+    // explicitly invalidated by AgentDefaultsSettingsCard after a save.
     staleTime: Number.POSITIVE_INFINITY,
     // Never show a stale empty flash while a background refetch runs.
     placeholderData: EMPTY_CONFIG,

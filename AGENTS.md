@@ -104,7 +104,9 @@ commit. **Pre-push hooks** run clippy (workspace + Tauri) and fast unit tests
 in parallel (Rust, desktop JS, Tauri Rust, mobile Flutter) — no overlap with
 pre-commit. Builds are CI-only. Run `just fix-all` to auto-fix all formatting
 in one shot. Run `just ci` for the full local gate. Run `just hooks` to
-re-install hooks after env changes.
+re-install hooks after env changes. Before agents run Git or hooks, activate the
+repo's Hermit environment (`. ./bin/activate-hermit`); do not rewrite hook
+commands to compensate for an unconfigured shell `PATH`.
 
 Additional rules:
 - No `unsafe` code
@@ -460,34 +462,44 @@ new arbitrary text-size literal — px **or** rem/em. Genuinely decorative glyph
 (e.g. the `text-[6rem]` avatar emoji) are allowlisted by `path:line` in that
 script.
 
-### Workspace Switching
+### Community Switching
 
-The desktop app supports multiple workspaces (each backed by a different relay).
-Switching workspaces does **not** reload the page — it uses React key-based
-remounting. `<AppReady key={workspaceKey} />` in `App.tsx` forces the entire
-workspace-scoped subtree to unmount and remount with fresh state.
+The desktop app supports multiple communities (each backed by a different relay).
+Switching communities does **not** reload the page — it uses React key-based
+remounting. `<AppReady key={communityKey} />` in `App.tsx` forces the entire
+community-scoped subtree to unmount and remount with fresh state.
 
 **Module-level singletons must be explicitly reset.** React remounting only
 clears React state (useState, useRef, context). Module-level variables (Maps,
-class instances, cached promises) survive across remounts. Every workspace-scoped
-singleton needs a reset function wired into `resetWorkspaceState()` in
-`desktop/src/features/workspaces/useWorkspaceInit.ts`.
+class instances, cached promises) survive across remounts. Every community-scoped
+singleton needs a reset function wired into `resetCommunityState()` in
+`desktop/src/features/communities/useCommunityInit.ts`.
 
-Current singletons that are reset on workspace switch:
+Current singletons that are reset on relay boundary changes (same-relay
+reconnects preserve pending avatar verification work):
 - `relayClient.disconnect()` — WebSocket teardown + promise rejection
-- `resetMediaCaches()` — proxy port and relay origin caches
-- `clearSearchHitEventCache()` — search result event cache
+- `resetRateLimitGate()` — clears any active rate-limit window from the old relay
 - `clearAllDrafts()` — message draft cache
+- `resetAgentObserverStore()` — agent observer relay store
+- `resetActiveAgentTurnsStore()` — active agent turn timers
+- `resetAgentWorkingSignal()` — agent working indicator signal
+- `resetAvatarProfileSync()` — pending verified-avatar profile writes
+- `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
+- `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
+- `resetMediaCaches()` — proxy port and relay origin caches
+- `resetVideoPlayerState()` — video player singleton
+- `resetRenderScopedReactionHydration()` — reaction hydration cache
+- `clearSearchHitEventCache()` — search result event cache
+- `clearMarkdownNodeCache()` — markdown parse-node cache
 
 **If you add a new module-level cache, Map, or class instance that holds
-workspace-scoped data, you must add its reset to `resetWorkspaceState()`.**
-Failure to do so causes data from the old workspace to leak into the new one.
+community-scoped data, you must add its reset to `resetCommunityState()`.**
+Failure to do so causes data from the old community to leak into the new one.
 
 Key files:
-- `desktop/src/app/App.tsx` — workspace key, init gate, remount boundary
-- `desktop/src/features/workspaces/useWorkspaceInit.ts` — `resetWorkspaceState()`, applies config to Tauri backend
-- `desktop/src/features/workspaces/useWorkspaces.tsx` — `WorkspacesProvider` context (shared state for App + AppShell)
-- `desktop/src/main.tsx` — provider hierarchy (`QueryClientProvider` > `WorkspacesProvider` > `App`)
+- `desktop/src/app/App.tsx` — community key, init gate, remount boundary
+- `desktop/src/features/communities/useCommunityInit.ts` — `resetCommunityState()`, applies config to Tauri backend
+- `desktop/src/main.tsx` — provider hierarchy (`QueryClientProvider` > `App`)
 
 ---
 

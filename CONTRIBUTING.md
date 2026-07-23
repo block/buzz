@@ -45,7 +45,7 @@ unacceptable behavior to **conduct@buzz-relay.org**.
 | Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |
-| `lefthook` | latest | Optional; run `lefthook install` for local Git hooks |
+| `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
 
 This repo uses [Hermit](https://cashapp.github.io/hermit/) for toolchain
@@ -110,8 +110,14 @@ just desktop-dev  # terminal 2 — Vite dev server only (no Tauri shell)
 
 ```bash
 just down    # Stop Docker services, keep data
-just reset   # ⚠️  Wipe all data and recreate the environment
+just reset   # Wipe all dev state and recreate it; installed Buzz is preserved
 ```
+
+Development desktop state uses separate bundle identifiers
+(`xyz.block.buzz.app.dev` and per-worktree variants), a separate keyring service
+(`buzz-desktop-dev`), and `~/.buzz-dev`. `just reset` removes those dev-only
+locations and the local Docker volumes. It does not touch the installed app's
+`xyz.block.buzz.app` data, `buzz-desktop` keyring service, or `~/.buzz` nest.
 
 ---
 

@@ -6,6 +6,7 @@
 //! `created_at` for NIP-33 latest-wins semantics.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -29,10 +30,9 @@ pub struct RetainedEvent {
 pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| format!("failed to open retention db: {e}"))?;
 
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| format!("failed to set WAL mode: {e}"))?;
     conn.pragma_update(None, "busy_timeout", 5000)
         .map_err(|e| format!("failed to set busy_timeout: {e}"))?;
+    set_wal_mode(&conn)?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS persona_events (
@@ -49,6 +49,30 @@ pub fn open_retention_db(path: &Path) -> Result<Connection, String> {
     .map_err(|e| format!("failed to create retention table: {e}"))?;
 
     Ok(conn)
+}
+
+fn set_wal_mode(conn: &Connection) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(error) if sqlite_is_busy(&error) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("failed to set WAL mode: {error}")),
+        }
+    }
+}
+
+fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 /// Build the retention `d_tag` column value for a kind:5 tombstone row.
@@ -343,6 +367,21 @@ pub fn get_retained_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_open_waits_for_initialization_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("retention.db");
+        let first = open_retention_db(&path).unwrap();
+        first.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+        let second_path = path.clone();
+        let second = std::thread::spawn(move || open_retention_db(&second_path));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        first.execute_batch("COMMIT").unwrap();
+
+        assert!(second.join().unwrap().is_ok());
+    }
 
     fn test_db() -> Connection {
         open_retention_db(Path::new(":memory:")).unwrap()

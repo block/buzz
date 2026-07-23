@@ -84,6 +84,50 @@ void _insertTriggerAtCursor(
   focusNode.requestFocus();
 }
 
+bool hasMention(String text, String name) {
+  final pattern = RegExp(
+    '(?:^|\\s|[*_]{1,3}|\\|\\|)@${RegExp.escape(name)}(?=\\|\\||[\\s,;.!?:)\\]}*_]|\$)',
+    caseSensitive: false,
+  );
+  return pattern.hasMatch(text);
+}
+
+/// Outcome of the non-member mention prompt. `null` (dialog dismissed)
+/// cancels the send and keeps the draft.
+enum _NonMemberMentionChoice { invite, sendWithoutInviting }
+
+/// Ask whether to invite mentioned humans who aren't channel members, or
+/// send without inviting them. Mirrors desktop's `NonMemberMentionDialog`.
+Future<_NonMemberMentionChoice?> _promptNonMemberMention(
+  BuildContext context, {
+  required List<String> names,
+}) {
+  final verb = names.length == 1 ? 'is' : 'are';
+  return showDialog<_NonMemberMentionChoice>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Mention people outside this channel?'),
+      content: Text(
+        '${names.join(', ')} $verb not in this channel. Invite them to '
+        'the channel, or send without inviting them.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(
+            dialogContext,
+          ).pop(_NonMemberMentionChoice.sendWithoutInviting),
+          child: const Text('Do nothing'),
+        ),
+        TextButton(
+          onPressed: () =>
+              Navigator.of(dialogContext).pop(_NonMemberMentionChoice.invite),
+          child: const Text('Invite'),
+        ),
+      ],
+    ),
+  );
+}
+
 /// Send a typing indicator over the WebSocket (fire-and-forget).
 ///
 /// Desktop sends these as `["EVENT", signedEvent]` over the WebSocket — not

@@ -7,7 +7,7 @@ const MAX_RECENTS = 8;
 
 // Default persona display names to seed the list when empty.
 // These are resolved to IDs by the consumer.
-export const DEFAULT_PERSONA_NAMES = ["Fizz"] as const;
+export const DEFAULT_PERSONA_NAMES = ["Fizz", "Honey", "Bumble"] as const;
 
 export function pickQuickBotPersonas(
   personas: readonly AgentPersona[],

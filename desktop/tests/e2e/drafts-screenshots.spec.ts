@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
 const SHOTS = "test-results/drafts";
@@ -67,23 +68,23 @@ const ACTIVE_DRAFTS: StoredDrafts = {
 };
 
 /**
- * Patch the mock workspace to include the pubkey so initDraftStore gets the
- * correct pubkey on app startup. The workspace is seeded by installMockBridge
+ * Patch the mock community to include the pubkey so initDraftStore gets the
+ * correct pubkey on app startup. The community is seeded by installMockBridge
  * without a pubkey field; this addInitScript runs after that seed (init
  * scripts execute in registration order) and adds it.
  */
-async function patchWorkspacePubkey(page: import("@playwright/test").Page) {
+async function patchCommunityPubkey(page: import("@playwright/test").Page) {
   await page.addInitScript(
     ({ pubkey }) => {
-      const raw = window.localStorage.getItem("buzz-workspaces");
-      const workspaces = raw
+      const raw = window.localStorage.getItem("buzz-communities");
+      const communities = raw
         ? (JSON.parse(raw) as Array<Record<string, unknown>>)
         : [];
-      if (workspaces[0]) {
-        workspaces[0].pubkey = pubkey;
+      if (communities[0]) {
+        communities[0].pubkey = pubkey;
         window.localStorage.setItem(
-          "buzz-workspaces",
-          JSON.stringify(workspaces),
+          "buzz-communities",
+          JSON.stringify(communities),
         );
       }
     },
@@ -140,7 +141,7 @@ test.describe("drafts screenshots", () => {
 
   test("01 — drafts section populated", async ({ page }) => {
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
 
     const panel = await openDraftsPanel(page);
@@ -164,17 +165,47 @@ test.describe("drafts screenshots", () => {
     // Section heading should be "DRAFTS"
     await expect(panel.getByText("Drafts", { exact: true })).toBeVisible();
 
-    // Small settle before screenshot
-    await page.waitForTimeout(200);
+    const detail = page.getByTestId("home-inbox-draft-detail");
+    await expect(detail).toBeVisible();
+    await expect(detail.getByText("1 attachment")).toBeVisible();
+    await expect(detail.getByText("You", { exact: true })).toBeVisible();
+    await expect(detail.getByText("Draft", { exact: true })).toBeVisible();
 
-    await panel.screenshot({
+    await detail.locator("article").hover();
+    await expect(
+      detail.getByTestId("home-inbox-draft-action-bar"),
+    ).toBeVisible();
+
+    await waitForAnimations(page);
+    await page.getByTestId("home-inbox").screenshot({
       path: `${SHOTS}/01-drafts-section-populated.png`,
     });
   });
 
+  test("02 — narrow draft list opens the detail view", async ({ page }) => {
+    await page.setViewportSize({ width: 520, height: 900 });
+    await installMockBridge(page);
+    await patchCommunityPubkey(page);
+    await seedDraftStore(page, ACTIVE_DRAFTS);
+
+    const panel = await openDraftsPanel(page);
+    const draftRow = panel.locator(
+      `[data-testid='home-draft-item-channel:${GENERAL_CHANNEL_ID}']`,
+    );
+    await draftRow.getByRole("button", { name: /View draft/ }).click();
+
+    const detail = page.getByTestId("home-inbox-draft-detail");
+    await expect(detail).toBeVisible();
+    await expect(panel).not.toBeVisible();
+
+    await detail.getByRole("button", { name: "Back to drafts list" }).click();
+    await expect(panel).toBeVisible();
+    await expect(detail).not.toBeVisible();
+  });
+
   test("03 — hover actions visible", async ({ page }) => {
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
 
     const panel = await openDraftsPanel(page);
@@ -204,8 +235,7 @@ test.describe("drafts screenshots", () => {
     await expect(sendMessageBtn).toBeVisible({ timeout: 4_000 });
     await expect(deleteDraftBtn).toBeVisible({ timeout: 4_000 });
 
-    await page.waitForTimeout(200);
-
+    await waitForAnimations(page);
     await panel.screenshot({ path: `${SHOTS}/03-hover-actions.png` });
   });
 
@@ -218,8 +248,7 @@ test.describe("drafts screenshots", () => {
     // Empty state: FileText icon + "No drafts" text
     await expect(panel.getByText("No drafts")).toBeVisible({ timeout: 5_000 });
 
-    await page.waitForTimeout(200);
-
+    await waitForAnimations(page);
     await panel.screenshot({ path: `${SHOTS}/04-empty-state.png` });
   });
 
@@ -228,7 +257,7 @@ test.describe("drafts screenshots", () => {
     // the correct channel and passes the autoSend key so the thread composer
     // (not the main composer) arms the auto-submit.
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
 
     // A fixed fake root event ID — in the mock bridge get_event is unhandled
     // so useDraftRootStatus will map it to `error` (not `deleted`), keeping
@@ -286,7 +315,7 @@ test.describe("drafts screenshots", () => {
     // Confirm dialog body names the channel.
     await expect(dialog.getByText(/general/i)).toBeVisible();
 
-    await page.waitForTimeout(200);
+    await waitForAnimations(page);
     await panel.screenshot({
       path: `${SHOTS}/05-thread-draft-send-dialog.png`,
     });
@@ -320,11 +349,11 @@ test.describe("drafts screenshots", () => {
     page,
   }) => {
     // Captures both badge placements for the PR screenshot:
-    //   1. The numeric badge on the inbox filter trigger button.
+    //   1. The status dot on the inbox filter trigger button.
     //   2. The badge next to "Drafts" in the filter dropdown.
     // Two active drafts are seeded so the count is 2.
     await installMockBridge(page);
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
 
     await page.goto("/", { waitUntil: "domcontentloaded" });
@@ -332,10 +361,14 @@ test.describe("drafts screenshots", () => {
       timeout: 10_000,
     });
 
-    // Badge should be visible on the filter trigger with count = 2.
+    // The trigger uses a compact dot while retaining the count accessibly.
     const triggerBadge = page.getByTestId("inbox-draft-badge");
     await expect(triggerBadge).toBeVisible({ timeout: 6_000 });
-    await expect(triggerBadge).toHaveText("2");
+    await expect(triggerBadge).toBeEmpty();
+    await expect(page.getByTestId("inbox-filter-trigger")).toHaveAttribute(
+      "aria-label",
+      "Filter inbox: All. 2 active drafts",
+    );
 
     // Open the filter dropdown so the badge-option is visible too.
     await page.getByTestId("inbox-filter-trigger").click();
@@ -343,7 +376,7 @@ test.describe("drafts screenshots", () => {
     await expect(dropdownBadge).toBeVisible({ timeout: 4_000 });
     await expect(dropdownBadge).toHaveText("2");
 
-    await page.waitForTimeout(200);
+    await waitForAnimations(page);
 
     // Capture the full inbox header area including the open dropdown.
     await page.getByTestId("home-inbox").screenshot({
@@ -365,7 +398,7 @@ test.describe("drafts screenshots", () => {
     const THREAD_DRAFT_KEY = `thread:${DELETED_ROOT_ID}`;
 
     await installMockBridge(page, { deletedEventIds: [DELETED_ROOT_ID] });
-    await patchWorkspacePubkey(page);
+    await patchCommunityPubkey(page);
     await seedDraftStore(page, {
       [THREAD_DRAFT_KEY]: {
         content: "Planning to follow up on the discussion from last week.",
@@ -406,7 +439,7 @@ test.describe("drafts screenshots", () => {
       draftRow.getByRole("button", { name: "Delete draft" }),
     ).toBeVisible({ timeout: 4_000 });
 
-    await page.waitForTimeout(200);
+    await waitForAnimations(page);
 
     await panel.screenshot({
       path: `${SHOTS}/07-thread-deleted-state.png`,

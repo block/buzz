@@ -1,0 +1,89 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "push.name" . }}
+  labels: {{- include "push.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: buzz-push-gateway
+      rules:
+        # Sustained configuration faults mean the provider credential/topic is
+        # unhealthy; no endpoint is being invalidated but nothing is delivering.
+        - alert: PushGatewayConfigurationFault
+          expr: |
+            sum(rate(push_gateway_apns_deliveries_total{outcome="configuration_fault"}[5m])) > 0
+          for: 10m
+          labels: { severity: critical }
+          annotations:
+            summary: Push gateway APNs configuration faults
+            description: >-
+              APNs is returning configuration faults (bad/expired provider token
+              or topic). Deliveries are failing without invalidating endpoints.
+              See runbook: check the APNs .p8 key, key id, team id, and topic.
+        # Authority store unavailable at admission = durable dependency is down.
+        - alert: PushGatewayAdmissionUnavailable
+          expr: |
+            sum(rate(push_gateway_admissions_total{result="unavailable"}[5m])) > 0
+          for: 5m
+          labels: { severity: critical }
+          annotations:
+            summary: Push gateway authority store unavailable
+            description: >-
+              authorize_delivery is returning Unavailable — the PostgreSQL
+              authority store is unreachable or failing. Check DB connectivity
+              and the pod's postgres egress NetworkPolicy.
+        # Readiness failing on the authority cause = the pod will be pulled from
+        # rotation; alert before all replicas drop out.
+        - alert: PushGatewayReadinessAuthorityFailing
+          expr: |
+            sum(rate(push_gateway_readiness_failures_total{cause="authority"}[5m])) > 0
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: Push gateway readiness failing on authority
+            description: >-
+              Readiness probes are failing because the authority store check
+              fails. Replicas will be removed from the Service. Investigate DB
+              health before capacity drops below the PodDisruptionBudget.
+        # The retention reaper sweeps expired rows every 5m; a single transient
+        # failure self-heals on the next tick. Alert on repeated failure —
+        # at least two sweeps failing within ~30m (six ticks) — which grows the
+        # bounded crash-before-release window and leaks storage.
+        - alert: PushGatewayReaperFailing
+          expr: |
+            sum(increase(push_gateway_reaper_failures_total[30m])) >= 2
+          for: 5m
+          labels: { severity: warning }
+          annotations:
+            summary: Push gateway retention reaper failing
+            description: >-
+              The retention reaper has failed at least twice within 30m (it runs
+              every 5m). Expired delivery reservations are not being swept,
+              growing the bounded-until-expiry window. Check DB write availability.
+        # High sustained fraction of retryable APNs outcomes indicates APNs
+        # throttling or degradation. The ratio is a true fraction over the
+        # window (increase = counts, not per-second rate), gated by a minimum
+        # sample count so a couple of retries at trivial volume cannot trip it.
+        - alert: PushGatewayHighApnsRetryRate
+          expr: |
+            (
+              sum(increase(push_gateway_apns_deliveries_total{outcome="retry"}[10m]))
+                / sum(increase(push_gateway_apns_deliveries_total[10m]))
+              > {{ .Values.prometheusRule.apnsRetryRatioThreshold }}
+            )
+            and
+            sum(increase(push_gateway_apns_deliveries_total[10m])) >= {{ .Values.prometheusRule.apnsRetryMinSamples }}
+          for: 15m
+          labels: { severity: warning }
+          annotations:
+            summary: Push gateway high APNs retry ratio
+            description: >-
+              The retryable fraction of APNs attempts over a 10m window
+              (429/500/503), above a minimum sample count, has exceeded the
+              configured threshold continuously for 15m. APNs may be throttling
+              or degraded; deliveries are delayed but not lost.
+{{- end }}

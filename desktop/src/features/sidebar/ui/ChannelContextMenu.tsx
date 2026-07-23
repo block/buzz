@@ -1,4 +1,5 @@
 import {
+  Archive,
   Bell,
   BellOff,
   Check,
@@ -6,11 +7,19 @@ import {
   CircleDot,
   Copy,
   LogOut,
+  LoaderCircle,
   Plus,
   Star,
   StarOff,
+  Trash2,
+  TriangleAlert,
 } from "lucide-react";
 
+import {
+  useArchiveChannelMutation,
+  useChannelMembersQuery,
+} from "@/features/channels/hooks";
+import { useChannelModerationCapabilities } from "@/features/channels/ui/ChannelManagementModerationActions";
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import {
   ContextMenuIconSlot,
@@ -18,6 +27,7 @@ import {
 } from "@/features/sidebar/ui/sidebarMenuHelpers";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import type { Channel } from "@/shared/api/types";
+import { useIdentityQuery } from "@/shared/api/hooks";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   ContextMenuItem,
@@ -144,6 +154,7 @@ export function ChannelContextMenuItems({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  onDeleteChannel,
   onLeaveChannel,
 }: {
   channel: Channel;
@@ -164,8 +175,34 @@ export function ChannelContextMenuItems({
   onAssignChannel?: (channelId: string, sectionId: string) => void;
   onUnassignChannel?: (channelId: string) => void;
   onCreateSectionForChannel?: (channelId: string) => void;
+  onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
+  const canLoadOwnerActions =
+    channel.channelType !== "dm" && Boolean(onDeleteChannel);
+  const membersQuery = useChannelMembersQuery(channel.id, canLoadOwnerActions);
+  const currentPubkey = useIdentityQuery().data?.pubkey;
+  const archiveChannel = useArchiveChannelMutation(channel.id);
+  const {
+    canDeleteChannel,
+    canManageChannel,
+    error: capabilityError,
+    isLoading: isCapabilityLoading,
+  } = useChannelModerationCapabilities(
+    membersQuery.data,
+    currentPubkey,
+    canLoadOwnerActions,
+  );
+  const ownerActionsError = membersQuery.error ?? capabilityError;
+  const ownerActionsLoading =
+    canLoadOwnerActions && (membersQuery.isLoading || isCapabilityLoading);
+  const showChannelActions = Boolean(
+    onLeaveChannel ||
+      ownerActionsLoading ||
+      ownerActionsError ||
+      canManageChannel ||
+      canDeleteChannel,
+  );
   const showStar = Boolean(onStarChannel && onUnstarChannel);
   const showReadToggle = hasUnread
     ? Boolean(onMarkChannelRead)
@@ -265,19 +302,56 @@ export function ChannelContextMenuItems({
           </ContextMenuItem>
         )
       ) : null}
+      {showChannelActions ? <ContextMenuSeparator /> : null}
       {onLeaveChannel ? (
-        <>
-          <ContextMenuSeparator />
-          <ContextMenuItem
-            className="text-destructive focus:text-destructive"
-            onSelect={() => deferMenuAction(() => onLeaveChannel(channel))}
-          >
-            <ContextMenuIconSlot>
-              <LogOut className="h-4 w-4" />
-            </ContextMenuIconSlot>
-            <span>Leave channel</span>
-          </ContextMenuItem>
-        </>
+        <ContextMenuItem
+          className="text-destructive focus:text-destructive"
+          onSelect={() => deferMenuAction(() => onLeaveChannel(channel))}
+        >
+          <ContextMenuIconSlot>
+            <LogOut className="h-4 w-4" />
+          </ContextMenuIconSlot>
+          <span>Leave channel</span>
+        </ContextMenuItem>
+      ) : null}
+      {ownerActionsLoading ? (
+        <ContextMenuItem disabled>
+          <ContextMenuIconSlot>
+            <LoaderCircle className="h-4 w-4 animate-spin" />
+          </ContextMenuIconSlot>
+          <span>Loading channel actions...</span>
+        </ContextMenuItem>
+      ) : ownerActionsError ? (
+        <ContextMenuItem disabled>
+          <ContextMenuIconSlot>
+            <TriangleAlert className="h-4 w-4" />
+          </ContextMenuIconSlot>
+          <span>Channel actions unavailable</span>
+        </ContextMenuItem>
+      ) : null}
+      {canManageChannel ? (
+        <ContextMenuItem
+          data-testid={`archive-channel-${channel.name}`}
+          disabled={archiveChannel.isPending}
+          onSelect={() => deferMenuAction(() => archiveChannel.mutate())}
+        >
+          <ContextMenuIconSlot>
+            <Archive className="h-4 w-4" />
+          </ContextMenuIconSlot>
+          <span>Archive channel</span>
+        </ContextMenuItem>
+      ) : null}
+      {canDeleteChannel ? (
+        <ContextMenuItem
+          className="text-destructive focus:text-destructive"
+          data-testid={`delete-channel-${channel.name}`}
+          onSelect={() => deferMenuAction(() => onDeleteChannel?.(channel))}
+        >
+          <ContextMenuIconSlot>
+            <Trash2 className="h-4 w-4" />
+          </ContextMenuIconSlot>
+          <span>Delete channel</span>
+        </ContextMenuItem>
       ) : null}
     </>
   );

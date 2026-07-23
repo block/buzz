@@ -23,7 +23,10 @@ import {
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
-import { ownsAuthorAgent } from "@/features/profile/lib/identity";
+import {
+  formatOwnerLabel,
+  ownsAuthorAgent,
+} from "@/features/profile/lib/identity";
 import { formatElapsed } from "@/features/agents/ui/agentSessionUtils";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import { useUserStatusQuery } from "@/features/user-status/hooks";
@@ -52,6 +55,8 @@ type UserProfilePopoverProps = {
   children: React.ReactNode;
   pubkey: string;
   triggerElement?: "div" | "span";
+  /** Accessible name for interactive trigger content that is visually hidden. */
+  triggerAriaLabel?: string;
   /** Set false when the trigger is inside another interactive control. */
   enableProfilePanel?: boolean;
   /** When set to "bot", a BotIdenticon badge renders next to the display name. */
@@ -166,6 +171,7 @@ export function UserProfilePopover({
   children,
   pubkey,
   triggerElement = "div",
+  triggerAriaLabel,
   enableProfilePanel = true,
   role,
   botIdenticonValue,
@@ -205,6 +211,11 @@ export function UserProfilePopover({
     (a) => a.pubkey === pubkey,
   );
   const profile = profileQuery.data;
+  const ownerPubkey = profile?.ownerPubkey ?? null;
+  const ownerProfileQuery = useUsersBatchQuery(
+    ownerPubkey ? [ownerPubkey] : [],
+    { enabled: open && Boolean(ownerPubkey) },
+  );
   const normalizedPubkey = normalizePubkey(pubkey);
   const isAgentByOaOwner = Boolean(
     usersBatchQuery.data?.profiles[normalizedPubkey]?.isAgent,
@@ -232,6 +243,13 @@ export function UserProfilePopover({
   const isOwner = useIsManagedAgent(isBotProfile ? pubkey : null);
   const identityQuery = useIdentityQuery();
   const currentPubkey = identityQuery.data?.pubkey;
+  const ownerLabel = isBotProfile
+    ? formatOwnerLabel(
+        ownerPubkey,
+        currentPubkey,
+        ownerProfileQuery.data?.profiles,
+      )
+    : null;
   const isSelf =
     currentPubkey !== undefined &&
     currentPubkey.toLowerCase() === pubkey.toLowerCase();
@@ -241,6 +259,11 @@ export function UserProfilePopover({
   const selfProfileQuery = useProfileQuery(open && showProfileActions);
   const isCurrentUserOwner = ownsAuthorAgent(profile, currentPubkey);
   const viewerIsOwner = isCurrentUserOwner || isOwner === true;
+  const showMessageAction =
+    showProfileActions &&
+    !isAgentClassificationPending &&
+    (!isBotProfile || viewerIsOwner);
+  const showAnyProfileActions = showHumanProfileActions || showMessageAction;
   const canViewActivity =
     isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
@@ -298,7 +321,7 @@ export function UserProfilePopover({
   );
 
   const handleMessage = React.useCallback(async () => {
-    if (!showProfileActions || pendingAction !== null) return;
+    if (!showMessageAction || pendingAction !== null) return;
 
     clearHoverTimer();
     setPendingAction("message");
@@ -326,7 +349,7 @@ export function UserProfilePopover({
     openDmMutation,
     pendingAction,
     pubkey,
-    showProfileActions,
+    showMessageAction,
   ]);
 
   const handleHuddle = React.useCallback(async () => {
@@ -506,6 +529,14 @@ export function UserProfilePopover({
             />
           ) : null}
         </div>
+        {isBotProfile && ownerLabel ? (
+          <p
+            className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
+            data-testid={`user-profile-popover-owner-${pubkey}`}
+          >
+            managed by {ownerLabel}
+          </p>
+        ) : null}
         {profileSubheader ? (
           <p
             className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
@@ -522,6 +553,7 @@ export function UserProfilePopover({
     <Popover onOpenChange={setOpen} open={open}>
       <PopoverAnchor asChild>
         <TriggerElement
+          aria-label={triggerAriaLabel}
           role={canOpenProfilePanel ? "button" : undefined}
           tabIndex={canOpenProfilePanel ? 0 : undefined}
           onClick={handleTriggerClick}
@@ -615,7 +647,7 @@ export function UserProfilePopover({
             </button>
           ) : null}
 
-          {hasUserStatus || showProfileActions ? (
+          {hasUserStatus || showAnyProfileActions ? (
             <>
               <div
                 aria-hidden="true"
@@ -634,7 +666,7 @@ export function UserProfilePopover({
                   ) : null}
                 </StatusLine>
               ) : null}
-              {showProfileActions ? (
+              {showAnyProfileActions ? (
                 <div className="flex gap-2">
                   {showHumanProfileActions ? (
                     <Button
@@ -666,29 +698,31 @@ export function UserProfilePopover({
                       )}
                     </Button>
                   ) : null}
-                  <Button
-                    className="min-w-0 flex-1"
-                    data-testid={`user-profile-popover-message-${pubkey}`}
-                    disabled={
-                      pendingAction !== null || openDmMutation.isPending
-                    }
-                    onClick={() => {
-                      void handleMessage();
-                    }}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    {pendingAction === "message" ? (
-                      <Spinner
-                        aria-hidden="true"
-                        className="h-3.5 w-3.5 border-2"
-                      />
-                    ) : (
-                      <MessageSquare />
-                    )}
-                    Message
-                  </Button>
+                  {showMessageAction ? (
+                    <Button
+                      className="min-w-0 flex-1"
+                      data-testid={`user-profile-popover-message-${pubkey}`}
+                      disabled={
+                        pendingAction !== null || openDmMutation.isPending
+                      }
+                      onClick={() => {
+                        void handleMessage();
+                      }}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      {pendingAction === "message" ? (
+                        <Spinner
+                          aria-hidden="true"
+                          className="h-3.5 w-3.5 border-2"
+                        />
+                      ) : (
+                        <MessageSquare />
+                      )}
+                      Message
+                    </Button>
+                  ) : null}
                   {showHumanProfileActions ? (
                     <Button
                       className="min-w-0 flex-1"

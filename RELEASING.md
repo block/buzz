@@ -59,6 +59,11 @@ with any new commits, and updates the PR in place.
 All three lanes share one engine; they differ only in which version manifest
 they bump, which branch prefix they use, and what the merge triggers.
 
+The merge workflow creates tags with a short-lived installation token from the
+dedicated `buzz-release-bot` GitHub App. Release-tag rules allow that App to
+create matching tags and prevent other actors from creating, moving, or
+deleting them. The workflow's default `GITHUB_TOKEN` is read-only.
+
 ### Desktop
 
 1. **`just release-desktop`** runs locally on `main` — computes the next
@@ -79,15 +84,13 @@ they bump, which branch prefix they use, and what the merge triggers.
    opens (or updates) a PR.
 2. **Merge the PR** — the `auto-tag-on-release-pr-merge` workflow detects the
    `relay-release/*` branch merge and pushes a `relay-v<version>` tag.
-3. **Auto-tag dispatches `docker.yml`** — the same workflow then triggers
-   `docker.yml` with the version and tag ref, which builds the multi-arch relay
+3. **Tag triggers `docker.yml`** — the `relay-v<version>` push triggers
+   `docker.yml`, which builds the multi-arch relay
    image and publishes `ghcr.io/block/buzz:<version>` (plus `:<major>.<minor>`,
    `:<major>`, and `:latest` for stable releases). Prereleases
    (`relay-v<version>-rc.1`) publish only the prerelease tag and do **not**
-   move `:latest`. (The dispatch — rather than relying on `docker.yml`'s
-   `push: tags` trigger — is required because GitHub suppresses `on: push` for
-   tags pushed by the workflow's own `GITHUB_TOKEN`; the desktop lane dispatches
-   `release.yml` for the same reason.)
+   move `:latest`. GitHub runs the tag trigger because the tag is created by
+   the dedicated GitHub App rather than the workflow's `GITHUB_TOKEN`.
 
 Every push to `main` continues to build and publish `:main` + `:sha-<7>` tags
 (the rolling development image). The `:latest` tag tracks the latest **stable**
@@ -147,13 +150,39 @@ regenerates `mobile/pubspec.lock`.
 
 ---
 
-## Manual Fallback
+## Signed macOS Canary
 
-If the automated flow isn't suitable (e.g., building from a non-main ref):
+Use the manual **Signed macOS Canary** workflow when you need an Apple Silicon
+build of current `main` for explicit testing without publishing a release:
 
-1. Go to **Actions > Release** in the GitHub UI
-2. Click **Run workflow**
-3. Provide the semver version (no `v` prefix) and the ref to build from
+```sh
+gh workflow run signed-macos-canary.yml --repo block/buzz --ref main
+```
+
+The workflow derives a `-test.<run-number>` version, signs and notarizes the
+DMG, verifies it with Gatekeeper, and uploads it as a short-lived Actions
+artifact with seven-day retention. Because this is a public repository, any
+signed-in GitHub user can download that artifact while it exists; it is
+unpublished, not private. The workflow has no release permissions, does not
+create or move tags, and cannot update `buzz-desktop-latest` or `latest.json`.
+
+Download the artifact from the completed run:
+
+```sh
+gh run download <run-id> --repo block/buzz --name <artifact-name>
+```
+
+The workflow intentionally accepts only `main`. Use the normal release process
+for distributable builds or builds from an immutable release tag.
+
+---
+
+## Manual Release Retry
+
+The **Release** workflow's manual dispatch is only a retry mechanism for an
+existing immutable `v<version>` tag. Select that tag in the ref picker and
+provide the matching semver version without the `v` prefix. It cannot build
+from `main` or another caller-selected source ref.
 
 ---
 

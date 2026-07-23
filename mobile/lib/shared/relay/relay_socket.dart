@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -13,6 +14,20 @@ import 'nostr_models.dart';
 ///
 /// Does NOT handle reconnection — that is [RelaySessionNotifier]'s job.
 enum SocketState { disconnected, connecting, authenticating, connected }
+
+class RelayAuthRejectedException implements Exception {
+  final String message;
+
+  const RelayAuthRejectedException(this.message);
+
+  @override
+  String toString() => 'Relay authentication rejected: $message';
+}
+
+Exception classifyRelayAuthFailure(String message) {
+  if (message.startsWith('error:')) return Exception(message);
+  return RelayAuthRejectedException(message);
+}
 
 class RelaySocket {
   final String _wsUrl;
@@ -205,6 +220,9 @@ class RelaySocket {
     }
   }
 
+  @visibleForTesting
+  void debugHandleOkForTest(List<dynamic> data) => _onMessage(data);
+
   /// Handle OK frames. During auth, complete the auth flow.
   void _handleOk(List<dynamic> data) {
     if (data.length < 3) return;
@@ -222,7 +240,7 @@ class RelaySocket {
         final message = data.length > 3
             ? data[3] as String
             : 'Auth rejected by relay';
-        _failAuth(Exception(message));
+        _failAuth(classifyRelayAuthFailure(message));
       }
       return;
     }

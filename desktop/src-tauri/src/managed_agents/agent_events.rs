@@ -45,8 +45,6 @@ pub struct ManagedAgentEventContent {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_toolsets: Option<String>,
     /// `persona_content_hash` of the persona snapshot pinned at create time.
     /// Public drift indicator (not a secret) — lets other clients flag a stale
     /// snapshot without re-reading the source persona.
@@ -97,7 +95,6 @@ pub fn agent_event_content(record: &ManagedAgentRecord) -> ManagedAgentEventCont
         } else {
             record.provider.clone()
         },
-        mcp_toolsets: record.mcp_toolsets.clone(),
         persona_source_version: if definition_linked {
             None
         } else {
@@ -181,7 +178,6 @@ mod tests {
             model: Some("claude-opus-4".to_string()),
             provider: Some("anthropic".to_string()),
             persona_source_version: Some("abc123".to_string()),
-            mcp_toolsets: Some("default".to_string()),
             env_vars: BTreeMap::from([("OPENAI_API_KEY".to_string(), "sk-secret".to_string())]),
             start_on_app_launch: true,
             auto_restart_on_config_change: true,
@@ -192,6 +188,7 @@ mod tests {
             },
             backend_agent_id: Some("remote-id".to_string()),
             provider_binary_path: Some("/path/to/binary".to_string()),
+            team_id: None,
             persona_team_dir: None,
             persona_name_in_team: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -215,7 +212,6 @@ mod tests {
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: None,
         }
@@ -319,7 +315,6 @@ mod tests {
         // Instance fields stay on the wire.
         assert!(json.contains("parallelism"));
         assert!(json.contains("respond_to"));
-        assert!(json.contains("mcp_toolsets"));
 
         let mut standalone = sample_agent();
         standalone.persona_id = None;

@@ -59,7 +59,9 @@ import {
   loadDraftEntry,
   markDraftSentEntry,
   persistDraftEntry,
+  renameDraftEntry,
   saveDraftEntry,
+  subscribeToStore,
 } from "./useDrafts.ts";
 
 // Minimal ImetaMedia fixtures.
@@ -591,4 +593,801 @@ test("pre_status_sent_entry_is_dropped_on_read", () => {
   const active = getActiveDraftEntries();
   assert.equal(active.length, 0, "old sent: entry is dropped, not promoted");
   assert.equal(getSentDraftEntries().length, 0, "no entries read as sent");
+});
+
+// ── renameDraftEntry storage-layer tests ─────────────────────────────────────────────────────────────────────────────────────────
+
+function makeFullDraft(overrides = {}) {
+  const now = new Date().toISOString();
+  return {
+    content: "Legacy content",
+    selectionStart: 7,
+    selectionEnd: 7,
+    channelId: "chan-rename",
+    createdAt: now,
+    updatedAt: now,
+    pendingImeta: [],
+    spoileredAttachmentUrls: [],
+    status: "active",
+    ...overrides,
+  };
+}
+
+function makeFullImeta(overrides = {}) {
+  return {
+    url: "https://cdn.example.com/img.jpg",
+    sha256: "aabbccdd",
+    size: 1024,
+    type: "image/jpeg",
+    uploaded: 999,
+    dim: "800x600",
+    blurhash: "LEHV6nWB2yk8pyo0adR*",
+    thumb: undefined,
+    duration: undefined,
+    image: undefined,
+    filename: "img.jpg",
+    ...overrides,
+  };
+}
+
+/** Read the raw persisted store blob for the current pubkey (legacy v1 key). */
+function readRawStore(pubkey) {
+  const raw = localStorage.getItem(`buzz-drafts.v1:${pubkey}`);
+  return raw ? JSON.parse(raw) : {};
+}
+
+test("renameDraftEntry migrates: new key holds exact state, old key gone, one notify", () => {
+  setup("pubkey-rename-basic");
+  const draft = makeFullDraft();
+  saveDraftEntry("inbox-reply:old111", draft);
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  // Reset count after setup saves — only measure the rename call.
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:old111", "thread:new222");
+
+  unsub();
+
+  assert.equal(result, "migrated");
+  assert.equal(
+    notifyCount,
+    1,
+    "exactly one subscriber notification on successful rename",
+  );
+
+  const moved = loadDraftEntry("thread:new222");
+  assert.ok(moved, "canonical key must have the draft");
+  // Single deepStrictEqual proves every field migrated without loss or mutation.
+  assert.deepStrictEqual(
+    moved,
+    draft,
+    "moved record must equal the seeded draft exactly",
+  );
+
+  assert.equal(
+    loadDraftEntry("inbox-reply:old111"),
+    undefined,
+    "legacy key must be removed",
+  );
+
+  // Confirm persistence: localStorage must contain the canonical key, not the legacy key.
+  const persisted = readRawStore("pubkey-rename-basic");
+  assert.ok(
+    "thread:new222" in persisted,
+    "canonical key present in localStorage",
+  );
+  assert.ok(
+    !("inbox-reply:old111" in persisted),
+    "legacy key absent from localStorage",
+  );
+});
+
+test("renameDraftEntry migrates with attachments: all BlobDescriptor fields preserved", () => {
+  setup("pubkey-rename-attach");
+  const img = makeFullImeta();
+  const draft = makeFullDraft({
+    pendingImeta: [img],
+    spoileredAttachmentUrls: [img.url],
+  });
+  saveDraftEntry("inbox-reply:attach1", draft);
+
+  const result = renameDraftEntry(
+    "inbox-reply:attach1",
+    "thread:attach-canonical",
+  );
+  assert.equal(result, "migrated");
+
+  const moved = loadDraftEntry("thread:attach-canonical");
+  assert.ok(moved);
+  // deepStrictEqual confirms every BlobDescriptor optional field (dim, blurhash,
+  // thumb, duration, image, filename) survived the round-trip.
+  assert.deepStrictEqual(
+    moved,
+    draft,
+    "moved record including all attachment metadata must equal the seeded draft",
+  );
+  assert.equal(
+    loadDraftEntry("inbox-reply:attach1"),
+    undefined,
+    "legacy key removed",
+  );
+});
+
+test("renameDraftEntry noop: old key absent, returns noop, no notify, no writes", () => {
+  setup("pubkey-rename-noop");
+
+  const storeBefore = readRawStore("pubkey-rename-noop");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:missing", "thread:target");
+
+  unsub();
+  assert.equal(result, "noop");
+  assert.equal(notifyCount, 0, "no notification on noop");
+  assert.equal(loadDraftEntry("thread:target"), undefined);
+
+  // localStorage must be byte-identical before and after — no writes on noop.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-noop"),
+    storeBefore,
+    "localStorage must be unchanged on noop",
+  );
+});
+
+test("renameDraftEntry oldKey === newKey: returns noop, no writes, no notify", () => {
+  setup("pubkey-rename-same");
+  saveDraftEntry("thread:same", makeFullDraft());
+
+  const storeBefore = readRawStore("pubkey-rename-same");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("thread:same", "thread:same");
+
+  unsub();
+  assert.equal(result, "noop");
+  assert.equal(notifyCount, 0);
+
+  // localStorage must be byte-identical before and after.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-same"),
+    storeBefore,
+    "localStorage must be unchanged on self-rename noop",
+  );
+});
+
+test("renameDraftEntry collision on distinct content: both records preserved, no notify", () => {
+  setup("pubkey-rename-collision");
+  const legacy = makeFullDraft({ content: "Legacy draft" });
+  const canonical = makeFullDraft({ content: "Canonical draft" });
+  saveDraftEntry("inbox-reply:col1", legacy);
+  saveDraftEntry("thread:col-target", canonical);
+
+  // Snapshot both records before the rename attempt.
+  const legacyBefore = loadDraftEntry("inbox-reply:col1");
+  const canonicalBefore = loadDraftEntry("thread:col-target");
+  const storeBefore = readRawStore("pubkey-rename-collision");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:col1", "thread:col-target");
+
+  unsub();
+  assert.equal(result, "collision");
+  assert.equal(notifyCount, 0, "no notification on collision");
+
+  // Deep-compare after to before: both records must be byte-identical to their pre-call snapshots.
+  assert.deepStrictEqual(
+    loadDraftEntry("inbox-reply:col1"),
+    legacyBefore,
+    "legacy record must be byte-identical after collision",
+  );
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:col-target"),
+    canonicalBefore,
+    "canonical record must be byte-identical after collision",
+  );
+
+  // localStorage must be byte-identical before and after — no writes on collision.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-collision"),
+    storeBefore,
+    "localStorage must be unchanged on collision",
+  );
+});
+
+test("renameDraftEntry collision on optional attachment field only (blurhash differs): both preserved, no notify", () => {
+  setup("pubkey-rename-collision-optional");
+  const imgA = makeFullImeta({ blurhash: "HASH_A" });
+  const imgB = makeFullImeta({ blurhash: "HASH_B" }); // differs only in blurhash
+  const legacy = makeFullDraft({ pendingImeta: [imgA] });
+  const canonical = makeFullDraft({ pendingImeta: [imgB] });
+  saveDraftEntry("inbox-reply:opt1", legacy);
+  saveDraftEntry("thread:opt-canonical", canonical);
+
+  // Snapshot both records and the store before the rename attempt.
+  const legacyBefore = loadDraftEntry("inbox-reply:opt1");
+  const canonicalBefore = loadDraftEntry("thread:opt-canonical");
+  const storeBefore = readRawStore("pubkey-rename-collision-optional");
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:opt1", "thread:opt-canonical");
+
+  unsub();
+  assert.equal(
+    result,
+    "collision",
+    "blurhash difference must trigger collision",
+  );
+  assert.equal(notifyCount, 0);
+
+  // Deep-compare: both records must survive unchanged.
+  assert.deepStrictEqual(
+    loadDraftEntry("inbox-reply:opt1"),
+    legacyBefore,
+    "legacy record byte-identical after optional-field collision",
+  );
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:opt-canonical"),
+    canonicalBefore,
+    "canonical record byte-identical after optional-field collision",
+  );
+
+  // localStorage unchanged.
+  assert.deepStrictEqual(
+    readRawStore("pubkey-rename-collision-optional"),
+    storeBefore,
+    "localStorage must be unchanged on optional-field collision",
+  );
+});
+
+test("renameDraftEntry identical records: legacy removed, canonical kept, one notify", () => {
+  setup("pubkey-rename-identical");
+  const now = new Date().toISOString();
+  // Both records byte-identical across every field.
+  const shared = makeFullDraft({ createdAt: now, updatedAt: now });
+  saveDraftEntry("inbox-reply:ident", shared);
+  saveDraftEntry("thread:ident-target", shared);
+
+  let notifyCount = 0;
+  const unsub = subscribeToStore(() => {
+    notifyCount++;
+  });
+  notifyCount = 0;
+
+  const result = renameDraftEntry("inbox-reply:ident", "thread:ident-target");
+
+  unsub();
+  assert.equal(result, "migrated", "identical records collapse to migrated");
+  assert.equal(notifyCount, 1);
+  assert.equal(
+    loadDraftEntry("inbox-reply:ident"),
+    undefined,
+    "legacy key removed",
+  );
+  // deepStrictEqual on the surviving canonical record.
+  assert.deepStrictEqual(
+    loadDraftEntry("thread:ident-target"),
+    shared,
+    "canonical record must equal the seeded shared draft",
+  );
+
+  // Confirm localStorage reflects the final state.
+  const persisted = readRawStore("pubkey-rename-identical");
+  assert.ok(
+    "thread:ident-target" in persisted,
+    "canonical key in localStorage",
+  );
+  assert.ok(
+    !("inbox-reply:ident" in persisted),
+    "legacy key absent from localStorage",
+  );
+});
+
+test("persist_draft_round_trips_stable_mention_refs_across_restart", () => {
+  setup("mention-owner");
+  const mentionRefs = [
+    {
+      displayName: "Agent Ada",
+      pubkey: "abcdef1234",
+      isAgent: true,
+    },
+    {
+      displayName: "Pat Person",
+      pubkey: "987654fedc",
+      isAgent: false,
+    },
+  ];
+
+  persistDraftEntry(
+    "chan-mentions",
+    "Hi @Agent Ada and @Pat Person",
+    "chan-mentions",
+    [],
+    [],
+    mentionRefs,
+  );
+  clearAllDrafts();
+  initDraftStore("mention-owner");
+
+  assert.deepEqual(loadDraftEntry("chan-mentions")?.mentionRefs, mentionRefs);
+});
+
+test("legacy_draft_without_mention_refs_migrates_to_empty_refs", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const now = new Date().toISOString();
+  storage.setItem(
+    "buzz-drafts.v1:legacy-owner",
+    JSON.stringify({
+      "chan-legacy": {
+        content: "legacy @Ada",
+        selectionStart: 11,
+        selectionEnd: 11,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore("legacy-owner");
+  assert.deepEqual(loadDraftEntry("chan-legacy")?.mentionRefs, []);
+});
+
+test("invalid_mention_ref_rejects_corrupt_draft", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const now = new Date().toISOString();
+  storage.setItem(
+    "buzz-drafts.v1:corrupt-mention-owner",
+    JSON.stringify({
+      "chan-corrupt": {
+        content: "bad ref",
+        selectionStart: 7,
+        selectionEnd: 7,
+        channelId: "chan-corrupt",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        mentionRefs: [{ displayName: "Ada", pubkey: 123, isAgent: true }],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore("corrupt-mention-owner");
+  assert.equal(loadDraftEntry("chan-corrupt"), undefined);
+});
+
+// ── Relay-scoped draft store (v2 key) ─────────────────────────────────────────
+
+test("cross_relay_isolation_via_initDraftStore_without_clearAllDrafts", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-shared";
+
+  // Setup: write drafts in two relay scopes via direct initDraftStore calls
+  // with NO intervening clearAllDrafts — this pins the production invariant
+  // that initDraftStore resets _memCache when relayScope changes.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  saveDraftEntry("chan-1", makeDraft({ content: "Draft on relay A" }));
+  assert.equal(loadDraftEntry("chan-1")?.content, "Draft on relay A");
+
+  // Switch to relay B directly — no clearAllDrafts.
+  initDraftStore(pk, "wss://relay-b.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "relay B must not see relay A drafts",
+  );
+
+  saveDraftEntry("chan-1", makeDraft({ content: "Draft on relay B" }));
+  assert.equal(loadDraftEntry("chan-1")?.content, "Draft on relay B");
+
+  // Switch back to relay A directly — no clearAllDrafts.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1")?.content,
+    "Draft on relay A",
+    "relay A draft must survive relay B session",
+  );
+
+  // Verify localStorage has two distinct keys.
+  const v2a = storage.getItem(
+    "buzz-drafts.v2:wss://relay-a.example.com:pubkey-shared",
+  );
+  const v2b = storage.getItem(
+    "buzz-drafts.v2:wss://relay-b.example.com:pubkey-shared",
+  );
+  assert.ok(v2a, "v2 key for relay A must exist");
+  assert.ok(v2b, "v2 key for relay B must exist");
+  assert.notEqual(v2a, v2b, "buckets must differ");
+});
+
+test("legacy_migration_v1_entries_readable_after_scoped_init_v1_key_removed", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-migrating";
+  const now = new Date().toISOString();
+
+  // Seed a v1 bucket (pre-upgrade state).
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-old": {
+        content: "Legacy draft",
+        selectionStart: 12,
+        selectionEnd: 12,
+        channelId: "chan-old",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // Init with a relay scope — should trigger migration.
+  initDraftStore(pk, "wss://relay.example.com");
+
+  // Legacy draft must be readable through the scoped store.
+  const loaded = loadDraftEntry("chan-old");
+  assert.ok(loaded, "migrated draft must be readable");
+  assert.equal(loaded.content, "Legacy draft");
+
+  // v1 key must be deleted after migration.
+  assert.equal(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    null,
+    "v1 key must be removed after migration",
+  );
+
+  // v2 key must exist.
+  const v2 = storage.getItem(`buzz-drafts.v2:wss://relay.example.com:${pk}`);
+  assert.ok(v2, "v2 key must hold the migrated data");
+});
+
+test("legacy_migration_second_relay_init_does_not_reimport_deleted_v1", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-double-migrate";
+  const now = new Date().toISOString();
+
+  // Seed v1.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-first": {
+        content: "First workspace draft",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-first",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // First workspace loads — migrates v1 into relay-a's v2 bucket.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  assert.ok(loadDraftEntry("chan-first"), "relay A got the legacy draft");
+
+  // v1 key is gone.
+  assert.equal(storage.getItem(`buzz-drafts.v1:${pk}`), null);
+
+  // Second workspace initializes — must NOT see the legacy draft.
+  clearAllDrafts();
+  initDraftStore(pk, "wss://relay-b.example.com");
+  assert.equal(
+    loadDraftEntry("chan-first"),
+    undefined,
+    "relay B must not inherit legacy drafts already migrated to relay A",
+  );
+});
+
+test("v2_already_exists_legacy_bucket_ignored", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-v2-exists";
+  const now = new Date().toISOString();
+  const relay = "wss://relay.example.com";
+
+  // Seed both v1 and v2 — simulates a user who already ran post-upgrade
+  // but still has a leftover v1 key.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-legacy": {
+        content: "Should be ignored",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+  storage.setItem(
+    `buzz-drafts.v2:${relay}:${pk}`,
+    JSON.stringify({
+      "chan-v2": {
+        content: "V2 draft",
+        selectionStart: 8,
+        selectionEnd: 8,
+        channelId: "chan-v2",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore(pk, relay);
+
+  // v2 content wins.
+  assert.equal(loadDraftEntry("chan-v2")?.content, "V2 draft");
+  // Legacy content NOT merged.
+  assert.equal(
+    loadDraftEntry("chan-legacy"),
+    undefined,
+    "v1 entries must not leak when v2 key exists",
+  );
+  // v1 key is NOT deleted (no migration path ran).
+  assert.ok(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    "v1 key preserved when v2 already existed (no migration)",
+  );
+});
+
+// ── F1: clearAllDrafts fail-closed teardown ──────────────────────────────────
+
+test("clearAllDrafts_without_reinit_blocks_reads_and_writes_to_previous_bucket", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-teardown";
+
+  // Init relay A, write a draft.
+  initDraftStore(pk, "wss://relay-a.example.com");
+  saveDraftEntry("chan-1", makeDraft({ content: "A's draft" }));
+  assert.equal(loadDraftEntry("chan-1")?.content, "A's draft");
+
+  // Snapshot A's bucket before teardown.
+  const bucketBefore = storage.getItem(
+    "buzz-drafts.v2:wss://relay-a.example.com:pubkey-teardown",
+  );
+
+  // Simulate community switch teardown — clearAllDrafts with NO re-init.
+  clearAllDrafts();
+
+  // Reads must return undefined (no active scope).
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "reads must return undefined after clearAllDrafts without re-init",
+  );
+
+  // A write attempt must not modify A's stored bucket.
+  saveDraftEntry("chan-1", makeDraft({ content: "Rogue write" }));
+  assert.equal(
+    storage.getItem("buzz-drafts.v2:wss://relay-a.example.com:pubkey-teardown"),
+    bucketBefore,
+    "A's stored bucket must be byte-unchanged after unscoped write",
+  );
+
+  // Re-init with relay B — must see a clean bucket, not A's drafts.
+  initDraftStore(pk, "wss://relay-b.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "relay B must not see relay A drafts after teardown + re-init",
+  );
+});
+
+// ── F2: failed v2 flush preserves the only v1 copy ──────────────────────────
+
+test("failed_v2_flush_during_migration_preserves_v1_key", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-flush-fail";
+  const now = new Date().toISOString();
+
+  // Seed v1 bucket.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-legacy": {
+        content: "Precious legacy",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // Force setItem to throw persistently (quota full, no recovery possible).
+  const origSetItem = storage.setItem;
+  storage.setItem = () => {
+    throw new DOMException("QuotaExceededError");
+  };
+
+  // Init with relay scope — triggers migration attempt.
+  initDraftStore(pk, "wss://relay.example.com");
+
+  // Restore setItem so assertions can read storage.
+  storage.setItem = origSetItem;
+
+  // v1 key must still be present (flush failed, so legacy NOT deleted).
+  assert.ok(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    "v1 key must be preserved when v2 flush fails",
+  );
+
+  // v2 key must NOT exist (flush failed).
+  assert.equal(
+    storage.getItem(`buzz-drafts.v2:wss://relay.example.com:${pk}`),
+    null,
+    "v2 key must not exist when flush failed",
+  );
+});
+
+test("successful_v2_flush_during_migration_deletes_v1_key", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-flush-ok";
+  const now = new Date().toISOString();
+
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-old": {
+        content: "Migrating",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-old",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  initDraftStore(pk, "wss://relay.example.com");
+
+  assert.equal(
+    storage.getItem(`buzz-drafts.v1:${pk}`),
+    null,
+    "v1 key deleted after successful migration",
+  );
+  assert.ok(
+    storage.getItem(`buzz-drafts.v2:wss://relay.example.com:${pk}`),
+    "v2 key created after successful migration",
+  );
+  assert.equal(loadDraftEntry("chan-old")?.content, "Migrating");
+});
+
+// ── F4: relay URL canonicalization ──────────────────────────────────────────
+
+test("relay_canonicalization_host_case_and_trailing_slash_coalesce", () => {
+  installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-canon";
+
+  // Write with mixed-case host.
+  initDraftStore(pk, "WSS://Relay.Example.COM/");
+  saveDraftEntry("chan-1", makeDraft({ content: "canonical draft" }));
+
+  // Re-init with lowercase + no trailing slash — must see same draft.
+  initDraftStore(pk, "wss://relay.example.com");
+  assert.equal(
+    loadDraftEntry("chan-1")?.content,
+    "canonical draft",
+    "host-case + trailing-slash variants must coalesce",
+  );
+});
+
+test("relay_canonicalization_path_case_stays_isolated", () => {
+  installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-path-case";
+
+  initDraftStore(pk, "wss://gateway.example.com/Team");
+  saveDraftEntry("chan-1", makeDraft({ content: "Team draft" }));
+
+  // Different path case — must NOT see the draft.
+  initDraftStore(pk, "wss://gateway.example.com/team");
+  assert.equal(
+    loadDraftEntry("chan-1"),
+    undefined,
+    "path-case variants must remain isolated",
+  );
+
+  // Original path case still intact.
+  initDraftStore(pk, "wss://gateway.example.com/Team");
+  assert.equal(
+    loadDraftEntry("chan-1")?.content,
+    "Team draft",
+    "original path-case draft must survive",
+  );
+});
+
+test("no_relay_legacy_caller_form_still_reads_writes_v1_key", () => {
+  const storage = installFreshLocalStorage();
+  clearAllDrafts();
+  const pk = "pubkey-no-relay";
+  const now = new Date().toISOString();
+
+  // Seed a v1 bucket.
+  storage.setItem(
+    `buzz-drafts.v1:${pk}`,
+    JSON.stringify({
+      "chan-legacy": {
+        content: "Legacy no-relay",
+        selectionStart: 0,
+        selectionEnd: 0,
+        channelId: "chan-legacy",
+        createdAt: now,
+        updatedAt: now,
+        pendingImeta: [],
+        spoileredAttachmentUrls: [],
+        status: "active",
+      },
+    }),
+  );
+
+  // Init with no relay (legacy caller form).
+  initDraftStore(pk);
+
+  // Must read from v1 key.
+  assert.equal(loadDraftEntry("chan-legacy")?.content, "Legacy no-relay");
+
+  // Write a new draft.
+  saveDraftEntry("chan-new", makeDraft({ content: "New no-relay" }));
+
+  // Verify it lands in the v1 key.
+  const raw = JSON.parse(storage.getItem(`buzz-drafts.v1:${pk}`));
+  assert.ok(raw["chan-new"], "new draft must be in v1 key");
+  assert.equal(raw["chan-new"].content, "New no-relay");
 });

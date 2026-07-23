@@ -1,5 +1,5 @@
 use super::*;
-use crate::managed_agents::PersonaRecord;
+use crate::managed_agents::AgentDefinition;
 
 fn bare_agent_record(
     persona_id: Option<&str>,
@@ -29,13 +29,13 @@ fn bare_agent_record(
         model: model.map(str::to_string),
         provider: provider.map(str::to_string),
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: BTreeMap::new(),
         start_on_app_launch: false,
         runtime_pid: None,
         backend: BackendKind::Local,
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "".to_string(),
@@ -59,13 +59,12 @@ fn bare_agent_record(
         auto_restart_on_config_change: false,
         definition_respond_to: None,
         definition_respond_to_allowlist: vec![],
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
     }
 }
-fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> PersonaRecord {
+fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> AgentDefinition {
     use std::collections::BTreeMap;
-    PersonaRecord {
+    AgentDefinition {
         id: id.to_string(),
         display_name: "Test Persona".to_string(),
         avatar_url: None,
@@ -81,11 +80,50 @@ fn persona_record(id: &str, model: Option<&str>, provider: Option<&str>) -> Pers
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: vec![],
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "".to_string(),
         updated_at: "".to_string(),
     }
+}
+
+/// Auto-archive uses the same NIP-IA wire builder as the explicit GUI action,
+/// attaches owner consent, and marks a deliberate delete as `retired`.
+#[test]
+fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
+    use nostr::JsonUtil;
+
+    let owner = nostr::Keys::generate();
+    let agent = nostr::Keys::generate();
+    let event = build_agent_archive_request(&owner, &agent.public_key().to_hex())
+        .expect("build archive request");
+    let json: serde_json::Value = serde_json::from_str(&event.as_json()).unwrap();
+    let tags = json["tags"].as_array().unwrap();
+
+    assert_eq!(event.kind.as_u16(), 9035);
+    assert_eq!(event.pubkey, owner.public_key());
+    assert!(event.verify_id());
+    assert!(event.verify_signature());
+    assert!(tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|parts| {
+            parts.first().and_then(serde_json::Value::as_str) == Some("p")
+                && parts.get(1).and_then(serde_json::Value::as_str)
+                    == Some(agent.public_key().to_hex().as_str())
+        })
+    }));
+    assert!(tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|parts| {
+            parts.first().and_then(serde_json::Value::as_str) == Some("reason")
+                && parts.get(1).and_then(serde_json::Value::as_str) == Some("retired")
+        })
+    }));
+    assert!(tags.iter().any(|tag| {
+        tag.as_array().is_some_and(|parts| {
+            parts.first().and_then(serde_json::Value::as_str) == Some("auth")
+                && parts.get(1).and_then(serde_json::Value::as_str)
+                    == Some(owner.public_key().to_hex().as_str())
+                && parts.len() == 4
+        })
+    }));
 }
 
 /// Deploy-path regression for Fix 1 of Thufir pass-2: a persona-linked
@@ -161,7 +199,7 @@ fn normalize_relay_mesh_rejects_empty_model_ref() {
 
     assert_eq!(
         normalize_relay_mesh(Some(&config), &BackendKind::Local).unwrap_err(),
-        "relay mesh modelRef is required"
+        "Buzz shared compute model is required"
     );
 }
 
@@ -177,7 +215,7 @@ fn normalize_relay_mesh_rejects_non_local_backend() {
 
     assert_eq!(
         normalize_relay_mesh(Some(&config), &backend).unwrap_err(),
-        "relay mesh agents must use the local backend"
+        "Buzz shared compute agents must use the local backend"
     );
 }
 
@@ -349,7 +387,6 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
             "turn_timeout_seconds": 320,
             "system_prompt": null,
             "parallelism": 4,
-            "mcp_toolsets": "developer,search",
             "respond_to": "allowlist",
             "respond_to_allowlist": ["{allow}"],
             "created_at": "2026-01-01T00:00:00Z",
@@ -371,7 +408,6 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
     );
 
     assert_eq!(payload["parallelism"], 4);
-    assert_eq!(payload["mcp_toolsets"], "developer,search");
     assert_eq!(payload["respond_to"], "allowlist");
     assert_eq!(payload["respond_to_allowlist"][0], "a".repeat(64));
     assert_eq!(payload["model"], "gpt-x");

@@ -17,6 +17,7 @@ import { useAgentConfigSurface } from "../hooks";
 import { cn } from "@/shared/lib/cn";
 import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import { Spinner } from "@/shared/ui/spinner";
+import { McpServersSection } from "./McpServersSection";
 import type {
   ConfigField,
   ConfigOrigin,
@@ -24,6 +25,7 @@ import type {
   NormalizedConfig,
   NormalizedField,
 } from "@/shared/api/types";
+import { providerDisplayLabel } from "./agentConfigOptions";
 
 type Props = {
   pubkey: string;
@@ -179,10 +181,14 @@ function NormalizedRow({
   // ACP-sourced origins only become meaningful post-spawn
   const isAcpOnly =
     field.origin === "acpNativeRead" || field.origin === "acpConfigOption";
-  const displayValue =
+  const rawDisplayValue =
     isPreSpawn && isAcpOnly
       ? "Available after agent starts"
       : (field.value ?? "—");
+  const displayValue =
+    fieldKey === "provider"
+      ? providerDisplayLabel(rawDisplayValue)
+      : rawDisplayValue;
   const provenance = field.value
     ? provenanceSentence(field.origin, field.writeVia, configFilePath)
     : null;
@@ -365,7 +371,8 @@ export function AgentConfigPanel({
     );
   }
 
-  const { normalized, advanced, sources, isPreSpawn } = data;
+  const { normalized, advanced, extensions, runtimeId, sources, isPreSpawn } =
+    data;
   const configFilePath = sources.configFilePath;
 
   const normalizedEntries = (
@@ -416,8 +423,17 @@ export function AgentConfigPanel({
         )}
       </div>
 
+      <McpServersSection
+        extensions={extensions}
+        runtimeId={runtimeId}
+        variant={advancedMode === "flat" ? "profile" : "compact"}
+      />
+
       {advanced.length > 0 && advancedMode === "flat" ? (
         <div className="divide-y divide-border/50 border-t border-border/50">
+          <p className="px-4 py-3 text-xs font-medium text-foreground">
+            Advanced
+          </p>
           {advanced.map((field) => (
             <AdvancedRow
               key={field.key}

@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, Pencil } from "lucide-react";
+import { Check, ChevronDown, Copy, Eye, EyeOff, Pencil } from "lucide-react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -12,6 +12,8 @@ import {
   useProfileQuery,
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
+import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
+import { getNsec } from "@/shared/api/tauriIdentity";
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
@@ -23,6 +25,8 @@ import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { SignOutSection } from "./SignOutSection";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ProfileSettingsCardProps = {
   currentPubkey?: string;
@@ -72,7 +76,7 @@ function IdentityRow({
           className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           data-testid={`copy-${testId}`}
           onClick={async () => {
-            await navigator.clipboard.writeText(copyValue);
+            await writeTextToClipboard(copyValue);
             toast.success("Copied to clipboard");
           }}
           title={`Copy ${label}`}
@@ -81,6 +85,92 @@ function IdentityRow({
           <Copy className="h-4 w-4 shrink-0" />
           Copy
         </button>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * Collapsible row that reveals the user's nsec on demand.
+ * The nsec is fetched only when first expanded and cleared on collapse.
+ */
+function NsecRevealRow() {
+  const [isOpen, setIsOpen] = React.useState(false);
+  const [nsec, setNsec] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+  // Guards against a late-resolving getNsec() repopulating state after Hide
+  // or after the settings panel unmounts.
+  const fetchCancelledRef = React.useRef(false);
+
+  React.useEffect(() => {
+    return () => {
+      fetchCancelledRef.current = true;
+      setNsec(null);
+    };
+  }, []);
+
+  async function handleReveal() {
+    if (!isOpen) {
+      fetchCancelledRef.current = false;
+      setIsOpen(true);
+      setIsLoading(true);
+      setLoadError(null);
+      try {
+        const value = await getNsec();
+        if (!fetchCancelledRef.current) setNsec(value);
+      } catch (err) {
+        if (!fetchCancelledRef.current)
+          setLoadError(
+            err instanceof Error
+              ? err.message
+              : "Failed to retrieve private key.",
+          );
+      } finally {
+        if (!fetchCancelledRef.current) setIsLoading(false);
+      }
+    } else {
+      // Cancel any in-flight fetch before clearing state.
+      fetchCancelledRef.current = true;
+      setNsec(null);
+      setIsOpen(false);
+    }
+  }
+
+  return (
+    <div className="px-4 py-3" data-testid="profile-private-key-row">
+      <div className="flex items-center justify-between gap-4">
+        <p className="text-sm font-medium">Private key</p>
+        <button
+          aria-label={isOpen ? "Hide private key" : "Reveal private key"}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          data-testid="profile-private-key-toggle"
+          onClick={() => void handleReveal()}
+          type="button"
+        >
+          {isOpen ? (
+            <>
+              <EyeOff className="h-4 w-4 shrink-0" />
+              Hide
+            </>
+          ) : (
+            <>
+              <Eye className="h-4 w-4 shrink-0" />
+              Reveal
+            </>
+          )}
+        </button>
+      </div>
+      {isOpen ? (
+        <div className="mt-2">
+          {isLoading ? (
+            <p className="text-sm text-muted-foreground">Loading…</p>
+          ) : loadError ? (
+            <p className="text-sm text-destructive">{loadError}</p>
+          ) : nsec ? (
+            <NsecMaskedDisplay nsec={nsec} />
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
@@ -164,9 +254,11 @@ export function ProfileSettingsCard({
   const [avatarSquishKey, setAvatarSquishKey] = React.useState(0);
   const displayNameInputRef = React.useRef<HTMLInputElement>(null);
   const aboutTextareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const sectionRef = React.useRef<HTMLElement>(null);
   const isEditingProfileMetadataRef = React.useRef(false);
   const avatarEditorOpenFrameRef = React.useRef<number | null>(null);
   const avatarEditorFinishTimeoutRef = React.useRef<number | null>(null);
+  const savedScrollTopRef = React.useRef<number | null>(null);
   isEditingProfileMetadataRef.current = isEditingProfileMetadata;
 
   React.useEffect(() => {
@@ -323,14 +415,31 @@ export function ProfileSettingsCard({
     window.clearTimeout(avatarEditorFinishTimeoutRef.current);
     avatarEditorFinishTimeoutRef.current = null;
   }, []);
+  const saveScrollPosition = React.useCallback(() => {
+    const el = sectionRef.current;
+    if (!el) return;
+    const scroller = el.closest<HTMLElement>("[class*='overflow-y']");
+    if (scroller) savedScrollTopRef.current = scroller.scrollTop;
+  }, []);
+  const restoreScrollPosition = React.useCallback(() => {
+    const saved = savedScrollTopRef.current;
+    if (saved == null) return;
+    savedScrollTopRef.current = null;
+    const el = sectionRef.current;
+    if (!el) return;
+    const scroller = el.closest<HTMLElement>("[class*='overflow-y']");
+    if (scroller) scroller.scrollTop = saved;
+  }, []);
   const closeAvatarEditor = React.useCallback(() => {
     clearAvatarEditorFinishTimeout();
     setIsAvatarEditorOpen(false);
     setIsAvatarEditorFinishing(false);
-  }, [clearAvatarEditorFinishTimeout]);
+    restoreScrollPosition();
+  }, [clearAvatarEditorFinishTimeout, restoreScrollPosition]);
   const completeAvatarEditorClose = React.useCallback(() => {
     setIsAvatarEditorOpen(false);
     clearAvatarEditorFinishTimeout();
+    restoreScrollPosition();
     avatarEditorFinishTimeoutRef.current = window.setTimeout(
       () => {
         avatarEditorFinishTimeoutRef.current = null;
@@ -338,7 +447,11 @@ export function ProfileSettingsCard({
       },
       shouldReduceMotion ? 0 : AVATAR_EDITOR_TRANSITION_MS,
     );
-  }, [clearAvatarEditorFinishTimeout, shouldReduceMotion]);
+  }, [
+    clearAvatarEditorFinishTimeout,
+    restoreScrollPosition,
+    shouldReduceMotion,
+  ]);
   const reopenAvatarEditorAfterClose = React.useCallback(() => {
     clearAvatarEditorFinishTimeout();
     setShouldRenderAvatarEditor(true);
@@ -347,6 +460,7 @@ export function ProfileSettingsCard({
   }, [clearAvatarEditorFinishTimeout]);
 
   const openAvatarEditor = React.useCallback(() => {
+    saveScrollPosition();
     setShouldRenderAvatarEditor(true);
     setIsAvatarEditorFinishing(false);
     clearAvatarEditorFinishTimeout();
@@ -359,7 +473,7 @@ export function ProfileSettingsCard({
       avatarEditorOpenFrameRef.current = null;
       setIsAvatarEditorOpen(true);
     });
-  }, [clearAvatarEditorFinishTimeout]);
+  }, [clearAvatarEditorFinishTimeout, saveScrollPosition]);
 
   const saveProfile = React.useCallback(async () => {
     if (!canSave) {
@@ -447,7 +561,11 @@ export function ProfileSettingsCard({
   }, []);
 
   return (
-    <section className="min-w-0" data-testid="settings-profile">
+    <section
+      className="min-w-0"
+      data-testid="settings-profile"
+      ref={sectionRef}
+    >
       <div>
         <SettingsSectionHeader
           title="Profile"
@@ -643,9 +761,9 @@ export function ProfileSettingsCard({
                           data-testid="profile-metadata-card"
                         >
                           <div className="flex min-h-14 items-center justify-between gap-4 px-4 py-3">
-                            <h3 className="text-sm font-medium">
+                            <h2 className="text-lg font-semibold tracking-tight">
                               Profile info
-                            </h3>
+                            </h2>
                             <EditProfileMetadataButton
                               disabled={updateProfileMutation.isPending}
                               isEditing={isEditingProfileMetadata}
@@ -737,9 +855,9 @@ export function ProfileSettingsCard({
                               data-testid="profile-identity-toggle"
                             >
                               <div className="min-w-0">
-                                <h3 className="text-sm font-medium">
+                                <h2 className="text-lg font-semibold tracking-tight">
                                   Identity
-                                </h3>
+                                </h2>
                                 <p className="mt-1 text-sm font-normal text-muted-foreground">
                                   Your keypair and NIP-05 handle are fixed for
                                   this device.
@@ -765,6 +883,7 @@ export function ProfileSettingsCard({
                                 testId="profile-nip05"
                                 value={nip05Handle}
                               />
+                              <NsecRevealRow />
                             </div>
                           </details>
                         </div>
@@ -824,6 +943,8 @@ export function ProfileSettingsCard({
           </div>
         </div>
       </div>
+
+      <SignOutSection />
     </section>
   );
 }

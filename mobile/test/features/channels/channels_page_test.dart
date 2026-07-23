@@ -78,7 +78,7 @@ void main() {
     expect(find.text('Channels'), findsOneWidget);
     expect(find.text('FORUMS'), findsNothing);
     expect(find.text('DMs'), findsOneWidget);
-    expect(find.text('Workspace'), findsOneWidget);
+    expect(find.text('Community'), findsOneWidget);
     expect(find.byTooltip('Create or start conversation'), findsOneWidget);
   });
 

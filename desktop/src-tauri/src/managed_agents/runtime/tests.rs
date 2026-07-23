@@ -143,7 +143,6 @@ fn fixture(
         model: None,
         provider: None,
         persona_source_version: None,
-        mcp_toolsets: None,
         env_vars: std::collections::BTreeMap::new(),
         start_on_app_launch: false,
         auto_restart_on_config_change: true,
@@ -151,6 +150,7 @@ fn fixture(
         backend: Default::default(),
         backend_agent_id: None,
         provider_binary_path: None,
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "now".into(),
@@ -172,7 +172,6 @@ fn fixture(
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }
@@ -276,8 +275,8 @@ fn persona_with_provider(
     prompt: &str,
     model: Option<&str>,
     provider: Option<&str>,
-) -> crate::managed_agents::PersonaRecord {
-    crate::managed_agents::PersonaRecord {
+) -> crate::managed_agents::AgentDefinition {
+    crate::managed_agents::AgentDefinition {
         id: id.to_string(),
         display_name: id.to_string(),
         avatar_url: None,
@@ -293,7 +292,6 @@ fn persona_with_provider(
         env_vars: std::collections::BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2026-06-09T00:00:00Z".to_string(),
         updated_at: "2026-06-09T00:00:00Z".to_string(),
@@ -317,7 +315,7 @@ use std::collections::BTreeMap;
 /// snapshotted prompt/model/provider/source_version are pinned, with the
 /// system_prompt unwrapped (the persona always carries one). `env_vars` is
 /// deliberately NOT touched — it stays agent overrides only.
-fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::PersonaRecord) {
+fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::AgentDefinition) {
     let snapshot = persona_snapshot(persona);
     record.persona_id = Some(persona.id.clone());
     record.system_prompt = snapshot.system_prompt;
@@ -326,7 +324,11 @@ fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents:
     record.persona_source_version = Some(snapshot.source_version);
 }
 
-fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_agents::PersonaRecord {
+fn persona_v(
+    id: &str,
+    prompt: &str,
+    env: &[(&str, &str)],
+) -> crate::managed_agents::AgentDefinition {
     let mut p = persona_with_provider(id, prompt, Some("model-v"), Some("anthropic"));
     p.env_vars = env
         .iter()
@@ -340,7 +342,7 @@ fn persona_v(id: &str, prompt: &str, env: &[(&str, &str)]) -> crate::managed_age
 /// `resolve_effective_agent_env` perform.
 fn spawn_user_env(
     record: &ManagedAgentRecord,
-    personas: &[crate::managed_agents::PersonaRecord],
+    personas: &[crate::managed_agents::AgentDefinition],
 ) -> BTreeMap<String, String> {
     merged_user_env(
         &live_persona_env(personas, record.persona_id.as_deref()),
@@ -577,6 +579,45 @@ fn name_matches_interpreter_rejects_node_prefix() {
     assert!(!super::name_matches_interpreter("node-gyp"));
 }
 
+#[test]
+fn claude_spawn_uses_the_probed_cli_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cli = temp
+        .path()
+        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&cli, "").expect("write fake cli");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake cli executable");
+    }
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    assert!(command
+        .get_envs()
+        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
+}
+
+#[test]
+fn codex_spawn_does_not_set_a_claude_executable() {
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("codex-acp"));
+    assert!(!command
+        .get_envs()
+        .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
+}
+
 // ── PGID-based orphan sweep tests ───────────────────────────────────────
 
 /// Validates the kernel invariant that the orphan sweep PGID fix relies on:
@@ -757,4 +798,151 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).
     unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
     let _ = intermediate.wait();
+}
+
+// ── pair receipt validation tests ───────────────────────────────────────
+
+fn receipt_fixture(
+    key: crate::managed_agents::ManagedAgentRuntimeKey,
+) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
+    crate::managed_agents::ManagedAgentRuntimeReceipt {
+        key,
+        pid: std::process::id(),
+        desktop_instance_id: "test-instance".into(),
+        started_at: "now".into(),
+    }
+}
+
+#[test]
+fn receipt_validation_rejects_noncanonical_identity() {
+    let mut receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    receipt.key.relay_url = "WSS://RELAY.EXAMPLE/".into();
+    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
+    assert!(!super::valid_agent_runtime_receipt(
+        &path,
+        &receipt,
+        "test-instance"
+    ));
+}
+
+#[test]
+fn receipt_validation_rejects_wrong_pair_filename() {
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    assert!(!super::valid_agent_runtime_receipt(
+        std::path::Path::new("corrupted.json"),
+        &receipt,
+        "test-instance"
+    ));
+}
+
+#[test]
+fn replacement_removes_receipt_only_after_confirmed_exit() {
+    use std::cell::{Cell, RefCell};
+
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    let path = std::path::Path::new("pair.json");
+    let terminated = Cell::new(None);
+    let polls = Cell::new(0);
+    let removed = RefCell::new(None);
+
+    super::terminate_runtime_receipt_with(
+        path,
+        &receipt,
+        |pid| {
+            terminated.set(Some(pid));
+            Ok(())
+        },
+        |_| {
+            let poll = polls.get() + 1;
+            polls.set(poll);
+            poll < 2
+        },
+        |path| *removed.borrow_mut() = Some(path.to_path_buf()),
+    )
+    .unwrap();
+
+    assert_eq!(terminated.get(), Some(receipt.pid));
+    assert_eq!(polls.get(), 2);
+    assert_eq!(removed.into_inner().as_deref(), Some(path));
+}
+
+#[test]
+fn replacement_failure_keeps_receipt() {
+    use std::cell::Cell;
+
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    let removed = Cell::new(false);
+    let error = super::terminate_runtime_receipt_with(
+        std::path::Path::new("pair.json"),
+        &receipt,
+        |_| Err("signal failed".into()),
+        |_| false,
+        |_| removed.set(true),
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "signal failed");
+    assert!(!removed.get());
+}
+
+// ── workspace pair-key resolution (summary/stop scoping) ────────────────
+
+#[test]
+fn unpinned_record_resolves_pair_key_per_workspace() {
+    // Community-scoped truth: an unpinned agent running only on relay A must
+    // read as running in workspace A and stopped in workspace B — the pair
+    // key the summary looks up differs per workspace.
+    let pubkey = "aa".repeat(32);
+    let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
+    let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
+
+    let runtimes = std::collections::HashMap::from([(key_a.clone(), ())]);
+    assert!(runtimes.contains_key(&key_a));
+    assert!(!runtimes.contains_key(&key_b));
+}
+
+#[test]
+fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
+    // Legacy pins are ignored (#2122): a record carrying a creation-era
+    // `relay_url` resolves the same per-workspace pair key an unpinned record
+    // does, so summaries/stop act on the community being viewed.
+    let pubkey = "aa".repeat(32);
+    let from_a =
+        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://one.example")
+            .unwrap();
+    let from_b =
+        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://two.example")
+            .unwrap();
+    assert_ne!(from_a, from_b);
+    assert_eq!(from_a.relay_url, "wss://one.example");
+    assert_eq!(from_b.relay_url, "wss://two.example");
+}
+
+#[test]
+fn workspace_pair_key_is_canonical() {
+    // Spawn stamps the canonical key; lookup must hit the same entry even
+    // when the workspace relay is written in a non-canonical form.
+    let pubkey = "aa".repeat(32);
+    let stamped = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
+    let viewed = super::resolve_workspace_pair_key(&pubkey, "", "WSS://One.Example:443/").unwrap();
+    assert_eq!(stamped, viewed);
+}
+
+#[test]
+fn invalid_pubkey_resolves_no_pair_key() {
+    // Key-less records (keys minted on first start) cannot form a pair key;
+    // the summary must fall back to the stopped/legacy-pid path, not panic.
+    assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
 }

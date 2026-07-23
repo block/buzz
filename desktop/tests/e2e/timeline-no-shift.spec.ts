@@ -202,6 +202,56 @@ function expectAnchorOrderUnchanged(
   expect(after.rowsFromAnchor).toEqual(before.rowsFromAnchor);
 }
 
+test("timeline does not recompute row estimates during ordinary scroll", async ({
+  page,
+}) => {
+  await installMockBridge(page);
+  await page.goto("/");
+  await waitForMockTimelineBridge(page);
+  await page.evaluate(() => {
+    for (let index = 0; index < 120; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `estimate memo row ${index}\nsecond line ${index}`,
+        createdAt: 1_700_500_000 + index,
+      });
+    }
+  });
+
+  await page.getByTestId("channel-general").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
+  const timeline = page.getByTestId("message-timeline");
+  await expect(timeline).toContainText("estimate memo row 119");
+  await page.waitForFunction(() => {
+    const element = document.querySelector<HTMLDivElement>(
+      '[data-testid="message-timeline"]',
+    );
+    return element && element.scrollHeight > element.clientHeight * 3;
+  });
+
+  const estimateCallsBefore = await timeline.evaluate((element) =>
+    Number((element as HTMLDivElement).dataset.virtuaEstimateCallCount ?? "0"),
+  );
+  expect(estimateCallsBefore).toBeGreaterThan(0);
+
+  await timeline.evaluate(async (element) => {
+    const scroller = element as HTMLDivElement;
+    const maxOffset = scroller.scrollHeight - scroller.clientHeight;
+    for (const fraction of [0.75, 0.5, 0.25, 0.6, 0.4]) {
+      scroller.scrollTop = maxOffset * fraction;
+      scroller.dispatchEvent(new Event("scroll", { bubbles: true }));
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => resolve()),
+      );
+    }
+  });
+
+  const estimateCallsAfter = await timeline.evaluate((element) =>
+    Number((element as HTMLDivElement).dataset.virtuaEstimateCallCount ?? "0"),
+  );
+  expect(estimateCallsAfter).toBe(estimateCallsBefore);
+});
+
 test("timeline reserves mixed-media rows before fast scrollback", async ({
   page,
 }, testInfo) => {
@@ -313,42 +363,6 @@ test("timeline reserves mixed-media rows before fast scrollback", async ({
     ) as HTMLDivElement | null;
     return element && element.scrollHeight > element.clientHeight + 2_000;
   });
-
-  const intrinsic = (rowText: string) =>
-    timeline
-      .locator("[data-message-id]")
-      .filter({ hasText: rowText })
-      .first()
-      .evaluate((row) => {
-        const scroller = row.closest('[data-testid="message-timeline"]');
-        let node: HTMLElement | null = row.parentElement;
-        while (node && node !== scroller) {
-          if (node.classList.contains("timeline-row-cv")) {
-            const match = getComputedStyle(node).containIntrinsicSize.match(
-              /(?:auto\s+)?([0-9.]+)px/,
-            );
-            return match ? Number(match[1]) : 0;
-          }
-          node = node.parentElement;
-        }
-        return 0;
-      });
-
-  await expect
-    .poll(() => intrinsic("mixed-scroll dimmed media"))
-    .toBeGreaterThan(120);
-  await expect
-    .poll(() => intrinsic("mixed-scroll no-dim media"))
-    .toBeGreaterThan(180);
-  await expect
-    .poll(() => intrinsic("mixed-scroll fenced code"))
-    .toBeGreaterThan(160);
-  await expect
-    .poll(() => intrinsic("mixed-scroll link preview"))
-    .toBeGreaterThan(110);
-  await expect
-    .poll(() => intrinsic("mixed-scroll tall text"))
-    .toBeGreaterThan(120);
 
   const anchorId = await timeline
     .locator("[data-message-id]")
@@ -486,6 +500,15 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   const before = await snapshotAnchor(timeline);
   expect(before.anchorId).not.toBe("");
   expect(before.oldestOlderIndex).not.toBeNull();
+  await timeline.evaluate((element, anchorId) => {
+    const anchor = element.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(anchorId)}"]`,
+    );
+    if (!anchor) throw new Error("prepend mount-identity anchor missing");
+    (
+      window as typeof window & { __PREPEND_MOUNT_IDENTITY__?: HTMLElement }
+    ).__PREPEND_MOUNT_IDENTITY__ = anchor;
+  }, before.anchorId);
   await startAnchorDriftSampler(timeline, before.anchorId, before.anchorTop);
 
   await expect
@@ -505,6 +528,22 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
 
   const afterPrepend = await snapshotAnchor(timeline);
   expect(afterPrepend.anchorId).toBe(before.anchorId);
+  expect(
+    await timeline.evaluate((element, anchorId) => {
+      const anchor = element.querySelector<HTMLElement>(
+        `[data-message-id="${CSS.escape(anchorId)}"]`,
+      );
+      return (
+        anchor ===
+        (
+          window as typeof window & {
+            __PREPEND_MOUNT_IDENTITY__?: HTMLElement;
+          }
+        ).__PREPEND_MOUNT_IDENTITY__
+      );
+    }, before.anchorId),
+    "prepend must preserve the mounted anchor DOM node",
+  ).toBe(true);
   expect(
     Math.abs(afterPrepend.anchorTop - before.anchorTop),
     // First-pass prepended rows realize from content-visibility estimates to
@@ -555,39 +594,6 @@ test("timeline prepend plus late row reflow keeps the reading row stable", async
   expect(drift.samples).toBeGreaterThan(0);
   expect(drift.missingSamples).toBe(0);
   expect(drift.maxDrift).toBeLessThanOrEqual(LATE_REFLOW_DRIFT_PX);
-});
-
-test("de-virtualized timeline rows apply content-visibility", async ({
-  page,
-}, testInfo) => {
-  testInfo.setTimeout(45_000);
-
-  await installMockBridge(page);
-  await page.goto("/");
-  await waitForMockTimelineBridge(page);
-  await seedNoShiftTimeline(page);
-
-  await page.getByTestId("channel-general").click();
-  await expect(page.getByTestId("chat-title")).toHaveText("general");
-
-  const timeline = page.getByTestId("message-timeline");
-  await expect(timeline.locator("[data-message-id]").first()).toBeVisible();
-
-  // Guards against a typo'd/removed wrapper class shipping inert — a bad
-  // utility name is invisible to typecheck.
-  const hasContentVisibility = await timeline
-    .locator("[data-message-id]")
-    .first()
-    .evaluate((element) => {
-      const scroller = element.closest('[data-testid="message-timeline"]');
-      let node: HTMLElement | null = element.parentElement;
-      while (node && node !== scroller) {
-        if (getComputedStyle(node).contentVisibility === "auto") return true;
-        node = node.parentElement;
-      }
-      return false;
-    });
-  expect(hasContentVisibility).toBe(true);
 });
 
 test("thread panel late row reflow keeps the reading reply stable", async ({

@@ -2,7 +2,7 @@
  * Per-pubkey localStorage record store for channels manually marked unread via
  * right-click → "mark unread". Keyed by channelId (not thread-root). Persisted
  * so the sidebar badge survives reload and the rail observer can read it for
- * inactive workspaces.
+ * inactive communities.
  *
  * Each entry stores the channel's own NIP-RS read marker (unix seconds) at the
  * moment mark-unread was invoked, or null if no marker existed yet. The rail

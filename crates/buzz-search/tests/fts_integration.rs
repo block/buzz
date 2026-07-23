@@ -2,9 +2,9 @@
 //!
 //! Run with a local PG: `BUZZ_TEST_DATABASE_URL=postgres://buzz:buzz_dev@localhost:5432/buzz cargo test -p buzz-search --tests -- --include-ignored`
 //!
-//! Each test creates a uniquely-named schema, applies all five migrations in
-//! order (0001 → 0002 → 0003 → 0004 → 0005) into it, exercises a scenario, and drops
-//! it. Tests are parallel-safe.
+//! Each test creates a uniquely-named schema, applies every FTS-affecting
+//! migration in order, exercises a scenario, and drops it. Tests are
+//! parallel-safe.
 
 use buzz_core::{
     kind::{
@@ -23,6 +23,11 @@ const MIGRATION_0002_SQL: &str = include_str!("../../../migrations/0002_git_repo
 const MIGRATION_0003_SQL: &str = include_str!("../../../migrations/0003_community_icon.sql");
 const MIGRATION_0004_SQL: &str = include_str!("../../../migrations/0004_events_tags_gin.sql");
 const MIGRATION_0005_SQL: &str = include_str!("../../../migrations/0005_agent_turn_metric_fts.sql");
+const MIGRATION_0006_SQL: &str = include_str!("../../../migrations/0006_moderation.sql");
+const MIGRATION_0007_SQL: &str = include_str!("../../../migrations/0007_nip_rs_retention.sql");
+const MIGRATION_0008_SQL: &str =
+    include_str!("../../../migrations/0008_fresh_install_search_allowlist.sql");
+const MIGRATION_0014_SQL: &str = include_str!("../../../migrations/0014_push_lease_fts.sql");
 
 async fn setup() -> (PgPool, String) {
     let url = std::env::var("BUZZ_TEST_DATABASE_URL").unwrap_or_else(|_| TEST_DB_URL.to_string());
@@ -64,6 +69,18 @@ async fn setup() -> (PgPool, String) {
     pool.execute(MIGRATION_0005_SQL)
         .await
         .expect("apply 0005 migration");
+    pool.execute(MIGRATION_0006_SQL)
+        .await
+        .expect("apply 0006 migration");
+    pool.execute(MIGRATION_0007_SQL)
+        .await
+        .expect("apply 0007 migration");
+    pool.execute(MIGRATION_0008_SQL)
+        .await
+        .expect("apply 0008 migration");
+    pool.execute(MIGRATION_0014_SQL)
+        .await
+        .expect("apply 0014 migration");
     (pool, schema)
 }
 
@@ -148,7 +165,7 @@ async fn search_finds_event_in_same_community() {
         c_a,
         evt_id,
         pk,
-        1,
+        9,
         "hello wonderland — buzz everyone",
         None,
         1700000000,
@@ -174,7 +191,7 @@ async fn search_finds_event_in_same_community() {
 
     assert_eq!(result.hits.len(), 1);
     assert_eq!(result.hits[0].event_id, evt_id);
-    assert_eq!(result.hits[0].kind, 1);
+    assert_eq!(result.hits[0].kind, 9);
     assert_eq!(result.hits[0].created_at, 1700000000);
     assert!(result.hits[0].rank > 0.0);
 
@@ -196,7 +213,7 @@ async fn search_does_not_return_other_community_events() {
         c_a,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "only-in-a unique-token-xyz",
         None,
         1700000000,
@@ -547,7 +564,7 @@ async fn channel_scope_restricts_results() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "shared-token in ch-a",
         Some(ch_a),
         1700000000,
@@ -558,7 +575,7 @@ async fn channel_scope_restricts_results() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "shared-token in ch-b",
         Some(ch_b),
         1700000001,
@@ -569,7 +586,7 @@ async fn channel_scope_restricts_results() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "shared-token global",
         None,
         1700000002,
@@ -662,7 +679,7 @@ async fn deleted_events_are_excluded() {
     let c = mk_community(&pool, "a.example").await;
     let evt_id = rand_bytes32();
     let pk = rand_bytes32();
-    insert_event(&pool, c, evt_id, pk, 1, "deleted-token-q", None, 1700000000).await;
+    insert_event(&pool, c, evt_id, pk, 9, "deleted-token-q", None, 1700000000).await;
 
     // Soft-delete
     sqlx::query("UPDATE events SET deleted_at = NOW() WHERE community_id = $1 AND id = $2")
@@ -740,7 +757,7 @@ async fn since_until_filters() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "time-token-zz at A",
         None,
         1_700_000_000,
@@ -751,7 +768,7 @@ async fn since_until_filters() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "time-token-zz at B",
         None,
         1_700_010_000,
@@ -762,7 +779,7 @@ async fn since_until_filters() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "time-token-zz at C",
         None,
         1_700_020_000,
@@ -805,7 +822,7 @@ async fn pagination_works() {
             c,
             rand_bytes32(),
             pk,
-            1,
+            9,
             "page-token-qq",
             None,
             1_700_000_000 + i,
@@ -893,7 +910,7 @@ async fn channel_less_only_excludes_per_channel_events() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "fence-token in ch-a",
         Some(ch_a),
         1_700_000_000,
@@ -904,7 +921,7 @@ async fn channel_less_only_excludes_per_channel_events() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "fence-token in ch-b",
         Some(ch_b),
         1_700_000_001,
@@ -915,7 +932,7 @@ async fn channel_less_only_excludes_per_channel_events() {
         c,
         rand_bytes32(),
         pk,
-        1,
+        9,
         "fence-token channel-less",
         None,
         1_700_000_002,

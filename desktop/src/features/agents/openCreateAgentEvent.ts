@@ -1,25 +1,37 @@
 const OPEN_CREATE_AGENT_EVENT = "buzz:open-create-agent";
 
-let pendingOpenCreateAgent = false;
+export type OpenCreateAgentOptions = {
+  channelId?: string;
+  channelName?: string;
+};
 
-export function requestOpenCreateAgent() {
-  pendingOpenCreateAgent = true;
-  window.dispatchEvent(new Event(OPEN_CREATE_AGENT_EVENT));
+let pendingOpenCreateAgent: OpenCreateAgentOptions | null = null;
+
+export function requestOpenCreateAgent(options: OpenCreateAgentOptions = {}) {
+  pendingOpenCreateAgent = options;
+  window.dispatchEvent(
+    new CustomEvent<OpenCreateAgentOptions>(OPEN_CREATE_AGENT_EVENT, {
+      detail: options,
+    }),
+  );
 }
 
 export function consumePendingOpenCreateAgent() {
-  if (!pendingOpenCreateAgent) {
-    return false;
-  }
-
-  pendingOpenCreateAgent = false;
-  return true;
+  const pending = pendingOpenCreateAgent;
+  pendingOpenCreateAgent = null;
+  return pending;
 }
 
-export function subscribeOpenCreateAgent(handler: () => void) {
-  function handleOpenCreateAgent() {
-    pendingOpenCreateAgent = false;
-    handler();
+export function subscribeOpenCreateAgent(
+  handler: (options: OpenCreateAgentOptions) => void,
+) {
+  function handleOpenCreateAgent(event: Event) {
+    pendingOpenCreateAgent = null;
+    handler(
+      event instanceof CustomEvent
+        ? (event.detail as OpenCreateAgentOptions)
+        : {},
+    );
   }
 
   window.addEventListener(OPEN_CREATE_AGENT_EVENT, handleOpenCreateAgent);

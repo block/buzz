@@ -445,6 +445,22 @@ pub async fn validate_admin_event(
                 }
             }
 
+            // Validate channel names before storage. A name made entirely of
+            // display-prefix hashes becomes empty after canonicalization.
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "name" {
+                    match t.content() {
+                        Some(v)
+                            if !buzz_core::channel::canonical_channel_name(v)
+                                .trim()
+                                .is_empty() => {}
+                        _ => {
+                            return Err(anyhow::anyhow!("channel name is required"));
+                        }
+                    }
+                }
+            }
+
             // Validate visibility values before storage.
             for t in event.tags.iter() {
                 if t.kind().to_string() == "visibility" {
@@ -1073,10 +1089,17 @@ async fn handle_agent_profile(
         .ok_or_else(|| anyhow::anyhow!("kind:10100 missing channel_add_policy field"))?;
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
     state
         .db
         .set_channel_add_policy(tenant.community(), &pubkey_bytes, policy)
@@ -1124,10 +1147,17 @@ async fn handle_kind0_profile(
 
     let pubkey_bytes = event.pubkey.to_bytes().to_vec();
 
-    state
+    if state
         .db
         .ensure_user(tenant.community(), &pubkey_bytes)
-        .await?;
+        .await?
+    {
+        metrics::counter!(
+            "buzz_users_created_total",
+            "community" => tenant.host().to_owned()
+        )
+        .increment(1);
+    }
 
     // Pass all fields as Some — empty string clears the field in the DB.
     // This ensures kind:0 is treated as absolute state, not a partial update.
@@ -1653,13 +1683,21 @@ async fn handle_create_group(
     // If the event has an h-tag UUID, ingest_event() already created the channel
     // via create_channel_with_id(). Fetch it rather than creating a duplicate.
     // If no h-tag, fall back to the original auto-UUID creation path.
+    //
+    // Double-count analysis (C5): the counter increments below do NOT
+    // double-count vs. ingest.rs. For the h-tag path, ingest increments on
+    // was_created=true and this handler only reaches create_channel() on a DB
+    // lookup Err — an error recovery path where ingest's channel is
+    // inaccessible, so the counter correctly records a new creation. For the
+    // no-h-tag path, ingest never creates the channel, so this is the sole
+    // increment.
     let channel = if let Some(client_uuid) = extract_h_tag_channel(event) {
         match state.db.get_channel(tenant.community(), client_uuid).await {
             Ok(ch) => ch,
             Err(_) => {
                 // Channel not found — shouldn't happen (ingest_event pre-created it),
                 // but fall back to creation to stay resilient.
-                state
+                let ch = state
                     .db
                     .create_channel(
                         tenant.community(),
@@ -1670,11 +1708,18 @@ async fn handle_create_group(
                         &actor_bytes,
                         ttl_seconds,
                     )
-                    .await?
+                    .await?;
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => channel_type.to_string()
+                )
+                .increment(1);
+                ch
             }
         }
     } else {
-        state
+        let ch = state
             .db
             .create_channel(
                 tenant.community(),
@@ -1685,7 +1730,14 @@ async fn handle_create_group(
                 &actor_bytes,
                 ttl_seconds,
             )
-            .await?
+            .await?;
+        metrics::counter!(
+            "buzz_channels_created_total",
+            "community" => tenant.host().to_owned(),
+            "type" => channel_type.to_string()
+        )
+        .increment(1);
+        ch
     };
 
     // Creator becomes owner — evict any stale negative membership lookup.
@@ -1948,6 +2000,10 @@ async fn handle_a_tag_deletion(
     let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
 
     match kind_num {
+        // kind:30350 revocation is exclusively a higher-generation inactive replacement.
+        super::push_lease::KIND_PUSH_LEASE => {
+            tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
+        }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
@@ -2071,6 +2127,13 @@ async fn handle_standard_deletion_event(
             Some(target) => target,
             None => continue,
         };
+        if u32::from(target_event.event.kind.as_u16()) == super::push_lease::KIND_PUSH_LEASE {
+            tracing::debug!(
+                target_id = %hex::encode(&target_id),
+                "NIP-09 deletion ignored for push lease"
+            );
+            continue;
+        }
 
         let meta = state
             .db
@@ -2703,43 +2766,98 @@ async fn emit_initial_ref_state(
     Ok(())
 }
 
+/// Reconcile every community's event-backed NIP-43 membership view.
+///
+/// `relay_members` is canonical. A snapshot is rebuilt only when it is absent
+/// or its member/role set differs from the canonical rows. This makes the sweep
+/// safe to run at startup and periodically without producing an event stream
+/// when nothing changed. A failure in one community is logged and counted but
+/// does not prevent the remaining communities from being repaired.
+pub async fn reconcile_nip43_membership_snapshots(state: &Arc<AppState>) -> anyhow::Result<usize> {
+    let communities = state.db.usage_community_hosts().await?;
+    let mut reconciled = 0usize;
+
+    for community in communities {
+        let community_id = buzz_core::CommunityId::from_uuid(community.id);
+        let host = community.host;
+        let result = async {
+            if !state
+                .db
+                .nip43_membership_snapshot_needs_reconciliation(
+                    community_id,
+                    &state.relay_keypair.public_key(),
+                )
+                .await?
+            {
+                return Ok::<bool, anyhow::Error>(false);
+            }
+
+            let tenant = TenantContext::resolved(community_id, host.clone());
+            publish_nip43_membership_list(&tenant, state).await?;
+            Ok::<bool, anyhow::Error>(true)
+        }
+        .await;
+
+        match result {
+            Ok(true) => reconciled += 1,
+            Ok(false) => {}
+            Err(error) => {
+                metrics::counter!("buzz_nip43_membership_reconciliation_failures_total")
+                    .increment(1);
+                warn!(%community_id, %host, %error, "NIP-43 membership reconciliation failed");
+            }
+        }
+    }
+
+    metrics::counter!("buzz_nip43_membership_reconciliations_total").increment(reconciled as u64);
+    Ok(reconciled)
+}
+
 /// Publish a kind:13534 relay membership list event (NIP-43).
 ///
 /// Queries all current relay members and emits a relay-signed, NIP-70-protected
 /// addressable event listing every member pubkey. Replaces any previous list.
+///
+/// The member query, event construction, and replacement all happen inside
+/// the same per-community advisory lock held by
+/// `publish_nip43_membership_locked`. This prevents a stale snapshot from
+/// overwriting a newer one when two publications race: the lock serializes
+/// the entire read-build-write cycle, not just the write.
 pub async fn publish_nip43_membership_list(
     tenant: &TenantContext,
     state: &Arc<AppState>,
 ) -> anyhow::Result<()> {
-    let members = state.db.list_relay_members(tenant.community()).await?;
+    let started_at = std::time::Instant::now();
+    metrics::counter!("buzz_nip43_membership_publications_total", "result" => "attempted")
+        .increment(1);
+    let result = publish_nip43_membership_list_inner(tenant, state).await;
+    metrics::histogram!("buzz_nip43_membership_publication_seconds")
+        .record(started_at.elapsed().as_secs_f64());
+    metrics::counter!(
+        "buzz_nip43_membership_publications_total",
+        "result" => if result.is_ok() { "succeeded" } else { "failed" }
+    )
+    .increment(1);
+    result
+}
+
+async fn publish_nip43_membership_list_inner(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+) -> anyhow::Result<()> {
     let relay_pubkey_hex = state.relay_keypair.public_key().to_hex();
+    let community = tenant.community();
 
-    let mut tags: Vec<Tag> = Vec::with_capacity(members.len() + 1);
-
-    // NIP-70 protected-event marker — prevents re-broadcasting by third parties.
-    tags.push(Tag::parse(["-"]).map_err(|e| anyhow::anyhow!("failed to build '-' tag: {e}"))?);
-
-    for member in &members {
-        tags.push(
-            Tag::parse(["member", &member.pubkey, &member.role])
-                .map_err(|e| anyhow::anyhow!("failed to build member tag: {e}"))?,
-        );
-    }
-
-    let event = EventBuilder::new(Kind::Custom(KIND_NIP43_MEMBERSHIP_LIST as u16), "")
-        .tags(tags)
-        .sign_with_keys(&state.relay_keypair)
-        .map_err(|e| anyhow::anyhow!("failed to sign kind:13534: {e}"))?;
-
-    // NOTE: kind 13534 is technically a regular event (not in the NIP-16 replaceable
-    // range), but we intentionally use replace_addressable_event to get replacement
-    // semantics — only the latest membership snapshot matters. This function keys on
-    // (kind, pubkey, channel_id) and atomically replaces older events, which is exactly
-    // what Pyramid (the reference NIP-43 implementation) does with store.ReplaceEvent().
-    let (stored, was_inserted) = state
+    // The DB method acquires the per-community snapshot lock BEFORE reading
+    // members, so that the entire read-build-write cycle is serialized. A
+    // concurrent publication that reads newer state will block until our
+    // replacement commits, then read the updated membership. This prevents a
+    // stale snapshot from winning by arrival order.
+    let (stored, was_inserted, member_count) = state
         .db
-        .replace_addressable_event(tenant.community(), &event, None)
+        .publish_nip43_membership_locked(community, &state.relay_keypair)
         .await?;
+
     if was_inserted {
         dispatch_persistent_event(
             tenant,
@@ -2752,10 +2870,7 @@ pub async fn publish_nip43_membership_list(
         .await;
     }
 
-    info!(
-        member_count = members.len(),
-        "NIP-43 membership list published"
-    );
+    info!(member_count, "NIP-43 membership list published");
     Ok(())
 }
 

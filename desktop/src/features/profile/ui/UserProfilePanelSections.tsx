@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Pencil,
   Play,
+  RefreshCw,
   Square,
   UserMinus,
   UserPlus,
@@ -77,6 +78,7 @@ export type ProfileSummaryViewProps = {
   canInstantiateAgent: boolean;
   agentInstruction: string | null;
   handleAgentPrimaryAction: () => void;
+  handleAgentRestart: () => void;
   handleEditAgent: () => void;
   handleEditPersona?: () => void;
   handleInstantiateAgent: () => void;
@@ -88,6 +90,7 @@ export type ProfileSummaryViewProps = {
   isFollowing: boolean;
   isOwner: boolean | undefined;
   isSelf: boolean;
+  instances: ManagedAgent[];
   managedAgent: ManagedAgent | undefined;
   memoriesLoading: boolean;
   memoryCount: number | undefined;
@@ -95,6 +98,7 @@ export type ProfileSummaryViewProps = {
   agentSettingsFields: ProfileField[];
   diagnosticsFields: ProfileField[];
   onAddToChannel: () => void;
+  onOpenInstance: (pubkey: string) => void;
   onOpenActivity: (channelId?: string | null) => void;
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
@@ -187,6 +191,7 @@ export function ProfileSummaryView({
   canInstantiateAgent,
   agentInstruction,
   handleAgentPrimaryAction,
+  handleAgentRestart,
   handleEditAgent,
   handleEditPersona,
   handleInstantiateAgent,
@@ -198,6 +203,7 @@ export function ProfileSummaryView({
   isFollowing,
   isOwner,
   isSelf,
+  instances,
   managedAgent,
   memoriesLoading,
   memoryCount,
@@ -205,6 +211,7 @@ export function ProfileSummaryView({
   agentSettingsFields,
   diagnosticsFields,
   onAddToChannel,
+  onOpenInstance,
   onOpenActivity,
   onOpenChannel,
   onOpenDiagnostics,
@@ -248,6 +255,7 @@ export function ProfileSummaryView({
   const showActivityIngress = canViewActivity;
   const showInfoTab =
     agentInfoFields.length > 0 ||
+    instances.length > 1 ||
     isArchived ||
     showActivityIngress ||
     !showRuntimeTab;
@@ -364,6 +372,14 @@ export function ProfileSummaryView({
               ? handleAgentPrimaryAction
               : undefined
           }
+          onAgentRestart={
+            isOwner === true &&
+            managedAgent?.backend.type === "local" &&
+            (managedAgent.status === "running" ||
+              managedAgent.status === "deployed")
+              ? handleAgentRestart
+              : undefined
+          }
           isFollowing={isFollowing}
           messagePending={isMessagePending}
           onMessage={onOpenDm ? handleMessage : undefined}
@@ -388,8 +404,10 @@ export function ProfileSummaryView({
               agentInfoFields={agentInfoFields}
               callerChannelId={callerChannelId}
               channelIdToName={channelIdToName}
+              instances={instances}
               isArchived={isArchived}
               onOpenActivity={onOpenActivity}
+              onOpenInstance={onOpenInstance}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
             />
@@ -398,8 +416,12 @@ export function ProfileSummaryView({
             <>
               <ProfileRuntimeTabContent
                 agentInstruction={agentInstruction}
+                autoRestartEnabled={
+                  managedAgent?.autoRestartOnConfigChange ?? false
+                }
                 diagnosticsFields={diagnosticsFields}
                 diagnosticsSummary={diagnosticsTrailing}
+                needsRestart={managedAgent?.needsRestart ?? false}
                 onOpenDiagnostics={onOpenDiagnostics}
                 onOpenInstructions={onOpenInstructions}
                 runtimeConfigurationFields={runtimeConfigurationFields}
@@ -618,6 +640,7 @@ function ProfilePrimaryActions({
   isFollowing,
   messagePending,
   onAgentPrimaryAction,
+  onAgentRestart,
   onEditAgent,
   onMessage,
   pubkey,
@@ -631,6 +654,7 @@ function ProfilePrimaryActions({
   isFollowing: boolean;
   messagePending?: boolean;
   onAgentPrimaryAction?: () => void;
+  onAgentRestart?: () => void;
   onEditAgent: () => void;
   onMessage?: () => void;
   pubkey: string;
@@ -685,6 +709,15 @@ function ProfilePrimaryActions({
           label={agentActionLabel}
           onClick={onAgentPrimaryAction}
           testId="user-profile-agent-primary-action"
+        />
+      ) : null}
+      {onAgentRestart ? (
+        <ProfileQuickAction
+          disabled={agentActionDisabled}
+          icon={RefreshCw}
+          label="Restart"
+          onClick={onAgentRestart}
+          testId="user-profile-agent-restart"
         />
       ) : null}
     </div>

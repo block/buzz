@@ -15,6 +15,8 @@
  *      so the caller can throw rather than silently misdeliver.
  *   4. resolveEffectiveChannel falls back to the closed-over channel when no
  *      capturedChannelId was supplied (legacy-caller path).
+ *   5. resolveSendChannel uses a relay-returned channel object even when a
+ *      stale shared channel list does not contain the captured id.
  */
 
 import assert from "node:assert/strict";
@@ -23,6 +25,7 @@ import test from "node:test";
 import {
   createOptimisticMessage,
   resolveEffectiveChannel,
+  resolveSendChannel,
   resolveThreadReplyTarget,
 } from "../hooks.ts";
 
@@ -199,6 +202,37 @@ test("resolveEffectiveChannel_emptyCache_capturedIdPresent_returnsNull", () => {
   const channelB = makeChannel("channel-B");
 
   const result = resolveEffectiveChannel("channel-A", [], channelB);
+
+  assert.strictEqual(result, null);
+});
+
+// ---------------------------------------------------------------------------
+// resolveSendChannel — direct channel capture for read-after-write safety
+// ---------------------------------------------------------------------------
+
+test("resolveSendChannel_staleCacheMissingOpenedDm_returnsCapturedDm", () => {
+  const openedDm = { ...makeChannel("new-dm"), channelType: "dm" };
+  const unrelatedChannel = makeChannel("channel-B");
+
+  const result = resolveSendChannel(
+    openedDm,
+    openedDm.id,
+    [unrelatedChannel],
+    unrelatedChannel,
+  );
+
+  assert.strictEqual(result, openedDm);
+});
+
+test("resolveSendChannel_withoutCapturedObject_preservesIdSafety", () => {
+  const unrelatedChannel = makeChannel("channel-B");
+
+  const result = resolveSendChannel(
+    undefined,
+    "missing-channel",
+    [unrelatedChannel],
+    unrelatedChannel,
+  );
 
   assert.strictEqual(result, null);
 });

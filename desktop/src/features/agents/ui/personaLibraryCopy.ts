@@ -4,12 +4,12 @@ export const personaLibraryCopy = {
     "The agents you have chosen for this app. Use them to create teams and launch agents.",
   chooseFromCatalog: "Choose from catalog",
   createNew: "New agent",
-  import: "Import",
+  import: "Import snapshot",
   emptyTitle: "No agents yet",
   emptyDescription:
     "Choose one from Agent Catalog, create your own, or import one to get started.",
   emptyImportHint:
-    "Or drop a .persona.md, .persona.json, .persona.png, or .zip file here to import.",
+    "Or drop an .agent.json or .agent.png snapshot here to import.",
 } as const;
 
 export const personaCatalogCopy = {

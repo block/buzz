@@ -1,17 +1,14 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  activateRateLimit,
+  parseRateLimitHint,
+} from "@/shared/api/relayRateLimitGate";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
   BackendProviderCandidate,
   BackendProviderProbeResult,
   CanvasResponse,
-  Channel,
-  ChannelDetail,
-  ChannelMember,
-  ChannelMessagesPageResponse,
-  ChannelPageCursor,
-  ChannelType,
-  CreateChannelInput,
   GetHomeFeedInput,
   HomeFeedResponse,
   ManagedAgent,
@@ -27,68 +24,23 @@ import type {
   SendChannelMessageResult,
   SetCanvasInput,
   SetCanvasResult,
-  SetChannelPurposeInput,
-  SetChannelTopicInput,
   ThreadCursor,
   ThreadRepliesResponse,
-  UpdateChannelInput,
   CreateManagedAgentInput,
   AgentModelsResponse,
   UpdateManagedAgentInput,
   AcpAvailabilityStatus,
   AcpRuntimeCatalogEntry,
+  AuthStatus,
   CommandAvailability,
   InstallRuntimeResult,
-  OpenDmInput,
+  GitBashPrerequisite,
   RuntimeConfigSurface,
 } from "@/shared/api/types";
 
+export * from "@/shared/api/tauriChannels";
+
 type RawPresenceLookup = Record<string, PresenceStatus>;
-
-type RawChannel = {
-  id: string;
-  name: string;
-  channel_type: ChannelType;
-  visibility: "open" | "private";
-  description: string;
-  topic: string | null;
-  purpose: string | null;
-  member_count: number;
-  member_pubkeys: string[];
-  last_message_at: string | null;
-  archived_at: string | null;
-  participants: string[];
-  participant_pubkeys: string[];
-  is_member?: boolean;
-  ttl_seconds: number | null;
-  ttl_deadline: string | null;
-};
-
-type RawChannelDetail = RawChannel & {
-  created_by: string;
-  created_at: string;
-  updated_at: string;
-  topic_set_by: string | null;
-  topic_set_at: string | null;
-  purpose_set_by: string | null;
-  purpose_set_at: string | null;
-  topic_required: boolean;
-  max_members: number | null;
-  nip29_group_id: string | null;
-};
-
-type RawChannelMember = {
-  pubkey: string;
-  role: ChannelMember["role"];
-  is_agent?: boolean;
-  joined_at: string;
-  display_name: string | null;
-};
-
-type RawChannelMembersResponse = {
-  members: RawChannelMember[];
-  next_cursor: string | null;
-};
 
 type RawAddChannelMembersResult = {
   added: string[];
@@ -106,7 +58,9 @@ type RawFeedItem = {
   created_at: number;
   channel_id: string | null;
   channel_name: string;
-  channel_type: string;
+  // Native FeedItemInfo.channel_type is Option<String>: serde emits `null`,
+  // never omits the key.
+  channel_type: string | null;
   tags: string[][];
   category: "mention" | "needs_action" | "activity" | "agent_activity";
 };
@@ -164,6 +118,7 @@ export type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  team_id?: string | null;
   relay_url: string;
   acp_command: string;
   agent_command: string;
@@ -181,7 +136,6 @@ export type RawManagedAgent = {
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
   needs_restart: boolean;
-  mcp_toolsets: string | null;
   env_vars?: Record<string, string>;
   status: ManagedAgent["status"];
   pid: number | null;
@@ -224,10 +178,17 @@ export type RawAcpRuntimeCatalogEntry = {
   binary_path: string | null;
   default_args: string[];
   mcp_command: string | null;
+  model_env_var?: string | null;
+  provider_env_var?: string | null;
+  thinking_env_var?: string | null;
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
   underlying_cli_path: string | null;
+  node_required: boolean;
+  /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
+  auth_status: AuthStatus;
+  login_hint?: string;
 };
 
 export type RawInstallStepResult = {
@@ -243,6 +204,15 @@ export type RawInstallStepResult = {
 export type RawInstallRuntimeResult = {
   success: boolean;
   steps: RawInstallStepResult[];
+  restarted_count: number;
+  failed_restart_count: number;
+};
+
+type RawGitBashPrerequisite = {
+  available: boolean;
+  path: string | null;
+  install_instructions_url: string;
+  install_hint: string;
 };
 
 type RawCommandAvailability = {
@@ -278,13 +248,24 @@ type RawSetCanvasResult = {
   event_id: string;
 };
 
+/** Error normalized from a rejected Tauri invocation with its wire payload. */
+export class TauriInvokeError extends Error {
+  readonly payload: unknown;
+
+  constructor(message: string, payload: unknown) {
+    super(message);
+    this.name = "TauriInvokeError";
+    this.payload = payload;
+  }
+}
+
 function toTauriError(error: unknown): Error {
   if (error instanceof Error) {
     return error;
   }
 
   if (typeof error === "string") {
-    return new Error(error);
+    return new TauriInvokeError(error, error);
   }
 
   if (
@@ -293,13 +274,25 @@ function toTauriError(error: unknown): Error {
     "message" in error &&
     typeof error.message === "string"
   ) {
-    return new Error(error.message);
+    return new TauriInvokeError(error.message, error);
   }
 
   try {
-    return new Error(JSON.stringify(error));
+    return new TauriInvokeError(JSON.stringify(error), error);
   } catch {
-    return new Error("Unknown Tauri error");
+    return new TauriInvokeError("Unknown Tauri error", error);
+  }
+}
+
+/**
+ * Inspect a Tauri error message and activate the shared rate-limit gate when
+ * the Rust relay layer emitted an HTTP 429 response (`relay rate-limited:` prefix).
+ *
+ * Extracted so it can be unit-tested without mocking the Tauri invoke bridge.
+ */
+export function applyTauriRateLimitIfNeeded(message: string): void {
+  if (message.startsWith("relay rate-limited:")) {
+    activateRateLimit(parseRateLimitHint(message));
   }
 }
 
@@ -310,58 +303,15 @@ export async function invokeTauri<T>(
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    throw toTauriError(error);
+    const err = toTauriError(error);
+    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
+    // shared gate so the TS relay client backs off for the same window.
+    applyTauriRateLimitIfNeeded(err.message);
+    throw err;
   }
 }
 
-function fromRawChannel(channel: RawChannel): Channel {
-  return {
-    id: channel.id,
-    name: channel.name,
-    channelType: channel.channel_type,
-    visibility: channel.visibility,
-    description: channel.description,
-    topic: channel.topic,
-    purpose: channel.purpose,
-    memberCount: channel.member_count,
-    memberPubkeys: channel.member_pubkeys ?? [],
-    lastMessageAt: channel.last_message_at,
-    archivedAt: channel.archived_at,
-    participants: channel.participants,
-    participantPubkeys: channel.participant_pubkeys,
-    isMember: channel.is_member ?? true,
-    ttlSeconds: channel.ttl_seconds,
-    ttlDeadline: channel.ttl_deadline,
-  };
-}
-
-function fromRawChannelDetail(channel: RawChannelDetail): ChannelDetail {
-  return {
-    ...fromRawChannel(channel),
-    createdBy: channel.created_by,
-    createdAt: channel.created_at,
-    updatedAt: channel.updated_at,
-    topicSetBy: channel.topic_set_by,
-    topicSetAt: channel.topic_set_at,
-    purposeSetBy: channel.purpose_set_by,
-    purposeSetAt: channel.purpose_set_at,
-    topicRequired: channel.topic_required,
-    maxMembers: channel.max_members,
-    nip29GroupId: channel.nip29_group_id,
-  };
-}
-
-function fromRawChannelMember(member: RawChannelMember): ChannelMember {
-  return {
-    pubkey: member.pubkey,
-    role: member.role,
-    isAgent: member.is_agent ?? false,
-    joinedAt: member.joined_at,
-    displayName: member.display_name,
-  };
-}
-
-function fromRawFeedItem(item: RawFeedItem) {
+export function fromRawFeedItem(item: RawFeedItem) {
   return {
     id: item.id,
     kind: item.kind,
@@ -370,7 +320,10 @@ function fromRawFeedItem(item: RawFeedItem) {
     createdAt: item.created_at,
     channelId: item.channel_id,
     channelName: item.channel_name,
-    channelType: item.channel_type,
+    // Canonicalize the wire `null` to undefined so FeedItem's optional
+    // channelType contract holds at runtime (enrichment and the DM
+    // notification filter both key off `=== undefined`).
+    channelType: item.channel_type ?? undefined,
     tags: item.tags,
     category: item.category,
   };
@@ -406,6 +359,10 @@ export function getDefaultRelayUrl(): Promise<string> {
   return invokeTauri<string>("get_default_relay_url");
 }
 
+export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
+  return invokeTauri<boolean>("auto_connect_default_relay_enabled");
+}
+
 export function isSharedIdentity(): Promise<boolean> {
   return invokeTauri<boolean>("is_shared_identity");
 }
@@ -416,79 +373,6 @@ export function getRelayWsUrl(): Promise<string> {
 
 export function getRelayHttpUrl(): Promise<string> {
   return invokeTauri<string>("get_relay_http_url");
-}
-
-export async function getChannels(): Promise<Channel[]> {
-  const channels = await invokeTauri<RawChannel[]>("get_channels");
-  return channels.map(fromRawChannel);
-}
-
-export async function createChannel(
-  input: CreateChannelInput,
-): Promise<Channel> {
-  return fromRawChannel(await invokeTauri<RawChannel>("create_channel", input));
-}
-
-export async function openDm(input: OpenDmInput): Promise<Channel> {
-  return fromRawChannel(await invokeTauri<RawChannel>("open_dm", input));
-}
-
-export async function hideDm(channelId: string): Promise<void> {
-  await invokeTauri<void>("hide_dm", { channelId });
-}
-
-export async function getChannelDetails(
-  channelId: string,
-): Promise<ChannelDetail> {
-  const channel = await invokeTauri<RawChannelDetail>("get_channel_details", {
-    channelId,
-  });
-  return fromRawChannelDetail(channel);
-}
-
-export async function getChannelMembers(
-  channelId: string,
-): Promise<ChannelMember[]> {
-  const response = await invokeTauri<RawChannelMembersResponse>(
-    "get_channel_members",
-    {
-      channelId,
-    },
-  );
-  return response.members.map(fromRawChannelMember);
-}
-
-export async function updateChannel(
-  input: UpdateChannelInput,
-): Promise<ChannelDetail> {
-  const channel = await invokeTauri<RawChannelDetail>("update_channel", {
-    input,
-  });
-  return fromRawChannelDetail(channel);
-}
-
-export async function setChannelTopic(
-  input: SetChannelTopicInput,
-): Promise<void> {
-  await invokeTauri("set_channel_topic", input);
-}
-
-export async function setChannelPurpose(
-  input: SetChannelPurposeInput,
-): Promise<void> {
-  await invokeTauri("set_channel_purpose", input);
-}
-
-export async function archiveChannel(channelId: string): Promise<void> {
-  await invokeTauri("archive_channel", { channelId });
-}
-
-export async function unarchiveChannel(channelId: string): Promise<void> {
-  await invokeTauri("unarchive_channel", { channelId });
-}
-
-export async function deleteChannel(channelId: string): Promise<void> {
-  await invokeTauri("delete_channel", { channelId });
 }
 
 export async function addChannelMembers(
@@ -526,8 +410,11 @@ export async function getCanvas(channelId: string): Promise<CanvasResponse> {
   });
   return {
     content: response.content,
-    updatedAt: response.updated_at,
-    author: response.author,
+    // Normalize absent keys to null: ensureWelcomeCanvas treats null as
+    // "no canvas yet", and `undefined !== null` would make every fresh
+    // channel look already-seeded.
+    updatedAt: response.updated_at ?? null,
+    author: response.author ?? null,
   };
 }
 
@@ -646,49 +533,6 @@ export async function getThreadReplies(
   };
 }
 
-type RawChannelMessagesPageResponse = {
-  events: RelayEvent[];
-  next_cursor: RawThreadCursor | null;
-};
-
-/**
- * Fetch one keyset page of top-level channel history strictly older than a
- * cursor, via the bridge composite `(createdAt, eventId)` cursor.
- *
- * The desktop timeline pages history over WS `REQ` with a bare `until`
- * (`createdAt`) cursor, which cannot advance past a `createdAt` second denser
- * than one page. This is the escape hatch: `beforeId` is the id of the oldest
- * event already loaded at `before`, and the relay returns strictly-older rows
- * (`created_at < before OR (created_at = before AND id > beforeId)`). Pass the
- * returned `nextCursor` back to page further; `nextCursor` is null once a short
- * page proves history is exhausted.
- */
-export async function getChannelMessagesBefore(
-  channelId: string,
-  cursor: ChannelPageCursor,
-  limit?: number,
-): Promise<ChannelMessagesPageResponse> {
-  const response = await invokeTauri<RawChannelMessagesPageResponse>(
-    "get_channel_messages_before",
-    {
-      channelId,
-      before: cursor.createdAt,
-      beforeId: cursor.eventId,
-      limit: limit ?? null,
-    },
-  );
-
-  return {
-    events: response.events,
-    nextCursor: response.next_cursor
-      ? {
-          createdAt: response.next_cursor.created_at,
-          eventId: response.next_cursor.event_id,
-        }
-      : null,
-  };
-}
-
 export async function sendChannelMessage(
   channelId: string,
   content: string,
@@ -770,6 +614,7 @@ export async function editMessage(
   content: string,
   mediaTags?: string[][],
   emojiTags?: string[][],
+  mentionPubkeys?: string[],
 ): Promise<void> {
   await invokeTauri("edit_message", {
     channelId,
@@ -777,6 +622,7 @@ export async function editMessage(
     content,
     mediaTags: mediaTags ?? [],
     emojiTags: emojiTags ?? [],
+    mentionPubkeys: mentionPubkeys ?? null,
   });
 }
 
@@ -839,6 +685,7 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     personaId: agent.persona_id,
+    teamId: agent.team_id ?? null,
     relayUrl: agent.relay_url,
     acpCommand: agent.acp_command,
     agentCommand: agent.agent_command,
@@ -852,12 +699,10 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
-    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
     needsRestart: agent.needs_restart ?? false,
-    mcpToolsets: agent.mcp_toolsets,
     envVars: agent.env_vars ?? {},
     status: agent.status,
     pid: agent.pid,
@@ -892,10 +737,16 @@ function fromRawAcpRuntimeCatalogEntry(
     binaryPath: entry.binary_path,
     defaultArgs: entry.default_args,
     mcpCommand: entry.mcp_command,
+    modelEnvVar: entry.model_env_var ?? null,
+    providerEnvVar: entry.provider_env_var ?? null,
+    thinkingEnvVar: entry.thinking_env_var ?? null,
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
     underlyingCliPath: entry.underlying_cli_path,
+    nodeRequired: entry.node_required,
+    authStatus: entry.auth_status,
+    loginHint: entry.login_hint ?? null,
   };
 }
 
@@ -913,6 +764,8 @@ function fromRawInstallRuntimeResult(
       exitCode: step.exit_code,
       hint: step.hint,
     })),
+    restartedCount: raw.restarted_count,
+    failedRestartCount: raw.failed_restart_count,
   };
 }
 
@@ -990,7 +843,6 @@ export async function listManagedAgents(): Promise<ManagedAgent[]> {
     fromRawManagedAgent,
   );
 }
-
 export async function createManagedAgent(input: CreateManagedAgentInput) {
   const response = await invokeTauri<RawCreateManagedAgentResponse>(
     "create_managed_agent",
@@ -998,13 +850,13 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
       input: {
         name: input.name,
         personaId: input.personaId,
+        teamId: input.teamId,
         relayUrl: input.relayUrl,
         acpCommand: input.acpCommand,
         agentCommand: input.agentCommand,
         harnessOverride: input.harnessOverride ?? false,
         agentArgs: input.agentArgs,
         mcpCommand: input.mcpCommand,
-        mcpToolsets: input.mcpToolsets,
         turnTimeoutSeconds: input.turnTimeoutSeconds,
         idleTimeoutSeconds: input.idleTimeoutSeconds,
         maxTurnDurationSeconds: input.maxTurnDurationSeconds,
@@ -1012,6 +864,7 @@ export async function createManagedAgent(input: CreateManagedAgentInput) {
         systemPrompt: input.systemPrompt,
         avatarUrl: input.avatarUrl,
         model: input.model,
+        provider: input.provider,
         envVars: input.envVars ?? {},
         spawnAfterCreate: input.spawnAfterCreate,
         startOnAppLaunch: input.startOnAppLaunch,
@@ -1053,6 +906,20 @@ export async function getManagedAgentLog(pubkey: string, lineCount?: number) {
     content: response.content,
     logPath: response.log_path,
   };
+}
+
+export async function discoverGitBashPrerequisite(): Promise<GitBashPrerequisite | null> {
+  const prerequisite = await invokeTauri<RawGitBashPrerequisite | null>(
+    "discover_git_bash_prerequisite",
+  );
+  return (
+    prerequisite && {
+      available: prerequisite.available,
+      path: prerequisite.path,
+      installInstructionsUrl: prerequisite.install_instructions_url,
+      installHint: prerequisite.install_hint,
+    }
+  );
 }
 
 export async function discoverAcpRuntimes(): Promise<AcpRuntimeCatalogEntry[]> {
@@ -1241,17 +1108,19 @@ export async function cancelPairing(): Promise<void> {
   await invokeTauri("cancel_pairing");
 }
 
-export async function applyWorkspace(
+export async function applyCommunity(
   relayUrl: string,
   nsec?: string,
   token?: string,
   reposDir?: string,
+  agentManagedProfiles?: boolean,
 ): Promise<void> {
   await invokeTauri("apply_workspace", {
     relayUrl,
     nsec: nsec ?? null,
     token: token ?? null,
     reposDir: reposDir ?? null,
+    agentManagedProfiles: agentManagedProfiles ?? false,
   });
 }
 
@@ -1263,6 +1132,9 @@ export async function validateReposDir(dir: string): Promise<void> {
 
 export const setPreventSleepActive = (active: boolean) =>
   invokeTauri("set_prevent_sleep_active", { active });
+
+export const setAgentManagedProfiles = (enabled: boolean) =>
+  invokeTauri("set_agent_managed_profiles", { enabled });
 
 /** Returns true on macOS, Windows, and Linux AppImage installs.
  *  Returns false on Linux non-AppImage packages (e.g. .deb) where

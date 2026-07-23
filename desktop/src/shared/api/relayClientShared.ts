@@ -3,7 +3,7 @@ import type { RelayEvent } from "@/shared/api/types";
 /**
  * Observable connection state for the relay singleton.
  *
- * - `idle`         — never tried to connect yet (post-init, pre-workspace).
+ * - `idle`         — never tried to connect yet (post-init, pre-community).
  * - `connecting`   — initial socket + AUTH handshake in flight.
  * - `connected`    — socket open and AUTH'd.
  * - `reconnecting` — socket dropped, waiting for the backoff timer.
@@ -11,7 +11,7 @@ import type { RelayEvent } from "@/shared/api/types";
  *                    for a long time (half-open / Warp split-brain). We
  *                    surface this so the UI can warn even though tungstenite
  *                    hasn't reported anything wrong yet.
- * - `disconnected` — final/terminal disconnect (auth rejected, workspace
+ * - `disconnected` — final/terminal disconnect (auth rejected, community
  *                    switch, etc.) — no auto-reconnect scheduled.
  */
 export type ConnectionState =
@@ -52,6 +52,8 @@ type LiveSubscription = {
   onEvent: (event: RelayEvent) => void;
   resolveReady?: () => void;
   lastSeenCreatedAt?: number;
+  closedRetryAttempt?: number;
+  closedRetryTimeout?: number;
 };
 
 export type PendingEvent = {

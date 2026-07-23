@@ -96,8 +96,8 @@ class _AttachmentStrip extends StatelessWidget {
                             ),
                           ),
                         )
-                      : Image.network(
-                          previewUrl,
+                      : MediaImage(
+                          url: previewUrl,
                           fit: BoxFit.cover,
                           errorBuilder: (_, _, _) => ColoredBox(
                             color: context.colors.surface,

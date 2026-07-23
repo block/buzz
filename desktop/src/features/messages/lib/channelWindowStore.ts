@@ -57,7 +57,7 @@ function cursorsEqual(
 }
 
 /** Relay order: newest timestamp first, then ascending id within a second. */
-function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
+export function compareRelayOrder(left: RelayEvent, right: RelayEvent) {
   return left.created_at !== right.created_at
     ? right.created_at - left.created_at
     : left.id < right.id
@@ -178,7 +178,7 @@ export function mergeLiveThreadSummary(
 
 /**
  * Merge a live top-level event without mutating authoritative page boundaries.
- * Events below the oldest loaded boundary wait for ordinary relay pagination.
+ * Events below an open oldest boundary wait for ordinary relay pagination.
  */
 export function mergeLiveChannelWindowEvent(
   current: ChannelWindowStore,
@@ -205,7 +205,13 @@ export function mergeLiveChannelWindowEvent(
   }
   const oldestPage = current.pages[current.pages.length - 1];
   const oldest = oldestPage?.rows[oldestPage.rows.length - 1]?.event;
-  if (oldest && compareRelayOrder(event, oldest) >= 0) return current;
+  if (
+    oldest &&
+    (event.created_at < oldest.created_at ||
+      (oldestPage.hasMore && compareRelayOrder(event, oldest) >= 0))
+  ) {
+    return current;
+  }
   return {
     ...current,
     liveOverlay: current.liveOverlay
@@ -280,6 +286,17 @@ export function flattenChannelWindowEvents(store: ChannelWindowStore) {
 export function channelWindowHasMore(store: ChannelWindowStore) {
   const tail = store.pages[store.pages.length - 1];
   return tail?.hasMore ?? false;
+}
+
+/**
+ * Whether the loaded window PROVABLY starts at the channel's beginning. This
+ * is not `!channelWindowHasMore`: an empty store also reports "no more", but
+ * that means the boundary is unresolved (nothing has loaded), not exhausted.
+ * Only a resolved tail page saying `hasMore: false` proves the start.
+ */
+export function channelWindowHistoryExhausted(store: ChannelWindowStore) {
+  const tail = store.pages[store.pages.length - 1];
+  return tail !== undefined && !tail.hasMore;
 }
 
 /**

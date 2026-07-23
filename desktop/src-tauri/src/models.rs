@@ -17,6 +17,11 @@ pub struct IdentityInfo {
     /// shows a "unlock the keyring and relaunch" screen. Mutually exclusive
     /// with `lost`.
     pub locked: bool,
+    /// True when the boot-time Phase 2 reset attempted a wipe but verification
+    /// failed. Identity resolution was skipped; the frontend shows a
+    /// reset-failed recovery screen. The sentinel is preserved so the next
+    /// relaunch retries the wipe automatically.
+    pub reset_failed: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -246,6 +251,7 @@ pub struct ThreadSummary {
 pub struct ForumMessageInfo {
     pub event_id: String,
     pub pubkey: String,
+    pub sig: String,
     pub content: String,
     pub kind: u32,
     pub created_at: i64,
@@ -267,6 +273,7 @@ pub struct ForumPostsResponse {
 pub struct ForumThreadReplyInfo {
     pub event_id: String,
     pub pubkey: String,
+    pub sig: String,
     pub content: String,
     pub kind: u32,
     pub created_at: i64,

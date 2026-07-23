@@ -1,3 +1,4 @@
+import type { AgentChannelAttachmentFailure } from "@/features/agents/channelAttachmentFailure";
 import type { CreateManagedAgentResponse } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -10,11 +11,17 @@ import {
 import { CopyButton } from "./CopyButton";
 
 export function SecretRevealDialog({
+  attachmentFailure,
   created,
+  isRetryingAttachment = false,
   onOpenChange,
+  onRetryAttachment,
 }: {
+  attachmentFailure?: AgentChannelAttachmentFailure | null;
   created: CreateManagedAgentResponse | null;
+  isRetryingAttachment?: boolean;
   onOpenChange: (open: boolean) => void;
+  onRetryAttachment?: () => void;
 }) {
   return (
     <Dialog onOpenChange={onOpenChange} open={created !== null}>
@@ -61,6 +68,17 @@ export function SecretRevealDialog({
                   <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
                     {created.spawnError}
                   </p>
+                ) : attachmentFailure ? (
+                  <div
+                    className="space-y-1 rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
+                    role="alert"
+                  >
+                    <p>
+                      {created.agent.name} was created, but couldn’t be added to
+                      #{attachmentFailure.channelName}.
+                    </p>
+                    <p>{attachmentFailure.error}</p>
+                  </div>
                 ) : (
                   <p className="rounded-2xl border border-primary/20 bg-primary/10 px-4 py-3 text-sm text-primary">
                     {created.agent.name} is ready
@@ -75,8 +93,19 @@ export function SecretRevealDialog({
             ) : null}
           </div>
 
-          <div className="flex justify-end border-t border-border/60 px-6 py-4">
+          <div className="flex justify-end gap-2 border-t border-border/60 px-6 py-4">
+            {attachmentFailure && onRetryAttachment ? (
+              <Button
+                disabled={isRetryingAttachment}
+                onClick={onRetryAttachment}
+                size="sm"
+                type="button"
+              >
+                {isRetryingAttachment ? "Trying again…" : "Try again"}
+              </Button>
+            ) : null}
             <Button
+              disabled={isRetryingAttachment}
               onClick={() => onOpenChange(false)}
               size="sm"
               type="button"

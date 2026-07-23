@@ -122,10 +122,10 @@ function IssueRow({
             pubkey={issue.author}
             showLabel={false}
           />
-          <span className="truncate font-medium text-foreground/80">
-            {authorLabel}
+          <span className="truncate text-foreground/80">
+            <span className="font-medium">{authorLabel}</span> created this
+            issue {relativeTime(issue.createdAt)}
           </span>
-          <span>opened {relativeTime(issue.createdAt)}</span>
           <span>·</span>
           <span>{issue.status}</span>
           {issue.labels.map((label) => (
@@ -230,9 +230,9 @@ function IssueDetail({
         </header>
 
         <section className="space-y-3 p-4">
-          <h4 className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
             <MessageSquare className="h-3.5 w-3.5" />
-            Discussion
+            Add Your Comment
           </h4>
           {issue.comments.length > 0 ? (
             <div className="space-y-3">
@@ -323,7 +323,7 @@ function IssueMetaRail({
       <OverviewRailSection title="Activity">
         <dl className="space-y-1.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between gap-3">
-            <dt>Opened</dt>
+            <dt>Created</dt>
             <dd className="font-medium text-foreground">
               {compactDate(issue.createdAt)}
             </dd>

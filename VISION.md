@@ -166,7 +166,7 @@ See [VISION_PROJECTS.md](VISION_PROJECTS.md) for the full forge vision: the proj
 
 ## Agent Personas & Teams
 
-Agents aren't monolithic. A persona bundles a model, a system prompt, and a set of MCP toolsets. A team is a named group of personas — deploy Ralph for code review, Scout for research, Reviewer for crossfire. Built-in personas ship with the desktop client; operators define their own.
+Agents aren't monolithic. A persona bundles a model and a system prompt. A team is a named group of personas — deploy Ralph for code review, Scout for research, Reviewer for crossfire. Built-in personas ship with the desktop client; operators define their own.
 
 ---
 

@@ -7,6 +7,7 @@ import {
   tagsEqual,
 } from "@/features/messages/lib/messageRowEquality";
 import type { TimelineMessage } from "@/features/messages/types";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
@@ -34,10 +35,12 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
+import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
@@ -45,10 +48,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 
 const DiffMessage = React.lazy(() => import("./DiffMessage"));
 const DiffMessageExpanded = React.lazy(() => import("./DiffMessageExpanded"));
-
-/** Stable empty fallback so rows without an agent-pubkey set keep a constant
- *  reference (a fresh `new Set()` per render would defeat downstream memos). */
-const EMPTY_AGENT_PUBKEYS: ReadonlySet<string> = new Set();
 
 export type ThreadDepthGuideAction = {
   active?: boolean;
@@ -88,14 +87,14 @@ export const MessageRow = React.memo(
     onMarkRead,
     onToggleReaction,
     onReply,
+    onEntranceComplete,
+    playEntrance = false,
     onUnfollowThread,
     profiles,
     searchQuery,
     showDepthGuides = true,
-    agentPubkeys,
     videoReviewContext,
   }: {
-    agentPubkeys?: ReadonlySet<string>;
     channelId?: string | null;
     collapseDepthGuideActions?: ReadonlyArray<ThreadDepthGuideAction>;
     connectDescendants?: boolean;
@@ -136,6 +135,8 @@ export const MessageRow = React.memo(
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
     onUnfollowThread?: (message: TimelineMessage) => void;
+    onEntranceComplete?: (messageId: string) => void;
+    playEntrance?: boolean;
     profiles?: UserProfileLookup;
     searchQuery?: string;
     showDepthGuides?: boolean;
@@ -146,6 +147,17 @@ export const MessageRow = React.memo(
     );
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
+    );
+    const handleEntranceAnimationEnd = React.useCallback(
+      (event: React.AnimationEvent<HTMLElement>) => {
+        if (
+          playEntrance &&
+          event.animationName === "motion-enter-conversation"
+        ) {
+          onEntranceComplete?.(message.id);
+        }
+      },
+      [message.id, onEntranceComplete, playEntrance],
     );
     const {
       reactions,
@@ -171,15 +183,24 @@ export const MessageRow = React.memo(
       () => resolveMentionProps(message.tags, profiles),
       [profiles, message.tags],
     );
-    // The agent-pubkey set is computed once by the parent (ChannelScreen)
-    // from the same profile lookup and passed down already normalised — no
-    // per-row rescan of `profiles` (that duplicated the parent's work in every
-    // mounted row and re-ran on each profile-lookup change).
-    const resolvedAgentPubkeys = agentPubkeys ?? EMPTY_AGENT_PUBKEYS;
+    // "Is this pubkey an agent" = the community-scoped baseline every surface
+    // shares (managed ∪ relay) plus the pubkey's own profile `isAgent` flag from this surface's lookup. Both are per-pubkey
+    // O(1) checks — no per-row rescan of `profiles` (that duplicated parent
+    // work in every mounted row and re-ran on each profile-lookup change).
+    const knownAgentPubkeys = useKnownAgentPubkeys();
+    const isKnownAgentPubkey = React.useCallback(
+      (pubkey: string) => {
+        const normalized = normalizePubkey(pubkey);
+        return (
+          knownAgentPubkeys.has(normalized) ||
+          profiles?.[normalized]?.isAgent === true
+        );
+      },
+      [knownAgentPubkeys, profiles],
+    );
     const profilePopoverRole =
       message.role === "bot" ||
-      (message.pubkey &&
-        resolvedAgentPubkeys.has(normalizePubkey(message.pubkey)))
+      (message.pubkey && isKnownAgentPubkey(message.pubkey))
         ? "bot"
         : message.role;
     const agentMentionPubkeysByName = React.useMemo(() => {
@@ -189,17 +210,25 @@ export const MessageRow = React.memo(
 
       const values: Record<string, string> = {};
       for (const [name, pubkey] of Object.entries(mentionPubkeysByName)) {
-        if (resolvedAgentPubkeys.has(normalizePubkey(pubkey))) {
+        if (isKnownAgentPubkey(pubkey)) {
           values[name] = pubkey;
         }
       }
 
       return Object.keys(values).length > 0 ? values : undefined;
-    }, [resolvedAgentPubkeys, mentionPubkeysByName]);
+    }, [isKnownAgentPubkey, mentionPubkeysByName]);
 
     const imetaByUrl = React.useMemo(
       () => (message.tags ? parseImetaTags(message.tags) : undefined),
       [message.tags],
+    );
+    const snapshotSharedBy = React.useMemo(
+      () =>
+        resolveSnapshotSharedBy(
+          { signerPubkey: message.signerPubkey },
+          profiles,
+        ),
+      [message.signerPubkey, profiles],
     );
 
     const { customEmoji, emojiOnly } = useMessageEmoji(
@@ -330,11 +359,11 @@ export const MessageRow = React.memo(
               )}
               // Only pass the author pubkey for agent-authored messages so
               // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey) — not the tag-attributed
-              // display author — to prevent actor/p-tag spoofing.
+              // raw event signer (signerPubkey), not a relay-delegated display
+              // author, because the agent itself must have signed the card.
               configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
                 message,
-                resolvedAgentPubkeys,
+                isKnownAgentPubkey,
               )}
               content={message.body}
               customEmoji={customEmoji}
@@ -343,6 +372,7 @@ export const MessageRow = React.memo(
               mentionNames={mentionNames}
               mentionPubkeysByName={mentionPubkeysByName}
               searchQuery={searchQuery}
+              snapshotSharedBy={snapshotSharedBy}
               videoReviewContext={videoReviewContext}
             />
           );
@@ -430,6 +460,12 @@ export const MessageRow = React.memo(
     ) : (
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
+    const agentOwnerNode = message.isAgent ? (
+      <MessageAgentOwner
+        ownerLabel={message.ownerLabel}
+        ownerPubkey={message.ownerPubkey}
+      />
+    ) : null;
 
     const actionBarNode = (
       <div
@@ -516,6 +552,7 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
+        {agentOwnerNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&
         message.personaDisplayName !== message.author ? (
@@ -735,6 +772,7 @@ export const MessageRow = React.memo(
         <article
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
+            playEntrance && "motion-enter-conversation",
             "py-1",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
@@ -750,6 +788,7 @@ export const MessageRow = React.memo(
           )}
           data-message-id={message.id}
           data-testid="message-row"
+          onAnimationEnd={handleEntranceAnimationEnd}
         >
           {isThreadReplyLayout ? (
             <>
@@ -780,6 +819,9 @@ export const MessageRow = React.memo(
     prev.message.pubkey === next.message.pubkey &&
     prev.message.body === next.message.body &&
     prev.message.author === next.message.author &&
+    prev.message.isAgent === next.message.isAgent &&
+    prev.message.ownerPubkey === next.message.ownerPubkey &&
+    prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
     prev.message.time === next.message.time &&
@@ -795,7 +837,6 @@ export const MessageRow = React.memo(
     tagsEqual(prev.message.tags, next.message.tags) &&
     prev.message.role === next.message.role &&
     prev.message.personaDisplayName === next.message.personaDisplayName &&
-    prev.agentPubkeys === next.agentPubkeys &&
     depthGuideActionsEqual(
       prev.collapseDepthGuideActions,
       next.collapseDepthGuideActions,
@@ -823,6 +864,8 @@ export const MessageRow = React.memo(
     prev.onCollapseDescendants === next.onCollapseDescendants &&
     prev.onCollapseDescendantsHoverChange ===
       next.onCollapseDescendantsHoverChange &&
+    prev.onEntranceComplete === next.onEntranceComplete &&
+    prev.playEntrance === next.playEntrance &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,

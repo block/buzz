@@ -8,8 +8,8 @@ const UUID: &str = "11111111-2222-3333-4444-555555555555";
 
 /// A local in-app persona: `source_team_persona_slug` is None, so its d-tag
 /// IS its UUID id. Carries env_vars + source_team that must survive a patch.
-fn local_in_app() -> PersonaRecord {
-    PersonaRecord {
+fn local_in_app() -> AgentDefinition {
+    AgentDefinition {
         id: UUID.to_string(),
         display_name: "Local".to_string(),
         avatar_url: None,
@@ -25,7 +25,6 @@ fn local_in_app() -> PersonaRecord {
         env_vars: BTreeMap::from([("API_KEY".to_string(), "secret".to_string())]),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
         updated_at: "2025-01-01T00:00:00Z".to_string(),
@@ -34,8 +33,8 @@ fn local_in_app() -> PersonaRecord {
 
 /// An inbound persona as `persona_from_event` would produce it: id = d-tag,
 /// slug = Some(d-tag), empty env_vars, source_team None.
-fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
-    PersonaRecord {
+fn inbound_for(d_tag: &str, display_name: &str) -> AgentDefinition {
+    AgentDefinition {
         id: d_tag.to_string(),
         display_name: display_name.to_string(),
         avatar_url: Some("https://example.com/a.png".to_string()),
@@ -51,7 +50,6 @@ fn inbound_for(d_tag: &str, display_name: &str) -> PersonaRecord {
         env_vars: BTreeMap::new(),
         respond_to: None,
         respond_to_allowlist: Vec::new(),
-        mcp_toolsets: None,
         parallelism: None,
         created_at: "2025-06-01T00:00:00Z".to_string(),
         updated_at: "2025-06-01T00:00:00Z".to_string(),
@@ -91,7 +89,6 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     let mut inbound = inbound_for(UUID, "Remote");
     inbound.respond_to = Some("allowlist".to_string());
     inbound.respond_to_allowlist = vec!["a".repeat(64)];
-    inbound.mcp_toolsets = Some("default,canvas".to_string());
     inbound.parallelism = Some(8);
     apply_inbound_persona(&mut personas, inbound);
 
@@ -99,7 +96,6 @@ fn inbound_quad_edit_applies_to_existing_matched_record() {
     let p = &personas[0];
     assert_eq!(p.respond_to, Some("allowlist".to_string()));
     assert_eq!(p.respond_to_allowlist, vec!["a".repeat(64)]);
-    assert_eq!(p.mcp_toolsets, Some("default,canvas".to_string()));
     assert_eq!(p.parallelism, Some(8));
     // A quad-absent inbound also applies (clears), same as prompt/model.
     apply_inbound_persona(&mut personas, inbound_for(UUID, "Remote"));
@@ -179,7 +175,6 @@ fn local_agent() -> ManagedAgentRecord {
         model: Some("local-model".to_string()),
         provider: Some("local-provider".to_string()),
         persona_source_version: Some("local-hash".to_string()),
-        mcp_toolsets: Some("local".to_string()),
         env_vars: BTreeMap::from([("API_KEY".to_string(), "localsecret".to_string())]),
         start_on_app_launch: true,
         auto_restart_on_config_change: true,
@@ -190,6 +185,7 @@ fn local_agent() -> ManagedAgentRecord {
         },
         backend_agent_id: Some("local-remote-id".to_string()),
         provider_binary_path: Some("/local/bin".to_string()),
+        team_id: None,
         persona_team_dir: None,
         persona_name_in_team: None,
         created_at: "2025-01-01T00:00:00Z".to_string(),
@@ -211,7 +207,6 @@ fn local_agent() -> ManagedAgentRecord {
         source_team_persona_slug: None,
         definition_respond_to: None,
         definition_respond_to_allowlist: Vec::new(),
-        definition_mcp_toolsets: None,
         definition_parallelism: None,
         relay_mesh: None,
     }
@@ -228,7 +223,6 @@ fn foreign_agent_event_with_secrets(d_tag: &str) -> nostr::Event {
         "system_prompt": "remote prompt",
         "model": "remote-model",
         "provider": "remote-provider",
-        "mcp_toolsets": "remote",
         "persona_source_version": "remote-hash",
         "parallelism": 99,
         "respond_to": "anyone",
@@ -339,7 +333,6 @@ fn inbound_definition_less_agent_applies_quad() {
         "system_prompt": "remote prompt",
         "model": "remote-model",
         "provider": "remote-provider",
-        "mcp_toolsets": "remote",
         "persona_source_version": "remote-version",
         "parallelism": 99,
         "respond_to": "anyone",
@@ -393,6 +386,7 @@ fn local_team() -> TeamRecord {
         id: TEAM_ID.to_string(),
         name: "Local Team".to_string(),
         description: Some("local desc".to_string()),
+        instructions: None,
         persona_ids: vec!["p-local".to_string()],
         is_builtin: false,
         source_dir: Some(std::path::PathBuf::from("/local/team/dir")),
@@ -408,7 +402,30 @@ fn team_content(name: &str) -> TeamEventContent {
     TeamEventContent {
         name: name.to_string(),
         description: Some("remote desc".to_string()),
-        persona_ids: vec!["p-remote-1".to_string(), "p-remote-2".to_string()],
+        instructions: Some(Some("remote instructions".to_string())),
+        persona_ids: Some(vec!["p-remote-1".to_string(), "p-remote-2".to_string()]),
+    }
+}
+
+/// An inbound event shaped like one from a client that predates
+/// always-publish: `instructions`/`persona_ids` both omitted (`None`).
+fn team_content_omitting_optional_fields(name: &str) -> TeamEventContent {
+    TeamEventContent {
+        name: name.to_string(),
+        description: Some("remote desc".to_string()),
+        instructions: None,
+        persona_ids: None,
+    }
+}
+
+/// An inbound event that explicitly clears both fields: `instructions` is
+/// `Some(None)` (JSON `null`), `persona_ids` is `Some(vec![])`.
+fn team_content_clearing_optional_fields(name: &str) -> TeamEventContent {
+    TeamEventContent {
+        name: name.to_string(),
+        description: Some("remote desc".to_string()),
+        instructions: Some(None),
+        persona_ids: Some(vec![]),
     }
 }
 
@@ -426,6 +443,7 @@ fn inbound_team_match_patches_shared_preserves_local() {
     // Shared fields overwritten.
     assert_eq!(t.name, "Renamed Team");
     assert_eq!(t.description, Some("remote desc".to_string()));
+    assert_eq!(t.instructions, Some("remote instructions".to_string()));
     assert_eq!(
         t.persona_ids,
         vec!["p-remote-1".to_string(), "p-remote-2".to_string()]
@@ -440,6 +458,66 @@ fn inbound_team_match_patches_shared_preserves_local() {
     assert_eq!(t.symlink_target, Some("/external".to_string()));
     assert_eq!(t.version, Some("1.0".to_string()));
     assert_eq!(t.created_at, "2025-01-01T00:00:00Z");
+}
+
+#[test]
+fn inbound_team_omitted_fields_preserve_local() {
+    // A `None` for instructions/persona_ids means the publisher predates
+    // always-publish — its true value is unknown, so reconcile must
+    // preserve whatever this device already has. This is the fix for the
+    // Sietch Tabr wipe: an old-shaped (or genuinely field-omitting) event
+    // must not blank out a team that has real membership/instructions.
+    let mut teams = vec![local_team()];
+    // Give local_team real instructions so preservation is discriminating:
+    // the pre-fix blind-overwrite bug would collapse this to `None`, while
+    // the fix must leave it untouched on an omitted field.
+    teams[0].instructions = Some("local instructions".to_string());
+    apply_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content_omitting_optional_fields("Renamed Team"),
+    );
+
+    assert_eq!(teams.len(), 1);
+    let t = &teams[0];
+    assert_eq!(
+        t.name, "Renamed Team",
+        "shared non-optional field still overwrites"
+    );
+    assert_eq!(
+        t.instructions,
+        Some("local instructions".to_string()),
+        "omitted instructions preserves local value rather than wiping it"
+    );
+    assert_eq!(
+        t.persona_ids,
+        vec!["p-local".to_string()],
+        "omitted persona_ids preserves local membership rather than wiping it"
+    );
+}
+
+#[test]
+fn inbound_team_explicit_clear_overwrites_local() {
+    // `Some(None)` / `Some(vec![])` are the explicit-clear signals a
+    // pre-fix client can never produce — these must still overwrite local.
+    let mut teams = vec![local_team()];
+    // Give local_team real instructions so the clear has something to erase.
+    teams[0].instructions = Some("local instructions".to_string());
+
+    apply_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content_clearing_optional_fields("Cleared Team"),
+    );
+
+    assert_eq!(teams.len(), 1);
+    let t = &teams[0];
+    assert_eq!(t.instructions, None, "explicit null clears instructions");
+    assert_eq!(
+        t.persona_ids,
+        Vec::<String>::new(),
+        "explicit empty array clears membership"
+    );
 }
 
 #[test]

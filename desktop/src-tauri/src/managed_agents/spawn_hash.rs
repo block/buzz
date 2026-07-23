@@ -16,8 +16,9 @@
 //!   re-snapshot. Harness command, args/mcp, env layering, and the record
 //!   fields the spawn env writes read are hashed as spawn resolves them.
 //! - The relay URL is hashed in resolved form (`effective_agent_relay_url`):
-//!   a record with a blank relay spawns against the active workspace relay,
-//!   so a workspace relay change means a restart would change what runs.
+//!   every record spawns against the active workspace relay (legacy per-record
+//!   pins are ignored), so a workspace relay change means a restart would
+//!   change what runs.
 //! - Channel membership is not an input: agents pick up channel changes live
 //!   (#1468), never via restart.
 //!
@@ -30,27 +31,34 @@ use super::{
     known_acp_runtime, normalize_agent_args,
     persona_events::apply_persona_snapshot,
     resolve_effective_agent_env,
-    types::{ManagedAgentRecord, PersonaRecord},
+    types::{AgentDefinition, ManagedAgentRecord, TeamRecord},
     GlobalAgentConfig,
 };
 
 /// The prompt a spawn would actually deliver: `Some("")` collapses to `None`
-/// because an empty BUZZ_ACP_SYSTEM_PROMPT is no prompt — EXCEPT for
-/// team-pack records, where buzz-acp falls back to the pack persona's prompt
-/// when the env var is absent, making set-but-empty a deliberate suppression.
+/// because an empty `BUZZ_ACP_SYSTEM_PROMPT` is no prompt.
 ///
-/// The single source of truth for the spawn env write AND the config hash:
-/// both call this, so they cannot disagree (the hash's contract is "digest
-/// what a spawn would actually run"). B5 hash row 2 depends on the collapse:
-/// backfilled prompt-less records re-snapshot to `Some("")` from their
-/// manufactured definition and must not trip the restart badge.
+/// The single source of truth for the spawn env write AND the config hash.
 pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<String> {
-    let has_pack_fallback =
-        record.persona_team_dir.is_some() && record.persona_name_in_team.is_some();
     record
         .system_prompt
         .clone()
-        .filter(|p| has_pack_fallback || !p.is_empty())
+        .filter(|prompt| !prompt.is_empty())
+}
+
+/// Resolve the current instructions for this instance's deployment-time team binding.
+/// A deleted team deliberately degrades to no team section.
+pub(crate) fn effective_team_instructions(
+    record: &ManagedAgentRecord,
+    teams: &[TeamRecord],
+) -> Option<String> {
+    teams
+        .iter()
+        .find(|team| Some(team.id.as_str()) == record.team_id.as_deref())
+        .and_then(|team| team.instructions.as_deref())
+        .map(str::trim)
+        .filter(|instructions| !instructions.is_empty())
+        .map(str::to_string)
 }
 
 /// Digest the effective spawn configuration of `record` under the current
@@ -58,7 +66,8 @@ pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<Stri
 /// Pure — no `AppHandle`, no disk, no keyring.
 pub(crate) fn spawn_config_hash(
     record: &ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
+    teams: &[TeamRecord],
     workspace_relay: &str,
     global: &GlobalAgentConfig,
 ) -> u64 {
@@ -97,12 +106,12 @@ pub(crate) fn spawn_config_hash(
     effective.env.hash(&mut hasher);
 
     // Record fields the spawn env writes read directly. The relay is hashed
-    // resolved: a blank record relay spawns on the workspace relay, so a
-    // workspace relay change must trip the badge.
+    // resolved: every record spawns on the workspace relay (legacy pins
+    // ignored), so a workspace relay change must trip the badge.
     crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
-    // Prompt via the shared spawn-effective filter (see its doc for the
-    // Some("")/None collapse and the team-pack exception).
+    // Prompt and runtime-layered team instructions use the same resolver as spawn.
     effective_spawn_prompt(record).hash(&mut hasher);
+    effective_team_instructions(record, teams).hash(&mut hasher);
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
@@ -120,20 +129,8 @@ pub(crate) fn spawn_config_hash(
             .hash(&mut hasher);
     }
     record.idle_timeout_seconds.hash(&mut hasher);
-    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION and BUZZ_TOOLSETS with defaults
-    // filled in, so None and an explicit default are the same spawned value.
-    record
-        .max_turn_duration_seconds
-        .unwrap_or(super::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS)
-        .hash(&mut hasher);
+    record.max_turn_duration_seconds.hash(&mut hasher);
     record.parallelism.hash(&mut hasher);
-    record
-        .mcp_toolsets
-        .as_deref()
-        .unwrap_or(super::types::DEFAULT_MCP_TOOLSETS)
-        .hash(&mut hasher);
-    record.persona_team_dir.hash(&mut hasher);
-    record.persona_name_in_team.hash(&mut hasher);
 
     hasher.finish()
 }

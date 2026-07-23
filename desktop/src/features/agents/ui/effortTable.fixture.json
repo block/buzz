@@ -84,6 +84,13 @@
     "defaultValue": "high"
   },
   {
+    "note": "OpenAI gpt-5.6: none/low/medium/high/xhigh/max",
+    "provider": "openai",
+    "model": "gpt-5.6",
+    "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
     "note": "OpenAI gpt-5.5: none/low/medium/high/xhigh",
     "provider": "openai",
     "model": "gpt-5.5",
@@ -138,6 +145,20 @@
     "model": "databricks-claude-opus-4-7",
     "validValues": ["low", "medium", "high", "xhigh", "max"],
     "defaultValue": "high"
+  },
+  {
+    "note": "DatabricksV2 gpt-5.6-sol route: OpenAI max-capable table",
+    "provider": "databricks_v2",
+    "model": "gpt-5.6-sol",
+    "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
+  },
+  {
+    "note": "DatabricksV2 gpt-5-6-sol route: dashed OpenAI max-capable table",
+    "provider": "databricks_v2",
+    "model": "gpt-5-6-sol",
+    "validValues": ["none", "low", "medium", "high", "xhigh", "max"],
+    "defaultValue": "medium"
   },
   {
     "note": "DatabricksV2 gpt-5.4 route: OpenAI gpt-5.5/5.4 table",

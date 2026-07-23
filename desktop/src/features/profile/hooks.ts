@@ -41,7 +41,8 @@ import {
   shouldFetchAvatar,
   resolveAvatarDataUrl,
 } from "@/features/profile/lib/selfProfileStorage";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
 
 export const profileQueryKey = ["profile"] as const;
 export const contactListQueryKey = (pubkey: string) =>
@@ -73,6 +74,7 @@ async function persistSelfProfile(
     version: 1,
     displayName: profile.displayName,
     avatarUrl: profile.avatarUrl,
+    about: profile.about,
     avatarDataUrl,
     updatedAt: Date.now(),
     // Only persist the presence bit when true — no-event fallbacks
@@ -83,10 +85,10 @@ async function persistSelfProfile(
 }
 
 export function useProfileQuery(enabled = true) {
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
   const queryClient = useQueryClient();
-  const relayUrl = activeWorkspace?.relayUrl ?? "";
+  const relayUrl = activeCommunity?.relayUrl ?? "";
   const pubkey = identityQuery.data?.pubkey ?? "";
 
   // Parse localStorage once per relayUrl/pubkey pair — not on every render.
@@ -106,7 +108,7 @@ export function useProfileQuery(enabled = true) {
             pubkey,
             displayName: cached.displayName,
             avatarUrl: cached.avatarUrl,
-            about: null,
+            about: cached.about,
             nip05Handle: null,
             ownerPubkey: null,
             // Only true when the cache entry was explicitly written with a
@@ -119,7 +121,7 @@ export function useProfileQuery(enabled = true) {
   );
 
   // `initialData` is only honored at query construction, which happens before
-  // identity/workspace resolve on a fresh QueryClient — seed the cache
+  // identity/community resolve on a fresh QueryClient — seed the cache
   // imperatively once they arrive, without ever stomping a real fetch result.
   React.useEffect(() => {
     if (!initialData || !cached) return;
@@ -157,9 +159,9 @@ export function useProfileQuery(enabled = true) {
  * SELF_PROFILE_CACHE_EVENT after writes so this hook re-reads without polling.
  */
 export function useSelfProfileCache(): SelfProfileCache | null {
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
-  const relayUrl = activeWorkspace?.relayUrl ?? "";
+  const relayUrl = activeCommunity?.relayUrl ?? "";
   const pubkey = identityQuery.data?.pubkey ?? "";
 
   const [cache, setCache] = React.useState<SelfProfileCache | null>(() =>
@@ -485,7 +487,7 @@ export function useUserSearchFetchMoreOnScroll(
 
 export function useUpdateProfileMutation() {
   const queryClient = useQueryClient();
-  const { activeWorkspace } = useWorkspaces();
+  const { activeCommunity } = useCommunities();
   const identityQuery = useIdentityQuery();
 
   return useMutation({
@@ -504,12 +506,18 @@ export function useUpdateProfileMutation() {
       // Cancel again: a refetch may have started while mutationFn awaited.
       await queryClient.cancelQueries({ queryKey: profileQueryKey });
       queryClient.setQueryData(profileQueryKey, profile);
-      const relayUrl = activeWorkspace?.relayUrl ?? "";
+      const relayUrl = activeCommunity?.relayUrl ?? "";
       const pubkey = identityQuery.data?.pubkey ?? profile.pubkey;
       if (relayUrl && pubkey) {
         void persistSelfProfile(relayUrl, pubkey, profile);
       }
       if (pubkey) {
+        await updateCachedChannelMemberDisplayName(
+          queryClient,
+          pubkey,
+          profile.displayName,
+        );
+
         // Own author labels/avatars render through the users-batch delta
         // cache too — evict so the next batch run picks up the new profile
         // instead of the fresh-looking stale entry, then poke the aggregates.

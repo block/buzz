@@ -23,6 +23,9 @@ buzz-auth = { workspace = true }
 buzz-pubsub = { workspace = true }
 buzz-audit = { workspace = true }
 buzz-search = { workspace = true }
+buzz-relay-mesh = { workspace = true }
+async-trait = "0.1"
+postcard = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 # `io` (ReaderStream) is needed to stream git subprocess stdout straight into
@@ -54,6 +57,7 @@ redis = { workspace = true }
 # main(). Mirrors buzz-acp's rustls setup for wss://.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 sqlx = { workspace = true }
+reqwest = { workspace = true }
 base64 = "0.22"
 buzz-sdk = { workspace = true }
 buzz-workflow = { workspace = true, features = ["reqwest"] }
@@ -72,13 +76,17 @@ url             = { workspace = true }
 moka            = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+metrics-util    = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
 
 [features]
 dev = ["buzz-auth/dev"]
 
 [dev-dependencies]
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "ebc3ab4c4b5f4a45d5bc942c66c18583800c3f82", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"] }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"] }
 buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = "0.3"

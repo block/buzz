@@ -87,6 +87,9 @@ class FrostedAppBar extends StatelessWidget {
                             left: effectiveLeading != null
                                 ? 0
                                 : Grid.gutter - Grid.quarter,
+                            right: actions.isEmpty
+                                ? Grid.gutter - Grid.quarter
+                                : 0,
                           ),
                           child: DefaultTextStyle.merge(
                             style: context.textTheme.titleMedium?.copyWith(

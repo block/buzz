@@ -115,26 +115,15 @@ class _MessageBubble extends ConsumerWidget {
                     channelNames: channelNames,
                     tags: message.tags,
                     onChannelTap: (channelId) {
-                      if (channelId == currentChannelId) return;
-                      final channelsAsync = ref.read(channelsProvider);
-                      final channels = channelsAsync.hasValue
-                          ? channelsAsync.value
-                          : null;
-                      Channel? targetChannel;
-                      for (final channel in channels ?? const <Channel>[]) {
-                        if (channel.id == channelId) {
-                          targetChannel = channel;
-                          break;
-                        }
-                      }
-                      if (targetChannel == null) return;
-                      Navigator.of(context).push(
-                        MaterialPageRoute<void>(
-                          builder: (_) =>
-                              ChannelDetailPage(channel: targetChannel!),
-                        ),
+                      openChannelLink(
+                        context: context,
+                        ref: ref,
+                        channelId: channelId,
+                        currentChannelId: currentChannelId,
                       );
                     },
+                    onMentionTap: (pubkey) =>
+                        showUserProfileSheet(context, pubkey),
                   ),
                   if (message.reactions.isNotEmpty)
                     ReactionRow(
@@ -163,19 +152,17 @@ class _UserAvatar extends StatelessWidget {
         profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
     final avatarUrl = profile?.avatarUrl;
 
-    return CircleAvatar(
+    return AvatarImage(
+      imageUrl: avatarUrl,
       radius: 14,
       backgroundColor: context.colors.primaryContainer,
-      backgroundImage: avatarUrl != null ? NetworkImage(avatarUrl) : null,
-      child: avatarUrl == null
-          ? Text(
-              initial,
-              style: context.textTheme.labelSmall?.copyWith(
-                color: context.colors.onPrimaryContainer,
-                fontWeight: FontWeight.w600,
-              ),
-            )
-          : null,
+      fallback: Text(
+        initial,
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onPrimaryContainer,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
     );
   }
 }

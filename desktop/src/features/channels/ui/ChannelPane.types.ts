@@ -46,11 +46,20 @@ export type ChannelPaneProps = {
   fetchOlder?: () => Promise<void>;
   header?: React.ReactNode;
   hasOlderMessages?: boolean;
+  /** True when the loaded window provably starts at the channel's beginning. */
+  historyExhausted?: boolean;
   isFetchingOlder?: boolean;
   isJoining?: boolean;
   isSinglePanelView?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
+  /** Newly-created message that should receive the one-shot conversation arrival motion. */
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
+  /** Welcome kickoff characters, rendered standing on the Welcome composer banner. */
+  welcomeKickoffStage?: React.ReactNode;
+  /** The kickoff is still setting up the team — the banner copy reads as setup status. */
+  welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
@@ -68,12 +77,17 @@ export type ChannelPaneProps = {
   onCloseChannelManagement?: () => void;
   onChannelManagementDeleted?: () => void;
   onCloseProfilePanel: () => void;
-  onAddAgent?: () => void;
+  onAddAgent?: (options?: { beforeSend?: () => void }) => void;
+  onBrowseChannels?: () => void;
   onCreateChannel?: () => void;
   onCloseThread: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
@@ -120,6 +134,7 @@ export type ChannelPaneProps = {
   ) => void;
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   shouldShowThreadSkeleton: boolean;
   openAgentSessionChannelId: string | null;
@@ -137,6 +152,7 @@ export type ChannelPaneProps = {
   profilePanelView: ProfilePanelView;
   threadHeadMessage: TimelineMessage | null;
   threadMessages: MainTimelineEntry[];
+  threadMessagesPending?: boolean;
   threadPanelWidthPx: number;
   threadTypingPubkeys: string[];
   threadReplyTargetMessage: TimelineMessage | null;

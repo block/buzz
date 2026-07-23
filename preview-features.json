@@ -26,17 +26,17 @@
       ]
     },
     {
-      "id": "workspaceRail",
-      "name": "Workspace Rail",
-      "description": "Far-left rail for switching relays with cross-relay unread indicators",
+      "id": "forum",
+      "name": "Forum Channels",
+      "description": "Forum-style threaded channels for long-form discussions",
       "platforms": [
         "desktop"
       ]
     },
     {
-      "id": "forum",
-      "name": "Forum Channels",
-      "description": "Forum-style threaded channels for long-form discussions",
+      "id": "agentManagedProfiles",
+      "name": "Agent-managed profiles",
+      "description": "Let agents manage their own relay name and avatar instead of restoring the desktop copy",
       "platforms": [
         "desktop"
       ]

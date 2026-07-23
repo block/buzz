@@ -9,9 +9,10 @@ use buzz_core::{
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
-        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
+        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
+        KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -619,9 +620,18 @@ pub fn build_update_channel(
             ));
         }
     }
+    if name
+        .map(buzz_core::channel::canonical_channel_name)
+        .is_some_and(|name| name.trim().is_empty())
+    {
+        return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?];
     if let Some(n) = name {
-        tags.push(tag(&["name", n])?);
+        tags.push(tag(&[
+            "name",
+            buzz_core::channel::canonical_channel_name(n),
+        ])?);
     }
     if let Some(a) = about {
         tags.push(tag(&["about", a])?);
@@ -669,6 +679,10 @@ pub fn build_create_channel(
     about: Option<&str>,
     ttl: Option<i32>,
 ) -> Result<EventBuilder, SdkError> {
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(SdkError::InvalidTag("channel name is required".into()));
+    }
     let mut tags = vec![tag(&["h", &channel_id.to_string()])?, tag(&["name", name])?];
     if let Some(v) = visibility {
         tags.push(tag(&["visibility", v.as_str()])?);
@@ -928,6 +942,23 @@ pub fn build_repo_announcement(
     }
 
     Ok(EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), "").tags(tags))
+}
+
+/// Build a repository announcement while preserving caller-supplied metadata.
+///
+/// This is intended for read-modify-write updates to kind:30617 announcements.
+/// Every supplied tag is retained except `d`; all existing `d` tags are replaced
+/// with exactly one validated canonical repository identifier.
+pub fn build_repo_announcement_with_tags(
+    repo_id: &str,
+    content: &str,
+    mut tags: Vec<Tag>,
+) -> Result<EventBuilder, SdkError> {
+    check_repo_id(repo_id)?;
+    tags.retain(|tag| tag.as_slice().first().map(String::as_str) != Some("d"));
+    tags.insert(0, tag(&["d", repo_id])?);
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GIT_REPO_ANNOUNCEMENT as u16), content).tags(tags))
 }
 
 /// Repository coordinate — owner pubkey + `d`-tag identifier.
@@ -1647,6 +1678,143 @@ pub fn build_moderation_resolve_report(
     Ok(EventBuilder::new(Kind::Custom(KIND_MODERATION_RESOLVE_REPORT as u16), "").tags(tags))
 }
 
+// ---------------------------------------------------------------------------
+// NIP-IA identity archival (kinds 9035/9036).
+//
+// kind:9035 archive request, kind:9036 unarchive request. Both protected by
+// NIP-70 (`["-"]`), p-tag the target, and may carry an optional machine-
+// readable `reason` code, a `replaced-by` rotation pointer (9035 only), and a
+// NIP-OA `auth` tag for owner-of-agent requests. The relay verifies; this
+// builder's job is to produce a well-formed, signed request — the relay
+// selects the consent path (self / admin / owner). Mirrors the desktop's
+// `identity_archive_tags`/`build_archive_identity_request` (events.rs:624-743)
+// so both clients emit the same wire form.
+// ---------------------------------------------------------------------------
+
+/// Maximum `reason` length in UTF-8 bytes (not chars — see
+/// `desktop/src-tauri/src/events.rs:635-647`, whose `.len()` check is
+/// already byte-based despite its error text saying "chars").
+const MAX_REASON_BYTES: usize = 64;
+
+fn check_reason(reason: &str) -> Result<(), SdkError> {
+    if reason.len() > MAX_REASON_BYTES {
+        return Err(SdkError::InvalidInput(format!(
+            "reason code exceeds maximum length of {MAX_REASON_BYTES} UTF-8 bytes (got {})",
+            reason.len()
+        )));
+    }
+    if reason.chars().any(|c| c.is_control()) {
+        return Err(SdkError::InvalidInput(
+            "reason code must not contain control characters".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Structural check only — the relay performs full NIP-OA verification.
+/// Requires the `auth` label, a 64-hex owner pubkey, and a 128-hex signature.
+fn check_auth_tag_shape(auth: &[String; 4]) -> Result<(), SdkError> {
+    if auth[0] != "auth" {
+        return Err(SdkError::InvalidInput(format!(
+            "auth tag label must be \"auth\" (got \"{}\")",
+            auth[0]
+        )));
+    }
+    check_pubkey_hex(&auth[1], "auth tag owner pubkey")?;
+    if auth[3].len() != 128 || !auth[3].chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(SdkError::InvalidInput(
+            "auth tag signature must be 128-character hex".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn identity_archive_tags(
+    target_pubkey: &str,
+    reason: Option<&str>,
+    replaced_by: Option<&str>,
+    auth: Option<&[String; 4]>,
+) -> Result<Vec<Tag>, SdkError> {
+    let target_lower = check_pubkey_hex(target_pubkey, "target_pubkey")?;
+
+    // NIP-70: mark as protected administrative state.
+    let mut tags = vec![tag(&["-"])?, tag(&["p", &target_lower])?];
+
+    if let Some(r) = reason {
+        check_reason(r)?;
+        tags.push(tag(&["reason", r])?);
+    }
+
+    if let Some(rb) = replaced_by {
+        let rb_lower = check_pubkey_hex(rb, "replaced_by")?;
+        if rb_lower == target_lower {
+            return Err(SdkError::InvalidInput(
+                "replaced-by must differ from the target".into(),
+            ));
+        }
+        tags.push(tag(&["replaced-by", &rb_lower])?);
+    }
+
+    if let Some(auth_tag) = auth {
+        check_auth_tag_shape(auth_tag)?;
+        tags.push(tag(&["auth", &auth_tag[1], &auth_tag[2], &auth_tag[3]])?);
+    }
+
+    Ok(tags)
+}
+
+/// Build a NIP-IA archive request (kind 9035).
+///
+/// `content` is an optional human-readable reason (clients MUST NOT parse
+/// authorization semantics from it; capped at 64 KiB like other content
+/// fields). `reason` is a machine-readable code (`rotated`, `retired`,
+/// `bot-rebuilt`, `left-organization`, `spam`, ... — unknown codes are
+/// allowed per spec), capped at 64 UTF-8 bytes. `replaced_by` is the
+/// rotation pointer and must differ from `target_pubkey`. `auth` is a
+/// NIP-OA owner-attestation tag required only for the owner-of-agent
+/// consent path; full verification happens relay-side.
+///
+/// `.allow_self_tagging()` is required: NIP-IA's self path has
+/// `actor == target`, so the request's `["p", target]` matches the signer.
+/// nostr 0.44 strips matching `p` tags by default — this keeps the wire
+/// form intact.
+pub fn build_archive_identity_request(
+    target_pubkey: &str,
+    content: &str,
+    reason: Option<&str>,
+    replaced_by: Option<&str>,
+    auth: Option<&[String; 4]>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let tags = identity_archive_tags(target_pubkey, reason, replaced_by, auth)?;
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
+/// Build a NIP-IA unarchive request (kind 9036).
+///
+/// Same shape as [`build_archive_identity_request`] minus `replaced-by`
+/// (which has no defined meaning on unarchive per spec). `auth` is used for
+/// owner-of-agent unarchive paths. See that function for the rationale on
+/// `.allow_self_tagging()`.
+pub fn build_unarchive_identity_request(
+    target_pubkey: &str,
+    content: &str,
+    reason: Option<&str>,
+    auth: Option<&[String; 4]>,
+) -> Result<EventBuilder, SdkError> {
+    check_content(content, 64 * 1024)?;
+    let tags = identity_archive_tags(target_pubkey, reason, None, auth)?;
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_IA_UNARCHIVE_REQUEST as u16), content)
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2227,6 +2395,21 @@ mod tests {
     }
 
     #[test]
+    fn update_channel_strips_all_leading_hashes_from_name() {
+        let ev =
+            sign(build_update_channel(uuid(), Some("  ###new-name  "), None, None, None).unwrap());
+        assert!(has_tag(&ev, "name", "new-name"));
+    }
+
+    #[test]
+    fn update_channel_rejects_hash_only_name() {
+        assert!(matches!(
+            build_update_channel(uuid(), Some("  ###  "), None, None, None),
+            Err(SdkError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
     fn update_channel_visibility_and_ttl() {
         let cid = uuid();
         let ev =
@@ -2314,6 +2497,37 @@ mod tests {
         );
         assert_eq!(ev.kind.as_u16(), 9007);
         assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_strips_all_leading_hashes_from_name() {
+        let ev = sign(
+            build_create_channel(
+                uuid(),
+                "  ###dev  ",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        assert!(has_tag(&ev, "name", "dev"));
+    }
+
+    #[test]
+    fn create_channel_rejects_hash_only_name() {
+        assert!(matches!(
+            build_create_channel(
+                uuid(),
+                "  ###  ",
+                None::<Visibility>,
+                None::<ChannelKind>,
+                None,
+                None,
+            ),
+            Err(SdkError::InvalidTag(_))
+        ));
     }
 
     #[test]
@@ -2611,6 +2825,34 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(|v| v.as_str()) == Some("clone")));
+    }
+
+    #[test]
+    fn repo_announcement_with_tags_preserves_metadata_and_canonicalizes_d() {
+        let tags = vec![
+            Tag::parse(["d", "wrong-repo"]).unwrap(),
+            Tag::parse(["name", "Protected Repo"]).unwrap(),
+            Tag::parse(["buzz-channel", "channel-id"]).unwrap(),
+            Tag::parse(["future-metadata", "preserve-me"]).unwrap(),
+        ];
+
+        let ev = sign(
+            build_repo_announcement_with_tags("protected-repo", "repository content", tags)
+                .unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), 30617);
+        assert_eq!(ev.content, "repository content");
+        assert_eq!(
+            ev.tags
+                .iter()
+                .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("d"))
+                .count(),
+            1
+        );
+        assert!(has_tag(&ev, "d", "protected-repo"));
+        assert!(has_tag(&ev, "buzz-channel", "channel-id"));
+        assert!(has_tag(&ev, "future-metadata", "preserve-me"));
     }
 
     #[test]
@@ -3412,5 +3654,134 @@ mod tests {
         let err =
             build_moderation_resolve_report(&"a".repeat(65), "resolved", "ban", None).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    // ── NIP-IA identity archival (kinds 9035/9036) ────────────────────────
+    //
+    // Mirrors `desktop/src-tauri/src/events.rs`'s own tests so both clients
+    // are pinned to the same wire form. See NIP-IA.md §Vector 1.
+
+    const IA_OWNER_HEX: &str = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    const IA_TARGET_HEX: &str = "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5";
+    const IA_CONDITIONS: &str = "kind=1&created_at<1713957000";
+    const IA_SIG: &str = "8b7df2575caf0a108374f8471722b233c53f9ff827a8b0f91861966c3b9dd5cb2e189eae9f49d72187674c2f5bd244145e10ff86c9f257ffe65a1ee5f108b369";
+
+    #[test]
+    fn archive_identity_request_matches_spec_vector_1_layout() {
+        let auth: [String; 4] = [
+            "auth".into(),
+            IA_OWNER_HEX.into(),
+            IA_CONDITIONS.into(),
+            IA_SIG.into(),
+        ];
+        let ev = sign(
+            build_archive_identity_request(
+                IA_TARGET_HEX,
+                "Archiving zombie agent after rebuild.",
+                Some("bot-rebuilt"),
+                None,
+                Some(&auth),
+            )
+            .unwrap(),
+        );
+
+        let tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(ev.kind, Kind::Custom(KIND_IA_ARCHIVE_REQUEST as u16));
+        // Spec layout: ["-"], ["p", target], ["reason", code], ["auth", ...]
+        assert_eq!(tags[0], vec!["-"]);
+        assert_eq!(tags[1], vec!["p", IA_TARGET_HEX]);
+        assert_eq!(tags[2], vec!["reason", "bot-rebuilt"]);
+        assert_eq!(tags[3], vec!["auth", IA_OWNER_HEX, IA_CONDITIONS, IA_SIG]);
+        assert_eq!(tags.len(), 4);
+    }
+
+    #[test]
+    fn archive_request_rejects_replaced_by_equal_target() {
+        let err =
+            build_archive_identity_request(IA_TARGET_HEX, "", None, Some(IA_TARGET_HEX), None)
+                .unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn unarchive_request_layout_self_path() {
+        // Self-unarchive: actor == target, so the `p` tag points at the
+        // signer. Pins that `.allow_self_tagging()` survives nostr 0.44's
+        // default same-pubkey `p`-tag scrub, and that no `auth` tag rides
+        // along on the self path.
+        let builder = build_unarchive_identity_request(
+            IA_TARGET_HEX,
+            "I am active again.",
+            Some("returned"),
+            None,
+        )
+        .unwrap();
+        let target_secret = nostr::SecretKey::from_hex(
+            "0000000000000000000000000000000000000000000000000000000000000002",
+        )
+        .unwrap();
+        let ev = builder
+            .sign_with_keys(&Keys::new(target_secret))
+            .expect("sign");
+        let tags: Vec<Vec<String>> = ev.tags.iter().map(|t| t.as_slice().to_vec()).collect();
+        assert_eq!(ev.kind, Kind::Custom(KIND_IA_UNARCHIVE_REQUEST as u16));
+        assert_eq!(tags[0], vec!["-"]);
+        assert_eq!(tags[1], vec!["p", IA_TARGET_HEX]);
+        assert_eq!(tags[2], vec!["reason", "returned"]);
+        assert_eq!(tags.len(), 3, "self unarchive must not carry an auth tag");
+        assert_eq!(ev.pubkey.to_hex(), IA_TARGET_HEX);
+    }
+
+    #[test]
+    fn identity_archive_reason_accepts_64_bytes() {
+        // check_reason compares `.len()` (bytes), not chars — use a
+        // multi-byte char so a chars-based off-by-one would slip through.
+        let reason: String = "é".repeat(32); // 32 * 2 bytes = 64 bytes exactly
+        assert_eq!(reason.len(), 64);
+        build_archive_identity_request(IA_TARGET_HEX, "", Some(&reason), None, None)
+            .expect("64-byte reason must be accepted");
+    }
+
+    #[test]
+    fn identity_archive_reason_rejects_65_bytes() {
+        let reason: String = "a".repeat(65);
+        let err = build_archive_identity_request(IA_TARGET_HEX, "", Some(&reason), None, None)
+            .unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn identity_archive_reason_rejects_control_chars() {
+        let err = build_unarchive_identity_request(IA_TARGET_HEX, "", Some("bad\nreason"), None)
+            .unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn identity_archive_rejects_malformed_auth_tag() {
+        let bad_auth: [String; 4] = [
+            "auth".into(),
+            IA_OWNER_HEX.into(),
+            IA_CONDITIONS.into(),
+            "not-hex".into(),
+        ];
+        let err = build_archive_identity_request(IA_TARGET_HEX, "", None, None, Some(&bad_auth))
+            .unwrap_err();
+        assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn unarchive_request_has_no_replaced_by_param() {
+        // 9036 has no `replaced_by` parameter at all (unlike 9035) — this is
+        // a compile-time guarantee, but pin the tag count so a future
+        // signature change that reintroduces it doesn't silently widen the
+        // wire form without a test failing.
+        let ev = sign(
+            build_unarchive_identity_request(IA_TARGET_HEX, "", Some("returned"), None).unwrap(),
+        );
+        assert!(!ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(String::as_str) == Some("replaced-by")));
     }
 }

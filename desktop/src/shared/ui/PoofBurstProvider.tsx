@@ -2,6 +2,7 @@ import React, { type CSSProperties, useEffect, useRef, useState } from "react";
 
 export const POOF_TRIGGER_CLASS = "buzz-poof-trigger";
 export const POOF_ORIGIN_CLASS = "buzz-poof-origin";
+export const POOF_POINTER_ORIGIN_CLASS = "buzz-poof-pointer-origin";
 
 export const POOF_DURATION_MS = 430;
 
@@ -16,6 +17,9 @@ const POOF_FRAMES = [
 ] as const;
 
 let poofAudio: HTMLAudioElement | null = null;
+let poofAudioContext: AudioContext | null = null;
+let poofAudioBuffer: AudioBuffer | null = null;
+let poofAudioBufferPromise: Promise<AudioBuffer | null> | null = null;
 let lastPointerDownTrigger: Element | null = null;
 
 type PoofBurst = {
@@ -31,19 +35,66 @@ type PoofStyle = CSSProperties & {
   "--buzz-poof-y": string;
 };
 
-function getPoofOrigin(target: Element) {
+type PoofPointer = {
+  x: number;
+  y: number;
+};
+
+function getPoofOrigin(target: Element, pointer?: PoofPointer) {
   const origin = target.closest(`.${POOF_ORIGIN_CLASS}`) ?? target;
   const rect = origin.getBoundingClientRect();
   const baseSize = Math.min(Math.max(rect.width * 0.54, 104), 190);
+  const usesPointerOrigin = Boolean(
+    pointer && target.closest(`.${POOF_POINTER_ORIGIN_CLASS}`),
+  );
 
   return {
     size: baseSize * POOF_SIZE_SCALE,
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2,
+    x: usesPointerOrigin && pointer ? pointer.x : rect.left + rect.width / 2,
+    y: usesPointerOrigin && pointer ? pointer.y : rect.top + rect.height / 2,
   };
 }
 
-function playPoofSound() {
+function getPoofAudioContext() {
+  try {
+    poofAudioContext ??= new AudioContext({ latencyHint: "interactive" });
+    return poofAudioContext;
+  } catch {
+    return null;
+  }
+}
+
+function loadPoofAudioBuffer() {
+  if (poofAudioBuffer) {
+    return Promise.resolve(poofAudioBuffer);
+  }
+  if (poofAudioBufferPromise) {
+    return poofAudioBufferPromise;
+  }
+
+  const audioContext = getPoofAudioContext();
+  if (!audioContext) {
+    return Promise.resolve(null);
+  }
+
+  poofAudioBufferPromise = fetch(POOF_SOUND_URL)
+    .then((response) => {
+      if (!response.ok) {
+        throw new Error(`Failed to load poof sound: ${response.status}`);
+      }
+      return response.arrayBuffer();
+    })
+    .then((arrayBuffer) => audioContext.decodeAudioData(arrayBuffer))
+    .then((audioBuffer) => {
+      poofAudioBuffer = audioBuffer;
+      return audioBuffer;
+    })
+    .catch(() => null);
+
+  return poofAudioBufferPromise;
+}
+
+function playFallbackPoofSound() {
   try {
     poofAudio ??= new Audio(POOF_SOUND_URL);
     poofAudio.volume = 0.34;
@@ -53,6 +104,34 @@ function playPoofSound() {
     });
   } catch {
     // Best-effort only: audio may be unavailable or blocked.
+  }
+}
+
+function playPoofSound() {
+  const audioContext = getPoofAudioContext();
+  if (!audioContext || !poofAudioBuffer) {
+    playFallbackPoofSound();
+    void loadPoofAudioBuffer();
+    return;
+  }
+
+  try {
+    const source = audioContext.createBufferSource();
+    const gain = audioContext.createGain();
+    source.buffer = poofAudioBuffer;
+    gain.gain.value = 0.34;
+    source.connect(gain);
+    gain.connect(audioContext.destination);
+    if (audioContext.state === "suspended") {
+      void audioContext.resume().then(
+        () => source.start(),
+        () => playFallbackPoofSound(),
+      );
+    } else {
+      source.start();
+    }
+  } catch {
+    playFallbackPoofSound();
   }
 }
 
@@ -67,6 +146,7 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
       image.src = frame.src;
     }
 
+    void loadPoofAudioBuffer();
     try {
       poofAudio ??= new Audio(POOF_SOUND_URL);
       poofAudio.preload = "auto";
@@ -77,14 +157,12 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    function emitPoof(target: Element) {
+    function emitPoof(target: Element, pointer?: PoofPointer) {
       const id = idRef.current;
       idRef.current += 1;
+      const origin = getPoofOrigin(target, pointer);
 
-      setBursts((current) => [
-        ...current.slice(-5),
-        { ...getPoofOrigin(target), id },
-      ]);
+      setBursts((current) => [...current.slice(-5), { ...origin, id }]);
       playPoofSound();
 
       const timeoutId = window.setTimeout(() => {
@@ -116,7 +194,7 @@ export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
           lastPointerDownTrigger = null;
         }
       }, POOF_DURATION_MS);
-      emitPoof(target);
+      emitPoof(target, { x: event.clientX, y: event.clientY });
     }
 
     function handleDocumentClick(event: MouseEvent) {

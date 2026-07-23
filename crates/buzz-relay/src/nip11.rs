@@ -40,12 +40,18 @@ pub struct RelayInfo {
     /// Draft/extension protocol identifiers supported by this relay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_extensions: Option<Vec<String>>,
+    /// NIP-PL executor descriptor. Present only when push delivery is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub push: Option<serde_json::Value>,
     /// URL of the relay software repository.
     pub software: String,
     /// Relay software version string.
     pub version: String,
     /// Protocol and resource limits advertised to clients.
     pub limitation: Option<RelayLimitation>,
+    /// Public WebSocket URL of the dedicated NIP-AB device-pairing relay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pairing_relay_url: Option<String>,
     /// Relay's own signing pubkey (NIP-11 `self` field, NIP-43).
     #[serde(rename = "self", skip_serializing_if = "Option::is_none")]
     pub relay_self: Option<String>,
@@ -132,6 +138,7 @@ impl RelayInfo {
         icon: Option<&str>,
         advertise_nip43: bool,
         max_message_length: usize,
+        pairing_relay_url: Option<&str>,
     ) -> Self {
         debug_assert!(
             !advertise_nip43 || relay_self.is_some(),
@@ -151,9 +158,11 @@ impl RelayInfo {
             contact: None,
             supported_nips,
             supported_extensions: Some(vec!["nip-er".to_string()]),
+            push: None,
             software: "https://github.com/block/buzz".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             limitation: Some(relay_limitation(max_message_length)),
+            pairing_relay_url: pairing_relay_url.map(str::to_string),
             relay_self: relay_self.map(|s| s.to_string()),
         }
     }
@@ -171,6 +180,52 @@ pub async fn relay_info_handler(
     axum::response::Json(nip11_document(&state, raw_host).await)
 }
 
+fn push_descriptor(
+    push_configured: bool,
+    relay_url: &str,
+    executor_key_id: &str,
+    relay_keypair: &nostr::Keys,
+    tenant_host: Option<&str>,
+) -> Option<serde_json::Value> {
+    let host = tenant_host?;
+    push_configured.then_some(())?;
+    let scheme = if relay_url.starts_with("wss://") {
+        "wss"
+    } else {
+        "ws"
+    };
+    Some(serde_json::json!({
+        "origin": format!("{scheme}://{host}"),
+        "keys": [{
+            "id": executor_key_id,
+            "pubkey": relay_keypair.public_key().to_hex(),
+            "current": true
+        }],
+        "app_profiles": [
+            {"id": "buzz-ios-production", "transport": "apns"},
+            {"id": "buzz-ios-sandbox", "transport": "apns"}
+        ],
+        "push_kinds": crate::handlers::push_lease::PUSH_KINDS,
+        "urgent_kinds": crate::handlers::push_lease::URGENT_KINDS,
+        "h_grammar": "uuid-v4-lowercase",
+        "class_support": {"apns": ["silent", "default", "time_sensitive"]},
+        "limitation": {
+            "max_lease_ttl": 2592000,
+            "max_leases_per_pubkey": 16,
+            "max_subscriptions_per_lease": 16,
+            "max_kinds": 16,
+            "max_authors": 20,
+            "max_h": 50,
+            "max_tag_values": 20,
+            "max_ignore": 8,
+            "max_content_len": 65536,
+            "max_plaintext_len": 32768,
+            "max_endpoint_len": 4096,
+            "max_string_len": 512
+        }
+    }))
+}
+
 /// Builds the served NIP-11 document for a request arriving on `raw_host`.
 ///
 /// Centralised so the content-negotiated root handler and the dedicated
@@ -180,12 +235,34 @@ pub async fn relay_info_handler(
 pub(crate) async fn nip11_document(state: &crate::state::AppState, raw_host: &str) -> RelayInfo {
     let (relay_self, advertise_nip43) = nip11_facts(state);
     let icon = workspace_icon_for_host(state, raw_host).await;
-    RelayInfo::build(
+    let mut info = RelayInfo::build(
         relay_self.as_deref(),
         icon.as_deref(),
         advertise_nip43,
         state.config.max_frame_bytes,
-    )
+        state.config.pairing_relay_url.as_deref(),
+    );
+    let tenant_host = if state.config.push_gateway_delivery_url.is_some() {
+        crate::tenant::bind_community(&state.db, raw_host)
+            .await
+            .ok()
+            .map(|tenant| tenant.host().to_owned())
+    } else {
+        None
+    };
+    if let Some(push) = push_descriptor(
+        state.config.push_gateway_delivery_url.is_some(),
+        &state.config.relay_url,
+        &state.config.push_executor_key_id,
+        &state.relay_keypair,
+        tenant_host.as_deref(),
+    ) {
+        info.supported_extensions
+            .get_or_insert_default()
+            .push("nip-pl".to_string());
+        info.push = Some(push);
+    }
+    info
 }
 
 /// Fetches the workspace icon for the community bound to `raw_host`, as the
@@ -248,16 +325,34 @@ pub(crate) fn nip11_facts(state: &crate::state::AppState) -> (Option<String>, bo
 /// hard build break, the same way a deny-lint would. If you must change this
 /// signature, you are changing the conformance contract: update the conformance
 /// doc and prove the new input is host-scoped, not unscoped, first.
+#[allow(clippy::type_complexity)]
 const _RELAY_INFO_BUILD_STATIC_INPUT_FENCE: fn(
     Option<&str>,
     Option<&str>,
     bool,
     usize,
+    Option<&str>,
 ) -> RelayInfo = RelayInfo::build;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn push_descriptor_is_gated_by_gateway_configuration_and_tenant_binding() {
+        let keys = nostr::Keys::generate();
+        assert!(
+            push_descriptor(false, "ws://relay", "key", &keys, Some("tenant.example")).is_none()
+        );
+        assert!(push_descriptor(true, "ws://relay", "key", &keys, None).is_none());
+        let descriptor = push_descriptor(true, "ws://relay", "key", &keys, Some("tenant.example"))
+            .expect("configured push descriptor");
+        assert_eq!(descriptor["origin"], "ws://tenant.example");
+        assert_eq!(
+            descriptor["push_kinds"],
+            serde_json::json!(crate::handlers::push_lease::PUSH_KINDS)
+        );
+    }
 
     #[test]
     fn supported_nips_includes_nip23_and_nip33() {
@@ -291,8 +386,29 @@ mod tests {
 
     #[test]
     fn build_advertises_buzz_repository_url() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES);
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.software, "https://github.com/block/buzz");
+    }
+
+    #[test]
+    fn configured_pairing_relay_is_advertised_and_unset_value_is_omitted() {
+        let info = RelayInfo::build(
+            None,
+            None,
+            false,
+            DEFAULT_MAX_FRAME_BYTES,
+            Some("wss://pairing.buzz.xyz"),
+        );
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert_eq!(
+            json.get("pairing_relay_url")
+                .and_then(|value| value.as_str()),
+            Some("wss://pairing.buzz.xyz")
+        );
+
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
+        let json = serde_json::to_value(&info).expect("serialize");
+        assert!(json.get("pairing_relay_url").is_none());
     }
 
     /// NIP-WP → NIP-11 mirror: a set workspace icon is served in the standard
@@ -305,6 +421,7 @@ mod tests {
             Some("data:image/webp;base64,UklGRg=="),
             false,
             DEFAULT_MAX_FRAME_BYTES,
+            None,
         );
         assert_eq!(
             info.icon.as_deref(),
@@ -317,7 +434,7 @@ mod tests {
         );
 
         for icon in [None, Some("")] {
-            let info = RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES);
+            let info = RelayInfo::build(None, icon, false, DEFAULT_MAX_FRAME_BYTES, None);
             assert!(info.icon.is_none());
             let json = serde_json::to_value(&info).expect("serialize");
             assert!(
@@ -337,7 +454,7 @@ mod tests {
 
     #[test]
     fn max_message_length_uses_configured_frame_limit() {
-        let info = RelayInfo::build(None, None, false, 262_144);
+        let info = RelayInfo::build(None, None, false, 262_144, None);
         let limitation = info.limitation.expect("limitation");
         assert_eq!(limitation.max_message_length, Some(262_144));
     }
@@ -368,7 +485,7 @@ mod tests {
     /// Open relay, ephemeral key — both `self` and NIP-43 are absent.
     #[test]
     fn build_open_relay_ephemeral_key_omits_self_and_nip43() {
-        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES);
+        let info = RelayInfo::build(None, None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert!(info.relay_self.is_none());
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -381,7 +498,7 @@ mod tests {
     #[test]
     fn build_open_relay_stable_key_advertises_self_but_not_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES);
+        let info = RelayInfo::build(Some(pk), None, false, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(!info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -390,7 +507,7 @@ mod tests {
     #[test]
     fn build_membership_relay_advertises_self_and_nip43() {
         let pk = "0000000000000000000000000000000000000000000000000000000000000001";
-        let info = RelayInfo::build(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES);
+        let info = RelayInfo::build(Some(pk), None, true, DEFAULT_MAX_FRAME_BYTES, None);
         assert_eq!(info.relay_self.as_deref(), Some(pk));
         assert!(info.supported_nips.contains(&NIP_RELAY_MEMBERSHIP));
     }
@@ -401,6 +518,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "advertise_nip43=true requires relay_self=Some")]
     fn build_nip43_without_self_panics_in_debug() {
-        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES);
+        let _ = RelayInfo::build(None, None, true, DEFAULT_MAX_FRAME_BYTES, None);
     }
 }

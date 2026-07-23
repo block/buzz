@@ -42,8 +42,8 @@ const MARKDOWN_NODE_CACHE_LIMIT = 1000;
 const MARKDOWN_NODE_CACHE_MAX_CONTENT_LENGTH = 32_000;
 const markdownNodeCache = new Map<string, React.ReactElement>();
 
-/** Workspace switches swap relays; drop parses keyed against the old
- * workspace's mention/channel-name space (see `resetWorkspaceState`). */
+/** Community switches swap relays; drop parses keyed against the old
+ * community's mention/channel-name space (see `resetCommunityState`). */
 export function clearMarkdownNodeCache() {
   markdownNodeCache.clear();
 }

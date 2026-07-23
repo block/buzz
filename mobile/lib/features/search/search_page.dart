@@ -4,6 +4,7 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../../shared/widgets/filter_chip_bar.dart';
 import '../../shared/widgets/frosted_app_bar.dart';
 import '../../shared/widgets/frosted_scaffold.dart';
@@ -237,13 +238,10 @@ class _PeopleSection extends ConsumerWidget {
         _SectionLabel(label: 'People'),
         for (final user in users)
           ListTile(
-            leading: CircleAvatar(
-              backgroundImage: user.avatarUrl != null
-                  ? NetworkImage(user.avatarUrl!)
-                  : null,
-              child: user.avatarUrl == null
-                  ? Text(user.label.substring(0, 1).toUpperCase())
-                  : null,
+            leading: AvatarImage(
+              imageUrl: user.avatarUrl,
+              radius: 20,
+              fallback: Text(user.label.substring(0, 1).toUpperCase()),
             ),
             title: Text(user.label),
             subtitle: Text(

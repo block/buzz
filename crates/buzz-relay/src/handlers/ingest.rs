@@ -22,13 +22,13 @@ use buzz_core::kind::{
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
     KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MESH_LLM_RELAY_STATUS, KIND_MODERATION_BAN,
-    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
-    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
-    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
-    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
-    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
+    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
+    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
+    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
+    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
     KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
@@ -91,6 +91,11 @@ impl IngestAuth {
         }
     }
 
+    /// Pubkey used for principal-scoped accounting and policy lookups.
+    pub fn principal_pubkey_bytes(&self) -> Vec<u8> {
+        self.pubkey().to_bytes().to_vec()
+    }
+
     /// Permission scopes for this auth context.
     pub fn scopes(&self) -> &[Scope] {
         match self {
@@ -125,6 +130,38 @@ impl IngestAuth {
     }
 }
 
+fn emit_product_feedback_success(
+    tracer: &Arc<dyn buzz_conformance::Tracer>,
+    tenant: &TenantContext,
+    event: &Event,
+    auth: &IngestAuth,
+) {
+    emit(
+        tracer,
+        TraceAction::WriteInsertGlobal {
+            msg_id: msg_id_label(event.id.as_bytes()),
+            claimed_community: claimed_community_from_event(event),
+        },
+        state_for_request(tenant, auth.pubkey()),
+    );
+}
+
+/// Increment the rejection counter with a bounded reason and transport label.
+///
+/// Shared by the WS `EVENT` handler and the HTTP `POST /events` handler so
+/// both transports feed the same series — `transport` distinguishes them so
+/// existing WS-only dashboards aren't silently diluted by HTTP volume.
+/// `reason` is one of a small closed set ("auth", "invalid", "scope",
+/// "error") — bounded, no cardinality risk.
+pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
+    metrics::counter!(
+        "buzz_events_rejected_total",
+        "transport" => transport,
+        "reason" => reason
+    )
+    .increment(1);
+}
+
 /// Successful ingestion result.
 pub struct IngestResult {
     /// Hex-encoded event ID.
@@ -146,6 +183,15 @@ pub enum IngestError {
     Internal(String),
 }
 
+fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
+    match error {
+        super::push_lease::AcceptError::Validation(reason) => {
+            IngestError::Rejected(format!("invalid: {reason}"))
+        }
+        super::push_lease::AcceptError::Internal(reason) => IngestError::Internal(reason),
+    }
+}
+
 /// Determine the required scope for a given event kind.
 ///
 /// Returns `Err` for unknown kinds — the relay rejects them.
@@ -154,7 +200,8 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT => {
+        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
+        | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
@@ -162,7 +209,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
-        KIND_REPORT => Ok(Scope::MessagesWrite),
+        KIND_REPORT | KIND_PRODUCT_FEEDBACK => Ok(Scope::MessagesWrite),
         // Community moderation commands are direct, mod-authz-gated writes.
         // Scope only proves the transport can submit message writes; the
         // command handler owns role/capability authorization.
@@ -396,12 +443,11 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // events. A stray `h` tag must not channel-scope them.
             | KIND_IA_ARCHIVE_REQUEST
             | KIND_IA_UNARCHIVE_REQUEST
-            // Mesh-LLM relay status is relay-signed and global. Clients may
-            // subscribe to it, but must not channel-scope or submit it.
-            | KIND_MESH_LLM_RELAY_STATUS
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            // NIP-PL leases are author-owned, addressable global state.
+            | super::push_lease::KIND_PUSH_LEASE
     )
 }
 
@@ -678,10 +724,12 @@ fn count_e_tags(event: &Event) -> usize {
         .count()
 }
 
-/// Extract the effective author of a stored event (handles relay-signed REST events).
+/// Extract the effective author of a stored event (handles workflow-generated and
+/// legacy relay-signed attributed events).
 pub(crate) fn effective_message_author(event: &Event, relay_pubkey: &nostr::PublicKey) -> Vec<u8> {
     if event.pubkey == *relay_pubkey {
-        // Relay-signed REST event — real author in "actor" or "p" tag.
+        // Workflow-generated or legacy relay-signed attributed event — real author
+        // in "actor" or "p" tag.
         if let Some(hex) = event.tags.iter().find_map(|t| {
             if t.kind().to_string() == "actor" {
                 t.content().map(|s| s.to_string())
@@ -1272,6 +1320,36 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Resolve the `author_type` metric label (`"agent"` / `"human"`) for an
+/// event author, from `users.agent_owner_pubkey IS NOT NULL` via a
+/// per-community cache. Metric-labeling only — never used for authorization.
+/// Unknown pubkeys and lookup errors count as "human" (the label must not
+/// add a failure path to ingest).
+async fn author_type_label(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    author_pubkey_bytes: Vec<u8>,
+) -> &'static str {
+    let key = (tenant.community(), author_pubkey_bytes);
+    let cached = state.author_type_cache.get(&key);
+    let is_agent = match cached {
+        Some(v) => v,
+        None => {
+            let v = match state.db.get_agent_channel_policy(key.0, &key.1).await {
+                Ok(Some((_, owner))) => owner.is_some(),
+                Ok(None) | Err(_) => false,
+            };
+            state.author_type_cache.insert(key, v);
+            v
+        }
+    };
+    if is_agent {
+        "agent"
+    } else {
+        "human"
+    }
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -1292,6 +1370,14 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    // Captured before `event` moves into the inner fn: the stored-events
+    // counter below is emitted at this shared seam so WebSocket and HTTP
+    // transports are counted identically.
+    let kind_label = super::event::bounded_kind_label(event_kind_u32(&event));
+    // Classify the authenticated principal, not the event envelope signer:
+    // NIP-59 gift wraps deliberately use an unrelated ephemeral pubkey.
+    let author_pubkey_bytes = auth.principal_pubkey_bytes();
+
     let abstract_state = state_for_request(tenant, auth.pubkey());
     let (_guard, tracer) = EmitGuard::arm(
         state.tracer.clone(),
@@ -1300,6 +1386,22 @@ pub async fn ingest_event(
     );
 
     let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+
+    // Fleet-wide stored counter: kind + author_type only, no community tag
+    // (see the cardinality rationale on buzz_events_received_total —
+    // author_type is a 2-value label so it merely doubles the kind series).
+    // Emitted here rather than per-transport so HTTP bridge ingests count too.
+    if let Ok(r) = &result {
+        if r.accepted {
+            let author_type = author_type_label(state, tenant, author_pubkey_bytes).await;
+            metrics::counter!(
+                "buzz_events_stored_total",
+                "kind" => kind_label,
+                "author_type" => author_type
+            )
+            .increment(1);
+        }
+    }
 
     // Map terminal error variants onto the closed SanitizedReason
     // alphabet (spec line 778). The inner fn's success path emits
@@ -1433,6 +1535,23 @@ async fn ingest_event_inner(
         return super::command_executor::handle_command(tenant, state, event, auth).await;
     }
 
+    // Product feedback is sidecarred directly into its private deployment table.
+    // It never enters ordinary event storage or subscription fan-out.
+    if kind_u32 == KIND_PRODUCT_FEEDBACK {
+        super::product_feedback::handle(tenant, &event, state)
+            .await
+            .map_err(IngestError::Rejected)?;
+        // Feedback is a host-resolved, channel-less write. Although its row is
+        // private to operator tooling rather than ordinary event reads, this is
+        // the matching modeled success action at the ingest isolation seam.
+        emit_product_feedback_success(tracer, tenant, &event, &auth);
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
+    }
+
     // NIP-56 reports are persisted only to the mod queue. They are not stored in
     // the public events table and never fan out to subscribers. Reports remain
     // available while timed out so users can signal abuse during a write-block.
@@ -1454,9 +1573,9 @@ async fn ingest_event_inner(
     // mutations. They are never stored or fanned out as ordinary events; the
     // handler writes the durable audit/enforcement rows after its own capability
     // authorization. These commands are intentionally routed before the
-    // timeout/write-block gate below: restriction-lifting commands must remain
-    // available so a wrongly restricted admin is not stranded, while banned
-    // actors are handled by the auth seam and live-disconnect enforcement.
+    // timeout/write-block gate below so a timed-out admin can lift a timeout.
+    // The handler independently checks the durable ban state before executing
+    // any command, which also covers NIP-98 and missed live disconnects.
     if buzz_core::kind::is_moderation_command_kind(kind_u32) {
         super::moderation_commands::handle_moderation_command(tenant, state, &event)
             .await
@@ -1477,8 +1596,9 @@ async fn ingest_event_inner(
     // subscriber reconnect window), a banned member's open socket would keep
     // writing indefinitely. So the ban is re-checked here — this write-path gate
     // is the durable backstop the fan-out's best-effort delivery relies on.
-    // Moderation/relay-admin commands are exempt: a restriction must never
-    // disarm the tools used to lift or manage it.
+    // Moderation commands enforce bans inside their handler and remain exempt
+    // here only so timeouts do not disarm the tool used to lift them. Relay-admin
+    // commands retain their separate authorization policy.
     //
     // Scope: this gate checks the *authoring* pubkey only, with no NIP-OA
     // owner→agent cascade. That cascade lives at the auth seam for bans, where
@@ -1919,7 +2039,11 @@ async fn ingest_event_inner(
         });
         if create_name
             .as_ref()
-            .map(|n| n.trim().is_empty())
+            .map(|n| {
+                buzz_core::channel::canonical_channel_name(n)
+                    .trim()
+                    .is_empty()
+            })
             .unwrap_or(true)
         {
             return Err(IngestError::Rejected(
@@ -1962,6 +2086,7 @@ async fn ingest_event_inner(
 
         if let Some(client_uuid) = channel_id {
             let name = create_name.unwrap_or_default();
+            let name = buzz_core::channel::canonical_channel_name(&name);
 
             let description = event.tags.iter().find_map(|t| {
                 if t.kind().to_string() == "about" {
@@ -1979,7 +2104,7 @@ async fn ingest_event_inner(
                 .create_channel_with_id(
                     tenant.community(),
                     client_uuid,
-                    &name,
+                    name,
                     channel_type,
                     visibility,
                     description.as_deref(),
@@ -1997,6 +2122,12 @@ async fn ingest_event_inner(
                 });
             }
             pre_created_channel = Some(client_uuid);
+            metrics::counter!(
+                "buzz_channels_created_total",
+                "community" => tenant.host().to_owned(),
+                "type" => channel_type.to_string()
+            )
+            .increment(1);
         }
     }
 
@@ -2020,6 +2151,54 @@ async fn ingest_event_inner(
                 _ => {} // open — OK
             }
         }
+    }
+
+    if kind_u32 == super::push_lease::KIND_PUSH_LEASE {
+        let outcome = super::push_lease::accept(tenant, state, &event, now)
+            .await
+            .map_err(map_push_accept_error)?;
+        match outcome {
+            buzz_db::push::AcceptLeaseOutcome::Accepted => {}
+            buzz_db::push::AcceptLeaseOutcome::StaleEvent => {
+                return Err(IngestError::Rejected("invalid: stale replacement".into()));
+            }
+            buzz_db::push::AcceptLeaseOutcome::StaleGeneration => {
+                return Err(IngestError::Rejected("invalid: stale generation".into()));
+            }
+            buzz_db::push::AcceptLeaseOutcome::EndpointAlreadyLeased => {
+                return Err(IngestError::Rejected(
+                    "invalid: endpoint already leased".into(),
+                ));
+            }
+            buzz_db::push::AcceptLeaseOutcome::LeaseQuotaExceeded => {
+                return Err(IngestError::Rejected(
+                    "invalid: lease quota exceeded".into(),
+                ));
+            }
+            buzz_db::push::AcceptLeaseOutcome::SourceEventCollision => {
+                return Err(IngestError::Rejected(
+                    "invalid: source event collision".into(),
+                ));
+            }
+            buzz_db::push::AcceptLeaseOutcome::ConstraintViolation => {
+                return Err(IngestError::Rejected(
+                    "invalid: lease constraint violation".into(),
+                ));
+            }
+        };
+        emit(
+            tracer,
+            TraceAction::WriteInsertGlobal {
+                msg_id: msg_id_label(event.id.as_bytes()),
+                claimed_community: claimed_community_from_event(&event),
+            },
+            state_for_request(tenant, auth.pubkey()),
+        );
+        return Ok(IngestResult {
+            event_id: event_id_hex,
+            accepted: true,
+            message: String::new(),
+        });
     }
 
     let imeta_tags: Vec<Vec<String>> = event
@@ -2252,16 +2431,6 @@ async fn ingest_event_inner(
         });
     }
 
-    // Any successfully stored channel-scoped event keeps the channel alive.
-    // Skip kind:9007 (create) — the deadline was just set during creation.
-    if let Some(ch_id) = channel_id {
-        if kind_u32 != KIND_NIP29_CREATE_GROUP {
-            if let Err(e) = state.db.bump_ttl_deadline(tenant.community(), ch_id).await {
-                warn!(channel = %ch_id, "TTL deadline bump failed: {e}");
-            }
-        }
-    }
-
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
         if let Err(e) =
             crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
@@ -2336,12 +2505,64 @@ async fn ingest_event_inner(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+    use buzz_conformance::{TraceStep, Tracer};
     use buzz_core::kind::{
         KIND_CANVAS, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_LONG_FORM,
         KIND_MANAGED_AGENT, KIND_PERSONA, KIND_PRESENCE_UPDATE, KIND_STREAM_MESSAGE,
         KIND_STREAM_MESSAGE_DIFF, KIND_TEAM, KIND_USER_STATUS,
     };
+    use nostr::{EventBuilder, Kind};
+
+    #[derive(Debug, Default)]
+    struct VecTracer {
+        steps: Mutex<Vec<TraceStep>>,
+    }
+
+    impl Tracer for VecTracer {
+        fn record(&self, step: TraceStep) {
+            self.steps.lock().expect("trace lock").push(step);
+        }
+    }
+
+    #[test]
+    fn feedback_success_action_satisfies_ingest_emit_guard() {
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        let tenant = TenantContext::resolved(community, "feedback.test");
+        let keys = nostr::Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(KIND_PRODUCT_FEEDBACK as u16),
+            "Useful feedback",
+        )
+        .sign_with_keys(&keys)
+        .expect("sign feedback");
+        let auth = IngestAuth::Http {
+            pubkey: keys.public_key(),
+            scopes: vec![Scope::MessagesWrite],
+            auth_method: HttpAuthMethod::Nip98,
+        };
+        let tracer = Arc::new(VecTracer::default());
+        let abstract_state = state_for_request(&tenant, auth.pubkey());
+
+        {
+            let (guard, counting) = EmitGuard::arm(
+                tracer.clone(),
+                abstract_state.clone(),
+                "ingest_event_exited_without_trace",
+            );
+            emit_product_feedback_success(&counting, &tenant, &event, &auth);
+            drop(guard);
+        }
+
+        let steps = tracer.steps.lock().expect("trace lock");
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            steps[0].action,
+            TraceAction::WriteInsertGlobal { .. }
+        ));
+    }
 
     #[test]
     fn nip_ia_requests_are_global_only() {
@@ -2459,10 +2680,11 @@ mod tests {
     }
 
     #[test]
-    fn reports_and_moderation_commands_require_messages_write_scope() {
+    fn private_sidecars_and_moderation_commands_require_messages_write_scope() {
         let dummy = make_dummy_event();
         for kind in [
             KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
             KIND_MODERATION_BAN,
             KIND_MODERATION_UNBAN,
             KIND_MODERATION_TIMEOUT,
@@ -2507,6 +2729,27 @@ mod tests {
     }
 
     #[test]
+    fn push_infrastructure_failures_are_internal_not_protocol_invalid() {
+        match map_push_accept_error(crate::handlers::push_lease::AcceptError::Internal(
+            "gateway unavailable".to_string(),
+        )) {
+            IngestError::Internal(message) => {
+                assert_eq!(message, "gateway unavailable");
+                assert!(!message.starts_with("invalid:"));
+            }
+            _ => panic!("infrastructure failure became a protocol rejection"),
+        }
+        match map_push_accept_error(crate::handlers::push_lease::AcceptError::Validation(
+            "unknown executor key".to_string(),
+        )) {
+            IngestError::Rejected(message) => {
+                assert_eq!(message, "invalid: unknown executor key")
+            }
+            _ => panic!("validation failure did not become a protocol rejection"),
+        }
+    }
+
+    #[test]
     fn global_only_and_channel_scoped_are_disjoint() {
         // A kind cannot be both global-only and channel-scoped
         for kind in 0..=65535u32 {
@@ -2530,6 +2773,7 @@ mod tests {
             KIND_DELETION,
             KIND_REACTION,
             KIND_REPORT,
+            KIND_PRODUCT_FEEDBACK,
             KIND_MODERATION_BAN,
             KIND_MODERATION_UNBAN,
             KIND_MODERATION_TIMEOUT,
@@ -2593,15 +2837,6 @@ mod tests {
                 "kind {kind} should require UsersWrite scope"
             );
         }
-    }
-
-    #[test]
-    fn mesh_llm_relay_status_is_global_only_and_relay_only() {
-        assert!(is_global_only_kind(KIND_MESH_LLM_RELAY_STATUS));
-        assert!(buzz_core::kind::is_relay_only_kind(
-            KIND_MESH_LLM_RELAY_STATUS
-        ));
-        assert!(!requires_h_channel_scope(KIND_MESH_LLM_RELAY_STATUS));
     }
 
     #[test]
@@ -2698,6 +2933,24 @@ mod tests {
         assert!(
             required_scope_for_kind(KIND_GIFT_WRAP, &dummy).is_ok(),
             "KIND_GIFT_WRAP should be in the scope allowlist"
+        );
+    }
+
+    #[test]
+    fn accounting_uses_authenticated_principal_pubkey() {
+        let principal = nostr::Keys::generate();
+        let envelope_signer = nostr::Keys::generate();
+        let auth = IngestAuth::Nip42 {
+            pubkey: principal.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+
+        assert_ne!(principal.public_key(), envelope_signer.public_key());
+        assert_eq!(
+            auth.principal_pubkey_bytes(),
+            principal.public_key().to_bytes().to_vec()
         );
     }
 
@@ -3194,8 +3447,8 @@ mod tests {
 
     #[test]
     fn persona_envelope_accepts_behavioral_fields() {
-        // Widened content (respond_to / mcp_toolsets / parallelism) is opaque
-        // to the relay — unknown-field tolerance is the contract.
+        // Unknown legacy fields in persona content remain relay-opaque;
+        // unknown-field tolerance is the contract.
         let ev = make_event_with_tags(
             KIND_PERSONA,
             r#"{"display_name":"x","respond_to":"owner-only","respond_to_allowlist":[],"mcp_toolsets":"default","parallelism":2}"#,
@@ -3379,5 +3632,55 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    /// The HTTP bridge's `submit_event` 400 arm and the WS `EVENT` handler's
+    /// reject path must land on the same counter, distinguished only by the
+    /// `transport` label — this is what lets a dashboard tell "server got
+    /// hammered with bad HTTP requests" apart from "a WS client is
+    /// misbehaving" without losing the combined total.
+    #[test]
+    fn reject_with_transport_labels_http_and_ws_as_separate_series() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            reject_with_transport("http", "invalid");
+            reject_with_transport("ws", "invalid");
+            reject_with_transport("http", "invalid");
+        });
+
+        let counts: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_events_rejected_total")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_events_rejected_total must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let transport = labels
+                    .iter()
+                    .find(|l| l.key() == "transport")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                let reason = labels
+                    .iter()
+                    .find(|l| l.key() == "reason")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                ((transport, reason), n)
+            })
+            .collect();
+
+        assert_eq!(
+            counts.get(&("http".to_owned(), "invalid".to_owned())),
+            Some(&2)
+        );
+        assert_eq!(
+            counts.get(&("ws".to_owned(), "invalid".to_owned())),
+            Some(&1)
+        );
     }
 }

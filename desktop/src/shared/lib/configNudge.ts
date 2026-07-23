@@ -32,6 +32,7 @@ export type ConfigNudgeRequirement =
        * Determines which message and CTA the nudge card shows:
        * - "available"         → tooling installed, needs login
        * - "adapter_missing"   → CLI installed but ACP adapter missing
+       * - "adapter_outdated"  → ACP adapter present but from deprecated package; reinstall required
        * - "cli_missing"       → ACP adapter installed but CLI missing
        * - "not_installed"     → neither adapter nor CLI found
        */
@@ -48,7 +49,8 @@ export type ConfigNudgeRequirement =
       setup_copy: string;
       /** One-line stderr excerpt from the CLI's parse error. */
       diagnostic: string;
-    };
+    }
+  | { surface: "git_bash" };
 
 /**
  * The structured payload embedded in the `buzz:config-nudge` sentinel block.
@@ -140,9 +142,12 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
         typeof r.setup_copy === "string" &&
         (r.availability === "available" ||
           r.availability === "adapter_missing" ||
+          r.availability === "adapter_outdated" ||
           r.availability === "cli_missing" ||
           r.availability === "not_installed")
       );
+    case "git_bash":
+      return true;
     case "cli_config_invalid":
       return (
         Array.isArray(r.probe_args) &&

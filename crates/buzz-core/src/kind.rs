@@ -101,6 +101,13 @@ pub const KIND_AGENT_ENGRAM: u32 = 30174;
 /// author-only (see [`AUTHOR_ONLY_KINDS`]). See `docs/nips/NIP-ER.md`.
 pub const KIND_EVENT_REMINDER: u32 = 30300;
 
+/// NIP-PL: encrypted push lease (parameterized replaceable, author-only).
+///
+/// The source event contains endpoint-bearing NIP-44 ciphertext and is readable
+/// only by its authenticated author. Effective delivery state lives in the
+/// dedicated push lease tables.
+pub const KIND_PUSH_LEASE: u32 = 30350;
+
 /// Kinds whose stored events are readable only by their author.
 ///
 /// The relay must never reveal the existence, count, tags, content, schedule,
@@ -108,9 +115,9 @@ pub const KIND_EVENT_REMINDER: u32 = 30300;
 /// Shared across the ingest write path (NIP-ER `not_before` validation) and the
 /// read path (REQ/COUNT/subscription author-only filtering).
 ///
-/// Currently O(1) with a single entry. If this grows past ~4 kinds, convert to
-/// a compile-time bitset or sorted array with binary search for hot-path use.
-pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER];
+/// Currently a tiny linear set. If this grows past ~4 kinds, convert to a
+/// compile-time bitset or sorted array with binary search for hot-path use.
+pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER, KIND_PUSH_LEASE];
 
 /// Kinds that require a result-level read gate beyond the filter-layer
 /// `#p` check: even a reader who knows an event id MUST match the event's
@@ -182,6 +189,10 @@ pub const KIND_MANAGED_AGENT: u32 = 30177;
 /// queue, and never fanned out publicly. Reports are signals, not triggers:
 /// the relay never auto-actions on them (NIP-56).
 pub const KIND_REPORT: u32 = 1984;
+
+/// Buzz product feedback submission. Accepted at ingest, sidecarred to the
+/// deployment feedback table, and never stored or fanned out as an event.
+pub const KIND_PRODUCT_FEEDBACK: u32 = 42000;
 
 // NIP-29 group admin events
 /// NIP-29: Add a user to a group.
@@ -294,12 +305,6 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
-/// Mesh-LLM relay status (relay-signed, parameterized replaceable, d=buzz-relay-mesh).
-///
-/// Published only by the relay. Carries a sanitized, member-readable projection
-/// of mesh status, including EndpointAddr dial pointers for serving nodes.
-pub const KIND_MESH_LLM_RELAY_STATUS: u32 = 30621;
-
 /// NIP-DV: per-viewer DM visibility snapshot (relay-signed, parameterized
 /// replaceable, d=viewer_pubkey). Carries one `h` tag per DM the viewer has
 /// hidden from their sidebar. Re-published by the relay on every hide/unhide so
@@ -329,23 +334,6 @@ pub const KIND_AGENT_OBSERVER_FRAME: u32 = 24200;
 /// Ephemeral: huddle emoji reaction burst. Channel-scoped to the ephemeral
 /// huddle channel with an `h` tag; never stored in the timeline.
 pub const KIND_HUDDLE_REACTION: u32 = 24810;
-/// Ephemeral: mesh status report (desktop → relay). A relay member reports its
-/// current mesh serve availability + EndpointAddr(s) so the relay can project a
-/// sanitized, relay-signed kind:30621 discovery note keyed per reporter. Tagged
-/// `["p", <self>]` optional; never stored — the durable record is the relay's
-/// 30621, not this transient input.
-pub const KIND_MESH_STATUS_REPORT: u32 = 24620;
-/// Ephemeral: mesh connect request (desktop → relay). A relay member asks the
-/// relay to coordinate a direct iroh hole-punch to a peer it discovered via
-/// kind:30621. Tagged `["p", <target_pubkey>]`. Never stored; the relay
-/// validates membership of both ends, then emits paired KIND_MESH_CALL_ME_NOW.
-pub const KIND_MESH_CONNECT_REQUEST: u32 = 24621;
-/// Ephemeral: mesh call-me-now signal (relay → desktop, relay-signed). The live
-/// dial trigger for a direct iroh hole-punch — carries the peer's EndpointAddr
-/// so both ends dial near-simultaneously. Tagged `["p", <recipient_pubkey>]`.
-/// Never stored; seconds expiry.
-pub const KIND_MESH_CALL_ME_NOW: u32 = 24622;
-
 // Stream messaging
 /// NIP-29 group chat message kind. V1 used kind:10001 (replaceable range — wrong), then 40001.
 ///
@@ -523,6 +511,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_TEAM,
     KIND_MANAGED_AGENT,
     KIND_REPORT,
+    KIND_PRODUCT_FEEDBACK,
     KIND_NIP29_PUT_USER,
     KIND_NIP29_REMOVE_USER,
     KIND_NIP29_EDIT_METADATA,
@@ -559,9 +548,6 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,
-    KIND_MESH_STATUS_REPORT,
-    KIND_MESH_CONNECT_REQUEST,
-    KIND_MESH_CALL_ME_NOW,
     KIND_BLOSSOM_AUTH,
     KIND_PAIRING,
     KIND_AGENT_OBSERVER_FRAME,
@@ -578,7 +564,6 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_SYSTEM_MESSAGE,
     KIND_CHANNEL_SUMMARY,
     KIND_PRESENCE_SNAPSHOT,
-    KIND_MESH_LLM_RELAY_STATUS,
     KIND_DM_VISIBILITY,
     KIND_DM_OPEN,
     KIND_DM_ADD_MEMBER,
@@ -692,14 +677,14 @@ pub const fn is_command_kind(kind: u32) -> bool {
     )
 }
 
-/// Returns `true` if `kind` is a relay-only sidecar kind.
+/// Returns `true` if `kind` may only be authored by the relay.
 /// Client submission of these kinds must be rejected.
 pub const fn is_relay_only_kind(kind: u32) -> bool {
     matches!(
         kind,
-        KIND_CHANNEL_SUMMARY
+        KIND_NIP43_MEMBERSHIP_LIST
+            | KIND_CHANNEL_SUMMARY
             | KIND_PRESENCE_SNAPSHOT
-            | KIND_MESH_LLM_RELAY_STATUS
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
@@ -725,7 +710,6 @@ const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 300
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
-const _: () = assert!(is_parameterized_replaceable(KIND_MESH_LLM_RELAY_STATUS)); // 30621 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
@@ -770,6 +754,12 @@ mod tests {
         for &k in ALL_KINDS {
             assert!(seen.insert(k), "duplicate kind value: {k}");
         }
+    }
+
+    #[test]
+    fn nip43_membership_snapshot_is_relay_only() {
+        assert!(is_relay_only_kind(KIND_NIP43_MEMBERSHIP_LIST));
+        assert!(!is_relay_only_kind(KIND_NIP43_LEAVE_REQUEST));
     }
 
     #[test]

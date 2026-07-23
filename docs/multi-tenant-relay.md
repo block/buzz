@@ -1043,13 +1043,9 @@ registers a subscription only after:
    `Err(_)` emit `CLOSED "restricted: …"` (`:127-132`).
 5. Global path (`channel_id = None`): per-filter p/engram/author gates must
    hold against *p* (`:144-167`); otherwise `CLOSED`.
-6. Only then is `sub_registry.register(conn_id, sub_id, filters, channel_id)`
-   called (`:202-204`). `rg -U -n "sub_registry\s*\n?\s*\.register\(" crates/buzz-relay/src`
-   (`-U` is required — the prod call splits `.sub_registry` and `.register(`
-   across `:203-204`, so the single-line pattern would miss it) returns
-   exactly three sites: `req.rs:204` is the **sole** production caller; the
-   two others (`mesh_signaling.rs:550`, `event.rs:1058`) are inside
-   `#[cfg(test)]` modules.
+6. Only then is `sub_registry.register_scoped(...)` called. Direct `register`
+   calls are confined to test setup; production subscription registration goes
+   through the community-scoped API in `req.rs`.
 
 #### G2 — delivery (`crates/buzz-relay/src/handlers/event.rs:59-113`)
 

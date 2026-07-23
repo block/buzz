@@ -59,10 +59,17 @@ async function fetchRepoRefs(repoId: string): Promise<RepoRefs> {
   return parseRefs(events);
 }
 
-export function useRepoRefs(repoId: string) {
+export function useRepoRefs(repoId: string, { preview = false } = {}) {
+  const mockRefs: RepoRefs = {
+    branches: ["main"],
+    tags: ["v0.1.0"],
+    head: { ref: "main", sha: "a".repeat(40) },
+  };
+
   return useQuery({
-    queryKey: ["repo-refs", repoId],
-    queryFn: () => fetchRepoRefs(repoId),
+    queryKey: preview ? ["repo-refs", "mock", repoId] : ["repo-refs", repoId],
+    queryFn: preview ? async () => mockRefs : () => fetchRepoRefs(repoId),
+    initialData: preview ? mockRefs : undefined,
     staleTime: 60_000,
   });
 }

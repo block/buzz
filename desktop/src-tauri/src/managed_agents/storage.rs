@@ -8,7 +8,9 @@ use std::{
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::keyring_service;
-use crate::managed_agents::ManagedAgentRecord;
+use crate::managed_agents::{
+    ManagedAgentRecord, ManagedAgentRuntimeKey, ManagedAgentRuntimeReceipt,
+};
 use crate::secret_store::{KeyringProbe, SecretStore};
 
 /// Keyring key name for an agent's nsec, namespaced from the human identity
@@ -40,7 +42,7 @@ pub fn managed_agents_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn managed_agents_store_path(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn managed_agents_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(managed_agents_base_dir(app)?.join("managed-agents.json"))
 }
 
@@ -52,6 +54,15 @@ fn managed_agents_logs_dir(app: &AppHandle) -> Result<PathBuf, String> {
 
 pub fn managed_agent_log_path(app: &AppHandle, pubkey: &str) -> Result<PathBuf, String> {
     Ok(managed_agents_logs_dir(app)?.join(format!("{pubkey}.log")))
+}
+
+/// Pair-scoped log path for a managed runtime. The relay URL never appears in
+/// the filename; the suffix is a hash of the canonical URL.
+pub fn managed_agent_runtime_log_path(
+    app: &AppHandle,
+    key: &ManagedAgentRuntimeKey,
+) -> Result<PathBuf, String> {
+    Ok(managed_agents_logs_dir(app)?.join(format!("{}.log", key.runtime_id())))
 }
 
 /// The keyring operations the migration chokepoint needs. Abstracted so the
@@ -194,7 +205,7 @@ pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, S
 
 /// Load the key-less agent *definitions* (former personas) from the unified
 /// store. The persona compatibility shim (`load_personas`) presents these in
-/// the legacy shape via `to_persona_view`.
+/// the legacy shape via `to_definition_view`.
 pub(crate) fn load_agent_definitions(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| record.pubkey.is_empty());
@@ -384,7 +395,7 @@ fn persist_agent_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRec
 /// after the service-name change.
 #[cfg(debug_assertions)]
 pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
-    if !cfg!(feature = "system-keyring") {
+    if !cfg!(feature = "system-keyring") || keyring_service() != "buzz-desktop-dev" {
         return;
     }
 
@@ -404,11 +415,6 @@ pub fn migrate_agent_keys_to_dev_service(app: &tauri::AppHandle) {
         .filter(|r| !r.pubkey.is_empty())
         .map(|r| r.pubkey)
         .collect();
-
-    if pubkeys.is_empty() {
-        return;
-    }
-
     // A fresh non-singleton store for the prod service — its own empty
     // cache so reads go to the OS keyring without polluting the dev
     // singleton's cache.
@@ -457,14 +463,20 @@ fn copy_agent_keys_between_stores(pubkeys: &[String], src: &impl KeyStore, dst: 
             return;
         }
     };
-
-    // One read of the prod blob.
-    let src_map: HashMap<String, String> = match src.load_all_readonly() {
-        Ok(Some(map)) => map,
-        Ok(None) => HashMap::new(), // prod has no blob yet — nothing to copy
-        Err(e) => {
-            eprintln!("buzz-desktop: keyring-dev-migration: cannot read prod keyring: {e}");
-            return;
+    // Skip production when a reset left no agents or onboarding created every dev key.
+    let src_map: HashMap<String, String> = if pubkeys
+        .iter()
+        .all(|pubkey| dst_map.contains_key(&agent_keyring_name(pubkey)))
+    {
+        HashMap::new()
+    } else {
+        match src.load_all_readonly() {
+            Ok(Some(map)) => map,
+            Ok(None) => HashMap::new(), // prod has no blob yet — nothing to copy
+            Err(e) => {
+                eprintln!("buzz-desktop: keyring-dev-migration: cannot read prod keyring: {e}");
+                return;
+            }
         }
     };
 
@@ -500,13 +512,23 @@ fn copy_agent_keys_between_stores(pubkeys: &[String], src: &impl KeyStore, dst: 
     }
 }
 
+/// Remove an agent's key from the keyring, returning an error on failure.
+/// Used by the snapshot-import rollback path, which must surface cleanup
+/// failures rather than swallowing them.
+pub(crate) fn try_delete_agent_key(pubkey: &str) -> Result<(), String> {
+    if let Some(store) = agent_secret_store() {
+        store.delete(&agent_keyring_name(pubkey))
+    } else {
+        // No keyring backend — nothing to clean up.
+        Ok(())
+    }
+}
+
 /// Remove an agent's key from the keyring (best-effort). Called when an agent
 /// is deleted so its secret does not linger in the OS store.
 pub fn delete_agent_key(pubkey: &str) {
-    if let Some(store) = agent_secret_store() {
-        if let Err(e) = store.delete(&agent_keyring_name(pubkey)) {
-            eprintln!("buzz-desktop: failed to delete agent {pubkey} key from keyring: {e}");
-        }
+    if let Err(e) = try_delete_agent_key(pubkey) {
+        eprintln!("buzz-desktop: failed to delete agent {pubkey} key from keyring: {e}");
     }
 }
 
@@ -587,12 +609,49 @@ fn agent_pids_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Write a PID file for a spawned agent. The PID equals the PGID since we
-/// spawn with `process_group(0)`.
-pub fn write_agent_pid_file(app: &AppHandle, pubkey: &str, pid: u32) -> Result<(), String> {
-    let path = agent_pids_dir(app)?.join(format!("{pubkey}.pid"));
-    fs::write(&path, pid.to_string())
-        .map_err(|error| format!("failed to write PID file {}: {error}", path.display()))
+/// Persist a pair-scoped runtime receipt atomically. Callers must register the
+/// process in memory in the same runtime transition; on write failure they must
+/// terminate the child before releasing that transition.
+pub fn write_agent_runtime_receipt(
+    app: &AppHandle,
+    receipt: &ManagedAgentRuntimeReceipt,
+) -> Result<(), String> {
+    let path = agent_pids_dir(app)?.join(format!("{}.json", receipt.key.runtime_id()));
+    let payload = serde_json::to_vec(receipt)
+        .map_err(|error| format!("failed to serialize runtime receipt: {error}"))?;
+    atomic_write_json_restricted(&path, &payload)
+}
+
+pub fn remove_agent_runtime_receipt(app: &AppHandle, key: &ManagedAgentRuntimeKey) {
+    if let Ok(dir) = agent_pids_dir(app) {
+        let _ = fs::remove_file(dir.join(format!("{}.json", key.runtime_id())));
+    }
+}
+
+pub fn remove_agent_runtime_receipt_path(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+pub fn read_all_agent_runtime_receipts(
+    app: &AppHandle,
+) -> Vec<(PathBuf, ManagedAgentRuntimeReceipt)> {
+    let Ok(dir) = agent_pids_dir(app) else {
+        return Vec::new();
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .filter_map(|entry| {
+            let path = entry.path();
+            let bytes = fs::read(&path).ok()?;
+            serde_json::from_slice(&bytes)
+                .ok()
+                .map(|receipt| (path, receipt))
+        })
+        .collect()
 }
 
 /// Remove the PID file for an agent (e.g. on normal stop).
@@ -1204,6 +1263,7 @@ mod tests {
             Some("done"),
             "marker must be set even when all keys are already present"
         );
+        assert_eq!(*src.read_count.borrow(), 0);
     }
 
     #[test]
@@ -1306,5 +1366,17 @@ mod tests {
             Some("done"),
             "marker must be set even when pubkey list is empty"
         );
+        assert_eq!(*src.read_count.borrow(), 0);
+    }
+
+    #[test]
+    fn try_delete_agent_key_returns_result() {
+        // Verify the result-returning seam exists and has the correct signature.
+        // We cannot call it in default builds (system-keyring feature is on,
+        // which accesses the real OS keychain and blocks in headless/CI). The
+        // real keychain paths are integration-tested through the #[ignore]
+        // tests in secret_store.rs; the rollback aggregation is tested in
+        // team_snapshot::tests::rollback_aggregates_multiple_errors.
+        let _: fn(&str) -> Result<(), String> = super::try_delete_agent_key;
     }
 }

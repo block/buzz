@@ -1,30 +1,61 @@
+# Glob patterns below mirror the `changes` job's dorny/paths-filter groups in
+# .github/workflows/ci.yml — keep the two in sync. Deliberate deviations:
+# - The `.github/workflows/ci.yml` path CI adds to its `rust`/`mobile` filters
+#   is omitted; a CI-workflow-only edit doesn't need a local test run.
+# - `desktop-check`/`desktop-test` don't trigger on `rust` changes, though CI's
+#   Desktop Core job does. Those commands are pure TS (biome + node:test) with
+#   no Rust dependency, so the extra trigger would be spurious locally.
+# - Deletion-only surface changes do not trigger local hooks: lefthook 2.1.x
+#   drops deleted paths from push-file discovery (`extractFiles` existence
+#   check, repository.go). CI's dorny/paths-filter catches deletions.
+#   Deliberate — accepted, not worked around.
 pre-commit:
   parallel: true
   commands:
     rust-fmt:
+      glob: ["crates/**", "examples/countdown-bot/**"]
       run: just fmt
       stage_fixed: true
     desktop-tauri-fmt:
+      glob: ["desktop/src-tauri/**"]
       run: just desktop-tauri-fmt
       stage_fixed: true
     desktop-fix:
+      glob: ["desktop/**", "pnpm-lock.yaml"]
+      exclude: ["desktop/src-tauri/**"]
       run: just desktop-fix
       stage_fixed: true
     web-fix:
+      glob: ["web/**", "pnpm-lock.yaml"]
       run: just web-fix
       stage_fixed: true
     mobile-fix:
+      glob: ["mobile/**"]
       run: just mobile-fix
       stage_fixed: true
 
 pre-push:
   parallel: true
   commands:
+    branch-skew:
+      run: ./scripts/check-branch-skew.sh
     rust-tests:
+      glob: ["crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
       run: just test-unit
+    desktop-check:
+      glob: ["desktop/**", "pnpm-lock.yaml"]
+      exclude: ["desktop/src-tauri/**"]
+      run: just desktop-check
     desktop-test:
+      glob: ["desktop/**", "pnpm-lock.yaml"]
+      exclude: ["desktop/src-tauri/**"]
       run: just desktop-test
     desktop-tauri-test:
+      # ci.yml:113 — Desktop Core triggers on `rust` OR `desktop-rust`;
+      # desktop/src-tauri path-depends on crates/buzz-core, buzz-persona,
+      # buzz-sdk, buzz-agent (desktop/src-tauri/Cargo.toml:88-91).
+      glob: ["desktop/src-tauri/**", "crates/**", "migrations/**", "schema/**", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "deny.toml", "scripts/run-tests.sh", "justfile"]
       run: just desktop-tauri-test
     mobile-test:
+      glob: ["mobile/**"]
       run: just mobile-test

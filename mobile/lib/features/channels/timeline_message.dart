@@ -343,9 +343,12 @@ List<TimelineMessage> formatTimeline(
         event.kind == EventKind.streamMessageDiff) {
       final edit = edits[event.id];
       final effectiveTags = edit?.tags ?? event.tags;
+      // Include both notify (`p`) and reference-only (`mention`) tags —
+      // mirrors desktop's resolveMentionNames, so names in messages sent
+      // "without inviting" still render as mentions.
       final mentions = <String>[
         for (final tag in effectiveTags)
-          if (tag.length >= 2 && tag[0] == 'p') tag[1],
+          if (tag.length >= 2 && (tag[0] == 'p' || tag[0] == 'mention')) tag[1],
       ];
 
       final threadRef = event.threadReference;

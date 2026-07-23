@@ -18,22 +18,17 @@ name: Docker image
 #   - push tags relay-v*.*.* → :{version} + :{major}.{minor} + :{major}
 #                              (+ :latest for stable, NOT for prereleases)
 #   - pull_request           → build only (no push), cache stays warm
-#   - workflow_dispatch      → manual canary (no inputs), or relay-tag rescue
-#                              dispatch with version+ref inputs (see below)
+#   - workflow_dispatch      → manual relay-tag rescue at the tag itself
 #
-# Why workflow_dispatch carries version/ref inputs:
-#   auto-tag-on-release-pr-merge.yml pushes relay-v* with the default
-#   GITHUB_TOKEN, which GitHub deliberately does NOT let fire on:push triggers
-#   (recursion guard). So the push:tags trigger above never runs for releases.
-#   auto-tag instead dispatches this workflow with the bare version + tag ref,
-#   the same rescue release.yml already uses for the desktop lane. On dispatch
-#   github.ref is `main`, so the tag ref is plumbed through explicitly: checkout
-#   pins to inputs.ref, and the semver tags take inputs.version via `value=`.
+# Why workflow_dispatch carries a version input:
+#   Normal releases arrive through the push:tags trigger above. The input is
+#   retained only for an operator to rerun publication manually at an immutable
+#   relay tag. The workflow rejects a dispatch whose github.ref, checked-out
+#   HEAD, and relay-v tag do not resolve to one commit.
 #   On the rescue path inputs.version is already bare (e.g. 0.3.0), so the
 #   match=^relay-v(.*)$ regex simply no-ops (it warns, leaving the value
 #   intact) and the bare version flows straight to the semver parser. On a
 #   real push event value= is empty and the match strips relay-v from the ref.
-#   Inputless canary dispatch (version="", ref=main) renders no semver tag.
 #
 # The :latest tag tracks the latest STABLE relay release: metadata-action's
 # `flavor.latest=auto` (its default) emits :latest only for non-prerelease
@@ -47,6 +42,7 @@ on:
   pull_request:
     paths:
       - "Dockerfile"
+      - "Dockerfile.push-gateway"
       - ".dockerignore"
       - ".github/workflows/docker.yml"
       - "Cargo.toml"
@@ -62,11 +58,7 @@ on:
     inputs:
       version:
         description: "Semver version e.g. 0.3.0 (no relay-v prefix) — for relay-tag rescue dispatch"
-        required: false
-      ref:
-        description: "Tag/branch/SHA to build, e.g. relay-v0.3.0"
-        required: false
-        default: main
+        required: true
 
 # One image build per ref; cancel superseded PR builds, but never cancel
 # tag/main builds (publishing must not be aborted mid-flight).
@@ -111,10 +103,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
-          # On workflow_dispatch (relay-tag rescue) build the tagged commit,
-          # not main. Empty string = default ref for push/PR events.
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || '' }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Verify tag-bound release source
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${INPUT_VERSION:-${GITHUB_REF_NAME#relay-v}}"
+          scripts/verify-release-ref.sh relay-v "$VERSION"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
@@ -146,7 +144,7 @@ jobs:
           # own — it only strips refs/tags/, then runs the raw ref through
           # semver.valid(), which rejects "relay-v0.3.0". The match capture
           # group feeds the bare version to the semver parser. value= supplies
-          # the version on the auto-tag rescue dispatch (github.ref is `main`
+          # the version on a manual rescue dispatch (github.ref is `main`
           # there, not the tag): it is already bare, so match no-ops (warns,
           # value intact) and the bare version validates as-is. On push value=
           # is empty, so the ref drives it and match strips relay-v — push
@@ -303,4 +301,158 @@ jobs:
             echo '```'
             echo "gh attestation verify oci://${IMAGE_NAME}@${MERGED_DIGEST} --owner block"
             echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  push-gateway-build:
+    name: Build public push gateway (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            arch: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify tag-bound release source
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          VERSION="${INPUT_VERSION:-${GITHUB_REF_NAME#relay-v}}"
+          scripts/verify-release-ref.sh relay-v "$VERSION"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ghcr.io/block/buzz-push-gateway
+          labels: |
+            org.opencontainers.image.title=Buzz Push Gateway
+            org.opencontainers.image.description=Capability-gated APNs last hop for Buzz
+            org.opencontainers.image.licenses=Apache-2.0
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        with:
+          context: .
+          file: ./Dockerfile.push-gateway
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=ghcr.io/block/buzz-push-gateway,push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          cache-from: type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:${{ matrix.arch }}
+          cache-to: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref=ghcr.io/block/buzz-push-gateway-buildcache:{0},mode=max,compression=zstd', matrix.arch) || '' }}
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: mkdir -p /tmp/gateway-digests && touch "/tmp/gateway-digests/${DIGEST#sha256:}"
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gateway-digests-${{ matrix.arch }}
+          path: /tmp/gateway-digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  push-gateway-merge:
+    name: Publish public push gateway image
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    needs: push-gateway-build
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download per-arch digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: /tmp/gateway-digests
+          pattern: gateway-digests-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        with:
+          images: ghcr.io/block/buzz-push-gateway
+          tags: |
+            type=ref,event=branch,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name != 'workflow_dispatch' || inputs.version == '' }}
+            type=semver,pattern={{version}},match=^relay-v(.*)$,value=${{ inputs.version }}
+            type=semver,pattern={{major}}.{{minor}},match=^relay-v(.*)$,value=${{ inputs.version }}
+      - name: Merge and publish manifest
+        id: manifest
+        working-directory: /tmp/gateway-digests
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          tags=(); while IFS= read -r tag; do [ -n "$tag" ] && tags+=("-t" "$tag"); done <<< "$META_TAGS"
+          digests=(); for digest in *; do digests+=("ghcr.io/block/buzz-push-gateway@sha256:${digest}"); done
+          docker buildx imagetools create "${tags[@]}" "${digests[@]}"
+          first_tag=$(echo "$META_TAGS" | head -n1)
+          digest=$(docker buildx imagetools inspect "$first_tag" --format '{{json .Manifest}}' | jq -r '.digest')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: Attest gateway image provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373  # v4.1.1
+        with:
+          subject-name: ghcr.io/block/buzz-push-gateway
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
+      - name: Gateway publication summary
+        env:
+          GATEWAY_DIGEST: ${{ steps.manifest.outputs.digest }}
+          GATEWAY_TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`ghcr.io/block/buzz-push-gateway\`"
+            echo
+            printf "**Digest:** \`%s\`\n" "$GATEWAY_DIGEST"
+            echo
+            echo '**Tags:**'
+            echo "\`\`\`"
+            printf '%s\n' "$GATEWAY_TAGS"
+            echo "\`\`\`"
+            echo
+            echo 'Verify provenance before deployment:'
+            echo "\`\`\`"
+            printf 'gh attestation verify oci://ghcr.io/block/buzz-push-gateway@%s --owner block\n' "$GATEWAY_DIGEST"
+            echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"

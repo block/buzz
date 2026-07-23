@@ -1,6 +1,6 @@
 // Inline/review playback state survives player remounts (for example route
 // swaps, optimistic-to-acked row replacement, or markdown context refreshes)
-// without leaking across workspace switches.
+// without leaking across community switches.
 const inlinePlaybackPositions = new Map<string, number>();
 const openReviewKeys = new Set<string>();
 const reviewPlaybackPositions = new Map<string, number>();

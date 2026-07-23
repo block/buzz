@@ -154,7 +154,7 @@ fn mapping_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn goose_config_path() -> Option<PathBuf> {
+pub(crate) fn goose_config_path() -> Option<PathBuf> {
     if let Ok(root) = std::env::var("GOOSE_PATH_ROOT") {
         return Some(PathBuf::from(root).join("config").join("config.yaml"));
     }

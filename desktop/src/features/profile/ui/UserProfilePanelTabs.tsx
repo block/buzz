@@ -1,7 +1,15 @@
 import * as React from "react";
 import type { LucideIcon } from "lucide-react";
-import { Activity, Archive, ChevronRight, Info, Wrench } from "lucide-react";
+import {
+  Activity,
+  Archive,
+  ChevronRight,
+  Info,
+  RefreshCw,
+  Wrench,
+} from "lucide-react";
 
+import type { ManagedAgent } from "@/shared/api/types";
 import type { ActiveTurnSummary } from "@/features/agents/activeAgentTurnsStore";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
 import {
@@ -275,8 +283,10 @@ export function ProfileInfoTabContent({
   agentInfoFields,
   callerChannelId,
   channelIdToName,
+  instances,
   isArchived,
   onOpenActivity,
+  onOpenInstance,
   pubkey,
   showActivityIngress,
 }: {
@@ -285,8 +295,10 @@ export function ProfileInfoTabContent({
   agentInfoFields: ProfileField[];
   callerChannelId: string | null;
   channelIdToName: Record<string, string>;
+  instances: ManagedAgent[];
   isArchived: boolean;
   onOpenActivity: (channelId?: string | null) => void;
+  onOpenInstance: (pubkey: string) => void;
   pubkey: string | null;
   showActivityIngress: boolean;
 }) {
@@ -303,11 +315,12 @@ export function ProfileInfoTabContent({
       ]
     : agentInfoFields;
   const hasInfoFields = infoFields.length > 0;
+  const hasInstances = instances.length > 1;
   const feedScope = useProfileActivityFeedScope(activityAgent, activeTurns);
   const showLiveActivityEmbed =
     showActivityIngress && (feedScope.isLive || feedScope.hasFeedContent);
 
-  if (!hasInfoFields && !showActivityIngress) {
+  if (!hasInfoFields && !showActivityIngress && !hasInstances) {
     return null;
   }
 
@@ -334,6 +347,72 @@ export function ProfileInfoTabContent({
         )
       ) : null}
       {hasInfoFields ? <ProfileFieldGroup fields={infoFields} /> : null}
+      {hasInstances ? (
+        <ProfileInstancesSection
+          currentPubkey={pubkey}
+          instances={instances}
+          onOpenInstance={onOpenInstance}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function ProfileInstancesSection({
+  currentPubkey,
+  instances,
+  onOpenInstance,
+}: {
+  currentPubkey: string | null;
+  instances: ManagedAgent[];
+  onOpenInstance: (pubkey: string) => void;
+}) {
+  const [expanded, setExpanded] = React.useState(false);
+
+  return (
+    <div className="overflow-hidden rounded-2xl bg-muted/20">
+      <button
+        aria-expanded={expanded}
+        className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/40"
+        data-testid="user-profile-instances"
+        onClick={() => setExpanded((value) => !value)}
+        type="button"
+      >
+        <span className="min-w-0 flex-1 text-sm font-medium">Instances</span>
+        <span className="text-sm text-muted-foreground">
+          {instances.length}
+        </span>
+        <ChevronRight
+          className={cn(
+            "h-4 w-4 shrink-0 text-muted-foreground transition-transform",
+            expanded && "rotate-90",
+          )}
+        />
+      </button>
+      {expanded ? (
+        <div className="border-t border-border/60 px-2 py-2">
+          {instances.map((instance) => {
+            const isCurrent = instance.pubkey === currentPubkey;
+            return (
+              <button
+                className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors hover:bg-muted/40"
+                data-testid={`user-profile-instance-${instance.pubkey}`}
+                key={instance.pubkey}
+                onClick={() => onOpenInstance(instance.pubkey)}
+                type="button"
+              >
+                <span className="min-w-0 flex-1 truncate text-sm font-medium">
+                  {instance.name}
+                </span>
+                <span className="text-xs capitalize text-muted-foreground">
+                  {isCurrent ? "Current" : instance.status.replace("_", " ")}
+                </span>
+                <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -726,8 +805,10 @@ function ArchiveStatusTooltip() {
 
 export function ProfileRuntimeTabContent({
   agentInstruction,
+  autoRestartEnabled = false,
   diagnosticsFields,
   diagnosticsSummary,
+  needsRestart = false,
   onOpenDiagnostics,
   onOpenInstructions,
   runtimeConfigurationFields,
@@ -736,8 +817,12 @@ export function ProfileRuntimeTabContent({
   showInstructionBlock,
 }: {
   agentInstruction: string | null;
+  /** Whether the per-agent auto-restart toggle is ON. */
+  autoRestartEnabled?: boolean;
   diagnosticsFields: ProfileField[];
   diagnosticsSummary: React.ReactNode;
+  /** True when the running agent's config has drifted from what it was spawned with. */
+  needsRestart?: boolean;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
   runtimeConfigurationFields: ProfileField[];
@@ -766,6 +851,24 @@ export function ProfileRuntimeTabContent({
 
   return (
     <div className="space-y-2">
+      {needsRestart ? (
+        <div
+          className="flex items-start gap-3 rounded-2xl bg-amber-500/10 px-4 py-3"
+          data-testid="needs-restart-banner"
+        >
+          <RefreshCw className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+          <div className="min-w-0 text-sm">
+            <p className="font-medium text-amber-600 dark:text-amber-400">
+              Restart required
+            </p>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              {autoRestartEnabled
+                ? "Configuration changed since this agent started. Buzz can restart it automatically after ~3 minutes idle, or stop and respawn it to apply now."
+                : "Configuration changed since this agent started. Automatic restart is off for this agent \u2014 stop and respawn it to apply the changes."}
+            </p>
+          </div>
+        </div>
+      ) : null}
       {showInstructionBlock ? (
         <div className="overflow-hidden rounded-2xl bg-muted/20">
           <AgentInstructionRow

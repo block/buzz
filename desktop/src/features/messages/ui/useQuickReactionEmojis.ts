@@ -1,9 +1,9 @@
 import * as React from "react";
 
 import {
-  loadActiveWorkspaceId,
-  loadWorkspaces,
-} from "@/features/workspaces/workspaceStorage";
+  loadActiveCommunityId,
+  loadCommunities,
+} from "@/features/communities/communityStorage";
 import type { CustomEmoji } from "@/shared/lib/remarkCustomEmoji";
 
 const QUICK_REACTION_STORAGE_KEY = "buzz.quick-reaction-emojis.v1";
@@ -27,28 +27,28 @@ function canUseLocalStorage() {
   }
 }
 
-function getActiveWorkspaceScope() {
+function getActiveCommunityScope() {
   if (!canUseLocalStorage()) return null;
 
   try {
-    return loadActiveWorkspaceId() ?? loadWorkspaces()[0]?.id ?? null;
+    return loadActiveCommunityId() ?? loadCommunities()[0]?.id ?? null;
   } catch {
     return null;
   }
 }
 
-function quickReactionStorageKey(workspaceScope: string | null) {
-  return workspaceScope
-    ? `${QUICK_REACTION_STORAGE_KEY}:${workspaceScope}`
+function quickReactionStorageKey(communityScope: string | null) {
+  return communityScope
+    ? `${QUICK_REACTION_STORAGE_KEY}:${communityScope}`
     : QUICK_REACTION_STORAGE_KEY;
 }
 
 function quickReactionSessionKey(
   limit: number,
-  workspaceScope: string | null,
+  communityScope: string | null,
   customEmojiSignature: string,
 ) {
-  return `${workspaceScope ?? "global"}:${customEmojiSignature}:${limit}`;
+  return `${communityScope ?? "global"}:${customEmojiSignature}:${limit}`;
 }
 
 function normalizeEntry(entry: unknown): QuickReactionEntry | null {
@@ -175,11 +175,11 @@ export function resolveQuickReactionEmojis(
 
 function getQuickReactionEmojis(
   limit: number,
-  workspaceScope: string | null,
+  communityScope: string | null,
   customEmojiSignature: string,
 ) {
   return resolveQuickReactionEmojisWithShortcodes(
-    readQuickReactionEntries(quickReactionStorageKey(workspaceScope)),
+    readQuickReactionEntries(quickReactionStorageKey(communityScope)),
     limit,
     customEmojiShortcodesFromSignature(customEmojiSignature),
   );
@@ -187,12 +187,12 @@ function getQuickReactionEmojis(
 
 function getSessionQuickReactionEmojis(
   limit: number,
-  workspaceScope: string | null,
+  communityScope: string | null,
   customEmojiSignature: string,
 ) {
   const sessionKey = quickReactionSessionKey(
     limit,
-    workspaceScope,
+    communityScope,
     customEmojiSignature,
   );
   const cached = sessionQuickReactionEmojis.get(sessionKey);
@@ -200,7 +200,7 @@ function getSessionQuickReactionEmojis(
 
   const emojis = getQuickReactionEmojis(
     limit,
-    workspaceScope,
+    communityScope,
     customEmojiSignature,
   );
   sessionQuickReactionEmojis.set(sessionKey, emojis);
@@ -211,8 +211,8 @@ export function recordQuickReactionEmoji(emoji: string) {
   const trimmed = emoji.trim();
   if (!trimmed) return;
 
-  const workspaceScope = getActiveWorkspaceScope();
-  const storageKey = quickReactionStorageKey(workspaceScope);
+  const communityScope = getActiveCommunityScope();
+  const storageKey = quickReactionStorageKey(communityScope);
   const entries = readQuickReactionEntries(storageKey);
   const existing = entries.find((entry) => entry.emoji === trimmed);
   if (existing) {
@@ -227,7 +227,7 @@ export function recordQuickReactionEmoji(emoji: string) {
   }
 
   // Keep the current hover tray stable; the stored recents apply on reload or
-  // when another tab updates this workspace's quick reactions.
+  // when another tab updates this community's quick reactions.
   writeQuickReactionEntries(entries, storageKey);
 }
 
@@ -235,19 +235,19 @@ export function useQuickReactionEmojis(
   limit = 4,
   customEmoji: ReadonlyArray<CustomEmoji> = [],
 ) {
-  const workspaceScope = getActiveWorkspaceScope();
+  const communityScope = getActiveCommunityScope();
   const customEmojiCacheKey = customEmojiSignature(customEmoji);
   const [emojis, setEmojis] = React.useState(() =>
-    getSessionQuickReactionEmojis(limit, workspaceScope, customEmojiCacheKey),
+    getSessionQuickReactionEmojis(limit, communityScope, customEmojiCacheKey),
   );
 
   React.useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const storageKey = quickReactionStorageKey(workspaceScope);
+    const storageKey = quickReactionStorageKey(communityScope);
     const sessionKey = quickReactionSessionKey(
       limit,
-      workspaceScope,
+      communityScope,
       customEmojiCacheKey,
     );
     const handleStorage = (event: StorageEvent) => {
@@ -256,7 +256,7 @@ export function useQuickReactionEmojis(
         setEmojis(
           getSessionQuickReactionEmojis(
             limit,
-            workspaceScope,
+            communityScope,
             customEmojiCacheKey,
           ),
         );
@@ -265,13 +265,13 @@ export function useQuickReactionEmojis(
 
     window.addEventListener("storage", handleStorage);
     setEmojis(
-      getSessionQuickReactionEmojis(limit, workspaceScope, customEmojiCacheKey),
+      getSessionQuickReactionEmojis(limit, communityScope, customEmojiCacheKey),
     );
 
     return () => {
       window.removeEventListener("storage", handleStorage);
     };
-  }, [customEmojiCacheKey, limit, workspaceScope]);
+  }, [customEmojiCacheKey, limit, communityScope]);
 
   return emojis;
 }

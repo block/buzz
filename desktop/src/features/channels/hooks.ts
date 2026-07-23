@@ -31,7 +31,7 @@ import type {
   SetChannelTopicInput,
   UpdateChannelInput,
 } from "@/shared/api/types";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   readChannelSnapshot,
   writeChannelSnapshot,
@@ -67,7 +67,88 @@ function sortChannels(channels: Channel[]) {
   });
 }
 
-async function invalidateChannelState(
+export type CachedChannelMember = {
+  membershipAdded: boolean;
+  name: string;
+  pubkey: string;
+};
+
+/**
+ * Records a successful membership mutation in the shared channel list before
+ * its read-after-write refetch completes. DM participant sets are immutable,
+ * so adding a member there creates a separate conversation and must never
+ * decorate the source channel optimistically. Exported for focused cache race
+ * regression coverage.
+ */
+export function upsertCachedChannelMember(
+  current: Channel[] | undefined,
+  channelId: string,
+  member: CachedChannelMember,
+): Channel[] | undefined {
+  if (!current) {
+    return current;
+  }
+
+  const normalizedPubkey = member.pubkey.toLowerCase();
+  return sortChannels(
+    current.map((channel) => {
+      if (channel.id !== channelId) {
+        return channel;
+      }
+
+      if (channel.channelType === "dm") {
+        return channel;
+      }
+
+      const hasMember = channel.memberPubkeys.some(
+        (pubkey) => pubkey.toLowerCase() === normalizedPubkey,
+      );
+      const memberPubkeys = hasMember
+        ? channel.memberPubkeys
+        : [...channel.memberPubkeys, member.pubkey];
+      return {
+        ...channel,
+        memberCount: Math.max(
+          memberPubkeys.length,
+          channel.memberCount + (member.membershipAdded && !hasMember ? 1 : 0),
+        ),
+        memberPubkeys,
+      };
+    }),
+  );
+}
+
+/**
+ * Adds or replaces a relay-returned channel in a possibly stale channel list.
+ * Exported for focused cache race regression coverage.
+ */
+export function upsertCachedChannel(
+  current: Channel[] | undefined,
+  channel: Channel,
+): Channel[] {
+  return sortChannels([
+    ...(current ?? []).filter((candidate) => candidate.id !== channel.id),
+    channel,
+  ]);
+}
+
+/**
+ * Reconciles a relay-returned channel after a list refresh. When the refresh
+ * already contains the immutable DM, its current metadata wins over the older
+ * snapshot used to open the route. Otherwise the opened channel repairs the
+ * route after a read-after-write-lagged list response.
+ */
+export function reconcileRefreshedCachedChannel(
+  refreshed: Channel[] | undefined,
+  channel: Channel,
+): Channel[] {
+  const refreshedChannel = refreshed?.find(
+    (candidate) => candidate.id === channel.id,
+  );
+  return upsertCachedChannel(refreshed, refreshedChannel ?? channel);
+}
+
+export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
 ) {
@@ -107,8 +188,8 @@ function setChannelArchivedState(
 }
 
 export function useChannelsQuery(options?: { enabled?: boolean }) {
-  const { activeWorkspace } = useWorkspaces();
-  const relayUrl = activeWorkspace?.relayUrl ?? null;
+  const { activeCommunity } = useCommunities();
+  const relayUrl = activeCommunity?.relayUrl ?? null;
 
   return useQuery({
     enabled: options?.enabled ?? true,
@@ -142,11 +223,8 @@ export function useCreateChannelMutation() {
   return useMutation({
     mutationFn: (input: CreateChannelInput) => createChannel(input),
     onSuccess: (createdChannel) => {
-      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current = []) =>
-        sortChannels([
-          ...current.filter((channel) => channel.id !== createdChannel.id),
-          createdChannel,
-        ]),
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        upsertCachedChannel(current, createdChannel),
       );
     },
     onSettled: () => {
@@ -167,17 +245,36 @@ export function useOpenDmMutation() {
   return useMutation({
     mutationFn: (input: OpenDmInput) => openDm(input),
     onSuccess: (openedChannel) => {
-      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current = []) =>
-        sortChannels([
-          ...current.filter((channel) => channel.id !== openedChannel.id),
-          openedChannel,
-        ]),
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        upsertCachedChannel(current, openedChannel),
       );
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     },
   });
+}
+
+/**
+ * Waits for any active channel-list refresh to settle, then restores a
+ * relay-returned channel to the shared cache before a caller depends on it for
+ * navigation.
+ */
+export function useUpsertCachedChannel() {
+  const queryClient = useQueryClient();
+
+  return React.useCallback(
+    async (channel: Channel) => {
+      await queryClient.refetchQueries({
+        queryKey: channelsQueryKey,
+        type: "active",
+      });
+      queryClient.setQueryData<Channel[]>(channelsQueryKey, (current) =>
+        reconcileRefreshedCachedChannel(current, channel),
+      );
+    },
+    [queryClient],
+  );
 }
 
 export function useHideDmMutation() {
@@ -251,13 +348,10 @@ export function useUpdateChannelMutation(channelId: string | null) {
 
       return updateChannel({ ...input, channelId });
     },
+    onMutate: () => ({ channelId }),
     onSuccess: (updatedChannel) => {
-      if (!channelId) {
-        return;
-      }
-
       queryClient.setQueryData<ChannelDetail>(
-        channelDetailQueryKey(channelId),
+        channelDetailQueryKey(updatedChannel.id),
         updatedChannel,
       );
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current = []) =>
@@ -268,7 +362,7 @@ export function useUpdateChannelMutation(channelId: string | null) {
         ),
       );
     },
-    onSettled: () => {
+    onSettled: (_data, _error, _variables, context) => {
       // refetchType "none": onSuccess already cached the relay-returned detail;
       // awaiting the full channel-list refetch kept the edit dialog stuck on
       // "Saving..." (same failure #1360 fixed for create).
@@ -276,9 +370,9 @@ export function useUpdateChannelMutation(channelId: string | null) {
         queryKey: channelsQueryKey,
         refetchType: "none",
       });
-      if (channelId) {
+      if (context?.channelId) {
         void queryClient.invalidateQueries({
-          queryKey: channelDetailQueryKey(channelId),
+          queryKey: channelDetailQueryKey(context.channelId),
           refetchType: "none",
         });
       }

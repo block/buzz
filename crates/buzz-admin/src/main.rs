@@ -76,6 +76,11 @@ enum Command {
     GenerateKey,
     /// Run pending database migrations.
     Migrate,
+    /// Inspect deployment-wide Buzz product feedback.
+    ProductFeedback {
+        #[command(subcommand)]
+        command: ProductFeedbackCommand,
+    },
     /// Emit kind:39000/39002 events for channels missing them.
     ///
     /// Channels created via direct SQL (seed scripts, pre-migration data) won't
@@ -87,6 +92,16 @@ enum Command {
         /// an ephemeral key (events will be unverifiable after restart).
         #[arg(long)]
         relay_key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProductFeedbackCommand {
+    /// List feedback across every community as JSON.
+    List {
+        /// Maximum records to return.
+        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=1000))]
+        limit: u16,
     },
 }
 
@@ -130,6 +145,9 @@ async fn run(cli: Cli) -> Result<i32> {
         Command::AddMember { pubkey, role } => cmd_add_member(pubkey, role).await,
         Command::RemoveMember { pubkey, role } => cmd_remove_member(pubkey, role).await,
         Command::ListMembers => cmd_list_members().await,
+        Command::ProductFeedback {
+            command: ProductFeedbackCommand::List { limit },
+        } => cmd_list_product_feedback(limit).await,
         Command::ReconcileChannels { relay_key } => {
             reconcile_channels(relay_key).await?;
             Ok(0)
@@ -229,6 +247,13 @@ async fn cmd_remove_member(pubkey_arg: String, role_filter: Option<String>) -> R
         eprintln!("warning: member removed from DB but list publish failed: {e}");
     }
 
+    Ok(0)
+}
+
+async fn cmd_list_product_feedback(limit: u16) -> Result<i32> {
+    let db = connect_db().await?;
+    let feedback = db.list_product_feedback(i64::from(limit)).await?;
+    println!("{}", serde_json::to_string_pretty(&feedback)?);
     Ok(0)
 }
 

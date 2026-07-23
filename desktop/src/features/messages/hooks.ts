@@ -5,25 +5,33 @@ import { toast } from "sonner";
 import {
   channelMessagesKey,
   channelWindowKey,
-  dedupeMessagesById,
-  normalizeTimelineMessages,
-  sortMessages,
   threadRepliesKey,
 } from "@/features/messages/lib/messageQueryKeys";
 import {
   buildReplyTags,
-  getChannelIdFromTags,
   getThreadReference,
   isBroadcastReply,
   normalizeMentionPubkeys,
   resolveReplyRootId,
 } from "@/features/messages/lib/threading";
+import {
+  projectChannelWindowMessages,
+  refreshChannelWindowMessages,
+} from "@/features/messages/lib/projectChannelWindow";
+import { reconcileChannelWindowMessages } from "@/features/messages/lib/channelWindowReconciliation";
+import {
+  mergeMessages,
+  mergeTimelineCacheMessages,
+} from "@/features/messages/lib/messageMerge";
+
+export { mergeMessages, mergeTimelineCacheMessages };
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
+import { messageMentionPubkeys } from "@/features/messages/lib/messageMentionPubkeys";
 import {
   clearTimeoutState,
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
-import { relayClient } from "@/shared/api/relayClient";
+import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -42,7 +50,6 @@ import type { Channel, Identity, RelayEvent } from "@/shared/api/types";
 import { applyEditTagOverlay } from "@/features/messages/lib/applyEditTagOverlay.mjs";
 import {
   emptyChannelWindowStore,
-  flattenChannelWindowEvents,
   mapChannelWindowEvents,
   mergeLiveChannelWindowEvent,
   mergeLiveThreadSummary,
@@ -71,74 +78,6 @@ type MessageQueryContext = {
 
 const CHANNEL_TIMELINE_KINDS = new Set<number>(CHANNEL_TIMELINE_CONTENT_KINDS);
 const CHANNEL_AUX_KINDS = new Set<number>(CHANNEL_AUX_EVENT_KINDS);
-
-function getLocalRenderKey(message: RelayEvent) {
-  return message.localKey ?? message.id;
-}
-
-function isMatchingPendingMessage(pending: RelayEvent, incoming: RelayEvent) {
-  if (
-    !pending.pending ||
-    pending.content !== incoming.content ||
-    pending.kind !== incoming.kind ||
-    pending.pubkey.toLowerCase() !== incoming.pubkey.toLowerCase() ||
-    getChannelIdFromTags(pending.tags) !== getChannelIdFromTags(incoming.tags)
-  ) {
-    return false;
-  }
-
-  const pendingThread = getThreadReference(pending.tags);
-  const incomingThread = getThreadReference(incoming.tags);
-
-  return (
-    pendingThread.parentId === incomingThread.parentId &&
-    pendingThread.rootId === incomingThread.rootId
-  );
-}
-
-function mergeMessagesWithNormalizer(
-  current: RelayEvent[],
-  incoming: RelayEvent,
-  normalize: (messages: RelayEvent[]) => RelayEvent[],
-): RelayEvent[] {
-  const normalizedCurrent = dedupeMessagesById(current);
-  const replacedPending = normalizedCurrent.find((message) =>
-    isMatchingPendingMessage(message, incoming),
-  );
-  const incomingWithLocalKey = replacedPending
-    ? {
-        ...incoming,
-        localKey: replacedPending.localKey ?? replacedPending.id,
-      }
-    : incoming;
-  const incomingLocalKey = getLocalRenderKey(incomingWithLocalKey);
-  const deduped = normalizedCurrent.filter(
-    (message) =>
-      message.id !== incoming.id &&
-      getLocalRenderKey(message) !== incomingLocalKey &&
-      !isMatchingPendingMessage(message, incoming),
-  );
-
-  return normalize([...deduped, incomingWithLocalKey]);
-}
-
-export function mergeMessages(
-  current: RelayEvent[],
-  incoming: RelayEvent,
-): RelayEvent[] {
-  return mergeMessagesWithNormalizer(current, incoming, sortMessages);
-}
-
-export function mergeTimelineCacheMessages(
-  current: RelayEvent[],
-  incoming: RelayEvent,
-): RelayEvent[] {
-  return mergeMessagesWithNormalizer(
-    current,
-    incoming,
-    normalizeTimelineMessages,
-  );
-}
 
 export function createOptimisticMessage(
   channelId: string,
@@ -214,6 +153,25 @@ export function resolveEffectiveChannel(
 }
 
 /**
+ * Resolves a send target captured as either the channel object itself or its id.
+ * A relay-returned channel remains authoritative even when the shared channel
+ * list is temporarily stale and does not contain it.
+ *
+ * Exported for unit testing.
+ */
+export function resolveSendChannel(
+  targetChannel: Channel | undefined,
+  capturedChannelId: string | null | undefined,
+  channelsCache: Channel[] | undefined,
+  fallbackChannel: Channel | null,
+): Channel | null {
+  return (
+    targetChannel ??
+    resolveEffectiveChannel(capturedChannelId, channelsCache, fallbackChannel)
+  );
+}
+
+/**
  * Resolves the thread reply target from a submit-time captured context or,
  * for callers that predate the capture pattern, from live refs.
  *
@@ -255,25 +213,6 @@ export function resolveThreadReplyTarget(
   };
 }
 
-function retainRefetchReconciliationEvents(events: RelayEvent[]) {
-  return events.filter((event) => {
-    if (!CHANNEL_TIMELINE_KINDS.has(event.kind)) return false;
-    if (event.pending) return true;
-    const thread = getThreadReference(event.tags);
-    return thread.parentId !== null && !isBroadcastReply(event.tags);
-  });
-}
-
-function mergeRefetchReconciliationEvents(
-  windowEvents: RelayEvent[],
-  previousMessages: RelayEvent[],
-) {
-  const authoritativeIds = new Set(windowEvents.map((event) => event.id));
-  return retainRefetchReconciliationEvents(previousMessages)
-    .filter((event) => !authoritativeIds.has(event.id))
-    .reduce((current, reply) => mergeMessages(current, reply), windowEvents);
-}
-
 export function useChannelWindowQuery(channel: Channel | null) {
   const queryClient = useQueryClient();
   const queryKey = channelWindowKey(channel?.id ?? "none");
@@ -305,9 +244,8 @@ export function useChannelMessagesQuery(channel: Channel | null) {
         queryClient.getQueryData<ChannelWindowStore>(windowKey) ??
         emptyChannelWindowStore();
       const next = replaceNewestChannelWindow(current, page);
-      const windowEvents = flattenChannelWindowEvents(next);
       queryClient.setQueryData(windowKey, next);
-      return mergeRefetchReconciliationEvents(windowEvents, previousMessages);
+      return reconcileChannelWindowMessages(next, previousMessages);
     },
     staleTime: 5 * 60 * 1_000,
     gcTime: 60 * 60 * 1_000,
@@ -320,11 +258,7 @@ export function useChannelSubscription(channel: Channel | null) {
   const channelType = channel?.channelType ?? null;
   const refreshNewestWindow = useEffectEvent(async () => {
     if (!channelId) return;
-    await queryClient.invalidateQueries({
-      queryKey: channelMessagesKey(channelId),
-      exact: true,
-      refetchType: "active",
-    });
+    await refreshChannelWindowMessages(queryClient, channelId);
   });
 
   const appendMessage = useEffectEvent((event: RelayEvent) => {
@@ -371,10 +305,7 @@ export function useChannelSubscription(channel: Channel | null) {
     const next = mergeLiveChannelWindowEvent(current, event, isTimelineRow);
     if (next !== current) {
       queryClient.setQueryData(windowKey, next);
-      queryClient.setQueryData<RelayEvent[]>(
-        channelMessagesKey(channelId),
-        flattenChannelWindowEvents(next),
-      );
+      projectChannelWindowMessages(queryClient, channelId);
     }
 
     if (event.kind === KIND_SYSTEM_MESSAGE) {
@@ -398,6 +329,17 @@ export function useChannelSubscription(channel: Channel | null) {
       }
     }
   });
+
+  // Notify the relay client which channel is currently visible so its live
+  // subscriptions are replayed first on reconnect, reducing latency on
+  // degraded networks.
+  useEffect(() => {
+    if (!channelId || channelType === "forum") return;
+    setVisibleChannel(channelId);
+    return () => {
+      setVisibleChannel(null);
+    };
+  }, [channelId, channelType]);
 
   useEffect(() => {
     if (!channelId || channelType === "forum") {
@@ -466,6 +408,7 @@ export function useSendMessageMutation(
     Error,
     {
       channelId?: string;
+      targetChannel?: Channel;
       content: string;
       mentionPubkeys?: string[];
       parentEventId?: string | null;
@@ -475,27 +418,31 @@ export function useSendMessageMutation(
   >({
     mutationFn: async ({
       channelId: capturedChannelId,
+      targetChannel,
       content,
       mentionPubkeys,
       parentEventId,
       mediaTags,
     }) => {
-      // Resolve the target channel from the compose-time id when provided, so
-      // a channel switch mid-send does not redirect the message. Fall back to
-      // the closed-over `channel` for callers that don't supply a capturedId.
-      // A supplied-but-unresolvable id throws rather than silently falling back
-      // to the live channel (silent misdelivery is the failure mode we're fixing).
-      const effectiveChannel = resolveEffectiveChannel(
+      // Prefer a channel captured by the caller at compose time. Otherwise,
+      // resolve a captured id from the shared channel cache so navigation
+      // cannot redirect the message. Legacy callers without either value use
+      // the closed-over `channel`.
+      const effectiveChannel = resolveSendChannel(
+        targetChannel,
         capturedChannelId,
         queryClient.getQueryData<Channel[]>(channelsQueryKey),
         channel,
       );
 
-      if (capturedChannelId != null && effectiveChannel == null) {
-        throw new Error("Channel is no longer available.");
+      if (effectiveChannel == null) {
+        if (capturedChannelId != null) {
+          throw new Error("Channel is no longer available.");
+        }
+        throw new Error("This channel does not support message sending yet.");
       }
 
-      if (!effectiveChannel || effectiveChannel.channelType === "forum") {
+      if (effectiveChannel.channelType === "forum") {
         throw new Error("This channel does not support message sending yet.");
       }
 
@@ -512,6 +459,11 @@ export function useSendMessageMutation(
         emojiTags,
         mentionTags,
       } = splitOutgoingTags(mediaTags);
+      const recipientPubkeys = messageMentionPubkeys(
+        effectiveChannel,
+        identity.pubkey,
+        mentionPubkeys,
+      );
 
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
@@ -526,7 +478,7 @@ export function useSendMessageMutation(
           content,
           parentEventId ?? null,
           imetaTags,
-          mentionPubkeys,
+          recipientPubkeys,
           undefined,
           emojiTags,
           mentionTags,
@@ -541,7 +493,7 @@ export function useSendMessageMutation(
               identity.pubkey,
               parentEventId,
               resolveReplyRootId(parentEventId, cachedMessages),
-              mentionPubkeys,
+              recipientPubkeys,
             )
           : [];
         const baseTags = parentEventId
@@ -560,10 +512,9 @@ export function useSendMessageMutation(
             ...baseTags,
             // For non-replies, add mention p-tags here (replies get them via buildReplyTags)
             ...(!parentEventId
-              ? normalizeMentionPubkeys(
-                  mentionPubkeys ?? [],
-                  identity.pubkey,
-                ).map((pk) => ["p", pk])
+              ? normalizeMentionPubkeys(recipientPubkeys, identity.pubkey).map(
+                  (pk) => ["p", pk],
+                )
               : []),
             ...imetaTags,
             ...emojiTags,
@@ -577,22 +528,23 @@ export function useSendMessageMutation(
       return relayClient.sendMessage(
         effectiveChannel.id,
         content,
-        mentionPubkeys ?? [],
+        recipientPubkeys,
         mentionTags,
       );
     },
     onMutate: async ({
       channelId: capturedChannelId,
+      targetChannel,
       content,
       mentionPubkeys,
       parentEventId,
       mediaTags,
     }) => {
-      // Mirror the mutationFn channel resolution so the optimistic message
-      // lands in the same cache key the real send will eventually populate.
-      // A supplied-but-unresolvable id returns undefined (skips optimistic write)
-      // rather than silently writing to the live channel.
-      const effectiveChannel = resolveEffectiveChannel(
+      // Mirror mutationFn's target resolution so the optimistic message lands
+      // in the cache for the same channel as the real send. A caller-supplied
+      // channel remains valid even when a stale channel-list read omitted it.
+      const effectiveChannel = resolveSendChannel(
+        targetChannel,
         capturedChannelId,
         queryClient.getQueryData<Channel[]>(channelsQueryKey),
         channel,
@@ -629,10 +581,7 @@ export function useSendMessageMutation(
         optimisticMessage,
       );
       queryClient.setQueryData(windowKey, nextWindow);
-      queryClient.setQueryData<RelayEvent[]>(
-        queryKey,
-        flattenChannelWindowEvents(nextWindow),
-      );
+      projectChannelWindowMessages(queryClient, effectiveChannel.id);
 
       return {
         optimisticId: optimisticMessage.id,
@@ -680,10 +629,7 @@ export function useSendMessageMutation(
         localKey: context.optimisticId,
       });
       queryClient.setQueryData(windowKey, next);
-      queryClient.setQueryData<RelayEvent[]>(
-        context.queryKey,
-        flattenChannelWindowEvents(next),
-      );
+      projectChannelWindowMessages(queryClient, context.channelId);
     },
   });
 }
@@ -706,7 +652,7 @@ export function useToggleReactionMutation() {
       }
 
       // Custom-emoji reaction: emoji is `:shortcode:`. Resolve its image URL
-      // from the cached workspace palette so the kind:7 carries the NIP-30
+      // from the cached community palette so the kind:7 carries the NIP-30
       // `["emoji", shortcode, url]` tag. Unicode reactions resolve to no URL.
       const emojiUrl = reactionEmojiUrl(
         emoji,
@@ -750,9 +696,12 @@ export function useEditMessageMutation(channel: Channel | null) {
       eventId: string;
       content: string;
       mediaTags?: string[][];
+      // Pubkeys of mentions *newly added* by this edit, diffed at the composer.
+      // Only these receive a `p` tag so a typo-fix edit re-wakes nobody.
+      mentionPubkeys?: string[];
     }
   >({
-    mutationFn: async ({ eventId, content, mediaTags }) => {
+    mutationFn: async ({ eventId, content, mediaTags, mentionPubkeys }) => {
       if (!channel) {
         throw new Error("No channel selected.");
       }
@@ -763,7 +712,14 @@ export function useEditMessageMutation(channel: Channel | null) {
       // guard rejects any non-imeta prefix), mirroring the send path.
       const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
 
-      await editMessage(channel.id, eventId, content, imetaTags, emojiTags);
+      await editMessage(
+        channel.id,
+        eventId,
+        content,
+        imetaTags,
+        emojiTags,
+        mentionPubkeys,
+      );
     },
     onSuccess: (_data, { eventId, content, mediaTags }) => {
       if (!channel) {

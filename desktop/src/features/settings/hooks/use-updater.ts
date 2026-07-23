@@ -57,6 +57,7 @@ export function useUpdater() {
   const updateRef = useRef<Update | null>(null);
   const checkInFlightRef = useRef(false);
   const downloadInFlightRef = useRef(false);
+  const installInFlightRef = useRef(false);
   const manualResultRequestedRef = useRef(false);
 
   const setStatus = useCallback((nextStatus: UpdateStatus) => {
@@ -65,7 +66,7 @@ export function useUpdater() {
   }, []);
 
   const closeUpdate = useCallback(async () => {
-    if (downloadInFlightRef.current) {
+    if (downloadInFlightRef.current || installInFlightRef.current) {
       return;
     }
     const current = updateRef.current;
@@ -75,7 +76,7 @@ export function useUpdater() {
     }
   }, []);
 
-  const downloadAndInstall = useCallback(async () => {
+  const downloadUpdate = useCallback(async () => {
     if (downloadInFlightRef.current) {
       return;
     }
@@ -88,19 +89,35 @@ export function useUpdater() {
       }
 
       setStatus({ state: "downloading" });
-
-      await update.downloadAndInstall((event) => {
-        if (event.event === "Finished") {
-          setStatus({ state: "installing" });
-        }
-      });
-
-      updateRef.current = null;
+      await update.download();
       setStatus({ state: "ready" });
     } catch (err) {
       setStatus({ state: "error", message: toErrorMessage(err) });
     } finally {
       downloadInFlightRef.current = false;
+    }
+  }, [setStatus]);
+
+  const installAndRelaunch = useCallback(async () => {
+    if (installInFlightRef.current) {
+      return;
+    }
+
+    const update = updateRef.current;
+    if (!update) {
+      return;
+    }
+
+    installInFlightRef.current = true;
+    try {
+      setStatus({ state: "installing" });
+      await update.install();
+      updateRef.current = null;
+      await relaunch();
+    } catch (err) {
+      setStatus({ state: "error", message: toErrorMessage(err) });
+    } finally {
+      installInFlightRef.current = false;
     }
   }, [setStatus]);
 
@@ -137,17 +154,16 @@ export function useUpdater() {
         if (update) {
           // Check support BEFORE exposing any actionable state — on a Linux
           // .deb, the window between "available" and "manual-required" would
-          // let a click reach downloadAndInstall on an un-updatable install.
+          // let a click reach an un-updatable install.
           const autoUpdateOk = await isAutoUpdateSupported();
           updateRef.current = update;
           if (autoUpdateOk) {
             setStatus({ state: "available", version: update.version });
-            // Start download automatically — user sees "restart" when done
-            void downloadAndInstall();
+            void downloadUpdate();
           } else {
             // .deb / non-AppImage: surface manual-download card instead.
             // updateRef is intentionally NOT retained — no install handle
-            // should be kept when we will never call downloadAndInstall.
+            // should be kept when we will never install in-app.
             updateRef.current = null;
             setStatus({
               state: "manual-required",
@@ -182,7 +198,7 @@ export function useUpdater() {
         checkInFlightRef.current = false;
       }
     },
-    [closeUpdate, downloadAndInstall, setStatus],
+    [closeUpdate, downloadUpdate, setStatus],
   );
 
   const checkForUpdate = useCallback(async () => {
@@ -192,14 +208,6 @@ export function useUpdater() {
   const checkForUpdateInBackground = useCallback(async () => {
     await runUpdateCheck({ background: true });
   }, [runUpdateCheck]);
-
-  const handleRelaunch = useCallback(async () => {
-    try {
-      await relaunch();
-    } catch (err) {
-      setStatus({ state: "error", message: toErrorMessage(err) });
-    }
-  }, [setStatus]);
 
   useEffect(() => {
     void checkForUpdateInBackground();
@@ -217,7 +225,6 @@ export function useUpdater() {
   return {
     status,
     checkForUpdate,
-    downloadAndInstall,
-    relaunch: handleRelaunch,
+    installAndRelaunch,
   };
 }

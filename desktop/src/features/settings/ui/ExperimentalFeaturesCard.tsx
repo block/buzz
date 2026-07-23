@@ -1,3 +1,4 @@
+import { setAgentManagedProfiles } from "@/shared/api/tauri";
 import { desktopFeatures, useFeatureToggle } from "@/shared/features";
 import type { FeatureDefinition } from "@/shared/features";
 import { Switch } from "@/shared/ui/switch";
@@ -19,7 +20,17 @@ function FeatureRow({ feature }: { feature: FeatureDefinition }) {
         aria-labelledby={`${switchId}-label`}
         checked={enabled}
         data-testid={switchId}
-        onCheckedChange={toggle}
+        onCheckedChange={(value) => {
+          toggle(value);
+          if (feature.id === "agentManagedProfiles") {
+            void setAgentManagedProfiles(value).catch((error) => {
+              console.error(
+                "Failed to apply agent-managed profiles setting:",
+                error,
+              );
+            });
+          }
+        }}
       />
     </div>
   );

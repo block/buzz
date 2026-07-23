@@ -97,14 +97,14 @@ pub struct SubscriptionRule {
     /// Tag passed to the prompt template. Falls back to `name` if absent.
     #[serde(default)]
     pub prompt_tag: Option<String>,
-    /// Pre-compiled evalexpr AST for the `filter` expression (finding #34).
+    /// Pre-compiled evalexpr AST for the `filter` expression.
     ///
     /// Populated by `load_rules()` at startup so `match_event` never re-parses
     /// the expression string on the hot path. `None` when `filter` is `None`
     /// or the rule was constructed without calling `load_rules()` (e.g. tests).
     #[serde(skip)]
     pub compiled_filter: Option<Arc<evalexpr::Node>>,
-    /// Consecutive filter-evaluation timeout counter (finding #25).
+    /// Consecutive filter-evaluation timeout counter.
     ///
     /// Incremented on each timeout; reset on any successful evaluation.
     /// When this reaches `MAX_CONSECUTIVE_TIMEOUTS`, the rule is treated as
@@ -164,7 +164,7 @@ const MAX_EXPR_LEN: usize = 4096;
 /// Maximum wall-clock time allowed for a single evalexpr evaluation.
 const EVAL_TIMEOUT: Duration = Duration::from_millis(100);
 
-/// Maximum concurrent blocking filter evaluations (finding #13 / Issue 3).
+/// Maximum concurrent blocking filter evaluations.
 ///
 /// The semaphore permit is moved into each `spawn_blocking` closure so it is
 /// held until the blocking thread finishes — not just until the caller's timeout
@@ -178,7 +178,7 @@ const MAX_CONCURRENT_FILTER_EVALS: usize = 4;
 /// `OwnedSemaphorePermit` that can be moved into the `spawn_blocking` closure.
 /// This ensures the permit is held until the blocking task actually finishes —
 /// not just until the caller's timeout fires — so the semaphore truly bounds
-/// the number of live blocking threads (finding #13 / Issue 3).
+/// the number of live blocking threads.
 static FILTER_EVAL_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_FILTER_EVALS)));
 
@@ -187,11 +187,11 @@ static FILTER_EVAL_SEMAPHORE: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
 /// - Caps expression length at [`MAX_EXPR_LEN`] bytes.
 /// - Acquires an owned permit from [`FILTER_EVAL_SEMAPHORE`] and moves it into
 ///   the blocking closure so it is held until the task finishes, not just until
-///   the caller's timeout fires (finding #13 / Issue 3).
+///   the caller's timeout fires.
 /// - Runs evaluation on a blocking thread with a [`EVAL_TIMEOUT`] hard timeout.
 /// - When a pre-compiled `node` is provided (via `Arc`), uses
 ///   `node.eval_boolean_with_context()` instead of re-parsing the expression
-///   string on every call (finding #34).
+///   string on every call.
 /// - Registers custom string helpers: `str_contains`, `str_starts_with`,
 ///   `str_ends_with`, `str_len` (duplicated intentionally from buzz-workflow).
 pub async fn evaluate_filter(
@@ -212,7 +212,7 @@ pub async fn evaluate_filter(
     // Acquire an *owned* permit so it can be moved into the spawn_blocking closure.
     // The permit is held until the blocking task actually completes — not just until
     // the caller's timeout fires — so the semaphore truly bounds the number of live
-    // blocking threads even when callers time out (Issue 3 / finding #13).
+    // blocking threads even when callers time out.
     //
     // The acquire itself is bounded by EVAL_TIMEOUT: if all permits are held by
     // wedged blocking tasks, we time out instead of blocking the main event loop.
@@ -351,10 +351,10 @@ const MAX_CONSECUTIVE_TIMEOUTS: u32 = 5;
 /// 2. **kinds** — if non-empty, the event kind must be in the list.
 /// 3. **require_mention** — if `true`, a `p` tag matching `agent_pubkey_hex` must
 ///    exist. Tag kind is checked via `tag.as_slice()` for stable, library-independent
-///    access (finding #45).
+///    access.
 /// 4. **filter** — if `Some`, the evalexpr expression must evaluate to `true`.
 ///
-/// # Fail-closed filter error handling (finding #25)
+/// # Fail-closed filter error handling
 ///
 /// Any filter evaluation error — including timeout — causes the **entire
 /// `match_event` call** to return `None` (no match for any rule). We never
@@ -386,7 +386,7 @@ pub async fn match_event(
 
         // 3. Mention check — look for a `p` tag whose first element equals
         //    agent_pubkey_hex. Uses tag.as_slice() for stable, library-independent
-        //    access (finding #45) — avoids relying on the Display impl of tag kind.
+        //    access — avoids relying on the Display impl of tag kind.
         if rule.require_mention {
             let mentioned = event.tags.iter().any(|tag| {
                 let s = tag.as_slice();

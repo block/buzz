@@ -9,7 +9,7 @@
  *
  *  - **Terminal sessions never reconnect.** When the relay has explicitly
  *    rejected us (today: kind:22242 AUTH OK=false) the session is dead
- *    until the user re-engages (workspace switch or explicit preconnect).
+ *    until the user re-engages (community switch or explicit preconnect).
  *    This guards the reconnect-timer catch handler — and the retry wrappers
  *    in `publishEvent` / `sendRawWithReconnectRetry` — from racing the
  *    `disconnected` state back to `reconnecting`.
@@ -40,4 +40,27 @@ export function shouldScheduleReconnect(inputs: RelayReconnectInputs): boolean {
 /** Whether `ensureConnected()` should refuse with a terminal error. */
 export function shouldRefuseConnect(inputs: { terminal: boolean }): boolean {
   return inputs.terminal;
+}
+
+export function isWebSocketClose(
+  message: unknown,
+): message is { type: "Close"; data?: unknown } {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "type" in message &&
+    message.type === "Close"
+  );
+}
+
+export function isServiceRestartClose(message: unknown): boolean {
+  if (!isWebSocketClose(message)) return false;
+  if (!("data" in message)) return false;
+  const data = message.data;
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "code" in data &&
+    data.code === 1012
+  );
 }

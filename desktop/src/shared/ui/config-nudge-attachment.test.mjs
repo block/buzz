@@ -26,13 +26,39 @@ globalThis.window = {
   dispatchEvent: _eventTarget.dispatchEvent.bind(_eventTarget),
 };
 
-import { focusTargetForRequirement } from "./config-nudge-attachment.tsx";
+import {
+  focusTargetForRequirement,
+  shouldOpenDoctor,
+} from "./config-nudge-attachment.tsx";
 import {
   consumePendingOpenEditAgent,
   requestOpenEditAgent,
 } from "../../features/agents/openEditAgentEvent.ts";
 
 const AGENT_PUBKEY = "aabbccddeeff00112233445566778899";
+
+// ── Doctor routing ────────────────────────────────────────────────────────────
+
+test("shouldOpenDoctor_gitBashMixedWithEnvKey_routesToDoctor", () => {
+  assert.equal(
+    shouldOpenDoctor([
+      { surface: "git_bash" },
+      { surface: "env_key", key: "ANTHROPIC_API_KEY" },
+    ]),
+    true,
+    "a Git Bash requirement must route the whole mixed card to Doctor",
+  );
+});
+
+test("shouldOpenDoctor_regularMixedRequirements_routesToEditAgent", () => {
+  assert.equal(
+    shouldOpenDoctor([
+      { surface: "env_key", key: "ANTHROPIC_API_KEY" },
+      { surface: "normalized_field", field: "model" },
+    ]),
+    false,
+  );
+});
 
 // ── focusTargetForRequirement — pure function ─────────────────────────────────
 

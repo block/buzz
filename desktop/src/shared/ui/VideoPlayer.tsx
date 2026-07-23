@@ -13,7 +13,6 @@ import {
   VolumeX,
   X,
 } from "lucide-react";
-
 import { EmojiPicker } from "@/features/custom-emoji/ui/EmojiPicker";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -27,6 +26,8 @@ import { useSmoothCorners } from "@/shared/ui/smoothCorners";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
 import { Spinner } from "./spinner";
+import { useNaturalVideoAspectRatio } from "./videoAspectRatio";
+import { useVideoContextMenu } from "./useVideoContextMenu";
 import {
   getInlinePlaybackPosition,
   getReviewPlaybackPosition,
@@ -91,6 +92,14 @@ type VideoPlayerProps = {
   durationSeconds?: number;
   reviewKey?: string;
   reviewContext?: VideoReviewContext;
+  /**
+   * Original relay `/media/` URL for the right-click Download action, distinct
+   * from the possibly-proxied `src` the download command's SSRF check rejects.
+   * Omitted for non-relay sources, which hide the Download item.
+   */
+  downloadUrl?: string;
+  /** imeta `filename`, used as the save-dialog name. */
+  filename?: string;
 };
 
 type TimecodedComment = {
@@ -702,6 +711,8 @@ export function VideoPlayer({
   durationSeconds,
   reviewKey,
   reviewContext,
+  downloadUrl,
+  filename,
 }: VideoPlayerProps) {
   const persistedReviewKey = reviewKey ?? src;
   const videoRef = React.useRef<HTMLVideoElement>(null);
@@ -722,9 +733,10 @@ export function VideoPlayer({
   const [playbackSpeed, setPlaybackSpeed] = React.useState(
     DEFAULT_PLAYBACK_SPEED,
   );
-  const [naturalAspectRatio, setNaturalAspectRatio] = React.useState<
-    number | null
-  >(null);
+  // Cache-seeded so a row evicted by the virtualized timeline remounts at the
+  // ratio learned on first metadata load, not the 16/9 fallback.
+  const [naturalAspectRatio, learnNaturalAspectRatio] =
+    useNaturalVideoAspectRatio(src);
   const [reviewOpen, setReviewOpenState] = React.useState(() =>
     isVideoReviewOpen(persistedReviewKey),
   );
@@ -737,6 +749,9 @@ export function VideoPlayer({
   const [inlineRenderedWidth, setInlineRenderedWidth] = React.useState<
     number | null
   >(null);
+
+  const { onContextMenu: onSurfaceContextMenu, menu: videoContextMenu } =
+    useVideoContextMenu(src, downloadUrl, filename);
 
   React.useEffect(() => {
     // The imeta duration seeds the timeline before metadata loads; metadata
@@ -986,6 +1001,7 @@ export function VideoPlayer({
           ref={inlineSurfaceRef}
           className="group/video relative isolate max-w-full overflow-hidden rounded-2xl border border-border/70 bg-black"
           style={inlineSurfaceStyle}
+          onContextMenuCapture={onSurfaceContextMenu}
         >
           {/* Cover, not contain: when the surface's max-height clamp breaks
               the aspect match (tall videos), fill the tile and crop instead
@@ -1035,9 +1051,7 @@ export function VideoPlayer({
                 event.currentTarget.currentTime = restoredSeconds;
                 setCurrentTime(restoredSeconds);
               }
-              if (videoWidth > 0 && videoHeight > 0) {
-                setNaturalAspectRatio(videoWidth / videoHeight);
-              }
+              learnNaturalAspectRatio(videoWidth, videoHeight);
             }}
             onPause={() => {
               setIsPlaying(false);
@@ -1175,6 +1189,7 @@ export function VideoPlayer({
           </button>
         ) : null}
       </div>
+      {videoContextMenu}
       <VideoReviewDialog
         comments={timecodedComments}
         currentTime={reviewCurrentTime}

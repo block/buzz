@@ -27,7 +27,7 @@ const MAX_PENDING_PER_CHANNEL: usize = 500;
 const MAX_BATCH_EVENTS: usize = 50;
 
 /// Maximum retry attempts before a batch is dead-lettered.
-const MAX_RETRIES: u32 = 10;
+pub(crate) const MAX_RETRIES: u32 = 10;
 
 /// Base retry delay in seconds (doubled each attempt).
 const BASE_RETRY_DELAY_SECS: u64 = 5;
@@ -35,8 +35,11 @@ const BASE_RETRY_DELAY_SECS: u64 = 5;
 /// Cap on retry delay in seconds.
 const MAX_RETRY_DELAY_SECS: u64 = 300;
 
-/// In-flight deadline: max_turn (3600s) + 100s buffer.
-const IN_FLIGHT_DEADLINE_SECS: u64 = 3700;
+/// Buffer added to `max_turn_duration` to derive the in-flight deadline.
+const IN_FLIGHT_DEADLINE_BUFFER_SECS: u64 = 100;
+
+/// Default in-flight deadline: default max_turn (7200s) + 100s buffer.
+const DEFAULT_IN_FLIGHT_DEADLINE_SECS: u64 = 7300;
 
 /// An event waiting in the queue.
 #[derive(Debug, Clone)]
@@ -94,7 +97,7 @@ pub struct FlushBatch {
 /// State:
 ///   queues:               Map<channel_id, VecDeque<QueuedEvent>>  (capped at MAX_PENDING_PER_CHANNEL)
 ///   in_flight_channels:   HashSet<Uuid>
-///   in_flight_deadlines:  Map<channel_id, Instant>                (auto-expire after IN_FLIGHT_DEADLINE_SECS)
+///   in_flight_deadlines:  Map<channel_id, Instant>                (auto-expire after in_flight_deadline)
 ///   retry_after:          Map<channel_id, Instant>
 ///   retry_counts:         Map<channel_id, u32>                    (dead-letter after MAX_RETRIES)
 ///   dedup_mode:           DedupMode
@@ -117,7 +120,7 @@ pub struct FlushBatch {
 ///     channel = pick candidate with oldest head event (min received_at)
 ///     events = drain up to MAX_BATCH_EVENTS from queues[channel]
 ///     in_flight_channels.insert(channel)
-///     in_flight_deadlines.insert(channel, now + IN_FLIGHT_DEADLINE_SECS)
+///     in_flight_deadlines.insert(channel, now + in_flight_deadline)
 ///     return Some(FlushBatch { channel, events })
 ///
 ///   mark_complete(channel_id):
@@ -157,14 +160,22 @@ pub struct EventQueue {
     /// path. Populated by [`mark_native_steer_pending`]; drained back to the
     /// queue front by [`release_native_steer`] (preserving original
     /// `received_at` fairness, same discipline as `requeue_preserve_timestamps`
-    /// at line 453). Bulk recovery on `IN_FLIGHT_DEADLINE_SECS` expiry is
-    /// performed by `flush_next` / `has_flushable_work` (recover, not
-    /// log-and-drop — the events were never delivered to the agent).
+    /// at line 453). Bulk recovery on in-flight deadline expiry is performed
+    /// by `flush_next` / `has_flushable_work` (recover, not log-and-drop —
+    /// the events were never delivered to the agent).
     withheld_native_steer: HashMap<Uuid, Vec<QueuedEvent>>,
+    /// Duration after which an in-flight channel is auto-expired as orphaned.
+    /// Must be strictly greater than `max_turn_duration` so a turn running to
+    /// the hard cap returns via `mark_complete` before the backstop fires.
+    in_flight_deadline: Duration,
 }
 
 impl EventQueue {
     /// Create a new empty event queue with the given dedup mode.
+    ///
+    /// Uses [`DEFAULT_IN_FLIGHT_DEADLINE_SECS`] for the in-flight backstop.
+    /// Call [`with_in_flight_deadline`](Self::with_in_flight_deadline) to
+    /// derive the deadline from the configured `max_turn_duration`.
     pub fn new(dedup_mode: DedupMode) -> Self {
         Self {
             queues: HashMap::new(),
@@ -177,6 +188,36 @@ impl EventQueue {
             cancelled_batches: HashMap::new(),
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
+            in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
+        }
+    }
+
+    /// Set the in-flight backstop deadline from the configured max turn
+    /// duration, preserving the 100s buffer for cancel-drain grace + respawn.
+    pub fn with_in_flight_deadline(mut self, max_turn_duration_secs: u64) -> Self {
+        self.in_flight_deadline =
+            Duration::from_secs(max_turn_duration_secs + IN_FLIGHT_DEADLINE_BUFFER_SECS);
+        self
+    }
+
+    /// Monotonically extend an existing in-flight deadline for `channel_id`.
+    ///
+    /// Called when a successful steer grants a fresh turn budget. The new
+    /// deadline is `max(current, now + max_turn_secs + buffer)` — it never
+    /// moves backward. If the channel is not in-flight (already completed
+    /// via `mark_complete`), this is a no-op: a late ack never resurrects
+    /// a deadline.
+    pub fn extend_in_flight_deadline(&mut self, channel_id: Uuid, max_turn_secs: u64) {
+        if let Some(current) = self.in_flight_deadlines.get_mut(&channel_id) {
+            let extended = Instant::now()
+                + Duration::from_secs(max_turn_secs + IN_FLIGHT_DEADLINE_BUFFER_SECS);
+            if extended > *current {
+                tracing::info!(
+                    %channel_id,
+                    "extending in-flight deadline by {max_turn_secs}s + {IN_FLIGHT_DEADLINE_BUFFER_SECS}s buffer"
+                );
+                *current = extended;
+            }
         }
     }
 
@@ -231,7 +272,7 @@ impl EventQueue {
             tracing::error!(
                 channel_id = %id,
                 lost_events,
-                deadline_secs = IN_FLIGHT_DEADLINE_SECS,
+                deadline_secs = self.in_flight_deadline.as_secs(),
                 "BUG: in-flight channel expired without mark_complete — \
                  auto-releasing; {lost_events} dispatched event(s) orphaned"
             );
@@ -277,7 +318,7 @@ impl EventQueue {
                         let cancel_reason = self.cancel_reasons.remove(&id);
                         self.in_flight_channels.insert(id);
                         self.in_flight_deadlines
-                            .insert(id, now + Duration::from_secs(IN_FLIGHT_DEADLINE_SECS));
+                            .insert(id, now + self.in_flight_deadline);
                         self.in_flight_batch_sizes.insert(id, cancelled.len());
                         return Some(FlushBatch {
                             channel_id: id,
@@ -294,7 +335,7 @@ impl EventQueue {
         // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
         let queue = self.queues.entry(channel_id).or_default();
         let drain_count = MAX_BATCH_EVENTS.min(queue.len());
-        let events: Vec<BatchEvent> = queue
+        let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
             .map(|qe| BatchEvent {
                 event: qe.event,
@@ -302,6 +343,11 @@ impl EventQueue {
                 received_at: qe.received_at,
             })
             .collect();
+        // Relay replay delivers stored events newest-first (`ORDER BY
+        // created_at DESC`), but batch consumers — `format_prompt` scope and
+        // reply-anchor selection — require the LAST event to be the newest.
+        // Stable sort: same-second events keep delivery order.
+        events.sort_by_key(|be| be.event.created_at);
 
         // Remove the queue entry if now empty.
         if self.queues.get(&channel_id).is_some_and(|q| q.is_empty()) {
@@ -309,10 +355,8 @@ impl EventQueue {
         }
 
         self.in_flight_channels.insert(channel_id);
-        self.in_flight_deadlines.insert(
-            channel_id,
-            now + Duration::from_secs(IN_FLIGHT_DEADLINE_SECS),
-        );
+        self.in_flight_deadlines
+            .insert(channel_id, now + self.in_flight_deadline);
         self.in_flight_batch_sizes.insert(channel_id, events.len());
 
         // Merge any cancelled events stored by requeue_as_cancelled().
@@ -524,7 +568,7 @@ impl EventQueue {
             tracing::error!(
                 channel_id = %id,
                 lost_events,
-                deadline_secs = IN_FLIGHT_DEADLINE_SECS,
+                deadline_secs = self.in_flight_deadline.as_secs(),
                 "BUG: in-flight channel expired without mark_complete — \
                  auto-releasing; {lost_events} dispatched event(s) orphaned"
             );
@@ -549,6 +593,22 @@ impl EventQueue {
     /// Number of channels with pending events.
     pub fn pending_channels(&self) -> usize {
         self.queues.len()
+    }
+
+    /// Number of queued events for a specific channel. Test-only.
+    #[cfg(test)]
+    pub fn queued_event_count(&self, channel_id: &Uuid) -> usize {
+        self.queues.get(channel_id).map_or(0, |q| q.len())
+    }
+
+    /// Force a channel's retry-attempt counter to `count`, simulating `count`
+    /// prior failed attempts without needing to drive fake flush/requeue
+    /// cycles through the queue (which would leave artifact events behind).
+    /// Test-only — lets integration tests outside this module exercise
+    /// `requeue()`'s dead-letter threshold directly.
+    #[cfg(test)]
+    pub fn set_retry_count_for_test(&mut self, channel_id: Uuid, count: u32) {
+        self.retry_counts.insert(channel_id, count);
     }
 
     /// Drop all queued (non-in-flight) events for a channel.
@@ -693,7 +753,7 @@ impl EventQueue {
     /// Bulk-release every withheld event for `channel_id` back to the queue
     /// front, preserving relative FIFO order.
     ///
-    /// Called from the `IN_FLIGHT_DEADLINE_SECS` expiry blocks in
+    /// Called from the `in_flight_deadline` expiry blocks in
     /// `flush_next` and `has_flushable_work` — if a steer ack never arrives
     /// (read loop hung, watcher never posted), the withheld events would
     /// otherwise be permanently orphaned. Recover, do not log-and-drop: the
@@ -1303,6 +1363,15 @@ pub struct FormatPromptArgs<'a> {
     pub base_prompt: Option<&'a str>,
     /// System prompt content for legacy agents (protocol_version < 2).
     pub system_prompt: Option<&'a str>,
+    /// Team instructions for legacy agents, rendered after `[System]`.
+    pub team_instructions: Option<&'a str>,
+    /// Rendered `[Channel Canvas]` metadata section for legacy agents.
+    ///
+    /// For modern agents (protocol_version >= 2) the section is delivered via
+    /// the system role in session/new; omit here to avoid duplication.
+    /// For legacy agents it rides in the user message on every turn of the
+    /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
+    pub agent_canvas: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1364,6 +1433,13 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         if let Some(sp) = args.system_prompt {
             sections.push(format!("[System]\n{sp}"));
         }
+        if let Some(team) = args
+            .team_instructions
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            sections.push(format!("[Team Instructions]\n{team}"));
+        }
     }
 
     // NIP-AE agent core memory (rendered by `engram_fetch::build_core_section`).
@@ -1374,6 +1450,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     if !args.has_system_prompt_support {
         if let Some(core) = args.agent_core {
             sections.push(core.to_string());
+        }
+        // Channel canvas metadata — same delivery semantics as core for legacy agents.
+        if let Some(canvas) = args.agent_canvas {
+            sections.push(canvas.to_string());
         }
     }
 
@@ -1548,7 +1628,7 @@ pub(crate) fn native_steer_framing() -> (&'static str, &'static str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nostr::{EventBuilder, Keys, Kind};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
     use std::time::Duration;
 
     /// Build a test event with the given content and kind.
@@ -1576,6 +1656,26 @@ mod tests {
             channel_id,
             event: make_event(content),
             received_at: Instant::now() - age,
+            prompt_tag: "test".into(),
+        }
+    }
+
+    /// Build a QueuedEvent with an explicit Nostr `created_at` timestamp.
+    fn make_queued_created_at(
+        channel_id: Uuid,
+        content: &str,
+        created_at_secs: u64,
+    ) -> QueuedEvent {
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(9), content)
+            .custom_created_at(Timestamp::from(created_at_secs))
+            .tags([])
+            .sign_with_keys(&keys)
+            .unwrap();
+        QueuedEvent {
+            channel_id,
+            event,
+            received_at: Instant::now(),
             prompt_tag: "test".into(),
         }
     }
@@ -1676,6 +1776,34 @@ mod tests {
         // All drained.
         assert_eq!(pending_count(&q), 0);
         assert_eq!(q.queues.len(), 0);
+    }
+
+    #[test]
+    fn test_flush_orders_replayed_events_chronologically() {
+        // Relay replay after a reconnect/restart delivers stored events newest
+        // first (`ORDER BY created_at DESC`), but `format_prompt` derives the
+        // reply anchor and scope from the LAST batch event on the assumption
+        // that it is the newest. The drained batch must therefore be
+        // chronological regardless of delivery order.
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.push(make_queued_created_at(ch, "newest", 2_000));
+        q.push(make_queued_created_at(ch, "oldest", 1_000));
+
+        let batch = q.flush_next().expect("should return batch");
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.events[0].event.content, "oldest");
+        assert_eq!(batch.events[1].event.content, "newest");
+
+        // The rendered prompt's reply anchor must cite the newest event, so
+        // the agent's reply threads under the message it is responding to.
+        let newest_id = batch.events[1].event.id.to_hex();
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            prompt.contains(&format!("--reply-to {newest_id}")),
+            "reply anchor must target the newest event; prompt was:\n{prompt}"
+        );
     }
 
     #[test]
@@ -4139,7 +4267,7 @@ mod tests {
     // `flush_next` / `has_flushable_work` / contiguous drain. `Success` ack
     // drops it via `remove_event`; `Err` / `PromptCompletedNeutral` ack
     // restores it to the queue front via `release_native_steer`. The
-    // `IN_FLIGHT_DEADLINE_SECS` expiry bulk-recovers withheld events so they
+    // `in_flight_deadline` expiry bulk-recovers withheld events so they
     // are never permanently orphaned.
 
     /// A channel whose only queued event has been withheld for a goose-native
@@ -4219,7 +4347,7 @@ mod tests {
     }
 
     /// If the steer ack never arrives — read loop hung, watcher never posted —
-    /// the `IN_FLIGHT_DEADLINE_SECS` auto-expiry block must bulk-recover the
+    /// the `in_flight_deadline` auto-expiry block must bulk-recover the
     /// withheld events back to the queue front so normal dispatch can deliver
     /// them. Recover, not log-and-drop: the events were never seen by the
     /// agent.
@@ -4241,7 +4369,7 @@ mod tests {
 
         // Force the in-flight deadline to be in the past, simulating the
         // steer ack never arriving and the read loop hanging long enough
-        // for `IN_FLIGHT_DEADLINE_SECS` to elapse. Same expiry-simulation
+        // for `in_flight_deadline` to elapse. Same expiry-simulation
         // trick used by `test_retry_throttle_blocks_requeue_channel`.
         q.in_flight_deadlines
             .insert(ch, Instant::now() - Duration::from_secs(1));
@@ -4316,5 +4444,316 @@ mod tests {
             .collect();
         assert_eq!(recovered, vec![e1_id, e2_id, e3_id]);
         assert!(q.withheld_native_steer.is_empty());
+    }
+
+    // ── format_prompt: agent_canvas ─────────────────────────────────────────
+
+    #[test]
+    fn test_format_prompt_canvas_injected_for_legacy_agent() {
+        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_canvas: Some(canvas),
+                has_system_prompt_support: false,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            prompt.contains("[Channel Canvas]"),
+            "legacy agent prompt must include canvas section; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_canvas_omitted_for_modern_agent() {
+        let canvas = "[Channel Canvas]\nCanvas revision (event ID): abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\nLast modified: 2024-01-15T10:30:00+00:00\nFetch current content with: buzz canvas get --channel 00f1ccaf-1506-4dd7-9a0e-fa67e9e486ae";
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                agent_canvas: Some(canvas),
+                has_system_prompt_support: true,
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(
+            !prompt.contains("[Channel Canvas]"),
+            "modern agent must not get canvas in user message (it's in systemPrompt); got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_no_canvas_produces_no_canvas_section() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("hi"),
+                prompt_tag: "test".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+        assert!(
+            !prompt.contains("[Channel Canvas]"),
+            "no canvas section expected when agent_canvas is None; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn default_in_flight_deadline_exceeds_default_max_turn_duration() {
+        let q = EventQueue::new(DedupMode::Queue);
+        let default_max_turn = Duration::from_secs(crate::config::DEFAULT_MAX_TURN_DURATION_SECS);
+        assert!(
+            q.in_flight_deadline > default_max_turn,
+            "in_flight_deadline ({:?}) must be strictly greater than \
+             default max_turn_duration ({:?})",
+            q.in_flight_deadline,
+            default_max_turn,
+        );
+    }
+
+    #[test]
+    fn with_in_flight_deadline_derives_from_max_turn_duration() {
+        let max_turn = 9000u64;
+        let q = EventQueue::new(DedupMode::Queue).with_in_flight_deadline(max_turn);
+        let expected = Duration::from_secs(max_turn + IN_FLIGHT_DEADLINE_BUFFER_SECS);
+        assert_eq!(
+            q.in_flight_deadline, expected,
+            "in_flight_deadline should be max_turn_duration + buffer"
+        );
+        assert!(
+            q.in_flight_deadline > Duration::from_secs(max_turn),
+            "in_flight_deadline must be strictly greater than max_turn_duration"
+        );
+    }
+
+    #[test]
+    fn extend_in_flight_deadline_advances_existing_entry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let old_deadline = Instant::now() + Duration::from_secs(100);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, old_deadline);
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let new = *q.in_flight_deadlines.get(&ch).unwrap();
+        assert!(
+            new > old_deadline,
+            "extended deadline must be past the original"
+        );
+    }
+
+    #[test]
+    fn extend_in_flight_deadline_is_monotonic() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let far_future = Instant::now() + Duration::from_secs(999_999);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, far_future);
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let after = *q.in_flight_deadlines.get(&ch).unwrap();
+        assert_eq!(after, far_future, "deadline must never move backward");
+    }
+
+    #[test]
+    fn extend_in_flight_deadline_noop_after_mark_complete() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(100));
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        q.mark_complete(ch);
+        assert!(!q.in_flight_deadlines.contains_key(&ch));
+
+        q.extend_in_flight_deadline(ch, 7200);
+        assert!(
+            !q.in_flight_deadlines.contains_key(&ch),
+            "extend after mark_complete must not resurrect a deadline"
+        );
+    }
+
+    #[test]
+    fn compact_expired_state_preserves_extended_in_flight_deadline() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let extended = Instant::now() + Duration::from_secs(9999);
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, extended);
+
+        q.compact_expired_state();
+
+        assert!(
+            q.in_flight_deadlines.contains_key(&ch),
+            "compaction must not touch in-flight deadlines"
+        );
+        assert_eq!(
+            *q.in_flight_deadlines.get(&ch).unwrap(),
+            extended,
+            "compaction must leave extended deadline intact"
+        );
+    }
+
+    // ── F2 case 2.2: extend_in_flight_deadline prevents flush_next expiry ────
+
+    /// A channel in-flight with a past deadline is auto-expired by
+    /// `flush_next` and the "BUG: in-flight channel expired" path fires.
+    /// Verify this baseline — we need the expiry to actually happen for the
+    /// next test's "extended deadline prevents it" assertion to be meaningful.
+    #[test]
+    fn expired_in_flight_deadline_is_auto_released_by_flush_next() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Insert the channel as in-flight with a deadline already in the past
+        // (Instant::now() — by the time flush_next runs, now >= deadline).
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines.insert(ch, Instant::now());
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        // Also push an event so flush_next has something to do after expiry.
+        q.push(make_queued(ch, "after-expiry"));
+
+        // flush_next auto-expires the stuck entry and then dispatches the
+        // pending event for the now-freed channel.
+        let batch = q
+            .flush_next()
+            .expect("channel should be dispatchable after auto-expiry");
+        assert_eq!(batch.channel_id, ch);
+        assert_eq!(batch.events[0].event.content, "after-expiry");
+    }
+
+    /// F2 case 2.2 — `flush_next` path.
+    ///
+    /// A channel whose in-flight deadline was extended far into the future
+    /// must NOT be auto-expired by `flush_next`.  No "BUG: in-flight channel
+    /// expired" logic fires; the channel stays in-flight; the pending event
+    /// for it is not dispatched a second time.
+    #[test]
+    fn extended_deadline_prevents_flush_next_expiry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // Put the channel in-flight with an extended deadline far in the future.
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(9999));
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        // Push an event for another channel so flush_next has work to do.
+        let ch2 = Uuid::new_v4();
+        q.push(make_queued(ch2, "other-channel"));
+
+        let batch = q.flush_next().expect("other channel should flush");
+        assert_eq!(
+            batch.channel_id, ch2,
+            "only ch2 should be flushed; ch is still in-flight with extended deadline"
+        );
+
+        // ch must still be in-flight — the extended deadline did not expire.
+        assert!(
+            q.in_flight_channels.contains(&ch),
+            "ch must remain in-flight after flush_next with an extended deadline"
+        );
+        assert!(
+            q.in_flight_deadlines.contains_key(&ch),
+            "in-flight deadline for ch must not be removed by flush_next"
+        );
+    }
+
+    /// F2 case 2.2 — `has_flushable_work` path.
+    ///
+    /// Same guarantee as above but exercising `has_flushable_work` instead of
+    /// `flush_next`.  A channel with an extended deadline far in the future
+    /// must not be auto-expired, and the method must return the correct answer
+    /// based on the other pending channel only.
+    #[test]
+    fn extended_deadline_prevents_has_flushable_work_expiry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // In-flight channel with extended (far-future) deadline.
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(9999));
+        q.in_flight_batch_sizes.insert(ch, 1);
+
+        // No other channels — nothing flushable.
+        assert!(
+            !q.has_flushable_work(),
+            "has_flushable_work must return false when the only channel is in-flight with extended deadline"
+        );
+        assert!(
+            q.in_flight_channels.contains(&ch),
+            "ch must remain in-flight after has_flushable_work with extended deadline"
+        );
+
+        // Add a pending event for a different channel.
+        let ch2 = Uuid::new_v4();
+        q.push(make_queued(ch2, "pending"));
+        assert!(
+            q.has_flushable_work(),
+            "has_flushable_work must return true for the pending ch2 event"
+        );
+        // ch still in-flight and not expired.
+        assert!(
+            q.in_flight_channels.contains(&ch),
+            "ch must still be in-flight after has_flushable_work finds ch2 work"
+        );
+    }
+
+    // ── F2 case 2.5: steer renewal is monotonic across repeated steers ───────
+
+    /// Calling `extend_in_flight_deadline` twice with the same `max_turn_secs`
+    /// must only move the deadline forward; the second call must produce a
+    /// deadline >= the first (monotonic guarantee, tested at queue-unit level).
+    #[test]
+    fn repeated_extend_in_flight_deadline_is_monotonic() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        q.in_flight_channels.insert(ch);
+        q.in_flight_deadlines
+            .insert(ch, Instant::now() + Duration::from_secs(100));
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let after_first = *q.in_flight_deadlines.get(&ch).unwrap();
+
+        q.extend_in_flight_deadline(ch, 7200);
+        let after_second = *q.in_flight_deadlines.get(&ch).unwrap();
+
+        assert!(
+            after_second >= after_first,
+            "second extend must not move deadline backward (monotonic)"
+        );
     }
 }

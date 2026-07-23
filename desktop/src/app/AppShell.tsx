@@ -1,20 +1,19 @@
 import * as React from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Outlet, useLocation } from "@tanstack/react-router";
-
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { AppShellProvider } from "@/app/AppShellContext";
-import {
-  AppShellOverlays,
-  type BrowseDialogType,
-} from "@/app/AppShellOverlays";
+import * as BuzzTheme from "@/app/BuzzThemeSurfaces";
+import { AppShellOverlays } from "@/app/AppShellOverlays";
 import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
+import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
 import { useSettingsShortcuts } from "@/app/useSettingsShortcuts";
 import { useAppShellDesktopNotifications } from "@/app/useAppShellDesktopNotifications";
+import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
@@ -34,13 +33,15 @@ import {
   useHomeFeedNotifications,
   useHomeFeedNotificationState,
 } from "@/features/notifications/hooks";
-import { setDesktopAppBadge } from "@/features/notifications/lib/desktop";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
+import { useManagedAgentRuntimeReconciliation } from "@/features/agents/useManagedAgentRuntimeReconciliation";
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
 import { usePersonaSync } from "@/features/agents/lib/usePersonaSync";
 import { useAgentObserverIngestion } from "@/features/agents/useAgentObserverIngestion";
+import { AgentManagementDialogs } from "@/features/agents/ui/AgentManagementDialogs";
+import { RequestedAgentCreateDialogs } from "@/features/agents/ui/RequestedAgentCreateDialogs";
 import {
   usePresenceSession,
   usePresenceSubscription,
@@ -50,11 +51,12 @@ import {
   useUserStatusQuery,
   useUserStatusSubscription,
 } from "@/features/user-status/hooks";
-import { useWorkspaceEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
+import { useCommunityEmojiLiveUpdates } from "@/features/custom-emoji/hooks";
 import { useArchiveSync } from "@/features/local-archive/archiveSyncManager";
-import { useObserverArchiveSeed } from "@/features/local-archive/useObserverArchiveSeed";
+import { useObserverArchiveReconciliation } from "@/features/local-archive/useObserverArchiveSeed";
 import { useAgentMetricArchiveSeed } from "@/features/local-archive/useAgentMetricArchiveSeed";
 import { useProfileQuery } from "@/features/profile/hooks";
+import { SendFeedbackController } from "@/features/settings/ui/SendFeedbackController";
 import {
   DEFAULT_SETTINGS_SECTION,
   type SettingsSection,
@@ -65,19 +67,19 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
-import { WorkspaceRail } from "@/features/sidebar/ui/WorkspaceRail";
+import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
-import { useWorkspaces } from "@/features/workspaces/useWorkspaces";
+import { useCommunities } from "@/features/communities/useCommunities";
+import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
-import { useFeatureEnabled } from "@/shared/features";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useRelayAutoHeal } from "@/shared/api/useRelayAutoHeal";
 import { useDeferredStartup } from "@/shared/hooks/useDeferredStartup";
 import { useWebviewScrollBoundaryLock } from "@/shared/hooks/useWebviewScrollBoundaryLock";
 import { joinChannel } from "@/shared/api/tauri";
-import type { SearchHit } from "@/shared/api/types";
+import type { ChannelVisibility, SearchHit } from "@/shared/api/types";
 import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationContext";
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
@@ -87,7 +89,6 @@ import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
-
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
   return { default: module.SettingsScreen };
@@ -98,27 +99,27 @@ export function AppShell() {
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
 
-  const workspacesHook = useWorkspaces();
-  const workspaceRailEnabled = useFeatureEnabled("workspaceRail");
-  const [isAddWorkspaceOpen, setIsAddWorkspaceOpen] = React.useState(false);
+  const communitiesHook = useCommunities();
+  const hasCommunityRail = communitiesHook.communities.length > 1;
+  const addCommunityDialog = useAddCommunityDialogState();
   const [isChannelManagementOpen, setIsChannelManagementOpen] =
     React.useState(false);
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
     null,
   );
   const [searchFocusRequest, setSearchFocusRequest] = React.useState(0);
-  const [browseDialogType, setBrowseDialogType] =
-    React.useState<BrowseDialogType>(null);
-  const [isNewDmOpen, setIsNewDmOpen] = React.useState(false);
   const [isCreateChannelOpen, setIsCreateChannelOpen] = React.useState(false);
+  const [isSendFeedbackOpen, setIsSendFeedbackOpen] = React.useState(false);
   const [isHuddleDrawerOpen, setIsHuddleDrawerOpen] = React.useState(false);
   const mainInsetRef = React.useRef<HTMLElement>(null);
   const location = useLocation();
   const queryClient = useQueryClient();
+  useManagedAgentRuntimeReconciliation(communitiesHook.communities); // sync storage snapshot
   const {
     goAgents,
     goChannel,
     goHome,
+    goNewMessage,
     goProjects,
     goPulse,
     goSettings,
@@ -128,24 +129,24 @@ export function AppShell() {
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
-  // Navigate home before switching workspaces so the outgoing channel URL is
+  // Navigate home before switching communities so the outgoing channel URL is
   // cleared. Without this, ChannelScreen's read effect continues firing
-  // markChannelRead({ topLevelOnly: true }) for the previous workspace's
+  // markChannelRead({ topLevelOnly: true }) for the previous community's
   // channel, advancing its NIP-RS markers and causing the rail badge to vanish
   // on the next 30s poll (A→B→A→B disappearance bug).
-  // Guard: skip goHome() when re-selecting the already-active workspace so
+  // Guard: skip goHome() when re-selecting the already-active community so
   // the current channel is not unexpectedly cleared.
-  const handleSwitchWorkspace = React.useCallback(
+  const handleSwitchCommunity = React.useCallback(
     (id: string) => {
-      if (id !== workspacesHook.activeWorkspace?.id) {
+      if (id !== communitiesHook.activeCommunity?.id) {
         void goHome();
       }
-      workspacesHook.switchWorkspace(id);
+      communitiesHook.switchCommunity(id);
     },
     [
       goHome,
-      workspacesHook.activeWorkspace?.id,
-      workspacesHook.switchWorkspace,
+      communitiesHook.activeCommunity?.id,
+      communitiesHook.switchCommunity,
     ],
   );
   const { selectedChannelId, selectedView } = React.useMemo(
@@ -182,21 +183,24 @@ export function AppShell() {
   // relay-owned agents join automatically once identity arrives. Adding a
   // guard here would drop managed-agent coverage during startup.
   useAgentObserverIngestion();
-  useArchiveSync();
-  // Defer the archive *seeds* until startup is idle: they're first-run catch-up
-  // config (a one-shot mergeSaveSubscriptionKinds), not live-ingest — that's
-  // useArchiveSync's job, which stays eager above. Passing deferredPubkey makes
-  // each seed hook wait on its own `if (!pubkey) return` guard until the shell
-  // is interactive, so their IPC + sqlite archive open doesn't compete with
-  // first paint. The explicit-choice guard inside each hook is unchanged.
+  // Kind 24200 is relay-ephemeral, so reconciliation runs eagerly (not
+  // deferred) and unconditionally repairs the DB subscription on internal
+  // builds — otherwise frames emitted before the listener opens are lost.
+  const observerReconciled = useObserverArchiveReconciliation(
+    identityQuery.data?.pubkey,
+  );
+  // useArchiveSync must wait for reconciliation, or listeners could open
+  // before kind 24200 is guaranteed present in the subscription.
+  useArchiveSync(observerReconciled);
+  // Kind 44200 is relay-persisted (durable) and stays deferred: missed
+  // startup frames can be replayed, so there's no ordering constraint.
   const deferredPubkey = startupReady ? identityQuery.data?.pubkey : undefined;
-  useObserverArchiveSeed(deferredPubkey);
   useAgentMetricArchiveSeed(deferredPubkey);
   const profileQuery = useProfileQuery();
   useRelayAutoHeal();
   usePresenceSubscription();
   useUserStatusSubscription();
-  useWorkspaceEmojiLiveUpdates();
+  useCommunityEmojiLiveUpdates();
   useMembershipNotifications(identityQuery.data?.pubkey);
   const presenceSession = usePresenceSession(deferredPubkey);
   const selfStatusQuery = useUserStatusQuery(
@@ -227,7 +231,7 @@ export function AppShell() {
       : undefined;
   const relayConnectionCard = useSidebarRelayConnectionCard(
     channelsErrorMessage,
-    workspacesHook.activeWorkspace?.relayUrl,
+    communitiesHook.activeCommunity?.relayUrl,
   );
   const memberChannels = React.useMemo(
     () => channels.filter((channel) => channel.isMember),
@@ -293,6 +297,7 @@ export function AppShell() {
   } = useUnreadChannels(sidebarChannels, activeChannel, {
     pubkey: identityQuery.data?.pubkey,
     relayClient,
+    relayUrl: communitiesHook.activeCommunity?.relayUrl,
     currentPubkey: identityQuery.data?.pubkey,
     mutedChannelIds,
     notifyForActiveChannel: notificationSettings.settings.notifyWhileViewing,
@@ -369,6 +374,7 @@ export function AppShell() {
       threadActivityFeedItems,
       getThreadReadAt,
       getMessageReadAt,
+      channels,
     );
 
   const dueReminderBadge = useDueReminderBadgeCount(
@@ -407,26 +413,21 @@ export function AppShell() {
     [unfollowThread, muteThread],
   );
 
-  const createChannelMutation = useCreateChannelMutation();
-  const createForumMutation = useCreateChannelMutation();
+  const createChannelMutation = useCreateChannelMutation(),
+    createForumMutation = useCreateChannelMutation();
   const { applyCanvas, applyAgents } = useApplyTemplate();
-
   const openDmMutation = useOpenDmMutation();
   const hideDmMutation = useHideDmMutation();
-  const handleOpenBrowseChannels = React.useCallback(() => {
-    setBrowseDialogType("stream");
-    void refetchChannels();
-  }, [refetchChannels]);
+  const {
+    browseDialogType,
+    openBrowseChannels: handleOpenBrowseChannels,
+    onBrowseDialogOpenChange: handleBrowseDialogOpenChange,
+    getCreateSuccess,
+  } = useChannelBrowserDialog(() => void refetchChannels());
   const handleOpenSearch = React.useCallback(() => {
     setSearchFocusRequest((request) => request + 1);
     void refetchChannels();
   }, [refetchChannels]);
-
-  const handleBrowseDialogOpenChange = React.useCallback((open: boolean) => {
-    if (!open) {
-      setBrowseDialogType(null);
-    }
-  }, []);
 
   const handleBrowseChannelJoin = React.useCallback(
     async (channelId: string) => {
@@ -434,6 +435,92 @@ export function AppShell() {
       await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
     },
     [queryClient],
+  );
+
+  const handleCreateChannel = React.useCallback(
+    async (
+      {
+        description,
+        name,
+        visibility,
+        ttlSeconds,
+        templateId,
+      }: {
+        name: string;
+        description?: string;
+        visibility: ChannelVisibility;
+        ttlSeconds?: number;
+        templateId?: string;
+      },
+      onCreated?: (channelId: string) => void,
+    ) => {
+      const createdChannel = await createChannelMutation.mutateAsync({
+        name,
+        description,
+        channelType: "stream",
+        visibility,
+        ttlSeconds,
+      });
+
+      await applyCanvas(templateId, createdChannel.id, name);
+      await goChannel(createdChannel.id);
+      onCreated?.(createdChannel.id);
+      void applyAgents(templateId, createdChannel.id);
+    },
+    [applyAgents, applyCanvas, createChannelMutation, goChannel],
+  );
+
+  const handleCreateForum = React.useCallback(
+    async ({
+      description,
+      name,
+      visibility,
+      ttlSeconds,
+      templateId,
+    }: {
+      name: string;
+      description?: string;
+      visibility: ChannelVisibility;
+      ttlSeconds?: number;
+      templateId?: string;
+    }) => {
+      const createdForum = await createForumMutation.mutateAsync({
+        name,
+        description,
+        channelType: "forum",
+        visibility,
+        ttlSeconds,
+      });
+
+      await applyCanvas(templateId, createdForum.id, name);
+      await goChannel(createdForum.id);
+      void applyAgents(templateId, createdForum.id);
+    },
+    [applyAgents, applyCanvas, createForumMutation, goChannel],
+  );
+
+  // The channel browser can create either a stream or a forum depending on
+  // which section opened it. Route to the matching handler.
+  const handleBrowseChannelCreate = React.useCallback(
+    async (input: {
+      name: string;
+      description?: string;
+      visibility: ChannelVisibility;
+      ttlSeconds?: number;
+      templateId?: string;
+    }) => {
+      if (browseDialogType === "forum") {
+        await handleCreateForum(input);
+      } else {
+        await handleCreateChannel(input, getCreateSuccess() ?? undefined);
+      }
+    },
+    [
+      browseDialogType,
+      handleCreateChannel,
+      handleCreateForum,
+      getCreateSuccess,
+    ],
   );
 
   const handleHideDm = React.useCallback(
@@ -480,73 +567,19 @@ export function AppShell() {
     [openSearchHit],
   );
 
-  // Prevent webview file:/// navigation on file drop outside the composer.
-  // Scoped to file drags only (text drag-and-drop into inputs still works).
-  // Composer's onDrop fires first (React synthetic before window bubble).
-  React.useEffect(() => {
-    function preventNavigation(e: DragEvent) {
-      if (e.dataTransfer?.types.includes("Files")) {
-        e.preventDefault();
-      }
-    }
-    window.addEventListener("dragover", preventNavigation);
-    window.addEventListener("drop", preventNavigation);
-    return () => {
-      window.removeEventListener("dragover", preventNavigation);
-      window.removeEventListener("drop", preventNavigation);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    let isCancelled = false;
-
-    const startPreconnect = () => {
-      if (isCancelled) {
-        return;
-      }
-
-      void relayClient.preconnect().catch((error) => {
-        if (!isCancelled) {
-          console.error("Failed to preconnect to relay", error);
-        }
-      });
-    };
-
-    if ("requestIdleCallback" in window) {
-      const idleId = window.requestIdleCallback(startPreconnect, {
-        timeout: 1_500,
-      });
-      return () => {
-        isCancelled = true;
-        window.cancelIdleCallback(idleId);
-      };
-    }
-
-    const timeoutId = globalThis.setTimeout(startPreconnect, 250);
-    return () => {
-      isCancelled = true;
-      globalThis.clearTimeout(timeoutId);
-    };
-  }, []);
-
-  React.useEffect(() => {
-    const count =
-      unreadChannelNotificationCount + homeBadgeCountExcludingHighPriority;
-    void setDesktopAppBadge(
-      count
-        ? { kind: "count", count }
-        : { kind: unreadChannelIds.size ? "dot" : "none" },
-    );
-  }, [
+  useAppShellLifecycleEffects({
     homeBadgeCountExcludingHighPriority,
     unreadChannelIds,
     unreadChannelNotificationCount,
-  ]);
+  });
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
 
-  const handleOpenNewDm = React.useCallback(() => setIsNewDmOpen(true), []);
+  const handleOpenNewDm = React.useCallback(
+    () => void goNewMessage(),
+    [goNewMessage],
+  );
   const handleOpenCreateChannel = React.useCallback(
     () => setIsCreateChannelOpen(true),
     [],
@@ -684,6 +717,7 @@ export function AppShell() {
             markAllChannelsRead,
             markChannelRead,
             markChannelUnread,
+            openBrowseChannels: handleOpenBrowseChannels,
             openCreateChannel: handleOpenCreateChannel,
             openChannelManagement: (channelId?: string) => {
               setManagedChannelId(
@@ -721,16 +755,18 @@ export function AppShell() {
                     isHuddleDrawerOpen && "buzz-huddle-app-surface-open",
                   )}
                 >
-                  {workspaceRailEnabled ? (
-                    <WorkspaceRail
-                      activeWorkspaceId={
-                        workspacesHook.activeWorkspace?.id ?? null
+                  <BuzzTheme.GradientLayer />
+                  {hasCommunityRail ? (
+                    <CommunityRail
+                      activeCommunityId={
+                        communitiesHook.activeCommunity?.id ?? null
                       }
-                      onAddWorkspace={() => setIsAddWorkspaceOpen(true)}
-                      onRemoveWorkspace={workspacesHook.removeWorkspace}
-                      onSwitchWorkspace={handleSwitchWorkspace}
-                      onUpdateWorkspace={workspacesHook.updateWorkspace}
-                      workspaces={workspacesHook.workspaces}
+                      onAddCommunity={addCommunityDialog.openDialog}
+                      onRemoveCommunity={communitiesHook.removeCommunity}
+                      onReorderCommunities={communitiesHook.reorderCommunities}
+                      onSwitchCommunity={handleSwitchCommunity}
+                      onUpdateCommunity={communitiesHook.updateCommunity}
+                      communities={communitiesHook.communities}
                     />
                   ) : null}
                   <SidebarProvider className="min-h-0 flex-1 flex-col overflow-hidden">
@@ -738,10 +774,7 @@ export function AppShell() {
                       <AppTopChrome
                         canGoBack={canGoBack}
                         canGoForward={canGoForward}
-                        hasWorkspaceRail={
-                          workspaceRailEnabled &&
-                          workspacesHook.workspaces.length > 1
-                        }
+                        hasCommunityRail={hasCommunityRail}
                         onGoBack={goBack}
                         onGoForward={goForward}
                       />
@@ -791,85 +824,43 @@ export function AppShell() {
                     ) : (
                       <div className="flex min-h-0 flex-1 overflow-hidden">
                         <AppSidebar
-                          activeWorkspace={workspacesHook.activeWorkspace}
+                          activeCommunity={communitiesHook.activeCommunity}
                           channels={sidebarChannels}
                           currentPubkey={identityQuery.data?.pubkey}
                           errorMessage={channelsErrorMessage}
                           fallbackDisplayName={identityQuery.data?.displayName}
                           homeBadgeCount={homeBadgeCount + dueReminderBadge}
-                          isAddWorkspaceOpen={isAddWorkspaceOpen}
+                          addCommunityPrefill={addCommunityDialog.prefill}
+                          isAddCommunityOpen={addCommunityDialog.open}
                           relayConnectionCard={relayConnectionCard}
                           isCreatingChannel={createChannelMutation.isPending}
                           isCreatingForum={createForumMutation.isPending}
                           isLoading={channelsQuery.isLoading}
-                          isOpeningDm={openDmMutation.isPending}
-                          isNewDmOpen={isNewDmOpen}
                           isCreateChannelOpen={isCreateChannelOpen}
                           isPresencePending={presenceSession.isPending}
-                          onAddWorkspace={(workspace) => {
-                            const id = workspacesHook.addWorkspace(workspace);
-                            handleSwitchWorkspace(id);
+                          onAddCommunity={(community) => {
+                            const id = communitiesHook.addCommunity({
+                              ...community,
+                              pubkey:
+                                community.pubkey ?? identityQuery.data?.pubkey,
+                            });
+                            handleSwitchCommunity(id);
                           }}
-                          onAddWorkspaceOpenChange={setIsAddWorkspaceOpen}
-                          onNewDmOpenChange={setIsNewDmOpen}
-                          onCreateChannelOpenChange={setIsCreateChannelOpen}
-                          onOpenAddWorkspace={() => setIsAddWorkspaceOpen(true)}
-                          onUpdateWorkspace={workspacesHook.updateWorkspace}
-                          onRemoveWorkspace={workspacesHook.removeWorkspace}
-                          onSwitchWorkspace={handleSwitchWorkspace}
-                          onCreateAgent={() =>
-                            void goAgents().then(requestOpenCreateAgent)
+                          onAddCommunityOpenChange={
+                            addCommunityDialog.onOpenChange
                           }
+                          onNewMessage={handleOpenNewDm}
+                          onCreateChannelOpenChange={setIsCreateChannelOpen}
+                          onOpenAddCommunity={addCommunityDialog.openDialog}
+                          onSendFeedback={() => setIsSendFeedbackOpen(true)}
+                          onUpdateCommunity={communitiesHook.updateCommunity}
+                          onRemoveCommunity={communitiesHook.removeCommunity}
+                          onSwitchCommunity={handleSwitchCommunity}
+                          onCreateAgent={() => requestOpenCreateAgent()}
                           selfPresenceStatus={presenceSession.currentStatus}
-                          workspaces={workspacesHook.workspaces}
-                          onCreateChannel={async ({
-                            description,
-                            name,
-                            visibility,
-                            ttlSeconds,
-                            templateId,
-                          }) => {
-                            const createdChannel =
-                              await createChannelMutation.mutateAsync({
-                                name,
-                                description,
-                                channelType: "stream",
-                                visibility,
-                                ttlSeconds,
-                              });
-
-                            await applyCanvas(
-                              templateId,
-                              createdChannel.id,
-                              name,
-                            );
-                            await goChannel(createdChannel.id);
-                            void applyAgents(templateId, createdChannel.id);
-                          }}
-                          onCreateForum={async ({
-                            description,
-                            name,
-                            visibility,
-                            ttlSeconds,
-                            templateId,
-                          }) => {
-                            const createdForum =
-                              await createForumMutation.mutateAsync({
-                                name,
-                                description,
-                                channelType: "forum",
-                                visibility,
-                                ttlSeconds,
-                              });
-
-                            await applyCanvas(
-                              templateId,
-                              createdForum.id,
-                              name,
-                            );
-                            await goChannel(createdForum.id);
-                            void applyAgents(templateId, createdForum.id);
-                          }}
+                          communities={communitiesHook.communities}
+                          onCreateChannel={handleCreateChannel}
+                          onCreateForum={handleCreateForum}
                           onHideDm={handleHideDm}
                           onMarkAllChannelsRead={markAllChannelsRead}
                           onMarkChannelRead={markChannelRead}
@@ -930,31 +921,36 @@ export function AppShell() {
                             ref={mainInsetRef}
                             className="isolate min-h-0 min-w-0 overflow-hidden bg-sidebar"
                             data-buzz-glass-inset
+                            data-buzz-shadow-viewport
                             style={chromeCssVarDefaults as React.CSSProperties}
                           >
-                            <div className="relative z-10 mb-2 ml-px mr-2 mt-px flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl bg-background shadow-[-1px_-1px_0_0_hsl(var(--sidebar-border)/0.45)]">
+                            <BuzzTheme.ContentSurface>
                               <Outlet />
-                            </div>
+                            </BuzzTheme.ContentSurface>
                           </SidebarInset>
                         </MainInsetProvider>
                         <RelayConnectionOverlay
                           card={relayConnectionCard}
                           errorMessage={channelsErrorMessage}
-                          hasWorkspaceRail={
-                            workspaceRailEnabled &&
-                            workspacesHook.workspaces.length > 1
-                          }
+                          hasCommunityRail={hasCommunityRail}
                           isHuddleDrawerOpen={isHuddleDrawerOpen}
                         />
                       </div>
                     )}
+                    <RequestedAgentCreateDialogs />
+                    <AgentManagementDialogs />
                     <AppShellOverlays
                       activeChannel={managedChannel}
                       browseDialogType={browseDialogType}
                       channels={channels}
                       currentPubkey={identityQuery.data?.pubkey}
                       isChannelManagementOpen={isChannelManagementOpen}
+                      isCreatingBrowseChannel={
+                        createChannelMutation.isPending ||
+                        createForumMutation.isPending
+                      }
                       onBrowseChannelJoin={handleBrowseChannelJoin}
+                      onBrowseChannelCreate={handleBrowseChannelCreate}
                       onBrowseDialogOpenChange={handleBrowseDialogOpenChange}
                       onChannelManagementOpenChange={(open) => {
                         setIsChannelManagementOpen(open);
@@ -970,6 +966,10 @@ export function AppShell() {
                       onSelectChannel={(channelId) => {
                         void goChannel(channelId);
                       }}
+                    />
+                    <SendFeedbackController
+                      onOpenChange={setIsSendFeedbackOpen}
+                      open={isSendFeedbackOpen}
                     />
                   </SidebarProvider>
                 </div>

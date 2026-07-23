@@ -5,6 +5,7 @@ class _ChannelsBody extends StatelessWidget {
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
   final SessionStatus sessionStatus;
+  final bool showConnectionBanner;
   final String? currentPubkey;
   final Future<void> Function() onRefresh;
   final Future<void> Function(Channel channel) onSelectChannel;
@@ -14,6 +15,7 @@ class _ChannelsBody extends StatelessWidget {
     required this.channelsAsync,
     required this.showError,
     required this.sessionStatus,
+    required this.showConnectionBanner,
     required this.currentPubkey,
     required this.onRefresh,
     required this.onSelectChannel,
@@ -33,8 +35,7 @@ class _ChannelsBody extends StatelessWidget {
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
                 // Extra space for the connection banner when visible.
-                if (sessionStatus != SessionStatus.connected &&
-                    sessionStatus != SessionStatus.disconnected)
+                if (showConnectionBanner)
                   const SliverToBoxAdapter(
                     child: SizedBox(height: _kBannerHeight),
                   ),
@@ -50,7 +51,9 @@ class _ChannelsBody extends StatelessWidget {
             top: barHeight,
             left: 0,
             right: 0,
-            child: _ConnectionBanner(status: sessionStatus),
+            child: showConnectionBanner
+                ? _ConnectionBanner(status: sessionStatus)
+                : const SizedBox.shrink(),
           ),
         ],
       );

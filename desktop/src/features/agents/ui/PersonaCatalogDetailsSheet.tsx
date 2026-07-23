@@ -123,13 +123,13 @@ export function PersonaCatalogDetailsSheet({
 
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="rounded-xl border border-border/70 bg-card/70 p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Type
                   </p>
                   <p className="mt-2 text-sm font-medium">Built-in agent</p>
                 </div>
                 <div className="rounded-xl border border-border/70 bg-card/70 p-4">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Preferred model
                   </p>
                   <p className="mt-2 text-sm font-medium">
@@ -137,7 +137,7 @@ export function PersonaCatalogDetailsSheet({
                   </p>
                 </div>
                 <div className="rounded-xl border border-border/70 bg-card/70 p-4 sm:col-span-2">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                  <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                     Preferred runtime
                   </p>
                   <p className="mt-2 text-sm font-medium">
@@ -147,7 +147,7 @@ export function PersonaCatalogDetailsSheet({
               </div>
 
               <div className="rounded-xl border border-border/70 bg-card/70 p-4">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
                   System prompt
                 </p>
                 <pre className="mt-3 whitespace-pre-wrap break-words font-sans text-sm leading-6 text-foreground">

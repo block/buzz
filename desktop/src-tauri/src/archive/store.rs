@@ -11,6 +11,7 @@
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension};
+use std::time::{Duration, Instant};
 
 // ── Schema ─────────────────────────────────────────────────────────────────
 
@@ -92,15 +93,38 @@ pub fn open_archive_db(path: &Path) -> Result<Connection, String> {
 
     let conn = Connection::open(path).map_err(|e| format!("failed to open archive db: {e}"))?;
 
-    conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(|e| format!("failed to set WAL mode: {e}"))?;
     conn.pragma_update(None, "busy_timeout", 5000)
         .map_err(|e| format!("failed to set busy_timeout: {e}"))?;
+    set_wal_mode(&conn)?;
 
     conn.execute_batch(SCHEMA)
         .map_err(|e| format!("failed to initialize archive schema: {e}"))?;
 
     Ok(conn)
+}
+
+fn set_wal_mode(conn: &Connection) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match conn.pragma_update(None, "journal_mode", "WAL") {
+            Ok(()) => return Ok(()),
+            Err(error) if sqlite_is_busy(&error) && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("failed to set WAL mode: {error}")),
+        }
+    }
+}
+
+fn sqlite_is_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
 }
 
 // ── Save subscriptions ──────────────────────────────────────────────────────

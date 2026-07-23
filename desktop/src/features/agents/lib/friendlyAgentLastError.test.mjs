@@ -89,7 +89,7 @@ test("code -32002 → model-not-found copy (severity: denied)", () => {
   });
 });
 
-test("code -32001 → relay mesh denied copy (structured path)", () => {
+test("code -32001 → Buzz shared compute denied copy (structured path)", () => {
   const result = friendlyAgentLastError("any error text", -32001);
   assert.deepEqual(result, {
     severity: "denied",

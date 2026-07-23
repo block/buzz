@@ -41,7 +41,10 @@ function classifyChildren(childArray) {
     (child) =>
       !isBlockMedia(child) &&
       !(typeof child === "string" && child.trim() === "") &&
-      !(isValidElement(child) && child.type === "br"),
+      !(
+        isValidElement(child) &&
+        (child.type === "br" || child.props?.node?.tagName === "br")
+      ),
   );
   return { imageChildren, nonImageChildren };
 }
@@ -67,9 +70,7 @@ function isHastText(node) {
 function isHastImageOnlyParagraph(node) {
   if (!isHastElement(node) || node.tagName !== "p") return false;
   const meaningful = node.children.filter(
-    (child) =>
-      !(isHastText(child) && child.value.trim() === "") &&
-      !(isHastElement(child) && child.tagName === "br"),
+    (child) => !isIgnorableImageSeparator(child),
   );
   return (
     meaningful.length >= 1 &&
@@ -77,8 +78,47 @@ function isHastImageOnlyParagraph(node) {
   );
 }
 
+function isIgnorableImageSeparator(node) {
+  return (
+    (isHastText(node) && node.value.trim() === "") ||
+    (isHastElement(node) && node.tagName === "br")
+  );
+}
+
+function splitTrailingImageRun(node) {
+  if (!isHastElement(node) || node.tagName !== "p") return [node];
+
+  let cursor = node.children.length - 1;
+  const trailingImages = [];
+  while (cursor >= 0) {
+    const child = node.children[cursor];
+    if (isHastElement(child) && child.tagName === "img") {
+      trailingImages.unshift(child);
+      cursor -= 1;
+      continue;
+    }
+    if (isIgnorableImageSeparator(child)) {
+      cursor -= 1;
+      continue;
+    }
+    break;
+  }
+
+  if (trailingImages.length < 2 || cursor < 0) return [node];
+  return [
+    { ...node, children: node.children.slice(0, cursor + 1) },
+    {
+      type: "element",
+      tagName: "p",
+      properties: {},
+      children: trailingImages,
+    },
+  ];
+}
+
 function rehypeImageGallery() {
   return (tree) => {
+    const normalizedChildren = tree.children.flatMap(splitTrailingImageRun);
     const newChildren = [];
     let imageRun = [];
 
@@ -104,7 +144,7 @@ function rehypeImageGallery() {
       imageRun = [];
     }
 
-    for (const child of tree.children) {
+    for (const child of normalizedChildren) {
       if (isHastImageOnlyParagraph(child)) {
         imageRun.push(child);
         continue;
@@ -189,6 +229,32 @@ test("classifyChildren: <br> elements are excluded from non-image", () => {
   const { imageChildren, nonImageChildren } = classifyChildren(children);
   assert.equal(imageChildren.length, 0);
   assert.equal(nonImageChildren.length, 0);
+});
+
+test("classifyChildren: react-markdown break components are excluded", () => {
+  const BreakComponent = () => null;
+  const children = [
+    fakeElement(BreakComponent, { node: { type: "element", tagName: "br" } }),
+  ];
+  const { imageChildren, nonImageChildren } = classifyChildren(children);
+  assert.equal(imageChildren.length, 0);
+  assert.equal(nonImageChildren.length, 0);
+});
+
+test("isImageOnlyParagraph: react-markdown breaks preserve image mosaics", () => {
+  const BreakComponent = () => null;
+  const media = { "data-block-media": "" };
+  const customBreak = fakeElement(BreakComponent, {
+    node: { type: "element", tagName: "br" },
+  });
+  const children = [
+    fakeElement("span", media),
+    customBreak,
+    fakeElement("span", media),
+    customBreak,
+    fakeElement("span", media),
+  ];
+  assert.equal(isImageOnlyParagraph(children), true);
 });
 
 test("classifyChildren: mixed media, text, and br", () => {
@@ -413,6 +479,44 @@ test("rehypeImageGallery: mixed content paragraph is not image-only", () => {
   rehypeImageGallery()(tree);
   // Middle paragraph has text, so it breaks the run
   assert.equal(tree.children.length, 3);
+});
+
+test("rehypeImageGallery: splits composer text from trailing image bundle", () => {
+  const br = { type: "element", tagName: "br", properties: {}, children: [] };
+  const tree = {
+    type: "root",
+    children: [
+      hastP(
+        hastText("gallery bundle"),
+        br,
+        hastImg("a.png"),
+        br,
+        hastImg("b.png"),
+        br,
+        hastImg("c.png"),
+      ),
+    ],
+  };
+
+  rehypeImageGallery()(tree);
+
+  assert.equal(tree.children.length, 2);
+  assert.equal(tree.children[0].children[0].value, "gallery bundle");
+  assert.deepEqual(
+    tree.children[1].children.map((child) => child.properties.src),
+    ["a.png", "b.png", "c.png"],
+  );
+});
+
+test("rehypeImageGallery: leaves a single trailing image in the text flow", () => {
+  const br = { type: "element", tagName: "br", properties: {}, children: [] };
+  const paragraph = hastP(hastText("caption"), br, hastImg("a.png"));
+  const tree = { type: "root", children: [paragraph] };
+
+  rehypeImageGallery()(tree);
+
+  assert.equal(tree.children.length, 1);
+  assert.equal(tree.children[0], paragraph);
 });
 
 // Regression test: react-markdown's `defaultUrlTransform` strips unknown

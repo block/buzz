@@ -15,6 +15,20 @@ pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MO
 pub use config::Provider;
 pub use types::AgentError;
 
+/// Environment keys the Windows Git Bash resolver may inspect. `spawn_one()`
+/// forwards every key in this list into its otherwise-cleared MCP child; Doctor
+/// uses the same contract so a ready agent can always start its shell tool.
+#[cfg(windows)]
+pub const WINDOWS_SHELL_RESOLUTION_ENV: &[&str] = &[
+    "PATH",
+    "BUZZ_SHELL",
+    "GIT_BASH",
+    "SystemRoot",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "LOCALAPPDATA",
+];
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;

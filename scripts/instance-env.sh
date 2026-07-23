@@ -20,7 +20,12 @@ export VITE_PORT="$BUZZ_VITE_PORT"
 export VITE_HMR_PORT="$BUZZ_HMR_PORT"
 export BUZZ_RELAY_URL="${BUZZ_RELAY_URL:-ws://localhost:3000}"
 
-BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${BUZZ_VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev\",\"productName\":\"Buzz Dev\"}"
+DEV_URL="http://localhost:${BUZZ_VITE_PORT}"
+if [[ "${BUZZ_RESET_WEBVIEW_STATE:-0}" == "1" ]]; then
+    DEV_URL="${DEV_URL}?resetDevState=1"
+fi
+
+BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev\",\"productName\":\"Buzz Dev\"}"
 unset VITE_DEV_BRANCH
 
 # In worktrees, extract a label from the branch name and derive a unique app
@@ -42,14 +47,36 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         # identifier is kept so concurrent instances don't collide on
         # tauri-plugin-single-instance or the app data directory.
         if [[ "${BUZZ_SHARE_IDENTITY:-0}" == "1" ]]; then
+            KEYRING_SERVICE="buzz-desktop-dev"
+            KEYRING_BLOB=""
+            case "$(uname -s)" in
+                Darwin)
+                    if command -v security &>/dev/null; then
+                        KEYRING_BLOB="$(security find-generic-password -s "$KEYRING_SERVICE" -a secrets -w 2>/dev/null || true)"
+                    fi
+                    ;;
+                Linux)
+                    if command -v secret-tool &>/dev/null; then
+                        KEYRING_BLOB="$(secret-tool lookup service "$KEYRING_SERVICE" username secrets target default 2>/dev/null || true)"
+                    fi
+                    ;;
+            esac
+
+            KEYRING_IDENTITY="$(printf '%s' "$KEYRING_BLOB" | python3 -c 'import json, sys; value = json.load(sys.stdin).get("identity", ""); print(value if isinstance(value, str) else "")' 2>/dev/null || true)"
             CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.buzz.app.dev/identity.key"
             LEGACY_CANONICAL_KEY="$HOME/Library/Application Support/xyz.block.sprout.app.dev/identity.key"
-            if [[ -f "$CANONICAL_KEY" ]]; then
-                export BUZZ_PRIVATE_KEY="$(cat "$CANONICAL_KEY")"
-            elif [[ -f "$LEGACY_CANONICAL_KEY" ]]; then
-                export BUZZ_PRIVATE_KEY="$(cat "$LEGACY_CANONICAL_KEY")"
+
+            SHARED_IDENTITY="$KEYRING_IDENTITY"
+            if [[ -z "$SHARED_IDENTITY" && -f "$CANONICAL_KEY" ]]; then
+                SHARED_IDENTITY="$(cat "$CANONICAL_KEY")"
+            elif [[ -z "$SHARED_IDENTITY" && -f "$LEGACY_CANONICAL_KEY" ]]; then
+                SHARED_IDENTITY="$(cat "$LEGACY_CANONICAL_KEY")"
+            fi
+
+            if [[ -n "$SHARED_IDENTITY" ]]; then
+                export BUZZ_PRIVATE_KEY="$SHARED_IDENTITY"
             else
-                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found at $CANONICAL_KEY or $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
+                echo "⚠ BUZZ_SHARE_IDENTITY=1 but no identity found in keyring service $KEYRING_SERVICE, at $CANONICAL_KEY, or at $LEGACY_CANONICAL_KEY — run Buzz from repo root first" >&2
             fi
         fi
 
@@ -62,7 +89,7 @@ if git rev-parse --is-inside-work-tree &>/dev/null; then
         if swift "$GENERATE_DEV_ICON" "$BASE_ICON" "$DEV_ICON" "$BUZZ_WORKTREE_LABEL"; then
             echo "🌳 Worktree: ${BUZZ_WORKTREE_LABEL}"
             export VITE_DEV_BRANCH="$BUZZ_WORKTREE_LABEL"
-            BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"http://localhost:${BUZZ_VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":\"Buzz Dev (${BUZZ_WORKTREE_LABEL})\",\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
+            BUZZ_TAURI_CONFIG="{\"build\":{\"devUrl\":\"${DEV_URL}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${BUZZ_VITE_PORT} --strictPort\"},\"identifier\":\"xyz.block.buzz.app.dev.${BUZZ_INSTANCE_SLUG}\",\"productName\":\"Buzz Dev (${BUZZ_WORKTREE_LABEL})\",\"bundle\":{\"icon\":[\"$DEV_ICON\"]}}"
         fi
     fi
 fi

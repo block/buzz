@@ -17,13 +17,18 @@ export interface RepoContext {
   error: Error | null;
 }
 
-export function useRepoContext(repoId: string): RepoContext {
+export function useRepoContext(
+  repoId: string,
+  { preview = false } = {},
+): RepoContext {
   const {
     data: repo,
     isLoading: repoLoading,
     error: repoError,
-  } = useRepo(repoId);
-  const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId);
+  } = useRepo(repoId, { preview });
+  const { data: refs, isLoading: refsLoading } = useRepoRefs(repoId, {
+    preview,
+  });
 
   return {
     owner: repo?.owner ?? "",

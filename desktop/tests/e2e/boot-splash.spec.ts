@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { installMockBridge } from "../helpers/bridge";
 
-// Cold-boot splash hold: on a real boot the workspace resolves in well under
+// Cold-boot splash hold: on a real boot the community resolves in well under
 // 100ms — before the hidden Tauri window ever puts a frame on screen — so the
 // loading gate keeps the flapping bee up as an overlay above the already
 // mounted app for a minimum visible duration, then fades out. E2E runs skip

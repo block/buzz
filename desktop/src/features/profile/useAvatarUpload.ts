@@ -11,6 +11,8 @@ const AVATAR_IMAGE_TYPES = [
 ];
 
 type UseAvatarUploadOptions = {
+  onUploadStart?: (file: File) => void;
+  onUploadSettled?: () => void;
   onUploadSuccess: (url: string) => void;
 };
 
@@ -25,6 +27,8 @@ type UseAvatarUploadReturn = {
 };
 
 export function useAvatarUpload({
+  onUploadStart,
+  onUploadSettled,
   onUploadSuccess,
 }: UseAvatarUploadOptions): UseAvatarUploadReturn {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
@@ -49,6 +53,7 @@ export function useAvatarUpload({
       flushSync(() => {
         setIsUploading(true);
         setErrorMessage(null);
+        onUploadStart?.(file);
       });
 
       try {
@@ -71,9 +76,10 @@ export function useAvatarUpload({
         );
       } finally {
         setIsUploading(false);
+        onUploadSettled?.();
       }
     },
-    [onUploadSuccess],
+    [onUploadSettled, onUploadStart, onUploadSuccess],
   );
 
   const handleFileChange = React.useCallback(

@@ -6,7 +6,9 @@ metadata:
   labels:
     {{- include "buzz.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -53,6 +55,41 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if .Values.minio.enabled }}
+      # Quickstart only: the bundled MinIO bucket is created by a concurrent
+      # init Job (templates/quickstart-minio-init.yaml). The relay's A3 S3
+      # conformance probe is startup-fatal, so without this gate the relay Pods
+      # CrashLoopBackOff (with growing backoff) until the bucket appears. Block
+      # relay start until the bucket exists — deterministic, no crash-loops.
+      initContainers:
+        - name: wait-for-bucket
+          image: {{ .Values.minio.mcImage | quote }}
+          securityContext:
+            {{- toYaml .Values.relay.containerSecurityContext | nindent 12 }}
+          env:
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.chartSecretName" . }}
+                  key: BUZZ_S3_SECRET_KEY
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              export MC_CONFIG_DIR=/tmp/.mc
+              until mc alias set local {{ include "buzz.minioEndpoint" . }} "$S3_ACCESS_KEY" "$S3_SECRET_KEY" >/dev/null 2>&1; do
+                echo "waiting for MinIO..."; sleep 2
+              done
+              until mc stat local/{{ .Values.s3.bucket }} >/dev/null 2>&1; do
+                echo "waiting for bucket {{ .Values.s3.bucket }}..."; sleep 2
+              done
+              echo "bucket {{ .Values.s3.bucket }} present"
+      {{- end }}
       containers:
         - name: relay
           image: {{ include "buzz.image" . }}
@@ -69,6 +106,9 @@ spec:
             - { name: BUZZ_HEALTH_PORT,   value: {{ .Values.service.healthPort | quote }} }
             - { name: BUZZ_METRICS_PORT,  value: {{ .Values.service.metricsPort | quote }} }
             - { name: RELAY_URL,          value: {{ .Values.relayUrl | quote }} }
+            {{- if .Values.pairingRelay.url }}
+            - { name: BUZZ_PAIRING_RELAY_URL, value: {{ .Values.pairingRelay.url | quote }} }
+            {{- end }}
             - { name: BUZZ_MEDIA_BASE_URL, value: {{ include "buzz.mediaBaseUrl" . | quote }} }
 
             # ── Behavior ─────────────────────────────────────────────
@@ -77,6 +117,7 @@ spec:
             - { name: BUZZ_SEND_BUFFER,            value: {{ .Values.relay.sendBuffer | quote }} }
             - { name: BUZZ_REQUIRE_AUTH_TOKEN,     value: {{ .Values.relay.requireAuthToken | quote }} }
             - { name: BUZZ_REQUIRE_RELAY_MEMBERSHIP, value: {{ .Values.relay.requireRelayMembership | quote }} }
+            - { name: BUZZ_REQUIRE_MEDIA_GET_AUTH, value: {{ .Values.relay.requireMediaGetAuth | quote }} }
             - { name: BUZZ_ALLOW_NIP_OA_AUTH,      value: {{ .Values.relay.allowNipOaAuth | quote }} }
             - { name: BUZZ_PUBKEY_ALLOWLIST,       value: {{ .Values.relay.pubkeyAllowlist | quote }} }
             {{- if .Values.relay.corsOrigins }}
@@ -104,6 +145,9 @@ spec:
             # ── Git ──────────────────────────────────────────────────
             - { name: BUZZ_GIT_REPO_PATH,         value: {{ .Values.persistence.git.mountPath | quote }} }
             - { name: BUZZ_GIT_MAX_PACK_BYTES,    value: {{ .Values.git.maxPackBytes | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_PATH,   value: {{ .Values.git.packCachePath | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_BYTES, value: {{ .Values.git.packCacheMaxBytes | quote }} }
+            - { name: BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS, value: {{ .Values.git.packCacheMaxConcurrentPopulations | quote }} }
             - { name: BUZZ_GIT_MAX_REPOS_PER_PUBKEY, value: {{ .Values.git.maxReposPerPubkey | quote }} }
             - { name: BUZZ_GIT_MAX_CONCURRENT_OPS, value: {{ .Values.git.maxConcurrentOps | quote }} }
 
@@ -132,12 +176,18 @@ spec:
                 secretKeyRef:
                   name: {{ include "buzz.envSecretName" . }}
                   key: DATABASE_URL
+            - name: READ_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "buzz.envSecretName" . }}
+                  key: READ_DATABASE_URL
+                  optional: true
             - name: REDIS_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ include "buzz.envSecretName" . }}
                   key: REDIS_URL
-                  optional: {{ and (eq (.Values.replicaCount | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
+                  optional: {{ and (eq (include "buzz.minimumReplicas" . | int) 1) (not .Values.redis.enabled) (not .Values.externalRedis.url) }}
             - name: BUZZ_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
@@ -174,6 +224,7 @@ spec:
 
           volumeMounts:
             - { name: git-repos, mountPath: {{ .Values.persistence.git.mountPath | quote }} }
+            - { name: git-pack-cache, mountPath: {{ .Values.git.packCachePath | quote }} }
 
       volumes:
         - name: git-repos
@@ -181,5 +232,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ default (printf "%s-git" (include "buzz.fullname" .)) .Values.persistence.git.existingClaim }}
         {{- else }}
-          emptyDir: {}
+          emptyDir:
+            sizeLimit: {{ .Values.persistence.git.size | quote }}
         {{- end }}
+        - name: git-pack-cache
+          emptyDir:
+            sizeLimit: {{ .Values.git.packCacheVolumeSize | quote }}

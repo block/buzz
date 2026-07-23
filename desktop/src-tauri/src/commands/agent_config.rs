@@ -14,7 +14,8 @@ use crate::{
         },
         current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
-        GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord, PersonaRecord,
+        AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
+        ManagedAgentRuntimeKey,
     },
 };
 
@@ -53,7 +54,7 @@ pub struct RuntimeFileConfigSubset {
 /// Buzz keeps `had_* == true` and is never re-tagged.
 fn resolve_config_surface(
     mut record: ManagedAgentRecord,
-    personas: &[PersonaRecord],
+    personas: &[AgentDefinition],
     runtime_meta: Option<&KnownAcpRuntime>,
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
@@ -357,7 +358,7 @@ pub async fn get_agent_config_surface(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
         records
             .into_iter()
@@ -368,7 +369,14 @@ pub async fn get_agent_config_surface(
     let personas = load_personas(&app).unwrap_or_default();
     let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
-    let session_cache = state.get_session_cache(&pubkey);
+    let runtime_key = ManagedAgentRuntimeKey::new(
+        pubkey.clone(),
+        &crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &crate::relay::relay_ws_url_with_override(&state),
+        ),
+    )?;
+    let session_cache = state.get_session_cache(&runtime_key);
     let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
     Ok(resolve_config_surface(
@@ -391,16 +399,35 @@ pub fn put_agent_session_config(
     app: AppHandle,
     state: State<'_, AppState>,
 ) {
-    {
+    let record_relay_url = {
         let _guard = match state.managed_agents_store_lock.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         match load_managed_agents(&app) {
-            Ok(records) if records.iter().any(|r| r.pubkey == pubkey) => {}
+            Ok(records) => match records.into_iter().find(|r| r.pubkey == pubkey) {
+                Some(record) => record.relay_url,
+                None => return,
+            },
             _ => return,
         }
-    }
+    };
+
+    // Pair identity: prefer the relay URL the harness attached to the payload
+    // (same pattern as lifecycle frames). Older harnesses don't attach one;
+    // fall back to the record's effective relay — with no attached URL the
+    // frame can only have arrived over the active workspace relay, which is
+    // exactly what effective_agent_relay_url resolves to absent a pin.
+    let relay_url = payload
+        .get("relayUrl")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::relay::effective_agent_relay_url(
+                &record_relay_url,
+                &crate::relay::relay_ws_url_with_override(&state),
+            )
+        });
 
     let config_options = parse_config_options(payload.get("configOptions"));
     let available_modes = parse_modes(&config_options, payload.get("modes"));
@@ -420,7 +447,10 @@ pub fn put_agent_session_config(
         captured_at: crate::util::now_iso(),
     };
 
-    state.put_session_cache(&pubkey, cache);
+    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, &relay_url) else {
+        return;
+    };
+    state.put_session_cache(runtime_key, cache);
 }
 
 fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionEntry> {
@@ -582,6 +612,7 @@ mod tests {
             mcp_hooks: false,
             underlying_cli: None,
             cli_install_commands: &[],
+            cli_install_commands_windows: &[],
             adapter_install_commands: &[],
             install_instructions_url: "",
             cli_install_hint: "",
@@ -599,6 +630,8 @@ mod tests {
             max_tokens_env_var: Some("GOOSE_MAX_TOKENS"),
             context_limit_env_var: Some("GOOSE_CONTEXT_LIMIT"),
             required_normalized_fields: &["model", "provider"],
+            login_hint: None,
+            auth_probe_args: None,
         }
     }
 
@@ -621,7 +654,6 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
-            mcp_toolsets: None,
             env_vars: BTreeMap::new(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
@@ -629,6 +661,7 @@ mod tests {
             backend: BackendKind::Local,
             backend_agent_id: None,
             provider_binary_path: None,
+            team_id: None,
             persona_team_dir: None,
             persona_name_in_team: None,
             created_at: "".to_string(),
@@ -650,7 +683,6 @@ mod tests {
             source_team_persona_slug: None,
             definition_respond_to: None,
             definition_respond_to_allowlist: Vec::new(),
-            definition_mcp_toolsets: None,
             definition_parallelism: None,
             relay_mesh: None,
             agent_command_override: None,
@@ -659,8 +691,8 @@ mod tests {
         }
     }
 
-    fn persona_with_model(model: &str) -> PersonaRecord {
-        PersonaRecord {
+    fn persona_with_model(model: &str) -> AgentDefinition {
+        AgentDefinition {
             id: "persona-1".to_string(),
             display_name: "Persona".to_string(),
             avatar_url: None,
@@ -676,7 +708,6 @@ mod tests {
             env_vars: BTreeMap::new(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
-            mcp_toolsets: None,
             parallelism: None,
             created_at: "".to_string(),
             updated_at: "".to_string(),
@@ -730,7 +761,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", false);
 
         let surface = resolve_config_surface(
@@ -758,7 +789,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
 
         let surface = resolve_config_surface(
@@ -785,7 +816,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         record.model = Some("model-x".to_string());
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-x", true);
 
         let surface = resolve_config_surface(
@@ -840,7 +871,7 @@ mod tests {
         let mut record = agent_record();
         record.persona_id = None;
         // record.model = None (set by agent_record())
-        let personas: Vec<PersonaRecord> = vec![];
+        let personas: Vec<AgentDefinition> = vec![];
         let cache = session_cache("model-y", true);
         let global = crate::managed_agents::GlobalAgentConfig {
             model: Some("global-model".to_string()),

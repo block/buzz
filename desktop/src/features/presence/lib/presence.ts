@@ -36,6 +36,22 @@ export function mergePresenceUpdate(
   return { ...old, [pubkey]: status };
 }
 
+// Away means "human not at the machine" (Slack/Discord semantics), never
+// "Buzz is not the focused window". OS-wide idle is authoritative when the
+// platform exposes it; otherwise fall back to in-app activity.
+export const PRESENCE_IDLE_TIMEOUT_MS = 10 * 60_000;
+
+export function resolveAutomaticPresenceStatus(
+  osIdleSeconds: number | null,
+  lastActivityAt: number,
+  now: number,
+): PresenceStatus {
+  if (osIdleSeconds !== null) {
+    return osIdleSeconds * 1000 >= PRESENCE_IDLE_TIMEOUT_MS ? "away" : "online";
+  }
+  return now - lastActivityAt >= PRESENCE_IDLE_TIMEOUT_MS ? "away" : "online";
+}
+
 export function getPresenceLabel(status: PresenceStatus) {
   switch (status) {
     case "online":
@@ -55,5 +71,17 @@ export function getPresenceDotClassName(status: PresenceStatus) {
       return "bg-amber-500";
     case "offline":
       return "bg-muted-foreground/35";
+  }
+}
+
+// Chip styling for the presence pill (colored fill + matching text, no dot).
+export function getPresenceChipClassName(status: PresenceStatus) {
+  switch (status) {
+    case "online":
+      return "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400";
+    case "away":
+      return "bg-amber-500/15 text-amber-600 dark:text-amber-400";
+    case "offline":
+      return "bg-muted-foreground/15 text-muted-foreground";
   }
 }

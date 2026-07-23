@@ -7,6 +7,7 @@ DB_PORT="${BUZZ_DB_PORT:-5432}"
 DB_USER="${BUZZ_DB_USER:-buzz}"
 DB_PASS="${BUZZ_DB_PASS:-buzz_dev}"
 DB_NAME="${BUZZ_DB_NAME:-buzz}"
+DB_DOCKER_CONTAINER="${BUZZ_DB_DOCKER_CONTAINER:-buzz-postgres}"
 
 SYSTEM_PUBKEY="0000000000000000000000000000000000000000000000000000000000000000"
 ALICE_PUBKEY="953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f"
@@ -17,9 +18,9 @@ AGENT_PUBKEY="db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36"
 
 if command -v psql >/dev/null 2>&1; then
   run_psql() { PGPASSWORD="$DB_PASS" psql -h"$DB_HOST" -p"$DB_PORT" -U"$DB_USER" -d"$DB_NAME" -qtA "$@"; }
-elif docker exec buzz-postgres psql --version >/dev/null 2>&1; then
+elif docker exec "$DB_DOCKER_CONTAINER" psql --version >/dev/null 2>&1; then
   run_psql() {
-    docker exec -e PGPASSWORD="$DB_PASS" buzz-postgres \
+    docker exec -e PGPASSWORD="$DB_PASS" "$DB_DOCKER_CONTAINER" \
       psql -U"$DB_USER" -d"$DB_NAME" -qtA "$@"
   }
 else
@@ -47,23 +48,32 @@ run_sql "SELECT 1" >/dev/null
 # tenant per-connection from the durable communities host map (WHERE host = $1
 # against the *normalized* host). normalize_host() keeps non-default ports, so
 # the host must be 'localhost:3000' verbatim to match RELAY_URL=ws://localhost:3000.
-# The relay does not auto-seed communities (ensure_configured_community has no
-# callers); this seed is the only writer of the dev community row. Insert it
-# first so the channel/member INSERTs below satisfy their community_id FKs, and
-# so the channel reconciler (BUZZ_RECONCILE_CHANNELS, which binds localhost:3000
-# fail-closed and retries every 5s for 2min) can resolve the tenant.
-COMMUNITY_ID="00000000-0000-4000-8000-00000000c0de"
+# Insert the host if another setup step has not already done so, then resolve
+# its real id. `just setup` seeds local host aliases with generated ids, so a
+# fixture-owned id would point channel rows at a community that does not exist.
 # Host must match the relay's normalized bind host verbatim (non-default ports
 # are kept by normalize_host). Overridable so an isolated relay on an alternate
 # port can seed the same channels/members against its own tenant.
 COMMUNITY_HOST="${BUZZ_COMMUNITY_HOST:-localhost:3000}"
+COMMUNITY_HOST_SQL="${COMMUNITY_HOST//\'/\'\'}"
 
 run_sql "
-INSERT INTO communities (id, host)
-VALUES ('${COMMUNITY_ID}', '${COMMUNITY_HOST}')
+INSERT INTO communities (host)
+VALUES ('${COMMUNITY_HOST_SQL}')
 ON CONFLICT (lower(host)) DO NOTHING
 ;
 "
+COMMUNITY_ID="$(run_sql "
+SELECT id
+FROM communities
+WHERE lower(host) = lower('${COMMUNITY_HOST_SQL}')
+LIMIT 1
+;
+")"
+if [[ ! "${COMMUNITY_ID}" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+  echo "Could not resolve community id for host ${COMMUNITY_HOST}." >&2
+  exit 1
+fi
 
 UUID_GENERAL=$(uuid5_hex "buzz.channel.general")
 UUID_RANDOM=$(uuid5_hex "buzz.channel.random")

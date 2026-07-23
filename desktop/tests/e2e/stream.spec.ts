@@ -19,52 +19,61 @@ async function getTimelineMetrics(page: Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
 
+    const composer = document.querySelector<HTMLElement>(
+      '[data-testid="channel-composer-overlay"]',
+    );
+    const composerHeight = composer?.getBoundingClientRect().height ?? 0;
+
     return {
       clientHeight: timeline.clientHeight,
       scrollHeight: timeline.scrollHeight,
       scrollTop: timeline.scrollTop,
+      composerHeight,
+      // The virtualized timeline reserves a trailing spacer equal to the
+      // overlaid composer. Reaching the visual tail therefore leaves that
+      // spacer below the last row rather than setting the raw DOM distance to 0.
       distanceFromBottom:
-        timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop,
+        timeline.scrollHeight -
+        timeline.clientHeight -
+        timeline.scrollTop -
+        composerHeight,
     };
   });
 }
 
-async function ensureTimelineScrollable(
+async function seedTimelineHistory(
   senderPage: Page,
-  receiverPage: Page,
+  channelName: string,
   prefix: string,
 ) {
-  const input = senderPage.getByTestId("message-input");
-  const sendButton = senderPage.getByTestId("send-message");
-
-  for (let index = 0; index < 24; index += 1) {
-    const metrics = await getTimelineMetrics(receiverPage);
-    if (metrics.scrollHeight > metrics.clientHeight + 160) {
-      return;
-    }
-
-    const message = `${prefix} seed ${index}`;
-
-    await expect(input).toBeEnabled();
-    await input.fill(message);
-    await sendButton.click();
-    await expectTimelineToContain(receiverPage, message);
+  const messages = Array.from(
+    { length: 24 },
+    (_, index) => `${prefix} seed ${index}`,
+  );
+  for (const content of messages) {
+    await sendChannelMessage(senderPage, { channelName, content });
   }
-
-  const metrics = await getTimelineMetrics(receiverPage);
-  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight + 160);
+  const lastSeed = messages.at(-1);
+  if (!lastSeed) throw new Error("Timeline seed set is empty.");
+  return lastSeed;
 }
 
 async function createAndJoinSharedStream(
   ownerPage: Page,
   memberPage: Page,
   channelName: string,
+  seed?: { prefix: string; minDistance?: number },
 ) {
   await openCreateChannelDialog(ownerPage);
   await ownerPage.getByTestId("create-channel-name").fill(channelName);
   await ownerPage.getByTestId("create-channel-submit").click();
   await expect(ownerPage.getByTestId("stream-list")).toContainText(channelName);
   await expect(ownerPage.getByTestId("chat-title")).toHaveText(channelName);
+  await expect(ownerPage.getByTestId("message-input")).toBeEnabled();
+
+  const lastSeed = seed
+    ? await seedTimelineHistory(ownerPage, channelName, seed.prefix)
+    : null;
 
   await openChannelBrowser(memberPage);
   await expect(memberPage.getByTestId("channel-browser-dialog")).toBeVisible();
@@ -76,6 +85,18 @@ async function createAndJoinSharedStream(
   await expect(memberPage.getByTestId("stream-list")).toContainText(
     channelName,
   );
+
+  await expect(memberPage.getByTestId("message-input")).toBeEnabled();
+
+  if (lastSeed) {
+    await expectTimelineToContain(memberPage, lastSeed);
+    const metrics = await getTimelineMetrics(memberPage);
+    expect(metrics.scrollHeight).toBeGreaterThan(
+      metrics.clientHeight +
+        metrics.composerHeight +
+        (seed?.minDistance ?? 160),
+    );
+  }
 }
 
 async function sendChannelMessage(
@@ -156,7 +177,7 @@ async function scrollTimelineAwayFromBottom(page: Page, minDistance = 160) {
       // so waiting for it guarantees the anchor is in the away-from-bottom
       // branch before callers send the message they expect to be counted.
       await expect(page.getByTestId("message-scroll-to-latest")).toBeVisible();
-      return;
+      return metrics.distanceFromBottom;
     }
   }
 
@@ -324,15 +345,15 @@ test("stays pinned to the latest message when new messages arrive at the bottom"
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expectTimelineToContain(pageTwo, incomingMessage);
     await expect
@@ -369,9 +390,7 @@ test("stays pinned after you send a message and a remote reply arrives right aft
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -380,8 +399,10 @@ test("stays pinned after you send a message and a remote reply arrives right aft
     await pageTwo.getByTestId("send-message").click();
     await expectTimelineToContain(pageTwo, localMessage);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expectTimelineToContain(pageTwo, incomingMessage);
     await expect
@@ -418,9 +439,7 @@ test("keeps bottom-pinned scrolling after the composer grows", async ({
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, { prefix });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
@@ -437,8 +456,10 @@ test("keeps bottom-pinned scrolling after the composer grows", async ({
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expectTimelineToContain(pageTwo, incomingMessage);
     await expect
@@ -474,24 +495,31 @@ test("keeps scroll position when new messages arrive above the fold", async ({
 
     await pageOne.goto("/");
     await pageTwo.goto("/");
-    await createAndJoinSharedStream(pageOne, pageTwo, channelName);
-
-    await ensureTimelineScrollable(pageOne, pageTwo, prefix);
+    const minAwayDistance = 80;
+    await createAndJoinSharedStream(pageOne, pageTwo, channelName, {
+      prefix,
+      minDistance: 480,
+    });
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
       .toBeLessThan(8);
 
-    await scrollTimelineAwayFromBottom(pageTwo);
+    const distanceBeforeDelivery = await scrollTimelineAwayFromBottom(
+      pageTwo,
+      minAwayDistance,
+    );
 
-    await pageOne.getByTestId("message-input").fill(incomingMessage);
-    await pageOne.getByTestId("send-message").click();
+    await sendChannelMessage(pageOne, {
+      channelName,
+      content: incomingMessage,
+    });
 
     await expect(pageTwo.getByTestId("message-scroll-to-latest")).toContainText(
       "1 new message",
     );
     await expect
       .poll(async () => (await getTimelineMetrics(pageTwo)).distanceFromBottom)
-      .toBeGreaterThan(160);
+      .toBeGreaterThanOrEqual(distanceBeforeDelivery - 8);
 
     await pageTwo.getByTestId("message-scroll-to-latest").click();
 

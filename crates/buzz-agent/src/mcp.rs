@@ -54,18 +54,31 @@ const PASSTHROUGH_ENV: &[&str] = &[
     "GIT_CONFIG_GLOBAL",
     // Buzz identity — dev-mcp writes NOSTR_PRIVATE_KEY to a keyfile then
     // removes it from its own env (children never see it). BUZZ_PRIVATE_KEY
-    // and BUZZ_RELAY_URL are kept for the buzz CLI.
+    // and BUZZ_RELAY_URL are kept for the buzz CLI. BUZZ_AUTH_TAG is a
+    // non-secret signed ownership attestation needed by portable owner-scoped
+    // CLI operations; MCP subprocesses are trusted like the agent runtime.
     "NOSTR_PRIVATE_KEY",
     "BUZZ_PRIVATE_KEY",
     "BUZZ_RELAY_URL",
+    "BUZZ_AUTH_TAG",
 ];
 
 // Windows has no $TMPDIR/$HOME. TMP/TEMP/USERPROFILE are what
 // std::env::temp_dir() consults — without them it falls back to C:\Windows,
 // which child processes can't write to (PermissionDenied). USERPROFILE is the
-// always-set floor. LOCALAPPDATA/APPDATA carry child-tool config (git, etc.).
+// always-set floor. APPDATA carries child-tool config (git, etc.).
 #[cfg(windows)]
-const PASSTHROUGH_ENV_WINDOWS: &[&str] = &["TMP", "TEMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA"];
+const PASSTHROUGH_ENV_WINDOWS: &[&str] = &["TMP", "TEMP", "USERPROFILE", "APPDATA"];
+
+/// Environment retained by `spawn_one()` after `env_clear()` on Windows.
+/// Shell resolver keys are shared with Doctor through the public contract.
+#[cfg(windows)]
+fn windows_child_passthrough_env() -> impl Iterator<Item = &'static str> {
+    PASSTHROUGH_ENV_WINDOWS
+        .iter()
+        .copied()
+        .chain(crate::WINDOWS_SHELL_RESOLUTION_ENV.iter().copied())
+}
 
 type Client = RunningService<RoleClient, ()>;
 
@@ -705,7 +718,7 @@ async fn spawn_one(
         }
     }
     #[cfg(windows)]
-    for k in PASSTHROUGH_ENV_WINDOWS {
+    for k in windows_child_passthrough_env() {
         if let Ok(v) = std::env::var(k) {
             cmd.env(k, v);
         }
@@ -977,17 +990,28 @@ fn tool_result_content(
 #[cfg(test)]
 mod content_tests {
     use super::*;
+
+    #[test]
+    fn passthrough_includes_buzz_owner_attestation() {
+        assert!(PASSTHROUGH_ENV.contains(&"BUZZ_AUTH_TAG"));
+    }
     use rmcp::model::Content;
 
     #[cfg(windows)]
     #[test]
-    fn windows_passthrough_includes_temp_dir_vars() {
-        // std::env::temp_dir() consults these in order; without them it falls
-        // back to C:\Windows, which children can't write to.
+    fn windows_passthrough_includes_shell_resolution_vars() {
+        // Temp directories and every resolver key must survive `env_clear()`.
         for var in ["TMP", "TEMP", "USERPROFILE"] {
             assert!(
                 PASSTHROUGH_ENV_WINDOWS.contains(&var),
-                "{var} must pass through or temp_dir() falls back to C:\\Windows"
+                "{var} must pass through for Windows child processes"
+            );
+        }
+        let child_env: Vec<_> = windows_child_passthrough_env().collect();
+        for var in crate::WINDOWS_SHELL_RESOLUTION_ENV {
+            assert!(
+                child_env.contains(var),
+                "{var} must pass through so the MCP shell resolver matches Doctor"
             );
         }
     }

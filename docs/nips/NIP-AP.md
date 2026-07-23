@@ -70,7 +70,6 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
   "name_pool": ["<string>", ...],
   "respond_to": "<string | null>",
   "respond_to_allowlist": ["<64-hex pubkey>", ...],
-  "mcp_toolsets": "<string | null>",
   "parallelism": "<integer | null>"
 }
 ```
@@ -93,16 +92,15 @@ The `content` field is a **plaintext** (unencrypted) JSON object:
 | `name_pool` | string[] | `[]` | Pool of display names for agent instances spawned from this definition. When non-empty, the spawning system picks a name from this pool for each new agent instance, enabling multiple concurrent agents from the same definition to have distinct identities. |
 | `respond_to` | string \| null | `null` | **Reserved.** Default respond-to policy for instances spawned from this definition: `"anyone"`, `"owner-only"`, or `"allowlist"`. `null` defers to the client default. |
 | `respond_to_allowlist` | string[] | `[]` | **Reserved.** Allowlisted author pubkeys (64-char lowercase hex) when `respond_to` is `"allowlist"`. Ignored otherwise. |
-| `mcp_toolsets` | string \| null | `null` | **Reserved.** MCP toolset selector string passed to spawned instances. |
 | `parallelism` | integer \| null | `null` | **Reserved.** Default max concurrent turns for spawned instances. `null` defers to the client default. |
 
-The behavioral fields (`respond_to`, `respond_to_allowlist`, `mcp_toolsets`,
+The behavioral fields (`respond_to`, `respond_to_allowlist`,
 `parallelism`) are definition-level *defaults*: a spawned instance copies them
 at creation and may be reconfigured independently afterwards. They were
 previously carried only on the kind:30177 projection (see
 "Slimming: kind:30177" below).
 
-**Status: reserved.** In the current implementation these four fields are
+**Status: reserved.** In the current implementation these behavioral fields are
 *parsed but not yet applied*: readers tolerate and preserve them at the wire
 layer, but the local definition store does not yet carry them and writers do
 not emit them. The instance-copy-at-creation behavior activates in a
@@ -190,7 +188,7 @@ to carry only instance-level state:
   kind:30177 events **for definition-linked instances**. Those resolve
   through the linked kind:30175 definition. Writers continue to publish
   instance-level fields (name, linked definition id, `respond_to` +
-  allowlist, `parallelism`, `mcp_toolsets`).
+  allowlist, `parallelism`).
 - **Exception — definition-less instances:** an instance with no linked
   definition is its own definition; writers MUST keep emitting the
   definition-level fields for such instances. (Rationale: old readers

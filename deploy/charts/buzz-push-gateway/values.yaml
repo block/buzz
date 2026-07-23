@@ -1,0 +1,92 @@
+replicaCount: 2
+image:
+  repository: ghcr.io/block/buzz-push-gateway
+  # `main` is published by the push-gateway lane on every main push.
+  tag: main
+  digest: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+existingSecret: buzz-push-gateway
+# DDL-capable credentials are used only by the pre-install/pre-upgrade migration
+# Job. Runtime DATABASE_URL in existingSecret should have DML-only privileges.
+migration:
+  existingSecret: buzz-push-gateway-migrations
+  databaseUrlKey: DATABASE_URL
+  # Existing LOGIN role used by runtime DATABASE_URL. Migrations grant it only
+  # CONNECT plus DML on the six gateway tables in this dedicated database.
+  runtimeDatabaseRole: buzz_push_gateway_runtime
+  resources:
+    requests: {cpu: 50m, memory: 64Mi}
+    limits: {cpu: 250m, memory: 128Mi}
+publicDeliveryUrl: https://push.buzz.xyz/v1/deliveries/apns
+maxGrantLifetimeSeconds: 2592000
+enabledProfiles: buzz-ios-production
+# Example App Attest identifier. Production MUST override this with the exact
+# Apple TEAMID.bundle-id value (see values-production.yaml).
+appAttestAppId: TEAMID.xyz.buzz
+appAttestRoot:
+  secretName: buzz-push-gateway
+  secretKey: app-attest-root.pem
+apnsKey:
+  secretName: buzz-push-gateway
+  secretKey: apns-provider.p8
+service:
+  port: 8080
+httpRoute:
+  # Disabled by default so a generic install cannot claim an unattached route.
+  # Production enables this with an explicit Gateway parentRef.
+  enabled: false
+  parentRefs: []
+  hostnames: [push.buzz.xyz]
+resources:
+  requests: {cpu: 100m, memory: 128Mi}
+  limits: {cpu: "1", memory: 512Mi}
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+networkPolicy:
+  enabled: true
+  # Kubernetes NetworkPolicy cannot allow DNS names. Production operators must
+  # narrow these CIDRs to their PostgreSQL/NAT destinations where supported.
+  apnsEgressCidrs: [0.0.0.0/0]
+  # Override with the actual database network. This example private range is
+  # intentionally separate from broad APNs HTTPS egress.
+  postgresEgressCidrs: [10.0.0.0/8]
+  dns:
+    namespaceSelector:
+      kubernetes.io/metadata.name: kube-system
+    podSelector:
+      k8s-app: kube-dns
+  # Scoped ingress to the private metrics port (8081). Off by default so 8081
+  # has no pod ingress at all; enable only alongside podMonitor and name the
+  # scraper's namespace/pod so reachability stays narrow.
+  monitoring:
+    enabled: false
+    namespaceSelector: {}
+    podSelector: {}
+# Prometheus-operator PodMonitor scraping the private /metrics on port 8081.
+# Off by default; requires networkPolicy.monitoring to also be enabled.
+podMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+# Prometheus-operator alerting rules. Off by default.
+prometheusRule:
+  enabled: false
+  labels: {}
+  # Retryable-outcome fraction (0..1] that fires PushGatewayHighApnsRetryRate.
+  apnsRetryRatioThreshold: 0.25
+  # Minimum APNs attempts in the 10m window before the retry-ratio alert can
+  # fire, so a couple of retries at trivial volume cannot trip it.
+  apnsRetryMinSamples: 20
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: buzz-push-gateway

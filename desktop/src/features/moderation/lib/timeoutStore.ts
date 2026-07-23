@@ -70,6 +70,15 @@ export function clearTimeoutState(): void {
   emit();
 }
 
+/**
+ * Synchronously read the current timeout state without subscribing to updates.
+ * Safe to call outside a React rendering context (e.g. inside a guarded send
+ * pipeline action where render state may be stale).
+ */
+export function getTimeoutSnapshot(): TimeoutState {
+  return snapshot;
+}
+
 export type TimeoutState = {
   /** True while the member is timed out (write-blocked). */
   active: boolean;

@@ -58,17 +58,19 @@ import UserNotifications
         return
       }
 
-      let sanitizedData: Data?
-      switch mimeType {
-      case "image/png":
-        sanitizedData = image.pngData()
-      case "image/jpeg":
-        sanitizedData = image.jpegData(compressionQuality: 1.0)
-      default:
-        sanitizedData = nil
-      }
-
-      guard let sanitizedData else {
+      do {
+        guard let sanitizedData = try MediaSanitizer.sanitizeImage(image, mimeType: mimeType) else {
+          result(
+            FlutterError(
+              code: "sanitize_failed",
+              message: "Unable to sanitize picked image.",
+              details: mimeType
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: sanitizedData))
+      } catch {
         result(
           FlutterError(
             code: "sanitize_failed",
@@ -76,10 +78,7 @@ import UserNotifications
             details: mimeType
           )
         )
-        return
       }
-
-      result(FlutterStandardTypedData(bytes: sanitizedData))
     case "transcodeImageToJpeg":
       guard let typedData = call.arguments as? FlutterStandardTypedData else {
         result(
@@ -92,9 +91,7 @@ import UserNotifications
         return
       }
 
-      guard let image = UIImage(data: typedData.data),
-        let jpegData = image.jpegData(compressionQuality: 1.0)
-      else {
+      guard let image = UIImage(data: typedData.data) else {
         result(
           FlutterError(
             code: "transcode_failed",
@@ -105,7 +102,27 @@ import UserNotifications
         return
       }
 
-      result(FlutterStandardTypedData(bytes: jpegData))
+      do {
+        guard let jpegData = try MediaSanitizer.encodeJpeg(image) else {
+          result(
+            FlutterError(
+              code: "transcode_failed",
+              message: "Unable to convert picked image to JPEG.",
+              details: nil
+            )
+          )
+          return
+        }
+        result(FlutterStandardTypedData(bytes: jpegData))
+      } catch {
+        result(
+          FlutterError(
+            code: "transcode_failed",
+            message: "Unable to convert picked image to JPEG.",
+            details: nil
+          )
+        )
+      }
     case "transcodeVideoToMp4":
       guard let sourcePath = call.arguments as? String else {
         result(
@@ -118,9 +135,35 @@ import UserNotifications
         return
       }
       transcodeVideoToMp4(sourcePath: sourcePath, result: result)
+    case "clipboardHasImage":
+      result(UIPasteboard.general.hasImages)
+    case "readClipboardImage":
+      guard let imageData = Self.clipboardImageData(from: UIPasteboard.general) else {
+        result(nil)
+        return
+      }
+      result(FlutterStandardTypedData(bytes: imageData))
     default:
       result(FlutterMethodNotImplemented)
     }
+  }
+
+  static func clipboardImageData(from pasteboard: UIPasteboard) -> Data? {
+    if let pngData = pasteboard.data(forPasteboardType: "public.png") {
+      return pngData
+    }
+    if let jpegData = pasteboard.data(forPasteboardType: "public.jpeg") {
+      return jpegData
+    }
+    for imageType in ["public.heic", "public.heif", "org.webmproject.webp", "com.compuserve.gif"] {
+      if let imageData = pasteboard.data(forPasteboardType: imageType) {
+        return imageData
+      }
+    }
+    guard let image = pasteboard.image else {
+      return nil
+    }
+    return image.pngData()
   }
 
   private func transcodeVideoToMp4(
@@ -151,6 +194,7 @@ import UserNotifications
     exportSession.outputURL = outputURL
     exportSession.outputFileType = .mp4
     exportSession.shouldOptimizeForNetworkUse = true
+    exportSession.metadataItemFilter = AVMetadataItemFilter.forSharing()
 
     exportSession.exportAsynchronously {
       switch exportSession.status {

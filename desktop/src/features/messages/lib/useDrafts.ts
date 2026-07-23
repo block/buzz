@@ -39,6 +39,12 @@ function getStoreSnapshot(): number {
  */
 export { subscribeToStore, getStoreSnapshot };
 
+export type DraftMentionRef = {
+  displayName: string;
+  pubkey: string;
+  isAgent: boolean;
+};
+
 export type DraftState = {
   content: string;
   selectionStart: number;
@@ -56,6 +62,8 @@ export type DraftState = {
   updatedAt: string;
   /** Pasted/uploaded image attachments, preserved across channel-switch. */
   pendingImeta: ImetaMedia[];
+  /** Stable identity references for autocomplete-selected mentions in content. */
+  mentionRefs?: DraftMentionRef[];
   /** URLs of imeta attachments marked as spoilered. */
   spoileredAttachmentUrls: string[];
   /**
@@ -71,39 +79,69 @@ export type DraftState = {
 /** Serialised shape stored in localStorage (same as DraftState for round-trips). */
 type StoredDrafts = Record<string, DraftState>;
 
-const DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v1";
+const DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v2";
+const LEGACY_DRAFT_STORE_KEY_PREFIX = "buzz-drafts.v1";
 const MAX_DRAFTS = 100;
 
-/** Module-level pubkey set by `initDraftStore`. Empty string = no identity. */
+/**
+ * Canonicalize a relay URL for use as a storage key scope.
+ * Unlike the shared `normalizeRelayUrl` (which lowercases the entire URL),
+ * this preserves path/query case so that distinct path-bearing relays
+ * (e.g. `wss://host/Team` vs `wss://host/team`) produce separate buckets.
+ */
+function canonicalizeRelayScope(relayUrl: string): string {
+  const trimmed = relayUrl.trim().replace(/\/+$/, "");
+  if (!trimmed) return "";
+  try {
+    const u = new URL(trimmed);
+    const path = u.pathname.replace(/\/+$/, "");
+    return `${u.protocol}//${u.host}${path}${u.search}`;
+  } catch {
+    return trimmed.toLowerCase();
+  }
+}
+
+/** Module-level workspace identity set by `initDraftStore`. Empty = no workspace. */
 let currentPubkey = "";
+let currentRelayScope = "";
 
 function storageKey(): string {
-  return `${DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
+  // The no-relay form is retained for direct legacy callers/tests. App startup
+  // always supplies a normalized relay and therefore uses the v2 scoped key.
+  return currentRelayScope
+    ? `${DRAFT_STORE_KEY_PREFIX}:${currentRelayScope}:${currentPubkey}`
+    : legacyStorageKey();
+}
+
+function legacyStorageKey(): string {
+  return `${LEGACY_DRAFT_STORE_KEY_PREFIX}:${currentPubkey}`;
 }
 
 /**
  * Initialise (or re-initialise) the draft store for a given identity.
- * Called from `useWorkspaceInit` alongside the other singleton resets.
- * Resets the in-memory cache whenever the pubkey changes so a direct
- * identity switch (without a prior `clearAllDrafts`) never serves the
- * wrong identity's drafts.
+ * Called from `useCommunityInit` alongside the other singleton resets.
+ * Resets the in-memory cache whenever the pubkey or relay scope changes
+ * so a workspace switch never serves the wrong workspace's drafts.
  */
-export function initDraftStore(pubkey: string): void {
-  if (currentPubkey !== pubkey) {
+export function initDraftStore(pubkey: string, relayUrl = ""): void {
+  const relayScope = canonicalizeRelayScope(relayUrl);
+  if (currentPubkey !== pubkey || currentRelayScope !== relayScope) {
     _memCache = null;
   }
   currentPubkey = pubkey;
+  currentRelayScope = relayScope;
   // Eagerly load to surface corruption errors in console at startup rather
   // than on first draft interaction.
   readStore();
 }
 
 /**
- * Reset the in-memory draft store on workspace switch.
+ * Reset the in-memory draft store on community switch.
  * Replaces the old `clearAllDrafts()`.
  */
 export function clearAllDrafts(): void {
   currentPubkey = "";
+  currentRelayScope = "";
   _memCache = null;
 }
 
@@ -123,13 +161,19 @@ function readStore(): Map<string, DraftState> {
   }
 
   const raw = localStorage.getItem(storageKey());
-  if (!raw) {
+  // One-time forward migration: read legacy v1 entries only when no v2 store
+  // exists yet AND a relay scope is set. Once migrated, the v1 key is deleted
+  // so no other workspace can import the same legacy bucket.
+  const legacyRaw =
+    raw || !currentRelayScope ? null : localStorage.getItem(legacyStorageKey());
+  const source = raw ?? legacyRaw;
+  if (!source) {
     _memCache = map;
     return map;
   }
 
   try {
-    const parsed: unknown = JSON.parse(raw);
+    const parsed: unknown = JSON.parse(source);
     if (
       parsed !== null &&
       typeof parsed === "object" &&
@@ -152,6 +196,11 @@ function readStore(): Map<string, DraftState> {
   }
 
   _memCache = map;
+  if (legacyRaw !== null) {
+    if (flushStore(map)) {
+      localStorage.removeItem(legacyStorageKey());
+    }
+  }
   return map;
 }
 
@@ -170,6 +219,25 @@ function isValidDraftState(v: unknown): v is DraftState {
   ) {
     return false;
   }
+  // Migration: drafts written before mention routing was persisted have no
+  // mentionRefs. Preserve them as ordinary drafts with no selected identities.
+  if (d.mentionRefs === undefined) {
+    (d as DraftState).mentionRefs = [];
+  } else if (
+    !Array.isArray(d.mentionRefs) ||
+    d.mentionRefs.some(
+      (ref) =>
+        typeof ref !== "object" ||
+        ref === null ||
+        typeof ref.displayName !== "string" ||
+        ref.displayName.trim().length === 0 ||
+        typeof ref.pubkey !== "string" ||
+        ref.pubkey.trim().length === 0 ||
+        typeof ref.isAgent !== "boolean",
+    )
+  ) {
+    return false;
+  }
   // Migration: entries written before the status field was introduced have no
   // status field. Treat absent status as "active" to avoid data loss on the
   // first run after the upgrade.
@@ -183,13 +251,13 @@ function isValidDraftState(v: unknown): v is DraftState {
   return true;
 }
 
-function flushStore(map: Map<string, DraftState>): void {
-  if (!currentPubkey) return;
+function flushStore(map: Map<string, DraftState>): boolean {
+  if (!currentPubkey) return false;
   const obj: StoredDrafts = {};
   for (const [k, v] of map) {
     obj[k] = v;
   }
-  setLocalStorageItemWithRecovery(storageKey(), JSON.stringify(obj));
+  return setLocalStorageItemWithRecovery(storageKey(), JSON.stringify(obj));
 }
 
 /**
@@ -238,6 +306,118 @@ export function clearDraftEntry(draftKey: string): void {
 }
 
 /**
+ * Return true only when every field of two DraftState values is identical,
+ * including all ImetaMedia optional fields (dim, blurhash, thumb, duration,
+ * image, filename, displayLabel, uploaded). Any divergence — including
+ * selection offsets, timestamps, attachment metadata, spoiler state, and
+ * status — is treated as a distinct record that must not be discarded.
+ */
+function draftStatesEqual(a: DraftState, b: DraftState): boolean {
+  if (
+    a.content !== b.content ||
+    a.selectionStart !== b.selectionStart ||
+    a.selectionEnd !== b.selectionEnd ||
+    a.channelId !== b.channelId ||
+    a.createdAt !== b.createdAt ||
+    a.updatedAt !== b.updatedAt ||
+    a.status !== b.status ||
+    a.pendingImeta.length !== b.pendingImeta.length ||
+    (a.mentionRefs?.length ?? 0) !== (b.mentionRefs?.length ?? 0) ||
+    a.spoileredAttachmentUrls.length !== b.spoileredAttachmentUrls.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < a.pendingImeta.length; i++) {
+    const am = a.pendingImeta[i];
+    const bm = b.pendingImeta[i];
+    if (
+      am.url !== bm.url ||
+      am.sha256 !== bm.sha256 ||
+      am.size !== bm.size ||
+      am.type !== bm.type ||
+      am.uploaded !== bm.uploaded ||
+      am.dim !== bm.dim ||
+      am.blurhash !== bm.blurhash ||
+      am.thumb !== bm.thumb ||
+      am.duration !== bm.duration ||
+      am.image !== bm.image ||
+      am.filename !== bm.filename ||
+      am.displayLabel !== bm.displayLabel
+    ) {
+      return false;
+    }
+  }
+  const aMentionRefs = a.mentionRefs ?? [];
+  const bMentionRefs = b.mentionRefs ?? [];
+  for (let i = 0; i < aMentionRefs.length; i++) {
+    const ar = aMentionRefs[i];
+    const br = bMentionRefs[i];
+    if (
+      ar.displayName !== br.displayName ||
+      ar.pubkey !== br.pubkey ||
+      ar.isAgent !== br.isAgent
+    ) {
+      return false;
+    }
+  }
+  for (let i = 0; i < a.spoileredAttachmentUrls.length; i++) {
+    if (a.spoileredAttachmentUrls[i] !== b.spoileredAttachmentUrls[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Atomically rename a draft key: move the DraftState from `oldKey` to
+ * `newKey`, flush once, and notify once. Returns the outcome:
+ *
+ * - `"migrated"` — the rename succeeded; `oldKey` no longer exists.
+ * - `"collision"` — `newKey` already held a record whose full persisted
+ *   DraftState differed from `oldKey`'s record across any field (content,
+ *   selection, timestamps, attachments, spoiler state, or status). Both
+ *   records are preserved unchanged; no I/O is performed.
+ * - `"noop"` — `oldKey` did not exist in the store; nothing changed.
+ *
+ * If `oldKey === newKey` no I/O occurs and `"noop"` is returned.
+ * Map cardinality is unchanged by a rename (one key removed, one added or
+ * identical collapse), so `evictOldest` is never called here.
+ * Callers must not compose this from public save+clear calls (that would
+ * issue two flushes and could overwrite a concurrent write).
+ */
+export function renameDraftEntry(
+  oldKey: string,
+  newKey: string,
+): "migrated" | "collision" | "noop" {
+  if (oldKey === newKey) return "noop";
+  const map = readStore();
+  const existing = map.get(oldKey);
+  if (existing === undefined) return "noop";
+
+  const destination = map.get(newKey);
+  if (destination !== undefined) {
+    // Only collapse when every persisted field is identical; any divergence
+    // is treated as a collision to prevent silent data loss.
+    if (!draftStatesEqual(existing, destination)) {
+      return "collision";
+    }
+    // Identical records: remove the legacy key, keep the destination entry.
+    map.delete(oldKey);
+    flushStore(map);
+    notifySubscribers();
+    return "migrated";
+  }
+
+  // No destination conflict: move the record. Cardinality is unchanged
+  // (one delete + one set), so evictOldest is not called.
+  map.set(newKey, existing);
+  map.delete(oldKey);
+  flushStore(map);
+  notifySubscribers();
+  return "migrated";
+}
+
+/**
  * Convenience: save if content or attachments are non-empty, otherwise clear.
  * Preserves existing createdAt on updates; sets it on first save.
  */
@@ -247,6 +427,7 @@ export function persistDraftEntry(
   channelId: string,
   pendingImeta: ImetaMedia[],
   spoileredAttachmentUrls: string[],
+  mentionRefs: DraftMentionRef[] = [],
 ): void {
   const hasContent = content.trim().length > 0 || pendingImeta.length > 0;
   if (hasContent) {
@@ -261,6 +442,7 @@ export function persistDraftEntry(
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       pendingImeta,
+      mentionRefs,
       spoileredAttachmentUrls,
       status: "active",
     });
@@ -359,6 +541,7 @@ export function useDrafts() {
       channelId: string,
       pendingImeta: ImetaMedia[],
       spoileredAttachmentUrls: string[],
+      mentionRefs: DraftMentionRef[] = [],
     ) =>
       persistDraftEntry(
         draftKey,
@@ -366,6 +549,7 @@ export function useDrafts() {
         channelId,
         pendingImeta,
         spoileredAttachmentUrls,
+        mentionRefs,
       ),
     [],
   );

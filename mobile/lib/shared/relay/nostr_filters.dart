@@ -132,6 +132,20 @@ abstract final class NostrFilters {
     limit: limit,
   );
 
+  /// Global user search over kind:0 profiles (NIP-50 via the HTTP bridge).
+  ///
+  /// `search_mode: "prefix"` is a Buzz bridge-only extension: every caller is
+  /// a typeahead surface, so a partially typed name must match ("rac" →
+  /// "raccoon"). Mirrors desktop's `build_user_search_filter`
+  /// (desktop/src-tauri/src/commands/profile.rs). Bridge-only — send through
+  /// `queryRelay`, not a WebSocket REQ.
+  static NostrFilter searchUsers(String query, {int limit = 50}) => NostrFilter(
+    kinds: [0],
+    search: query,
+    limit: limit,
+    extensions: const {'search_mode': 'prefix'},
+  );
+
   /// Deletions (kind:5) targeting event IDs.
   static NostrFilter deletionsByTargetIds(
     List<String> ids, {

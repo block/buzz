@@ -20,7 +20,6 @@ function agent(overrides = {}) {
     systemPrompt: "Prompt",
     avatarUrl: null,
     model: null,
-    mcpToolsets: null,
     envVars: {},
     status: "stopped",
     pid: null,

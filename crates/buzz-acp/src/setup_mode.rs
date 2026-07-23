@@ -62,6 +62,8 @@ pub(crate) enum AcpAvailabilityStatus {
     Available,
     /// ACP adapter binary missing; underlying CLI may be present.
     AdapterMissing,
+    /// ACP adapter binary is from the deprecated package (< 1.0). Reinstall required.
+    AdapterOutdated,
     /// CLI binary missing; ACP adapter may be present.
     CliMissing,
     /// Neither adapter nor CLI found.
@@ -111,6 +113,8 @@ pub(crate) enum RequirementPayload {
         /// One-line stderr excerpt identifying the parse error.
         diagnostic: String,
     },
+    /// Git for Windows is missing; open Agent runtimes for the installation guide.
+    GitBash,
 }
 
 impl RequirementPayload {
@@ -135,7 +139,17 @@ impl RequirementPayload {
                         .map(String::as_str)
                         .unwrap_or("the agent");
                     format!(
-                        "install the {} ACP adapter (open Doctor in Settings to diagnose)",
+                        "install the {} ACP adapter (open Agent runtimes in Settings to diagnose)",
+                        harness
+                    )
+                }
+                AcpAvailabilityStatus::AdapterOutdated => {
+                    let harness = probe_args
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or("the agent");
+                    format!(
+                        "reinstall the {} ACP adapter — the installed version is outdated (open Agent runtimes in Settings to diagnose)",
                         harness
                     )
                 }
@@ -145,7 +159,7 @@ impl RequirementPayload {
                         .map(String::as_str)
                         .unwrap_or("the agent");
                     format!(
-                        "install {} CLI (open Doctor in Settings to diagnose)",
+                        "install {} CLI (open Agent runtimes in Settings to diagnose)",
                         harness
                     )
                 }
@@ -154,7 +168,10 @@ impl RequirementPayload {
                         .first()
                         .map(String::as_str)
                         .unwrap_or("the agent");
-                    format!("install {} (open Doctor in Settings to diagnose)", harness)
+                    format!(
+                        "install {} (open Agent runtimes in Settings to diagnose)",
+                        harness
+                    )
                 }
             },
             RequirementPayload::CliConfigInvalid {
@@ -168,6 +185,9 @@ impl RequirementPayload {
                     "{} is invalid: {} — fix the config and restart the agent",
                     config_file, diagnostic
                 )
+            }
+            RequirementPayload::GitBash => {
+                "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
         }
     }
@@ -233,6 +253,10 @@ impl SetupPayload {
                 .map(|r| format!("- {}", r.instruction()))
                 .collect();
 
+            let has_doctor_requirement = self
+                .requirements
+                .iter()
+                .any(|r| matches!(r, RequirementPayload::GitBash));
             let all_external = self
                 .requirements
                 .iter()
@@ -242,7 +266,9 @@ impl SetupPayload {
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
 
-            let footer = if all_external {
+            let footer = if has_doctor_requirement {
+                "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
+            } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
                 // help. Don't send the user there.
                 "Fix the config file(s) and restart the agent.".to_string()
@@ -357,6 +383,8 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
     let publisher = relay.event_publisher();
     let rest_client = relay.rest_client();
 
+    let channel_info = crate::pool::ChannelInfoResolver::new(channel_info_map, rest_client.clone());
+
     // Deduplicate by event-id so reconnect replay cannot double-nudge.
     let mut nudged_event_ids: HashSet<EventId> = HashSet::new();
 
@@ -398,12 +426,15 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         }
 
         // Apply the same author gate as normal mode so the nudge only goes
-        // to authors the real agent would have answered.
+        // to authors the real agent would have answered. Same DM hardening:
+        // in DMs only owner/siblings get a nudge (fail-closed on unknown type).
         let author_hex = buzz_event.event.pubkey.to_hex();
+        let is_dm = crate::is_dm_channel(buzz_event.channel_id, &channel_info).await;
         let allowed = author_allowed(
             &config.respond_to,
             &config.respond_to_allowlist,
             &author_hex,
+            is_dm,
             &owner_cache,
             &rest_client,
         )
@@ -657,6 +688,18 @@ mod tests {
     }
 
     #[test]
+    fn setup_payload_deserializes_git_bash_requirement() {
+        let payload: SetupPayload = serde_json::from_str(
+            r#"{"agent_name":"Buzz Agent","agent_pubkey":"test","requirements":[{"surface":"git_bash"}]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            payload.requirements.as_slice(),
+            [RequirementPayload::GitBash]
+        ));
+    }
+
+    #[test]
     fn nudge_body_names_all_requirements() {
         let payload = SetupPayload {
             agent_name: "Fizz".to_string(),
@@ -705,6 +748,53 @@ mod tests {
         assert!(
             body.contains("codex login"),
             "codex nudge must mention `codex login`; got: {body:?}"
+        );
+    }
+
+    #[test]
+    fn nudge_body_runtime_install_copy_points_to_agent_runtimes() {
+        for availability in [
+            AcpAvailabilityStatus::AdapterMissing,
+            AcpAvailabilityStatus::AdapterOutdated,
+            AcpAvailabilityStatus::CliMissing,
+            AcpAvailabilityStatus::NotInstalled,
+        ] {
+            let payload = SetupPayload {
+                agent_name: "Codex".to_string(),
+                agent_pubkey: "test".to_string(),
+                requirements: vec![RequirementPayload::CliLogin {
+                    probe_args: vec!["codex".to_string()],
+                    setup_copy: "run `codex login`".to_string(),
+                    availability,
+                }],
+            };
+            let body = payload.nudge_body();
+            assert!(
+                body.contains("Agent runtimes in Settings"),
+                "runtime install nudge must point to Agent runtimes; got: {body:?}"
+            );
+            assert!(
+                !body.contains("Doctor"),
+                "runtime install nudge must not point to the removed Doctor section; got: {body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn nudge_body_git_bash_copy_points_to_agent_runtimes() {
+        let payload = SetupPayload {
+            agent_name: "Buzz Agent".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![RequirementPayload::GitBash],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("Open Agent runtimes in Settings"),
+            "Git Bash nudge must point to Agent runtimes; got: {body:?}"
+        );
+        assert!(
+            !body.contains("Doctor"),
+            "Git Bash nudge must not point to the removed Doctor section; got: {body:?}"
         );
     }
 

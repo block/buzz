@@ -26,7 +26,7 @@ export const DEFAULT_STORE: ChannelSectionStore = Object.freeze({
  *
  * When `relayUrl` is provided the key is scoped to that relay (normalized via
  * the same `normalizeRelayUrl` used by all relay-scoped local stores) so
- * sections from different workspaces/relays don't bleed across each other.
+ * sections from different communities/relays don't bleed across each other.
  * When omitted the legacy pubkey-only key is returned (used only during
  * one-time migration in `readChannelSectionsStore`).
  */

@@ -170,7 +170,7 @@ export const CustomEmojiNode = Node.create<CustomEmojiNodeOptions>({
       src: {
         default: "",
         parseHTML: (el) => (el as HTMLElement).getAttribute("src") ?? "",
-        // `src` is derived from the workspace palette at render time, not
+        // `src` is derived from the community palette at render time, not
         // persisted in serialized output — see renderText/markdown below.
         renderHTML: () => ({}),
       },

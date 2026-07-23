@@ -320,11 +320,11 @@ function parseLinearIssue(parsed: URL): SupportedLinkPreview | null {
   const issueSegmentIndex = segments.findIndex(
     (segment) => segment.toLowerCase() === "issue",
   );
-  const workspace = segments[0];
+  const community = segments[0];
   const issueId = segments[issueSegmentIndex + 1]?.toUpperCase();
 
   if (
-    !workspace ||
+    !community ||
     issueSegmentIndex < 1 ||
     !issueId ||
     !/^[A-Z][A-Z0-9]*-\d+$/.test(issueId)

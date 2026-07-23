@@ -54,6 +54,8 @@ type MockManagedAgentSeed = {
     | { type: "provider"; id: string; config: Record<string, unknown> };
   lastError?: string | null;
   lastErrorCode?: number | null;
+  needsRestart?: boolean;
+  autoRestartOnConfigChange?: boolean;
   respondTo?: "owner-only" | "allowlist" | "anyone";
   respondToAllowlist?: string[];
 };
@@ -88,6 +90,25 @@ type MockPersonaSeed = {
   isActive?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
+  /**
+   * Runtime the persona is pinned to (e.g. "goose", "codex", "claude"). Lets a
+   * spec seed a CLI-login runtime whose provider picker is hidden, so the Edit
+   * dialog's provider-aware submit gate can be driven end-to-end. Omitted →
+   * null (definition inherits the app default at open).
+   */
+  runtime?: string | null;
+  /** Model pinned on the persona (a custom model id for Customize mode). */
+  model?: string | null;
+  /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
+  provider?: string | null;
+  namePool?: string[];
+};
+
+type MockTeamSeed = {
+  id?: string;
+  name: string;
+  description?: string | null;
+  personaIds: string[];
 };
 
 export type MockEngramEntry = {
@@ -106,7 +127,65 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** Advertised HEAD for the first mock project without adding that branch. */
+  projectHeadBranch?: string;
+  /** Relay NIP-11 identity used to sign authoritative repository state. */
+  relaySelf?: string | null;
+  /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
+  builderlabAuth?: { email?: string; name?: string; expiresAt: string } | null;
+  /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
+  builderlabIdentity?: { npub?: string; pubkey_hex?: string } | null;
+  /** Communities owned by the mocked Builderlab account. */
+  builderlabCommunities?: Array<{
+    id?: string;
+    name?: string;
+    slug?: string;
+    normalized_host?: string;
+    archived_at?: string | null;
+  }>;
   acpRuntimesCatalog?: Record<string, unknown>[];
+  /** Catalog returned after a successful mocked install. */
+  acpRuntimesCatalogAfterInstall?: Record<string, unknown>[];
+  /** Catalog responses after install for testing later sign-in completion. */
+  acpRuntimesCatalogAfterInstallSequence?: Record<string, unknown>[][];
+  /** Catalog responses for successive discovery calls. The final response repeats. */
+  acpRuntimesCatalogSequence?: Record<string, unknown>[][];
+  acpRuntimesDelayMs?: number;
+  acpAuthMethods?: Record<string, { methods: Record<string, unknown>[] }>;
+  acpAuthMethodsError?: string;
+  connectAcpRuntimeResult?: { launched: boolean };
+  connectAcpRuntimeDelayMs?: number;
+  connectAcpRuntimeError?: string;
+  installAcpRuntimeDelayMs?: number;
+  /** Override the result returned by the `install_acp_runtime` mock command.
+   *  Pass `{ success: false, steps: [...] }` to exercise error/Retry states. */
+  installAcpRuntimeResult?: {
+    success: boolean;
+    steps: {
+      step: string;
+      command: string;
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      hint?: string;
+    }[];
+  };
+  /** Sequence of results for successive `install_acp_runtime` calls. Call N
+   *  returns results[N]; when exhausted the last entry repeats. Takes precedence
+   *  over `installAcpRuntimeResult`. Use for fail-then-succeed Retry tests. */
+  installAcpRuntimeResults?: Array<{
+    success: boolean;
+    steps: {
+      step: string;
+      command: string;
+      success: boolean;
+      stdout: string;
+      stderr: string;
+      exit_code: number | null;
+      hint?: string;
+    }[];
+  }>;
   activePersonaIds?: string[];
   /**
    * Listing returned by the mocked `get_agent_memory` command. Pass a single
@@ -118,18 +197,51 @@ type MockBridgeOptions = {
     mcp?: MockCommandAvailability;
   };
   managedAgents?: MockManagedAgentSeed[];
+  /** Per agent+relay runtime rows for pair-scoped lifecycle commands. */
+  managedAgentRuntimes?: Array<{
+    pubkey: string;
+    relayUrl: string;
+    lifecycle?:
+      | "starting"
+      | "listening"
+      | "waking"
+      | "ready"
+      | "failed"
+      | "stopped";
+  }>;
   personas?: MockPersonaSeed[];
+  teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   addChannelMembersDelayMs?: number;
+  /** Sequenced add-member failures. A string fails that call; null succeeds. */
+  addChannelMembersErrors?: (string | null)[];
+  channelMembersReadDelayMs?: number;
   channelsReadError?: string;
+  /** Reject successive mock `create_channel` calls, then resume. */
+  createChannelErrors?: string[];
+  /** Reject successive mock `ensure_starter_channels` calls, then resume. */
+  ensureStarterChannelsErrors?: string[];
+  /** Reject successive mock `join_channel` calls, then resume. */
+  joinChannelErrors?: string[];
+  /** Number of seeded rows in the deep-history fixture. Defaults to 600. */
+  deepHistoryMessageCount?: number;
   feedReadError?: string;
   canvasReadError?: string;
   /** Delay (ms) for `apply_workspace`; see e2eBridge mock config. */
-  applyWorkspaceDelayMs?: number;
+  applyCommunityDelayMs?: number;
   openDmDelayMs?: number;
   sendMessageDelayMs?: number;
+  /** Close the first channel-window live REQ; its retry is accepted. */
+  closeChannelLiveSubscriptionOnce?: boolean;
+  /** Reject successive kind-9 sends with these messages, then resume. */
+  sendMessageErrors?: string[];
+  /** Reject successive managed-agent starts, then resume. */
+  startManagedAgentErrors?: string[];
+  /** Delay (ms) after snapshotting a thread-replies page so E2E tests can
+   * deliver live reply/aux events while an older response is in flight. */
+  threadRepliesDelayMs?: number;
   usersBatchDelayMs?: number;
   /** Delay (ms) for older-history fetches; see e2eBridge mock config. */
   channelWindowDelayMs?: number;
@@ -145,8 +257,31 @@ type MockBridgeOptions = {
   /** Set to false to simulate a Linux .deb install where auto-update is not
    *  supported. Defaults to true. See e2eBridge mock.autoUpdateSupported. */
   autoUpdateSupported?: boolean;
+  /** Reject browser opener calls to exercise manual pairing fallback UI. */
+  openerError?: string;
+  /** Delay binding signatures so specs can exercise request supersession. */
+  nostrBindSignDelayMs?: number;
+  /** Reject successive mock WebSocket connect attempts, then resume. */
+  websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
+  /**
+   * Value returned by the `observer_archive_default_enabled` mock command.
+   * `true` = internal-policy build (toggle locked ON); `false`/omitted = OSS
+   * build (toggle functional). Drives LocalArchiveSettingsCard policy state.
+   */
+  observerArchiveDefaultEnabled?: boolean;
+  /**
+   * Delay (ms) applied to `observer_archive_default_enabled` so specs can
+   * assert the pending-reconciliation state (toggle disabled, no
+   * `list_save_subscriptions` call yet) before the policy resolves.
+   */
+  observerArchiveDefaultEnabledDelayMs?: number;
+  /**
+   * When set, `observer_archive_default_enabled` throws with this message —
+   * drives the fail-closed path when the policy check itself fails.
+   */
+  observerArchiveDefaultEnabledError?: string;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**
@@ -160,6 +295,8 @@ type MockBridgeOptions = {
    * (owner-path branch of the gate).
    */
   oaOwnerIsMe?: boolean;
+  /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
+  relayRequiresMembership?: boolean;
   /**
    * Active identity's role in the seeded `mockRelayMembers`. `null` removes
    * the active identity from the membership list entirely (admin-path branch
@@ -167,17 +304,35 @@ type MockBridgeOptions = {
    */
   relayRole?: "owner" | "admin" | "member" | null;
   /**
-   * Reporter pubkey injected into mocked mesh serve targets. Defaults to the
-   * active identity; specs can override to catch malformed/missing #p handling.
-   */
-  meshReporterPubkey?: string;
-  /**
    * Descriptors returned by the mocked `pick_and_upload_media` /
    * `upload_media_bytes` commands. When omitted, the bridge returns a single
    * generic PDF so the file-attachment flow can be exercised by default. An
    * explicit `[]` is honoured (models a picker cancel / no files selected).
    */
   uploadDelayMs?: number;
+  /** Delay (ms) applied to `encode_agent_snapshot_for_send` so E2E tests can
+   *  observe the "preparing" phase before the upload begins. 0/undefined = instant. */
+  encodeDelayMs?: number;
+  /** Delay (ms) applied to `get_relay_self` so E2E tests can prove the
+   *  fail-closed race: DMs are withheld while classification is unresolved. */
+  relaySelfDelayMs?: number;
+  /**
+   * Sequenced results for `confirm_team_snapshot_import`. String = throw
+   * with that message; null = succeed. Call N uses results[N]; last entry
+   * repeats when exhausted. Follows the `nsecErrors` precedent.
+   */
+  teamSnapshotConfirmErrors?: (string | null)[];
+  /**
+   * When true, `preview_team_snapshot_import` returns a preview with
+   * `hasSourceAllowlist: true` so the allowlist section renders in the
+   * import dialog.
+   */
+  teamSnapshotPreviewHasSourceAllowlist?: boolean;
+  /**
+   * When set to a non-empty string, `fetch_snapshot_bytes` throws with this
+   * message — lets specs prove malformed/hash/size-mismatch error paths.
+   */
+  snapshotFetchError?: string;
   uploadDescriptors?: {
     url: string;
     sha256: string;
@@ -218,6 +373,18 @@ type MockBridgeOptions = {
    */
   identityLocked?: boolean;
   /**
+   * Pending community deep links seeded into the mocked Rust-side queue.
+   * The frontend drains these on boot into onboarding or an editable Add
+   * Community prefill.
+   */
+  pendingCommunityDeepLinks?: Array<{
+    id: string;
+    kind: "connect" | "join" | "add-community";
+    relayUrl: string;
+    code?: string | null;
+    name?: string | null;
+  }>;
+  /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.
    * Pass a config with a provider to test Inherit-from-global behavior.
@@ -226,7 +393,67 @@ type MockBridgeOptions = {
     env_vars: Record<string, string>;
     provider: string | null;
     model: string | null;
+    preferred_runtime?: string | null;
   };
+  bakedBuildEnv?: Array<{
+    key: string;
+    masked: boolean;
+    value: string;
+  }>;
+  /** Delay (ms) for `get_baked_build_env` so specs can verify load gating. */
+  bakedBuildEnvDelayMs?: number;
+  /** Delay (ms) for `set_global_agent_config` — hold saves open in tests.
+   *  Alias of `globalConfigSaveDelayMs` (kept for onboarding specs). */
+  setGlobalAgentConfigDelayMs?: number;
+  /**
+   * When set, `get_nsec` throws with this message. For a single always-fail
+   * scenario. Use `nsecErrors` for sequenced fail/succeed.
+   */
+  nsecError?: string;
+  /**
+   * Sequenced results for `get_nsec`. String = throw with that message;
+   * null = succeed. Call N uses results[N]; last entry repeats when exhausted.
+   */
+  nsecErrors?: (string | null)[];
+  /**
+   * The `restarted_count` returned by `set_global_agent_config`. Defaults to
+   * 0 (no agents restarted). Set to a positive integer to drive the
+   * "Saved. Restarted N agent(s)." status text in AgentDefaultsSettingsCard.
+   */
+  globalConfigRestartedCount?: number;
+  /**
+   * The `failed_restart_count` returned by `set_global_agent_config`. Defaults
+   * to 0. Set to a positive integer to drive the "failed to restart — check
+   * the Agents tab." status text in AgentDefaultsSettingsCard.
+   */
+  globalConfigFailedRestartCount?: number;
+  /**
+   * Milliseconds to delay the mocked `set_global_agent_config` response.
+   * Defaults to 0 (resolve immediately). Use to hold a save in flight so a
+   * test can interleave edits and exercise the mid-save race handling.
+   */
+  globalConfigSaveDelayMs?: number;
+  /**
+   * Override the `discover_agent_models` mock response. When set, the bridge
+   * returns this catalog instead of the default per-harness model list.
+   * Use `{ models: [], supportsSwitching: false }` to exercise empty discovery
+   * (e.g. optional harnesses that omit the Model control).
+   */
+  discoverAgentModels?: {
+    models: Array<{
+      id: string;
+      name: string | null;
+      description?: string | null;
+    }>;
+    supportsSwitching: boolean;
+    agentDefaultModel?: string | null;
+    selectedModel?: string | null;
+  };
+  /**
+   * When set, `discover_agent_models` throws with this message instead of
+   * returning a catalog. Exercises the discovery-failure UI path.
+   */
+  discoverAgentModelsError?: string;
 };
 
 type BridgeOptions = {
@@ -234,8 +461,9 @@ type BridgeOptions = {
   mock?: MockBridgeOptions;
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   skipOnboardingSeed?: boolean;
-  skipWorkspaceSeed?: boolean;
+  skipCommunitySeed?: boolean;
   /**
    * When true (default), seed every preview feature in preview-features.json as
    * enabled in localStorage so E2E tests can interact with gated UI without
@@ -394,23 +622,57 @@ async function seedOnboardingCompletionForKnownIdentities(
   );
 }
 
-async function seedDefaultWorkspace(page: Page, relayWsUrl?: string) {
+async function seedDefaultCommunity(
+  page: Page,
+  fallbackPubkey: string,
+  relayWsUrl?: string,
+) {
   await page.addInitScript(
-    ({ relayUrl }) => {
-      const workspaceId = "e2e-default-workspace";
-      const workspace = {
-        id: workspaceId,
+    ({ fallback, identityOverrideKey, relayUrl }) => {
+      // If seedActiveIdentity() ran before this script (the normal ordering),
+      // use its pubkey so the community matches the active identity and
+      // migrateMachineOnboardingCompletion's strict voucher accepts it.
+      // Mirror readStoredIdentityOverride()'s shape validation: require all
+      // three fields to be non-empty strings; fall through to fallback on
+      // malformed JSON, stored null, or partial objects.
+      let overridePubkey: string | undefined;
+      try {
+        const overrideRaw = window.localStorage.getItem(identityOverrideKey);
+        if (overrideRaw !== null) {
+          const parsed: unknown = JSON.parse(overrideRaw);
+          if (
+            parsed !== null &&
+            typeof parsed === "object" &&
+            typeof (parsed as Record<string, unknown>).pubkey === "string" &&
+            typeof (parsed as Record<string, unknown>).privateKey ===
+              "string" &&
+            typeof (parsed as Record<string, unknown>).username === "string"
+          ) {
+            overridePubkey = (parsed as { pubkey: string }).pubkey;
+          }
+        }
+      } catch {
+        // malformed entry — fall through to fallback
+      }
+      const communityId = "e2e-default-community";
+      const community = {
+        id: communityId,
         name: "E2E Test",
         relayUrl,
+        pubkey: overridePubkey ?? fallback,
         addedAt: new Date().toISOString(),
       };
       window.localStorage.setItem(
-        "buzz-workspaces",
-        JSON.stringify([workspace]),
+        "buzz-communities",
+        JSON.stringify([community]),
       );
-      window.localStorage.setItem("buzz-active-workspace-id", workspaceId);
+      window.localStorage.setItem("buzz-active-community-id", communityId);
     },
-    { relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL },
+    {
+      fallback: fallbackPubkey,
+      identityOverrideKey: "buzz:e2e-identity-override.v1",
+      relayUrl: relayWsUrl ?? DEFAULT_RELAY_WS_URL,
+    },
   );
 }
 
@@ -431,10 +693,15 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       ? TEST_IDENTITIES[options.user ?? "tyler"]
       : undefined;
 
-  // Most specs seed a workspace so useWorkspaceInit doesn't show WelcomeSetup.
+  // Most specs seed a community so useCommunityInit doesn't show WelcomeSetup.
   // skipOnboardingSeed only controls the onboarding-completion flag.
-  if (!options.skipWorkspaceSeed) {
-    await seedDefaultWorkspace(page, options.relayWsUrl);
+  // The community is stamped with the active identity's pubkey so the strict
+  // migrateMachineOnboardingCompletion voucher recognises it. The init script
+  // reads the seedActiveIdentity override key (if present) and falls back to
+  // the bridge identity's pubkey or DEFAULT_MOCK_PUBKEY for mock mode.
+  if (!options.skipCommunitySeed) {
+    const activePubkey = identity?.pubkey ?? DEFAULT_MOCK_PUBKEY;
+    await seedDefaultCommunity(page, activePubkey, options.relayWsUrl);
   }
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
@@ -446,7 +713,14 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   }
 
   await page.addInitScript(
-    ({ identity: bridgeIdentity, mock, mode, relayHttpUrl, relayWsUrl }) => {
+    ({
+      identity: bridgeIdentity,
+      mock,
+      mode,
+      relayHttpUrl,
+      relayWsUrl,
+      autoConnectDefaultRelay,
+    }) => {
       const notificationLog: Array<{
         body: string | null;
         title: string;
@@ -503,6 +777,8 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         mode,
         relayHttpUrl: relayHttpUrl ?? currentConfig.relayHttpUrl,
         relayWsUrl: relayWsUrl ?? currentConfig.relayWsUrl,
+        autoConnectDefaultRelay:
+          autoConnectDefaultRelay ?? currentConfig.autoConnectDefaultRelay,
       };
       testWindow.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
       testWindow.__BUZZ_E2E_APP_BADGE_STATE__ = "none";
@@ -525,6 +801,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       mode: options.mode,
       relayHttpUrl: options.relayHttpUrl,
       relayWsUrl: options.relayWsUrl,
+      autoConnectDefaultRelay: options.autoConnectDefaultRelay,
     },
   );
 }
@@ -534,8 +811,9 @@ export async function installMockBridge(
   mock?: MockBridgeOptions,
   options?: {
     relayWsUrl?: string;
+    autoConnectDefaultRelay?: boolean;
     skipOnboardingSeed?: boolean;
-    skipWorkspaceSeed?: boolean;
+    skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
   },
 ) {
@@ -543,8 +821,9 @@ export async function installMockBridge(
     mode: "mock",
     mock,
     relayWsUrl: options?.relayWsUrl,
+    autoConnectDefaultRelay: options?.autoConnectDefaultRelay,
     skipOnboardingSeed: options?.skipOnboardingSeed,
-    skipWorkspaceSeed: options?.skipWorkspaceSeed,
+    skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,
   });
 }
@@ -596,12 +875,31 @@ async function openSectionMenu(page: Page, actionsTestId: string) {
   await trigger.click();
 }
 
+// The Channels section "+" now opens the unified Add-channel browser, so the
+// standalone create dialog is reached via the primary-modifier + Shift + N
+// keyboard shortcut (the "New channel" menu item was removed as redundant).
 export async function openCreateChannelDialog(page: Page) {
-  await openSectionMenu(page, "section-actions-channels");
-  await page.getByRole("menuitem", { name: "New channel" }).click();
+  await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
+  const isMacBrowser = await page.evaluate(() =>
+    /mac|iphone|ipad|ipod/i.test(navigator.platform),
+  );
+  await page.evaluate((isMac) => {
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: !isMac,
+        key: "N",
+        metaKey: isMac,
+        shiftKey: true,
+      }),
+    );
+  }, isMacBrowser);
+  await page.getByTestId("create-channel-dialog").waitFor();
 }
 
-export async function openNewDirectMessageDialog(page: Page) {
+export async function openNewMessagePage(page: Page) {
   await openSectionMenu(page, "section-actions-dms");
   await page.getByRole("menuitem", { name: "New message" }).click();
+  await page.getByTestId("new-message-page").waitFor({ state: "visible" });
 }

@@ -4,6 +4,9 @@ import { cacheSearchHitEvent } from "@/app/navigation/searchHitEventCache";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useActiveChannelHeader } from "@/features/channels/useActiveChannelHeader";
 import { useChannelPaneHandlers } from "@/features/channels/useChannelPaneHandlers";
+import { useMessageEventProfilePubkeys } from "@/features/channels/useMessageEventProfilePubkeys";
+import { useMessageOwnerProfiles } from "@/features/channels/useMessageOwnerProfiles";
+import { useThreadTargetSync } from "@/features/channels/useThreadTargetSync";
 import {
   useChannelMembersQuery,
   useJoinChannelMutation,
@@ -15,6 +18,7 @@ import {
 import { ChannelScreenEmptyState } from "@/features/channels/ui/ChannelScreenEmptyState";
 import { ChannelScreenHeader } from "@/features/channels/ui/ChannelScreenHeader";
 import { ChannelPane } from "@/features/channels/ui/ChannelScreenLazyViews";
+import { WelcomeAgentCreateDialog } from "@/features/channels/ui/WelcomeAgentCreateDialog";
 import { ForumChannelContent } from "@/features/channels/ui/ForumChannelContent";
 import { MembersSidebar } from "@/features/channels/ui/MembersSidebar";
 import {
@@ -22,6 +26,13 @@ import {
   usePersonasQuery,
   useRelayAgentsQuery,
 } from "@/features/agents/hooks";
+import { mergeChannelKnownAgentPubkeys } from "@/features/agents/knownAgentPubkeys";
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
+import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
+import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
+import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -32,12 +43,7 @@ import {
   useSendMessageMutation,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
-import {
-  collectMessageAuthorPubkeys,
-  collectMessageMentionPubkeys,
-  collectReactionActorPubkeys,
-  formatTimelineMessages,
-} from "@/features/messages/lib/formatTimelineMessages";
+import { formatTimelineMessages } from "@/features/messages/lib/formatTimelineMessages";
 import {
   channelWindowThreadSummaries,
   type ChannelWindowThreadSummary,
@@ -54,10 +60,7 @@ import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
 import type { TimelineMessage } from "@/features/messages/types";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
-import {
-  mergeCurrentProfileIntoLookup,
-  profileLookupsEqual,
-} from "@/features/profile/lib/identity";
+import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import type { RelayEvent, RespondToMode, SearchHit } from "@/shared/api/types";
 import { useChannelFind } from "@/features/search/useChannelFind";
 import { ViewLoadingFallback } from "@/shared/ui/ViewLoadingFallback";
@@ -70,17 +73,14 @@ import { useElementWidth } from "@/shared/hooks/use-mobile";
 import { useThreadPanelWidth } from "@/shared/hooks/useThreadPanelWidth";
 import { AUXILIARY_PANEL_SINGLE_COLUMN_BREAKPOINT_PX } from "@/shared/layout/AuxiliaryPanel";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import {
-  mergeAgentNamesIntoProfiles,
-  useChannelActivityTyping,
-} from "./useChannelActivityTyping";
+import { useChannelActivityTyping } from "./useChannelActivityTyping";
 import { useChannelAgentSessions } from "./useChannelAgentSessions";
+import { useMessageProfiles } from "./useMessageProfiles";
 import { useChannelPanelHistoryState } from "./useChannelPanelHistoryState";
 import { useChannelProfilePanel } from "./useChannelProfilePanel";
 import { useChannelRouteTarget } from "./useChannelRouteTarget";
 import { useChannelUnreadState } from "./useChannelUnreadState";
 import type { ChannelScreenProps } from "./ChannelScreen.types";
-
 const HEADER_ACTIONS_COMPACT_BREAKPOINT_PX = 760,
   EMPTY_RELAY_EVENTS: RelayEvent[] = [];
 export function ChannelScreen({
@@ -96,6 +96,7 @@ export function ChannelScreen({
   targetMessageId,
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
+  const { activeCommunity } = useCommunities();
   const {
     markChannelRead,
     markChannelUnread,
@@ -103,6 +104,7 @@ export function ChannelScreen({
     getMessageReadAt,
     markMessageRead,
     setContextParentResolver,
+    openBrowseChannels,
     openCreateChannel,
     openChannelManagement: openGlobalChannelManagement,
     followThread,
@@ -150,9 +152,7 @@ export function ChannelScreen({
     string | null
   >(null);
   const [editTargetId, setEditTargetId] = React.useState<string | null>(null);
-  // Thread panel state is URL-backed, but router navigation is deferred out
-  // of the click handler; a tiny optimistic override lets the auxiliary pane
-  // open/close in the urgent render before the URL-backed state catches up.
+  // URL-backed thread state catches up after navigation; this override keeps urgent open/close renders responsive.
   const [optimisticOpenThreadHeadId, setOptimisticOpenThreadHeadId] =
     React.useState<string | null | undefined>(undefined);
   const clearOptimisticThreadOverride = React.useCallback(() => {
@@ -161,6 +161,7 @@ export function ChannelScreen({
   const mainInsetRef = useMainInsetRef();
   const currentPubkey = currentIdentity?.pubkey;
   const activeChannelId = activeChannel?.id ?? null;
+  const relaySelfPubkey = useRelaySelfQuery(activeChannel !== null).data;
   const effectiveOpenThreadHeadId =
     optimisticOpenThreadHeadId === undefined
       ? openThreadHeadId
@@ -190,7 +191,7 @@ export function ChannelScreen({
     effectiveOpenThreadHeadId,
   );
   useChannelSubscription(activeChannel);
-  const { fetchOlder, hasOlderMessages, isFetchingOlder } =
+  const { fetchOlder, hasOlderMessages, historyExhausted, isFetchingOlder } =
     useFetchOlderMessages(activeChannel);
   const latestActiveMessage = React.useMemo(() => {
     const messages = messagesQuery.data;
@@ -238,37 +239,34 @@ export function ChannelScreen({
   const deleteMessageMutation = useDeleteMessageMutation(activeChannel);
   const editMessageMutation = useEditMessageMutation(activeChannel);
   const joinChannelMutation = useJoinChannelMutation(activeChannelId);
-  const [findTargetEvents, setFindTargetEvents] = React.useState<RelayEvent[]>(
-    [],
-  );
+  const [findEvents, setFindEvents] = React.useState<RelayEvent[]>([]);
   // biome-ignore lint/correctness/useExhaustiveDependencies: clear spliced find results exactly when the active channel changes.
   React.useEffect(() => {
-    setFindTargetEvents([]);
+    setFindEvents([]);
   }, [activeChannelId]);
   const resolvedMessages = React.useMemo(() => {
     const currentMessages = messagesQuery.data ?? [];
-    const extraEvents = [...targetMessageEvents, ...findTargetEvents];
+    const extraEvents = [...targetMessageEvents, ...findEvents];
     if (!activeChannel || extraEvents.length === 0) {
       return currentMessages;
     }
     return extraEvents.reduce(mergeMessages, currentMessages);
-  }, [
-    activeChannel,
-    findTargetEvents,
-    messagesQuery.data,
-    targetMessageEvents,
-  ]);
+  }, [activeChannel, findEvents, messagesQuery.data, targetMessageEvents]);
   const threadReplyEvents = threadRepliesQuery.data ?? EMPTY_RELAY_EVENTS;
-  const messageEventProfilePubkeys = React.useMemo(() => {
-    const events = [...resolvedMessages, ...threadReplyEvents];
-    return [
-      ...new Set([
-        ...collectMessageAuthorPubkeys(events),
-        ...collectMessageMentionPubkeys(events),
-        ...collectReactionActorPubkeys(events),
-      ]),
-    ];
-  }, [resolvedMessages, threadReplyEvents]);
+  const {
+    entranceMessageId: welcomeEntranceMessageId,
+    handleEntranceComplete: handleWelcomeEntranceComplete,
+  } = useWelcomeKickoffEntrance(
+    activeChannel,
+    resolvedMessages,
+    threadReplyEvents,
+  );
+
+  const messageEventProfilePubkeys = useMessageEventProfilePubkeys(
+    resolvedMessages,
+    threadReplyEvents,
+    relaySelfPubkey,
+  );
   const latestMessageEvent = React.useMemo(
     () => resolvedMessages[resolvedMessages.length - 1] ?? null,
     [resolvedMessages],
@@ -277,6 +275,7 @@ export function ChannelScreen({
     activeChannel,
     currentPubkey,
     latestMessageEvent,
+    relaySelfPubkey,
   );
   const activeDmParticipantPubkeys = React.useMemo(
     () =>
@@ -289,23 +288,22 @@ export function ChannelScreen({
   const channelMembers = channelMembersQuery.data;
   const managedAgentsQuery = useManagedAgentsQuery();
   const managedAgents = managedAgentsQuery.data ?? [];
+  const welcomeGuideAgent = React.useMemo(
+    () => pickWelcomeGuideAgent(managedAgents),
+    [managedAgents],
+  );
+  const welcomeAgentCreate = useWelcomeAgentCreate({
+    activeChannel,
+    currentIdentity,
+    welcomeGuideAgent,
+  });
   const relayAgentsQuery = useRelayAgentsQuery();
   const relayAgents = relayAgentsQuery.data ?? [];
-  const knownAgentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set<string>();
-    for (const member of channelMembers ?? []) {
-      if (member.role === "bot" || member.isAgent) {
-        pubkeys.add(normalizePubkey(member.pubkey));
-      }
-    }
-    for (const agent of managedAgents) {
-      pubkeys.add(normalizePubkey(agent.pubkey));
-    }
-    for (const agent of relayAgents) {
-      pubkeys.add(normalizePubkey(agent.pubkey));
-    }
-    return pubkeys;
-  }, [channelMembers, managedAgents, relayAgents]);
+  const knownAgentPubkeys = React.useMemo(
+    () =>
+      mergeChannelKnownAgentPubkeys(channelMembers, managedAgents, relayAgents),
+    [channelMembers, managedAgents, relayAgents],
+  );
   const messageProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
@@ -347,50 +345,30 @@ export function ChannelScreen({
     relayAgents,
     typingEntries,
   });
-  // Observer ingestion (frame decryption + derived active-turn liveness) is
-  // owner-global — mounted once in AppShell via useAgentObserverIngestion —
-  // so this screen no longer mounts its own observer/turns bridges.
-  const messageProfilesRaw = React.useMemo(() => {
-    const base =
-      mergeCurrentProfileIntoLookup(
-        messageProfilesQuery.data?.profiles,
-        currentProfile,
-      ) ?? {};
-    return mergeAgentNamesIntoProfiles(
-      base,
-      managedAgents,
-      relayAgents,
-      currentPubkey,
-    );
-  }, [
+  const messageProfiles = useMessageProfiles({
+    channelMembers,
     currentProfile,
     currentPubkey,
     managedAgents,
-    messageProfilesQuery.data?.profiles,
+    profiles: messageProfilesQuery.data?.profiles,
     relayAgents,
-  ]);
-  // Stabilise the merged lookup's reference across renders when no profile
-  // value changed. `messageProfilesRaw` gets a fresh identity whenever the
-  // `users-batch` query re-keys — which typing churn triggers constantly — and
-  // that identity flows to MessageRow's `prev.profiles === next.profiles` memo
-  // check, so an unstable reference re-renders the whole timeline per keystroke.
-  const messageProfilesRef = React.useRef(messageProfilesRaw);
-  if (!profileLookupsEqual(messageProfilesRef.current, messageProfilesRaw)) {
-    messageProfilesRef.current = messageProfilesRaw;
-  }
-  const messageProfiles = messageProfilesRef.current;
-  // Derived from the stabilised lookup so this Set only churns when a profile
-  // value actually changed — MessageRow compares `agentPubkeys` by reference,
-  // and each row previously re-derived this same scan locally (removed).
+  });
+  const messageOwnerProfiles = useMessageOwnerProfiles(messageProfiles);
+  // Agent set for ChannelPane's own consumers (DM huddle member resolution,
+  // the agents list): the community-scoped baseline shared by every surface,
+  // widened with channel-member roles and this screen's profile lookup.
+  // Message rows no longer take this — MessageRow derives agent-ness itself
+  // from useKnownAgentPubkeys + per-pubkey profile checks.
+  const communityAgentPubkeys = useKnownAgentPubkeys();
   const agentPubkeys = React.useMemo(() => {
-    const pubkeys = new Set(knownAgentPubkeys);
+    const pubkeys = new Set([...communityAgentPubkeys, ...knownAgentPubkeys]);
     for (const [pubkey, profile] of Object.entries(messageProfiles)) {
       if (profile.isAgent) {
         pubkeys.add(normalizePubkey(pubkey));
       }
     }
     return pubkeys;
-  }, [knownAgentPubkeys, messageProfiles]);
+  }, [knownAgentPubkeys, messageProfiles, communityAgentPubkeys]);
   const personasQuery = usePersonasQuery();
   const { personaLookup, respondToLookup } = React.useMemo(() => {
     const agents = managedAgentsQuery.data ?? [];
@@ -418,6 +396,8 @@ export function ChannelScreen({
         channelMembers,
         personaLookup,
         respondToLookup,
+        relaySelfPubkey,
+        messageOwnerProfiles,
       ),
     [
       activeChannel,
@@ -425,7 +405,9 @@ export function ChannelScreen({
       currentProfile?.avatarUrl,
       currentPubkey,
       messageProfiles,
+      messageOwnerProfiles,
       personaLookup,
+      relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
     ],
@@ -440,7 +422,7 @@ export function ChannelScreen({
     );
   const handleFindSearchHit = React.useCallback((hit: SearchHit) => {
     const event = cacheSearchHitEvent(hit);
-    setFindTargetEvents((currentEvents) =>
+    setFindEvents((currentEvents) =>
       currentEvents.some((currentEvent) => currentEvent.id === event.id)
         ? currentEvents
         : [...currentEvents, event],
@@ -461,9 +443,11 @@ export function ChannelScreen({
     currentPubkey,
     currentAvatarUrl: currentProfile?.avatarUrl ?? null,
     profiles: messageProfiles,
+    ownerProfiles: messageOwnerProfiles,
     members: channelMembers,
     personaLookup,
     respondToLookup,
+    relaySelfPubkey,
   });
   const {
     firstUnreadMessageId,
@@ -538,8 +522,6 @@ export function ChannelScreen({
         : undefined,
     [activeChannel, handleToggleReaction],
   );
-  // The menu actions are typed (message) => void; the read-state handlers
-  // key off the message id (message + subtree). Adapt at the seam.
   const handleMessageMarkUnread = React.useCallback(
     (message: TimelineMessage) => handleMarkMessageUnread(message.id),
     [handleMarkMessageUnread],
@@ -570,7 +552,11 @@ export function ChannelScreen({
     activeChannel && !activeChannel.archivedAt && activeChannel.isMember
       ? handleSendVideoReviewComment
       : undefined;
-  const handleOpenAddBot = React.useCallback(() => setIsAddBotOpen(true), []);
+  const handleOpenAddBot = React.useCallback(
+    (options?: { beforeSend?: () => void }) =>
+      welcomeAgentCreate.openAddAgent(() => setIsAddBotOpen(true), options),
+    [welcomeAgentCreate],
+  );
   const handleOpenMembersSidebar = React.useCallback(
     () => setIsMembersSidebarOpen(true),
     [],
@@ -594,9 +580,6 @@ export function ChannelScreen({
   } = useChannelAgentSessions({
     activeChannel,
     activeChannelId,
-    // Loaded only once none of the three agent queries are in their initial
-    // fetch, so a channel with genuinely zero agents still auto-closes a stale
-    // agentSession param (a disabled query reports isLoading=false — fine).
     agentsLoaded:
       !channelMembersQuery.isLoading &&
       !managedAgentsQuery.isLoading &&
@@ -626,10 +609,6 @@ export function ChannelScreen({
       setThreadReplyTargetId,
       setThreadScrollTargetId,
     });
-  // `data !== undefined` is not "loaded" (the cache is seeded early by stale
-  // placeholders and the live subscription); wait for the history fetch to
-  // settle, latched per channel so a background refetch can't re-flip to the
-  // skeleton (the "skeleton bouncing up and down" on entry).
   const settledChannelIdRef = React.useRef<string | null>(null);
   const hasSettledThisChannel =
     activeChannelId !== null && settledChannelIdRef.current === activeChannelId;
@@ -652,8 +631,12 @@ export function ChannelScreen({
       timelineLoadingNow,
     );
   settledChannelIdRef.current = settledChannelId;
-  // Panel identity (thread/profile/agent session) lives in the URL search
-  // params and carries per history entry — only ephemeral targets reset here.
+  const { welcomeKickoffStage, welcomeKickoffSettingUp } =
+    useWelcomeKickoffStagePresence(
+      activeChannel,
+      timelineMessages,
+      isTimelineLoading,
+    );
   const resetComposerTargets = React.useCallback(
     (_channelId: string | null) => {
       setExpandedThreadReplyIds(new Set());
@@ -685,42 +668,21 @@ export function ChannelScreen({
     targetMessageId,
     timelineMessages,
   });
-  React.useEffect(() => {
-    if (openThreadHeadId && !openThreadHeadMessage) {
-      // While the timeline is still loading (e.g. a reload restoring the
-      // thread param from the URL) the head simply hasn't arrived yet.
-      if (isTimelineLoading) {
-        return;
-      }
-      clearOptimisticThreadOverride();
-      setOpenThreadHeadId(null, { replace: true });
-      setExpandedThreadReplyIds(new Set());
-      setThreadScrollTargetId(null);
-      return;
-    }
-
-    if (openThreadHeadMessage && !threadReplyTargetId) {
-      setThreadReplyTargetId(openThreadHeadMessage.id);
-      return;
-    }
-
-    if (threadReplyTargetId && !threadReplyTargetMessage) {
-      setThreadReplyTargetId(openThreadHeadMessage?.id ?? null);
-    }
-    if (editTargetId && !editTargetMessage) {
-      setEditTargetId(null);
-    }
-  }, [
+  useThreadTargetSync({
     clearOptimisticThreadOverride,
     editTargetId,
     editTargetMessage,
     isTimelineLoading,
     openThreadHeadId,
     openThreadHeadMessage,
+    setEditTargetId,
+    setExpandedThreadReplyIds,
     setOpenThreadHeadId,
+    setThreadReplyTargetId,
+    setThreadScrollTargetId,
     threadReplyTargetId,
     threadReplyTargetMessage,
-  ]);
+  });
 
   const hasAuxiliaryPanel = Boolean(
     effectiveOpenThreadHeadId ||
@@ -827,10 +789,18 @@ export function ChannelScreen({
       isSinglePanelView,
     ],
   );
-
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
+        <WelcomeAgentCreateDialog
+          guideName={welcomeGuideAgent?.name ?? "your welcome guide"}
+          isSending={welcomeAgentCreate.isSending}
+          onCreateInChat={() => void welcomeAgentCreate.createInChat()}
+          onCreateManually={welcomeAgentCreate.createManually}
+          onOpenChange={welcomeAgentCreate.setIsOpen}
+          open={welcomeAgentCreate.isOpen}
+          sendError={welcomeAgentCreate.error}
+        />
         <div
           className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
           ref={channelContentRef}
@@ -878,10 +848,16 @@ export function ChannelScreen({
                   fetchOlder={fetchOlder}
                   header={channelHeader}
                   hasOlderMessages={hasOlderMessages}
+                  historyExhausted={historyExhausted}
                   onAddAgent={handleOpenAddBot}
+                  onBrowseChannels={openBrowseChannels}
                   onCreateChannel={openCreateChannel}
                   onOpenMembers={handleOpenMembersSidebar}
                   isFetchingOlder={isFetchingOlder}
+                  entranceMessageId={welcomeEntranceMessageId}
+                  onEntranceMessageComplete={handleWelcomeEntranceComplete}
+                  welcomeKickoffStage={welcomeKickoffStage}
+                  welcomeKickoffSettingUp={welcomeKickoffSettingUp}
                   editTarget={
                     editTargetMessage
                       ? {
@@ -964,11 +940,13 @@ export function ChannelScreen({
                   profilePanelView={profilePanelView}
                   personaLookup={personaLookup}
                   profiles={messageProfiles}
+                  ownerProfiles={messageOwnerProfiles}
                   firstUnreadMessageId={firstUnreadMessageId}
                   unreadCount={unreadCount}
                   targetMessageId={mainTimelineTargetMessageId}
                   threadHeadMessage={displayedThreadHeadMessage}
                   threadMessages={displayedThreadMessages}
+                  threadMessagesPending={threadRepliesQuery.isPending}
                   threadPanelWidthPx={threadPanelWidthPx}
                   threadTypingPubkeys={threadTypingPubkeys}
                   threadReplyTargetMessage={displayedThreadReplyTargetMessage}
@@ -986,13 +964,13 @@ export function ChannelScreen({
             <ChannelScreenEmptyState />
           )}
         </div>
-
         <MembersSidebar
           channel={activeChannel}
           currentPubkey={currentPubkey}
           open={isMembersSidebarOpen}
           onOpenChange={setIsMembersSidebarOpen}
           onViewActivity={handleOpenAgentSession}
+          relayUrl={activeCommunity?.relayUrl}
         />
       </ProfilePanelProvider>
     </AgentSessionProvider>

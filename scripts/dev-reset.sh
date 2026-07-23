@@ -4,8 +4,9 @@
 # =============================================================================
 # Usage: ./scripts/dev-reset.sh
 #
-# Stops all services, removes ALL volumes (data is lost!), brings everything
-# back up fresh, and runs migrations.
+# Stops all services, removes development desktop state and ALL local service
+# volumes (data is lost!), brings everything back up fresh, and runs migrations.
+# Installed Buzz state is preserved.
 # =============================================================================
 set -euo pipefail
 
@@ -29,7 +30,8 @@ cd "${REPO_ROOT}"
 # ---- Confirm ----------------------------------------------------------------
 
 if [[ "${1:-}" != "--yes" ]]; then
-  echo -e "${YELLOW}WARNING: This will DELETE all local data (postgres, minio volumes).${NC}"
+  echo -e "${YELLOW}WARNING: This will DELETE all development data (desktop state, postgres, minio volumes).${NC}"
+  echo -e "   Installed Buzz app state and its production keyring are preserved."
   echo -e "   Redis data is ephemeral and always wiped on restart."
   echo ""
   read -r -p "Are you sure? [y/N] " confirm
@@ -41,6 +43,12 @@ if [[ "${1:-}" != "--yes" ]]; then
       ;;
   esac
 fi
+
+# ---- Desktop development state ---------------------------------------------
+
+log "Removing desktop development state..."
+"${SCRIPT_DIR}/reset-desktop-dev-state.sh"
+success "Desktop development state removed (installed Buzz state preserved)"
 
 # ---- Tear down --------------------------------------------------------------
 

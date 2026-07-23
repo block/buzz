@@ -1,6 +1,10 @@
 import * as React from "react";
 import { ArrowDown } from "lucide-react";
 
+import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
+import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
+import { normalizePubkey } from "@/shared/lib/pubkey";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import {
   buildThreadSummaryFromVisibleEntries,
   hasNestedThreadBranches,
@@ -15,6 +19,7 @@ import { canManageMessageForCurrentUser } from "@/features/messages/lib/canManag
 import type { TimelineMessage } from "@/features/messages/types";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { Channel } from "@/shared/api/types";
+import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanelLayout";
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { cn } from "@/shared/lib/cn";
@@ -25,10 +30,16 @@ import {
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
 } from "@/shared/layout/AuxiliaryPanel";
+import {
+  THREAD_PANEL_COLUMN_CLASS,
+  THREAD_PANEL_COMPOSER_GUTTER_CLASS,
+  THREAD_PANEL_MESSAGE_GUTTER_CLASS,
+} from "@/features/messages/lib/messageThreadPanelLayout";
 import { Button } from "@/shared/ui/button";
-import { Skeleton } from "@/shared/ui/skeleton";
+import { Separator } from "@/shared/ui/separator";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageComposer } from "./MessageComposer";
+import { ThreadMessageSkeleton } from "./MessageThreadPanelSkeleton";
 import { MessageRow, type ThreadDepthGuideAction } from "./MessageRow";
 import { MessageThreadSummaryRow } from "./MessageThreadSummaryRow";
 import { TypingIndicatorRow } from "./TypingIndicatorRow";
@@ -37,8 +48,7 @@ import { useComposerHeightPadding } from "./useComposerHeightPadding";
 import { useAnchoredScroll } from "./useAnchoredScroll";
 import { selectDeferredListRenderState } from "@/features/messages/lib/timelineSnapshot";
 
-type MessageThreadPanelProps = {
-  agentPubkeys?: ReadonlySet<string>;
+type MessageThreadPanelProps = ThreadPanelLayoutProps & {
   channel: Channel | null;
   channelId: string | null;
   channelName: string;
@@ -47,7 +57,6 @@ type MessageThreadPanelProps = {
   firstUnreadReplyId?: string | null;
   huddleMemberPubkeys?: readonly string[];
   huddleMemberPubkeysPending?: boolean;
-  layout?: "standalone" | "split";
   editTarget?: {
     author: string;
     body: string;
@@ -55,18 +64,22 @@ type MessageThreadPanelProps = {
     imetaMedia?: ImetaMedia[];
   } | null;
   isSending: boolean;
-  isSinglePanelView?: boolean;
   onCancelEdit?: () => void;
   onCancelReply: () => void;
   onClose: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
   onEditLastOwnMessage?: () => boolean;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandReplies: (message: TimelineMessage) => void;
   onScrollTargetResolved: () => void;
+  scrollTargetHighlights?: boolean;
   onSelectReplyTarget: (message: TimelineMessage) => void;
   onSend: (
     content: string,
@@ -88,13 +101,13 @@ type MessageThreadPanelProps = {
   scrollTargetId: string | null;
   threadHead: TimelineMessage | null;
   threadReplies: MainTimelineEntry[];
+  threadRepliesPending?: boolean;
   threadUnreadCount?: number;
   threadReplyUnreadCounts?: ReadonlyMap<string, number>;
   threadTypingPubkeys: string[];
   threadHeadVideoReviewContext?: VideoReviewContext;
   toolbarExtraActions?: React.ReactNode;
   widthPx: number;
-  transparentChrome?: boolean;
   isFollowingThread?: boolean;
   isMessageUnreadById?: (messageId: string) => boolean;
   onFollowThread?: () => void;
@@ -111,16 +124,7 @@ type MessageThreadPanelProps = {
 };
 
 const EMPTY_THREAD_REPLIES: MainTimelineEntry[] = [];
-const THREAD_PANEL_MESSAGE_GUTTER_CLASS = "px-2";
-const THREAD_PANEL_COMPOSER_GUTTER_CLASS = "px-5";
 const THREAD_PANEL_SUMMARY_INDENT_OFFSET_REM = 0;
-type MessageThreadPanelSkeletonProps = {
-  isSinglePanelView?: boolean;
-  layout?: "standalone" | "split";
-  onClose: () => void;
-  widthPx: number;
-  transparentChrome?: boolean;
-};
 
 function hasLaterVisibleSibling(
   entries: readonly MainTimelineEntry[],
@@ -173,132 +177,11 @@ function getActiveContinuationDepths({
   return depths;
 }
 
-function ThreadMessageSkeleton({ isHead = false }: { isHead?: boolean }) {
-  return (
-    <article className="relative flex items-start gap-2.5 rounded-2xl px-3 py-2">
-      <Skeleton className="h-9 w-9 shrink-0 rounded-full" />
-      <div className="-mt-1 min-w-0 flex-1">
-        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0">
-          <Skeleton className="h-[15px] w-28" />
-          <Skeleton className="h-3 w-16" />
-        </div>
-        <div className="mt-1 space-y-1.5 pb-2">
-          <Skeleton className="h-4 w-full" />
-          <Skeleton className={isHead ? "h-4 w-4/5" : "h-4 w-2/3"} />
-        </div>
-        <div className="flex items-center gap-4">
-          <Skeleton className="h-4 w-8 rounded-full" />
-          <Skeleton className="h-4 w-8 rounded-full" />
-          <Skeleton className="h-4 w-8 rounded-full" />
-        </div>
-      </div>
-    </article>
-  );
-}
-
-function ThreadComposerSkeleton() {
-  return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
-      <div className="pointer-events-auto">
-        <div
-          className={cn(
-            "relative z-10 shrink-0 bg-transparent pb-2 pt-0",
-            THREAD_PANEL_COMPOSER_GUTTER_CLASS,
-          )}
-        >
-          <div className="relative isolate rounded-2xl border border-border/50 bg-background/80 px-3 pb-2 pt-3 shadow-none backdrop-blur-md sm:px-4">
-            <Skeleton className="h-5 w-48 max-w-full" />
-            <div className="mt-4 flex items-center gap-2">
-              <Skeleton className="h-8 w-8 rounded-lg" />
-              <Skeleton className="h-8 w-8 rounded-lg" />
-              <Skeleton className="ml-auto h-8 w-20 rounded-full" />
-            </div>
-          </div>
-        </div>
-        <div
-          className={cn(
-            "h-7 bg-background pb-1 pt-0",
-            THREAD_PANEL_COMPOSER_GUTTER_CLASS,
-          )}
-        />
-      </div>
-    </div>
-  );
-}
-
-export function MessageThreadPanelSkeleton({
-  isSinglePanelView = false,
-  layout = "standalone",
-  onClose,
-  widthPx,
-  transparentChrome = false,
-}: MessageThreadPanelSkeletonProps) {
-  const isOverlay = useIsThreadPanelOverlay();
-  useEscapeKey(onClose, isOverlay || isSinglePanelView);
-
-  const threadHeaderContent = (
-    <>
-      <AuxiliaryPanelHeaderGroup
-        backButtonAriaLabel="Back to conversation"
-        onBack={isSinglePanelView ? onClose : undefined}
-      >
-        <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
-      </AuxiliaryPanelHeaderGroup>
-    </>
-  );
-
-  const threadBody = (
-    <AuxiliaryPanelBody
-      className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
-      data-testid="message-thread-loading"
-    >
-      <div
-        className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
-        data-testid="message-thread-head-loading"
-      >
-        <ThreadMessageSkeleton isHead />
-      </div>
-      <div
-        className={cn(
-          "space-y-2.5 pb-3 pt-1",
-          THREAD_PANEL_MESSAGE_GUTTER_CLASS,
-        )}
-      >
-        <ThreadMessageSkeleton />
-        <ThreadMessageSkeleton />
-        <div className="ml-[58px] flex items-center gap-1.5 pt-0.5">
-          <Skeleton className="h-7 w-7 rounded-full" />
-          <Skeleton className="h-7 w-7 rounded-full" />
-          <Skeleton className="h-4 w-28 rounded-full" />
-        </div>
-      </div>
-    </AuxiliaryPanelBody>
-  );
-
-  return (
-    <AuxiliaryPanel
-      className="relative"
-      footer={<ThreadComposerSkeleton />}
-      header={
-        <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>
-      }
-      isSinglePanelView={isSinglePanelView}
-      layout={layout}
-      onClose={onClose}
-      testId="message-thread-panel"
-      transparentChrome={transparentChrome}
-      widthPx={widthPx}
-    >
-      {threadBody}
-    </AuxiliaryPanel>
-  );
-}
-
 export function MessageThreadPanel({
-  agentPubkeys,
   channel,
   channelId,
   channelName,
+  columnMaxWidthPx,
   currentPubkey,
   disabled = false,
   firstUnreadReplyId,
@@ -306,7 +189,9 @@ export function MessageThreadPanel({
   huddleMemberPubkeysPending = false,
   layout = "standalone",
   editTarget,
+  headerLeading,
   isSending,
+  isFocusMode,
   isSinglePanelView = false,
   isFollowingThread,
   isMessageUnreadById,
@@ -329,9 +214,11 @@ export function MessageThreadPanel({
   profiles,
   replyTargetMessage,
   scrollTargetId,
+  scrollTargetHighlights = true,
   threadHead,
   threadHeadVideoReviewContext,
   threadReplies,
+  threadRepliesPending = false,
   threadUnreadCount,
   threadReplyUnreadCounts,
   threadTypingPubkeys,
@@ -352,7 +239,8 @@ export function MessageThreadPanel({
   >(null);
   const isOverlay = useIsThreadPanelOverlay();
   const threadHeadId = threadHead?.id ?? null;
-  useEscapeKey(onClose, isOverlay || isSinglePanelView);
+  useEscapeKey(onClose, isOverlay || isSinglePanelView || isFocusMode);
+  const hasConstrainedColumn = columnMaxWidthPx != null;
   useComposerHeightPadding(
     threadBodyRef,
     threadComposerWrapperRef,
@@ -460,6 +348,13 @@ export function MessageThreadPanel({
   const visibleThreadHeadSummary = isThreadHeadRepliesCollapsed
     ? threadHeadSummary
     : null;
+  // Focus mode gives the thread a subject/body structure: the head is what the
+  // thread is about, the replies are the conversation about it. Only draw the
+  // rule when there is actually conversation under it — the "no replies yet"
+  // card and the streaming-in `pending` state would both leave a rule hanging
+  // over an empty region or a placeholder.
+  const showThreadHeadDivider =
+    isFocusMode && (threadRepliesPending || repliesRenderState === "list");
 
   const threadMessages = React.useMemo(
     () => deferredThreadReplies.map((entry) => entry.message),
@@ -589,12 +484,37 @@ export function MessageThreadPanel({
     useAnchoredScroll({
       channelId: threadHeadId,
       contentRef: threadContentRef,
-      isLoading: repliesRenderState === "pending",
+      isLoading: threadRepliesPending || repliesRenderState === "pending",
       messages: threadMessages,
+      highlightTargetMessage: scrollTargetHighlights,
       onTargetReached: onScrollTargetResolved,
       scrollContainerRef: threadBodyRef,
       targetMessageId: scrollTargetId,
     });
+
+  const knownAgentPubkeys = useKnownAgentPubkeys();
+  const initialAgentPubkeys = React.useMemo(() => {
+    if (
+      !threadHead ||
+      !currentPubkey ||
+      normalizePubkey(threadHead.signerPubkey ?? threadHead.pubkey ?? "") !==
+        normalizePubkey(currentPubkey)
+    ) {
+      return [];
+    }
+    const { mentionPubkeysByName } = resolveMentionProps(
+      threadHead.tags,
+      profiles,
+    );
+    if (!mentionPubkeysByName) return [];
+
+    return orderMentionPubkeysByText(
+      threadHead.body,
+      mentionPubkeysByName,
+      (pubkey) =>
+        knownAgentPubkeys.has(pubkey) || profiles?.[pubkey]?.isAgent === true,
+    );
+  }, [currentPubkey, knownAgentPubkeys, profiles, threadHead]);
 
   if (!threadHead) {
     return null;
@@ -608,7 +528,13 @@ export function MessageThreadPanel({
       onScroll={onScroll}
       ref={threadBodyRef}
     >
-      <div ref={threadContentRef}>
+      <div
+        className={cn(hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS)}
+        ref={threadContentRef}
+        style={
+          hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+        }
+      >
         <div
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-1 pt-0")}
           data-testid="message-thread-head"
@@ -616,7 +542,6 @@ export function MessageThreadPanel({
           <div className="rounded-2xl">
             <MessageRow
               actionBarPlacement="inside"
-              agentPubkeys={agentPubkeys}
               channelId={channelId}
               huddleMemberPubkeys={huddleMemberPubkeys}
               huddleMemberPubkeysPending={huddleMemberPubkeysPending}
@@ -660,11 +585,28 @@ export function MessageThreadPanel({
           </div>
         </div>
 
+        {showThreadHeadDivider ? (
+          <div
+            className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-2")}
+            data-testid="message-thread-head-divider"
+          >
+            <Separator className="bg-border/60" />
+          </div>
+        ) : null}
+
         <div
           className={cn(THREAD_PANEL_MESSAGE_GUTTER_CLASS, "pb-3 pt-0")}
           data-testid="message-thread-replies"
         >
-          {repliesRenderState === "list" ? (
+          {threadRepliesPending ? (
+            <div
+              className="space-y-2.5 pt-1"
+              data-testid="message-thread-replies-loading"
+            >
+              <ThreadMessageSkeleton />
+              <ThreadMessageSkeleton />
+            </div>
+          ) : repliesRenderState === "list" ? (
             visibleThreadHeadSummary ? (
               <div
                 className="space-y-0"
@@ -726,7 +668,6 @@ export function MessageThreadPanel({
                     >
                       {showUnreadDivider ? <UnreadDivider /> : null}
                       <MessageRow
-                        agentPubkeys={agentPubkeys}
                         channelId={channelId}
                         collapseDepthGuideActions={collapseDepthGuideActions}
                         collapseDescendantsLabel="Collapse replies"
@@ -869,12 +810,25 @@ export function MessageThreadPanel({
       ) : null}
 
       <div
-        className="pointer-events-none absolute inset-x-0 bottom-0 z-40"
+        className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:-z-10 before:h-24 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:-z-10 after:h-12 after:bg-background after:content-['']"
         data-testid="thread-composer-overlay"
         ref={threadComposerWrapperRef}
       >
-        <div className="pointer-events-auto">
+        <div
+          className={cn(
+            "composer-overlay-corner-masks pointer-events-auto",
+            hasConstrainedColumn && THREAD_PANEL_COLUMN_CLASS,
+          )}
+          style={
+            hasConstrainedColumn ? { maxWidth: columnMaxWidthPx } : undefined
+          }
+        >
           <MessageComposer
+            audienceContext={{
+              type: "thread",
+              threadRootId: threadHead.id,
+              initialAgentPubkeys,
+            }}
             channelId={channelId}
             channelName={channelName}
             channelType={channel?.channelType ?? null}
@@ -931,7 +885,12 @@ export function MessageThreadPanel({
       <AuxiliaryPanelHeaderGroup
         backButtonAriaLabel="Back to conversation"
         backButtonTestId="message-thread-back"
-        onBack={isSinglePanelView ? onClose : undefined}
+        // A focus drawer only sets `isSinglePanelView` to fill its container's
+        // width — it isn't the narrow single-column view, and it has the scrimmed
+        // sliver as its way back, so it takes no back control of its own. The
+        // narrow view still needs one.
+        leading={headerLeading}
+        onBack={isSinglePanelView && !isFocusMode ? onClose : undefined}
       >
         <AuxiliaryPanelTitle>Thread</AuxiliaryPanelTitle>
       </AuxiliaryPanelHeaderGroup>
@@ -941,6 +900,8 @@ export function MessageThreadPanel({
   return (
     <AuxiliaryPanel
       className="relative"
+      // The focus drawer animates itself; a second slide here would compound.
+      enterMotion={!isFocusMode}
       footer={threadFooter}
       header={
         <AuxiliaryPanelHeader>{threadHeaderContent}</AuxiliaryPanelHeader>

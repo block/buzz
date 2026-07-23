@@ -6,6 +6,7 @@ import 'package:nostr/nostr.dart' as nostr;
 
 import '../../shared/clipboard_utils.dart';
 import '../../shared/theme/theme.dart';
+import '../../shared/widgets/avatar_image.dart';
 import '../channels/channel_detail_page.dart';
 import '../channels/channel_management_provider.dart';
 import '../channels/message_content.dart';
@@ -64,20 +65,16 @@ class NoteCard extends HookConsumerWidget {
         children: [
           GestureDetector(
             onTap: () => showUserProfileSheet(context, note.pubkey),
-            child: CircleAvatar(
+            child: AvatarImage(
+              imageUrl: profile?.avatarUrl,
               radius: 18,
               backgroundColor: context.colors.primaryContainer,
-              backgroundImage: profile?.avatarUrl != null
-                  ? NetworkImage(profile!.avatarUrl!)
-                  : null,
-              child: profile?.avatarUrl == null
-                  ? Text(
-                      (profile?.initial ?? displayName[0]).toUpperCase(),
-                      style: context.textTheme.labelMedium?.copyWith(
-                        color: context.colors.onPrimaryContainer,
-                      ),
-                    )
-                  : null,
+              fallback: Text(
+                (profile?.initial ?? displayName[0]).toUpperCase(),
+                style: context.textTheme.labelMedium?.copyWith(
+                  color: context.colors.onPrimaryContainer,
+                ),
+              ),
             ),
           ),
           const SizedBox(width: Grid.xs),

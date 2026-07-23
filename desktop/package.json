@@ -1,11 +1,12 @@
 {
   "name": "buzz",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.4.23",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:e2e": "tsc && vite build --mode e2e",
     "typecheck": "tsc --noEmit",
     "check:file-sizes": "node ./scripts/check-file-sizes.mjs",
     "check:px-text": "node ./scripts/check-px-text.mjs",
@@ -16,9 +17,9 @@
     "test": "node --import ./test-loader.mjs --experimental-strip-types --test 'src/**/*.test.mjs'",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:e2e": "pnpm build && playwright test",
-    "test:e2e:smoke": "pnpm build && playwright test --project=smoke",
-    "test:e2e:integration": "pnpm build && playwright test --project=integration",
+    "test:e2e": "pnpm build:e2e && playwright test",
+    "test:e2e:smoke": "pnpm build:e2e && playwright test --project=smoke",
+    "test:e2e:integration": "pnpm build:e2e && playwright test --project=integration",
     "test:e2e:report": "playwright show-report",
     "tauri:build": "tauri build"
   },
@@ -77,6 +78,7 @@
     "tailwind-merge": "^3.5.0",
     "tiptap-markdown": "^0.9.0",
     "upng-js": "^2.1.0",
+    "virtua": "0.49.3",
     "yaml": "^2.8.3",
     "zod": "^4.4.3"
   },

@@ -5,10 +5,11 @@
 //!
 //! 1. Validates HMAC signature + 30s TTL (fail-closed)
 //! 2. Resolves kind:30617 → protection rules
-//! 3. Resolves pusher's channel role via buzz-channel binding
-//! 4. Promotes Bot → Member (bots in a channel push as members)
-//! 5. Calls `buzz_core::git_perms::evaluate_push()`
-//! 6. Returns 200 (allow) or 403 (deny with reasons)
+//! 3. Grants owner authority to the repo key or its verified managed-agent owner
+//! 4. Otherwise resolves the pusher's channel role via buzz-channel binding
+//! 5. Promotes Bot → Member (bots in a channel push as members)
+//! 6. Calls `buzz_core::git_perms::evaluate_push()`
+//! 7. Returns 200 (allow) or 403 (deny with reasons)
 //!
 //! # Bot Role Model
 //!
@@ -252,7 +253,7 @@ pub async fn hook_policy_check(
     };
     let query = EventQuery {
         kinds: Some(vec![30617]),
-        pubkey: Some(owner_bytes),
+        pubkey: Some(owner_bytes.clone()),
         d_tag: Some(req.repo_id.clone()),
         global_only: true,
         limit: Some(1),
@@ -316,9 +317,34 @@ pub async fn hook_policy_check(
         }
     }
 
-    // 7. Resolve pusher's role.
+    // 7. Resolve pusher's role. A cryptographically verified managed-agent
+    // owner has the same repository authority as the agent key itself.
     let repo_owner_hex = hex::encode(repo_event.event.pubkey.to_bytes());
-    let role = if req.pusher_pubkey == repo_owner_hex {
+    let pusher_bytes = match hex::decode(&req.pusher_pubkey) {
+        Ok(bytes) if bytes.len() == 32 => bytes,
+        _ => return (StatusCode::FORBIDDEN, "invalid pusher pubkey").into_response(),
+    };
+    let is_repo_owner = req.pusher_pubkey == repo_owner_hex;
+    let is_managed_agent_owner = if is_repo_owner {
+        false
+    } else {
+        match state
+            .db
+            .is_agent_owner(community, &owner_bytes, &pusher_bytes)
+            .await
+        {
+            Ok(is_owner) => is_owner,
+            Err(error) => {
+                error!(
+                    repo = %req.repo_id,
+                    error = %error,
+                    "hook callback: managed-agent owner lookup failed"
+                );
+                return (StatusCode::FORBIDDEN, "internal error").into_response();
+            }
+        }
+    };
+    let role = if is_repo_owner || is_managed_agent_owner {
         MemberRole::Owner
     } else {
         match channel_id {
@@ -327,12 +353,6 @@ pub async fn hook_policy_check(
                 return (StatusCode::FORBIDDEN, "no channel binding").into_response();
             }
             Some(ch_id) => {
-                let pusher_bytes = match hex::decode(&req.pusher_pubkey) {
-                    Ok(b) if b.len() == 32 => b,
-                    _ => {
-                        return (StatusCode::FORBIDDEN, "invalid pusher pubkey").into_response();
-                    }
-                };
                 match state
                     .db
                     .get_member_role(community, ch_id, &pusher_bytes)

@@ -7,7 +7,7 @@ import {
 } from "./ui/SettingsOptionGroup";
 import { SettingsSectionHeader } from "./ui/SettingsSectionHeader";
 export function UpdateChecker() {
-  const { status, checkForUpdate, relaunch } = useUpdaterContext();
+  const { status, checkForUpdate, installAndRelaunch } = useUpdaterContext();
 
   return (
     <section className="min-w-0" data-testid="settings-updates">
@@ -129,11 +129,11 @@ export function UpdateChecker() {
             <div className="min-w-0">
               <p className="text-sm font-medium">Update status</p>
               <p className="text-sm font-normal text-muted-foreground">
-                Update installed. Restart to apply.
+                Update downloaded. Click to apply.
               </p>
             </div>
-            <Button size="sm" onClick={relaunch}>
-              Restart Now
+            <Button size="sm" onClick={installAndRelaunch}>
+              Update Now
             </Button>
           </SettingsOptionRow>
         )}

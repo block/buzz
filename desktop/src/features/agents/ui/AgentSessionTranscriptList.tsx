@@ -12,6 +12,7 @@ import {
 } from "@/features/agents/observerRelayStore";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
+import { useStableArrayShallow } from "@/shared/hooks/useStableReference";
 import { cn } from "@/shared/lib/cn";
 import {
   Dialog,
@@ -48,6 +49,7 @@ import type { FileEditDiff } from "./agentSessionFileEditDiff";
 import {
   buildTranscriptDisplayBlocks,
   formatTurnSetupLabel,
+  getDisplayBlockKey,
   turnSetupDetail,
   turnSetupTimestamp,
   type TranscriptDisplayBlock,
@@ -154,13 +156,27 @@ export function AgentSessionTranscriptList({
     () => buildTranscriptDisplayBlocks(items, latestLiveSessionId),
     [items, latestLiveSessionId],
   );
+  // Derive the same block keys the DOM renders as `data-message-id` so
+  // useAnchoredScroll anchors on real DOM rows. Value-stabilized so the
+  // hook's restoration effect only fires when the ordered block sequence
+  // actually changes (same pattern as AgentSessionThreadPanel).
+  const blockKeys = React.useMemo(
+    () => (autoTail ? displayBlocks.map(getDisplayBlockKey) : []),
+    [autoTail, displayBlocks],
+  );
+  const stableBlockKeys = useStableArrayShallow(blockKeys);
+  const scrollMessages = React.useMemo(
+    () => stableBlockKeys.map((id) => ({ id })),
+    [stableBlockKeys],
+  );
+
   const scrollContainerRef = React.useRef<HTMLDivElement>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
   const anchoredScroll = useAnchoredScroll({
     channelId: autoTail ? (scrollScopeKey ?? agentPubkey) : null,
     contentRef,
     isLoading: false,
-    messages: items,
+    messages: scrollMessages,
     scrollContainerRef,
   });
 
@@ -333,18 +349,6 @@ function TranscriptAcpSourceBadge({ source }: { source: string }) {
   );
 }
 
-function getDisplayBlockKey(block: TranscriptDisplayBlock) {
-  if (block.kind === "single") {
-    return block.item.id;
-  }
-  if (block.kind === "session-boundary") {
-    // Use firstItemId (stable across prepend) rather than runIndex (shifts when
-    // older sessions are prepended, causing unnecessary boundary remounts).
-    return `session-boundary:${block.sessionId}:${block.firstItemId}`;
-  }
-  return `turn:${block.turnId}`;
-}
-
 function TranscriptDisplayBlockView({
   agentAvatarUrl,
   agentName,
@@ -449,7 +453,6 @@ function TranscriptTurnSegmentView({
         context={segment.context}
         profiles={profiles}
         setup={segment.setup}
-        systemPrompt={segment.systemPrompt}
         user={segment.user}
       />
     );
@@ -653,13 +656,11 @@ function TurnPromptBlock({
   context,
   profiles,
   setup,
-  systemPrompt,
   user,
 }: {
   context: Extract<TranscriptItem, { type: "metadata" }> | null;
   profiles?: UserProfileLookup;
   setup: Extract<TranscriptItem, { type: "lifecycle" }>[];
-  systemPrompt: Extract<TranscriptItem, { type: "metadata" }> | null;
   user: Extract<TranscriptItem, { type: "message" }>;
 }) {
   return (
@@ -677,7 +678,6 @@ function TurnPromptBlock({
         item={user}
         profiles={profiles}
         setup={setup}
-        systemPrompt={systemPrompt}
       />
     </div>
   );
@@ -688,18 +688,16 @@ function PromptUserMessage({
   item,
   profiles,
   setup = [],
-  systemPrompt = null,
 }: {
   context?: Extract<TranscriptItem, { type: "metadata" }> | null;
   item: Extract<TranscriptItem, { type: "message" }>;
   profiles?: UserProfileLookup;
   setup?: Extract<TranscriptItem, { type: "lifecycle" }>[];
-  systemPrompt?: Extract<TranscriptItem, { type: "metadata" }> | null;
 }) {
   const [contextOpen, setContextOpen] = React.useState(false);
   const contextSections = React.useMemo(
-    () => [...(systemPrompt?.sections ?? []), ...(context?.sections ?? [])],
-    [context, systemPrompt],
+    () => [...(context?.sections ?? [])],
+    [context],
   );
 
   return (

@@ -320,9 +320,13 @@ impl GitStore {
     /// A missing idx is a cache miss, not a hydrate failure; callers should
     /// regenerate with `git index-pack`. Other backend failures are surfaced so
     /// callers can decide whether to fall back or fail.
-    pub async fn get_idx(&self, pack_digest: &str) -> Result<Option<Bytes>, StoreError> {
+    pub async fn get_idx(
+        &self,
+        pack_digest: &str,
+        max_bytes: u64,
+    ) -> Result<Option<Bytes>, StoreError> {
         let key = Self::idx_key_for_pack_digest(pack_digest)?;
-        match self.get(&key).await {
+        match self.get_limited(&key, max_bytes).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(StoreError::NotFound(_)) => Ok(None),
             Err(e) => Err(e),
@@ -384,6 +388,22 @@ impl GitStore {
         expected_digest: &str,
         max_bytes: u64,
     ) -> Result<Bytes, StoreError> {
+        let bytes = self.get_limited(key, max_bytes).await?;
+        let mut hasher = Sha256::new();
+        hasher.update(&bytes);
+        let actual = hex::encode(hasher.finalize());
+        if actual != expected_digest {
+            return Err(StoreError::DigestMismatch {
+                key: key.into(),
+                expected: expected_digest.into(),
+                actual,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// GET an object after rejecting bodies larger than `max_bytes`.
+    pub async fn get_limited(&self, key: &str, max_bytes: u64) -> Result<Bytes, StoreError> {
         let (head, status) = self.bucket.head_object(key).await.map_err(|e| match e {
             S3Error::HttpFailWithBody(404, _) => StoreError::NotFound(key.into()),
             other => StoreError::Backend(other),
@@ -408,7 +428,7 @@ impl GitStore {
             }
         }
 
-        let bytes = self.get_verified(key, expected_digest).await?;
+        let bytes = self.get(key).await?;
         let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if size > max_bytes {
             return Err(StoreError::ObjectTooLarge {

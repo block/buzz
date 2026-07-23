@@ -13,6 +13,7 @@ import {
   formatImetaMediaLine,
   imetaMediaFromTags,
   mergeOutgoingTags,
+  restoreImetaMediaDisplayLabels,
   splitOutgoingTags,
   stripImetaMediaLines,
 } from "./imetaMediaMarkdown.ts";
@@ -117,6 +118,42 @@ test("formatImetaMediaLine: spoilered image mime → wrapped ![image] line", () 
   );
 });
 
+test("formatImetaMediaLine: agent snapshot PNG → filename link", () => {
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://b/analyst.png",
+      type: "image/png",
+      filename: "analyst.agent.png",
+    }),
+    "\n[analyst.agent.png](https://b/analyst.png)",
+  );
+});
+
+test("formatImetaMediaLine: team snapshot PNG → filename link", () => {
+  assert.equal(
+    formatImetaMediaLine({
+      url: "https://b/engineering.png",
+      type: "image/png",
+      filename: "engineering.team.png",
+    }),
+    "\n[engineering.team.png](https://b/engineering.png)",
+  );
+});
+
+test("formatImetaMediaLine: agent snapshot can use a display label", () => {
+  assert.equal(
+    formatImetaMediaLine(
+      {
+        url: "https://b/animation-auditor.png",
+        type: "image/png",
+        filename: "animation-auditor.agent.png",
+      },
+      { label: "Animation Auditor" },
+    ),
+    "\n[Animation Auditor](https://b/animation-auditor.png)",
+  );
+});
+
 test("buildImetaTags keeps media filenames in imeta", () => {
   // Filenames are included for every MIME type — the video review dialog
   // and file cards use them as display titles.
@@ -197,6 +234,59 @@ test("strip: removes an escaped-bracket generic file line on edit", () => {
     { url, type: "application/pdf" },
   ]);
   assert.equal(stripped, "note");
+});
+
+test("edit labels: restores an agent name from its durable attachment link", () => {
+  const url = "https://b/animation-auditor.png";
+  const body = "note\n[Animation Auditor](https://b/animation-auditor.png)";
+
+  assert.deepEqual(
+    restoreImetaMediaDisplayLabels(body, [
+      {
+        filename: "animation-auditor.agent.png",
+        type: "image/png",
+        url,
+      },
+    ]),
+    [
+      {
+        displayLabel: "Animation Auditor",
+        filename: "animation-auditor.agent.png",
+        type: "image/png",
+        url,
+      },
+    ],
+  );
+});
+
+test("edit labels: unescapes attachment labels without changing unmatched media", () => {
+  const labeledUrl = "https://b/labeled";
+  const unmatched = { type: "application/pdf", url: "https://b/unmatched" };
+  const body = String.raw`note
+[A\]gent \\ Auditor](${labeledUrl})`;
+
+  const restored = restoreImetaMediaDisplayLabels(body, [
+    { type: "application/zip", url: labeledUrl },
+    unmatched,
+  ]);
+
+  assert.equal(restored[0].displayLabel, String.raw`A]gent \ Auditor`);
+  assert.equal(restored[1], unmatched);
+});
+
+test("edit labels: prefers the trailing attachment label over an earlier link", () => {
+  const url = "https://b/agent";
+  const body = [
+    `[Earlier link](${url})`,
+    "message",
+    `[Current agent name](${url})`,
+  ].join("\n");
+
+  const [restored] = restoreImetaMediaDisplayLabels(body, [
+    { type: "image/png", url },
+  ]);
+
+  assert.equal(restored.displayLabel, "Current agent name");
 });
 
 test("findSpoileredImetaMediaUrls: extracts only spoilered matching media urls", () => {
@@ -402,6 +492,52 @@ test("buildOutgoingMessage: appends media markdown line per attachment, in order
     out.content,
     "hi\n![image](https://b/a.png)\n![video](https://b/v.mp4)",
   );
+});
+
+test("buildOutgoingMessage: agent snapshot PNG uses the snapshot-card link path", () => {
+  const out = buildOutgoingMessage("", [
+    {
+      url: "https://b/analyst.png",
+      type: "image/png",
+      sha256: "x",
+      size: 1,
+      uploaded: 0,
+      filename: "analyst.agent.png",
+    },
+  ]);
+  assert.equal(out.content, "\n[analyst.agent.png](https://b/analyst.png)");
+});
+
+test("buildOutgoingMessage: team snapshot PNG uses the snapshot-card link path", () => {
+  const out = buildOutgoingMessage("", [
+    {
+      url: "https://b/engineering.png",
+      type: "image/png",
+      sha256: "x",
+      size: 1,
+      uploaded: 0,
+      filename: "engineering.team.png",
+    },
+  ]);
+  assert.equal(
+    out.content,
+    "\n[engineering.team.png](https://b/engineering.png)",
+  );
+});
+
+test("buildOutgoingMessage: copied agent snapshot keeps its display label", () => {
+  const out = buildOutgoingMessage("", [
+    {
+      url: "https://b/analyst.png",
+      type: "image/png",
+      sha256: "x",
+      size: 1,
+      uploaded: 0,
+      filename: "analyst.agent.png",
+      displayLabel: "Animation Auditor",
+    },
+  ]);
+  assert.equal(out.content, "\n[Animation Auditor](https://b/analyst.png)");
 });
 
 test("buildOutgoingMessage: wraps spoilered image and video attachments", () => {

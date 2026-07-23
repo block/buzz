@@ -11,6 +11,7 @@ tests:
   - it: renders the in-cluster MinIO Deployment when minio.enabled
     release:
       name: rel
+      revision: 1
     set:
       relayUrl: wss://buzz.example.com
       ownerPubkey: "0000000000000000000000000000000000000000000000000000000000000000"
@@ -24,10 +25,16 @@ tests:
           name: rel-buzz-minio
         template: templates/quickstart-minio.yaml
         documentIndex: 0
+      # The bucket-init Job is a NORMAL resource (revision-suffixed name), not a
+      # helm hook: a post-install hook deadlocks against `--wait` because the
+      # relay's startup-fatal S3 probe can't pass until the bucket exists.
       - containsDocument:
           kind: Job
           apiVersion: batch/v1
-          name: rel-buzz-minio-init
+          name: rel-buzz-minio-init-1
+        template: templates/quickstart-minio-init.yaml
+      - notExists:
+          path: metadata.annotations["helm.sh/hook"]
         template: templates/quickstart-minio-init.yaml
 
   - it: relay S3 endpoint resolves to the bundled MinIO Service

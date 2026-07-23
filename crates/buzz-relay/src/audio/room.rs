@@ -8,10 +8,11 @@
 //! Frames are opaque Opus bytes — the relay never decodes audio.
 //! `try_send` is used throughout: real-time audio tolerates drops, never queues.
 
+use buzz_core::CommunityId;
 use bytes::Bytes;
 use dashmap::DashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 /// A connected audio peer.
@@ -46,6 +47,36 @@ const CTRL_CHANNEL_CAPACITY: usize = 32;
 /// N×(N−1) frame copies per 20ms tick — 25 peers = 600 copies/tick, which
 /// is reasonable. The 255 index space is the hard limit; this is the soft one.
 const MAX_PEERS_PER_ROOM: usize = 25;
+
+/// One authoritative owner-roster entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterPeer {
+    /// Nostr pubkey hex.
+    pub pubkey: String,
+    /// Owner-assigned media routing index.
+    pub peer_index: u8,
+}
+
+/// A complete owner-roster snapshot at one monotonic revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterSnapshot {
+    /// Owner-monotonic roster revision.
+    pub revision: u64,
+    /// Complete participants at this revision.
+    pub peers: Vec<RosterPeer>,
+}
+
+/// One ordered owner-roster mutation. Receivers that miss a revision must
+/// replace local state from a fresh [`RosterSnapshot`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RosterDelta {
+    /// Owner-monotonic roster revision.
+    pub revision: u64,
+    /// Newly admitted peer, when this is a join.
+    pub joined: Option<RosterPeer>,
+    /// Removed peer, when this is a leave.
+    pub left: Option<RosterPeer>,
+}
 
 /// Reason a peer was refused entry to a room.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,14 +118,15 @@ struct AdmissionGuard {
     ///
     /// Pin is per-`Room`-instance and clears when the manager evicts the
     /// Room via [`AudioRoomManager::cleanup_if_empty`] — the next
-    /// `get_or_create` for the same channel id then constructs a fresh
-    /// `Room` with a fresh `AdmissionGuard` (and therefore `None` pin),
+    /// `get_or_create` for the same community-local channel then constructs a
+    /// fresh `Room` with a fresh `AdmissionGuard` (and therefore `None` pin),
     /// so a new generation of joiners can negotiate a new version.
     /// A momentarily-empty-but-not-yet-cleaned-up Room keeps its pin so
     /// reconnecting peers don't accidentally renegotiate mid-call. See
     /// `version_pin_persists_across_peer_churn` for the test that pins
     /// this behavior.
     pinned_version: Option<u8>,
+    roster_revision: u64,
 }
 
 impl AdmissionGuard {
@@ -104,6 +136,7 @@ impl AdmissionGuard {
             free: Vec::new(),
             ended: false,
             pinned_version: None,
+            roster_revision: 0,
         }
     }
 
@@ -126,21 +159,29 @@ impl AdmissionGuard {
 
 /// A single audio room for one channel.
 pub struct Room {
+    /// Community this room belongs to.
+    pub community_id: CommunityId,
     /// Channel UUID this room belongs to.
     pub channel_id: Uuid,
     /// Connected peers keyed by peer UUID.
     pub peers: DashMap<Uuid, AudioPeer>,
     /// Admission gate: index allocator + ended flag under one lock.
     guard: std::sync::Mutex<AdmissionGuard>,
+    /// Ordered authoritative roster mutations. Lag is recoverable from
+    /// [`Self::roster_snapshot`], so the owner never blocks admission.
+    roster_tx: broadcast::Sender<RosterDelta>,
 }
 
 impl Room {
-    /// Create an empty room for the given channel.
-    pub fn new(channel_id: Uuid) -> Self {
+    /// Create an empty room for the given community-local channel.
+    pub fn new(community_id: CommunityId, channel_id: Uuid) -> Self {
+        let (roster_tx, _) = broadcast::channel(64);
         Self {
+            community_id,
             channel_id,
             peers: DashMap::new(),
             guard: std::sync::Mutex::new(AdmissionGuard::new()),
+            roster_tx,
         }
     }
 
@@ -217,22 +258,99 @@ impl Room {
         self.peers.insert(
             peer_id,
             AudioPeer {
-                pubkey,
+                pubkey: pubkey.clone(),
                 audio_tx,
                 ctrl_tx,
                 peer_index,
             },
         );
-        drop(g); // Release lock after insert.
+        g.roster_revision = g.roster_revision.wrapping_add(1);
+        let delta = RosterDelta {
+            revision: g.roster_revision,
+            joined: Some(RosterPeer { pubkey, peer_index }),
+            left: None,
+        };
+        let _ = self.roster_tx.send(delta);
+        drop(g); // Release lock after ordered roster publication.
         Ok((peer_id, peer_index, audio_rx, ctrl_rx))
+    }
+
+    /// Add a non-owner ingress peer at the index already allocated by the
+    /// authoritative owner. No client-visible state is emitted before this
+    /// succeeds, so a remote client has exactly one identity end-to-end.
+    pub fn add_peer_at_index(
+        &self,
+        pubkey: String,
+        requested_version: u8,
+        peer_index: u8,
+    ) -> Result<(Uuid, mpsc::Receiver<Bytes>, mpsc::Receiver<PeerCtrl>), AdmissionError> {
+        let mut g = self.guard.lock().map_err(|_| AdmissionError::Ended)?;
+        if g.ended {
+            return Err(AdmissionError::Ended);
+        }
+        if self.peers.len() >= MAX_PEERS_PER_ROOM
+            || self.peers.iter().any(|peer| peer.peer_index == peer_index)
+        {
+            return Err(AdmissionError::Full);
+        }
+        if let Some(pinned) = g.pinned_version {
+            if pinned != requested_version {
+                return Err(AdmissionError::VersionMismatch {
+                    pinned,
+                    requested: requested_version,
+                });
+            }
+        }
+        g.pinned_version.get_or_insert(requested_version);
+        // Keep a later local allocation from colliding if ownership changes
+        // while this room is still winding down. Skipped lower indices are a
+        // bounded handoff cost; a fresh room resets the allocator.
+        g.free.retain(|idx| *idx != peer_index);
+        if peer_index >= g.next_fresh {
+            g.next_fresh = peer_index.saturating_add(1);
+        }
+
+        let peer_id = Uuid::new_v4();
+        let (audio_tx, audio_rx) = mpsc::channel(AUDIO_CHANNEL_CAPACITY);
+        let (ctrl_tx, ctrl_rx) = mpsc::channel(CTRL_CHANNEL_CAPACITY);
+        self.peers.insert(
+            peer_id,
+            AudioPeer {
+                pubkey: pubkey.clone(),
+                audio_tx,
+                ctrl_tx,
+                peer_index,
+            },
+        );
+        g.roster_revision = g.roster_revision.wrapping_add(1);
+        let delta = RosterDelta {
+            revision: g.roster_revision,
+            joined: Some(RosterPeer { pubkey, peer_index }),
+            left: None,
+        };
+        let _ = self.roster_tx.send(delta);
+        drop(g);
+        Ok((peer_id, audio_rx, ctrl_rx))
     }
 
     /// Remove a peer and recycle its index.
     pub fn remove_peer(&self, peer_id: Uuid) {
+        let Ok(mut g) = self.guard.lock() else {
+            return;
+        };
         if let Some((_, peer)) = self.peers.remove(&peer_id) {
-            if let Ok(mut g) = self.guard.lock() {
-                g.release(peer.peer_index);
-            }
+            g.release(peer.peer_index);
+            g.roster_revision = g.roster_revision.wrapping_add(1);
+            let delta = RosterDelta {
+                revision: g.roster_revision,
+                joined: None,
+                left: Some(RosterPeer {
+                    pubkey: peer.pubkey,
+                    peer_index: peer.peer_index,
+                }),
+            };
+            let _ = self.roster_tx.send(delta);
+            drop(g);
         }
     }
 
@@ -242,22 +360,30 @@ impl Room {
     /// `add_peer` to sneak in between removal and the ended flag.
     /// Returns `(peer_index, should_auto_end)`.
     pub fn remove_peer_and_check_ended(&self, peer_id: Uuid) -> Option<(u8, bool)> {
+        let mut g = self.guard.lock().ok()?;
         let (_, peer) = self.peers.remove(&peer_id)?;
         let peer_index = peer.peer_index;
-        let should_end = if let Ok(mut g) = self.guard.lock() {
-            g.release(peer_index);
-            // Only the first task to see empty + !ended wins the auto-end.
-            // This prevents duplicate archive/48103 when two peers disconnect
-            // simultaneously and both see is_empty() == true.
-            if !g.ended && self.peers.is_empty() {
-                g.ended = true;
-                true
-            } else {
-                false
-            }
+        g.release(peer_index);
+        g.roster_revision = g.roster_revision.wrapping_add(1);
+        let delta = RosterDelta {
+            revision: g.roster_revision,
+            joined: None,
+            left: Some(RosterPeer {
+                pubkey: peer.pubkey,
+                peer_index,
+            }),
+        };
+        // Only the first task to see empty + !ended wins the auto-end.
+        // This prevents duplicate archive/48103 when two peers disconnect
+        // simultaneously and both see is_empty() == true.
+        let should_end = if !g.ended && self.peers.is_empty() {
+            g.ended = true;
+            true
         } else {
             false
         };
+        let _ = self.roster_tx.send(delta);
+        drop(g);
         Some((peer_index, should_end))
     }
 
@@ -278,6 +404,24 @@ impl Room {
 
         for entry in self.peers.iter() {
             if *entry.key() == sender_id {
+                continue;
+            }
+            let _ = entry.audio_tx.try_send(prefixed.clone());
+        }
+    }
+
+    /// Deliver an already-`[peer_index]`-prefixed frame that arrived over the
+    /// mesh to every local peer except the one whose `peer_index` authored it.
+    ///
+    /// Used by the cross-pod media path ([`super::mesh`]): the frame is
+    /// byte-identical to what `broadcast_frame` produces, but the author is a
+    /// *remote* participant identified only by its (owner-assigned) index, not
+    /// a local peer UUID. Skipping by index keeps a participant whose own frame
+    /// round-tripped owner→back-to-their-pod from hearing themselves. Drops on
+    /// full — real-time audio never queues.
+    pub fn deliver_prefixed(&self, author_index: u8, prefixed: Bytes) {
+        for entry in self.peers.iter() {
+            if entry.peer_index == author_index {
                 continue;
             }
             let _ = entry.audio_tx.try_send(prefixed.clone());
@@ -305,6 +449,32 @@ impl Room {
         }
     }
 
+    /// Subscribe to ordered roster mutations. A lagged receiver must call
+    /// [`Self::roster_snapshot`] and continue from that snapshot's revision.
+    pub fn subscribe_roster(&self) -> broadcast::Receiver<RosterDelta> {
+        self.roster_tx.subscribe()
+    }
+
+    /// Capture a complete roster and its revision atomically with respect to
+    /// admission/removal. Subscribe before calling this to close the
+    /// snapshot-to-delta race; stale deltas at or below `revision` are ignored.
+    pub fn roster_snapshot(&self) -> RosterSnapshot {
+        let g = self.guard.lock().unwrap_or_else(|e| e.into_inner());
+        let mut peers = self
+            .peers
+            .iter()
+            .map(|e| RosterPeer {
+                pubkey: e.pubkey.clone(),
+                peer_index: e.peer_index,
+            })
+            .collect::<Vec<_>>();
+        peers.sort_by_key(|peer| peer.peer_index);
+        RosterSnapshot {
+            revision: g.roster_revision,
+            peers,
+        }
+    }
+
     /// All `(pubkey, peer_index)` pairs in the room.
     pub fn peer_pubkeys(&self) -> Vec<(String, u8)> {
         self.peers
@@ -321,7 +491,7 @@ impl Room {
 
 /// Global registry of active audio rooms.
 pub struct AudioRoomManager {
-    rooms: DashMap<Uuid, Arc<Room>>,
+    rooms: DashMap<(CommunityId, Uuid), Arc<Room>>,
 }
 
 impl AudioRoomManager {
@@ -333,17 +503,47 @@ impl AudioRoomManager {
     }
 
     /// Get an existing room or create a new one.
-    pub fn get_or_create(&self, channel_id: Uuid) -> Arc<Room> {
+    ///
+    /// Channel UUIDs are only unique inside a community. The room key must
+    /// carry both labels so two tenants that legitimately reuse the same UUID
+    /// never share peer lists, protocol pins, or audio frames.
+    pub fn get_or_create(&self, community_id: CommunityId, channel_id: Uuid) -> Arc<Room> {
         self.rooms
-            .entry(channel_id)
-            .or_insert_with(|| Arc::new(Room::new(channel_id)))
+            .entry((community_id, channel_id))
+            .or_insert_with(|| Arc::new(Room::new(community_id, channel_id)))
             .clone()
     }
 
-    /// Remove the room if it has no peers. Returns `true` if the room was removed.
-    pub fn cleanup_if_empty(&self, channel_id: Uuid) -> bool {
+    /// Look up an existing community-local room without creating one.
+    pub fn get(&self, community_id: CommunityId, channel_id: Uuid) -> Option<Arc<Room>> {
         self.rooms
-            .remove_if(&channel_id, |_, room| room.is_empty())
+            .get(&(community_id, channel_id))
+            .map(|room| room.clone())
+    }
+
+    /// Look up a room for a mesh datagram that carries only a channel UUID.
+    ///
+    /// The current mesh media envelope does not carry a community identifier.
+    /// If two active communities use the same channel UUID, routing would be
+    /// ambiguous, so fail closed instead of delivering one community's audio
+    /// to the other. Control-path lookups always use [`Self::get`].
+    pub fn get_unambiguous_by_channel(&self, channel_id: Uuid) -> Option<Arc<Room>> {
+        let mut matches = self
+            .rooms
+            .iter()
+            .filter(|entry| entry.key().1 == channel_id)
+            .map(|entry| Arc::clone(entry.value()));
+        let room = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(room)
+    }
+
+    /// Remove the room if it has no peers. Returns `true` if the room was removed.
+    pub fn cleanup_if_empty(&self, community_id: CommunityId, channel_id: Uuid) -> bool {
+        self.rooms
+            .remove_if(&(community_id, channel_id), |_, room| room.is_empty())
             .is_some()
     }
 }
@@ -359,7 +559,53 @@ mod tests {
     use super::*;
 
     fn fresh_room() -> Room {
-        Room::new(Uuid::new_v4())
+        Room::new(CommunityId::from_uuid(Uuid::new_v4()), Uuid::new_v4())
+    }
+
+    #[test]
+    fn owner_assigned_index_is_preserved_and_reserved() {
+        let room = fresh_room();
+        let (_local_id, local_index, ..) = room.add_peer("owner-local".into(), 2).unwrap();
+        assert_eq!(local_index, 0);
+
+        let (remote_id, _audio, _ctrl) = room
+            .add_peer_at_index("remote".into(), 2, 7)
+            .expect("owner-assigned index admits");
+        assert_eq!(room.peers.get(&remote_id).unwrap().peer_index, 7);
+
+        let (_next_id, next_index, ..) = room.add_peer("next-local".into(), 2).unwrap();
+        assert_eq!(
+            next_index, 8,
+            "local allocation cannot collide with owner index"
+        );
+    }
+
+    #[test]
+    fn roster_revisions_are_ordered_and_snapshot_is_authoritative() {
+        let room = fresh_room();
+        let mut deltas = room.subscribe_roster();
+        let (alice, alice_index, ..) = room.add_peer("alice".into(), 2).unwrap();
+        let (_bob, bob_index, ..) = room.add_peer("bob".into(), 2).unwrap();
+        room.remove_peer(alice);
+
+        assert_eq!(deltas.try_recv().unwrap().revision, 1);
+        assert_eq!(deltas.try_recv().unwrap().revision, 2);
+        let leave = deltas.try_recv().unwrap();
+        assert_eq!(leave.revision, 3);
+        assert_eq!(
+            leave.left.as_ref().map(|peer| peer.peer_index),
+            Some(alice_index)
+        );
+
+        let snapshot = room.roster_snapshot();
+        assert_eq!(snapshot.revision, 3);
+        assert_eq!(
+            snapshot.peers,
+            vec![RosterPeer {
+                pubkey: "bob".into(),
+                peer_index: bob_index,
+            }]
+        );
     }
 
     /// First peer's `requested_version` becomes the room's pin; later peers
@@ -424,9 +670,10 @@ mod tests {
     #[test]
     fn manager_cleanup_resets_version_pin() {
         let manager = AudioRoomManager::new();
+        let community_id = CommunityId::from_uuid(Uuid::new_v4());
         let channel_id = Uuid::new_v4();
 
-        let room1 = manager.get_or_create(channel_id);
+        let room1 = manager.get_or_create(community_id, channel_id);
         let (peer_id, _, _, _) = room1
             .add_peer("alice".to_string(), 2)
             .expect("first peer admits");
@@ -435,14 +682,51 @@ mod tests {
             .remove_peer_and_check_ended(peer_id)
             .expect("peer existed");
         assert!(ended, "single-peer room should end on its last departure");
-        assert!(manager.cleanup_if_empty(channel_id));
+        assert!(manager.cleanup_if_empty(community_id, channel_id));
 
         // Next joiner with a different version on the same channel id gets a
         // brand-new room (no v=2 pin carried over from the prior generation).
-        let room2 = manager.get_or_create(channel_id);
+        let room2 = manager.get_or_create(community_id, channel_id);
         let _ = room2
             .add_peer("bob".to_string(), 1)
             .expect("fresh room must accept any version");
+    }
+
+    #[test]
+    fn manager_isolates_same_channel_uuid_across_communities() {
+        let manager = AudioRoomManager::new();
+        let channel_id = Uuid::new_v4();
+        let community_a = CommunityId::from_uuid(Uuid::new_v4());
+        let community_b = CommunityId::from_uuid(Uuid::new_v4());
+
+        let room_a = manager.get_or_create(community_a, channel_id);
+        assert!(Arc::ptr_eq(
+            &manager
+                .get_unambiguous_by_channel(channel_id)
+                .expect("one matching room is unambiguous"),
+            &room_a
+        ));
+        let room_b = manager.get_or_create(community_b, channel_id);
+
+        assert!(
+            !Arc::ptr_eq(&room_a, &room_b),
+            "same channel UUID in two communities must create distinct rooms"
+        );
+        assert_eq!(room_a.community_id, community_a);
+        assert_eq!(room_b.community_id, community_b);
+        assert!(
+            manager.get_unambiguous_by_channel(channel_id).is_none(),
+            "community-free mesh lookup must fail closed on a UUID collision"
+        );
+
+        room_a
+            .add_peer("alice".to_string(), 1)
+            .expect("A peer admits");
+        assert_eq!(room_a.peer_pubkeys(), vec![("alice".to_string(), 0)]);
+        assert!(
+            room_b.peer_pubkeys().is_empty(),
+            "A room peers must not appear in B's same-UUID room"
+        );
     }
 
     /// Peer-index reuse: after a peer leaves, their index is released; a new

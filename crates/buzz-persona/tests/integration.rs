@@ -420,18 +420,20 @@ fn resolve_full_pipeline() {
     assert_eq!(lep.llm_provider.as_deref(), Some("anthropic"));
     assert_eq!(lep.model.as_deref(), Some("claude-sonnet-4-20250514"));
 
-    // System prompt composed: persona body + pack instructions
+    // System prompt is persona body only; pack instructions stay separate.
     assert!(
         pip.system_prompt.contains("You are Pip"),
         "pip prompt should contain persona body"
     );
     assert!(
-        pip.system_prompt.contains("Be helpful"),
-        "pip prompt should contain pack instructions"
+        !pip.system_prompt.contains("Be helpful"),
+        "pip prompt should not contain pack instructions"
     );
     assert!(
-        pip.system_prompt.contains("Team Instructions"),
-        "pip prompt should contain instructions header"
+        pip.pack_instructions
+            .as_deref()
+            .is_some_and(|instructions| instructions.contains("Be helpful")),
+        "pip.pack_instructions should carry the pack instructions"
     );
 
     // Temperature inherited from defaults
