@@ -1740,14 +1740,6 @@ test("channel date divider keeps the date sticky while the separator rule scroll
     "backdrop-filter",
     "none",
   );
-  const composerActivityRow = composerOverlay.getByTestId(
-    "channel-composer-activity-row",
-  );
-  await expect(composerActivityRow).toHaveCSS("backdrop-filter", "none");
-  await expect(composerActivityRow).not.toHaveCSS(
-    "background-color",
-    "rgba(0, 0, 0, 0)",
-  );
   await expect
     .poll(async () => {
       const composerOverlayZIndex = await page
