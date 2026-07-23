@@ -1137,7 +1137,7 @@ async fn await_scheduler_push(
 /// fan-out.
 ///
 /// Requires a low scheduler interval; run the relay with
-/// `SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS=1`.
+/// `BUZZ_REMINDER_SCHEDULER_INTERVAL_SECS=1`.
 #[tokio::test]
 #[ignore]
 async fn test_scheduler_delivers_due_reminder_to_author_subscription() {

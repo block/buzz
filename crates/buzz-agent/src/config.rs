@@ -644,7 +644,7 @@ pub const MAX_TOOL_RESULT_BYTES: usize = 8 * 1024 * 1024;
 /// Default cap on the *text* portion of a single tool result. Oversized text
 /// is middle-elided before it enters history; without this, one fat `cat`
 /// burns the context window and forces a lossy handoff. 50 KiB matches the
-/// shell-output caps in sprout-dev-mcp, goose, and pi; codex defaults to
+/// shell-output caps in buzz-dev-mcp, goose, and pi; codex defaults to
 /// 10 KB. Tunable via `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
 pub const DEFAULT_TOOL_RESULT_TEXT_BYTES: usize = 50 * 1024;
 pub const MAX_TOOL_CALLS_PER_TURN: usize = 64;
