@@ -61,6 +61,11 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Release workflow source contract
         run: scripts/test-release-ref-contract.sh
+      - name: Migration immutability
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref }}"
+          scripts/check-migration-immutability.sh
 
   rust-lint:
     name: Rust Lint

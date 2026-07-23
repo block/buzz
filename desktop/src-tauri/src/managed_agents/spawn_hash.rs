@@ -115,6 +115,10 @@ pub(crate) fn spawn_config_hash(
     record.model.hash(&mut hasher);
     record.provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
+    // Display name is written into AGENTS.md / nest identity and used for
+    // @mentions mid-session; a rename must trip needsRestart so running
+    // agents pick up the new identity (issue #1823).
+    record.name.hash(&mut hasher);
     record.respond_to.as_str().hash(&mut hasher);
     // The allowlist is hashed as the env receives it: spawn sets
     // BUZZ_ACP_RESPOND_TO_ALLOWLIST only in allowlist mode, and normalized
