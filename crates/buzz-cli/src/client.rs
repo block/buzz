@@ -87,13 +87,39 @@ fn sign_nip98(
     url: &str,
     body: Option<&[u8]>,
 ) -> Result<String, CliError> {
+    sign_nip98_request(
+        keys,
+        method,
+        url,
+        body,
+        None,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+}
+
+/// Sign a NIP-98 request with an optional audience and caller-provided nonce.
+///
+/// This is exposed for commands that send a signed request outside the Buzz
+/// relay while keeping the private key and Authorization header inside the CLI.
+pub fn sign_nip98_request(
+    keys: &Keys,
+    method: &str,
+    url: &str,
+    body: Option<&[u8]>,
+    audience: Option<&str>,
+    nonce: &str,
+) -> Result<String, CliError> {
     let mut tags = vec![
         Tag::parse(["u", url]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
         Tag::parse(["method", method]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
-        // Nonce prevents replay rejection for rapid-fire requests with identical bodies.
-        Tag::parse(["nonce", &uuid::Uuid::new_v4().to_string()])
-            .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
+        Tag::parse(["nonce", nonce]).map_err(|e| CliError::Other(format!("tag error: {e}")))?,
     ];
+    if let Some(audience) = audience {
+        tags.push(
+            Tag::parse(["aud", audience])
+                .map_err(|e| CliError::Other(format!("tag error: {e}")))?,
+        );
+    }
     if let Some(b) = body {
         let hash = hex::encode(Sha256::digest(b));
         tags.push(

@@ -164,6 +164,9 @@ enum Cmd {
     /// Draft owner-reviewed agent creation and updates
     #[command(subcommand)]
     Agents(AgentsCmd),
+    /// Sign and send narrowly scoped NIP-98 HTTP requests
+    #[command(subcommand)]
+    Auth(AuthCmd),
     /// Send, read, search, and manage messages
     #[command(subcommand)]
     Messages(MessagesCmd),
@@ -224,6 +227,25 @@ enum Cmd {
     /// Community moderation — reports queue, bans, timeouts, audit trail
     #[command(subcommand)]
     Moderation(ModerationCmd),
+}
+
+#[derive(Subcommand)]
+pub enum AuthCmd {
+    /// Sign and send a NIP-98 request without exposing the Authorization header
+    Nip98Request {
+        /// HTTP method; the functional pilot permits only POST
+        #[arg(long, default_value = "POST")]
+        method: String,
+        /// Exact absolute HTTPS URL bound into the signed event
+        #[arg(long)]
+        url: String,
+        /// Audience bound into the signed event
+        #[arg(long)]
+        audience: String,
+        /// Request body source; use '-' to read at most 1 KiB from stdin
+        #[arg(long, default_value = "-")]
+        body: String,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1754,6 +1776,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
 
     match cli.command {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
+        Cmd::Auth(sub) => commands::auth::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
@@ -1792,6 +1815,7 @@ mod tests {
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
+            "auth",
             "canvas",
             "channels",
             "dms",
