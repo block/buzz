@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "voiceDictation",
+      "name": "Voice dictation",
+      "description": "Compose messages with local, real-time speech recognition",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

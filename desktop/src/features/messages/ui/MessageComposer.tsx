@@ -45,6 +45,7 @@ import { useComposerSpoilerParticles } from "@/features/messages/lib/useComposer
 import { useTypingBroadcast } from "@/features/messages/useTypingBroadcast";
 import { getBuzzCodeBlockClipboardText } from "@/shared/lib/codeBlockClipboard";
 import { cn } from "@/shared/lib/cn";
+import { useFeatureEnabled } from "@/shared/features";
 import type { ChannelType } from "@/shared/api/types";
 import { ChannelAutocomplete } from "./ChannelAutocomplete";
 import { ComposerReplyEditBanner } from "./ComposerReplyEditBanner";
@@ -180,6 +181,7 @@ function MessageComposerImpl({
   typingParentEventId = null,
   typingRootEventId = null,
 }: MessageComposerProps) {
+  const voiceDictationEnabled = useFeatureEnabled("voiceDictation");
   const {
     contentRef,
     isContentEmpty,
@@ -302,6 +304,7 @@ function MessageComposerImpl({
   const stopDictationRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
   const dictation = useComposerDictation({
+    enabled: voiceDictationEnabled,
     syncContentRef: syncContentRefFromEditorRef,
     disabled,
     disabledRef,
@@ -1090,7 +1093,12 @@ function MessageComposerImpl({
               editor={richText.editor}
               extraActions={
                 <>
-                  <DictationButton dictation={dictation} disabled={disabled} />
+                  {voiceDictationEnabled && (
+                    <DictationButton
+                      dictation={dictation}
+                      disabled={disabled}
+                    />
+                  )}
                   {toolbarExtraActions}
                 </>
               }

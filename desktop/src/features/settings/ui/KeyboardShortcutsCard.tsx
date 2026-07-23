@@ -3,6 +3,7 @@ import {
   getPlatformKeys,
   type KeyboardShortcut,
 } from "@/shared/lib/keyboard-shortcuts";
+import { useFeatureEnabled } from "@/shared/features";
 import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
 
@@ -29,6 +30,7 @@ function KeyCombo({ shortcut }: { shortcut: KeyboardShortcut }) {
 }
 
 export function KeyboardShortcutsCard() {
+  const voiceDictationEnabled = useFeatureEnabled("voiceDictation");
   const categories = getShortcutsByCategory();
 
   return (
@@ -45,22 +47,27 @@ export function KeyboardShortcutsCard() {
               {category}
             </h2>
             <SettingsOptionGroup>
-              {shortcuts.map((shortcut) => (
-                <SettingsOptionRow
-                  className="min-h-12 px-3 py-2"
-                  key={shortcut.id}
-                >
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium text-foreground">
-                      {shortcut.label}
-                    </span>
-                    <span className="ml-2 text-muted-foreground">
-                      {shortcut.description}
-                    </span>
-                  </div>
-                  <KeyCombo shortcut={shortcut} />
-                </SettingsOptionRow>
-              ))}
+              {shortcuts
+                .filter(
+                  (shortcut) =>
+                    voiceDictationEnabled || shortcut.id !== "voice-dictation",
+                )
+                .map((shortcut) => (
+                  <SettingsOptionRow
+                    className="min-h-12 px-3 py-2"
+                    key={shortcut.id}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm font-medium text-foreground">
+                        {shortcut.label}
+                      </span>
+                      <span className="ml-2 text-muted-foreground">
+                        {shortcut.description}
+                      </span>
+                    </div>
+                    <KeyCombo shortcut={shortcut} />
+                  </SettingsOptionRow>
+                ))}
             </SettingsOptionGroup>
           </div>
         ))}

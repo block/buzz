@@ -516,7 +516,9 @@ const overrides = new Map([
   // +17: local-dictation integration: useComposerDictation wiring (mic toggle,
   // transcript append, recording/transcribing state, stop-on-send/edit guards).
   // Load-bearing feature growth; queued to split with the rest.
-  ["src/features/messages/ui/MessageComposer.tsx", 1131],
+  // +8: preview-feature gate wiring keeps dictation hidden and inactive until
+  // the user opts in through Settings → Experiments.
+  ["src/features/messages/ui/MessageComposer.tsx", 1139],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing

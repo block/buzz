@@ -8,6 +8,8 @@ import {
 import { useDictation } from "./useDictation";
 
 interface UseComposerDictationOptions {
+  /** Whether the voice-dictation preview feature is enabled. */
+  enabled?: boolean;
   /** Ref to a function that syncs contentRef from the Tiptap editor and returns it. */
   syncContentRef: React.MutableRefObject<() => string>;
   /** Whether the composer is currently disabled (read-only, etc.). */
@@ -33,6 +35,7 @@ interface UseComposerDictationOptions {
  * Uses the local Parakeet STT engine — fully offline, no relay or API key needed.
  */
 export function useComposerDictation({
+  enabled = true,
   syncContentRef,
   disabled = false,
   disabledRef,
@@ -47,9 +50,13 @@ export function useComposerDictation({
   const instanceId = useId();
   const isSendBlockedRef = useRef(false);
   isSendBlockedRef.current =
-    disabledRef.current || isSendingRef.current || isUploadingRef.current;
+    !enabled ||
+    disabledRef.current ||
+    isSendingRef.current ||
+    isUploadingRef.current;
 
   const dictation = useDictation({
+    disabled: !enabled,
     getText: () => syncContentRef.current(),
     setText: (text) => {
       setComposerContent(text);
@@ -124,10 +131,11 @@ export function useComposerDictation({
   useEffect(() => {
     const owningSession =
       dictation.isRecording || dictation.isStarting || dictation.isTranscribing;
-    if (disabled && owningSession) {
+    if ((!enabled || disabled) && owningSession) {
       dictation.cancelRecording();
     }
   }, [
+    enabled,
     disabled,
     dictation.isRecording,
     dictation.isStarting,
@@ -142,6 +150,7 @@ export function useComposerDictation({
   // biome-ignore lint/correctness/useExhaustiveDependencies: disabledRef/isSendBlockedRef are stable refs read at call time
   useEffect(() => {
     function handleKeyDown() {
+      if (!enabled) return;
       // Only respond if this is the active composer instance.
       if (!isActiveDictationComposer(instanceId)) return;
       // Only respond if focus is still inside this composer. The active-composer
@@ -171,6 +180,7 @@ export function useComposerDictation({
   }, [
     instanceId,
     composerRef,
+    enabled,
     dictation.isRecording,
     dictation.isStarting,
     dictation.startRecording,

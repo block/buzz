@@ -85,6 +85,7 @@ import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
+import { useFeatureEnabled } from "@/shared/features";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
@@ -98,6 +99,7 @@ export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
+  const voiceDictationEnabled = useFeatureEnabled("voiceDictation");
 
   const communitiesHook = useCommunities();
   const hasCommunityRail = communitiesHook.communities.length > 1;
@@ -633,7 +635,7 @@ export function AppShell() {
         return;
       }
 
-      if (key === "d" && !event.shiftKey) {
+      if (key === "d" && !event.shiftKey && voiceDictationEnabled) {
         event.preventDefault();
         dictationKeyHeld = true;
         window.dispatchEvent(new CustomEvent("buzz:dictation-key-down"));
@@ -695,6 +697,7 @@ export function AppShell() {
     handleOpenSearch,
     goHome,
     settingsOpen,
+    voiceDictationEnabled,
   ]);
   useSettingsShortcuts({
     onClose: handleCloseSettings,

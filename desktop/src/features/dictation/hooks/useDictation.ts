@@ -9,6 +9,8 @@ import {
 import { useLocalDictation } from "./useLocalDictation";
 
 interface UseDictationOptions {
+  /** Disable native availability checks and recording entry points. */
+  disabled?: boolean;
   /** Returns the current composer text (must be fresh — synced from editor). */
   getText: () => string;
   /** Set composer text */
@@ -20,6 +22,7 @@ interface UseDictationOptions {
 }
 
 export function useDictation({
+  disabled = false,
   getText,
   setText,
   onSend,
@@ -74,6 +77,7 @@ export function useDictation({
   );
 
   const dictation = useLocalDictation({
+    disabled,
     onRecordingStart: () => {
       lastTranscriptRef.current = "";
     },

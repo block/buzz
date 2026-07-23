@@ -108,6 +108,11 @@ export function useLocalDictation({
 
   // Check availability on mount and poll until available (model may be downloading).
   useEffect(() => {
+    if (disabled) {
+      setIsAvailable(false);
+      return;
+    }
+
     let cancelled = false;
     let pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -139,7 +144,7 @@ export function useLocalDictation({
       cancelled = true;
       if (pollTimer) clearInterval(pollTimer);
     };
-  }, []);
+  }, [disabled]);
 
   /** Flush accumulated audio batch to the native STT engine. Returns a promise
    *  that resolves once the IPC call completes (or immediately if nothing to flush).

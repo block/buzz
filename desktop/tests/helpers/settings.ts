@@ -7,6 +7,7 @@ type SettingsSection =
   | "channel-templates"
   | "compute"
   | "appearance"
+  | "experimental"
   | "shortcuts"
   | "tokens"
   | "community-members"
