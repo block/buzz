@@ -22,6 +22,11 @@ X" flag): add it to `KnownAcpRuntime` first, expose it on
 `AcpRuntimeCatalogEntry`, then project it through the core. Do not shortcut
 with a TypeScript lookup table or an id comparison in a component.
 
+Adding a runtime follows the same rule: declare its command aliases, default
+arguments, install/readiness metadata, and configuration capabilities in the
+Rust catalog. Catalog-driven setup and selection surfaces should pick it up
+without a parallel TypeScript runtime list.
+
 ## Rules
 
 1. **No hardcoded harness-ID checks in render code.** `runtime.id === "claude"`

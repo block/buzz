@@ -89,6 +89,26 @@ buzz-acp
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
 
+## Running with Hermes Agent
+
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) includes a native
+ACP server that uses the same personal configuration, credentials, memory, and
+skills as the Hermes CLI.
+
+```bash
+# Install Hermes, configure the personal agent, and add its optional ACP extra.
+# See https://hermes-agent.nousresearch.com/docs/user-guide/features/acp/
+
+export BUZZ_ACP_AGENT_COMMAND="hermes"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+buzz-acp
+```
+
+If `hermes-acp` is on `PATH`, it can be launched directly with empty agent
+arguments instead. Buzz Desktop discovers that entrypoint as the first-class
+`Hermes Agent` runtime.
+
 ## Configuration
 
 All configuration is via environment variables (or CLI flags — every env var has a matching flag).
