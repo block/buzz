@@ -135,6 +135,8 @@ type E2eConfig = {
   mock?: {
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
+    /** Serve zero projects so the Projects empty state can be exercised. */
+    emptyProjects?: boolean;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -4947,6 +4949,7 @@ function buildMockProjectEvents(): RelayEvent[] {
 }
 
 function getMockProjectEventStore(): RelayEvent[] {
+  if (getConfig()?.mock?.emptyProjects) return [];
   mockProjectEventStore ??= buildMockProjectEvents();
   return mockProjectEventStore;
 }
