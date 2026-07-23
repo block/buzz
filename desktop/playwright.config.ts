@@ -101,6 +101,7 @@ export default defineConfig({
         "**/channel-sort.spec.ts",
         "**/identity-lost.spec.ts",
         "**/deep-link-invite.spec.ts",
+        "**/agent-import-deep-link.spec.ts",
         "**/invite-qr-download.spec.ts",
         "**/global-agent-config-screenshots.spec.ts",
         "**/doctor-states.spec.ts",

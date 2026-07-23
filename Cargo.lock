@@ -908,6 +908,7 @@ dependencies = [
  "tokio",
  "url",
  "uuid",
+ "webbrowser",
 ]
 
 [[package]]

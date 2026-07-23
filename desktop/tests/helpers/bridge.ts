@@ -382,6 +382,14 @@ type MockBridgeOptions = {
     code?: string | null;
     name?: string | null;
   }>;
+  /** Verified agent snapshots waiting in the mocked Rust deep-link queue. */
+  pendingAgentSnapshotImports?: Array<{
+    id: string;
+    fileBytes: number[];
+    fileName: string;
+  }>;
+  /** System prompt returned by the mocked snapshot preview command. */
+  agentSnapshotPreviewSystemPrompt?: string | null;
   /**
    * Global agent config returned by `get_global_agent_config`. Defaults to
    * an empty config (no provider, model, or env vars) if not specified.

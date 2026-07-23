@@ -334,6 +334,14 @@ type E2eConfig = {
       code?: string | null;
       name?: string | null;
     }>;
+    /** Verified agent snapshots waiting in the mocked Rust deep-link queue. */
+    pendingAgentSnapshotImports?: Array<{
+      id: string;
+      fileBytes: number[];
+      fileName: string;
+    }>;
+    /** System prompt returned by the mocked snapshot preview command. */
+    agentSnapshotPreviewSystemPrompt?: string | null;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
     identityLost?: boolean;
@@ -3821,6 +3829,11 @@ let mockPendingCommunityDeepLinks: Array<{
   code: string | null;
   name: string | null;
 }> = [];
+let mockPendingAgentSnapshotImports: Array<{
+  id: string;
+  fileBytes: number[];
+  fileName: string;
+}> = [];
 
 function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
   mockPendingCommunityDeepLinks = (
@@ -3829,6 +3842,16 @@ function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
     ...pending,
     code: pending.code ?? null,
     name: pending.name ?? null,
+  }));
+}
+
+function resetMockPendingAgentSnapshotImports(config: E2eConfig | null) {
+  mockPendingAgentSnapshotImports = (
+    config?.mock?.pendingAgentSnapshotImports ?? []
+  ).map((pending) => ({
+    id: pending.id,
+    fileBytes: [...pending.fileBytes],
+    fileName: pending.fileName,
   }));
 }
 
@@ -8890,6 +8913,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockUserStatuses();
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
+  resetMockPendingAgentSnapshotImports(config);
   mockWebsocketSendMutexWedged = false;
   mockWindows("main");
   window.__BUZZ_E2E_COMMANDS__ = [];
@@ -9819,6 +9843,19 @@ export function maybeInstallE2eTauriMocks() {
         mockPendingCommunityDeepLinks.splice(index, 1);
         return true;
       }
+      case "take_pending_agent_snapshot_import":
+        return mockPendingAgentSnapshotImports[0] ?? null;
+      case "acknowledge_pending_agent_snapshot_import": {
+        const { id } = payload as { id: string };
+        const index = mockPendingAgentSnapshotImports.findIndex(
+          (pending) => pending.id === id,
+        );
+        if (index === -1) {
+          return false;
+        }
+        mockPendingAgentSnapshotImports.splice(index, 1);
+        return true;
+      }
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
@@ -9983,7 +10020,8 @@ export function maybeInstallE2eTauriMocks() {
         // Return a minimal preview — no writes performed.
         return {
           displayName: "Imported Agent",
-          systemPrompt: null,
+          systemPrompt:
+            activeConfig?.mock?.agentSnapshotPreviewSystemPrompt ?? null,
           avatarUrl: null,
           memoryLevel: "none",
           memoryEntryCount: 0,
