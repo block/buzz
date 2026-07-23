@@ -1,13 +1,14 @@
 //! Global agent configuration defaults.
 //!
 //! A single `global-agent-config.json` record that applies to ALL managed
-//! agents. Per-agent config always wins; global provides the lowest
-//! user-settable layer below persona.
+//! agents. For a linked instance, the definition wins over global; for a
+//! definition-less (legacy) instance, the record's own fields win over
+//! global. Global is always the lowest user-settable layer.
 //!
 //! # Precedence (low → high)
 //!
 //! ```text
-//! baked build env  <  GLOBAL  <  persona  <  per-agent  <  Buzz-identity
+//! baked build env  <  GLOBAL  <  definition (linked) / instance (legacy)  <  Buzz-identity
 //! ```
 //!
 //! # Semantics
@@ -38,8 +39,10 @@ use crate::managed_agents::types::{AgentDefinition, ManagedAgentRecord};
 /// so the config vocabulary is consistent across all three tiers.
 ///
 /// `env_vars` is the lowest user-settable env layer — global < persona < agent.
-/// `provider` / `model` are fallback defaults: effective provider/model =
-/// `agent → persona → global → None`.
+/// `provider` / `model` are fallback defaults, resolved via
+/// `effective_config::resolve_effective_config`: for a linked instance,
+/// definition → global (the record's own `provider`/`model` bytes are never
+/// consulted); for a definition-less instance, instance → global.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalAgentConfig {
     /// Global env vars injected into ALL agents unconditionally.
@@ -204,44 +207,28 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
     atomic_write_json_restricted(&path, &payload)
 }
 
-/// Resolve the effective model and provider for an agent using the
-/// precedence chain: `agent record → linked persona → global defaults → None`.
+/// Resolve the effective model and provider for an agent.
 ///
-/// This is the single source of truth used by readiness evaluation, spawn,
-/// and deploy-payload construction. All three paths must use this function so
-/// they agree on what model/provider the agent will actually run with.
+/// Delegates to `effective_config::resolve_effective_config` which enforces
+/// definition-authoritative semantics for linked instances:
+///   - **Linked:** definition → global. Record bytes are never consulted.
+///   - **Definition-less:** instance → global.
+///   - **Orphaned:** returns `(None, None)`. This function is a display/
+///     readiness/hash convenience, not the spawn gate — an orphan must never
+///     reach a real spawn regardless of what this returns, because
+///     `spawn_agent_child` refuses orphans itself via
+///     `effective_config::resolve_effective_config(...).require_resolved()`
+///     before resolving model/provider/prompt for the process env.
 ///
-/// # Arguments
-/// * `record` — the `ManagedAgentRecord` (may have `None` for model/provider)
-/// * `personas` — all current persona records (looked up by `record.persona_id`)
-/// * `global` — global agent config defaults
-///
-/// # Returns
-/// `(effective_model, effective_provider)` — both `Option<&str>`.
-pub(crate) fn resolve_effective_model_provider<'a>(
-    record: &'a ManagedAgentRecord,
-    personas: &'a [AgentDefinition],
-    global: &'a GlobalAgentConfig,
-) -> (Option<&'a str>, Option<&'a str>) {
-    let (persona_model, persona_provider) = record
-        .persona_id
-        .as_deref()
-        .and_then(|pid| personas.iter().find(|p| p.id == pid))
-        .map(|p| (p.model.as_deref(), p.provider.as_deref()))
-        .unwrap_or((None, None));
-
-    let effective_model = record
-        .model
-        .as_deref()
-        .or(persona_model)
-        .or(global.model.as_deref());
-    let effective_provider = record
-        .provider
-        .as_deref()
-        .or(persona_provider)
-        .or(global.provider.as_deref());
-
-    (effective_model, effective_provider)
+/// Returns owned `String`s because the effective value may come from a
+/// tier that outlives none of the input borrows (e.g. global config).
+pub(crate) fn resolve_effective_model_provider(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+    global: &GlobalAgentConfig,
+) -> (Option<String>, Option<String>) {
+    super::effective_config::resolve_effective_model_provider_pair(record, personas, global)
+        .unwrap_or((None, None))
 }
 
 #[cfg(test)]

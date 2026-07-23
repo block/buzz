@@ -374,20 +374,20 @@ fn pick_serve_target_for_model(
 /// Non relay-mesh records are a no-op.
 pub(crate) async fn ensure_relay_mesh_for_record(
     app: &AppHandle,
-    record: &crate::managed_agents::ManagedAgentRecord,
+    model_id: Option<&str>,
     _allow_fresh_create_start: bool,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let Some(model_id) = crate::managed_agents::relay_mesh_model_id(record) else {
+    let Some(model_id) = model_id else {
         return Ok(());
     };
     // A local serve/client runtime already owns the OpenAI ingress and its
     // router can resolve both `auto` and explicit remote models. Do not require
     // a separate relay-advertised target in that case.
     if state.mesh_llm_runtime.lock().await.is_some() {
-        return wait_for_mesh_inference(&model_id).await;
+        return wait_for_mesh_inference(model_id).await;
     }
-    let target = match resolve_mesh_bootstrap_target(&state, &model_id).await {
+    let target = match resolve_mesh_bootstrap_target(&state, model_id).await {
         Ok(Some(target)) => target,
         Ok(None) => {
             return Err(
@@ -402,8 +402,8 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         }
     };
 
-    ensure_client_node_for_model(&state, &model_id, Some(target.endpoint_addr)).await?;
-    wait_for_mesh_inference(&model_id).await
+    ensure_client_node_for_model(&state, model_id, Some(target.endpoint_addr)).await?;
+    wait_for_mesh_inference(model_id).await
 }
 
 #[tauri::command]

@@ -674,30 +674,36 @@ export function AgentInstanceEditDialog({
           parsedParallelism > 0 && parsedParallelism !== agent.parallelism
             ? parsedParallelism
             : undefined,
-        // Use tri-state: send null to clear, value to set, omit if unchanged.
+        // Linked instances defer model/provider/systemPrompt to the definition.
         systemPrompt:
-          (systemPrompt.trim() || null) !== agent.systemPrompt
-            ? systemPrompt.trim() || null
-            : undefined,
+          linkedPersona != null
+            ? undefined
+            : (systemPrompt.trim() || null) !== agent.systemPrompt
+              ? systemPrompt.trim() || null
+              : undefined,
         model:
-          normalizedModel !== (agent.model ?? null)
-            ? normalizedModel
-            : undefined,
+          linkedPersona != null
+            ? undefined
+            : normalizedModel !== (agent.model ?? null)
+              ? normalizedModel
+              : undefined,
         // Tri-state provider persistence keyed on providerRuntimeCapability:
         //   "capable"  → persist: value if changed, omit if unchanged.
         //   "locked"   → clear: send null if provider was set, else omit.
         //   "unknown"  → omit always (never send null for a transient state).
         // llmProviderFieldVisible is for UX visibility only; not used here.
         provider:
-          providerRuntimeCapability === "capable"
-            ? normalizedSubmitProvider !== (agent.provider ?? null)
-              ? normalizedSubmitProvider
-              : undefined
-            : providerRuntimeCapability === "locked"
-              ? (agent.provider ?? null) !== null
-                ? null
+          linkedPersona != null
+            ? undefined
+            : providerRuntimeCapability === "capable"
+              ? normalizedSubmitProvider !== (agent.provider ?? null)
+                ? normalizedSubmitProvider
                 : undefined
-              : undefined, // "unknown" → omit always
+              : providerRuntimeCapability === "locked"
+                ? (agent.provider ?? null) !== null
+                  ? null
+                  : undefined
+                : undefined, // "unknown" → omit always
         envVars: envVarsEqual(submitEnvVars, agent.envVars)
           ? undefined
           : submitEnvVars,

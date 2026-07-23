@@ -359,10 +359,14 @@ pub fn persona_event_content(record: &AgentDefinition) -> PersonaEventContent {
 }
 
 /// A persona's spawn-relevant config, pinned onto a `ManagedAgentRecord` at
-/// create time. After the snapshot, spawn and deploy read these fields off the
-/// record and never the live persona, so an agent stays pinned to the config
-/// it was created with — restart reuses the snapshot, delete+respawn rewrites
-/// it.
+/// create time for display/backward-compat purposes. For a linked instance,
+/// spawn and deploy do NOT read these snapshotted fields — they resolve
+/// model/provider/prompt live from the definition on every spawn (see
+/// `effective_config::resolve_effective_config`), so a definition edit
+/// propagates on the next restart without delete+respawn. The snapshot still
+/// matters for `runtime` (materialized per B5, no live-read path yet) and for
+/// `persona_source_version`, the drift basis the Agents menu compares against
+/// the definition's current content hash.
 pub struct PersonaSnapshot {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
@@ -375,24 +379,6 @@ pub struct PersonaSnapshot {
     pub runtime: Option<String>,
     /// `persona_content_hash` of the persona at snapshot time; the drift basis.
     pub source_version: String,
-}
-
-/// Apply persona-wins-when-set precedence for a single optional string field.
-///
-/// Returns the persona's value when it is non-`None` and non-whitespace-only;
-/// otherwise falls back to the record's value with the same blank filter applied.
-/// Returns `None` only when both are blank — a genuinely unconfigured field stays
-/// unconfigured.
-///
-/// This is the single source of truth for the precedence rule used by
-/// `persona_snapshot_with_agent_config_fallback`, `build_deploy_payload`, and
-/// `resolve_effective_prompt_model_provider` so the three paths cannot drift.
-pub fn persona_field_with_record_fallback(
-    persona_value: Option<&str>,
-    record_value: Option<&str>,
-) -> Option<String> {
-    let non_blank = |v: Option<&str>| v.filter(|s| !s.trim().is_empty()).map(str::to_owned);
-    non_blank(persona_value).or_else(|| non_blank(record_value))
 }
 
 /// Build the pinned snapshot for an agent created from `persona`.
@@ -411,51 +397,14 @@ pub fn persona_snapshot(persona: &AgentDefinition) -> PersonaSnapshot {
     }
 }
 
-/// Build the pinned snapshot for an **existing** agent record being re-snapshotted
-/// from its linked persona (on spawn or app-launch restore).
+/// Re-pin `record` to `persona`: build a snapshot via [`persona_snapshot`]
+/// and mirror it onto the record — the definition quad
+/// (`system_prompt`/`model`/`provider`/`runtime`), the env-override
+/// self-heal, and the `persona_source_version` drift basis.
 ///
-/// Precedence rule: when the persona sets `model` or `provider` (non-`None`, non-empty),
-/// the persona wins — this is the expected inheritance. When the persona leaves
-/// these fields blank (`None` or empty string), the agent record's own values are
-/// preserved instead. This prevents a persona with no configured model/provider from
-/// clobbering a value the user already set on the agent, which would trap the agent
-/// in a permanent "needs configuration" loop that users cannot escape.
-///
-/// `source_version` is always updated to the current persona content hash so the
-/// drift badge clears correctly even when model/provider are not touched.
-///
-/// Env vars are not part of the snapshot: `record.env_vars` (agent overrides)
-/// is left untouched and the live persona env is merged underneath at read time.
-///
-/// The two fields (`model`, `provider`) are independent: a persona that sets only
-/// `model` wins on `model` while the agent's `provider` is preserved, and vice versa.
-pub fn persona_snapshot_with_agent_config_fallback(
-    persona: &AgentDefinition,
-    current_agent_model: Option<&str>,
-    current_agent_provider: Option<&str>,
-) -> PersonaSnapshot {
-    // Delegate system_prompt and source_version to persona_snapshot so future
-    // PersonaSnapshot field additions stay automatically consistent.
-    let base = persona_snapshot(persona);
-
-    // Apply the shared precedence rule: persona wins when non-blank, else
-    // the agent record's value is preserved so a configured agent stays configured.
-    let model = persona_field_with_record_fallback(base.model.as_deref(), current_agent_model);
-    let provider =
-        persona_field_with_record_fallback(base.provider.as_deref(), current_agent_provider);
-
-    PersonaSnapshot {
-        model,
-        provider,
-        ..base
-    }
-}
-
-/// Re-pin `record` to `persona`: build the snapshot (via
-/// [`persona_snapshot_with_agent_config_fallback`], so blank persona
-/// `model`/`provider` preserve the record's own values) and mirror it onto the
-/// record — the definition quad (`system_prompt`/`model`/`provider`/`runtime`),
-/// the env-override self-heal, and the `persona_source_version` drift basis.
+/// Definition-authoritative: blank definition model/provider produce `None`
+/// on the record. The effective-config resolver falls through to the global
+/// default at read time; stale materialized record bytes are never preserved.
 ///
 /// This is the single apply used by every snapshot-apply site: the spawn
 /// re-pin (`start_local_agent_with_preflight`), the launch backfill and
@@ -467,11 +416,7 @@ pub fn persona_snapshot_with_agent_config_fallback(
 /// caller's concern, and `spawn_config_hash` (which applies this to a clone)
 /// must stay pure.
 pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDefinition) {
-    let snapshot = persona_snapshot_with_agent_config_fallback(
-        persona,
-        record.model.as_deref(),    // fallback: record.model
-        record.provider.as_deref(), // fallback: record.provider
-    );
+    let snapshot = persona_snapshot(persona);
     if let Some(prompt) = snapshot.system_prompt {
         record.system_prompt = Some(prompt);
     }
@@ -506,6 +451,34 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
         .env_vars
         .retain(|k, v| persona.env_vars.get(k) != Some(v));
     record.persona_source_version = Some(snapshot.source_version);
+}
+
+/// Preview what `record` would look like immediately after the start/restore
+/// paths re-pin it to its linked persona, without mutating `record` itself.
+///
+/// Every decision made ahead of the real re-pin — the relay-mesh preflight in
+/// `start_local_agent_with_preflight`, the restart-badge hash in
+/// `spawn_config_hash` — needs to reason about spawn-time state, not
+/// pre-snapshot bytes, so a persona edit that flips a field (e.g. `provider`
+/// to/from relay-mesh) between saves is reflected in the decision instead of
+/// the stale value the real [`apply_persona_snapshot`] is about to overwrite
+/// anyway. Idempotent: applying it to an already-current record is a no-op,
+/// so the spawn-time stamp and later recomputes agree when nothing changed.
+///
+/// Orphaned records (persona deleted) pass through unchanged: the caller's
+/// own orphan handling — refusing to spawn, hashing as `(None, None, None)`
+/// — runs on the real record downstream, not on this preview.
+pub fn preview_prospective_persona_snapshot(
+    record: &ManagedAgentRecord,
+    personas: &[AgentDefinition],
+) -> ManagedAgentRecord {
+    let mut preview = record.clone();
+    if let Some(persona_id) = preview.persona_id.clone() {
+        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
+            apply_persona_snapshot(&mut preview, persona);
+        }
+    }
+    preview
 }
 #[cfg(test)]
 mod tests;

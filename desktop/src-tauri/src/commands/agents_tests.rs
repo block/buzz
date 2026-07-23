@@ -126,57 +126,56 @@ fn build_agent_archive_request_attaches_owner_auth_and_retired_reason() {
     }));
 }
 
-/// Deploy-path regression for Fix 1 of Thufir pass-2: a persona-linked
-/// provider agent with a stale record snapshot must use the live persona
-/// model/provider in the deploy payload, not the stale record values.
-///
-/// Scenario: agent was created with persona at model="old-model"/provider="old-prov".
-/// The persona was subsequently updated to "new-model"/"new-prov" but the record
-/// was NOT re-snapshotted (provider start skips re-snapshot; local spawn does it).
-/// The deploy resolver must use the current persona values.
-///
-/// Fails against `resolve_effective_model_provider` (record-first precedence),
-/// which would return "old-model"/"old-prov" from the stale record.
+/// Deploy resolver uses definition model/provider, ignoring stale record.
 #[test]
-fn deploy_resolver_uses_live_persona_over_stale_record_snapshot() {
-    // Record holds the stale snapshot (created when persona had old values).
+fn deploy_resolver_uses_definition_over_stale_record() {
     let record = bare_agent_record(Some("p1"), Some("old-model"), Some("old-prov"));
-    // Live persona has been updated since the record was snapshotted.
     let personas = vec![persona_record("p1", Some("new-model"), Some("new-prov"))];
     let global = crate::managed_agents::GlobalAgentConfig::default();
 
     let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
 
     assert_eq!(
-        model,
+        model.as_deref(),
         Some("new-model"),
-        "deploy must use live persona model, not stale record snapshot"
+        "deploy must use definition model, not stale record snapshot"
     );
     assert_eq!(
-        provider,
+        provider.as_deref(),
         Some("new-prov"),
-        "deploy must use live persona provider, not stale record snapshot"
+        "deploy must use definition provider, not stale record snapshot"
     );
 }
 
-/// Deploy resolver falls back to record when persona has no model/provider
-/// (persona without structured model — fallback to record snapshot).
+/// When a linked definition has blank model/provider (inherit), the deploy
+/// resolver must fall through to global — stale record bytes are inert.
 #[test]
-fn deploy_resolver_falls_back_to_record_when_persona_has_none() {
-    let record = bare_agent_record(Some("p1"), Some("record-model"), Some("record-prov"));
-    // Persona exists but has no model/provider.
+fn deploy_resolver_inherits_global_when_definition_blank() {
+    let record = bare_agent_record(Some("p1"), Some("stale-model"), Some("stale-prov"));
     let personas = vec![persona_record("p1", None, None)];
-    let global = crate::managed_agents::GlobalAgentConfig::default();
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-prov".to_string()),
+        ..Default::default()
+    };
 
     let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
 
-    assert_eq!(model, Some("record-model"));
-    assert_eq!(provider, Some("record-prov"));
+    assert_eq!(
+        model.as_deref(),
+        Some("global-model"),
+        "definition blank → global; stale record ignored"
+    );
+    assert_eq!(
+        provider.as_deref(),
+        Some("global-prov"),
+        "definition blank → global; stale record ignored"
+    );
 }
 
-/// Deploy resolver falls back to global when both persona and record have none.
+/// Deploy resolver falls back to global when both definition and record have none.
 #[test]
-fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
+fn deploy_resolver_falls_back_to_global_when_definition_and_record_have_none() {
     let record = bare_agent_record(Some("p1"), None, None);
     let personas = vec![persona_record("p1", None, None)];
     let global = crate::managed_agents::GlobalAgentConfig {
@@ -187,8 +186,35 @@ fn deploy_resolver_falls_back_to_global_when_persona_and_record_have_none() {
 
     let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
 
-    assert_eq!(model, Some("global-model"));
-    assert_eq!(provider, Some("global-prov"));
+    assert_eq!(model.as_deref(), Some("global-model"));
+    assert_eq!(provider.as_deref(), Some("global-prov"));
+}
+
+/// Orphan: linked record with missing definition → the pure model/provider
+/// pair resolver returns `(None, None)`. This is NOT the deploy refusal
+/// boundary — `build_deploy_payload` refuses an orphan outright via
+/// `.require_resolved()?` before this pair is ever computed. This test pins
+/// the resolver's own orphan behavior, which readiness/hash also depend on.
+#[test]
+fn deploy_resolver_returns_none_for_orphaned_instance() {
+    let record = bare_agent_record(Some("missing-def"), Some("stale-model"), Some("stale-prov"));
+    let personas: Vec<AgentDefinition> = vec![];
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("global-model".to_string()),
+        provider: Some("global-prov".to_string()),
+        ..Default::default()
+    };
+
+    let (model, provider) = resolve_deploy_model_provider(&record, &personas, &global);
+
+    assert!(
+        model.is_none(),
+        "orphaned instance must not resolve to any model"
+    );
+    assert!(
+        provider.is_none(),
+        "orphaned instance must not resolve to any provider"
+    );
 }
 
 #[test]
@@ -404,6 +430,7 @@ fn deploy_payload_carries_the_full_behavioral_quad() {
         "wss://relay.example".to_string(),
         Some("gpt-x".to_string()),
         Some("openai".to_string()),
+        None,
         std::collections::BTreeMap::new(),
     );
 
