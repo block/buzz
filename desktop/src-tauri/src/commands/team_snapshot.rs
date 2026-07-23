@@ -483,12 +483,12 @@ pub async fn preview_team_snapshot_import(
 ///      If ANY generation fails, return immediately — zero writes.
 ///   3. Store — inside `managed_agents_store_lock`: write all `AgentDefinition`s
 ///      + all `ManagedAgentRecord`s (with `team_id` set) + `TeamRecord`.
-///      Both store files are snapshotted (or noted absent) before the first
-///      write. On any write error the pre-import state is restored — including
-///      deleting a file that was absent, cleaning minted keyring entries, and
-///      surfacing rollback failures alongside the original error. This makes
-///      the store phase all-or-none for ordinary application errors; a process
-///      crash between atomic file commits is NOT covered.
+///        Both store files are snapshotted (or noted absent) before the first
+///        write. On any write error the pre-import state is restored — including
+///        deleting a file that was absent, cleaning minted keyring entries, and
+///        surfacing rollback failures alongside the original error. This makes
+///        the store phase all-or-none for ordinary application errors; a process
+///        crash between atomic file commits is NOT covered.
 ///   4. Profile sync — for each member, call `sync_managed_agent_profile`.
 ///      Best-effort; errors are collected per member.
 ///   5. Memory restore — for each member with non-empty snapshot memory,
