@@ -125,9 +125,17 @@ export function MeshComputeSettingsCard() {
   }, []);
 
   // Mirror the running node's modelId back into the field so the card shows
-  // what's actually being served, even after a fresh app load.
+  // what's ACTUALLY being served — not just on a fresh load (empty field) but
+  // whenever the served model differs from the field (e.g. the member switched
+  // models and the node restarted on the new one). This is safe from clobbering
+  // a mid-edit because the field is disabled whenever the slot is occupied
+  // (`controlsDisabled`), so the user can't be typing while a node is running.
   React.useEffect(() => {
-    if (status?.state === "running" && status.modelId && modelInput === "") {
+    if (
+      status?.state === "running" &&
+      status.modelId &&
+      status.modelId !== modelInput
+    ) {
       setModelInput(status.modelId);
       writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
     }
