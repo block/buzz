@@ -8,6 +8,8 @@ mod admission;
 pub mod api;
 /// WebSocket audio relay for huddle voice channels.
 pub mod audio;
+/// Advisory Buzz client-identification parsing.
+pub mod client_info;
 /// Relay configuration from environment variables.
 pub mod config;
 /// Runtime conformance harness — abstract trace emission at the

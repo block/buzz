@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:async';
 
+import 'package:buzz/shared/client/client_headers.dart';
 import 'package:buzz/shared/relay/media_auth.dart';
 import 'package:buzz/shared/relay/media_image.dart';
 import 'package:flutter/painting.dart';
@@ -18,8 +19,16 @@ final _pngBytes = base64Decode(
 const _relayBase = 'https://relay.example.com';
 const _mediaUrl = '$_relayBase/media/abc123.png';
 
-MediaGetAuthService _auth({String? nsec, DateTime Function()? now}) =>
-    MediaGetAuthService(baseUrl: _relayBase, nsec: nsec, now: now);
+MediaGetAuthService _auth({
+  String? nsec,
+  DateTime Function()? now,
+  ClientHeaders? clientHeaders,
+}) => MediaGetAuthService(
+  baseUrl: _relayBase,
+  nsec: nsec,
+  now: now,
+  clientHeaders: clientHeaders,
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -57,10 +66,43 @@ void main() {
       expect(refreshed['Authorization'], isNot(first['Authorization']));
     });
 
+    test('sends identification only for relay media URLs', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(
+        nsec: nostr.Keys.generate().nsec,
+        clientHeaders: clientHeaders,
+      );
+
+      expect(
+        auth.headersFor(_mediaUrl),
+        containsPair('Buzz-Client', 'test-client'),
+      );
+      expect(auth.headersFor('https://elsewhere.com/media/abc.png'), isEmpty);
+    });
+
+    test('sends identification without a signing key', () {
+      const clientHeaders = ClientHeaders(
+        appVersion: '1.0',
+        buzzClient: 'test-client',
+        userAgent: 'test-agent',
+      );
+      final auth = _auth(clientHeaders: clientHeaders);
+
+      expect(auth.headersFor(_mediaUrl), clientHeaders.values);
+    });
+
     test('non-relay URLs get no headers even with a key', () {
       final nsec = nostr.Keys.generate().nsec;
       final auth = _auth(nsec: nsec);
       expect(auth.headersFor('https://elsewhere.com/media/abc.png'), isEmpty);
+      expect(
+        auth.headersFor('http://relay.example.com/media/abc.png'),
+        isEmpty,
+      );
       expect(auth.headersFor('$_relayBase/not-media/abc.png'), isEmpty);
     });
   });

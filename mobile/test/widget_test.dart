@@ -3,7 +3,14 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:buzz/app.dart';
 import 'package:buzz/shared/auth/auth.dart';
+import 'package:buzz/shared/client/client_headers.dart';
 import 'package:buzz/shared/theme/theme_provider.dart';
+
+const _clientHeaders = ClientHeaders(
+  appVersion: '1.0',
+  buzzClient: 'test-client',
+  userAgent: 'Buzz/1.0 (ios; build 1)',
+);
 
 void main() {
   testWidgets('App renders pairing page when unauthenticated', (
@@ -16,6 +23,7 @@ void main() {
       ProviderScope(
         overrides: [
           authProvider.overrideWith(() => _FakeAuthNotifier()),
+          clientHeadersProvider.overrideWithValue(_clientHeaders),
           savedPrefsProvider.overrideWithValue(prefs),
         ],
         child: const App(),

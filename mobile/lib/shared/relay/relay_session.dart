@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth.dart';
+import '../client/client_headers.dart';
 import 'nostr_models.dart';
 import 'relay_client.dart';
 import 'relay_provider.dart';
@@ -69,15 +70,32 @@ typedef RelaySocketFactory =
     RelaySocket Function({
       required String wsUrl,
       required String? nsec,
+      required Map<String, String> headers,
       required void Function(List<dynamic> message) onMessage,
       required void Function() onConnected,
       required void Function(Object? error) onDisconnected,
     });
 
 class RelaySessionNotifier extends Notifier<SessionState> {
+  static RelaySocket _defaultSocketFactory({
+    required String wsUrl,
+    required String? nsec,
+    required Map<String, String> headers,
+    required void Function(List<dynamic> message) onMessage,
+    required void Function() onConnected,
+    required void Function(Object? error) onDisconnected,
+  }) => RelaySocket(
+    wsUrl: wsUrl,
+    nsec: nsec,
+    headers: headers,
+    onMessage: onMessage,
+    onConnected: onConnected,
+    onDisconnected: onDisconnected,
+  );
+
   RelaySessionNotifier({
     http.Client? httpClient,
-    RelaySocketFactory socketFactory = RelaySocket.new,
+    RelaySocketFactory socketFactory = _defaultSocketFactory,
   }) : _httpClient = httpClient,
        _socketFactory = socketFactory;
 
@@ -143,6 +161,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         .post(
           Uri.parse(url),
           headers: {
+            ...clientHeadersForUrl(
+              headers: ref.read(clientHeadersProvider),
+              targetUrl: url,
+              relayUrl: config.baseUrl,
+            ),
             'Authorization': buildNip98AuthHeader(
               method: 'POST',
               url: url,
@@ -361,6 +384,11 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     final socket = _socketFactory(
       wsUrl: config.wsUrl,
       nsec: config.nsec,
+      headers: clientHeadersForUrl(
+        headers: ref.read(clientHeadersProvider),
+        targetUrl: config.wsUrl,
+        relayUrl: config.baseUrl,
+      ),
       onMessage: (message) {
         if (generation == _connectionGeneration) _handleMessage(message);
       },

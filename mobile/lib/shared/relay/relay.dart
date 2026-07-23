@@ -1,3 +1,4 @@
+export '../client/client_headers.dart';
 export 'app_lifecycle_provider.dart';
 export 'media_auth.dart';
 export 'media_image.dart';

@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import '../client/client_headers.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
@@ -138,6 +139,7 @@ class MediaUploadService {
   final TranscodeVideoToMp4 _transcodeVideoToMp4;
   final ReadClipboardImage _readClipboardImage;
   final DateTime Function() _now;
+  final ClientHeaders? _clientHeaders;
   final http.Client _http;
   final bool _ownsHttpClient;
 
@@ -151,6 +153,7 @@ class MediaUploadService {
     TranscodeVideoToMp4? transcodeVideoToMp4,
     ReadClipboardImage? readClipboardImage,
     DateTime Function()? now,
+    ClientHeaders? clientHeaders,
     http.Client? httpClient,
   }) : _baseUrl = baseUrl,
        _nsec = nsec,
@@ -162,6 +165,7 @@ class MediaUploadService {
        _transcodeVideoToMp4 = transcodeVideoToMp4 ?? _transcodePickedVideoToMp4,
        _readClipboardImage = readClipboardImage ?? _readPlatformClipboardImage,
        _now = now ?? DateTime.now,
+       _clientHeaders = clientHeaders,
        _http = httpClient ?? http.Client(),
        _ownsHttpClient = httpClient == null;
 
@@ -297,7 +301,14 @@ class MediaUploadService {
     required String mimeType,
     required String sha256,
   }) {
+    final clientHeaders = _clientHeaders;
     final headers = <String, String>{
+      if (clientHeaders != null)
+        ...clientHeadersForUrl(
+          headers: clientHeaders,
+          targetUrl: _baseUrl,
+          relayUrl: _baseUrl,
+        ),
       'Authorization': _buildUploadAuthHeader(sha256),
       'Content-Type': mimeType,
       'X-SHA-256': sha256,
@@ -668,6 +679,7 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
   final service = MediaUploadService(
     baseUrl: config.baseUrl,
     nsec: config.nsec,
+    clientHeaders: ref.watch(clientHeadersProvider),
     pickGalleryImage: () => picker.pickImage(
       source: ImageSource.gallery,
       requestFullMetadata: false,

@@ -110,13 +110,35 @@ void main() {
       expect(socket.isConnected, isFalse);
     });
 
+    test('passes identification headers to the WebSocket handshake', () async {
+      Map<String, String>? capturedHeaders;
+      final channel = _ControlledWebSocketChannel();
+      final socket = PairingSocket(
+        wsUrl: 'ws://unused',
+        ephemeralPrivkey: _privateKey,
+        headers: const {'Buzz-Client': 'client', 'User-Agent': 'agent'},
+        onMessage: (_) {},
+        onDisconnected: (_) {},
+        authChallengeTimeout: Duration.zero,
+        channelFactory: (_, headers) {
+          capturedHeaders = headers;
+          return channel;
+        },
+      );
+      addTearDown(socket.disconnect);
+
+      await socket.connect();
+
+      expect(capturedHeaders, {'Buzz-Client': 'client', 'User-Agent': 'agent'});
+    });
+
     test('notifies once when a connected stream emits an error', () async {
       var disconnectCount = 0;
       final channel = _ControlledWebSocketChannel();
       final socket = _socket(
         'ws://unused',
         onDisconnected: (_) => disconnectCount++,
-        channelFactory: (_) => channel,
+        channelFactory: (_, _) => channel,
         authChallengeTimeout: Duration.zero,
       );
       addTearDown(socket.disconnect);
@@ -134,7 +156,7 @@ void main() {
       final socket = _socket(
         'ws://unused',
         onDisconnected: (_) => disconnectCount++,
-        channelFactory: (_) => channel,
+        channelFactory: (_, _) => channel,
         authChallengeTimeout: Duration.zero,
       );
       addTearDown(socket.disconnect);
@@ -153,7 +175,7 @@ void main() {
         final disconnectingSocket = _socket(
           'ws://unused',
           onDisconnected: (_) => disconnectCount++,
-          channelFactory: (_) => disconnectChannel,
+          channelFactory: (_, _) => disconnectChannel,
           authChallengeTimeout: Duration.zero,
         );
         await disconnectingSocket.connect();
@@ -164,7 +186,7 @@ void main() {
         final disposingSocket = _socket(
           'ws://unused',
           onDisconnected: (_) => disconnectCount++,
-          channelFactory: (_) => disposeChannel,
+          channelFactory: (_, _) => disposeChannel,
           authChallengeTimeout: Duration.zero,
         );
         await disposingSocket.connect();
@@ -183,7 +205,7 @@ PairingSocket _socket(
   Duration authChallengeTimeout = const Duration(milliseconds: 500),
   Duration authResponseTimeout = const Duration(seconds: 10),
   void Function(Object? error)? onDisconnected,
-  WebSocketChannel Function(Uri uri)? channelFactory,
+  PairingChannelFactory? channelFactory,
 }) => PairingSocket(
   wsUrl: url,
   ephemeralPrivkey: _privateKey,
@@ -191,7 +213,8 @@ PairingSocket _socket(
   onDisconnected: onDisconnected ?? (_) {},
   authChallengeTimeout: authChallengeTimeout,
   authResponseTimeout: authResponseTimeout,
-  channelFactory: channelFactory ?? WebSocketChannel.connect,
+  channelFactory:
+      channelFactory ?? (uri, headers) => WebSocketChannel.connect(uri),
 );
 
 class _ControlledWebSocketChannel implements WebSocketChannel {
