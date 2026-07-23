@@ -101,6 +101,11 @@ pub async fn create_channel(
         )));
     }
 
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(DbError::InvalidData("channel name is required".into()));
+    }
+
     let id = Uuid::new_v4();
 
     let mut tx = pool.begin().await?;
@@ -189,6 +194,11 @@ pub async fn create_channel_with_id(
         return Err(DbError::InvalidData(
             "channel_id must not be nil (reserved for global fan-out)".into(),
         ));
+    }
+
+    let name = buzz_core::channel::canonical_channel_name(name);
+    if name.trim().is_empty() {
+        return Err(DbError::InvalidData("channel name is required".into()));
     }
 
     let mut tx = pool.begin().await?;
@@ -1041,7 +1051,7 @@ pub async fn update_channel(
     pool: &PgPool,
     community_id: CommunityId,
     channel_id: Uuid,
-    updates: ChannelUpdate,
+    mut updates: ChannelUpdate,
 ) -> Result<ChannelRecord> {
     if updates.name.is_none()
         && updates.description.is_none()
@@ -1051,6 +1061,13 @@ pub async fn update_channel(
         return Err(DbError::InvalidData(
             "at least one field must be provided for update".to_string(),
         ));
+    }
+
+    if let Some(name) = updates.name.as_mut() {
+        *name = buzz_core::channel::canonical_channel_name(name).to_owned();
+        if name.is_empty() {
+            return Err(DbError::InvalidData("channel name is required".into()));
+        }
     }
 
     // Build SET clause dynamically — only include fields that are provided.

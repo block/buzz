@@ -689,6 +689,16 @@ function SetupStepContent({
 
         <Button
           className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
+          data-testid="onboarding-setup-skip"
+          onClick={() => actions.next([])}
+          type="button"
+          variant="ghost"
+        >
+          Skip for now
+        </Button>
+
+        <Button
+          className="h-9 rounded-full bg-foreground/10 px-6 text-sm hover:bg-foreground/15"
           data-testid="onboarding-back"
           onClick={actions.back}
           type="button"

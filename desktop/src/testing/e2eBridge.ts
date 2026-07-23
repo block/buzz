@@ -393,6 +393,25 @@ type E2eConfig = {
      * spec can interleave edits and exercise the mid-save race handling.
      */
     globalConfigSaveDelayMs?: number;
+    /**
+     * Override the `discover_agent_models` mock response. When set, returns
+     * this catalog instead of the default per-harness model list.
+     */
+    discoverAgentModels?: {
+      models: Array<{
+        id: string;
+        name: string | null;
+        description?: string | null;
+      }>;
+      supportsSwitching: boolean;
+      agentDefaultModel?: string | null;
+      selectedModel?: string | null;
+    };
+    /**
+     * When set, `discover_agent_models` throws with this message instead of
+     * returning a catalog.
+     */
+    discoverAgentModelsError?: string;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
@@ -9307,6 +9326,13 @@ export function maybeInstallE2eTauriMocks() {
           payload as Parameters<typeof handleUpdateProfile>[0],
           activeConfig,
         );
+      case "update_profile_at_relay":
+        return handleUpdateProfile(
+          {
+            avatarUrl: (payload as { avatarUrl: string }).avatarUrl,
+          },
+          activeConfig,
+        );
       case "get_user_profile":
         return handleGetUserProfile(
           (payload as Parameters<typeof handleGetUserProfile>[0]) ?? {},
@@ -10135,6 +10161,25 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
+        const discoverError = activeConfig?.mock?.discoverAgentModelsError;
+        if (discoverError) {
+          throw new Error(discoverError);
+        }
+        const discoverOverride = activeConfig?.mock?.discoverAgentModels;
+        if (discoverOverride) {
+          return {
+            agentName: "mock-agent",
+            agentVersion: "0.0.0",
+            models: discoverOverride.models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              description: model.description ?? null,
+            })),
+            agentDefaultModel: discoverOverride.agentDefaultModel ?? null,
+            selectedModel: discoverOverride.selectedModel ?? null,
+            supportsSwitching: discoverOverride.supportsSwitching,
+          };
+        }
         const input = (
           payload as {
             input?: { agentCommand?: string; provider?: string };

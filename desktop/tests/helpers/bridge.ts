@@ -431,6 +431,27 @@ type MockBridgeOptions = {
    * test can interleave edits and exercise the mid-save race handling.
    */
   globalConfigSaveDelayMs?: number;
+  /**
+   * Override the `discover_agent_models` mock response. When set, the bridge
+   * returns this catalog instead of the default per-harness model list.
+   * Use `{ models: [], supportsSwitching: false }` to exercise empty discovery
+   * (e.g. optional harnesses that omit the Model control).
+   */
+  discoverAgentModels?: {
+    models: Array<{
+      id: string;
+      name: string | null;
+      description?: string | null;
+    }>;
+    supportsSwitching: boolean;
+    agentDefaultModel?: string | null;
+    selectedModel?: string | null;
+  };
+  /**
+   * When set, `discover_agent_models` throws with this message instead of
+   * returning a catalog. Exercises the discovery-failure UI path.
+   */
+  discoverAgentModelsError?: string;
 };
 
 type BridgeOptions = {

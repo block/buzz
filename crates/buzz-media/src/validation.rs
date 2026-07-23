@@ -626,6 +626,40 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
 }
 
 fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
+    fn validate_frame_payload(payload: &[u8]) -> Result<(), MediaError> {
+        const FRAME_HEADER_LEN: usize = 16;
+        if payload.len() < FRAME_HEADER_LEN {
+            return Err(MediaError::InvalidImage);
+        }
+
+        let mut i = FRAME_HEADER_LEN;
+        let mut saw_alpha = false;
+        let mut saw_image = false;
+        while i < payload.len() {
+            if i + 8 > payload.len() {
+                return Err(MediaError::InvalidImage);
+            }
+            let kind: [u8; 4] = payload[i..i + 4].try_into().unwrap();
+            let len = u32::from_le_bytes(payload[i + 4..i + 8].try_into().unwrap()) as usize;
+            let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
+            i = i
+                .checked_add(8)
+                .and_then(|start| start.checked_add(padded))
+                .filter(|&end| end <= payload.len())
+                .ok_or(MediaError::InvalidImage)?;
+
+            match &kind {
+                b"ALPH" if !saw_alpha && !saw_image => saw_alpha = true,
+                b"VP8 " if !saw_image => saw_image = true,
+                b"VP8L" if !saw_alpha && !saw_image => saw_image = true,
+                b"ALPH" | b"VP8 " | b"VP8L" => return Err(MediaError::InvalidImage),
+                _ => return Err(MediaError::MetadataForbidden),
+            }
+        }
+
+        saw_image.then_some(()).ok_or(MediaError::InvalidImage)
+    }
+
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
         return Err(MediaError::InvalidImage);
     }
@@ -659,6 +693,8 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
             if flags & (0x20 | 0x08 | 0x04) != 0 {
                 return Err(MediaError::MetadataForbidden);
             }
+        } else if &kind == b"ANMF" {
+            validate_frame_payload(&bytes[payload_start..payload_start + len])?;
         }
     }
     Ok(())
@@ -740,7 +776,13 @@ fn validate_gif_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
                             return Err(MediaError::MetadataForbidden);
                         }
                         i += 12;
-                        skip_sub_blocks(bytes, &mut i)?;
+                        if bytes.get(i) != Some(&3)
+                            || bytes.get(i + 1) != Some(&1)
+                            || bytes.get(i + 4) != Some(&0)
+                        {
+                            return Err(MediaError::MetadataForbidden);
+                        }
+                        i += 5;
                     }
                     _ => return Err(MediaError::MetadataForbidden),
                 }
@@ -1296,6 +1338,30 @@ mod tests {
                 Err(MediaError::MetadataForbidden)
             ));
         }
+        let mut frame = vec![0; 16];
+        frame.extend_from_slice(b"VP8 ");
+        frame.extend_from_slice(&3u32.to_le_bytes());
+        frame.extend_from_slice(&[1, 2, 3, 0]);
+        let clean_frame = frame.clone();
+        frame.extend_from_slice(b"JUNK");
+        frame.extend_from_slice(&8u32.to_le_bytes());
+        frame.extend_from_slice(b"location");
+        let nested_metadata = webp(&[
+            (b"VP8X", &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (b"ANIM", &[0; 6]),
+            (b"ANMF", &frame),
+        ]);
+        assert!(matches!(
+            validate_webp_metadata_free(&nested_metadata),
+            Err(MediaError::MetadataForbidden)
+        ));
+        let canonical_animation = webp(&[
+            (b"VP8X", &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (b"ANIM", &[0; 6]),
+            (b"ANMF", &clean_frame),
+        ]);
+        assert!(validate_webp_metadata_free(&canonical_animation).is_ok());
+
         let mut trailing = webp(&[(b"VP8 ", b"pixels")]);
         trailing.extend_from_slice(b"hidden");
         assert!(matches!(
@@ -1327,6 +1393,23 @@ mod tests {
             validate_gif_metadata_free(&trailing),
             Err(MediaError::MetadataForbidden)
         ));
+
+        let mut hidden_in_loop = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+        hidden_in_loop.extend_from_slice(&[0x21, 0xff, 11]);
+        hidden_in_loop.extend_from_slice(b"NETSCAPE2.0");
+        hidden_in_loop.extend_from_slice(&[3, 1, 0, 0, 8]);
+        hidden_in_loop.extend_from_slice(b"location");
+        hidden_in_loop.extend_from_slice(&[0, 0x3b]);
+        assert!(matches!(
+            validate_gif_metadata_free(&hidden_in_loop),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        let mut canonical_loop = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+        canonical_loop.extend_from_slice(&[0x21, 0xff, 11]);
+        canonical_loop.extend_from_slice(b"NETSCAPE2.0");
+        canonical_loop.extend_from_slice(&[3, 1, 0, 0, 0, 0x3b]);
+        assert!(validate_gif_metadata_free(&canonical_loop).is_ok());
     }
 
     #[test]
