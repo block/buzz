@@ -24,6 +24,8 @@ import { useAcpRuntimesQuery } from "@/features/agents/hooks";
 import {
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
   resetConfigForHarnessChange,
   sortPersonaRuntimes,
 } from "@/features/agents/ui/agentConfigOptions";
@@ -41,6 +43,12 @@ const PROGRESSIVE_FIELDS_TRANSITION = {
   duration: 0.22,
   ease: [0.23, 1, 0.32, 1],
 } as const;
+
+const PERSONA_SELECT_TRIGGER_CLASS = cn(
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+  "h-11 px-3 py-2 leading-6 hover:bg-muted/40 focus:bg-muted/40 [&>svg]:text-muted-foreground/60",
+);
 
 export type GlobalAgentConfigSaveResult = Awaited<
   ReturnType<typeof setGlobalAgentConfig>
@@ -228,6 +236,8 @@ export function AgentDefaultsEditor({
       onCustomModelEditingChange={setIsCustomModelEditing}
       onIsCustomProviderChange={setIsCustomProvider}
       onValidityChange={setConfigIsValid}
+      placeholderClassName={flatLayout ? "text-muted-foreground/55" : undefined}
+      selectClassName={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
       unstyled={flatLayout}
       useCustomSelect
     />
@@ -250,21 +260,22 @@ export function AgentDefaultsEditor({
         </div>
       ) : (
         <>
-          <div className={flatLayout ? "space-y-4" : "space-y-1.5"}>
+          <div className="space-y-1.5">
             <label
-              className={cn(
-                "text-sm font-medium text-foreground",
-                flatLayout && "pl-3",
-              )}
+              className="text-sm font-medium text-foreground"
               htmlFor="global-agent-default-harness"
             >
               Default harness
             </label>
             <AgentDropdownSelect
+              className={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
               id="global-agent-default-harness"
               onValueChange={handleHarnessChange}
               options={harnessOptions}
               placeholder="Select a harness"
+              placeholderClassName={
+                flatLayout ? "text-muted-foreground/55" : undefined
+              }
               testId="global-agent-default-harness"
               value={selectedRuntime?.id ?? ""}
             />

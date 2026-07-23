@@ -36,6 +36,7 @@ import {
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
 import {
+  AgentConfigTextInput,
   AgentDropdownSelect,
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
@@ -49,7 +50,6 @@ import {
   EffortSelectField,
   useEffortAutoClear,
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
-import { Input } from "@/shared/ui/input";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
 
 /** Sentinel value for an unconfigured global agent config. */
@@ -638,9 +638,15 @@ export function AgentConfigFields({
     : "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
 
-  const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
+  const progressiveDefaults = disclosure === "progressive-defaults";
+  const fieldClassName = unstyled
+    ? progressiveDefaults
+      ? "space-y-1.5"
+      : "space-y-4"
+    : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
-  const fieldLabelClassName = unstyled ? "pl-3" : undefined;
+  const fieldLabelClassName =
+    unstyled && !progressiveDefaults ? "pl-3" : undefined;
   const providerDropdownOptions = [
     ...providerOptions
       .filter(
@@ -721,11 +727,12 @@ export function AgentConfigFields({
         providerSelect
       )}
       {isCustomProvider ? (
-        <Input
+        <AgentConfigTextInput
           aria-label="Custom global provider ID"
           autoCorrect="off"
           onChange={(e) => handleCustomProviderInput(e.target.value)}
           placeholder="Custom provider ID"
+          usePersonaInputStyle={progressiveDefaults}
           value={providerValue}
         />
       ) : null}
@@ -803,6 +810,7 @@ export function AgentConfigFields({
             testId="global-agent-model"
             useCustomSelect={useCustomSelect}
             useChevronIcon={useChevronSelectIcon}
+            usePersonaInputStyle={progressiveDefaults}
           />
         </div>
       ) : null}
@@ -933,7 +941,10 @@ export function AgentConfigFields({
           {revealDependentFields ? (
             <motion.div
               animate={{ height: "auto", opacity: 1 }}
-              className={cn("overflow-hidden", unstyled && "space-y-7")}
+              className={cn(
+                "overflow-hidden",
+                unstyled && (progressiveDefaults ? "space-y-5" : "space-y-7"),
+              )}
               data-testid="global-agent-dependent-fields-motion"
               exit={{ height: 0, opacity: 0 }}
               initial={{ height: 0, opacity: 0 }}
@@ -956,7 +967,10 @@ export function AgentConfigFields({
 
   if (unstyled) {
     return (
-      <div className="space-y-7" data-testid="global-agent-config-fields">
+      <div
+        className={progressiveDefaults ? "space-y-5" : "space-y-7"}
+        data-testid="global-agent-config-fields"
+      >
         {content}
       </div>
     );

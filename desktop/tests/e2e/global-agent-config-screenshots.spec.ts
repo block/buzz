@@ -449,6 +449,17 @@ test.describe("global agent config screenshots", () => {
     await expect(
       defaultsDialog.getByTestId("global-agent-model"),
     ).toBeVisible();
+    for (const field of [
+      harness,
+      provider,
+      defaultsDialog.getByTestId("global-agent-model"),
+      defaultsDialog.getByTestId("global-agent-thinking-effort-select"),
+    ]) {
+      await expect(field).toHaveClass(/h-11/);
+      await expect(field).toHaveClass(/rounded-xl/);
+      await expect(field).toHaveClass(/bg-muted\/40/);
+      await expect(field).toHaveClass(/shadow-none/);
+    }
     await waitForAnimations(page);
     const configuredHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
     expect(configuredHeight).toBeGreaterThan(providerHeight);
