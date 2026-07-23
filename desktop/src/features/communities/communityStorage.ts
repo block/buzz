@@ -111,11 +111,16 @@ export function normalizeRelayUrl(url: string): string {
   return url;
 }
 
+function isLocalRelayHost(hostname: string): boolean {
+  return ["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(hostname);
+}
+
 export function shouldAutoConnectDefaultRelay(relayUrl: string): boolean {
   try {
-    const parsed = new URL(normalizeRelayUrl(relayUrl));
-    return !["localhost", "127.0.0.1", "[::1]", "0.0.0.0"].includes(
-      parsed.hostname,
+    const parsed = new URL(relayUrl);
+    return (
+      (parsed.protocol === "ws:" || parsed.protocol === "wss:") &&
+      !isLocalRelayHost(parsed.hostname)
     );
   } catch {
     return false;
@@ -128,7 +133,7 @@ export function deriveCommunityName(relayUrl: string): string {
       relayUrl.replace("ws://", "http://").replace("wss://", "https://"),
     );
     const host = url.hostname;
-    if (host === "localhost" || host === "127.0.0.1") {
+    if (isLocalRelayHost(host)) {
       return "Local Dev";
     }
     const parts = host.split(".");
@@ -157,6 +162,8 @@ export function initFirstCommunity(
     id: crypto.randomUUID(),
     name: trimmedName || deriveCommunityName(normalizedUrl),
     relayUrl: normalizedUrl,
+    // Compiled default relays must admit the first token-less connection; there
+    // is no invite-token prompt on this auto-connect path.
     pubkey,
     addedAt: new Date().toISOString(),
   };
