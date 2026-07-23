@@ -534,8 +534,6 @@ export class RelayClient {
   }
 
   private async connect() {
-    // Clear any pending stability timer from a previous connection — a new
-    // connect attempt resets the clock and must re-arm the timer on success.
     if (this.stabilityTimer !== null) {
       window.clearTimeout(this.stabilityTimer);
       this.stabilityTimer = null;
@@ -545,51 +543,66 @@ export class RelayClient {
       this.hasConnectedOnce ? "reconnecting" : "connecting",
     );
 
-    if (!this.relayUrl) {
-      this.relayUrl = await getRelayWsUrl();
-    }
-
     const generation = ++this.connectionGeneration;
     this.onMessageChannel = new Channel<unknown>((message) => {
-      void this.handleWsMessage(message, generation);
-    });
-
-    this.wsId = await invoke<number>("plugin:websocket|connect", {
-      url: this.relayUrl,
-      onMessage: this.onMessageChannel,
-      config: {},
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => {
-        this.authRequest = null;
+      void this.handleWsMessage(message, generation).catch((error) => {
+        if (generation !== this.connectionGeneration) return;
         this.resetConnection(
-          new Error("Timed out while waiting for relay authentication."),
+          this.normalizeRelayError(error, "Relay connection errored."),
         );
-        reject(new Error("Timed out while waiting for relay authentication."));
-      }, AUTH_TIMEOUT_MS);
-
-      this.authRequest = {
-        pendingEventId: "",
-        resolve,
-        reject,
-        timeout,
-      };
+      });
     });
 
-    // Start a stability timer instead of resetting backoff immediately.
-    // The backoff resets to its base value only after BACKOFF_RESET_STABLE_MS
-    // of uninterrupted uptime, preventing fast reconnect loops from erasing
-    // the exponential backoff that throttles them.
-    this.stabilityTimer = window.setTimeout(() => {
-      this.stabilityTimer = null;
-      this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
-    }, BACKOFF_RESET_STABLE_MS);
+    try {
+      if (!this.relayUrl) {
+        this.relayUrl = await getRelayWsUrl();
+      }
+      const wsId = await invoke<number>("plugin:websocket|connect", {
+        url: this.relayUrl,
+        onMessage: this.onMessageChannel,
+        config: {},
+      });
+      if (generation !== this.connectionGeneration) {
+        void closeWebSocket(wsId, "stale connection attempt");
+        throw new Error("Relay connection attempt was superseded.");
+      }
+      this.wsId = wsId;
 
-    await this.replayLiveSubscriptions();
-    this.connectionStateEmitter.set("connected");
-    this.stallWatchdog.start();
-    this.emitReconnectIfNeeded();
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(() => {
+          const error = new Error("Relay authentication timed out.");
+          this.authRequest = null;
+          this.resetConnection(error);
+          reject(error);
+        }, AUTH_TIMEOUT_MS);
+
+        this.authRequest = {
+          pendingEventId: "",
+          resolve,
+          reject,
+          timeout,
+        };
+      });
+
+      this.stabilityTimer = window.setTimeout(() => {
+        this.stabilityTimer = null;
+        this.reconnectDelayMs = RECONNECT_BASE_DELAY_MS;
+      }, BACKOFF_RESET_STABLE_MS);
+
+      await this.replayLiveSubscriptions();
+      this.connectionStateEmitter.set("connected");
+      this.stallWatchdog.start();
+      this.emitReconnectIfNeeded();
+    } catch (error) {
+      const connectionError = this.normalizeRelayError(
+        error,
+        "Failed to connect to relay.",
+      );
+      if (generation === this.connectionGeneration) {
+        this.resetConnection(connectionError);
+      }
+      throw connectionError;
+    }
   }
 
   private async subscribe(

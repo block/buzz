@@ -80,6 +80,33 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("failed initial relay dial retries automatically", async ({ page }) => {
+  await installMockBridge(page, {
+    websocketConnectErrors: ["mock relay pod unavailable"],
+  });
+  await page.goto("/");
+
+  // App-shell preconnect owns a keep-alive request. The first native dial is
+  // rejected before a socket ID exists; the session must still enter its
+  // backoff loop and recover without a click, query, or reload.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const getState = (
+            window as Window & {
+              __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => string;
+            }
+          ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__;
+          if (!getState) throw new Error("Relay state seam is not installed.");
+          return getState();
+        }),
+      { timeout: 10_000 },
+    )
+    .toBe("connected");
+  await expect(page.getByTestId("channel-general")).toBeVisible();
+});
+
 test("passive relay watchdog does not write while the websocket is half-open", async ({
   page,
 }) => {

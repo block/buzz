@@ -250,6 +250,8 @@ type E2eConfig = {
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
     nostrBindSignDelayMs?: number;
+    /** Reject successive mock WebSocket connect attempts, then resume. */
+    websocketConnectErrors?: string[];
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -8498,6 +8500,11 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
+  const connectError = getConfig()?.mock?.websocketConnectErrors?.shift();
+  if (connectError) {
+    throw new Error(connectError);
+  }
+
   if (mockWebsocketSendMutexWedged) {
     return new Promise<number>(() => {});
   }
@@ -9324,6 +9331,13 @@ export function maybeInstallE2eTauriMocks() {
       case "update_profile":
         return handleUpdateProfile(
           payload as Parameters<typeof handleUpdateProfile>[0],
+          activeConfig,
+        );
+      case "update_profile_at_relay":
+        return handleUpdateProfile(
+          {
+            avatarUrl: (payload as { avatarUrl: string }).avatarUrl,
+          },
           activeConfig,
         );
       case "get_user_profile":

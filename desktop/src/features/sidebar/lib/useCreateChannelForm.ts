@@ -1,4 +1,3 @@
-import { ClockFading, Hash, type LucideIcon } from "lucide-react";
 import * as React from "react";
 
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
@@ -40,8 +39,8 @@ export type CreateChannelFormState = {
   setVisibility: (value: ChannelVisibility) => void;
   ephemeral: boolean;
   setEphemeral: (value: boolean) => void;
-  durationLabel: string;
-  DurationIcon: LucideIcon;
+  ttlSeconds: number;
+  setTtlSeconds: (value: number) => void;
   typePopoverOpen: boolean;
   setTypePopoverOpen: (open: boolean) => void;
   errorMessage: string | null;
@@ -72,6 +71,9 @@ export function useCreateChannelForm({
   const [description, setDescription] = React.useState("");
   const [visibility, setVisibility] = React.useState<ChannelVisibility>("open");
   const [ephemeral, setEphemeral] = React.useState(false);
+  const [ttlSeconds, setTtlSeconds] = React.useState(
+    DEFAULT_EPHEMERAL_TTL_SECONDS,
+  );
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = React.useState<
     string | null
@@ -84,9 +86,6 @@ export function useCreateChannelForm({
   const templates = templatesQuery.data ?? [];
 
   const kindLabel = channelKind === "forum" ? "forum" : "channel";
-  const durationLabel = ephemeral ? "Temporary" : "Ongoing";
-  const DurationIcon = ephemeral ? ClockFading : Hash;
-
   React.useEffect(() => {
     if (!active) return;
 
@@ -94,6 +93,7 @@ export function useCreateChannelForm({
     setDescription("");
     setVisibility("open");
     setEphemeral(false);
+    setTtlSeconds(DEFAULT_EPHEMERAL_TTL_SECONDS);
     setErrorMessage(null);
     setSelectedTemplateId(null);
     setTypePopoverOpen(false);
@@ -158,7 +158,7 @@ export function useCreateChannelForm({
             name: trimmedName,
             description: description.trim() || undefined,
             visibility,
-            ttlSeconds: ephemeral ? DEFAULT_EPHEMERAL_TTL_SECONDS : undefined,
+            ttlSeconds: ephemeral ? ttlSeconds : undefined,
             templateId: selectedTemplateId ?? undefined,
           });
           onCreated?.();
@@ -179,6 +179,7 @@ export function useCreateChannelForm({
       onCreate,
       onCreated,
       selectedTemplateId,
+      ttlSeconds,
       visibility,
     ],
   );
@@ -203,8 +204,8 @@ export function useCreateChannelForm({
     },
     ephemeral,
     setEphemeral,
-    durationLabel,
-    DurationIcon,
+    ttlSeconds,
+    setTtlSeconds,
     typePopoverOpen,
     setTypePopoverOpen,
     errorMessage,

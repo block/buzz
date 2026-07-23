@@ -667,6 +667,7 @@ pub fn run() {
             persist_current_identity,
             get_profile,
             update_profile,
+            update_profile_at_relay,
             get_user_profile,
             get_users_batch,
             get_user_notes,

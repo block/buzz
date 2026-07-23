@@ -303,6 +303,15 @@ async fn nip11_or_ws_handler(
     let client_info = ClientInfo::from_headers(&headers);
     match WebSocketUpgrade::from_request(req, &state).await {
         Ok(ws) => {
+            // Shutting down: refuse new sockets instead of accepting a
+            // connection onto a dying pod. Readiness already returns 503, but
+            // that only stops K8s routing. Direct and in-flight upgrades still
+            // reach here during the pre-drain grace window. Clients treat the
+            // refusal as a normal dial failure and retry on a healthy pod.
+            if state.shutting_down.load(Ordering::Relaxed) {
+                return (StatusCode::SERVICE_UNAVAILABLE, "relay restarting").into_response();
+            }
+
             let connection_span = tracing::info_span!(
                 "ws.connection",
                 client.app = client_info.as_ref().map(|client| client.app.as_str()),
