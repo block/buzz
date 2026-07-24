@@ -158,6 +158,13 @@ pub fn run() -> i32 {
     let req = parse_stdin();
 
     if !req.has_authtype_capability {
+        if std::env::var("BUZZ_NOSTR_GIT_AUTH_REQUIRED").as_deref() == Ok("1") {
+            eprintln!(
+                "error: Nostr git authentication requires Git 2.46 or newer \
+                 (credential authtype support)"
+            );
+            return 1;
+        }
         println!();
         let _ = io::stdout().flush();
         return 0;
