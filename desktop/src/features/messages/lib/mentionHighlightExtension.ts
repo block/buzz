@@ -460,7 +460,9 @@ function handleAgentMentionKeyDown(
     const range = ranges.find((candidate) => candidate.from === from);
     if (!range) return false;
     view.dispatch(
-      view.state.tr.setSelection(TextSelection.create(view.state.doc, range.to)),
+      view.state.tr.setSelection(
+        TextSelection.create(view.state.doc, range.to),
+      ),
     );
     return true;
   }
