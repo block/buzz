@@ -4,6 +4,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   inviteErrorMessage,
   parseInviteInput,
+  type ParsedInvite,
 } from "@/shared/api/inviteHelpers";
 import {
   acceptJoinPolicy,
@@ -34,6 +35,12 @@ const SPOTLIGHT_OVERFLOW_FADE = {
   maskImage:
     "linear-gradient(to right, transparent, black 2rem, black calc(100% - 2rem), transparent)",
 };
+
+function hasInviteRelay(
+  invite: ParsedInvite,
+): invite is Extract<ParsedInvite, { relayWsUrl: string }> {
+  return "relayWsUrl" in invite;
+}
 
 type InviteRedeemFormProps = {
   /**
@@ -87,17 +94,21 @@ export function InviteRedeemForm({
     [inviteInput],
   );
   const normalizedRelayUrl = React.useMemo(
-    () => (onConnect && !parsed ? normalizeRelayUrl(inviteInput) : null),
-    [inviteInput, onConnect, parsed],
+    () =>
+      onConnect &&
+      (!parsed || (variant === "add-community" && !hasInviteRelay(parsed)))
+        ? normalizeRelayUrl(inviteInput)
+        : null,
+    [inviteInput, onConnect, parsed, variant],
   );
-  const parsedInvite = parsed;
-  const isBareCode = parsedInvite !== null && !("relayWsUrl" in parsedInvite);
+  const parsedInvite: ParsedInvite | null = normalizedRelayUrl ? null : parsed;
+  const isBareCode = parsedInvite !== null && !hasInviteRelay(parsedInvite);
   const needsRelayField = isBareCode && defaultRelayUrl !== undefined;
 
   React.useEffect(() => {
     const relayWsUrl = normalizedRelayUrl
       ? normalizedRelayUrl
-      : parsedInvite && "relayWsUrl" in parsedInvite
+      : parsedInvite && hasInviteRelay(parsedInvite)
         ? parsedInvite.relayWsUrl
         : parsedInvite
           ? bareCodeRelayUrl.trim()
@@ -186,10 +197,9 @@ export function InviteRedeemForm({
       }
       if (!parsedInvite) return;
 
-      const relayWsUrl =
-        "relayWsUrl" in parsedInvite
-          ? parsedInvite.relayWsUrl
-          : bareCodeRelayUrl.trim();
+      const relayWsUrl = hasInviteRelay(parsedInvite)
+        ? parsedInvite.relayWsUrl
+        : bareCodeRelayUrl.trim();
       if (!relayWsUrl) return;
 
       setPolicyError(null);

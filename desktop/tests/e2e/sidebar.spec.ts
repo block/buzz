@@ -33,6 +33,12 @@ async function loadTheme(page: Page, theme: string) {
   await page.goto("/");
 }
 
+async function openAddCommunityDialog(page: Page) {
+  await page.getByTestId("sidebar-profile-avatar-button").click();
+  await page.getByTestId("community-switcher").click();
+  await page.getByRole("menuitem", { name: "Add a community" }).click();
+}
+
 // Regression guard for the "Leave channel" lockup: with two bundled copies of
 // @radix-ui/react-dismissable-layer, opening a modal AlertDialog from a modal
 // Radix ContextMenu left `pointer-events: none` stuck on <body> after the
@@ -72,8 +78,7 @@ test("add community starts with create and join choices", async ({ page }) => {
   await installMockBridge(page, {});
   await page.goto("/");
 
-  await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add a community", { exact: true }).click();
+  await openAddCommunityDialog(page);
 
   await expect(
     page.getByRole("heading", { name: "Add community" }),
@@ -106,6 +111,7 @@ test("add community starts with create and join choices", async ({ page }) => {
 test("automatically shows community join requirements near the community URL", async ({
   page,
 }) => {
+  await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
   await page.route(
     "https://policy.example.com/api/join-policy",
     async (route) => {
@@ -125,8 +131,7 @@ test("automatically shows community join requirements near the community URL", a
   );
   await page.goto("/");
 
-  await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add a community", { exact: true }).click();
+  await openAddCommunityDialog(page);
   await page.getByTestId("add-community-join").click();
   await page
     .getByLabel("Community URL or invite link")
@@ -183,8 +188,7 @@ test("supports API tokens without cluttering the default join form", async ({
   );
   await page.goto("/");
 
-  await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add a community", { exact: true }).click();
+  await openAddCommunityDialog(page);
   await page.getByTestId("add-community-join").click();
 
   await expect(page.getByLabel("API token")).toHaveCount(0);
@@ -192,19 +196,30 @@ test("supports API tokens without cluttering the default join form", async ({
 
   await page
     .getByLabel("Community URL or invite link")
-    .fill("https://token.example.com");
+    .fill("token.example.com");
   await page.getByTestId("community-api-token-reveal").click();
   await page.getByLabel("API token").fill("buzz_secret");
   await page.getByTestId("invite-redeem-submit").click();
 
   await expect
     .poll(() =>
-      page.evaluate(
-        (key) => window.localStorage.getItem(key),
-        COMMUNITY_ONBOARDING_STORAGE_KEY,
-      ),
+      page.evaluate((key) => {
+        const raw = window.localStorage.getItem(key);
+        if (!raw) return null;
+        const transaction = JSON.parse(raw) as {
+          relayUrl?: string;
+          token?: string;
+        };
+        return {
+          relayUrl: transaction.relayUrl,
+          token: transaction.token,
+        };
+      }, COMMUNITY_ONBOARDING_STORAGE_KEY),
     )
-    .toContain('"token":"buzz_secret"');
+    .toEqual({
+      relayUrl: "wss://token.example.com",
+      token: "buzz_secret",
+    });
 });
 
 test("hides Invites settings on open relays", async ({ page }) => {
