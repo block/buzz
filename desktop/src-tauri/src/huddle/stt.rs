@@ -741,6 +741,16 @@ fn process_16k_samples(
                 if collapsed {
                     eprintln!("buzz-desktop: STT partial collapsed ({text:?}) — suppressed");
                 } else if !text.is_empty() {
+                    let mut text = text;
+                    // Second collapse shape — see stitch_prefix_collapse.
+                    if let Some(best) = best_partial.as_deref() {
+                        if let Some(stitched) = stitch_prefix_collapse(best, &text) {
+                            eprintln!(
+                                "buzz-desktop: STT partial dropped its front ({text:?}) — stitched"
+                            );
+                            text = stitched;
+                        }
+                    }
                     if text.ends_with(['.', '?', '!', ',']) {
                         *punct_partial = Some(text.clone());
                     }
@@ -827,6 +837,104 @@ fn decode_collapsed(new_text: &str, best: &str) -> bool {
     words(new_text) < words(best)
 }
 
+/// The v3 collapse's second shape: once a phrase contains an internal pause,
+/// a re-decode sometimes returns only the words after the pause — dropping
+/// the front while gaining newly spoken tail words, so decode_collapsed's
+/// word-count check passes it. Detect: an established phrase (best ≥ 4
+/// words) whose re-decode agrees on neither of its first two words — early
+/// decodes legitimately rewrite a 1–3 word front, but a settled front never
+/// vanishes wholesale. Repair: anchor the new decode's opening words inside
+/// best and splice best's preserved front onto new (new wins from the anchor
+/// on, so tail revisions survive); with no anchor the drop swallowed the
+/// overlap too, so append new after best.
+/// ponytail: anchor window is 3 words then 2 — a 1-word anchor false-matches
+/// on common words, and a missed overlap only duplicates ≤2 words.
+fn stitch_prefix_collapse(best: &str, new: &str) -> Option<String> {
+    // Per-token norms keep display and normalized tokens 1:1 aligned.
+    let b_disp: Vec<&str> = best.split_whitespace().collect();
+    let b_norm: Vec<String> = b_disp.iter().map(|t| norm_words(t)).collect();
+    let n_norm: Vec<String> = new.split_whitespace().map(norm_words).collect();
+    if b_norm.len() < 4 || n_norm.len() < 2 {
+        return None;
+    }
+    if b_norm[0] == n_norm[0] || b_norm[1] == n_norm[1] {
+        return None; // front agrees — a revision, not a drop
+    }
+    for m in [3usize, 2] {
+        if n_norm.len() < m {
+            continue;
+        }
+        let window = &n_norm[..m];
+        if let Some(j) = (0..=b_norm.len() - m)
+            .rev()
+            .find(|&j| &b_norm[j..j + m] == window)
+        {
+            let mut out = b_disp[..j].join(" ");
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(new);
+            return Some(out);
+        }
+    }
+    Some(format!("{best} {new}"))
+}
+
+#[cfg(test)]
+mod stitch_prefix_collapse_tests {
+    use super::stitch_prefix_collapse;
+
+    // Strings from chl's 2026-07-24 trace (/tmp/buzz-dev-dictation.log).
+    #[test]
+    fn splices_at_the_overlap_anchor() {
+        assert_eq!(
+            stitch_prefix_collapse(
+                "Big questions are coming out, I need to start asking.",
+                "I need to start asking whether it's a little bit more."
+            )
+            .as_deref(),
+            Some("Big questions are coming out, I need to start asking whether it's a little bit more.")
+        );
+    }
+
+    #[test]
+    fn appends_when_no_overlap_survived() {
+        assert_eq!(
+            stitch_prefix_collapse(
+                "Big questions are coming out.",
+                "I need to start asking whether it's"
+            )
+            .as_deref(),
+            Some("Big questions are coming out. I need to start asking whether it's")
+        );
+    }
+
+    #[test]
+    fn tail_revision_wins_from_the_anchor_on() {
+        assert_eq!(
+            stitch_prefix_collapse(
+                "Big questions are coming out, I need to start asking whether it's a little bit more.",
+                "I need to start asking whether or not that's the same"
+            )
+            .as_deref(),
+            Some("Big questions are coming out, I need to start asking whether or not that's the same")
+        );
+    }
+
+    #[test]
+    fn honest_revisions_pass_through() {
+        // Front agrees → not a drop.
+        assert!(stitch_prefix_collapse(
+            "Big question to come.",
+            "Big questions are coming up."
+        )
+        .is_none());
+        // Short phrases rewrite themselves legitimately.
+        assert!(stitch_prefix_collapse("Yeah.", "Big question.").is_none());
+        assert!(stitch_prefix_collapse("Costing.", "Calls passing.").is_none());
+    }
+}
+
 #[cfg(test)]
 mod decode_collapsed_tests {
     use super::decode_collapsed;
@@ -862,6 +970,9 @@ fn flush_to_stt(
         if decode_collapsed(&text, &best) {
             eprintln!("buzz-desktop: STT final collapsed ({text:?}) — keeping best partial");
             text = best;
+        } else if let Some(stitched) = stitch_prefix_collapse(&best, &text) {
+            eprintln!("buzz-desktop: STT final dropped its front ({text:?}) — stitched");
+            text = stitched;
         }
     }
     // In live mode finals ride the same channel as partials so the receiver
