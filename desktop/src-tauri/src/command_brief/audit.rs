@@ -325,7 +325,7 @@ impl EncryptedBriefAudit {
                 previous_lifecycle_event_id: previous.clone(),
             };
             let event =
-                crate::events::build_command_brief_lifecycle_event(&self.owner_keys, &payload)
+                buzz_core_pkg::command_brief::build_command_brief_event(&self.owner_keys, &payload)
                     .map_err(|_| BriefAuditError::Failed)?;
             let event_id = event.id.to_hex();
             insert_spool_event(

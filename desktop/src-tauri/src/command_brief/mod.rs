@@ -20,6 +20,12 @@ mod audit_tests;
 mod orchestrator_tests;
 
 #[cfg(test)]
+mod orchestrator_lifecycle_tests;
+
+#[cfg(test)]
+mod orchestrator_test_support;
+
+#[cfg(test)]
 mod personas_tests;
 
 #[cfg(test)]

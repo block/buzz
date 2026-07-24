@@ -672,3 +672,6 @@ pub async fn read_archived_events(
 #[cfg(test)]
 #[path = "mod_tests.rs"]
 mod mod_tests;
+
+#[cfg(test)]
+mod command_brief_tests;

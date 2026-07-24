@@ -13,18 +13,6 @@ use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
 
-/// Build and sign one exact owner-to-self NIP-CB lifecycle event.
-///
-/// Unlike ordinary desktop builders this must retain the owner's self-`p` tag,
-/// so signing is delegated to the core NIP-CB implementation.
-pub fn build_command_brief_lifecycle_event(
-    owner_keys: &nostr::Keys,
-    payload: &buzz_core_pkg::command_brief::CommandBriefEventPayload,
-) -> Result<nostr::Event, String> {
-    buzz_core_pkg::command_brief::build_command_brief_event(owner_keys, payload)
-        .map_err(|_| "command brief lifecycle event rejected".to_string())
-}
-
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).

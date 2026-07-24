@@ -9,9 +9,7 @@ use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag};
 use rusqlite::Connection;
 use uuid::Uuid;
 
-// ── Helpers ──────────────────────────────────────────────────────────────
-
-fn in_memory() -> Connection {
+pub(super) fn in_memory() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     conn.pragma_update(None, "journal_mode", "WAL").unwrap();
     conn.pragma_update(None, "busy_timeout", 5000).unwrap();
@@ -33,7 +31,7 @@ fn make_observer_frame(owner_keys: &Keys, agent_keys: &Keys, frame_type: &str) -
         .unwrap()
 }
 
-fn add_sub(
+pub(super) fn add_sub(
     conn: &Connection,
     identity_pk: &str,
     relay_url: &str,
@@ -55,8 +53,6 @@ fn add_sub(
 
 /// Run the full archive pipeline synchronously with a fake relay response.
 ///
-/// Calls `plan_archive` → injects fake relay events → `commit_archive`.
-/// This mirrors `archive_events` without the async relay calls.
 fn run_batch_sync(
     candidates: Vec<ArchiveCandidate>,
     identity_pk: &str,
@@ -76,7 +72,7 @@ fn run_batch_sync(
 }
 
 /// Like `run_batch_sync` but with a specific owner `Keys` for decrypt.
-fn run_batch_sync_with_keys(
+pub(super) fn run_batch_sync_with_keys(
     candidates: Vec<ArchiveCandidate>,
     identity_pk: &str,
     relay_url: &str,
@@ -115,7 +111,11 @@ fn run_batch_sync_with_keys(
     .unwrap()
 }
 
-fn candidate(event: &Event, scope_type: ScopeType, scope_value: &str) -> ArchiveCandidate {
+pub(super) fn candidate(
+    event: &Event,
+    scope_type: ScopeType,
+    scope_value: &str,
+) -> ArchiveCandidate {
     ArchiveCandidate {
         raw_event_json: event.as_json(),
         matched_scope: MatchedScope {
@@ -658,86 +658,6 @@ fn make_turn_metric_event(owner_keys: &Keys, agent_keys: &Keys) -> Event {
         .tags(tags)
         .sign_with_keys(agent_keys)
         .unwrap()
-}
-
-fn make_command_brief_event(owner_keys: &Keys) -> Event {
-    use buzz_core_pkg::command_brief::{
-        build_command_brief_event, CommandBriefEventPayload, CommandBriefLifecycleState,
-        COMMAND_BRIEF_PAYLOAD_VERSION,
-    };
-    build_command_brief_event(
-        owner_keys,
-        &CommandBriefEventPayload {
-            version: COMMAND_BRIEF_PAYLOAD_VERSION,
-            classification: "OFFICIAL".into(),
-            run_id: "run-1".into(),
-            schedule_id: "daily".into(),
-            lifecycle_state: CommandBriefLifecycleState::Completed,
-            occurred_at: "2026-07-25T06:00:00Z".into(),
-            frozen_snapshot_id: "snapshot-1".into(),
-            final_brief: Some(
-                buzz_core_pkg::command_brief::CommandBriefWire::try_from(
-                    super::super::command_brief::types_tests::brief_value(),
-                )
-                .expect("strict brief"),
-            ),
-            failure: None,
-            previous_lifecycle_event_id: None,
-        },
-    )
-    .unwrap()
-}
-
-#[test]
-fn test_owner_p_44210_routes_persistent_and_decrypts_only_for_owner() {
-    let conn = in_memory();
-    let owner = Keys::generate();
-    let owner_pk = owner.public_key().to_hex();
-    let relay_url = "wss://relay.example";
-    add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[44210]");
-    let event = make_command_brief_event(&owner);
-    let plan = plan_archive(
-        vec![candidate(&event, ScopeType::OwnerP, &owner_pk)],
-        &owner_pk,
-        relay_url,
-        &conn,
-    )
-    .unwrap();
-    assert_eq!(plan.buckets.len(), 1);
-    assert!(plan.ephemeral.is_empty());
-    let result = run_batch_sync_with_keys(
-        vec![candidate(&event, ScopeType::OwnerP, &owner_pk)],
-        &owner_pk,
-        relay_url,
-        &conn,
-        vec![event.clone()],
-        &owner,
-    );
-    assert_eq!(result.persisted, 1);
-    let plaintext: String = conn
-        .query_row("SELECT raw_json FROM archived_events", [], |row| row.get(0))
-        .unwrap();
-    assert!(plaintext.contains("\"classification\":\"OFFICIAL\""));
-
-    let wrong_conn = in_memory();
-    add_sub(
-        &wrong_conn,
-        &owner_pk,
-        relay_url,
-        "owner_p",
-        &owner_pk,
-        "[44210]",
-    );
-    let denied = run_batch_sync_with_keys(
-        vec![candidate(&event, ScopeType::OwnerP, &owner_pk)],
-        &owner_pk,
-        relay_url,
-        &wrong_conn,
-        vec![event],
-        &Keys::generate(),
-    );
-    assert_eq!(denied.persisted, 0);
-    assert_eq!(denied.dropped, 1);
 }
 
 /// A kind-44200 event with `owner_p` scope must route to the persistent
