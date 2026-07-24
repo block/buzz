@@ -92,9 +92,17 @@ pub(crate) fn strip_gif_metadata(body: &[u8]) -> Option<Vec<u8>> {
                         }
                         let app = &body[i + 1..i + 12];
                         let keep = app == b"NETSCAPE2.0" || app == b"ANIMEXTS1.0";
-                        i = gif_sub_blocks_end(body, i + 12)?;
+                        let data_start = i + 12;
+                        i = gif_sub_blocks_end(body, data_start)?;
                         if keep {
-                            out.extend_from_slice(&body[start..i]);
+                            if body.get(data_start) != Some(&3)
+                                || body.get(data_start + 1) != Some(&1)
+                                || data_start.checked_add(5)? > body.len()
+                            {
+                                return None;
+                            }
+                            out.extend_from_slice(&body[start..data_start + 4]);
+                            out.push(0);
                         }
                     }
                     // Comment (0xFE), plain-text (0x01), and unknown
@@ -180,6 +188,17 @@ mod tests {
     fn test_strip_gif_metadata_preserves_clean_gif_byte_identical() {
         let clean = minimal_gif();
         assert_eq!(strip_gif_metadata(&clean).unwrap(), clean);
+    }
+
+    #[test]
+    fn test_strip_gif_metadata_canonicalizes_loop_extension() {
+        let clean = minimal_gif();
+        let mut dirty = clean[..37].to_vec();
+        dirty.extend_from_slice(&[8]);
+        dirty.extend_from_slice(b"location");
+        dirty.push(0);
+        dirty.extend_from_slice(&clean[38..]);
+        assert_eq!(strip_gif_metadata(&dirty).unwrap(), clean);
     }
 
     #[test]

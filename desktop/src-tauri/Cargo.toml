@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.4.23"
+version = "0.4.24"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -126,3 +126,6 @@ strip-ansi-escapes = "0.2"
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
 # admission gate tests can assert exact wait durations without real sleeps.
 tokio = { version = "1", features = ["test-util"] }
+# The relay's media validation, so the snapshot-sharing tests can prove the
+# full export → sanitize → relay-accept → import contract end to end.
+buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }

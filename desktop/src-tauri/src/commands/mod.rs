@@ -23,8 +23,10 @@ mod identity_archive;
 mod legacy_storage;
 mod link_preview;
 pub(crate) mod media;
+mod media_animated;
 mod media_download;
 mod media_gif;
+mod media_snapshot_png;
 mod media_transcode;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_llm;

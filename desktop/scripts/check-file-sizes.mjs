@@ -136,7 +136,9 @@ const overrides = new Map([
   // lowest env layer (+8 lines). Queued to split.
   // internal-owner-only: runtime authorization normalization protects stale
   // or hand-edited records before spawning an internal managed agent.
-  ["src-tauri/src/managed_agents/runtime.rs", 2228],
+  // Current-main merge adds unrelated runtime path/error handling around this
+  // branch's unchanged policy delta; keep the existing narrow allowance exact.
+  ["src-tauri/src/managed_agents/runtime.rs", 2240],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -183,6 +185,10 @@ const overrides = new Map([
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
   ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
+  // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
+  // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1041],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -541,7 +547,9 @@ const overrides = new Map([
   // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
   // PR-B moves default/API-key derivation into shared hooks; the explicit
   // hidden-key projection keeps the top-level secret out of Advanced rows.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1195],
+  // Current-main merge adds unrelated provider/harness UI wiring around this
+  // branch's extracted access field; keep the allowance at the merged size.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1200],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
