@@ -496,12 +496,6 @@ function RuntimeCard({
             {getRuntimeDisplayLabel(runtime)}
           </h2>
         </div>
-        <RuntimeStatus
-          installError={installError}
-          isInstalling={isInstalling}
-          onInstall={onInstall}
-          runtime={runtime}
-        />
         {!isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
@@ -513,6 +507,12 @@ function RuntimeCard({
             {runtimeDetailText(runtime)}
           </p>
         ) : null}
+        <RuntimeStatus
+          installError={installError}
+          isInstalling={isInstalling}
+          onInstall={onInstall}
+          runtime={runtime}
+        />
       </div>
       {installError ? (
         <RuntimeErrorTooltip
