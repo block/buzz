@@ -10,6 +10,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
 use tauri::Manager;
 
@@ -743,12 +744,7 @@ fn verify_signed_catalogue(
             Ok(name.to_string())
         })
         .collect::<Result<Vec<_>, RagError>>()?;
-    if physical
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        != physical.len()
-    {
+    if physical.iter().collect::<BTreeSet<_>>().len() != physical.len() {
         return Err(RagError::InvalidResponse);
     }
     let documents = catalogue
@@ -759,18 +755,20 @@ fn verify_signed_catalogue(
     if reference.get("document_count").and_then(Value::as_u64) != Some(documents.len() as u64) {
         return Err(RagError::ValidationFailed);
     }
-    let mut logical = documents
-        .iter()
-        .map(|document| {
-            document
-                .as_object()
-                .and_then(|document| document.get("collection"))
-                .and_then(Value::as_str)
-                .filter(|name| valid_catalogue_name(name))
-                .map(str::to_string)
-                .ok_or(RagError::InvalidResponse)
-        })
-        .collect::<Result<Vec<_>, RagError>>()?;
+    let mut document_ids = BTreeSet::new();
+    let mut logical = Vec::with_capacity(documents.len());
+    for document in documents {
+        let document = exact_object(document, &["doc_id", "collection"])?;
+        let document_id = field_text(document, "doc_id")?;
+        let collection = field_text(document, "collection")?;
+        if !valid_catalogue_name(document_id)
+            || !valid_catalogue_name(collection)
+            || !document_ids.insert(document_id)
+        {
+            return Err(RagError::InvalidResponse);
+        }
+        logical.push(collection.to_string());
+    }
     logical.sort();
     logical.dedup();
     if logical.is_empty() || logical.len() > 256 {

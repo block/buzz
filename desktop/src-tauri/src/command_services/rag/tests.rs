@@ -257,6 +257,35 @@ fn rejects_catalogue_content_that_does_not_match_the_signed_manifest_hash() {
 }
 
 #[test]
+fn rejects_signed_catalogues_outside_the_exact_producer_document_contract() {
+    let (_config, manifest, catalogue, _activation, _readiness, _probe) = fixture();
+    let mut missing_collection = catalogue.clone();
+    missing_collection["documents"][0]
+        .as_object_mut()
+        .expect("document")
+        .remove("collection");
+    let mut extra_field = catalogue.clone();
+    extra_field["documents"][0]["content_hash"] = json!("b".repeat(64));
+    let mut unsafe_id = catalogue.clone();
+    unsafe_id["documents"][0]["doc_id"] = json!("unsafe/id");
+    let mut duplicate_id = catalogue;
+    duplicate_id["documents"][1]["doc_id"] = json!("doc-1");
+
+    for catalogue in [missing_collection, extra_field, unsafe_id, duplicate_id] {
+        let mut manifest = manifest.clone();
+        manifest["catalogue"]["sha256"] = json!(hex(&catalogue));
+        assert_eq!(
+            verify_signed_catalogue(
+                manifest.as_object().expect("manifest"),
+                manifest["collections"].as_array().expect("collections"),
+                &catalogue,
+            ),
+            Err(RagError::InvalidResponse),
+        );
+    }
+}
+
+#[test]
 fn verifies_manifest_signature_and_pinned_public_key_fingerprint() {
     let (_config, mut manifest, _catalogue, _activation, _readiness, _probe) = fixture();
     let signing_key = SigningKey::from_bytes(&[7; 32]);
