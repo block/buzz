@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "composerLiveActivity",
+      "name": "Composer live activity",
+      "description": "Live activity preview for the selected working agent in the agents-working popover below the chat composer",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

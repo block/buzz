@@ -17,6 +17,7 @@ import {
   AgentInstructionRow,
 } from "@/features/profile/ui/UserProfilePanelAgentDetails";
 import type { ProfileActivityAgent } from "@/features/profile/lib/profileActivityAgent";
+import { formatLastLiveLabel } from "@/features/profile/lib/lastLiveLabel";
 import { resolveActivityChannelId } from "@/features/profile/lib/profileActivityCarousel";
 import {
   type ProfileActivityFeedScope,
@@ -748,36 +749,6 @@ function LiveActivityOpenButton({
       {label}
     </Button>
   );
-}
-
-function formatLastLiveLabel(timestamp: number | null, now: number): string {
-  if (timestamp === null) {
-    return "No activity yet";
-  }
-
-  const elapsedMs = Math.max(0, now - timestamp);
-  const totalSeconds = Math.floor(elapsedMs / 1000);
-  if (totalSeconds < 60) {
-    return "Just now";
-  }
-
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  if (totalMinutes < 60) {
-    return `${totalMinutes}m ago`;
-  }
-
-  const totalHours = Math.floor(totalMinutes / 60);
-  if (totalHours < 24) {
-    return `${totalHours}h ago`;
-  }
-
-  const totalDays = Math.floor(totalHours / 24);
-  if (totalDays < 7) {
-    return `${totalDays}d ago`;
-  }
-
-  const totalWeeks = Math.floor(totalDays / 7);
-  return `${totalWeeks}w ago`;
 }
 
 function ArchiveStatusTooltip() {

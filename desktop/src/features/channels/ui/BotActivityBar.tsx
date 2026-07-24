@@ -9,12 +9,16 @@ import {
 } from "@/features/agents/ui/agentSessionTranscriptPresentation";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import type { ManagedAgent } from "@/shared/api/types";
+import { useFeatureEnabled } from "@/shared/features";
 import { cn } from "@/shared/lib/cn";
+import { Button } from "@/shared/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import { Shimmer } from "@/shared/ui/Shimmer";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { ComposerLiveActivityFeed } from "./ComposerLiveActivityFeed";
+import { resolveSelectedActivityAgent } from "./composerLiveActivity";
 
-export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name">;
+export type BotActivityAgent = Pick<ManagedAgent, "pubkey" | "name" | "status">;
 
 type BotActivityBarProps = {
   agents: BotActivityAgent[];
@@ -40,6 +44,13 @@ export function BotActivityComposerAction({
   variant = "toolbar",
 }: BotActivityBarProps) {
   const [open, setOpen] = React.useState(false);
+  const liveActivityEnabled = useFeatureEnabled("composerLiveActivity");
+  // Which working agent's feed the live-activity preview shows. Explicit tab
+  // selection first; falls back to the open session pane, then the first
+  // working agent (see resolveSelectedActivityAgent).
+  const [selectedActivityPubkey, setSelectedActivityPubkey] = React.useState<
+    string | null
+  >(null);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
@@ -53,6 +64,22 @@ export function BotActivityComposerAction({
   }, [agents, workingBotPubkeys]);
   const singleWorkingAgent =
     workingAgents.length === 1 ? (workingAgents[0] ?? null) : null;
+  const selectedActivityAgent = React.useMemo(
+    () =>
+      liveActivityEnabled
+        ? resolveSelectedActivityAgent({
+            openAgentSessionPubkey,
+            selectedPubkey: selectedActivityPubkey,
+            workingAgents,
+          })
+        : null,
+    [
+      liveActivityEnabled,
+      openAgentSessionPubkey,
+      selectedActivityPubkey,
+      workingAgents,
+    ],
+  );
   const transcript = useAgentTranscript(
     Boolean(singleWorkingAgent),
     singleWorkingAgent?.pubkey,
@@ -217,52 +244,112 @@ export function BotActivityComposerAction({
       </PopoverTrigger>
       <PopoverContent
         align={isInline ? "start" : "end"}
-        className="w-64 p-1"
+        className={cn(
+          liveActivityEnabled ? "flex w-80 flex-col gap-1.5 p-2" : "w-64 p-1",
+        )}
         onMouseEnter={keepOpen}
         onMouseLeave={closeWithDelay}
         onOpenAutoFocus={(event) => event.preventDefault()}
         side="top"
         sideOffset={8}
       >
-        <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
-          Agents working
-        </div>
-        <div className="mt-1 flex flex-col gap-1">
-          {workingAgents.map((agent) => {
-            const isSelected = selectedPubkey === agent.pubkey.toLowerCase();
-
-            return (
-              <button
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
-                  isSelected
-                    ? "bg-primary/10 text-primary"
-                    : "text-foreground hover:bg-accent hover:text-accent-foreground",
-                )}
-                data-testid={`bot-activity-composer-item-${agent.pubkey}`}
-                key={agent.pubkey}
-                onClick={() => {
+        {liveActivityEnabled ? (
+          <>
+            {selectedActivityAgent ? (
+              <ComposerLiveActivityFeed
+                agent={selectedActivityAgent}
+                channelId={channelId}
+                className="h-48 rounded-lg border border-border/60 bg-background"
+                onOpenAgentSession={(pubkey) => {
                   clearHoverTimer();
                   setOpen(false);
-                  onOpenAgentSession(agent.pubkey, channelId);
+                  onOpenAgentSession(pubkey, channelId);
                 }}
-                type="button"
-              >
-                <UserAvatar
-                  avatarUrl={agentAvatarUrl(agent)}
-                  className="shrink-0"
-                  displayName={agent.name}
-                  size="sm"
-                />
-                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-80">
-                  View activity
-                </span>
-                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
-              </button>
-            );
-          })}
-        </div>
+                profiles={profiles}
+              />
+            ) : null}
+            <div
+              aria-label="Working agents"
+              className="flex w-full flex-wrap items-center justify-start gap-1.5"
+              role="tablist"
+            >
+              {workingAgents.map((agent) => {
+                const isSelected =
+                  selectedActivityAgent?.pubkey.toLowerCase() ===
+                  agent.pubkey.toLowerCase();
+
+                return (
+                  <Button
+                    aria-selected={isSelected}
+                    className="max-w-full shrink-0 rounded-full px-2"
+                    data-testid={`bot-activity-composer-item-${agent.pubkey}`}
+                    key={agent.pubkey}
+                    onClick={() =>
+                      setSelectedActivityPubkey(agent.pubkey.toLowerCase())
+                    }
+                    role="tab"
+                    size="sm"
+                    type="button"
+                    variant={isSelected ? "secondary" : "ghost"}
+                  >
+                    <UserAvatar
+                      avatarUrl={agentAvatarUrl(agent)}
+                      className="!h-[18px] !w-[18px] shrink-0 text-3xs"
+                      displayName={agent.name}
+                      size="xs"
+                    />
+                    <span className="max-w-28 truncate">{agent.name}</span>
+                  </Button>
+                );
+              })}
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="px-2 py-1 text-xs font-medium text-muted-foreground">
+              Agents working
+            </div>
+            <div className="mt-1 flex flex-col gap-1">
+              {workingAgents.map((agent) => {
+                const isSelected =
+                  selectedPubkey === agent.pubkey.toLowerCase();
+
+                return (
+                  <button
+                    className={cn(
+                      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors",
+                      isSelected
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-accent hover:text-accent-foreground",
+                    )}
+                    data-testid={`bot-activity-composer-item-${agent.pubkey}`}
+                    key={agent.pubkey}
+                    onClick={() => {
+                      clearHoverTimer();
+                      setOpen(false);
+                      onOpenAgentSession(agent.pubkey, channelId);
+                    }}
+                    type="button"
+                  >
+                    <UserAvatar
+                      avatarUrl={agentAvatarUrl(agent)}
+                      className="shrink-0"
+                      displayName={agent.name}
+                      size="sm"
+                    />
+                    <span className="min-w-0 flex-1 truncate">
+                      {agent.name}
+                    </span>
+                    <span className="shrink-0 whitespace-nowrap text-xs font-medium opacity-80">
+                      View activity
+                    </span>
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-muted-foreground/70" />
+                  </button>
+                );
+              })}
+            </div>
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );
