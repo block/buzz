@@ -135,11 +135,20 @@ function CommunityButton({
               {...dragAttributes}
               {...dragListeners}
             >
+              {/* Discord-style active pill — stays visible when a custom icon
+                  covers the tile background (#2570). */}
+              {isActive ? (
+                <span
+                  aria-hidden
+                  className="absolute -left-1.5 top-1/2 h-5 w-1 -translate-y-1/2 rounded-r-full bg-sidebar-foreground"
+                  data-testid={`community-rail-active-${community.id}`}
+                />
+              ) : null}
               <span
                 className={cn(
                   "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
                   isActive
-                    ? "rounded-xl bg-primary text-primary-foreground"
+                    ? "rounded-xl bg-primary text-primary-foreground ring-2 ring-sidebar-foreground/40"
                     : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
                   pending && "opacity-60",
                 )}
