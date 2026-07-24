@@ -1,0 +1,151 @@
+//! `buzz-migrate serve` — the operator claim-service binary.
+//!
+//! Loads the Slack export roster, holds the operator's admin key, and serves
+//! the claim HTTP surface. It automates the owner/admin attestation half of a
+//! two-party import identity binding so a team migrates with no per-person
+//! operator work and no account-takeover. See the crate docs for the model.
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use buzz_migrate::roster::Roster;
+use buzz_migrate::server::{router, AppState, Inner, Mailer};
+use buzz_migrate::token::ConsumedNonces;
+use clap::Parser;
+use nostr::Keys;
+
+/// Operator claim-service for Slack→Buzz identity migration.
+#[derive(Parser, Debug)]
+#[command(name = "buzz-migrate", version, about)]
+struct Args {
+    /// Relay base URL (http/https/ws/wss). The admin key must be a community
+    /// owner or admin on this relay.
+    #[arg(long, env = "BUZZ_RELAY_URL", default_value = "http://localhost:3000")]
+    relay_url: String,
+
+    /// Operator admin private key (hex or nsec). Used only to sign attestations.
+    #[arg(long, env = "BUZZ_PRIVATE_KEY")]
+    admin_key: String,
+
+    /// NIP-OA auth tag JSON (community membership delegation), if the relay
+    /// requires one.
+    #[arg(long, env = "BUZZ_AUTH_TAG")]
+    auth_tag: Option<String>,
+
+    /// Unzipped Slack export directory (must contain users.json).
+    #[arg(long)]
+    export_dir: PathBuf,
+
+    /// Address to bind the HTTP service to.
+    #[arg(long, default_value = "127.0.0.1:8787")]
+    bind: String,
+
+    /// Public base URL of this service, used to build magic links. Defaults to
+    /// `http://<bind>`.
+    #[arg(long)]
+    base_url: Option<String>,
+
+    /// Hex secret (>=32 bytes recommended) that signs magic-link tokens. If
+    /// omitted, a random one is generated — fine for a single run, but tokens
+    /// minted before a restart stop verifying. Set it to survive restarts.
+    #[arg(long, env = "BUZZ_MIGRATE_TOKEN_SECRET")]
+    token_secret: Option<String>,
+
+    /// Magic-link token lifetime in seconds (default 72h).
+    #[arg(long, default_value_t = 72 * 3600)]
+    token_ttl_secs: u64,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "buzz_migrate=info,tower_http=info".into()),
+        )
+        .init();
+
+    let args = Args::parse();
+
+    let admin = Keys::parse(&args.admin_key)
+        .map_err(|e| format!("invalid --admin-key (hex or nsec): {e}"))?;
+
+    let auth_tag = match args.auth_tag.as_deref() {
+        Some(json) => Some(
+            buzz_sdk::nip_oa::parse_auth_tag(json)
+                .map_err(|e| format!("invalid BUZZ_AUTH_TAG: {e}"))?,
+        ),
+        None => None,
+    };
+
+    let users_path = args.export_dir.join("users.json");
+    let users_bytes = std::fs::read(&users_path)
+        .map_err(|e| format!("could not read {}: {e}", users_path.display()))?;
+    let roster = Roster::from_users_json(&users_bytes)
+        .map_err(|e| format!("could not parse {}: {e}", users_path.display()))?;
+    tracing::info!(
+        mailable = roster.mailable_count(),
+        "loaded Slack export roster"
+    );
+
+    let token_secret = match args.token_secret {
+        Some(hex_secret) => {
+            hex::decode(hex_secret.trim()).map_err(|_| "--token-secret must be hex")?
+        }
+        None => {
+            let s = rand::random::<[u8; 32]>().to_vec();
+            tracing::warn!(
+                "no --token-secret set: generated an ephemeral one; links minted now will \
+                 stop verifying after a restart"
+            );
+            s
+        }
+    };
+
+    let base_url = args
+        .base_url
+        .unwrap_or_else(|| format!("http://{}", args.bind));
+
+    let inner = Inner {
+        roster,
+        token_secret,
+        consumed: Mutex::new(ConsumedNonces::new()),
+        admin,
+        relay_url: to_ws_url(&args.relay_url),
+        auth_tag,
+        base_url,
+        token_ttl_secs: args.token_ttl_secs,
+        mailer: Mailer::Dev,
+    };
+    let state = AppState(Arc::new(inner));
+
+    let listener = tokio::net::TcpListener::bind(&args.bind).await?;
+    tracing::info!(bind = %args.bind, "buzz-migrate claim-service listening");
+    axum::serve(listener, router(state)).await?;
+    Ok(())
+}
+
+/// Convert an http(s) relay URL to its ws(s) equivalent for event publishing.
+/// ws/wss URLs pass through unchanged.
+fn to_ws_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        url.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn http_urls_become_ws() {
+        assert_eq!(to_ws_url("http://localhost:3000"), "ws://localhost:3000");
+        assert_eq!(to_ws_url("https://relay.example"), "wss://relay.example");
+        assert_eq!(to_ws_url("ws://x:1"), "ws://x:1");
+        assert_eq!(to_ws_url("wss://x"), "wss://x");
+    }
+}

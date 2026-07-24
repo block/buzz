@@ -32,4 +32,5 @@
 
 pub mod attest;
 pub mod roster;
+pub mod server;
 pub mod token;
