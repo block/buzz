@@ -5,6 +5,10 @@ It establishes classification contracts, truthful local status, deterministic
 development services, and recoverable local workspace data. It does not run
 advisers or connect any later-phase data source.
 
+Continue with the [Phase 2 local agent runtime](phase-2-local-agent-runtime.md)
+for the separately packaged LM Studio-native adviser transport, its security
+boundary, and verified local-runtime evidence.
+
 Open **Command Console** from the pinned desktop sidebar. The screen always
 shows the current boundary:
 

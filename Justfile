@@ -83,6 +83,19 @@ _local-workspace-migrate:
 _local-workspace-ready:
     ./scripts/check-local-services.sh --require minio
 
+# Check the non-mutating, literal-loopback LM Studio native API.
+# Set BUZZ_LMSTUDIO_SMOKE=1 for a bounded chat request and optionally select
+# BUZZ_LMSTUDIO_REASONING=off|on. Model/base URL/token inputs use the script's
+# documented LM_STUDIO_* environment variables.
+check-lmstudio-native:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    args=(--reasoning "${BUZZ_LMSTUDIO_REASONING:-off}")
+    if [[ -n "${BUZZ_LMSTUDIO_SMOKE:-}" ]]; then
+        args+=(--smoke)
+    fi
+    ./scripts/check-lmstudio-native.sh "${args[@]}"
+
 # Stop all dev services (keep data)
 down:
     docker compose down

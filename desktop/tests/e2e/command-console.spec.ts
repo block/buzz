@@ -16,7 +16,7 @@ type CommandConsoleE2eWindow = Window & {
   __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: string) => void;
 };
 
-test("Command Console opens from the sidebar with truthful Phase 1 boundaries", async ({
+test("Command Console opens from the sidebar with truthful Phase 2 boundaries", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -56,7 +56,10 @@ test("Command Console opens from the sidebar with truthful Phase 1 boundaries", 
   await expect(
     consoleScreen.getByTestId("command-status-local-compute"),
   ).toContainText("Offline");
-  await expect(consoleScreen.getByText("Not configured")).toHaveCount(4);
+  await expect(
+    consoleScreen.getByTestId("command-status-lm-studio"),
+  ).toContainText("Unavailable");
+  await expect(consoleScreen.getByText("Not configured")).toHaveCount(3);
   await expect(
     consoleScreen.getByText("Connected", { exact: true }),
   ).toHaveCount(0);
@@ -64,6 +67,6 @@ test("Command Console opens from the sidebar with truthful Phase 1 boundaries", 
   await waitForAnimations(page);
   await page.screenshot({
     fullPage: true,
-    path: "test-results/command-console/phase-1-foundation.png",
+    path: "test-results/command-console/phase-2-local-runtime.png",
   });
 });
