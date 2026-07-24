@@ -53,7 +53,7 @@
 
 **Interfaces:**
 
-- Rust serializable types: `AdviserId`, `BriefSection`, `SourceLedgerEntry`, `CitedFinding`, `AdviserContribution`, `SourceFreshness`, `CommandBrief`, `BriefRunState`, `BriefRunStatus`, `BriefSchedule`, and `BriefLifecycleRecord`.
+- Rust serializable types: `AdviserId`, `BriefSection`, `SourceLedgerEntry`, `CitedFinding`, `AdviserContribution`, `SourceFreshness`, `CommandBrief`, `PublishedCommandBrief`, `BriefRunState`, `BriefRunStatus`, `BriefSchedule`, and `BriefLifecycleRecord`.
 - TypeScript display contracts mirror the exact Rust JSON wire shape and reject extra keys, unknown advisers/sections/states, unsafe classification inheritance, bad timestamps, duplicate IDs, missing citations, mixed snapshots, and non-pending proposals.
 - The nine canonical sections are `today`, `operations`, `navigation`, `daily_routine`, `reports`, `planning_30_60_90`, `decisions`, `conflicts_and_gaps`, and `sources`.
 
@@ -62,7 +62,7 @@
 1. Write failing Rust tests for exact JSON casing, `OFFICIAL` defaults, all closed enums, duplicate source IDs, dangling citations, duplicate adviser identities, missing specialist contributions, mixed snapshot IDs, stale-source referential integrity, confidence bounds, bounded text/arrays, and pending-only actions.
 2. Write failing tests proving a `Navigation` contribution cannot mark a finding as an order or decision and that the final brief always carries the advisory limitation.
 3. Extend `SourceReference` with a stable ledger ID and source kind while preserving its document/chunk/snapshot/quoted-location metadata. Add `CitedFinding { text, source_ids }` so evidence is referential rather than positional.
-4. Extend `CommandBrief` with generated time, run/schedule identity, snapshot ID, the nine sections, degraded sections, missing information, dissent, source ledger, retrieval timestamps, and lifecycle audit event ID.
+4. Extend `CommandBrief` with generated time, run/schedule identity, snapshot ID, the nine sections, degraded sections, missing information, dissent, source ledger, and retrieval timestamps. Wrap it after signing as `PublishedCommandBrief { brief, lifecycle_audit_event_id, publication_state }`; the signed event ID must never be embedded in the ciphertext from which that same ID is derived.
 5. Make Rust `TryFrom` validation the authority. Keep TypeScript parsers exact and immutable as persistence/display guards.
 6. Add property-style fixture loops for every bounded field at its limit and one past its limit; reject control characters and prototype-pollution keys.
 7. Run focused Rust and Node contract tests.
@@ -202,7 +202,7 @@
 
 - Reserve `KIND_COMMAND_BRIEF = 44210` as a regular stored append-only event.
 - Content is NIP-44 v2 ciphertext from the owner to the owner's public key. Tags are exactly one `p` owner tag, one `d` run ID tag, one `status` lifecycle tag, and optional `previous` event ID.
-- `CommandBriefEventPayload` contains version, classification, run/schedule IDs, lifecycle state, timestamp, frozen snapshot, bounded final brief or redacted failure metadata, and previous lifecycle event ID.
+- `CommandBriefEventPayload` contains version, classification, run/schedule IDs, lifecycle state, timestamp, frozen snapshot, bounded final brief or redacted failure metadata, and previous lifecycle event ID. The post-signing event ID lives only in `PublishedCommandBrief` and the local spool row, avoiding a cryptographic self-reference.
 
 **Steps:**
 
@@ -210,7 +210,7 @@
 2. Add `44210` to the authoritative kind registry, `P_GATED_KINDS`, `RESULT_GATED_KINDS`, known kinds, compile-time regular-kind assertions, relay authorisation, COUNT/id-filter gates, and search NULL-vector coverage.
 3. Write relay tests proving unauthenticated and wrong-identity `REQ`, `COUNT`, kindless ID queries, search, and archive access cannot reveal event existence or content.
 4. Add a protected local SQLite spool with owner/run/event primary keys, encrypted payload, publish state, bounded retry metadata, WAL, atomic schema migration, and backup compatibility.
-5. Before UI completion, encrypt and sign the terminal lifecycle event, commit it to the local spool, and attempt relay publication. Offline publication remains queued and does not invalidate local completion.
+5. Before UI completion, encrypt and sign the terminal lifecycle event, derive its event ID, commit the event plus ID to the local spool, and return a `PublishedCommandBrief` envelope. Offline publication remains queued and does not invalidate local completion.
 6. On reconnect, republish idempotently by event ID. Reject conflicting lifecycle predecessors and never overwrite an earlier event.
 7. Decrypt only after the current unlocked identity proves it owns the `p` tag. Return validated view models, not raw ciphertext or arbitrary JSON.
 8. Add `NIP-CB.md` with wire format, access controls, lifecycle, privacy, retention, and forward-compatibility rules.
