@@ -1,4 +1,11 @@
-import { Activity, Bot, FolderGit2, Inbox, Zap } from "lucide-react";
+import {
+  Activity,
+  Bot,
+  FolderGit2,
+  Inbox,
+  ShieldCheck,
+  Zap,
+} from "lucide-react";
 
 import { TopbarSearch } from "@/features/search/ui/TopbarSearch";
 import { FeatureGate } from "@/shared/features";
@@ -17,6 +24,7 @@ type SidebarSelectedView =
   | "channel"
   | "messages"
   | "agents"
+  | "console"
   | "workflows"
   | "pulse"
   | "projects";
@@ -38,6 +46,7 @@ type AppSidebarPinnedHeaderProps = {
 type AppSidebarPrimaryMenuProps = {
   homeBadgeCount: number;
   onSelectAgents: () => void;
+  onSelectCommandConsole: () => void;
   onSelectHome: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
@@ -83,6 +92,7 @@ export function AppSidebarPinnedHeader({
 export function AppSidebarPrimaryMenu({
   homeBadgeCount,
   onSelectAgents,
+  onSelectCommandConsole,
   onSelectHome,
   onSelectProjects,
   onSelectPulse,
@@ -153,6 +163,18 @@ export function AppSidebarPrimaryMenu({
           >
             <Bot className="h-4 w-4" />
             <SidebarMenuLabel>Agents</SidebarMenuLabel>
+          </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          <SidebarMenuButton
+            data-testid="open-command-console-view"
+            isActive={selectedView === "console"}
+            onClick={onSelectCommandConsole}
+            tooltip="Command Console"
+            type="button"
+          >
+            <ShieldCheck className="h-4 w-4" />
+            <SidebarMenuLabel>Command Console</SidebarMenuLabel>
           </SidebarMenuButton>
         </SidebarMenuItem>
         <FeatureGate feature="workflows">

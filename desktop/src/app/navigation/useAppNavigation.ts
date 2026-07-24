@@ -68,6 +68,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goCommandConsole = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/console",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -297,6 +308,7 @@ export function useAppNavigation() {
     closeWorkflowDetail,
     goAgents,
     goChannel,
+    goCommandConsole,
     goForumPost,
     goHome,
     goNewMessage,

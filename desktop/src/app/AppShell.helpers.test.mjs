@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldBounceForChannelNotification } from "./AppShell.helpers.ts";
+import {
+  deriveShellRoute,
+  shouldBounceForChannelNotification,
+} from "./AppShell.helpers.ts";
+
+test("deriveShellRoute_selectsCommandConsoleForConsolePath", () => {
+  assert.deepEqual(deriveShellRoute("/console"), {
+    selectedChannelId: null,
+    selectedView: "console",
+  });
+});
 
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);
