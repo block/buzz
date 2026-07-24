@@ -327,6 +327,35 @@ pub(crate) enum ReactionChannelResult {
     DbError(String),
 }
 
+/// Conformance write-trace action for a reaction after the DB upsert.
+///
+/// Channel-less targets (`derive_reaction_channel` → `NoChannel`) must emit
+/// [`TraceAction::WriteInsertGlobal`]. Trace emission must never panic after
+/// the reaction row has already been committed.
+fn reaction_write_trace_action(
+    channel_id: Option<Uuid>,
+    was_inserted: bool,
+    event_id: &[u8],
+    claimed_community: Option<conf::CommunityLabel>,
+) -> TraceAction {
+    match (channel_id, was_inserted) {
+        (Some(ch), true) => TraceAction::WriteInsert {
+            msg_id: msg_id_label(event_id),
+            channel: channel_label(ch),
+            claimed_community,
+        },
+        (Some(ch), false) => TraceAction::WriteDuplicate {
+            msg_id: msg_id_label(event_id),
+            channel: channel_label(ch),
+            claimed_community,
+        },
+        (None, _) => TraceAction::WriteInsertGlobal {
+            msg_id: msg_id_label(event_id),
+            claimed_community,
+        },
+    }
+}
+
 /// Derive channel_id from the target event for NIP-25 reactions.
 pub(crate) async fn derive_reaction_channel(
     community_id: CommunityId,
@@ -2326,25 +2355,15 @@ async fn ingest_event_inner(
         };
 
         let pubkey_hex = auth.pubkey().to_hex();
-        // Spec WriteInsert (line 514) / WriteDuplicate (line 606): emit
-        // the abstract write action. The persist API returns
-        // `was_inserted` (true → Insert, false → Duplicate). This branch
-        // is the reaction path; channel_id is always Some here, so
-        // WriteInsertGlobal does not apply.
+        // Spec WriteInsert (line 514) / WriteInsertGlobal (line 559) /
+        // WriteDuplicate (line 606): emit the abstract write action. The
+        // persist API returns `was_inserted` (true → Insert, false →
+        // Duplicate). Reactions to channel-less targets (e.g. global
+        // kind:0 / kind:1) arrive with `channel_id == None` — emit
+        // WriteInsertGlobal there. Never panicking after the DB write.
         let claimed = claimed_community_from_event(&event);
-        let action = if was_inserted {
-            TraceAction::WriteInsert {
-                msg_id: msg_id_label(event.id.as_bytes()),
-                channel: channel_label(channel_id.expect("reaction path has channel")),
-                claimed_community: claimed,
-            }
-        } else {
-            TraceAction::WriteDuplicate {
-                msg_id: msg_id_label(event.id.as_bytes()),
-                channel: channel_label(channel_id.expect("reaction path has channel")),
-                claimed_community: claimed,
-            }
-        };
+        let action =
+            reaction_write_trace_action(channel_id, was_inserted, event.id.as_bytes(), claimed);
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
         dispatch_persistent_event(
             tenant,
@@ -2628,6 +2647,28 @@ mod tests {
     #[test]
     fn reactions_do_not_require_h_tag() {
         assert!(!requires_h_channel_scope(KIND_REACTION));
+    }
+
+    #[test]
+    fn reaction_trace_emits_global_when_channel_missing() {
+        // Production panic regression (#2348): channel-less reaction targets
+        // must not `expect` a channel id in the post-write trace path.
+        let event_id = [0xabu8; 32];
+        let action = reaction_write_trace_action(None, true, &event_id, None);
+        assert!(matches!(action, TraceAction::WriteInsertGlobal { .. }));
+
+        let ch = Uuid::new_v4();
+        let action = reaction_write_trace_action(Some(ch), true, &event_id, None);
+        assert!(matches!(
+            action,
+            TraceAction::WriteInsert { channel, .. } if channel == channel_label(ch)
+        ));
+
+        let action = reaction_write_trace_action(Some(ch), false, &event_id, None);
+        assert!(matches!(
+            action,
+            TraceAction::WriteDuplicate { channel, .. } if channel == channel_label(ch)
+        ));
     }
 
     #[test]
