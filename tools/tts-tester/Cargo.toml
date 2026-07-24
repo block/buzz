@@ -1,0 +1,14 @@
+[package]
+name = "buzz-tts-tester"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+dirs = "=6.0.0"
+regex = "=1.13.0"
+serde_json = "=1.0.150"
+sherpa-onnx = "=1.13.4"
+
+# Keep this development tool isolated from Buzz's main and desktop workspaces.
+[workspace]
