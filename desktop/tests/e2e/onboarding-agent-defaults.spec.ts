@@ -57,9 +57,7 @@ async function readSavedRuntime(page: Parameters<typeof installMockBridge>[0]) {
   });
 }
 
-test("setup shows only Claude Code and Codex as detected harnesses", async ({
-  page,
-}) => {
+test("setup shows all bundled harnesses as detected", async ({ page }) => {
   await installMockBridge(
     page,
     {
@@ -77,10 +75,8 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
 
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-codex")).toBeVisible();
-  await expect(page.getByTestId("onboarding-runtime-goose")).toHaveCount(0);
-  await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toHaveCount(
-    0,
-  );
+  await expect(page.getByTestId("onboarding-runtime-goose")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toBeVisible();
   await expect(page.getByRole("checkbox")).toHaveCount(0);
 });
 
@@ -525,8 +521,8 @@ test("defaults auto-selects the only ready visible harness", async ({
     page,
     {
       acpRuntimesCatalog: [
-        runtime("buzz-agent", "available", { status: "not_applicable" }),
-        runtime("goose", "available", { status: "not_applicable" }),
+        runtime("buzz-agent", "not_installed", { status: "not_applicable" }),
+        runtime("goose", "not_installed", { status: "not_applicable" }),
         runtime("claude", "available", { status: "logged_in" }),
         runtime("codex", "available", { status: "logged_out" }),
       ],
@@ -626,10 +622,10 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
   ).toBeVisible();
   await expect(
     page.getByTestId("global-agent-default-harness-option-goose"),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await expect(
     page.getByTestId("global-agent-default-harness-option-buzz-agent"),
-  ).toHaveCount(0);
+  ).toBeVisible();
   await page.getByTestId("global-agent-default-harness-option-codex").click();
   await expect(harness).toHaveText("Codex");
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
