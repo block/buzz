@@ -40,6 +40,7 @@ const KNOWN_LLM_PROVIDER_IDS = [
   "anthropic",
   "databricks",
   "databricks_v2",
+  "ollama",
   "openai",
   "openai-compat",
 ] as const;
@@ -109,6 +110,11 @@ const PROVIDER_CREDENTIAL_CONFIG: Partial<
   "databricks-v2": {
     requiredEnvKeys: ["DATABRICKS_HOST"],
   },
+  ollama: {
+    // Ollama runs locally — no API key or host required (defaults to
+    // http://localhost:11434). Set OLLAMA_BASE_URL only for non-default hosts.
+    requiredEnvKeys: [],
+  },
 };
 
 const DEFAULT_MODEL_OPTION: PersonaModelOption = {
@@ -120,6 +126,7 @@ export const PERSONA_LLM_PROVIDER_OPTIONS: readonly PersonaModelOption[] = [
   { id: "anthropic", label: "Anthropic" },
   { id: "openai", label: "OpenAI" },
   { id: "openai-compat", label: "OpenAI-compatible" },
+  { id: "ollama", label: "Ollama (local)" },
   { id: "relay-mesh", label: "Buzz shared compute" },
   { id: "databricks", label: "Databricks" },
   { id: "databricks_v2", label: "Databricks v2" },
