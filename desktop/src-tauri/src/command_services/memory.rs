@@ -1,4 +1,7 @@
-use crate::command_services::policy::admission_secrets_are_independent;
+use crate::command_services::policy::{
+    admission_secrets_are_independent, admit_memory_for_catalog, cache_verified_service,
+    AuthenticatedSourceService,
+};
 use crate::command_services::ssh::{
     start_tunnel_with_reservation, validate_host_target, PinnedHostEvidence, ProtectedFile,
     ReservedLoopbackPort, SshError, SshTunnel, SshTunnelConfig,
@@ -656,6 +659,17 @@ pub(crate) struct MemoryServiceReadiness {
     error: Option<String>,
 }
 
+/// Verified local Memory read service plus the current unresolved conflict count.
+#[derive(Clone, Debug)]
+#[allow(
+    dead_code,
+    reason = "Task 8 installs the production command-brief source backend"
+)]
+pub(crate) struct MemorySourceBinding {
+    pub(crate) service: AuthenticatedSourceService,
+    pub(crate) conflict_count: u64,
+}
+
 fn fail_soft_readiness(error: MemoryError, _private_path: Option<&str>) -> MemoryServiceReadiness {
     MemoryServiceReadiness {
         status: if error == MemoryError::NotConfigured {
@@ -989,6 +1003,37 @@ pub(crate) async fn get_memory_service_readiness(app: tauri::AppHandle) -> Memor
         Ok(Err(error)) => fail_soft_readiness(error, None),
         Err(_) => fail_soft_readiness(MemoryError::Task, None),
     }
+}
+
+/// Loads and re-attests the exact local Memory node used by production brief reads.
+#[allow(
+    dead_code,
+    reason = "Task 8 installs the production command-brief source backend"
+)]
+pub(crate) async fn get_memory_source_binding(
+    app: tauri::AppHandle,
+) -> Result<MemorySourceBinding, MemoryError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = trusted_config_path(&app)?;
+        let store = SecretStore::shared(crate::app_state::keyring_service());
+        let trusted = load_trusted_config(&path, store)?;
+        let readiness = query_readiness(&trusted, READINESS_TIMEOUT)?;
+        let node_id = readiness
+            .node_id
+            .as_deref()
+            .ok_or(MemoryError::InvalidResponse)?;
+        let service = admit_memory_for_catalog(&app, node_id, &readiness.observed_at)
+            .map_err(|_| MemoryError::AuthenticationFailed)?;
+        cache_verified_service(service.clone());
+        let service = AuthenticatedSourceService::new(service, &trusted.secrets.local_attestation)
+            .map_err(|_| MemoryError::AuthenticationFailed)?;
+        Ok(MemorySourceBinding {
+            service,
+            conflict_count: readiness.conflict_count,
+        })
+    })
+    .await
+    .map_err(|_| MemoryError::Task)?
 }
 
 #[tauri::command]

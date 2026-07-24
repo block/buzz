@@ -1,5 +1,17 @@
 use super::*;
 
+#[test]
+fn app_state_owns_one_sequential_command_brief_scheduler() {
+    let state = build_app_state();
+    assert_eq!(state.command_brief_scheduler.capacity(), 1);
+    assert_eq!(state.command_brief_scheduler.active_job_count(), 0);
+    assert!(state
+        .command_brief_orchestrator
+        .try_read()
+        .expect("orchestrator slot")
+        .is_none());
+}
+
 fn assert_key_eq(a: &Keys, b: &Keys) {
     assert_eq!(a.public_key().to_hex(), b.public_key().to_hex());
 }

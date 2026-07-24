@@ -1,18 +1,21 @@
 use std::collections::{BTreeMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 
 use super::sources::{
-    FixedRetrievalIntent, FrozenSourceContext, SourceBackend, SourceCollectionError,
-    SourceCollector, SourceReadError,
+    FixedRetrievalIntent, FrozenSourceContext, ProductionSourceBackend, SourceBackend,
+    SourceCollectionError, SourceCollector, SourceReadError, SourceToolCaller,
 };
 use super::types::{AdviserId, BriefSection, SourceKind, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES};
 use crate::command_services::apple_inputs::{
     AppleBriefSelection, AppleInputRequest, AppleInputResponse,
 };
 use crate::command_services::memory::extract_verified_memory_evidence;
-use crate::command_services::policy::canonical_json_bytes;
+use crate::command_services::policy::{
+    canonical_json_bytes, AdmissionError, AuthenticatedSourceService, KnowledgeServiceKind,
+    VerifiedService, MEMORY_CATALOG_TOOLS, RAG_CATALOG_TOOLS,
+};
 use crate::command_services::rag::VerifiedRagSnapshot;
 use sha2::{Digest, Sha256};
 
@@ -1394,4 +1397,107 @@ fn canonical_ledger_ids_are_run_bound_but_stable_under_reorder_within_one_run() 
             "{source_id} must be bound to the trusted run"
         );
     }
+}
+
+fn authenticated_service(kind: KnowledgeServiceKind) -> AuthenticatedSourceService {
+    let (name, endpoint, identity, tools) = match kind {
+        KnowledgeServiceKind::Memory => (
+            "memory",
+            "http://127.0.0.1:18006/mcp",
+            "node:command",
+            MEMORY_CATALOG_TOOLS,
+        ),
+        KnowledgeServiceKind::Rag => (
+            "rag",
+            "http://127.0.0.1:18005/mcp/",
+            SNAPSHOT_A,
+            RAG_CATALOG_TOOLS,
+        ),
+    };
+    AuthenticatedSourceService::new(
+        VerifiedService {
+            kind,
+            server_identity: name.to_string(),
+            endpoint: endpoint.to_string(),
+            bearer_token: "fixture-source-token-123456789".to_string(),
+            active_identity: identity.to_string(),
+            advertised_tools: tools.iter().map(|tool| (*tool).to_string()).collect(),
+            verified_at: OBSERVED_AT.to_string(),
+        },
+        "fixture-source-attestation-secret-123456789",
+    )
+    .expect("authenticated source")
+}
+
+struct FakeSourceToolCaller {
+    calls: Mutex<Vec<Value>>,
+    observed_snapshot: String,
+}
+
+impl SourceToolCaller for FakeSourceToolCaller {
+    fn call(
+        &self,
+        _service: &AuthenticatedSourceService,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Value, AdmissionError> {
+        self.calls
+            .lock()
+            .expect("source caller")
+            .push(json!({"tool":tool_name,"arguments":arguments}));
+        match tool_name {
+            "search_knowledge_base" => Ok(rag_evidence(
+                SNAPSHOT_A,
+                "rag:production",
+                "Production evidence.",
+            )),
+            "command_memory_context" => Ok(empty_memory_wrapper()),
+            "get_snapshot_status" => Ok(json!({
+                "active_snapshot_id": self.observed_snapshot
+            })),
+            _ => Err(AdmissionError::UnexpectedToolCatalog),
+        }
+    }
+}
+
+#[test]
+fn production_backend_uses_fixed_tool_arguments_and_rejects_snapshot_mismatch() {
+    let caller = Arc::new(FakeSourceToolCaller {
+        calls: Mutex::new(Vec::new()),
+        observed_snapshot: SNAPSHOT_B.to_string(),
+    });
+    let snapshot = VerifiedRagSnapshot::for_test(SNAPSHOT_A, OBSERVED_AT, OBSERVED_AT);
+    let backend = ProductionSourceBackend::from_bindings_for_test(
+        snapshot.clone(),
+        authenticated_service(KnowledgeServiceKind::Rag),
+        authenticated_service(KnowledgeServiceKind::Memory),
+        2,
+        caller.clone(),
+    );
+    let intent = collector(FakeBackend::fresh(), "Brief")
+        .freeze()
+        .expect("fixture context")
+        .retrieval_intents()[0]
+        .clone();
+
+    assert!(backend.collect_rag(&snapshot, &intent).is_ok());
+    assert!(backend.collect_memory(&intent).is_ok());
+    assert_eq!(backend.memory_conflict_count(), 2);
+    assert_eq!(
+        backend.recheck_rag_snapshot(&snapshot),
+        Err(SourceCollectionError::SnapshotChanged)
+    );
+    let calls = caller.calls.lock().expect("calls").clone();
+    assert_eq!(calls[0]["tool"], "search_knowledge_base");
+    assert_eq!(calls[0]["arguments"]["query"], intent.query());
+    assert_eq!(
+        calls[0]["arguments"]["collections"],
+        json!(["navy-publications"])
+    );
+    assert_eq!(calls[0]["arguments"]["top_k"], 8);
+    assert_eq!(calls[1]["tool"], "command_memory_context");
+    assert_eq!(calls[1]["arguments"]["query"], intent.query());
+    assert_eq!(calls[1]["arguments"]["limit"], 10);
+    assert_eq!(calls[2]["tool"], "get_snapshot_status");
+    assert_eq!(calls[2]["arguments"], json!({}));
 }

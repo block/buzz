@@ -7,6 +7,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use chrono::DateTime;
 use serde::Serialize;
@@ -20,11 +21,15 @@ use super::types::{
     MAX_SOURCE_LEDGER_ITEMS, MAX_TEXT_BYTES,
 };
 use crate::command_services::apple_inputs::{
-    AppleBriefSelection, AppleInputPermission, AppleInputRequest, AppleInputResponse,
+    read_apple_inputs_blocking, AppleBriefSelection, AppleInputPermission, AppleInputRequest,
+    AppleInputResponse,
 };
-use crate::command_services::memory::extract_verified_memory_evidence;
+use crate::command_services::memory::{
+    extract_verified_memory_evidence, get_memory_source_binding,
+};
+use crate::command_services::policy::{AdmissionError, AuthenticatedSourceService};
 use crate::command_services::rag::{
-    extract_verified_rag_evidence, RagSnapshotError, VerifiedRagSnapshot,
+    extract_verified_rag_evidence, get_rag_source_binding, RagSnapshotError, VerifiedRagSnapshot,
 };
 
 const MAX_CO_REQUEST_BYTES: usize = 1024;
@@ -44,6 +49,7 @@ const RAG_MEMORY_SECTIONS: [BriefSection; 5] = [
 /// Stable, redacted failures which the orchestrator may expose as run status.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SourceCollectionError {
+    Cancelled,
     InvalidRequest,
     InvalidTime,
     RagUnavailable,
@@ -123,6 +129,167 @@ pub(crate) trait SourceBackend {
     ) -> Result<(), SourceCollectionError>;
 }
 
+pub(crate) trait SourceToolCaller: Send + Sync {
+    fn call(
+        &self,
+        service: &AuthenticatedSourceService,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Value, AdmissionError>;
+}
+
+#[allow(
+    dead_code,
+    reason = "Task 8 installs the production orchestrator into AppState"
+)]
+struct AuthenticatedMcpSourceCaller;
+
+impl SourceToolCaller for AuthenticatedMcpSourceCaller {
+    fn call(
+        &self,
+        service: &AuthenticatedSourceService,
+        tool_name: &str,
+        arguments: Value,
+    ) -> Result<Value, AdmissionError> {
+        service.call(tool_name, arguments)
+    }
+}
+
+/// Concrete production backend for the verified local RAG, Memory, and signed
+/// Apple helper sources.
+#[derive(Clone)]
+pub(crate) struct ProductionSourceBackend {
+    snapshot: VerifiedRagSnapshot,
+    rag: AuthenticatedSourceService,
+    memory: Option<AuthenticatedSourceService>,
+    memory_conflict_count: u64,
+    caller: Arc<dyn SourceToolCaller>,
+}
+
+impl std::fmt::Debug for ProductionSourceBackend {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProductionSourceBackend")
+            .field("snapshot_id", &self.snapshot.snapshot_id())
+            .field("rag", &self.rag)
+            .field("memory", &self.memory)
+            .field("memory_conflict_count", &self.memory_conflict_count)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProductionSourceBackend {
+    /// Re-attests and binds the exact configured local services.
+    #[allow(
+        dead_code,
+        reason = "Task 8 installs the production orchestrator into AppState"
+    )]
+    pub(crate) async fn from_app(app: tauri::AppHandle) -> Result<Self, SourceCollectionError> {
+        let (rag, memory) = tokio::join!(
+            get_rag_source_binding(app.clone()),
+            get_memory_source_binding(app),
+        );
+        let rag = rag.map_err(|_| SourceCollectionError::RagUnavailable)?;
+        let (memory, memory_conflict_count) = memory
+            .map(|binding| (Some(binding.service), binding.conflict_count))
+            .unwrap_or((None, 0));
+        Ok(Self {
+            snapshot: rag.snapshot,
+            rag: rag.service,
+            memory,
+            memory_conflict_count,
+            caller: Arc::new(AuthenticatedMcpSourceCaller),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_bindings_for_test(
+        snapshot: VerifiedRagSnapshot,
+        rag: AuthenticatedSourceService,
+        memory: AuthenticatedSourceService,
+        memory_conflict_count: u64,
+        caller: Arc<dyn SourceToolCaller>,
+    ) -> Self {
+        Self {
+            snapshot,
+            rag,
+            memory: Some(memory),
+            memory_conflict_count,
+            caller,
+        }
+    }
+}
+
+impl SourceBackend for ProductionSourceBackend {
+    fn verify_active_rag_snapshot(&self) -> Result<VerifiedRagSnapshot, SourceCollectionError> {
+        if self.rag.active_identity() != self.snapshot.snapshot_id() {
+            return Err(SourceCollectionError::RagInvalid);
+        }
+        Ok(self.snapshot.clone())
+    }
+
+    fn memory_conflict_count(&self) -> u64 {
+        self.memory_conflict_count
+    }
+
+    fn collect_rag(
+        &self,
+        snapshot: &VerifiedRagSnapshot,
+        intent: &FixedRetrievalIntent,
+    ) -> Result<Value, SourceReadError> {
+        if snapshot != &self.snapshot || self.rag.active_identity() != snapshot.snapshot_id() {
+            return Err(SourceReadError::new("rag_snapshot_mismatch"));
+        }
+        self.caller
+            .call(
+                &self.rag,
+                RAG_TOOL,
+                json!({
+                    "query": intent.query(),
+                    "collections": snapshot.logical_collections(),
+                    "top_k": 8,
+                }),
+            )
+            .map_err(|_| SourceReadError::new("rag_read_unavailable"))
+    }
+
+    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Value, SourceReadError> {
+        let memory = self
+            .memory
+            .as_ref()
+            .ok_or_else(|| SourceReadError::new("memory_read_unavailable"))?;
+        self.caller
+            .call(
+                memory,
+                MEMORY_TOOL,
+                json!({"query": intent.query(), "limit": 10}),
+            )
+            .map_err(|_| SourceReadError::new("memory_read_unavailable"))
+    }
+
+    fn collect_apple(&self, request: &AppleInputRequest) -> AppleInputResponse {
+        read_apple_inputs_blocking(request.clone())
+    }
+
+    fn recheck_rag_snapshot(
+        &self,
+        expected: &VerifiedRagSnapshot,
+    ) -> Result<(), SourceCollectionError> {
+        if expected != &self.snapshot {
+            return Err(SourceCollectionError::SnapshotChanged);
+        }
+        let status = self
+            .caller
+            .call(&self.rag, "get_snapshot_status", json!({}))
+            .map_err(|_| SourceCollectionError::RagUnavailable)?;
+        let observed = status
+            .get("active_snapshot_id")
+            .and_then(Value::as_str)
+            .ok_or(SourceCollectionError::RagInvalid)?;
+        expected.verify_unchanged(observed).map_err(Into::into)
+    }
+}
+
 /// All source evidence frozen before any adviser runs.
 pub(crate) struct FrozenSourceContext {
     run_id: String,
@@ -170,6 +337,36 @@ impl FrozenSourceContext {
 
     pub(crate) fn rag_catalogue(&self) -> &[String] {
         self.snapshot.logical_collections()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 8 constructs the Task 5 production source adapter"
+    )]
+    pub(crate) fn snapshot_binding(&self) -> &VerifiedRagSnapshot {
+        &self.snapshot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_orchestrator_test(
+        run_id: &str,
+        snapshot_id: &str,
+        observed_at: &str,
+        ledger: Vec<SourceLedgerEntry>,
+        degraded_sections: Vec<BriefSection>,
+        limitations: Vec<String>,
+    ) -> Self {
+        let validated_sources = ledger.iter().cloned().map(ValidatedSource::from).collect();
+        Self {
+            run_id: run_id.to_string(),
+            snapshot: VerifiedRagSnapshot::for_test(snapshot_id, observed_at, observed_at),
+            observed_at: observed_at.to_string(),
+            ledger,
+            validated_sources,
+            degraded_sections,
+            limitations,
+            retrieval_intents: Vec::new(),
+        }
     }
 }
 

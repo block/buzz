@@ -73,6 +73,61 @@ impl std::fmt::Debug for VerifiedService {
     }
 }
 
+/// One already-admitted local service plus the independent secret required to
+/// re-attest it before every fixed source read.
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct AuthenticatedSourceService {
+    verified: VerifiedService,
+    attestation_secret: String,
+}
+
+impl AuthenticatedSourceService {
+    pub(crate) fn new(
+        verified: VerifiedService,
+        attestation_secret: &str,
+    ) -> Result<Self, AdmissionError> {
+        if !valid_attestation_secret(attestation_secret)
+            || !admission_secrets_are_independent(&verified.bearer_token, attestation_secret)
+        {
+            return Err(AdmissionError::AuthenticationUnavailable);
+        }
+        Ok(Self {
+            verified,
+            attestation_secret: attestation_secret.to_string(),
+        })
+    }
+
+    #[allow(
+        dead_code,
+        reason = "Task 8 installs the production command-brief source backend"
+    )]
+    pub(crate) fn call(&self, tool_name: &str, arguments: Value) -> Result<Value, AdmissionError> {
+        call_authenticated_source_tool(
+            &self.verified.endpoint,
+            &self.verified.bearer_token,
+            &self.attestation_secret,
+            &self.verified.server_identity,
+            &self.verified.active_identity,
+            tool_name,
+            arguments,
+        )
+    }
+
+    pub(crate) fn active_identity(&self) -> &str {
+        &self.verified.active_identity
+    }
+}
+
+impl std::fmt::Debug for AuthenticatedSourceService {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthenticatedSourceService")
+            .field("verified", &self.verified)
+            .field("attestation_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdmissionError {
     EndpointNotLiteralLoopback,
@@ -527,6 +582,39 @@ pub(crate) fn probe_authenticated_mcp(
     expected_identity: &str,
     status_tool: Option<&str>,
 ) -> Result<AuthenticatedMcpAttestation, AdmissionError> {
+    let (mut session, server_identity, tools) = open_authenticated_mcp_session(
+        endpoint,
+        bearer_token,
+        attestation_secret,
+        expected_service,
+        expected_identity,
+    )?;
+    let status = if let Some(status_tool) = status_tool {
+        if !tools.iter().any(|tool| tool == status_tool) {
+            return Err(AdmissionError::MissingRequiredTool);
+        }
+        Some(call_tool_in_session(
+            &mut session,
+            status_tool,
+            serde_json::json!({}),
+        )?)
+    } else {
+        None
+    };
+    Ok(AuthenticatedMcpAttestation {
+        server_identity,
+        tools,
+        status,
+    })
+}
+
+fn open_authenticated_mcp_session<'a>(
+    endpoint: &'a str,
+    bearer_token: &'a str,
+    attestation_secret: &str,
+    expected_service: &str,
+    expected_identity: &str,
+) -> Result<(McpSession<'a>, String, Vec<String>), AdmissionError> {
     match expected_service {
         "memory" => validate_literal_loopback_mcp_endpoint(endpoint)?,
         "rag" => validate_rag_literal_loopback_mcp_endpoint(endpoint)?,
@@ -603,44 +691,74 @@ pub(crate) fn probe_authenticated_mcp(
         tools.push(name.to_string());
     }
     tool_set(&tools)?;
+    Ok((session, server_identity, tools))
+}
 
-    let status = if let Some(status_tool) = status_tool {
-        if !tools.iter().any(|tool| tool == status_tool) {
-            return Err(AdmissionError::MissingRequiredTool);
-        }
-        let status_response = session.post(&serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 3,
-            "method": "tools/call",
-            "params": {"name": status_tool, "arguments": {}},
-        }))?;
-        let result = mcp_result(&status_response)?;
-        if result.get("isError").and_then(Value::as_bool) == Some(true) {
-            return Err(AdmissionError::InvalidResponse);
-        }
-        let value = if let Some(value) = result.get("structuredContent") {
-            value.clone()
-        } else {
-            let text = result
-                .get("content")
-                .and_then(Value::as_array)
-                .and_then(|items| items.first())
-                .and_then(Value::as_object)
-                .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
-                .and_then(|item| item.get("text"))
-                .and_then(Value::as_str)
-                .ok_or(AdmissionError::InvalidResponse)?;
-            serde_json::from_str(text).map_err(|_| AdmissionError::InvalidResponse)?
-        };
-        Some(value)
-    } else {
-        None
+fn call_tool_in_session(
+    session: &mut McpSession<'_>,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<Value, AdmissionError> {
+    let response = session.post(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }))?;
+    let result = mcp_result(&response)?;
+    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+        return Err(AdmissionError::InvalidResponse);
+    }
+    if let Some(value) = result.get("structuredContent") {
+        return Ok(value.clone());
+    }
+    let text = result
+        .get("content")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(Value::as_object)
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+        .and_then(|item| item.get("text"))
+        .and_then(Value::as_str)
+        .ok_or(AdmissionError::InvalidResponse)?;
+    serde_json::from_str(text).map_err(|_| AdmissionError::InvalidResponse)
+}
+
+/// Executes one exact source-read tool through the same fully authenticated
+/// MCP session gates used by readiness admission.
+pub(crate) fn call_authenticated_source_tool(
+    endpoint: &str,
+    bearer_token: &str,
+    attestation_secret: &str,
+    expected_service: &str,
+    expected_identity: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<Value, AdmissionError> {
+    let expected_tool_service = match tool_name {
+        "command_memory_context" => "memory",
+        "search_knowledge_base" | "get_snapshot_status" => "rag",
+        _ => return Err(AdmissionError::UnexpectedToolCatalog),
     };
-    Ok(AuthenticatedMcpAttestation {
-        server_identity,
-        tools,
-        status,
-    })
+    if expected_service != expected_tool_service
+        || !arguments.is_object()
+        || serde_json::to_vec(&arguments)
+            .ok()
+            .is_none_or(|bytes| bytes.len() > 64 * 1024)
+    {
+        return Err(AdmissionError::UnexpectedToolCatalog);
+    }
+    let (mut session, _, tools) = open_authenticated_mcp_session(
+        endpoint,
+        bearer_token,
+        attestation_secret,
+        expected_service,
+        expected_identity,
+    )?;
+    if !tools.iter().any(|tool| tool == tool_name) {
+        return Err(AdmissionError::MissingRequiredTool);
+    }
+    call_tool_in_session(&mut session, tool_name, arguments)
 }
 
 #[path = "policy/catalog.rs"]

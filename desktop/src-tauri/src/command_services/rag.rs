@@ -1,7 +1,8 @@
 use crate::command_services::policy::{
     admission_secrets_are_independent, cache_verified_service, clear_cached_service,
     probe_authenticated_mcp, validate_rag_literal_loopback_mcp_endpoint, AdmissionError,
-    KnowledgeServiceKind, ServiceAdmissionPolicy, VerifiedService, RAG_CATALOG_TOOLS,
+    AuthenticatedSourceService, KnowledgeServiceKind, ServiceAdmissionPolicy, VerifiedService,
+    RAG_CATALOG_TOOLS,
 };
 use crate::command_services::ssh::ProtectedFile;
 use crate::secret_store::SecretStore;
@@ -121,6 +122,18 @@ pub(crate) struct VerifiedRagSnapshot {
     snapshot_time: String,
     physical_collections: Vec<String>,
     logical_collections: Vec<String>,
+}
+
+/// Cryptographically verified RAG snapshot and re-attested read service used
+/// by the production command-brief source backend.
+#[derive(Clone, Debug)]
+#[allow(
+    dead_code,
+    reason = "Task 8 installs the production command-brief source backend"
+)]
+pub(crate) struct RagSourceBinding {
+    pub(crate) snapshot: VerifiedRagSnapshot,
+    pub(crate) service: AuthenticatedSourceService,
 }
 
 #[cfg_attr(
@@ -896,10 +909,10 @@ fn read_config(path: &Path) -> Result<RagConfig, RagError> {
     Ok(config)
 }
 
-fn query_rag_readiness(
+fn query_rag_readiness_with_secret(
     config_path: &Path,
     credentials: &SecretStore,
-) -> Result<RagServiceReadiness, RagError> {
+) -> Result<(RagServiceReadiness, String), RagError> {
     let config = read_config(config_path)?;
     let bearer_token = credentials
         .load(&config.credential_key)
@@ -973,7 +986,14 @@ fn query_rag_readiness(
     if let Some(admitted) = result.admitted.clone() {
         cache_verified_service(admitted);
     }
-    Ok(result)
+    Ok((result, attestation_secret))
+}
+
+fn query_rag_readiness(
+    config_path: &Path,
+    credentials: &SecretStore,
+) -> Result<RagServiceReadiness, RagError> {
+    query_rag_readiness_with_secret(config_path, credentials).map(|(readiness, _)| readiness)
 }
 
 fn signed_snapshot_object_path(root: &Path, relative: &str) -> Result<PathBuf, RagError> {
@@ -1015,6 +1035,35 @@ pub(crate) async fn get_rag_service_readiness(app: tauri::AppHandle) -> RagServi
             fail_soft_readiness(RagError::ServiceUnavailable)
         }
     }
+}
+
+/// Loads the exact verified snapshot and independent re-attestation secret for
+/// production Daily Command Brief reads.
+#[allow(
+    dead_code,
+    reason = "Task 8 installs the production command-brief source backend"
+)]
+pub(crate) async fn get_rag_source_binding(
+    app: tauri::AppHandle,
+) -> Result<RagSourceBinding, RagError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = config_path(&app)?;
+        let store = SecretStore::shared(crate::app_state::keyring_service());
+        let (readiness, attestation_secret) = query_rag_readiness_with_secret(&path, store)?;
+        let snapshot =
+            verified_snapshot_from_readiness(&readiness).map_err(|_| RagError::ValidationFailed)?;
+        let service = readiness
+            .admitted
+            .clone()
+            .ok_or(RagError::ValidationFailed)
+            .and_then(|service| {
+                AuthenticatedSourceService::new(service, &attestation_secret)
+                    .map_err(|_| RagError::AuthenticationFailed)
+            })?;
+        Ok(RagSourceBinding { snapshot, service })
+    })
+    .await
+    .map_err(|_| RagError::ServiceUnavailable)?
 }
 
 #[cfg(test)]

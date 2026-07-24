@@ -18,6 +18,20 @@ use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
+    /// One app-owned scheduler for all Daily Command Brief local-model work.
+    #[allow(
+        dead_code,
+        reason = "Task 8 installs and exposes the production orchestrator"
+    )]
+    pub command_brief_scheduler: crate::command_brief::scheduler::LocalModelScheduler,
+    /// Native Daily Command Brief runtime installed after protected local
+    /// source admission and replaced only at the Tauri command boundary.
+    #[allow(
+        dead_code,
+        reason = "Task 8 installs and exposes the production orchestrator"
+    )]
+    pub command_brief_orchestrator:
+        tokio::sync::RwLock<Option<crate::command_brief::orchestrator::CommandBriefOrchestrator>>,
     /// A no-redirect client for authenticated relay media fetches (download,
     /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
     /// origin, but the app-wide `http_client` follows redirects by default, so
@@ -189,6 +203,8 @@ pub fn build_app_state() -> AppState {
 
     AppState {
         keys: Mutex::new(keys),
+        command_brief_scheduler: crate::command_brief::scheduler::LocalModelScheduler::sequential(),
+        command_brief_orchestrator: tokio::sync::RwLock::new(None),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))

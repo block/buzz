@@ -699,18 +699,25 @@ fn fail_soft(source: AppleInputSource, error: &SupervisionError) -> AppleInputRe
 #[tauri::command]
 pub(crate) async fn read_apple_inputs(request: AppleInputRequest) -> AppleInputResponse {
     let source = request.source();
+    let task = tauri::async_runtime::spawn_blocking(move || read_apple_inputs_blocking(request));
+    match task.await {
+        Ok(response) => response,
+        Err(_) => fail_soft(source, &SupervisionError::Task),
+    }
+}
+
+/// Runs the signed helper under the same bounded supervisor on a caller-owned
+/// blocking thread.
+pub(crate) fn read_apple_inputs_blocking(request: AppleInputRequest) -> AppleInputResponse {
+    let source = request.source();
     let timeout = request.timeout();
     let helper_path = match bundled_helper_path() {
         Ok(path) => path,
         Err(error) => return fail_soft(source, &error),
     };
-    let task = tauri::async_runtime::spawn_blocking(move || {
-        supervise_helper(&helper_path, &request, timeout)
-    });
-    match task.await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => fail_soft(source, &error),
-        Err(_) => fail_soft(source, &SupervisionError::Task),
+    match supervise_helper(&helper_path, &request, timeout) {
+        Ok(response) => response,
+        Err(error) => fail_soft(source, &error),
     }
 }
 
@@ -724,6 +731,14 @@ mod tests {
         AppleInputRequest::PermissionStatus(PermissionArguments {
             source: AppleInputSource::Calendar,
         })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_signed_helper_boundary_preserves_fail_soft_source_identity() {
+        let response = read_apple_inputs_blocking(permission_request());
+        assert_eq!(response.source_name(), "calendar");
+        assert_eq!(response.permission(), AppleInputPermission::Unavailable);
+        assert!(response.error().is_some());
     }
 
     fn response(extra: &str) -> String {

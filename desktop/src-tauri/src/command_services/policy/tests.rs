@@ -179,6 +179,252 @@ fn authenticated_fake_memory_mcp() -> (String, thread::JoinHandle<()>) {
     (endpoint, server)
 }
 
+fn authenticated_fake_memory_tool_call(terminal: Value) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind fake MCP");
+    let endpoint = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let server = thread::spawn(move || {
+        for index in 0..7 {
+            let (mut stream, _) = listener.accept().expect("accept fake MCP request");
+            let (headers, body) = read_http_request(&mut stream);
+            if index == 0 {
+                let nonce = body["nonce"].as_str().expect("attestation nonce");
+                let transcript =
+                    format!("buzz-command-attestation-v1\0memory\0node:command\0{nonce}");
+                let mut hmac =
+                    Hmac::<Sha256>::new_from_slice(ATTESTATION_SECRET.as_bytes()).unwrap();
+                hmac.update(transcript.as_bytes());
+                write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    Some(json!({
+                        "service": "memory",
+                        "identity": "node:command",
+                        "nonce": nonce,
+                        "mac": format!("sha256:{}", hex::encode(hmac.finalize().into_bytes())),
+                    })),
+                );
+                continue;
+            }
+            match index {
+                1 => write_http_response(&mut stream, "401 Unauthorized", None),
+                2 => write_http_response(&mut stream, "403 Forbidden", None),
+                3 => write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {},
+                            "serverInfo": {"name": "memory", "version": "test"},
+                        },
+                    })),
+                ),
+                4 => write_http_response(&mut stream, "202 Accepted", None),
+                5 => write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    Some(json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": {
+                            "tools": MEMORY_CATALOG_TOOLS
+                                .iter()
+                                .map(|name| json!({"name": name}))
+                                .collect::<Vec<_>>(),
+                        },
+                    })),
+                ),
+                _ => {
+                    assert!(headers.contains("authorization: Bearer fixture-token-123456789"));
+                    assert_eq!(body["method"], "tools/call");
+                    assert_eq!(body["params"]["name"], "command_memory_context");
+                    assert_eq!(
+                        body["params"]["arguments"],
+                        json!({"query":"readiness","limit":10})
+                    );
+                    let terminal_bytes =
+                        serde_json::to_vec(&terminal).expect("encode terminal response");
+                    if terminal_bytes.len() > MAXIMUM_MCP_RESPONSE_BYTES {
+                        write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            terminal_bytes.len()
+                        )
+                        .expect("write oversized response headers");
+                    } else {
+                        write_http_response(&mut stream, "200 OK", Some(terminal.clone()));
+                    }
+                }
+            }
+        }
+    });
+    (endpoint, server)
+}
+
+#[test]
+fn authenticated_source_tool_call_is_closed_bounded_and_reuses_mcp_gates() {
+    let terminal = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "structuredContent": {"schema":"memory-evidence-v1","results":[]},
+            "isError": false
+        }
+    });
+    let (endpoint, server) = authenticated_fake_memory_tool_call(terminal);
+    let value = call_authenticated_source_tool(
+        &endpoint,
+        "fixture-token-123456789",
+        ATTESTATION_SECRET,
+        "memory",
+        "node:command",
+        "command_memory_context",
+        json!({"query":"readiness","limit":10}),
+    )
+    .expect("authenticated exact tool call");
+    server.join().expect("join fake MCP");
+    assert_eq!(value["schema"], "memory-evidence-v1");
+
+    assert_eq!(
+        call_authenticated_source_tool(
+            "http://127.0.0.1:8006/mcp",
+            "fixture-token-123456789",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            "record_event",
+            json!({}),
+        ),
+        Err(AdmissionError::UnexpectedToolCatalog),
+    );
+    assert_eq!(
+        call_authenticated_source_tool(
+            "http://192.168.1.10:8006/mcp",
+            "fixture-token-123456789",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            "command_memory_context",
+            json!({}),
+        ),
+        Err(AdmissionError::EndpointNotLiteralLoopback),
+    );
+    assert_eq!(
+        call_authenticated_source_tool(
+            "http://127.0.0.1:8006/mcp",
+            "short",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            "command_memory_context",
+            json!({}),
+        ),
+        Err(AdmissionError::AuthenticationUnavailable),
+    );
+}
+
+#[test]
+fn authenticated_source_service_keeps_attestation_secret_separate_and_redacted() {
+    let service = AuthenticatedSourceService::new(
+        admitted_service(KnowledgeServiceKind::Memory),
+        ATTESTATION_SECRET,
+    )
+    .expect("separate service credentials");
+    let debug = format!("{service:?}");
+    assert!(debug.contains("[REDACTED]"));
+    assert!(!debug.contains(ATTESTATION_SECRET));
+    assert!(!debug.contains("fixture-token"));
+
+    let candidate = admitted_service(KnowledgeServiceKind::Memory);
+    let bearer = candidate.bearer_token.clone();
+    assert_eq!(
+        AuthenticatedSourceService::new(candidate, &bearer),
+        Err(AdmissionError::AuthenticationUnavailable),
+    );
+}
+
+#[test]
+fn authenticated_source_tool_call_rejects_invalid_or_oversized_terminal_result() {
+    let invalid = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {"content":[],"isError":false}
+    });
+    let (endpoint, server) = authenticated_fake_memory_tool_call(invalid);
+    assert_eq!(
+        call_authenticated_source_tool(
+            &endpoint,
+            "fixture-token-123456789",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            "command_memory_context",
+            json!({"query":"readiness","limit":10}),
+        ),
+        Err(AdmissionError::InvalidResponse),
+    );
+    server.join().expect("join invalid fake MCP");
+
+    let oversized = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": {
+            "structuredContent": {"payload":"x".repeat(MAXIMUM_MCP_RESPONSE_BYTES + 1)},
+            "isError": false
+        }
+    });
+    let (endpoint, server) = authenticated_fake_memory_tool_call(oversized);
+    assert_eq!(
+        call_authenticated_source_tool(
+            &endpoint,
+            "fixture-token-123456789",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            "command_memory_context",
+            json!({"query":"readiness","limit":10}),
+        ),
+        Err(AdmissionError::ResponseTooLarge),
+    );
+    server.join().expect("join oversized fake MCP");
+}
+
+#[test]
+fn authenticated_source_tool_call_rejects_redirect_without_following_it() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind redirect MCP");
+    let endpoint = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().unwrap().port()
+    );
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept attestation");
+        let _ = read_http_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 302 Found\r\nLocation: http://192.168.1.10/steal\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .expect("write redirect");
+    });
+    assert_eq!(
+        call_authenticated_source_tool(
+            &endpoint,
+            "fixture-token-123456789",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            "command_memory_context",
+            json!({}),
+        ),
+        Err(AdmissionError::AuthenticationUnavailable),
+    );
+    server.join().expect("join redirect MCP");
+}
+
 #[test]
 fn admits_only_authenticated_literal_loopback_with_exact_identity() {
     let policy = ServiceAdmissionPolicy::for_service(

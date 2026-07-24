@@ -1,0 +1,1171 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use chrono::{DateTime, SecondsFormat, Utc};
+use futures_util::future::join_all;
+use serde::Deserialize;
+use serde_json::{json, Value};
+use tauri::Manager;
+use tokio_util::sync::CancellationToken;
+
+use super::lmstudio::{
+    AdviserExecutionError, AdviserExecutionErrorCode, AdviserExecutor, ChiefOfStaffRequest,
+    SpecialistAdviserRequest,
+};
+use super::provenance::ValidatedSource;
+use super::scheduler::{LocalModelScheduler, SchedulerError, SchedulerJobKey};
+use super::sources::{
+    FrozenSourceContext, ProductionSourceBackend, SourceBackend, SourceCollectionError,
+    SourceCollector,
+};
+use super::types::{
+    AdviserContribution, AdviserId, BriefRunState, BriefRunStatus, BriefSection, CitedFinding,
+    Classification, CommandBrief, MAX_AGGREGATE_DISSENT_ITEMS, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
+    SPECIALIST_ADVISERS,
+};
+use crate::command_services::apple_inputs::AppleBriefSelection;
+
+const MAX_CO_REQUEST_BYTES: usize = 1024;
+const MAX_SCHEDULE_ID_BYTES: usize = 256;
+const MAX_STATUS_HISTORY: usize = 32;
+const MAX_TRACKED_RUNS: usize = 64;
+
+/// A boxed, cancellation-aware future used by the orchestration seams.
+pub(crate) type BriefFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Stable adviser failure classes that never carry prompts, evidence, or provider bodies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BriefAdviserError {
+    Cancelled,
+    Failed,
+}
+
+impl From<AdviserExecutionError> for BriefAdviserError {
+    fn from(error: AdviserExecutionError) -> Self {
+        if error.code() == AdviserExecutionErrorCode::Cancelled {
+            Self::Cancelled
+        } else {
+            Self::Failed
+        }
+    }
+}
+
+/// Stable persistence failures used until Task 6 installs the encrypted store.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BriefPersistenceError {
+    #[allow(
+        dead_code,
+        reason = "Task 6's encrypted persistence implementation returns this stable failure"
+    )]
+    Cancelled,
+    #[allow(
+        dead_code,
+        reason = "Task 6's encrypted persistence implementation returns this stable failure"
+    )]
+    Failed,
+}
+
+/// Native source collection seam. Implementations must return one frozen local context.
+pub(crate) trait BriefSourceProvider: Send + Sync {
+    fn freeze<'a>(
+        &'a self,
+        run_id: &'a str,
+        co_request: &'a str,
+        observed_at: &'a str,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<FrozenSourceContext, SourceCollectionError>>;
+
+    fn recheck<'a>(
+        &'a self,
+        context: &'a FrozenSourceContext,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<(), SourceCollectionError>>;
+}
+
+/// Native adviser seam. Its Chief method accepts no integration/tool parameter.
+pub(crate) trait BriefAdviserProvider: Send + Sync {
+    fn run_specialist<'a>(
+        &'a self,
+        run_id: &'a str,
+        adviser: AdviserId,
+        sources: Vec<ValidatedSource>,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<AdviserContribution, BriefAdviserError>>;
+
+    fn run_chief_of_staff<'a>(
+        &'a self,
+        run_id: &'a str,
+        contributions: Vec<AdviserContribution>,
+        source_ledger: Vec<ValidatedSource>,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<Value, BriefAdviserError>>;
+}
+
+/// Task 6 persistence seam. Completion is impossible until this future settles.
+pub(crate) trait BriefPersistence: Send + Sync {
+    fn persist<'a>(
+        &'a self,
+        brief: &'a CommandBrief,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<(), BriefPersistenceError>>;
+}
+
+impl BriefAdviserProvider for AdviserExecutor {
+    fn run_specialist<'a>(
+        &'a self,
+        run_id: &'a str,
+        adviser: AdviserId,
+        sources: Vec<ValidatedSource>,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<AdviserContribution, BriefAdviserError>> {
+        Box::pin(async move {
+            AdviserExecutor::run_specialist(
+                self,
+                SpecialistAdviserRequest::new(
+                    format!("{run_id}:{}", adviser_label(adviser)),
+                    adviser,
+                    sources,
+                ),
+                cancellation,
+            )
+            .await
+            .map(|result| result.contribution)
+            .map_err(BriefAdviserError::from)
+        })
+    }
+
+    fn run_chief_of_staff<'a>(
+        &'a self,
+        run_id: &'a str,
+        contributions: Vec<AdviserContribution>,
+        source_ledger: Vec<ValidatedSource>,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<Value, BriefAdviserError>> {
+        Box::pin(async move {
+            AdviserExecutor::run_chief_of_staff(
+                self,
+                ChiefOfStaffRequest::new(
+                    format!("{run_id}:chief_of_staff"),
+                    contributions,
+                    source_ledger,
+                ),
+                cancellation,
+            )
+            .await
+            .map_err(BriefAdviserError::from)
+            .and_then(|result| {
+                serde_json::to_value(result.contribution).map_err(|_| BriefAdviserError::Failed)
+            })
+        })
+    }
+}
+
+/// Production adapter over Task 4's trusted `SourceCollector` and exact backend.
+#[allow(
+    dead_code,
+    reason = "Task 8 constructs this adapter when Tauri commands expose orchestration"
+)]
+pub(crate) struct CollectedSourceProvider<B> {
+    backend: B,
+    apple_selection: AppleBriefSelection,
+}
+
+#[allow(
+    dead_code,
+    reason = "Task 8 constructs this adapter when Tauri commands expose orchestration"
+)]
+impl<B> CollectedSourceProvider<B> {
+    pub(crate) const fn new(backend: B, apple_selection: AppleBriefSelection) -> Self {
+        Self {
+            backend,
+            apple_selection,
+        }
+    }
+}
+
+impl<B> BriefSourceProvider for CollectedSourceProvider<B>
+where
+    B: SourceBackend + Clone + Send + Sync + 'static,
+{
+    fn freeze<'a>(
+        &'a self,
+        run_id: &'a str,
+        co_request: &'a str,
+        observed_at: &'a str,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<FrozenSourceContext, SourceCollectionError>> {
+        let backend = self.backend.clone();
+        let apple_selection = self.apple_selection.clone();
+        let run_id = run_id.to_string();
+        let co_request = co_request.to_string();
+        let observed_at = observed_at.to_string();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let result = tokio::task::spawn_blocking(move || {
+                SourceCollector::new(backend, &run_id, &co_request, &observed_at, apple_selection)
+                    .and_then(|collector| collector.freeze())
+            })
+            .await
+            .map_err(|_| SourceCollectionError::RagInvalid)?;
+            if cancellation.is_cancelled() {
+                Err(SourceCollectionError::Cancelled)
+            } else {
+                result
+            }
+        })
+    }
+
+    fn recheck<'a>(
+        &'a self,
+        context: &'a FrozenSourceContext,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<(), SourceCollectionError>> {
+        let backend = self.backend.clone();
+        let snapshot = context.snapshot_binding().clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let result =
+                tokio::task::spawn_blocking(move || backend.recheck_rag_snapshot(&snapshot))
+                    .await
+                    .map_err(|_| SourceCollectionError::RagInvalid)?;
+            if cancellation.is_cancelled() {
+                Err(SourceCollectionError::Cancelled)
+            } else {
+                result
+            }
+        })
+    }
+}
+
+/// Bounded, trusted input for one OFFICIAL command-brief run.
+#[derive(Clone)]
+pub struct CommandBriefRequest {
+    schedule_id: String,
+    co_request: String,
+    observed_at: String,
+}
+
+impl fmt::Debug for CommandBriefRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandBriefRequest")
+            .field("schedule_id", &self.schedule_id)
+            .field("co_request", &"[REDACTED]")
+            .field("observed_at", &self.observed_at)
+            .finish()
+    }
+}
+
+impl CommandBriefRequest {
+    /// Creates a request without accepting a classification, prompt, provider, or tools.
+    pub fn new(
+        schedule_id: &str,
+        co_request: &str,
+        observed_at: &str,
+    ) -> Result<Self, OrchestratorStartError> {
+        if !valid_bounded_text(schedule_id, MAX_SCHEDULE_ID_BYTES)
+            || !valid_bounded_text(co_request, MAX_CO_REQUEST_BYTES)
+            || DateTime::parse_from_rfc3339(observed_at).is_err()
+        {
+            return Err(OrchestratorStartError);
+        }
+        Ok(Self {
+            schedule_id: schedule_id.to_string(),
+            co_request: co_request.to_string(),
+            observed_at: observed_at.to_string(),
+        })
+    }
+}
+
+/// A redacted start error for invalid or capacity-exhausted run requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrchestratorStartError;
+
+impl fmt::Display for OrchestratorStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("command brief run rejected")
+    }
+}
+
+impl std::error::Error for OrchestratorStartError {}
+
+struct RunRecord {
+    cancellation: CancellationToken,
+    history: VecDeque<BriefRunStatus>,
+    result: Option<CommandBrief>,
+}
+
+struct OrchestratorInner {
+    scheduler: LocalModelScheduler,
+    sources: Arc<dyn BriefSourceProvider>,
+    advisers: Arc<dyn BriefAdviserProvider>,
+    persistence: Arc<dyn BriefPersistence>,
+    runs: Mutex<BTreeMap<String, RunRecord>>,
+}
+
+/// Trusted state machine for one or more bounded local Daily Command Brief runs.
+#[derive(Clone)]
+pub struct CommandBriefOrchestrator {
+    inner: Arc<OrchestratorInner>,
+}
+
+impl fmt::Debug for CommandBriefOrchestrator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CommandBriefOrchestrator")
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommandBriefOrchestrator {
+    /// Installs the app-owned scheduler and native-only orchestration seams.
+    pub(crate) fn new(
+        scheduler: LocalModelScheduler,
+        sources: Arc<dyn BriefSourceProvider>,
+        advisers: Arc<dyn BriefAdviserProvider>,
+        persistence: Arc<dyn BriefPersistence>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(OrchestratorInner {
+                scheduler,
+                sources,
+                advisers,
+                persistence,
+                runs: Mutex::new(BTreeMap::new()),
+            }),
+        }
+    }
+
+    /// Constructs the real local-only runtime from protected command-service
+    /// configuration, Keychain credentials, the signed Apple allowlist, and
+    /// the app-owned scheduler.
+    #[allow(
+        dead_code,
+        reason = "Task 8 installs the production orchestrator into AppState"
+    )]
+    pub(crate) async fn production(
+        app: tauri::AppHandle,
+        scheduler: LocalModelScheduler,
+        model: &str,
+        timeout: Duration,
+        persistence: Arc<dyn BriefPersistence>,
+    ) -> Result<Self, ProductionOrchestratorError> {
+        let backend = ProductionSourceBackend::from_app(app.clone())
+            .await
+            .map_err(|_| ProductionOrchestratorError)?;
+        let config_path = app
+            .path()
+            .app_config_dir()
+            .map_err(|_| ProductionOrchestratorError)?
+            .join("command-apple-inputs.json");
+        let apple_selection = AppleBriefSelection::load_protected(&config_path)
+            .map_err(|_| ProductionOrchestratorError)?;
+        let executor = AdviserExecutor::from_catalog(model.to_string(), timeout)
+            .map_err(|_| ProductionOrchestratorError)?;
+        Ok(Self::new(
+            scheduler,
+            Arc::new(CollectedSourceProvider::new(backend, apple_selection)),
+            Arc::new(executor),
+            persistence,
+        ))
+    }
+
+    /// Starts a unique trusted run and returns immediately with its UUID.
+    pub fn start(&self, request: CommandBriefRequest) -> Result<String, OrchestratorStartError> {
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let cancellation = CancellationToken::new();
+        let queued = status_value(
+            &run_id,
+            &request.schedule_id,
+            BriefRunState::Queued,
+            &[],
+            None,
+        )
+        .map_err(|_| OrchestratorStartError)?;
+        {
+            let mut runs = self.inner.runs.lock().map_err(|_| OrchestratorStartError)?;
+            if runs.len() >= MAX_TRACKED_RUNS {
+                let removable = runs.iter().find_map(|(id, record)| {
+                    record
+                        .history
+                        .back()
+                        .and_then(|status| {
+                            let value = serde_json::to_value(status).ok()?;
+                            serde_json::from_value::<BriefRunState>(value.get("state")?.clone())
+                                .ok()
+                        })
+                        .filter(|state| is_terminal(*state))
+                        .map(|_| id.clone())
+                });
+                if let Some(removable) = removable {
+                    runs.remove(&removable);
+                } else {
+                    return Err(OrchestratorStartError);
+                }
+            }
+            runs.insert(
+                run_id.clone(),
+                RunRecord {
+                    cancellation: cancellation.clone(),
+                    history: VecDeque::from([queued]),
+                    result: None,
+                },
+            );
+        }
+        let orchestrator = self.clone();
+        let spawned_run_id = run_id.clone();
+        tokio::spawn(async move {
+            orchestrator
+                .run(spawned_run_id, request, cancellation)
+                .await;
+        });
+        Ok(run_id)
+    }
+
+    /// Returns the latest bounded status for a run.
+    pub fn status(&self, run_id: &str) -> Option<BriefRunStatus> {
+        self.inner
+            .runs
+            .lock()
+            .ok()?
+            .get(run_id)?
+            .history
+            .back()
+            .cloned()
+    }
+
+    /// Returns at most 32 metadata-only lifecycle states.
+    pub fn history(&self, run_id: &str) -> Vec<BriefRunStatus> {
+        self.inner
+            .runs
+            .lock()
+            .ok()
+            .and_then(|runs| {
+                runs.get(run_id)
+                    .map(|record| record.history.iter().cloned().collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Returns the immutable validated brief only after persistence succeeds.
+    pub fn result(&self, run_id: &str) -> Option<CommandBrief> {
+        self.inner.runs.lock().ok()?.get(run_id)?.result.clone()
+    }
+
+    /// Cancels collection, queued/running model work, or persistence.
+    pub fn cancel(&self, run_id: &str) -> bool {
+        self.inner
+            .runs
+            .lock()
+            .ok()
+            .and_then(|runs| runs.get(run_id).map(|record| record.cancellation.clone()))
+            .is_some_and(|cancellation| {
+                cancellation.cancel();
+                true
+            })
+    }
+
+    async fn run(
+        &self,
+        run_id: String,
+        request: CommandBriefRequest,
+        cancellation: CancellationToken,
+    ) {
+        let mut restarted = false;
+        loop {
+            if cancellation.is_cancelled() {
+                self.terminal(
+                    &run_id,
+                    &request.schedule_id,
+                    BriefRunState::Cancelled,
+                    &[],
+                    None,
+                    None,
+                );
+                return;
+            }
+            self.transition(
+                &run_id,
+                &request.schedule_id,
+                BriefRunState::CollectingSources,
+                &[],
+                None,
+            );
+            let context = match self
+                .inner
+                .sources
+                .freeze(
+                    &run_id,
+                    &request.co_request,
+                    &request.observed_at,
+                    cancellation.clone(),
+                )
+                .await
+            {
+                Ok(context) => context,
+                Err(SourceCollectionError::SnapshotChanged) if !restarted => {
+                    restarted = true;
+                    continue;
+                }
+                Err(SourceCollectionError::Cancelled) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Cancelled,
+                        &[],
+                        None,
+                        None,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    let code = source_error_code(&error);
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &[],
+                        Some(code),
+                        None,
+                    );
+                    return;
+                }
+            };
+
+            self.transition(
+                &run_id,
+                &request.schedule_id,
+                BriefRunState::RunningSpecialists,
+                context.degraded_sections(),
+                None,
+            );
+            let jobs = SPECIALIST_ADVISERS.into_iter().map(|adviser| {
+                let scheduler = self.inner.scheduler.clone();
+                let advisers = Arc::clone(&self.inner.advisers);
+                let sources = context.validated_sources().to_vec();
+                let token = cancellation.clone();
+                let key = SchedulerJobKey::new(&run_id, adviser);
+                let specialist_run_id = run_id.clone();
+                async move {
+                    let key = key.map_err(|_| SchedulerError::Unavailable)?;
+                    scheduler
+                        .schedule(key, token.clone(), move |job_token| async move {
+                            advisers
+                                .run_specialist(&specialist_run_id, adviser, sources, job_token)
+                                .await
+                        })
+                        .await
+                }
+            });
+            let specialist_results = join_all(jobs).await;
+            if cancellation.is_cancelled()
+                || specialist_results
+                    .iter()
+                    .any(|result| matches!(result, Err(SchedulerError::Cancelled)))
+            {
+                self.terminal(
+                    &run_id,
+                    &request.schedule_id,
+                    BriefRunState::Cancelled,
+                    context.degraded_sections(),
+                    None,
+                    None,
+                );
+                return;
+            }
+            let ledger_ids = context
+                .ledger()
+                .iter()
+                .map(|source| source.ledger_id().to_string())
+                .collect::<BTreeSet<_>>();
+            let mut contributions = Vec::with_capacity(SPECIALIST_ADVISERS.len());
+            let mut failed_advisers = Vec::new();
+            for (adviser, result) in SPECIALIST_ADVISERS.into_iter().zip(specialist_results) {
+                match result {
+                    Ok(contribution) => contributions.push(contribution),
+                    Err(_) => {
+                        failed_advisers.push(adviser);
+                        let limitation = adviser_unavailable(adviser);
+                        let placeholder =
+                            limitation_only_contribution(adviser, &limitation, &ledger_ids);
+                        let Ok(placeholder) = placeholder else {
+                            self.terminal(
+                                &run_id,
+                                &request.schedule_id,
+                                BriefRunState::Failed,
+                                context.degraded_sections(),
+                                Some("brief_assembly_rejected"),
+                                None,
+                            );
+                            return;
+                        };
+                        contributions.push(placeholder);
+                    }
+                }
+            }
+
+            match self
+                .inner
+                .sources
+                .recheck(&context, cancellation.clone())
+                .await
+            {
+                Ok(()) => {}
+                Err(SourceCollectionError::SnapshotChanged) if !restarted => {
+                    restarted = true;
+                    continue;
+                }
+                Err(SourceCollectionError::SnapshotChanged) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        context.degraded_sections(),
+                        Some("snapshot_changed"),
+                        None,
+                    );
+                    return;
+                }
+                Err(SourceCollectionError::Cancelled) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Cancelled,
+                        context.degraded_sections(),
+                        None,
+                        None,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        context.degraded_sections(),
+                        Some(source_error_code(&error)),
+                        None,
+                    );
+                    return;
+                }
+            }
+
+            let mut degraded = context.degraded_sections().to_vec();
+            degraded.extend(failed_advisers.iter().copied().map(section_for_adviser));
+            degraded.sort();
+            degraded.dedup();
+            self.transition(
+                &run_id,
+                &request.schedule_id,
+                BriefRunState::Consolidating,
+                &degraded,
+                None,
+            );
+            let chief_key = match SchedulerJobKey::new(&run_id, AdviserId::ChiefOfStaff) {
+                Ok(key) => key,
+                Err(_) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some("chief_of_staff_output_rejected"),
+                        None,
+                    );
+                    return;
+                }
+            };
+            let advisers = Arc::clone(&self.inner.advisers);
+            let chief_contributions = contributions.clone();
+            let chief_sources = context.validated_sources().to_vec();
+            let chief_run_id = run_id.clone();
+            let chief = self
+                .inner
+                .scheduler
+                .schedule(
+                    chief_key,
+                    cancellation.clone(),
+                    move |job_token| async move {
+                        advisers
+                            .run_chief_of_staff(
+                                &chief_run_id,
+                                chief_contributions,
+                                chief_sources,
+                                job_token,
+                            )
+                            .await
+                    },
+                )
+                .await;
+            let chief_value = match chief {
+                Ok(value) => value,
+                Err(SchedulerError::Cancelled)
+                | Err(SchedulerError::Task(BriefAdviserError::Cancelled)) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Cancelled,
+                        &degraded,
+                        None,
+                        None,
+                    );
+                    return;
+                }
+                Err(_) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some("chief_of_staff_failed"),
+                        None,
+                    );
+                    return;
+                }
+            };
+            let chief = match validate_chief_output(chief_value, &contributions, &ledger_ids) {
+                Ok(chief) => chief,
+                Err(()) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some("chief_of_staff_output_rejected"),
+                        None,
+                    );
+                    return;
+                }
+            };
+
+            match self
+                .inner
+                .sources
+                .recheck(&context, cancellation.clone())
+                .await
+            {
+                Ok(()) => {}
+                Err(SourceCollectionError::SnapshotChanged) if !restarted => {
+                    restarted = true;
+                    continue;
+                }
+                Err(SourceCollectionError::SnapshotChanged) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some("snapshot_changed"),
+                        None,
+                    );
+                    return;
+                }
+                Err(SourceCollectionError::Cancelled) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Cancelled,
+                        &degraded,
+                        None,
+                        None,
+                    );
+                    return;
+                }
+                Err(error) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some(source_error_code(&error)),
+                        None,
+                    );
+                    return;
+                }
+            }
+
+            let brief = match assemble_brief(
+                &run_id,
+                &request,
+                &context,
+                contributions,
+                chief,
+                &failed_advisers,
+                &degraded,
+            ) {
+                Ok(brief) => brief,
+                Err(()) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some("brief_assembly_rejected"),
+                        None,
+                    );
+                    return;
+                }
+            };
+            self.transition(
+                &run_id,
+                &request.schedule_id,
+                BriefRunState::Persisting,
+                &degraded,
+                None,
+            );
+            match self
+                .inner
+                .persistence
+                .persist(&brief, cancellation.clone())
+                .await
+            {
+                Ok(()) if !cancellation.is_cancelled() => {}
+                Ok(()) | Err(BriefPersistenceError::Cancelled) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Cancelled,
+                        &degraded,
+                        None,
+                        None,
+                    );
+                    return;
+                }
+                Err(BriefPersistenceError::Failed) => {
+                    self.terminal(
+                        &run_id,
+                        &request.schedule_id,
+                        BriefRunState::Failed,
+                        &degraded,
+                        Some("brief_persistence_failed"),
+                        None,
+                    );
+                    return;
+                }
+            }
+            let terminal = if degraded.is_empty()
+                && context.limitations().is_empty()
+                && failed_advisers.is_empty()
+            {
+                BriefRunState::Completed
+            } else {
+                BriefRunState::Degraded
+            };
+            self.terminal(
+                &run_id,
+                &request.schedule_id,
+                terminal,
+                &degraded,
+                None,
+                Some(brief),
+            );
+            return;
+        }
+    }
+
+    fn transition(
+        &self,
+        run_id: &str,
+        schedule_id: &str,
+        state: BriefRunState,
+        degraded: &[BriefSection],
+        error: Option<&str>,
+    ) {
+        let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
+            return;
+        };
+        if let Ok(mut runs) = self.inner.runs.lock() {
+            if let Some(record) = runs.get_mut(run_id) {
+                if record.history.len() == MAX_STATUS_HISTORY {
+                    record.history.pop_front();
+                }
+                record.history.push_back(status);
+            }
+        }
+    }
+
+    fn terminal(
+        &self,
+        run_id: &str,
+        schedule_id: &str,
+        state: BriefRunState,
+        degraded: &[BriefSection],
+        error: Option<&str>,
+        result: Option<CommandBrief>,
+    ) {
+        self.transition(run_id, schedule_id, state, degraded, error);
+        if let Ok(mut runs) = self.inner.runs.lock() {
+            if let Some(record) = runs.get_mut(run_id) {
+                record.result = result;
+            }
+        }
+    }
+}
+
+/// Redacted failure to construct the protected production runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "Task 8 installs the production orchestrator into AppState"
+)]
+pub(crate) struct ProductionOrchestratorError;
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RawChiefOutput {
+    classification: Classification,
+    adviser: AdviserId,
+    findings: Vec<Value>,
+    limitations: Vec<String>,
+    dissent: Vec<String>,
+}
+
+struct ValidatedChief {
+    findings: Vec<CitedFinding>,
+    limitations: Vec<String>,
+}
+
+fn validate_chief_output(
+    value: Value,
+    contributions: &[AdviserContribution],
+    ledger_ids: &BTreeSet<String>,
+) -> Result<ValidatedChief, ()> {
+    let raw: RawChiefOutput = serde_json::from_value(value).map_err(|_| ())?;
+    if raw.classification != Classification::Official
+        || raw.adviser != AdviserId::ChiefOfStaff
+        || raw.findings.len() > MAX_ARRAY_ITEMS
+        || !valid_text_array(&raw.limitations, MAX_ARRAY_ITEMS)
+        || !valid_text_array(&raw.dissent, MAX_AGGREGATE_DISSENT_ITEMS)
+    {
+        return Err(());
+    }
+    let expected_dissent = contributions
+        .iter()
+        .flat_map(|contribution| contribution.dissent().iter().cloned())
+        .collect::<Vec<_>>();
+    if raw.dissent != expected_dissent {
+        return Err(());
+    }
+    let allowed = contributions
+        .iter()
+        .flat_map(|contribution| contribution.findings())
+        .map(|finding| (finding.text().to_string(), finding.source_ids().to_vec()))
+        .collect::<BTreeSet<_>>();
+    let mut seen = BTreeSet::new();
+    let mut findings = Vec::with_capacity(raw.findings.len());
+    for value in raw.findings {
+        let finding = CitedFinding::parse_for_ledger(value, ledger_ids).map_err(|_| ())?;
+        let identity = (finding.text().to_string(), finding.source_ids().to_vec());
+        if !allowed.contains(&identity) || !seen.insert(identity) {
+            return Err(());
+        }
+        findings.push(finding);
+    }
+    Ok(ValidatedChief {
+        findings,
+        limitations: raw.limitations,
+    })
+}
+
+fn assemble_brief(
+    run_id: &str,
+    request: &CommandBriefRequest,
+    context: &FrozenSourceContext,
+    contributions: Vec<AdviserContribution>,
+    chief: ValidatedChief,
+    failed_advisers: &[AdviserId],
+    degraded: &[BriefSection],
+) -> Result<CommandBrief, ()> {
+    let mut sections = BTreeMap::<BriefSection, Vec<CitedFinding>>::from([
+        (BriefSection::Today, chief.findings),
+        (BriefSection::Operations, Vec::new()),
+        (BriefSection::Navigation, Vec::new()),
+        (BriefSection::DailyRoutine, Vec::new()),
+        (BriefSection::Reports, Vec::new()),
+        (BriefSection::Planning306090, Vec::new()),
+        (BriefSection::Decisions, Vec::new()),
+        (BriefSection::ConflictsAndGaps, Vec::new()),
+        (BriefSection::Sources, Vec::new()),
+    ]);
+    for contribution in &contributions {
+        sections.insert(contribution.section(), contribution.findings().to_vec());
+    }
+    let dissent = contributions
+        .iter()
+        .flat_map(|contribution| contribution.dissent().iter().cloned())
+        .collect::<Vec<_>>();
+    let missing_information = bounded_unique_text(
+        context
+            .limitations()
+            .iter()
+            .cloned()
+            .chain(chief.limitations)
+            .chain(failed_advisers.iter().copied().map(adviser_unavailable)),
+    );
+    let value = json!({
+        "version": 1,
+        "classification": "OFFICIAL",
+        "generatedAt": timestamp(),
+        "runId": run_id,
+        "scheduleId": request.schedule_id,
+        "snapshotId": context.snapshot_id(),
+        "sections": sections,
+        "degradedSections": degraded,
+        "missingInformation": missing_information,
+        "dissent": dissent,
+        "sourceLedger": context.ledger(),
+        "sourceFreshness": {
+            "classification": "OFFICIAL",
+            "asOf": context.observed_at(),
+            "staleSourceIds": []
+        },
+        "contributions": contributions,
+        "advisoryLimitation": super::types::ADVISORY_LIMITATION
+    });
+    CommandBrief::try_from(value).map_err(|_| ())
+}
+
+fn limitation_only_contribution(
+    adviser: AdviserId,
+    limitation: &str,
+    ledger_ids: &BTreeSet<String>,
+) -> Result<AdviserContribution, ()> {
+    AdviserContribution::parse_for_adviser(
+        json!({
+            "classification": "OFFICIAL",
+            "adviser": adviser,
+            "section": section_for_adviser(adviser),
+            "findings": [],
+            "confidence": 0.0,
+            "limitations": [limitation],
+            "dissent": [],
+            "proposedActions": []
+        }),
+        adviser,
+        ledger_ids,
+    )
+    .map_err(|_| ())
+}
+
+fn section_for_adviser(adviser: AdviserId) -> BriefSection {
+    match adviser {
+        AdviserId::Operations => BriefSection::Operations,
+        AdviserId::Navigation => BriefSection::Navigation,
+        AdviserId::DailyRoutine => BriefSection::DailyRoutine,
+        AdviserId::Reporting => BriefSection::Reports,
+        AdviserId::Plans => BriefSection::Planning306090,
+        AdviserId::ChiefOfStaff => BriefSection::ConflictsAndGaps,
+    }
+}
+
+fn adviser_unavailable(adviser: AdviserId) -> String {
+    format!(
+        "{} adviser output was unavailable.",
+        adviser_display(adviser)
+    )
+}
+
+fn adviser_display(adviser: AdviserId) -> &'static str {
+    match adviser {
+        AdviserId::ChiefOfStaff => "Chief of Staff",
+        AdviserId::Operations => "Operations",
+        AdviserId::Navigation => "Navigation",
+        AdviserId::DailyRoutine => "Daily Routine",
+        AdviserId::Reporting => "Reporting",
+        AdviserId::Plans => "Plans",
+    }
+}
+
+fn adviser_label(adviser: AdviserId) -> &'static str {
+    match adviser {
+        AdviserId::ChiefOfStaff => "chief_of_staff",
+        AdviserId::Operations => "operations",
+        AdviserId::Navigation => "navigation",
+        AdviserId::DailyRoutine => "daily_routine",
+        AdviserId::Reporting => "reporting",
+        AdviserId::Plans => "plans",
+    }
+}
+
+fn source_error_code(error: &SourceCollectionError) -> &'static str {
+    match error {
+        SourceCollectionError::Cancelled => "cancelled",
+        SourceCollectionError::SnapshotChanged => "snapshot_changed",
+        SourceCollectionError::RagUnavailable => "rag_unavailable",
+        SourceCollectionError::RagStale => "rag_stale",
+        SourceCollectionError::RagInvalid => "rag_invalid",
+        SourceCollectionError::InvalidRequest => "source_request_rejected",
+        SourceCollectionError::InvalidTime => "source_time_rejected",
+        SourceCollectionError::ConflictingSourceIdentity => "source_identity_conflict",
+    }
+}
+
+fn status_value(
+    run_id: &str,
+    schedule_id: &str,
+    state: BriefRunState,
+    degraded: &[BriefSection],
+    error: Option<&str>,
+) -> Result<BriefRunStatus, ()> {
+    BriefRunStatus::try_from(json!({
+        "classification": "OFFICIAL",
+        "runId": run_id,
+        "scheduleId": schedule_id,
+        "state": state,
+        "updatedAt": timestamp(),
+        "degradedSections": degraded,
+        "error": error
+    }))
+    .map_err(|_| ())
+}
+
+fn valid_bounded_text(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.len() <= maximum
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_text_array(values: &[String], maximum_items: usize) -> bool {
+    values.len() <= maximum_items
+        && values
+            .iter()
+            .all(|value| valid_bounded_text(value, MAX_TEXT_BYTES))
+}
+
+fn bounded_unique_text(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut bounded = Vec::new();
+    for value in values {
+        if !valid_bounded_text(&value, MAX_TEXT_BYTES) || !seen.insert(value.clone()) {
+            continue;
+        }
+        if bounded.len() == MAX_ARRAY_ITEMS {
+            break;
+        }
+        bounded.push(value);
+    }
+    bounded
+}
+
+fn timestamp() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn is_terminal(state: BriefRunState) -> bool {
+    matches!(
+        state,
+        BriefRunState::Completed
+            | BriefRunState::Degraded
+            | BriefRunState::Cancelled
+            | BriefRunState::Failed
+    )
+}
