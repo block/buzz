@@ -959,6 +959,19 @@ pub async fn cmd_add_channel_member(
     pubkey: &str,
     role: Option<&str>,
 ) -> Result<(), CliError> {
+    println!(
+        "{}",
+        add_channel_member(client, channel_id, pubkey, role).await?
+    );
+    Ok(())
+}
+
+async fn add_channel_member(
+    client: &BuzzClient,
+    channel_id: &str,
+    pubkey: &str,
+    role: Option<&str>,
+) -> Result<String, CliError> {
     validate_hex64(pubkey)?;
     let channel_uuid = parse_uuid(channel_id)?;
 
@@ -980,7 +993,24 @@ pub async fn cmd_add_channel_member(
 
     let event = client.sign_event(builder)?;
     let resp = client.submit_event(event).await?;
-    println!("{}", normalize_write_response(&resp));
+    Ok(normalize_write_response(&resp))
+}
+
+pub async fn cmd_add_group_to_channel(
+    client: &BuzzClient,
+    channel_id: &str,
+    group_reference: &str,
+) -> Result<(), CliError> {
+    let group = crate::commands::groups::resolve_group(client, group_reference).await?;
+    let mut responses = Vec::with_capacity(group.members.len());
+    for pubkey in &group.members {
+        let response = add_channel_member(client, channel_id, pubkey, None).await?;
+        responses.push(
+            serde_json::from_str::<serde_json::Value>(&response)
+                .unwrap_or(serde_json::Value::String(response)),
+        );
+    }
+    println!("{}", serde_json::to_string(&responses).unwrap_or_default());
     Ok(())
 }
 
@@ -1158,6 +1188,9 @@ pub async fn dispatch(
             pubkey,
             role,
         } => cmd_add_channel_member(client, &channel, &pubkey, role.as_deref()).await,
+        ChannelsCmd::AddGroup { channel, group } => {
+            cmd_add_group_to_channel(client, &channel, &group).await
+        }
         ChannelsCmd::RemoveMember { channel, pubkey } => {
             cmd_remove_channel_member(client, &channel, &pubkey).await
         }

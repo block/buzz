@@ -182,6 +182,9 @@ enum Cmd {
     /// Create, configure, and manage channels
     #[command(subcommand)]
     Channels(ChannelsCmd),
+    /// Create and manage community user groups
+    #[command(subcommand)]
+    Groups(GroupsCmd),
     /// Get and set channel canvas documents
     #[command(subcommand)]
     Canvas(CanvasCmd),
@@ -656,6 +659,14 @@ pub enum ChannelsCmd {
         #[arg(long)]
         role: Option<String>,
     },
+    /// Add every current member of a user group to a channel
+    #[command(name = "add-group")]
+    AddGroup {
+        /// Channel UUID
+        channel: String,
+        /// User-group UUID or handle
+        group: String,
+    },
     /// Remove a member from a channel
     #[command(name = "remove-member")]
     RemoveMember {
@@ -672,6 +683,78 @@ pub enum ChannelsCmd {
         /// Policy: anyone | owner_only | nobody
         #[arg(long)]
         policy: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GroupsCmd {
+    /// Create a user group
+    Create {
+        /// Mention handle (without @)
+        #[arg(long)]
+        handle: String,
+        /// Display name
+        #[arg(long)]
+        name: String,
+        /// Optional description
+        #[arg(long)]
+        description: Option<String>,
+        /// Initial member pubkey; repeat for multiple members
+        #[arg(long = "member")]
+        members: Vec<String>,
+        /// Default public channel UUID; repeat for multiple channels
+        #[arg(long = "default-channel")]
+        default_channels: Vec<String>,
+    },
+    /// Edit group metadata or default channels
+    Edit {
+        /// User-group UUID or handle
+        group: String,
+        /// New mention handle
+        #[arg(long)]
+        handle: Option<String>,
+        /// New display name
+        #[arg(long)]
+        name: Option<String>,
+        /// New description; pass an empty string to clear
+        #[arg(long)]
+        description: Option<String>,
+        /// Replacement default public channel UUID; repeat for multiple channels
+        #[arg(long = "default-channel")]
+        default_channels: Vec<String>,
+        /// Clear all default channels
+        #[arg(long, conflicts_with = "default_channels")]
+        clear_default_channels: bool,
+    },
+    /// Delete a user group
+    Delete {
+        /// User-group UUID or handle
+        group: String,
+    },
+    /// List active user groups
+    List,
+    /// Get an active user group by UUID or handle
+    Get {
+        /// User-group UUID or handle
+        group: String,
+    },
+    /// Add one or more group members
+    #[command(name = "add-members")]
+    AddMembers {
+        /// User-group UUID or handle
+        group: String,
+        /// Member pubkey; repeat for multiple members
+        #[arg(long = "member", visible_alias = "pubkey", required = true)]
+        members: Vec<String>,
+    },
+    /// Remove one or more group members
+    #[command(name = "remove-members")]
+    RemoveMembers {
+        /// User-group UUID or handle
+        group: String,
+        /// Member pubkey; repeat for multiple members
+        #[arg(long = "member", visible_alias = "pubkey", required = true)]
+        members: Vec<String>,
     },
 }
 
@@ -1771,6 +1854,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Agents(sub) => commands::agents::dispatch(sub, &client).await,
         Cmd::Messages(sub) => commands::messages::dispatch(sub, &client, &cli.format).await,
         Cmd::Channels(sub) => commands::channels::dispatch(sub, &client, &cli.format).await,
+        Cmd::Groups(sub) => commands::groups::dispatch(sub, &client, &cli.format).await,
         Cmd::Canvas(sub) => commands::channels::dispatch_canvas(sub, &client).await,
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
@@ -1804,6 +1888,55 @@ mod tests {
     }
 
     #[test]
+    fn parses_group_create_repeated_values() {
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "groups",
+            "create",
+            "--handle",
+            "ios-team",
+            "--name",
+            "iOS Team",
+            "--member",
+            "aaaa",
+            "--member",
+            "bbbb",
+            "--default-channel",
+            "11111111-1111-1111-1111-111111111111",
+        ])
+        .expect("group create parses");
+        let Cmd::Groups(GroupsCmd::Create {
+            handle,
+            members,
+            default_channels,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected groups create");
+        };
+        assert_eq!(handle, "ios-team");
+        assert_eq!(members, ["aaaa", "bbbb"]);
+        assert_eq!(default_channels, ["11111111-1111-1111-1111-111111111111"]);
+    }
+
+    #[test]
+    fn parses_channel_add_group_positionally() {
+        let cli = Cli::try_parse_from([
+            "buzz",
+            "channels",
+            "add-group",
+            "11111111-1111-1111-1111-111111111111",
+            "ios-team",
+        ])
+        .expect("channel add-group parses");
+        let Cmd::Channels(ChannelsCmd::AddGroup { channel, group }) = cli.command else {
+            panic!("expected channels add-group");
+        };
+        assert_eq!(channel, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(group, "ios-team");
+    }
+
+    #[test]
     fn command_inventory_is_stable() {
         let expected_groups: Vec<&str> = vec![
             "agents",
@@ -1812,6 +1945,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "groups",
             "issues",
             "media",
             "mem",
@@ -1894,6 +2028,7 @@ mod tests {
         assert_eq!(
             names(&cmd, "channels"),
             vec![
+                "add-group",
                 "add-member",
                 "archive",
                 "create",
@@ -1910,6 +2045,18 @@ mod tests {
                 "topic",
                 "unarchive",
                 "update"
+            ]
+        );
+        assert_eq!(
+            names(&cmd, "groups"),
+            vec![
+                "add-members",
+                "create",
+                "delete",
+                "edit",
+                "get",
+                "list",
+                "remove-members"
             ]
         );
         assert_eq!(names(&cmd, "canvas"), vec!["get", "set"]);
@@ -1997,10 +2144,11 @@ mod tests {
         let expected: Vec<(&str, usize)> = vec![
             ("agents", 5),
             ("canvas", 2),
-            ("channels", 16),
+            ("channels", 17),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("groups", 7),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),

@@ -1,5 +1,5 @@
 use buzz_sdk::{DeleteMessageOptions, DiffMeta, ThreadRef, VoteDirection};
-use nostr::PublicKey;
+use nostr::{PublicKey, Tag};
 use uuid::Uuid;
 
 use crate::client::{normalize_events, normalize_write_response, BuzzClient};
@@ -119,83 +119,133 @@ async fn resolve_channel_id(client: &BuzzClient, event_id: &str) -> Result<Uuid,
     )))
 }
 
-/// Resolve `@name` mentions in `content` against this channel's members.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MentionExpansion {
+    pubkeys: Vec<String>,
+    groups: Vec<GroupMention>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GroupMention {
+    group_id: String,
+    handle: String,
+}
+
+fn resolve_mentions_from_data(
+    content: &str,
+    member_pubkeys: &[String],
+    profile_events: &[serde_json::Value],
+    groups: &[crate::commands::groups::GroupSnapshot],
+) -> MentionExpansion {
+    let channel_members: std::collections::HashSet<&str> =
+        member_pubkeys.iter().map(String::as_str).collect();
+    let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut known_names: Vec<String> = Vec::new();
+
+    for event in profile_events {
+        let Some(pubkey) = event.get("pubkey").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Some(content_json) = event.get("content").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let Ok(profile) = serde_json::from_str::<serde_json::Value>(content_json) else {
+            continue;
+        };
+        let Some(name) = profile
+            .get("display_name")
+            .or_else(|| profile.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            continue;
+        };
+        name_to_pubkeys
+            .entry(name.to_ascii_lowercase())
+            .or_default()
+            .push(pubkey.to_string());
+        known_names.push(name.to_string());
+    }
+    known_names.extend(groups.iter().map(|group| group.handle.clone()));
+
+    let known_refs: Vec<&str> = known_names.iter().map(String::as_str).collect();
+    let names = extract_at_mentions_with_known(content, &known_refs);
+    let mut pubkeys = Vec::new();
+    let mut seen_pubkeys = std::collections::HashSet::new();
+    let mut mentioned_groups = Vec::new();
+    let mut seen_groups = std::collections::HashSet::new();
+
+    for name in names {
+        if let Some(matches) = name_to_pubkeys.get(&name) {
+            for pubkey in matches {
+                if seen_pubkeys.insert(pubkey.clone()) {
+                    pubkeys.push(pubkey.clone());
+                }
+            }
+        }
+        for group in groups.iter().filter(|group| group.handle == name) {
+            if seen_groups.insert(group.group_id.clone()) {
+                mentioned_groups.push(GroupMention {
+                    group_id: group.group_id.clone(),
+                    handle: group.handle.clone(),
+                });
+            }
+            for pubkey in &group.members {
+                if channel_members.contains(pubkey.as_str()) && seen_pubkeys.insert(pubkey.clone())
+                {
+                    pubkeys.push(pubkey.clone());
+                }
+            }
+        }
+    }
+
+    MentionExpansion {
+        pubkeys,
+        groups: mentioned_groups,
+    }
+}
+
+/// Resolve individual and user-group mentions against current relay snapshots.
 ///
-/// Queries kind 39002 (channel members) then kind 0 (profiles), parses
-/// display names once, and feeds them to [`extract_at_mentions_with_known`]
-/// for multi-word matching. On any I/O or parse failure, returns an empty
-/// vec — auto-tagging is best-effort and must never block a send.
+/// Queries kind 39002 channel membership, kind 0 profiles, and active kind
+/// 39100 user groups. All lookups are best-effort so an unavailable mention
+/// index never blocks sending the author's text.
 async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
     content: &str,
-) -> Vec<String> {
+) -> MentionExpansion {
     if !content.contains('@') {
-        return vec![];
+        return MentionExpansion::default();
     }
 
-    // 1. Membership list (kind 39002 is parameterized-replaceable, addressed by `d` tag).
     let members_filter = serde_json::json!({
         "kinds": [39002],
         "#d": [channel_id],
         "limit": 1,
     });
-    let member_pubkeys = match fetch_member_pubkeys(client, &members_filter).await {
-        Some(pks) if !pks.is_empty() => pks,
-        _ => return vec![],
+    let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
+        .await
+        .unwrap_or_default();
+
+    let profile_events = if member_pubkeys.is_empty() {
+        Vec::new()
+    } else {
+        let profiles_filter = serde_json::json!({
+            "kinds": [0],
+            "authors": member_pubkeys,
+            "limit": member_pubkeys.len(),
+        });
+        fetch_events(client, &profiles_filter)
+            .await
+            .unwrap_or_default()
     };
 
-    // 2. Profiles for those members (kind 0).
-    let profiles_filter = serde_json::json!({
-        "kinds": [0],
-        "authors": member_pubkeys,
-        "limit": member_pubkeys.len(),
-    });
-    let profile_events = match fetch_events(client, &profiles_filter).await {
-        Some(v) => v,
-        None => return vec![],
-    };
-
-    // 3. Single parse: extract (pubkey, display_name) pairs from profile JSON.
-    let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    let mut display_names: Vec<String> = Vec::new();
-    for e in &profile_events {
-        let Some(pubkey) = e.get("pubkey").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(content_json) = e.get("content").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(content_json) else {
-            continue;
-        };
-        let Some(name) = v
-            .get("display_name")
-            .or_else(|| v.get("name"))
-            .and_then(|n| n.as_str())
-            .filter(|n| !n.is_empty())
-        else {
-            continue;
-        };
-        let lower = name.to_ascii_lowercase();
-        name_to_pubkeys
-            .entry(lower)
-            .or_default()
-            .push(pubkey.to_string());
-        display_names.push(name.to_string());
-    }
-
-    // 4. Two-pass extraction: known multi-word names first, single-word fallback.
-    let known_refs: Vec<&str> = display_names.iter().map(|s| s.as_str()).collect();
-    let names = extract_at_mentions_with_known(content, &known_refs);
-
-    // 5. Look up matched names → pubkeys via the map we already built.
-    names
-        .iter()
-        .flat_map(|n| name_to_pubkeys.get(n).into_iter().flatten())
-        .cloned()
-        .collect()
+    let groups = crate::commands::groups::fetch_active_groups(client)
+        .await
+        .unwrap_or_default();
+    resolve_mentions_from_data(content, &member_pubkeys, &profile_events, &groups)
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
@@ -528,14 +578,20 @@ pub async fn cmd_send_message(
 
     // Resolve @name mentions in the author-written body only — not the media markdown we
     // append above, which is derived from upload metadata and can't carry `@names`.
-    let mut auto_resolved = resolve_content_mentions(client, &p.channel_id, &p.content).await;
+    let mut mention_expansion = resolve_content_mentions(client, &p.channel_id, &p.content).await;
 
     // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
     let stripped = strip_code_regions(&p.content);
     let uri_pubkeys = extract_nostr_uris(&stripped);
-    merge_mentions(&mut auto_resolved, &uri_pubkeys, MENTION_CAP);
+    merge_mentions(&mut mention_expansion.pubkeys, &uri_pubkeys, MENTION_CAP);
 
-    let mention_refs: Vec<&str> = auto_resolved.iter().map(|s| s.as_str()).collect();
+    // Ordinary mentions use the SDK's 50-tag cap. A user-group mention must
+    // still notify every in-channel member, so append any already-resolved
+    // overflow p-tags after the builder has validated the first 50.
+    let builder_mention_count = mention_expansion.pubkeys.len().min(MENTION_CAP);
+    let (builder_mentions, overflow_mentions) =
+        mention_expansion.pubkeys.split_at(builder_mention_count);
+    let mention_refs: Vec<&str> = builder_mentions.iter().map(String::as_str).collect();
 
     let builder = match p.kind {
         Some(45001) => {
@@ -570,6 +626,22 @@ pub async fn cmd_send_message(
             )))
         }
     };
+    let overflow_tags = overflow_mentions
+        .iter()
+        .map(|pubkey| {
+            Tag::parse(["p", pubkey.as_str()])
+                .map_err(|error| CliError::Other(format!("group mention p tag failed: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let group_tags = mention_expansion
+        .groups
+        .iter()
+        .map(|group| {
+            Tag::parse(["group", group.group_id.as_str(), group.handle.as_str()])
+                .map_err(|error| CliError::Other(format!("group mention tag failed: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let builder = builder.tags(overflow_tags).tags(group_tags);
 
     let event = client.sign_event(builder)?;
 
@@ -876,7 +948,11 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        find_root_from_tags, match_profiles_by_name, parse_member_pubkeys,
+        resolve_mentions_from_data, GroupMention, MentionExpansion,
+    };
+    use crate::commands::groups::GroupSnapshot;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -891,6 +967,74 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    fn group(handle: &str, members: &[&str]) -> GroupSnapshot {
+        GroupSnapshot {
+            group_id: "11111111-1111-1111-1111-111111111111".into(),
+            handle: handle.into(),
+            name: "iOS Team".into(),
+            description: None,
+            creator: PK_VALID_A.into(),
+            members: members.iter().map(|member| (*member).to_string()).collect(),
+            default_channels: vec![],
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn group_mentions_expand_to_channel_member_intersection_and_marker() {
+        let profiles = vec![json!({
+            "pubkey": PK_VALID_A,
+            "content": r#"{"display_name":"Alice"}"#
+        })];
+        let groups = vec![group("ios-team", &[PK_VALID_B, PK_VALID_C])];
+        let expansion = resolve_mentions_from_data(
+            "cc @Alice and @ios-team",
+            &[PK_VALID_A.into(), PK_VALID_B.into()],
+            &profiles,
+            &groups,
+        );
+
+        assert_eq!(
+            expansion,
+            MentionExpansion {
+                pubkeys: vec![PK_VALID_A.into(), PK_VALID_B.into()],
+                groups: vec![GroupMention {
+                    group_id: "11111111-1111-1111-1111-111111111111".into(),
+                    handle: "ios-team".into(),
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_and_tombstoned_group_handles_remain_plain_text() {
+        let expansion =
+            resolve_mentions_from_data("hello @former-team", &[PK_VALID_A.into()], &[], &[]);
+        assert_eq!(expansion, MentionExpansion::default());
+    }
+
+    #[test]
+    fn repeated_group_mentions_deduplicate_members_and_marker() {
+        let groups = vec![group("ios-team", &[PK_VALID_A, PK_VALID_A])];
+        let expansion = resolve_mentions_from_data(
+            "@IOS-team then @ios-team",
+            &[PK_VALID_A.into()],
+            &[],
+            &groups,
+        );
+        assert_eq!(expansion.pubkeys, [PK_VALID_A]);
+        assert_eq!(expansion.groups.len(), 1);
+    }
+
+    #[test]
+    fn group_expansion_keeps_every_in_channel_member_past_individual_cap() {
+        let members: Vec<String> = (1..=60).map(|index| format!("{index:064x}")).collect();
+        let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
+        let groups = vec![group("ios-team", &member_refs)];
+        let expansion = resolve_mentions_from_data("@ios-team", &members, &[], &groups);
+        assert_eq!(expansion.pubkeys, members);
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
