@@ -61,12 +61,12 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use tauri::Listener;
 use tauri::{Emitter, Manager, RunEvent};
 use tauri_plugin_window_state::StateFlags;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
 
 fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
@@ -79,17 +79,21 @@ fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn set_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
-    // The window remains transparent at runtime for vibrancy. Use an opaque
-    // native backing only across the first visible frames so the previous app
-    // cannot show through before WebKit has submitted its first surface.
+    // The window remains transparent at runtime (for vibrancy on macOS; the
+    // frontend paints its own background on Linux). Use an opaque native
+    // backing only across the first visible frames so the previous app/
+    // desktop cannot show through before WebKit has submitted its first
+    // surface — on Linux this sets a real GTK CSS background-color on the
+    // outer ApplicationWindow (tao's platform_impl/linux/window.rs), same
+    // mechanism as macOS's NSWindow.setBackgroundColor.
     if let Err(error) = window.set_background_color(Some(tauri::window::Color(17, 21, 24, 255))) {
         eprintln!("buzz-desktop: failed to set initial window backing: {error}");
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<R>) {
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     if let Err(error) = window.set_background_color(None) {
@@ -97,7 +101,7 @@ async fn clear_initial_window_backing<R: tauri::Runtime>(window: &tauri::Window<
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tauri::Window<R>) {
     const MAX_POLLS: usize = 120;
     const REQUIRED_STABLE_POLLS: usize = 4;
@@ -107,11 +111,11 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
     for _ in 0..MAX_POLLS {
         // Accept whatever geometry the window-state plugin restores — maximized
-        // or a normal saved size. macOS applies the restore asynchronously, so
-        // we only need consecutive identical outer bounds to know it settled.
-        // Gating on `is_maximized()` here would leave `bounds` permanently
-        // `None` for restored non-maximized windows and stall the reveal until
-        // the poll timeout.
+        // or a normal saved size. The window-state plugin applies the restore
+        // asynchronously, so we only need consecutive identical outer bounds to
+        // know it settled. Gating on `is_maximized()` here would leave `bounds`
+        // permanently `None` for restored non-maximized windows and stall the
+        // reveal until the poll timeout.
         let bounds = match (window.outer_position(), window.outer_size()) {
             (Ok(position), Ok(size)) => Some((position.x, position.y, size.width, size.height)),
             _ => None,
@@ -193,12 +197,19 @@ pub fn run() {
                         return;
                     }
 
-                    // macOS applies the restored geometry asynchronously. Wait
+                    // The window-state plugin applies the restored geometry
+                    // asynchronously on macOS and Linux/GTK alike, so we wait
                     // for several identical outer bounds and for React to
-                    // commit the startup surface before revealing it.
+                    // commit the startup surface before revealing it. Windows
+                    // is deliberately left on the immediate-reveal path below:
+                    // no reproduced report there, and Win32's SetWindowPos/
+                    // ShowWindow are believed to apply synchronously (unlike
+                    // GTK's request/allocate-on-next-idle-iteration model),
+                    // making this race less likely to surface there. Revisit
+                    // if a Windows report ever comes in.
                     let window = webview.window();
 
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     {
                         set_initial_window_backing(&window);
 
@@ -229,7 +240,7 @@ pub fn run() {
                         });
                     }
 
-                    #[cfg(not(target_os = "macos"))]
+                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
                     {
                         reveal_initial_window(&window);
                     }
