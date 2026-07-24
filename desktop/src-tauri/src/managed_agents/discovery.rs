@@ -16,6 +16,8 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const OPENCODE_AVATAR_URL: &str = "https://opencode.ai/favicon.svg";
+const CURSOR_AVATAR_URL: &str = "https://cursor.com/favicon.svg";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -156,6 +158,72 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "opencode",
+        label: "OpenCode",
+        commands: &["opencode"],
+        aliases: &[],
+        avatar_url: OPENCODE_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        // OpenCode's CLI is its native ACP server; retain the CLI identity so
+        // the installer executes Phase 1 when the command is absent.
+        underlying_cli: Some("opencode"),
+        cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash"],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://opencode.ai/docs/acp/",
+        cli_install_hint: "Install OpenCode via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `opencode auth login` to configure a provider."),
+        auth_probe_args: None,
+    },
+    KnownAcpRuntime {
+        id: "cursor",
+        label: "Cursor Agent",
+        commands: &["agent", "cursor-agent"],
+        aliases: &[],
+        avatar_url: CURSOR_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        // Cursor Agent is likewise the native ACP server. This makes its
+        // install command reachable through the CLI-install phase.
+        underlying_cli: Some("agent"),
+        cli_install_commands: &["curl https://cursor.com/install -fsS | bash"],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://cursor.com/docs/cli/acp",
+        cli_install_hint: "Install Cursor Agent via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `agent login` to authenticate with Cursor."),
+        auth_probe_args: Some(&["agent", "status"]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -342,7 +410,9 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // These runtimes expose their ACP servers behind an explicit `acp`
+        // subcommand. Keep this list in sync with buzz-acp configuration.
+        "goose" | "opencode" | "agent" | "cursor-agent" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
