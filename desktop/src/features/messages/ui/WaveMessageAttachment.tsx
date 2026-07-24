@@ -4,6 +4,7 @@ import { toast } from "sonner";
 
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { useHuddle } from "@/features/huddle";
+import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import {
   Attachment,
   AttachmentAction,
@@ -45,9 +46,7 @@ export function WaveMessageAttachment({
         await startHuddle(channelId, [...huddleMemberPubkeys]);
         await queryClient.invalidateQueries({ queryKey: channelsQueryKey });
       } catch (error) {
-        toast.error(
-          error instanceof Error ? error.message : "Failed to start huddle.",
-        );
+        toast.error(formatHuddleActionError(error, "start"));
       }
     },
     [

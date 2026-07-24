@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { KIND_TYPING_INDICATOR } from "../../src/shared/constants/kinds";
+import {
+  KIND_HUDDLE_ENDED,
+  KIND_HUDDLE_STARTED,
+  KIND_TYPING_INDICATOR,
+} from "../../src/shared/constants/kinds";
 import {
   TEST_IDENTITIES,
   installMockBridge,
@@ -2877,6 +2881,58 @@ test("channel header omits the add agent action", async ({ page }) => {
   await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
+});
+
+test("huddle rollback end event clears the active header action", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", KIND_HUDDLE_STARTED);
+
+  const ephemeralChannelId = "10000000-0000-4000-8000-000000000001";
+  const createdAt = Math.floor(Date.now() / 1000);
+
+  await page.evaluate(
+    ({ createdAt, ephemeralChannelId, kind }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({
+          ephemeral_channel_id: ephemeralChannelId,
+        }),
+        createdAt,
+        id: "1".repeat(64),
+        kind,
+      });
+    },
+    { createdAt, ephemeralChannelId, kind: KIND_HUDDLE_STARTED },
+  );
+
+  await expect(
+    page.getByRole("button", {
+      name: "Join active huddle (1 participant)",
+    }),
+  ).toBeVisible();
+
+  await page.evaluate(
+    ({ createdAt, ephemeralChannelId, kind }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({
+          ephemeral_channel_id: ephemeralChannelId,
+        }),
+        createdAt,
+        id: "2".repeat(64),
+        kind,
+      });
+    },
+    { createdAt, ephemeralChannelId, kind: KIND_HUDDLE_ENDED },
+  );
+
+  await expect(
+    page.getByTestId("channel-start-huddle-trigger"),
+  ).toHaveAttribute("aria-label", "Start huddle");
 });
 
 test("channel header actions show tooltips", async ({ page }) => {
