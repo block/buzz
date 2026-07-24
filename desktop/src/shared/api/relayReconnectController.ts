@@ -28,12 +28,22 @@
  * testable without React or Tauri.
  */
 
-/** Short deadline for the optimistic fast-path attempt. */
-const FAST_PATH_TIMEOUT_MS = 4_000;
-/** Interval between poll attempts during phase 3. */
-const POLL_INTERVAL_MS = 3_000;
-/** Maximum total time to keep polling before giving up. */
-const BACKSTOP_MS = 120_000;
+/** Timer durations used by the reconnect controller. */
+export type ReconnectTimingPolicy = {
+  /** Short deadline for the optimistic fast-path attempt. */
+  fastPathTimeoutMs: number;
+  /** Interval between poll attempts during phase 3. */
+  pollIntervalMs: number;
+  /** Maximum total time to keep polling before giving up. */
+  backstopMs: number;
+};
+
+/** Current production reconnect timings. */
+export const DEFAULT_RECONNECT_TIMING_POLICY: ReconnectTimingPolicy = {
+  fastPathTimeoutMs: 4_000,
+  pollIntervalMs: 3_000,
+  backstopMs: 120_000,
+};
 
 export type ReconnectState = {
   isPending: boolean;
@@ -74,6 +84,14 @@ function withDeadline<T>(
 }
 
 export class RelayReconnectController {
+  private readonly timingPolicy: ReconnectTimingPolicy;
+
+  constructor(
+    timingPolicy: ReconnectTimingPolicy = DEFAULT_RECONNECT_TIMING_POLICY,
+  ) {
+    this.timingPolicy = timingPolicy;
+  }
+
   private state: ReconnectState = {
     isPending: false,
     isWaitingOnReconnectHook: false,
@@ -136,7 +154,7 @@ export class RelayReconnectController {
     try {
       await withDeadline(
         deps.preconnect(),
-        FAST_PATH_TIMEOUT_MS,
+        this.timingPolicy.fastPathTimeoutMs,
         "fast-path",
         deps.setTimeout,
         deps.clearTimeout,
@@ -226,7 +244,7 @@ export class RelayReconnectController {
         .catch(() => {
           // Poll failed — keep trying.
         });
-    }, POLL_INTERVAL_MS);
+    }, this.timingPolicy.pollIntervalMs);
 
     this.backstopId = deps.setTimeout(() => {
       if (resolved || cancelled()) return;
@@ -235,7 +253,7 @@ export class RelayReconnectController {
       // background retry loop keeps running. The notification is soft.
       onBackstop();
       this.finish(() => {}, false);
-    }, BACKSTOP_MS);
+    }, this.timingPolicy.backstopMs);
 
     // Return false now; async success is delivered via state updates.
     return false;

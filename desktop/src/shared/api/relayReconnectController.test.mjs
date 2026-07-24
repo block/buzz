@@ -9,7 +9,10 @@
 import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
-import { RelayReconnectController } from "./relayReconnectController.ts";
+import {
+  DEFAULT_RECONNECT_TIMING_POLICY,
+  RelayReconnectController,
+} from "./relayReconnectController.ts";
 
 // ── Dep builder helpers ───────────────────────────────────────────────────────
 
@@ -61,6 +64,36 @@ function makeDeps({
   };
   return deps;
 }
+
+// ── Timing policy ─────────────────────────────────────────────────────────────
+
+test("default timing policy preserves current reconnect timings", () => {
+  assert.deepEqual(DEFAULT_RECONNECT_TIMING_POLICY, {
+    fastPathTimeoutMs: 4_000,
+    pollIntervalMs: 3_000,
+    backstopMs: 120_000,
+  });
+});
+
+test("injected timing policy drives fast-path, poll, and backstop timers", async () => {
+  const ctrl = new RelayReconnectController({
+    fastPathTimeoutMs: 11,
+    pollIntervalMs: 22,
+    backstopMs: 33,
+  });
+  const deps = makeDeps({
+    preconnectResult: async () => {
+      throw new Error("relay unreachable");
+    },
+    hookConfiguredResult: async () => false,
+  });
+
+  await ctrl.start(deps);
+
+  assert.equal(deps.setTimeout.mock.calls[0].arguments[1], 11);
+  assert.equal(deps.setInterval.mock.calls[0].arguments[1], 22);
+  assert.equal(deps.setTimeout.mock.calls[1].arguments[1], 33);
+});
 
 // ── Phase 1: fast path ────────────────────────────────────────────────────────
 
