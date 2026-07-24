@@ -62,14 +62,23 @@ first if the Mac must be fully air-gapped.
 
 Phase 1 is a source and development foundation inside the existing Tauri 2
 desktop app. It does not add or require a separate Xcode project. Local
-development uses `just desktop-standalone`; an unsigned local bundle uses the
-existing `just desktop-release-build` recipe.
+development uses `just desktop-standalone`. The repository's existing unsigned
+bundle recipe is `just desktop-release-build`, but Task 6 did not exercise or
+verify that packaging path.
 
-Command Line Tools alone are not a packaging environment. A Mac producing a
-bundle must have the full Xcode application installed, accepted, and selected
-so `xcodebuild -version` succeeds. Signed and notarized release DMGs continue to
-use the repository release workflows and credentials documented in
-[RELEASING.md](../../RELEASING.md); Phase 1 does not change that process.
+Packaging remains prerequisite and deferred evidence on the Task 6 host. Only
+Command Line Tools were selected, and `xcodebuild -version` failed:
+
+```text
+xcode-select: error: tool 'xcodebuild' requires Xcode, but active developer directory '/Library/Developer/CommandLineTools' is a command line tools instance
+```
+
+A Mac producing a bundle must have the full Xcode application installed,
+accepted, and selected so `xcodebuild -version` succeeds. Signed and notarized
+release DMGs continue to use the repository release workflows and credentials
+documented in [RELEASING.md](../../RELEASING.md); Phase 1 does not change that
+process. These are repository capabilities and prerequisites, not Task 6
+packaging verification.
 
 ## Security boundary
 
@@ -117,6 +126,26 @@ objects and removes MinIO objects absent from the snapshot. Read the complete
 before using it.
 
 ## Acceptance evidence
+
+Task 6 acceptance is incomplete on the verification host. Aggregate `just ci`
+did not finish: every gate reached before `mobile-check` passed, then
+`dart format --output=none --set-exit-if-changed .` remained sleeping for more
+than 3 minutes 40 seconds and the run was terminated cleanly. A separately
+invoked `flutter test` also remained sleeping without output for more than one
+minute and was terminated. The mobile format, analysis, and test gates therefore
+remain unverified rather than passed.
+
+The preceding aggregate gates passed: root Rust formatting and workspace
+Clippy, desktop checks, desktop Tauri formatting and Clippy, and web checks.
+The following unaffected gates also passed in separate runs:
+
+- root unit tests;
+- desktop type checking, repository checks, Node tests, and production build;
+- desktop Tauri compile checks and unit tests;
+- web production build;
+- Compose configuration validation and Keycloak health;
+- the mocked local-workspace backup and restore regression suite; and
+- the focused Command Console E2E described below.
 
 The mocked Command Console browser regression opens the route through the same
 pinned sidebar control used by a person. It verifies `OFFICIAL`, all six adviser
