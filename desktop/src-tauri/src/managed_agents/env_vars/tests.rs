@@ -418,9 +418,9 @@ fn merged_env_drops_oversize_value() {
 
 // ── derived provider/model key filter ──────────────────────────────
 //
-// Pack import must strip derived env keys (GOOSE_MODEL, GOOSE_PROVIDER,
-// BUZZ_AGENT_MODEL, BUZZ_AGENT_PROVIDER) so they don't shadow the
-// structured AgentDefinition.model / AgentDefinition.provider fields after
+// Pack import must strip derived env keys (ANTHROPIC_MODEL, GOOSE_MODEL,
+// GOOSE_PROVIDER, BUZZ_AGENT_MODEL, BUZZ_AGENT_PROVIDER) so they don't shadow
+// the structured AgentDefinition.model / AgentDefinition.provider fields after
 // the user edits them in the UI.
 
 #[test]
@@ -439,6 +439,7 @@ fn is_derived_key_is_case_insensitive() {
     assert!(is_derived_provider_model_key("Goose_Provider"));
     assert!(is_derived_provider_model_key("buzz_agent_model"));
     assert!(is_derived_provider_model_key("BUZZ_AGENT_PROVIDER"));
+    assert!(is_derived_provider_model_key("anthropic_model"));
 }
 
 #[test]
