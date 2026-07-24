@@ -67,12 +67,28 @@ const IDLE_PEER_GRACE: std::time::Duration = std::time::Duration::from_millis(50
 /// that drift would accumulate as monotonic added latency (and eventually
 /// memory).
 ///
-/// We bound it explicitly: before each append, if the queue is already
-/// at or above this threshold, drop the oldest queued frame with
-/// `Player::skip_one()` so the new frame replaces it. 4 frames × 10 ms
-/// = 40 ms, far below NetEq's `max_delay_ms = 200 ms`, so the audible
-/// effect is negligible while the worst-case latency stays bounded.
-const PLAYOUT_QUEUE_HIGH_WATER: usize = 4;
+/// We bound it explicitly: before an append, if the queue has reached
+/// this threshold, drain it back down to [`PLAYOUT_QUEUE_TARGET`] with
+/// `Player::skip_one()`.
+///
+/// The threshold must sit WELL ABOVE the queue's natural breathing range.
+/// The device callback consumes in bursts (CoreAudio quanta, typically
+/// 5–11 ms, more on Bluetooth) that beat against the 10 ms producer tick,
+/// so on a healthy idle machine `Player::len()` oscillates between 1 and 6
+/// — measured with a standalone 100 × 10 ms-buffers/s feed. The previous
+/// threshold of 4 was *inside* that range: the drop fired on roughly half
+/// of all ticks in normal operation, discarding ~10 ms of good audio each
+/// time, which listeners heard as constantly choppy speech. 16 frames
+/// (160 ms) stays below NetEq's `max_delay_ms = 200 ms` while leaving the
+/// natural oscillation (and Bluetooth's larger quanta) untouched.
+const PLAYOUT_QUEUE_HIGH_WATER: usize = 16;
+
+/// When the high-water trips (a real consumer stall, not steady-state
+/// breathing), drain down to this depth in one go. Shedding to well below
+/// the threshold keeps the post-stall standing latency at ~80 ms instead
+/// of parking just under the high-water forever (the producer and consumer
+/// run at the same rate, so a one-frame-per-tick drop never converges).
+const PLAYOUT_QUEUE_TARGET: usize = 8;
 
 /// One remote peer's slot: jitter buffer + dedicated rodio Player.
 ///
@@ -192,13 +208,22 @@ pub(crate) async fn run_playout_recv_loop(
                             // callback's actual consumption rate, drop the
                             // oldest queued frame rather than letting the
                             // queue grow without bound.
-                            if slot.player.len() >= PLAYOUT_QUEUE_HIGH_WATER {
+                            let depth = slot.player.len();
+                            if depth >= PLAYOUT_QUEUE_HIGH_WATER {
+                                // Bounded by count, NOT `while len() > target`:
+                                // skip_one() takes effect on the device
+                                // callback thread, so len() does not shrink
+                                // synchronously — a len()-polling loop spins
+                                // millions of times while the output stream
+                                // is still starting (observed at huddle join).
+                                let to_drop = depth - PLAYOUT_QUEUE_TARGET;
+                                for _ in 0..to_drop {
+                                    slot.player.skip_one();
+                                }
                                 eprintln!(
                                     "buzz-desktop: playout queue high-water for peer {peer_idx} \
-                                     (depth={}) — dropping oldest frame",
-                                    slot.player.len(),
+                                     (depth={depth}) — dropped {to_drop} frames",
                                 );
-                                slot.player.skip_one();
                             }
                             slot.player.append(SamplesBuffer::new(channels, rate, samples));
                         }
