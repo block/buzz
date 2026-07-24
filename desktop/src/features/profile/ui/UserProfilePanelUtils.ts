@@ -292,6 +292,19 @@ export function personaManagedAgentUpdate(
     hasChanges = true;
   }
 
+  const personaRespondTo = persona.respondTo ?? "owner-only";
+  if (personaRespondTo !== agent.respondTo) {
+    input.respondTo = personaRespondTo;
+    hasChanges = true;
+  }
+  if (
+    personaRespondTo === "allowlist" &&
+    persona.respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
+  ) {
+    input.respondToAllowlist = [...persona.respondToAllowlist];
+    hasChanges = true;
+  }
+
   const runtimeChanged =
     options.previousPersona !== undefined &&
     options.previousPersona.runtime !== persona.runtime;
