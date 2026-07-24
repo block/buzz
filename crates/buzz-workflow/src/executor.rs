@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::error::WorkflowError;
 use crate::schema::{ActionDef, Step, WorkflowDef};
-use crate::WorkflowEngine;
+use crate::{AddReactionOutcome, WorkflowEngine};
 
 /// Data extracted from the triggering event, passed to every step.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -465,6 +465,33 @@ pub enum StepResult {
     Skipped,
 }
 
+async fn load_workflow_for_run(
+    engine: &WorkflowEngine,
+    community_id: CommunityId,
+    run_id: Uuid,
+    action_name: &str,
+) -> Result<buzz_db::workflow::WorkflowRecord, WorkflowError> {
+    let workflow_run = engine
+        .db
+        .get_workflow_run(community_id, run_id)
+        .await
+        .map_err(|e| {
+            WorkflowError::WebhookError(format!(
+                "{action_name}: failed to load workflow run {run_id}: {e}"
+            ))
+        })?;
+    engine
+        .db
+        .get_workflow(community_id, workflow_run.workflow_id)
+        .await
+        .map_err(|e| {
+            WorkflowError::WebhookError(format!(
+                "{action_name}: failed to load workflow {}: {e}",
+                workflow_run.workflow_id
+            ))
+        })
+}
+
 fn resolve_send_message_channel(
     explicit_channel: Option<&str>,
     trigger_channel: &str,
@@ -532,25 +559,8 @@ pub async fn dispatch_action(
             // attribution, scoped to the run's community — the same run/workflow
             // UUID may exist in another community, so a bare-id lookup could
             // load the wrong row and drive a side effect under it.
-            let wf_run = engine
-                .db
-                .get_workflow_run(community_id, run_id)
-                .await
-                .map_err(|e| {
-                    WorkflowError::WebhookError(format!(
-                        "SendMessage: failed to load workflow run {run_id}: {e}"
-                    ))
-                })?;
-            let workflow = engine
-                .db
-                .get_workflow(community_id, wf_run.workflow_id)
-                .await
-                .map_err(|e| {
-                    WorkflowError::WebhookError(format!(
-                        "SendMessage: failed to load workflow {}: {e}",
-                        wf_run.workflow_id
-                    ))
-                })?;
+            let workflow =
+                load_workflow_for_run(engine, community_id, run_id, "SendMessage").await?;
             let channel_id = resolve_send_message_channel(
                 channel.as_deref(),
                 &trigger_ctx.channel_id,
@@ -597,22 +607,27 @@ pub async fn dispatch_action(
                 ));
             }
 
-            #[cfg(feature = "reqwest")]
-            {
-                let result = add_reaction_impl(&trigger_ctx.message_id, emoji).await?;
-                Ok(StepResult::Completed(result))
-            }
+            let workflow =
+                load_workflow_for_run(engine, community_id, run_id, "AddReaction").await?;
+            let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+            let outcome = engine
+                .action_sink()?
+                .add_reaction(
+                    community_id,
+                    &trigger_ctx.message_id,
+                    emoji,
+                    &owner_pubkey_hex,
+                )
+                .await
+                .map_err(WorkflowError::from)?;
 
-            #[cfg(not(feature = "reqwest"))]
-            {
-                warn!(
-                    run_id = %run_id,
-                    step = step_id,
-                    "AddReaction: reqwest feature not enabled, skipping HTTP call"
-                );
-                Ok(StepResult::Completed(
-                    serde_json::json!({ "added": false, "skipped": true }),
-                ))
+            match outcome {
+                AddReactionOutcome::Added { event_id } => Ok(StepResult::Completed(
+                    serde_json::json!({ "added": true, "event_id": event_id }),
+                )),
+                AddReactionOutcome::AlreadyPresent => Ok(StepResult::Completed(
+                    serde_json::json!({ "added": false, "duplicate": true }),
+                )),
             }
         }
 
@@ -862,70 +877,6 @@ async fn call_webhook_impl(
     Ok(serde_json::json!({
         "status": status,
         "body": body_text,
-    }))
-}
-
-/// Returns a shared `reqwest::Client` reused across all workflow HTTP calls.
-/// Sharing a single client reuses the underlying connection pool.
-#[cfg(feature = "reqwest")]
-fn shared_http_client() -> &'static reqwest::Client {
-    use std::sync::LazyLock;
-    use std::time::Duration;
-    static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("HTTP client build must succeed")
-    });
-    &CLIENT
-}
-
-/// POST `{"emoji": emoji}` to `POST /api/messages/{message_id}/reactions`.
-#[cfg(feature = "reqwest")]
-async fn add_reaction_impl(message_id: &str, emoji: &str) -> Result<JsonValue, WorkflowError> {
-    let base_url =
-        std::env::var("BUZZ_RELAY_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_owned());
-
-    let url = format!("{base_url}/api/messages/{message_id}/reactions");
-
-    let client = shared_http_client();
-
-    let mut req = client
-        .post(&url)
-        .header("Content-Type", "application/json")
-        .json(&serde_json::json!({ "emoji": emoji }));
-
-    if let Ok(token) = std::env::var("BUZZ_API_TOKEN") {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    } else if let Ok(pubkey) = std::env::var("BUZZ_RELAY_PUBKEY") {
-        req = req.header("X-Pubkey", pubkey);
-    }
-
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| WorkflowError::WebhookError(format!("AddReaction HTTP error: {e}")))?;
-
-    let status = resp.status();
-
-    if !status.is_success() {
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|_| "<unreadable>".to_owned());
-        return Err(WorkflowError::WebhookError(format!(
-            "AddReaction: relay returned {status} for message {message_id}: {body}"
-        )));
-    }
-
-    let body_text = resp.text().await.unwrap_or_else(|_| String::new());
-    let body_json: JsonValue = serde_json::from_str(&body_text)
-        .unwrap_or_else(|_| serde_json::json!({ "raw": body_text }));
-
-    Ok(serde_json::json!({
-        "added": true,
-        "status": status.as_u16(),
-        "response": body_json,
     }))
 }
 

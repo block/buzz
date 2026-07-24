@@ -37,6 +37,18 @@ impl From<ActionSinkError> for crate::WorkflowError {
     }
 }
 
+/// Result of adding a workflow reaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddReactionOutcome {
+    /// A new kind:7 reaction event was persisted.
+    Added {
+        /// Hex-encoded reaction event ID.
+        event_id: String,
+    },
+    /// The workflow owner already had the same active reaction on the target.
+    AlreadyPresent,
+}
+
 /// Interface for workflow actions that produce side effects.
 ///
 /// Implemented by the relay to provide direct DB/event access to the executor.
@@ -66,4 +78,19 @@ pub trait ActionSink: Send + Sync {
         text: &str,
         author_pubkey: &str,
     ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>>;
+
+    /// Add a NIP-25 reaction to a message on behalf of a workflow owner.
+    ///
+    /// - `community_id`: server-resolved community that owns the workflow run
+    /// - `message_id`: hex-encoded target event ID
+    /// - `emoji`: reaction content (up to 64 Unicode characters)
+    /// - `author_pubkey`: hex-encoded workflow owner pubkey, used as the
+    ///   effective reaction actor while the relay signs the event
+    fn add_reaction(
+        &self,
+        community_id: CommunityId,
+        message_id: &str,
+        emoji: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<AddReactionOutcome, ActionSinkError>> + Send + '_>>;
 }
