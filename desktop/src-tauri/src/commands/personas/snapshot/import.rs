@@ -393,7 +393,7 @@ pub async fn confirm_agent_snapshot_import(
         let persona_id = uuid::Uuid::new_v4().to_string();
 
         // Build persona from snapshot definition.
-        let persona = AgentDefinition {
+        let mut persona = AgentDefinition {
             id: persona_id.clone(),
             display_name: display_name.clone(),
             avatar_url: effective_avatar.clone(),
@@ -417,6 +417,7 @@ pub async fn confirm_agent_snapshot_import(
             created_at: now.clone(),
             updated_at: now.clone(),
         };
+        crate::managed_agents::normalize_definition_access(&mut persona);
 
         personas.push(persona.clone());
         save_personas(&app, &personas)?;
@@ -426,7 +427,7 @@ pub async fn confirm_agent_snapshot_import(
 
         // Build the managed agent record — no machine-local commands, no
         // secrets, no lineage from the snapshot.
-        let record = ManagedAgentRecord {
+        let mut record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
@@ -485,6 +486,7 @@ pub async fn confirm_agent_snapshot_import(
             runtime: snapshot.definition.runtime.clone(),
             name_pool: snapshot.definition.name_pool.clone(),
         };
+        crate::managed_agents::normalize_managed_agent_access(&mut record);
 
         records.push(record.clone());
         save_managed_agents(&app, &records)?;

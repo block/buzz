@@ -300,6 +300,9 @@ fn hydrate_keys_with(store: &impl KeyStore, records: &mut [ManagedAgentRecord]) 
 pub fn save_managed_agents(app: &AppHandle, records: &[ManagedAgentRecord]) -> Result<(), String> {
     let definitions = load_agent_definitions(app).unwrap_or_default();
     let mut sorted = records.to_vec();
+    for record in &mut sorted {
+        super::normalize_managed_agent_access(record);
+    }
     // A caller-supplied key-less record would collide with the definition
     // half re-read below; instances always carry a pubkey.
     sorted.retain(|record| !record.pubkey.is_empty());

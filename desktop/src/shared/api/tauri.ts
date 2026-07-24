@@ -1018,6 +1018,11 @@ export async function getBakedBuildEnvKeys(): Promise<string[]> {
   return invokeTauri<string[]>("get_baked_build_env_keys");
 }
 
+/** Return whether this build forces managed-agent access to owner-only. */
+export async function getAgentAccessOwnerOnly(): Promise<boolean> {
+  return invokeTauri<boolean>("agent_access_owner_only");
+}
+
 /**
  * A single baked build env entry.
  *

@@ -6,6 +6,7 @@ import { toast } from "sonner";
 
 import {
   useAcpRuntimesQuery,
+  useAgentAccessOwnerOnlyQuery,
   useAgentConfigSurface,
   useBakedBuildEnvKeysQuery,
   usePersonasQuery,
@@ -65,7 +66,7 @@ import {
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { CreateAgentRespondToField } from "./RespondToField";
+import { InternalAgentAccessField } from "./InternalAgentAccessField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -386,6 +387,9 @@ export function AgentInstanceEditDialog({
     });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
+  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
+    enabled: open,
+  });
 
   // Merge global env as the base layer so credential keys satisfied via global
   // config (e.g. ANTHROPIC_API_KEY) are available to model discovery. Use
@@ -907,14 +911,15 @@ export function AgentInstanceEditDialog({
               </div>
             </div>
 
-            {/* Who can talk to this agent */}
-            <CreateAgentRespondToField
+            <InternalAgentAccessField
+              accessLocked={
+                agentAccessOwnerOnly === true && agent.backend.type === "local"
+              }
               allowlist={respondToAllowlist}
               disabled={updateMutation.isPending}
               mode={respondTo}
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
-              variant="persona"
             />
 
             {/* Provider (runtime) */}

@@ -578,22 +578,12 @@ pub async fn create_managed_agent(
     }
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
 
-    // Validate & normalize the respond-to allowlist BEFORE any side effects.
-    // The harness has its own validator (buzz-acp/src/config.rs) but we want
-    // to catch malformed input at the boundary so the agent never tries to
-    // start with a list that will crash it on launch. The mode/allowlist
-    // pairing (and the definition-default fallback) is resolved later at the
-    // mint site via `resolve_mint_behavioral_defaults`, where the linked
-    // definition is in hand.
-    let respond_to_allowlist =
-        crate::managed_agents::validate_respond_to_allowlist(&input.respond_to_allowlist)?;
-    if input.respond_to == Some(crate::managed_agents::RespondTo::Allowlist)
-        && respond_to_allowlist.is_empty()
-    {
-        return Err(
-            "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
-        );
-    }
+    let (requested_respond_to, respond_to_allowlist) =
+        crate::managed_agents::resolve_create_access(
+            &input.backend,
+            input.respond_to,
+            &input.respond_to_allowlist,
+        )?;
 
     // Snapshot the workspace owner pubkey for the legacy-record auth_tag
     // fallback. Computed outside the records lock to keep lock ordering simple.
@@ -817,7 +807,7 @@ pub async fn create_managed_agent(
         // point for definition behavioral strings — fails loudly on a bad
         // mode/range instead of minting an agent the author didn't describe.
         let minted = crate::managed_agents::resolve_mint_behavioral_defaults(
-            input.respond_to,
+            requested_respond_to,
             respond_to_allowlist.clone(),
             input.parallelism,
             linked_persona.as_ref(),

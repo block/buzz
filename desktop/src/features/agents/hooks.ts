@@ -26,6 +26,7 @@ import {
   discoverGitBashPrerequisite,
   discoverManagedAgentPrereqs,
   getAgentConfigSurface,
+  getAgentAccessOwnerOnly,
   getBakedBuildEnv,
   getBakedBuildEnvKeys,
   getChannelMembers,
@@ -909,6 +910,20 @@ export function useRuntimeFileConfigQuery(
 
 export const bakedBuildEnvKeysQueryKey = ["baked-build-env-keys"] as const;
 export const bakedBuildEnvQueryKey = ["baked-build-env"] as const;
+export const agentAccessOwnerOnlyQueryKey = [
+  "agent-access-owner-only",
+] as const;
+
+export function useAgentAccessOwnerOnlyQuery(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: agentAccessOwnerOnlyQueryKey,
+    queryFn: () => getAgentAccessOwnerOnly(),
+    enabled: options?.enabled ?? true,
+    staleTime: Infinity,
+    refetchInterval: false,
+    retry: false,
+  });
+}
 
 /**
  * Query safely displayable baked build env entries. The backend masks secrets,

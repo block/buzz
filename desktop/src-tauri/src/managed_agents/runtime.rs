@@ -1522,8 +1522,16 @@ pub fn build_managed_agent_summary(
         start_on_app_launch: record.start_on_app_launch,
         auto_restart_on_config_change: record.auto_restart_on_config_change,
         log_path,
-        respond_to: record.respond_to,
-        respond_to_allowlist: record.respond_to_allowlist.clone(),
+        respond_to: if super::owner_only_for_backend(&record.backend) {
+            super::types::RespondTo::OwnerOnly
+        } else {
+            record.respond_to
+        },
+        respond_to_allowlist: if super::owner_only_for_backend(&record.backend) {
+            Vec::new()
+        } else {
+            record.respond_to_allowlist.clone()
+        },
     })
 }
 
@@ -1554,9 +1562,31 @@ pub(crate) fn build_respond_to_env(
     record: &ManagedAgentRecord,
     owner_hex: Option<&str>,
 ) -> Result<RespondToEnv, String> {
+    build_respond_to_env_with_policy(
+        record,
+        owner_hex,
+        super::owner_only_for_backend(&record.backend),
+    )
+}
+
+fn build_respond_to_env_with_policy(
+    record: &ManagedAgentRecord,
+    owner_hex: Option<&str>,
+    enforced_owner_only: bool,
+) -> Result<RespondToEnv, String> {
+    let respond_to = if enforced_owner_only {
+        super::types::RespondTo::OwnerOnly
+    } else {
+        record.respond_to
+    };
+
     // Defensive re-validation: an on-disk record could have been hand-edited.
-    let normalized = super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?;
-    if record.respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
+    let normalized = if enforced_owner_only {
+        Vec::new()
+    } else {
+        super::types::validate_respond_to_allowlist(&record.respond_to_allowlist)?
+    };
+    if respond_to == super::types::RespondTo::Allowlist && normalized.is_empty() {
         return Err(
             "respond-to mode 'allowlist' requires at least one pubkey in the allowlist".to_string(),
         );
@@ -1565,12 +1595,9 @@ pub(crate) fn build_respond_to_env(
     let mut set: Vec<(&'static str, String)> = Vec::new();
     let mut remove: Vec<&'static str> = Vec::new();
 
-    set.push((
-        "BUZZ_ACP_RESPOND_TO",
-        record.respond_to.as_str().to_string(),
-    ));
+    set.push(("BUZZ_ACP_RESPOND_TO", respond_to.as_str().to_string()));
 
-    if record.respond_to == super::types::RespondTo::Allowlist {
+    if respond_to == super::types::RespondTo::Allowlist {
         set.push(("BUZZ_ACP_RESPOND_TO_ALLOWLIST", normalized.join(",")));
     } else {
         remove.push("BUZZ_ACP_RESPOND_TO_ALLOWLIST");

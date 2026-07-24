@@ -366,6 +366,9 @@ pub(crate) fn load_personas_from_path(
 
 pub fn save_personas(app: &AppHandle, records: &[AgentDefinition]) -> Result<(), String> {
     let mut sorted = records.to_vec();
+    for record in &mut sorted {
+        crate::managed_agents::normalize_definition_access(record);
+    }
     sort_personas(&mut sorted);
 
     // Post-fold: persona saves write key-less definition records into the

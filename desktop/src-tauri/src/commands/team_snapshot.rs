@@ -118,7 +118,7 @@ fn definition_from_snapshot(
     let respond_to = (behavior.respond_to != crate::managed_agents::RespondTo::default())
         .then(|| behavior.respond_to.as_str().to_string());
 
-    Ok(AgentDefinition {
+    let mut definition = AgentDefinition {
         id: Uuid::new_v4().to_string(),
         display_name: member.profile.display_name.trim().to_string(),
         avatar_url: effective_avatar(member),
@@ -137,7 +137,9 @@ fn definition_from_snapshot(
         parallelism: behavior.parallelism,
         created_at: now.to_string(),
         updated_at: now.to_string(),
-    })
+    };
+    crate::managed_agents::normalize_definition_access(&mut definition);
+    Ok(definition)
 }
 
 pub(crate) fn build_import_definitions(
@@ -547,7 +549,7 @@ pub async fn confirm_team_snapshot_import(
         };
 
         // Build the ManagedAgentRecord for this member.
-        let record = ManagedAgentRecord {
+        let mut record = ManagedAgentRecord {
             pubkey: pubkey.clone(),
             name: display_name.clone(),
             display_name: None,
@@ -608,6 +610,7 @@ pub async fn confirm_team_snapshot_import(
             runtime: member.definition.runtime.clone(),
             name_pool: member.definition.name_pool.clone(),
         };
+        crate::managed_agents::normalize_managed_agent_access(&mut record);
 
         minted.push(MintedMember {
             definition,

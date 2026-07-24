@@ -1,7 +1,12 @@
+pub(crate) mod access_policy;
 mod agent_env;
 pub(crate) mod agent_events;
 pub(crate) mod agent_snapshot;
 pub(crate) mod team_snapshot;
+pub(crate) use access_policy::{
+    apply_update_access, internal_build, normalize_definition_access,
+    normalize_managed_agent_access, owner_only_for_backend, resolve_create_access,
+};
 pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };

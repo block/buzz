@@ -112,7 +112,7 @@ fn unknown_command_returns_none() {
 
 // ── build_respond_to_env tests ───────────────────────────────────────
 
-use super::build_respond_to_env;
+use super::{build_respond_to_env, build_respond_to_env_with_policy};
 use crate::managed_agents::types::{ManagedAgentRecord, RespondTo};
 
 /// Construct a minimal record fixture for env-building tests. Only the
@@ -225,6 +225,24 @@ fn build_env_anyone_omits_allowlist_var() {
     assert_eq!(
         set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
         Some("anyone")
+    );
+    assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+    assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
+}
+
+#[test]
+fn internal_policy_overrides_stale_anyone_record_at_runtime() {
+    let rec = fixture(
+        RespondTo::Anyone,
+        vec!["malformed stale allowlist".into()],
+        Some("tag".into()),
+    );
+    let (set, remove) = build_respond_to_env_with_policy(&rec, Some("owner"), true).unwrap();
+    let set_map: std::collections::HashMap<_, _> = set.into_iter().collect();
+
+    assert_eq!(
+        set_map.get("BUZZ_ACP_RESPOND_TO").map(String::as_str),
+        Some("owner-only")
     );
     assert!(!set_map.contains_key("BUZZ_ACP_RESPOND_TO_ALLOWLIST"));
     assert!(remove.contains(&"BUZZ_ACP_RESPOND_TO_ALLOWLIST"));

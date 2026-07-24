@@ -9,6 +9,7 @@ import {
   pickWelcomeGuideAgentForRelay,
   pickWelcomeTeamStarterAgentForRelay,
   welcomeStarterRuntimeUpdate,
+  welcomeTeammateHasExpectedAccess,
   WELCOME_GUIDE_AGENT_NAME,
   WELCOME_GUIDE_PERSONA_ID,
   WELCOME_TEAM_ID,
@@ -377,5 +378,35 @@ test("starter matching prefers running, then deployed instances", () => {
   assert.equal(
     pickWelcomeTeamStarterAgentForRelay([stopped, deployed], fizz, RELAY_A),
     deployed,
+  );
+});
+
+test("internal local Welcome teammates accept enforced owner-only access", () => {
+  const teammate = makeAgent({
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), true);
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, false), false);
+});
+
+test("provider Welcome teammates still require the lead allowlist", () => {
+  const teammate = makeAgent({
+    backend: { type: "provider", id: "remote", config: {} },
+    respondTo: "owner-only",
+    respondToAllowlist: [],
+  });
+  assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), false);
+  assert.equal(
+    welcomeTeammateHasExpectedAccess(
+      {
+        ...teammate,
+        respondTo: "allowlist",
+        respondToAllowlist: [PUB_B],
+      },
+      PUB_B,
+      true,
+    ),
+    true,
   );
 });

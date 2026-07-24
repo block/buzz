@@ -98,6 +98,7 @@ pub async fn create_persona(
             updated_at: now,
         };
         apply_persona_behavior(&mut persona, input.behavior)?;
+        crate::managed_agents::normalize_definition_access(&mut persona);
         personas.push(persona.clone());
         save_personas(&app, &personas)?;
         retain_persona_pending(&app, &state, &persona);
@@ -197,6 +198,7 @@ pub async fn update_persona(
                 persona.env_vars = env_vars;
             }
             apply_persona_behavior(persona, input.behavior)?;
+            crate::managed_agents::normalize_definition_access(persona);
             persona.updated_at = now_iso();
 
             let result = persona.clone();
@@ -815,9 +817,14 @@ fn apply_inbound_persona(personas: &mut Vec<AgentDefinition>, inbound: AgentDefi
             local.respond_to = inbound.respond_to;
             local.respond_to_allowlist = inbound.respond_to_allowlist;
             local.parallelism = inbound.parallelism;
+            crate::managed_agents::normalize_definition_access(local);
             local.updated_at = inbound.updated_at;
         }
-        None => personas.push(inbound),
+        None => {
+            let mut inbound = inbound;
+            crate::managed_agents::normalize_definition_access(&mut inbound);
+            personas.push(inbound);
+        }
     }
 }
 
@@ -859,6 +866,7 @@ fn apply_inbound_managed_agent(
         local.parallelism = inbound.parallelism;
         local.respond_to = inbound.respond_to;
         local.respond_to_allowlist = inbound.respond_to_allowlist;
+        crate::managed_agents::normalize_managed_agent_access(local);
     }
 }
 
