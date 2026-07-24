@@ -1736,6 +1736,7 @@ pub fn spawn_agent_child(
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
+    super::codex_home::apply_isolated_codex_home_env(&mut command, runtime_meta.map(|r| r.id));
 
     // ── Readiness check: set setup-payload if agent is not ready ─────────────
     //
