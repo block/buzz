@@ -1906,6 +1906,17 @@ async fn tokio_main() -> Result<()> {
                     let _ = result_rx; // end split borrow before relay handling
                     match buzz_event {
                         Some(buzz_event) => {
+                            // Turn-stage timing: capture the harness-receipt
+                            // instant before any admission gates run, plus the
+                            // wall-clock relay-accept lag (1s resolution) from
+                            // the event's `created_at`. Both ride the queued
+                            // event into per-turn stage metrics.
+                            let relay_received_at = std::time::Instant::now();
+                            let relay_lag_secs = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs()
+                                .saturating_sub(buzz_event.event.created_at.as_secs());
                             let kind_u32 = buzz_event.event.kind.as_u16() as u32;
 
                             if kind_u32 == KIND_MEMBER_ADDED_NOTIFICATION
@@ -2200,6 +2211,8 @@ async fn tokio_main() -> Result<()> {
                                 event: buzz_event.event,
                                 received_at: std::time::Instant::now(),
                                 prompt_tag,
+                                relay_received_at,
+                                relay_lag_secs,
                             });
                             // 👀 — immediate "seen" reaction, only if the event
                             // was actually queued (not dropped by DedupMode::Drop).
@@ -2823,10 +2836,14 @@ fn try_native_steer(
     // steering (which is to inject only what's new).
     let (header, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
+    // Timing fields are placeholders: this BatchEvent exists only to render
+    // the steer body via `format_event_block` and never enters queue/metrics.
     let be = queue::BatchEvent {
         event,
         prompt_tag: prompt_tag.clone(),
         received_at: std::time::Instant::now(),
+        relay_received_at: std::time::Instant::now(),
+        relay_lag_secs: 0,
     };
     let event_block = queue::format_event_block(channel_id, None, &be, None);
     let body = format!("{header}\n\n[Buzz event: {prompt_tag}]\n{event_block}\n\n{closing}");
@@ -3164,6 +3181,24 @@ fn handle_prompt_result(
         PromptSource::Heartbeat => None,
     };
     let turn_id = result.turn_id.clone();
+    // One-line per-turn stage-latency summary, keyed by turn_id. `None`
+    // stages (unobserved for this turn) are omitted from the record.
+    if let Some(ref timings) = result.timings {
+        tracing::info!(
+            target: "pool::metrics",
+            turn_id = %turn_id,
+            channel_id = ?channel_id,
+            outcome = outcome_label,
+            relay_lag_secs = timings.relay_lag_secs,
+            admission_ms = timings.admission_ms,
+            queue_wait_ms = timings.queue_wait_ms,
+            session_setup_ms = timings.session_setup_ms,
+            first_output_ms = timings.first_output_ms,
+            turn_total_ms = timings.turn_total_ms,
+            session_reused = timings.session_reused,
+            "turn stage timing"
+        );
+    }
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -5188,6 +5223,7 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
+            timings: None,
         };
 
         handle_prompt_result(
@@ -5354,6 +5390,7 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: None,
+                timings: None,
             };
             handle_prompt_result(
                 &mut pool,
@@ -5404,6 +5441,8 @@ mod error_outcome_emission_tests {
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
+                    relay_received_at: std::time::Instant::now(),
+                    relay_lag_secs: 0,
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
@@ -5444,6 +5483,7 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
+                timings: None,
             };
             handle_prompt_result(
                 &mut pool,
@@ -5510,6 +5550,8 @@ mod error_outcome_emission_tests {
                     event,
                     prompt_tag: "test".into(),
                     received_at: std::time::Instant::now(),
+                    relay_received_at: std::time::Instant::now(),
+                    relay_lag_secs: 0,
                 }],
                 cancelled_events: vec![],
                 cancel_reason: None,
@@ -5549,6 +5591,7 @@ mod error_outcome_emission_tests {
                 turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
+                timings: None,
             };
             handle_prompt_result(
                 &mut pool,
@@ -5628,6 +5671,8 @@ mod error_outcome_emission_tests {
                     .unwrap(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                relay_received_at: std::time::Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -5640,6 +5685,7 @@ mod error_outcome_emission_tests {
                 recently_active: true,
             }),
             batch: Some(batch),
+            timings: None,
         };
         handle_prompt_result(
             &mut pool,
@@ -5721,6 +5767,8 @@ mod error_outcome_emission_tests {
                     .unwrap(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                relay_received_at: std::time::Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -5733,6 +5781,7 @@ mod error_outcome_emission_tests {
                 recently_active: true,
             }),
             batch: Some(batch),
+            timings: None,
         };
         handle_prompt_result(
             &mut pool,
@@ -5799,6 +5848,8 @@ mod error_outcome_emission_tests {
                 event: original_event.clone(),
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                relay_received_at: std::time::Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: Some(CancelReason::Steer),
@@ -5827,6 +5878,8 @@ mod error_outcome_emission_tests {
             channel_id,
             event: new_event.clone(),
             received_at: std::time::Instant::now(),
+            relay_received_at: std::time::Instant::now(),
+            relay_lag_secs: 0,
             prompt_tag: "test".into(),
         });
         let config = test_config();
@@ -5847,6 +5900,7 @@ mod error_outcome_emission_tests {
             turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             batch: Some(batch),
+            timings: None,
         };
 
         handle_prompt_result(
@@ -5979,6 +6033,7 @@ mod error_outcome_emission_tests {
             // `classify_control_cancel_failure` — `handle_prompt_result`
             // never sees one to requeue.
             batch: None,
+            timings: None,
         };
 
         handle_prompt_result(

@@ -647,6 +647,13 @@ fn make_turn_metric_event(owner_keys: &Keys, agent_keys: &Keys) -> Event {
         cumulative: None,
         delta_reliable: true,
         stop_reason: None,
+        relay_lag_secs: None,
+        admission_ms: None,
+        queue_wait_ms: None,
+        session_setup_ms: None,
+        first_output_ms: None,
+        turn_total_ms: None,
+        session_reused: None,
     };
     let ciphertext =
         encrypt_agent_turn_metric(agent_keys, &owner_keys.public_key(), &payload).unwrap();

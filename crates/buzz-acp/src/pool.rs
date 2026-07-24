@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tokio::task::{JoinHandle, JoinSet};
@@ -226,6 +226,83 @@ pub struct PromptResult {
     pub outcome: PromptOutcome,
     /// Present on failure in Queue mode, for requeue.
     pub batch: Option<FlushBatch>,
+    /// Stage latencies for this turn, when measured. `None` only for results
+    /// synthesized outside `run_prompt_task` (e.g. tests).
+    pub timings: Option<TurnTimings>,
+}
+
+/// Per-turn stage latencies. All values come from monotonic clocks except
+/// [`relay_lag_secs`](Self::relay_lag_secs) (wall-clock, 1s resolution).
+///
+/// A field is `None` when the stage was not observed for the turn: heartbeat
+/// turns carry no relay/admission/queue stages, early failures never reach
+/// session resolution or first output. No message content is recorded here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TurnTimings {
+    /// Wall-clock lag between event `created_at` and harness receipt,
+    /// minimum over the batch.
+    pub relay_lag_secs: Option<u64>,
+    /// Harness receipt to queue admission for the batch's oldest event
+    /// (dedup/author/rule gates).
+    pub admission_ms: Option<u64>,
+    /// Harness receipt of the batch's oldest event to prompt-task start
+    /// (queueing, retries, and dispatch wait).
+    pub queue_wait_ms: Option<u64>,
+    /// Prompt-task start to session resolution (reused or freshly created).
+    pub session_setup_ms: Option<u64>,
+    /// `session/prompt` write to the first `agent_message_chunk`.
+    pub first_output_ms: Option<u64>,
+    /// Prompt-task start to turn completion (any outcome).
+    pub turn_total_ms: Option<u64>,
+    /// `true` when the turn ran on an existing session, `false` when a new
+    /// session was created for it.
+    pub session_reused: Option<bool>,
+}
+
+impl TurnTimings {
+    /// Serialize the known stages into a camelCase JSON object for observer
+    /// frames, omitting unknown (`None`) stages.
+    fn to_observer_json(&self) -> serde_json::Value {
+        let mut map = serde_json::Map::new();
+        let mut put_u64 = |key: &str, value: Option<u64>| {
+            if let Some(v) = value {
+                map.insert(key.to_string(), serde_json::json!(v));
+            }
+        };
+        put_u64("relayLagSecs", self.relay_lag_secs);
+        put_u64("admissionMs", self.admission_ms);
+        put_u64("queueWaitMs", self.queue_wait_ms);
+        put_u64("sessionSetupMs", self.session_setup_ms);
+        put_u64("firstOutputMs", self.first_output_ms);
+        put_u64("turnTotalMs", self.turn_total_ms);
+        if let Some(reused) = self.session_reused {
+            map.insert("sessionReused".to_string(), serde_json::json!(reused));
+        }
+        serde_json::Value::Object(map)
+    }
+}
+
+/// Milliseconds from `from` to `to`, saturating at zero if `to` is earlier.
+fn duration_ms(from: Instant, to: Instant) -> u64 {
+    to.saturating_duration_since(from).as_millis() as u64
+}
+
+/// Complete a turn's [`TurnTimings`] at an exit site of `run_prompt_task`:
+/// stamps the total duration and first-output latency (consumed from the
+/// [`AcpClient`]), records the result on the completion guard so the
+/// `turn_completed` observer frame carries it, and returns the final value
+/// for the kind:44200 payload and the [`PromptResult`].
+fn finalize_turn_timings(
+    base: &TurnTimings,
+    turn_started: Instant,
+    acp: &mut AcpClient,
+    guard: &TurnCompletionGuard,
+) -> TurnTimings {
+    let mut timings = base.clone();
+    timings.first_output_ms = acp.take_first_output_latency_ms();
+    timings.turn_total_ms = Some(duration_ms(turn_started, Instant::now()));
+    guard.set_timings(timings.clone());
+    timings
 }
 
 /// Whether the prompt came from a channel event or a heartbeat.
@@ -1239,6 +1316,7 @@ fn send_prompt_result(
     source: PromptSource,
     outcome: PromptOutcome,
     batch: Option<FlushBatch>,
+    timings: Option<TurnTimings>,
 ) {
     agent.acp.clear_steer_rx();
     let _ = result_tx.send(PromptResult {
@@ -1247,6 +1325,7 @@ fn send_prompt_result(
         turn_id: turn_id.to_owned(),
         outcome,
         batch,
+        timings,
     });
 }
 
@@ -1281,6 +1360,19 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
+    // Monotonic twin of `turn_started_at` — anchor for all stage latencies.
+    let turn_started = Instant::now();
+    // Pre-task stages, measured from the batch's oldest event (the one that
+    // has waited longest and whose receipt anchors `queue_wait_ms`).
+    // Heartbeats have no batch and therefore no relay/admission/queue stages.
+    let mut timings = TurnTimings::default();
+    if let Some(b) = &batch {
+        timings.relay_lag_secs = b.events.iter().map(|be| be.relay_lag_secs).min();
+        if let Some(oldest) = b.events.iter().min_by_key(|be| be.relay_received_at) {
+            timings.admission_ms = Some(duration_ms(oldest.relay_received_at, oldest.received_at));
+            timings.queue_wait_ms = Some(duration_ms(oldest.relay_received_at, turn_started));
+        }
+    }
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         None,
@@ -1305,8 +1397,10 @@ pub async fn run_prompt_task(
     // Emits `turn_completed` on any exit path. Captures observer handle and
     // metadata now, before the agent is moved into PromptResult. It must be
     // declared before `liveness_guard`: Rust drops locals in reverse order, so
-    // liveness is aborted before completion makes the turn terminal.
-    let _turn_guard = TurnCompletionGuard::new(
+    // liveness is aborted before completion makes the turn terminal. Exit
+    // sites record stage timings on it via `finalize_turn_timings` so the
+    // `turn_completed` frame carries them.
+    let turn_guard = TurnCompletionGuard::new(
         agent.acp.observer_handle(),
         agent.acp.observer_agent_index(),
         observer_channel_id,
@@ -1493,6 +1587,12 @@ pub async fn run_prompt_task(
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
+                        let turn_timings = finalize_turn_timings(
+                            &timings,
+                            turn_started,
+                            &mut agent.acp,
+                            &turn_guard,
+                        );
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1500,12 +1600,19 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::AgentExited,
                             requeue_batch_if_queue(&ctx, batch),
+                            Some(turn_timings),
                         );
                         return;
                     }
                     Err(e) => {
                         // Session creation failed; pending canvas was never committed,
                         // so the next retry will re-fetch a fresh revision.
+                        let turn_timings = finalize_turn_timings(
+                            &timings,
+                            turn_started,
+                            &mut agent.acp,
+                            &turn_guard,
+                        );
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1513,6 +1620,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Error(e),
                             requeue_batch_if_queue(&ctx, batch),
+                            Some(turn_timings),
                         );
                         return;
                     }
@@ -1535,6 +1643,12 @@ pub async fn run_prompt_task(
                     }
                     Err(AcpError::AgentExited) => {
                         agent.state.invalidate_all();
+                        let turn_timings = finalize_turn_timings(
+                            &timings,
+                            turn_started,
+                            &mut agent.acp,
+                            &turn_guard,
+                        );
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1542,10 +1656,17 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::AgentExited,
                             None,
+                            Some(turn_timings),
                         );
                         return;
                     }
                     Err(e) => {
+                        let turn_timings = finalize_turn_timings(
+                            &timings,
+                            turn_started,
+                            &mut agent.acp,
+                            &turn_guard,
+                        );
                         send_prompt_result(
                             &result_tx,
                             &turn_id,
@@ -1553,6 +1674,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Error(e),
                             None,
+                            Some(turn_timings),
                         );
                         return;
                     }
@@ -1560,6 +1682,10 @@ pub async fn run_prompt_task(
             }
         }
     };
+    // Session resolution stage complete (covers core/canvas fetches and any
+    // session creation above; ~0 for a reused session).
+    timings.session_setup_ms = Some(duration_ms(turn_started, Instant::now()));
+    timings.session_reused = Some(!is_new_session);
     agent.acp.set_observer_context(observer::context_for_turn(
         observer_channel_id,
         Some(session_id.clone()),
@@ -1627,6 +1753,8 @@ pub async fn run_prompt_task(
                 }
                 Err(AcpError::AgentExited) => {
                     agent.state.invalidate_all();
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -1634,6 +1762,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::AgentExited,
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                     return;
                 }
@@ -1653,6 +1782,12 @@ pub async fn run_prompt_task(
                         }
                         Err(AcpError::AgentExited) => {
                             agent.state.invalidate_all();
+                            let turn_timings = finalize_turn_timings(
+                                &timings,
+                                turn_started,
+                                &mut agent.acp,
+                                &turn_guard,
+                            );
                             send_prompt_result(
                                 &result_tx,
                                 &turn_id,
@@ -1660,6 +1795,7 @@ pub async fn run_prompt_task(
                                 source,
                                 PromptOutcome::AgentExited,
                                 requeue_batch_if_queue(&ctx, batch),
+                                Some(turn_timings),
                             );
                             return;
                         }
@@ -1671,6 +1807,8 @@ pub async fn run_prompt_task(
                             agent.state.invalidate(&source);
                         }
                     }
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -1678,6 +1816,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                     return;
                 }
@@ -1689,6 +1828,8 @@ pub async fn run_prompt_task(
                         ctx.max_turn_duration.as_secs()
                     );
                     agent.state.invalidate_all();
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -1696,6 +1837,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                     return;
                 }
@@ -1705,6 +1847,8 @@ pub async fn run_prompt_task(
                         "initial_message failed for channel {cid}: {e} — invalidating session"
                     );
                     agent.state.invalidate(&source);
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     send_prompt_result(
                         &result_tx,
                         &turn_id,
@@ -1712,6 +1856,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Error(e),
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                     return;
                 }
@@ -1786,6 +1931,8 @@ pub async fn run_prompt_task(
         // Should not happen — batch is None only for heartbeats which have prompt_text.
         // Return the agent to the pool to prevent a permanent slot leak.
         tracing::error!("run_prompt_task: no batch and no prompt_text — returning agent");
+        let turn_timings =
+            finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
         send_prompt_result(
             &result_tx,
             &turn_id,
@@ -1793,6 +1940,7 @@ pub async fn run_prompt_task(
             source,
             PromptOutcome::Error(AcpError::Protocol("no batch and no prompt_text".into())),
             None,
+            Some(turn_timings),
         );
         return;
     };
@@ -1872,6 +2020,12 @@ pub async fn run_prompt_task(
                                     requeue_cancelled_batch(&ctx, control_signal, batch);
 
                                 let usage = agent.acp.take_turn_usage();
+                                let turn_timings = finalize_turn_timings(
+                                    &timings,
+                                    turn_started,
+                                    &mut agent.acp,
+                                    &turn_guard,
+                                );
                                 publish_agent_turn_metric(
                                     &ctx,
                                     usage,
@@ -1879,6 +2033,7 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                                    &turn_timings,
                                 )
                                 .await;
                                 send_prompt_result(
@@ -1888,6 +2043,7 @@ pub async fn run_prompt_task(
                                     source,
                                     PromptOutcome::Cancelled,
                                     retry_batch,
+                                    Some(turn_timings),
                                 );
                                 return;
                             }
@@ -1908,6 +2064,12 @@ pub async fn run_prompt_task(
                                 }
 
                                 let usage = agent.acp.take_turn_usage();
+                                let turn_timings = finalize_turn_timings(
+                                    &timings,
+                                    turn_started,
+                                    &mut agent.acp,
+                                    &turn_guard,
+                                );
                                 publish_agent_turn_metric(
                                     &ctx,
                                     usage,
@@ -1915,6 +2077,7 @@ pub async fn run_prompt_task(
                                     &session_id,
                                     &turn_id,
                                     Some(buzz_core::agent_turn_metric::StopReason::Error),
+                                    &turn_timings,
                                 )
                                 .await;
                                 send_prompt_result(
@@ -1924,6 +2087,7 @@ pub async fn run_prompt_task(
                                     source,
                                     failure.outcome,
                                     failure.retry_batch,
+                                    Some(turn_timings),
                                 );
                                 return;
                             }
@@ -1963,6 +2127,12 @@ pub async fn run_prompt_task(
                             &control_signal,
                         );
                         let usage = agent.acp.take_turn_usage();
+                        let turn_timings = finalize_turn_timings(
+                            &timings,
+                            turn_started,
+                            &mut agent.acp,
+                            &turn_guard,
+                        );
                         publish_agent_turn_metric(
                             &ctx,
                             usage,
@@ -1970,6 +2140,7 @@ pub async fn run_prompt_task(
                             &session_id,
                             &turn_id,
                             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+                            &turn_timings,
                         )
                         .await;
                         send_prompt_result(
@@ -1979,6 +2150,7 @@ pub async fn run_prompt_task(
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
                             None, // turn succeeded — batch was processed, no requeue
+                            Some(turn_timings),
                         );
                         return;
                     }
@@ -2025,6 +2197,8 @@ pub async fn run_prompt_task(
 
             let core_stop = acp_stop_to_core(&stop_reason);
             let usage = agent.acp.take_turn_usage();
+            let turn_timings =
+                finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
             publish_agent_turn_metric(
                 &ctx,
                 usage,
@@ -2032,6 +2206,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(core_stop),
+                &turn_timings,
             )
             .await;
 
@@ -2042,12 +2217,15 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Ok(stop_reason),
                 None,
+                Some(turn_timings),
             );
         }
         Err(AcpError::AgentExited) => {
             tracing::error!(target: "pool::prompt", "agent {} exited during prompt", agent.index);
             agent.state.invalidate_all();
             let usage = agent.acp.take_turn_usage();
+            let turn_timings =
+                finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
             publish_agent_turn_metric(
                 &ctx,
                 usage,
@@ -2055,6 +2233,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &turn_timings,
             )
             .await;
             send_prompt_result(
@@ -2064,6 +2243,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::AgentExited,
                 requeue_batch_if_queue(&ctx, batch),
+                Some(turn_timings),
             );
         }
         Err(AcpError::IdleTimeout(_)) => {
@@ -2080,6 +2260,8 @@ pub async fn run_prompt_task(
                 Ok(stop_reason) => {
                     log_stop_reason(&source, &stop_reason);
                     let usage = agent.acp.take_turn_usage();
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     publish_agent_turn_metric(
                         &ctx,
                         usage,
@@ -2087,6 +2269,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+                        &turn_timings,
                     )
                     .await;
                     // Timeout triggers respawn in handle_prompt_result —
@@ -2098,6 +2281,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                 }
                 Err(AcpError::AgentExited) => {
@@ -2108,6 +2292,8 @@ pub async fn run_prompt_task(
                     );
                     agent.state.invalidate_all();
                     let usage = agent.acp.take_turn_usage();
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     publish_agent_turn_metric(
                         &ctx,
                         usage,
@@ -2115,6 +2301,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        &turn_timings,
                     )
                     .await;
                     send_prompt_result(
@@ -2124,6 +2311,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::AgentExited,
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                 }
                 Err(e) => {
@@ -2133,6 +2321,8 @@ pub async fn run_prompt_task(
                     );
                     agent.state.invalidate(&source);
                     let usage = agent.acp.take_turn_usage();
+                    let turn_timings =
+                        finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
                     publish_agent_turn_metric(
                         &ctx,
                         usage,
@@ -2140,6 +2330,7 @@ pub async fn run_prompt_task(
                         &session_id,
                         &turn_id,
                         Some(buzz_core::agent_turn_metric::StopReason::Error),
+                        &turn_timings,
                     )
                     .await;
                     send_prompt_result(
@@ -2149,6 +2340,7 @@ pub async fn run_prompt_task(
                         source,
                         PromptOutcome::Timeout(TimeoutKind::Idle),
                         requeue_batch_if_queue(&ctx, batch),
+                        Some(turn_timings),
                     );
                 }
             }
@@ -2162,6 +2354,8 @@ pub async fn run_prompt_task(
             );
             agent.state.invalidate_all();
             let usage = agent.acp.take_turn_usage();
+            let turn_timings =
+                finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
             publish_agent_turn_metric(
                 &ctx,
                 usage,
@@ -2169,6 +2363,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &turn_timings,
             )
             .await;
             send_prompt_result(
@@ -2178,6 +2373,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Timeout(TimeoutKind::Hard { recently_active }),
                 requeue_batch_if_queue(&ctx, batch),
+                Some(turn_timings),
             );
         }
         Err(e) => {
@@ -2189,6 +2385,8 @@ pub async fn run_prompt_task(
                 agent.state.invalidate(&source);
             }
             let usage = agent.acp.take_turn_usage();
+            let turn_timings =
+                finalize_turn_timings(&timings, turn_started, &mut agent.acp, &turn_guard);
             publish_agent_turn_metric(
                 &ctx,
                 usage,
@@ -2196,6 +2394,7 @@ pub async fn run_prompt_task(
                 &session_id,
                 &turn_id,
                 Some(buzz_core::agent_turn_metric::StopReason::Error),
+                &turn_timings,
             )
             .await;
             send_prompt_result(
@@ -2205,6 +2404,7 @@ pub async fn run_prompt_task(
                 source,
                 PromptOutcome::Error(e),
                 requeue_batch_if_queue(&ctx, batch),
+                Some(turn_timings),
             );
         }
     }
@@ -3269,6 +3469,10 @@ struct TurnCompletionGuard {
     agent_index: Option<usize>,
     channel_id: Option<uuid::Uuid>,
     turn_id: String,
+    /// Stage timings recorded by `finalize_turn_timings` at the exit site,
+    /// carried into the `turn_completed` frame payload. Interior mutability
+    /// because the guard is held by shared reference for the whole turn.
+    timings: Mutex<Option<TurnTimings>>,
 }
 
 impl TurnCompletionGuard {
@@ -3283,6 +3487,15 @@ impl TurnCompletionGuard {
             agent_index,
             channel_id,
             turn_id,
+            timings: Mutex::new(None),
+        }
+    }
+
+    /// Record the turn's stage timings for the `turn_completed` frame.
+    /// Later calls overwrite earlier ones; the exit-site value wins.
+    fn set_timings(&self, timings: TurnTimings) {
+        if let Ok(mut slot) = self.timings.lock() {
+            *slot = Some(timings);
         }
     }
 }
@@ -3291,12 +3504,13 @@ impl Drop for TurnCompletionGuard {
     fn drop(&mut self) {
         if let Some(observer) = self.observer.take() {
             let context = observer::context_for(self.channel_id, None, Some(self.turn_id.clone()));
-            observer.emit(
-                "turn_completed",
-                self.agent_index,
-                &context,
-                serde_json::json!({}),
-            );
+            let payload = self
+                .timings
+                .lock()
+                .ok()
+                .and_then(|slot| slot.as_ref().map(TurnTimings::to_observer_json))
+                .unwrap_or_else(|| serde_json::json!({}));
+            observer.emit("turn_completed", self.agent_index, &context, payload);
         }
     }
 }
@@ -3326,6 +3540,7 @@ async fn publish_agent_turn_metric(
     session_id: &str,
     turn_id: &str,
     stop_reason: Option<buzz_core::agent_turn_metric::StopReason>,
+    timings: &TurnTimings,
 ) {
     use buzz_core::agent_turn_metric::{AgentTurnMetricPayload, TokenCounts};
     use nostr::{EventBuilder, Kind, Tag};
@@ -3372,6 +3587,13 @@ async fn publish_agent_turn_metric(
         cumulative: cumulative_counts,
         delta_reliable: usage.delta_reliable,
         stop_reason,
+        relay_lag_secs: timings.relay_lag_secs,
+        admission_ms: timings.admission_ms,
+        queue_wait_ms: timings.queue_wait_ms,
+        session_setup_ms: timings.session_setup_ms,
+        first_output_ms: timings.first_output_ms,
+        turn_total_ms: timings.turn_total_ms,
+        session_reused: timings.session_reused,
     };
     let ciphertext = match buzz_core::agent_turn_metric::encrypt_agent_turn_metric(
         &ctx.agent_keys,
@@ -4123,6 +4345,8 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: std::time::Instant::now(),
+                relay_received_at: std::time::Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4449,6 +4673,8 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: std::time::Instant::now(),
+                relay_received_at: std::time::Instant::now(),
+                relay_lag_secs: 0,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -5016,6 +5242,7 @@ mod tests {
             source,
             PromptOutcome::Error(AcpError::Protocol("simulated session-create error".into())),
             None,
+            None,
         );
 
         // Receive the PromptResult back from the channel.
@@ -5074,6 +5301,7 @@ mod tests {
             source,
             PromptOutcome::Ok(StopReason::EndTurn),
             None,
+            None,
         );
 
         let mut result = result_rx.recv().await.expect("PromptResult must be sent");
@@ -5125,6 +5353,7 @@ mod tests {
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnTimings::default(),
         )
         .await;
     }
@@ -5153,6 +5382,7 @@ mod tests {
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnTimings::default(),
         )
         .await;
     }
@@ -5185,6 +5415,7 @@ mod tests {
             "sess-1",
             "turn-1",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnTimings::default(),
         )
         .await;
     }
@@ -5218,6 +5449,7 @@ mod tests {
             "sess-cancel",
             "turn-cancel",
             Some(buzz_core::agent_turn_metric::StopReason::Cancelled),
+            &TurnTimings::default(),
         )
         .await;
     }
@@ -5251,8 +5483,85 @@ mod tests {
             "sess-ba",
             "turn-ba",
             Some(buzz_core::agent_turn_metric::StopReason::EndTurn),
+            &TurnTimings::default(),
         )
         .await;
+    }
+
+    // ── Turn stage-timing tests ────────────────────────────────────────────
+
+    /// `TurnTimings::to_observer_json` emits camelCase keys for known stages
+    /// and omits unknown (`None`) stages entirely.
+    #[test]
+    fn test_turn_timings_observer_json_omits_unknown_stages() {
+        assert_eq!(
+            TurnTimings::default().to_observer_json(),
+            serde_json::json!({}),
+            "all-None timings must serialize to an empty object"
+        );
+
+        let timings = TurnTimings {
+            relay_lag_secs: Some(3),
+            admission_ms: Some(40),
+            queue_wait_ms: Some(1200),
+            session_setup_ms: None,
+            first_output_ms: None,
+            turn_total_ms: Some(9000),
+            session_reused: Some(true),
+        };
+        assert_eq!(
+            timings.to_observer_json(),
+            serde_json::json!({
+                "relayLagSecs": 3,
+                "admissionMs": 40,
+                "queueWaitMs": 1200,
+                "turnTotalMs": 9000,
+                "sessionReused": true,
+            })
+        );
+    }
+
+    /// `finalize_turn_timings` stamps `turn_total_ms`, consumes the (absent)
+    /// first-output latency, and records the finalized value on the
+    /// completion guard for the `turn_completed` frame.
+    #[tokio::test]
+    async fn test_finalize_turn_timings_stamps_total_and_records_on_guard() {
+        let mut acp = AcpClient::spawn(
+            "bash",
+            &["-c".to_string(), "sleep 10".to_string()],
+            &[],
+            false,
+        )
+        .await
+        .expect("failed to spawn test agent");
+
+        let base = TurnTimings {
+            queue_wait_ms: Some(500),
+            session_reused: Some(false),
+            ..TurnTimings::default()
+        };
+        let guard = TurnCompletionGuard::new(None, Some(0), None, "turn-t".to_string());
+        let turn_started = Instant::now() - Duration::from_millis(50);
+
+        let finalized = finalize_turn_timings(&base, turn_started, &mut acp, &guard);
+
+        assert_eq!(finalized.queue_wait_ms, Some(500), "base stages preserved");
+        assert_eq!(finalized.session_reused, Some(false));
+        assert!(
+            finalized.turn_total_ms.is_some_and(|ms| ms >= 50),
+            "turn_total_ms must cover the elapsed turn: {:?}",
+            finalized.turn_total_ms
+        );
+        assert_eq!(
+            finalized.first_output_ms, None,
+            "no prompt was sent — first output latency must be absent"
+        );
+        let recorded = guard.timings.lock().expect("guard timings lock").clone();
+        assert_eq!(
+            recorded,
+            Some(finalized),
+            "guard must carry the finalized timings for turn_completed"
+        );
     }
 
     fn make_prompt_context_no_owner() -> PromptContext {
