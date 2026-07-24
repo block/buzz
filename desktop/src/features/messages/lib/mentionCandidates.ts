@@ -21,6 +21,10 @@ export type MentionCandidate = {
   role?: ChannelRole | null;
   personaName?: string | null;
   secondaryLabel?: string | null;
+  /** Kind-0 `about` when already resolved at candidate-build time (e.g. from
+   * a user-search result). `undefined` means "unknown — resolve from the
+   * profile lookup at suggestion-mapping time"; `null` means "known absent". */
+  description?: string | null;
   ownerPubkey?: string | null;
   isAgent: boolean;
   isManagedAgent?: boolean;

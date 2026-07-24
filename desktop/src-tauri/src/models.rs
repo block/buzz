@@ -48,6 +48,10 @@ pub struct UserProfileSummaryInfo {
     #[serde(default)]
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Kind-0 `about` field — one-line role/description surfaced in the
+    /// @-mention selector for agents.
+    #[serde(default)]
+    pub about: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,
     #[serde(default)]
@@ -65,6 +69,10 @@ pub struct UserSearchResultInfo {
     pub pubkey: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Kind-0 `about` field — one-line role/description surfaced in the
+    /// @-mention selector for agents.
+    #[serde(default)]
+    pub about: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,
     #[serde(default)]

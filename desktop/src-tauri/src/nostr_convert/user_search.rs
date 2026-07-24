@@ -19,6 +19,7 @@ pub fn user_search_result_from_event(ev: &Event) -> UserSearchResultInfo {
             .or_else(|| v.get("name").and_then(Value::as_str))
             .map(str::to_string),
         avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
+        about: v.get("about").and_then(Value::as_str).map(str::to_string),
         nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
         is_agent: owner_pubkey.is_some(),
         owner_pubkey,
@@ -236,6 +237,18 @@ mod tests {
         assert_eq!(r.users.len(), 2);
         assert_eq!(r.users[0].display_name.as_deref(), Some("a"));
         assert_eq!(r.users[1].display_name.as_deref(), Some("B"));
+    }
+
+    #[test]
+    fn user_search_result_carries_about_when_present() {
+        let with_about = ev(0, r#"{"name":"honey","about":"Writer bee"}"#, vec![]);
+        let without_about = ev(0, r#"{"name":"fizz"}"#, vec![]);
+
+        assert_eq!(
+            user_search_result_from_event(&with_about).about.as_deref(),
+            Some("Writer bee")
+        );
+        assert_eq!(user_search_result_from_event(&without_about).about, None);
     }
 
     #[test]

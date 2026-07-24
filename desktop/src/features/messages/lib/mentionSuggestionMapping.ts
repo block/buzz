@@ -15,6 +15,7 @@ export type MentionSuggestionCandidate = {
   isAgent: boolean;
   isMember: boolean;
   role?: ChannelRole | null;
+  description?: string | null;
   ownerPubkey?: string | null;
 };
 
@@ -38,6 +39,18 @@ export function mapMentionCandidateToSuggestion(opts: {
     ? formatOwnerLabel(candidate.ownerPubkey, currentPubkey, ownerProfiles)
     : null;
 
+  // Agent role line: prefer an `about` resolved at candidate-build time
+  // (search results), else fall back to the profile lookup like avatarUrl.
+  // Collapsed to a single line — the selector is a quick picker, not a
+  // profile card.
+  const rawDescription = candidate.isAgent
+    ? (candidate.description ??
+      (candidate.pubkey
+        ? profiles?.[normalizePubkey(candidate.pubkey)]?.about
+        : null))
+    : null;
+  const description = rawDescription?.replace(/\s+/g, " ").trim() || null;
+
   return {
     pubkey: candidate.pubkey,
     personaId: candidate.personaId ?? undefined,
@@ -58,5 +71,6 @@ export function mapMentionCandidateToSuggestion(opts: {
       candidate.isMember === false,
     ownerLabel,
     role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
+    description,
   };
 }

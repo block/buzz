@@ -58,6 +58,7 @@ export default defineConfig({
         "**/composer-link-shortcut.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
         "**/mentions.spec.ts",
+        "**/mention-descriptions-screenshots.spec.ts",
         "**/team-mentions.spec.ts",
         "**/persistent-agent-audience.spec.ts",
         "**/relay-reconnect.spec.ts",
