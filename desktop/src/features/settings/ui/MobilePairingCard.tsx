@@ -176,11 +176,11 @@ function PairingDialog({
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
       <DialogContent
-        className="max-w-md overflow-hidden p-0"
+        className="max-w-md gap-0 overflow-hidden border-0 px-6 pb-6 pt-6"
         data-testid="mobile-pairing-dialog"
       >
         <div className="flex max-h-[85vh] flex-col">
-          <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
+          <DialogHeader className="shrink-0 pb-5 pr-8">
             <DialogTitle>Pair Mobile Device</DialogTitle>
             <DialogDescription>
               {step === "sas"
@@ -191,7 +191,7 @@ function PairingDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto px-6 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pt-4">
             {step === "error" && error ? (
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />

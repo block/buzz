@@ -26,6 +26,11 @@ test("mobile pairing uses the local Wallet-style QR renderer", async ({
   await expect(dialog).toBeVisible();
   await expect(qrCode).toBeVisible();
   await expect(copyButton).toHaveText("Copy pairing code");
+  await expect(dialog).toHaveCSS("border-radius", "16px");
+  await expect(dialog).toHaveCSS("border-left-width", "0px");
+  await expect(dialog).toHaveCSS("padding-left", "24px");
+  await expect(dialog).toHaveCSS("padding-right", "24px");
+  await expect(dialog).toHaveCSS("padding-top", "24px");
   await expect(dialog.getByTestId("mobile-pairing-done")).toHaveCount(0);
   await expect(
     dialog.getByRole("button", { name: "Close", exact: true }),
