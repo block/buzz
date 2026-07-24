@@ -6,4 +6,8 @@
 // `mobile/ios/Flutter/AppOverrides.xcconfig` containing
 // `BUNDLE_IDENTIFIER = your.app.id` (gitignored).
 BUNDLE_IDENTIFIER = com.buzz.buzzMobile
+BUZZ_APP_GROUP_IDENTIFIER = group.$(BUNDLE_IDENTIFIER)
+BUZZ_KEYCHAIN_ACCESS_GROUP = $(BUNDLE_IDENTIFIER)
+BUZZ_IOS_PUSH_ENVIRONMENT = development
+BUZZ_APP_ATTEST_ENVIRONMENT = development
 #include? "AppOverrides.xcconfig"

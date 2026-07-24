@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth_provider.dart';
+import '../push/push_bridge.dart';
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -36,11 +37,14 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
+      await registerBuzzPushCommunitySnapshot(updatedList);
       return existing.id;
     }
 
     await storage.save(community);
-    state = AsyncData([...current, community]);
+    final updatedList = [...current, community];
+    state = AsyncData(updatedList);
+    await registerBuzzPushCommunitySnapshot(updatedList);
     return community.id;
   }
 
@@ -49,7 +53,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     await storage.remove(id);
 
     final current = state.value ?? [];
-    state = AsyncData(current.where((w) => w.id != id).toList());
+    final updatedList = current.where((w) => w.id != id).toList();
+    state = AsyncData(updatedList);
+    await registerBuzzPushCommunitySnapshot(updatedList);
 
     // If we removed the active community, switch to another or sign out.
     final activeId = await storage.loadActiveId();
@@ -90,6 +96,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current];
     updatedList[index] = updated;
     state = AsyncData(updatedList);
+    await registerBuzzPushCommunitySnapshot(updatedList);
   }
 }
 

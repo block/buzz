@@ -6,12 +6,23 @@ import UserNotifications
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var mediaUploadChannel: FlutterMethodChannel?
+  private var pushChannel: FlutterMethodChannel?
+  private var appGroupIdentifier: String? {
+    Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
+  }
 
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    UNUserNotificationCenter.current().requestAuthorization(options: [.badge]) { _, _ in }
+    UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound]) {
+      granted, _ in
+      if granted {
+        DispatchQueue.main.async {
+          application.registerForRemoteNotifications()
+        }
+      }
+    }
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
 
@@ -24,6 +35,81 @@ import UserNotifications
     mediaUploadChannel?.setMethodCallHandler { [weak self] call, result in
       self?.handleMediaUploadMethodCall(call, result: result)
     }
+
+    pushChannel = FlutterMethodChannel(
+      name: "buzz/push",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    pushChannel?.setMethodCallHandler { [weak self] call, result in
+      self?.handlePushMethodCall(call, result: result)
+    }
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
+  ) {
+    super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
+    pushChannel?.invokeMethod(
+      "apnsTokenChanged",
+      arguments: ["token": deviceToken.map { String(format: "%02x", $0) }.joined()])
+  }
+
+  override func application(
+    _ application: UIApplication,
+    didFailToRegisterForRemoteNotificationsWithError error: Error
+  ) {
+    super.application(application, didFailToRegisterForRemoteNotificationsWithError: error)
+    pushChannel?.invokeMethod(
+      "apnsRegistrationFailed", arguments: ["message": error.localizedDescription])
+  }
+
+  private func handlePushMethodCall(
+    _ call: FlutterMethodCall,
+    result: @escaping FlutterResult
+  ) {
+    switch call.method {
+    case "saveCommunitySnapshot":
+      guard let arguments = call.arguments as? [String: Any],
+        let communities = arguments["communities"] as? [[String: Any]]
+      else {
+        result(
+          FlutterError(
+            code: "invalid_arguments", message: "Expected communities array.", details: nil))
+        return
+      }
+      do {
+        try savePushCommunitySnapshot(communities)
+        result(nil)
+      } catch {
+        result(
+          FlutterError(
+            code: "save_failed", message: "Unable to save push community snapshot.",
+            details: error.localizedDescription))
+      }
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  private func savePushCommunitySnapshot(_ communities: [[String: Any]]) throws {
+    guard let appGroupIdentifier else {
+      throw NSError(
+        domain: "BuzzPush", code: 1,
+        userInfo: [NSLocalizedDescriptionKey: "Missing BuzzAppGroupIdentifier"])
+    }
+    guard
+      let container = FileManager.default.containerURL(
+        forSecurityApplicationGroupIdentifier: appGroupIdentifier)
+    else {
+      throw NSError(
+        domain: "BuzzPush", code: 2,
+        userInfo: [NSLocalizedDescriptionKey: "Missing App Group container"])
+    }
+    let data = try JSONSerialization.data(
+      withJSONObject: ["communities": communities], options: [.sortedKeys])
+    let destination = container.appendingPathComponent("push-communities.json")
+    try data.write(to: destination, options: [.atomic])
   }
 
   private func handleMediaUploadMethodCall(
@@ -173,10 +259,12 @@ import UserNotifications
     let sourceURL = URL(fileURLWithPath: sourcePath)
     let asset = AVURLAsset(url: sourceURL)
 
-    guard let exportSession = AVAssetExportSession(
-      asset: asset,
-      presetName: AVAssetExportPresetPassthrough
-    ) else {
+    guard
+      let exportSession = AVAssetExportSession(
+        asset: asset,
+        presetName: AVAssetExportPresetPassthrough
+      )
+    else {
       result(
         FlutterError(
           code: "transcode_failed",
@@ -201,7 +289,8 @@ import UserNotifications
       case .completed:
         result(outputURL.path)
       default:
-        let errorMessage = exportSession.error?.localizedDescription
+        let errorMessage =
+          exportSession.error?.localizedDescription
           ?? "Video transcoding failed with status \(exportSession.status.rawValue)."
         result(
           FlutterError(
