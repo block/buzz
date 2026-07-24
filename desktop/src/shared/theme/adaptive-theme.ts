@@ -76,6 +76,47 @@ function overlay(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+const MINIMUM_TEXT_CONTRAST = 4.5;
+
+function contrastRatio(first: string, second: string): number {
+  const firstLuminance = luminance(first);
+  const secondLuminance = luminance(second);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function ensureTextContrast(foreground: string, background: string): string {
+  if (contrastRatio(foreground, background) >= MINIMUM_TEXT_CONTRAST) {
+    return foreground;
+  }
+
+  const black = "#000000";
+  const white = "#ffffff";
+  const target =
+    contrastRatio(black, background) > contrastRatio(white, background)
+      ? black
+      : white;
+  let low = 0;
+  let high = 1;
+
+  // Find the smallest shift toward black or white that clears WCAG AA for
+  // normal text, preserving as much of the theme-provided color as possible.
+  for (let i = 0; i < 20; i++) {
+    const factor = (low + high) / 2;
+    if (
+      contrastRatio(mix(foreground, target, factor), background) >=
+      MINIMUM_TEXT_CONTRAST
+    ) {
+      high = factor;
+    } else {
+      low = factor;
+    }
+  }
+
+  return mix(foreground, target, high);
+}
+
 // =============================================================================
 // Chrome Color Calculation
 // =============================================================================
@@ -201,19 +242,27 @@ export function createThemeVars(
 
   const dir = isDark ? 1 : -1;
   const elevate = (amount: number) => adjust(primaryBg, dir * amount);
+  const hoverBg = elevate(0.06);
+  const popoverBg = elevate(0.08);
+  const menuSurfaceBg = mix(primaryBg, hoverBg, 0.2);
 
-  // Git/accent colors with fallbacks
+  // Git/accent colors with fallbacks. Deleted colors are also used as
+  // destructive foreground text, but some syntax themes provide pale diff
+  // background tints here. Guard against the mixed menu surface used by
+  // popoverSurface.ts, where destructive actions render.
   const fallbackGreen = isDark ? "#3fb950" : "#1a7f37";
   const fallbackRed = isDark ? "#f85149" : "#cf222e";
   const fallbackOrange = isDark ? "#d29922" : "#9a6700";
 
   const accentGreen = gitColors?.added ?? fallbackGreen;
-  const accentRed = gitColors?.deleted ?? fallbackRed;
+  const accentRed = ensureTextContrast(
+    gitColors?.deleted ?? fallbackRed,
+    menuSurfaceBg,
+  );
   const accentOrange = fallbackOrange;
 
   // Derived colors
   const borderColor = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
-  const hoverBg = elevate(0.06);
   const huddleControlBg = isDark ? mix(hoverBg, syntaxFg, 0.14) : "#333333";
   const huddleControlHoverBg = isDark
     ? mix(huddleControlBg, syntaxFg, 0.08)
@@ -237,7 +286,7 @@ export function createThemeVars(
       // Backgrounds
       "--background": hexToHsl(primaryBg),
       "--card": hexToHsl(primaryBg),
-      "--popover": hexToHsl(elevate(0.08)),
+      "--popover": hexToHsl(popoverBg),
       "--muted": hexToHsl(hoverBg),
       "--accent": hexToHsl(hoverBg),
       "--secondary": hexToHsl(hoverBg),
