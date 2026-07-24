@@ -304,8 +304,7 @@ fn scan_path_for_command(
     std::env::split_paths(path_env).find_map(|dir| {
         // System32 bash and %LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe are
         // WSL app-execution aliases, not Git Bash (#2685).
-        if system_root.is_some_and(|root| is_under_dir(&dir, root)) || is_windows_apps_dir(&dir)
-        {
+        if system_root.is_some_and(|root| is_under_dir(&dir, root)) || is_windows_apps_dir(&dir) {
             return None;
         }
         let candidate = dir.join(name);
