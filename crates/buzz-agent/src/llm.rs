@@ -234,14 +234,14 @@ impl LmStudioNativeClient {
                 401 | 403 => {
                     AgentError::LlmAuth("LM Studio authentication required".into())
                 }
-                404 => AgentError::LlmModelNotFound(
-                    "configured LM Studio model is unavailable".into(),
-                ),
-                400 | 409 | 410 if purpose == NativeRequestPurpose::Continuation => {
+                400 | 404 | 409 | 410 if purpose == NativeRequestPurpose::Continuation => {
                     AgentError::Llm(format!(
                         "LM Studio native continuation state unavailable ({status}); start a new ACP session"
                     ))
                 }
+                404 => AgentError::LlmModelNotFound(
+                    "configured LM Studio model is unavailable".into(),
+                ),
                 _ => AgentError::Llm(format!(
                     "LM Studio native request failed with {status}"
                 )),

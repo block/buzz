@@ -88,13 +88,20 @@ impl Harness {
     }
 
     async fn recv(&mut self) -> Value {
+        self.recv_with_len().await.0
+    }
+
+    async fn recv_with_len(&mut self) -> (Value, usize) {
         let mut line = String::new();
         let bytes = tokio::time::timeout(Duration::from_secs(10), self.stdout.read_line(&mut line))
             .await
             .expect("ACP receive timeout")
             .expect("read ACP line");
         assert!(bytes > 0, "agent closed stdout");
-        serde_json::from_str(&line).expect("ACP output is JSON")
+        (
+            serde_json::from_str(&line).expect("ACP output is JSON"),
+            bytes,
+        )
     }
 
     async fn recv_for_id(&mut self, id: i64) -> Value {
@@ -707,6 +714,55 @@ async fn native_expired_continuation_fails_without_retry_or_reconstruction() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_continuation_404_is_expired_state_not_missing_model() {
+    let (base_url, captures) = spawn_native_server(vec![
+        (
+            200,
+            native_response(
+                "resp_before_404",
+                vec![json!({"type":"message","content":"first"})],
+                1,
+                1,
+            ),
+            Duration::ZERO,
+        ),
+        (
+            404,
+            json!({"error":"previous response not found"}),
+            Duration::ZERO,
+        ),
+    ])
+    .await;
+    let mut harness = Harness::spawn(&base_url, None).await;
+    let session_id = initialize_and_new_session(&mut harness).await;
+    let first = harness
+        .send(
+            "session/prompt",
+            json!({"sessionId":session_id,"prompt":[{"type":"text","text":"first"}]}),
+        )
+        .await;
+    assert_eq!(
+        harness.recv_for_id(first).await["result"]["stopReason"],
+        "end_turn"
+    );
+    let second = harness
+        .send(
+            "session/prompt",
+            json!({"sessionId":session_id,"prompt":[{"type":"text","text":"second"}]}),
+        )
+        .await;
+    let failure = harness.recv_for_id(second).await;
+    assert_eq!(failure["error"]["code"], -32000);
+    let message = failure["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("state unavailable"), "{message}");
+    assert!(message.contains("start a new ACP session"), "{message}");
+    assert!(!message.contains("model"), "{message}");
+    assert_eq!(captures.lock().await.len(), 2);
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_timeout_is_explicit_and_not_retried() {
     let (base_url, captures) = spawn_native_server(vec![(
         200,
@@ -810,6 +866,77 @@ async fn native_tool_evidence_is_bounded_once_before_acp_output() {
         harness.recv_for_id(prompt).await["result"]["stopReason"],
         "end_turn"
     );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn high_operator_evidence_limit_cannot_exceed_acp_frame_budget() {
+    const ACP_FRAME_LIMIT: usize = 4 * 1024 * 1024;
+    let large_argument = "a".repeat(5 * 1024 * 1024);
+    // NUL uses JSON's six-byte `\u0000` representation, exercising the
+    // serializer's worst-case expansion rather than only ASCII payload size.
+    let large_output = "\0".repeat(1024 * 1024);
+    let (base_url, _captures) = spawn_native_server(vec![(
+        200,
+        native_response(
+            "resp_high_limit",
+            vec![
+                json!({
+                    "type":"tool_call",
+                    "tool":"search_events",
+                    "arguments":{"query":large_argument},
+                    "output":large_output,
+                    "provider_info":{"type":"ephemeral_mcp","server_label":"memory"}
+                }),
+                json!({"type":"message","content":"done"}),
+            ],
+            5,
+            2,
+        ),
+        Duration::ZERO,
+    )])
+    .await;
+    let integrations = json!([{
+        "type":"ephemeral_mcp",
+        "server_label":"memory",
+        "server_url":"http://127.0.0.1:9/mcp",
+        "allowed_tools":["search_events"]
+    }])
+    .to_string();
+    let mut harness = Harness::spawn_with_env(
+        &base_url,
+        Some(&integrations),
+        &[("BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES", "8388608")],
+    )
+    .await;
+    let session_id = initialize_and_new_session(&mut harness).await;
+    let prompt = harness
+        .send(
+            "session/prompt",
+            json!({"sessionId":session_id,"prompt":[{"type":"text","text":"search"}]}),
+        )
+        .await;
+
+    let mut evidence_frames = Vec::new();
+    loop {
+        let (frame, serialized_len) = harness.recv_with_len().await;
+        let update_type = frame["params"]["update"]["sessionUpdate"].as_str();
+        if matches!(update_type, Some("tool_call" | "tool_call_update")) {
+            evidence_frames.push((frame.clone(), serialized_len));
+        }
+        if frame["id"] == json!(prompt) {
+            break;
+        }
+    }
+    assert_eq!(evidence_frames.len(), 2);
+    for (frame, serialized_len) in evidence_frames {
+        assert!(
+            serialized_len < ACP_FRAME_LIMIT,
+            "{} frame was {serialized_len} bytes",
+            frame["params"]["update"]["sessionUpdate"]
+        );
+    }
 
     harness.shutdown().await;
 }

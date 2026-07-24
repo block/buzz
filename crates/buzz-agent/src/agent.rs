@@ -24,6 +24,13 @@ use crate::wire::{self, WireSender};
 const ERROR_REFLECTION_SUFFIX: &str =
     "\n\n[Reflect] Before retrying, identify the cause and change your approach.";
 
+/// Native evidence text is serialized into a single ACP JSON line. JSON can
+/// expand one input byte to six bytes (`\u00xx`), so 512 KiB leaves at least
+/// 960 KiB for the fixed envelope and bounded metadata below the 4 MiB line
+/// budget even in the worst case. This outbound boundary is intentionally
+/// independent of the larger generic MCP history/result setting.
+const MAX_NATIVE_ACP_EVIDENCE_TEXT_BYTES: usize = 512 * 1024;
+
 pub struct RunCtx<'a> {
     pub cfg: &'a Config,
     /// Effective model for this session. Usually equals `cfg.model`; overridden
@@ -414,7 +421,9 @@ impl RunCtx<'_> {
                         self.session_id,
                         &call,
                         &response.model_instance_id,
-                        self.cfg.max_tool_result_text_bytes,
+                        self.cfg
+                            .max_tool_result_text_bytes
+                            .min(MAX_NATIVE_ACP_EVIDENCE_TEXT_BYTES),
                     )
                     .await;
                 }
