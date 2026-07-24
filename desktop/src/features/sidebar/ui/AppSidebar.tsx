@@ -47,6 +47,7 @@ import { CreateChannelDialog } from "@/features/sidebar/ui/CreateChannelDialog";
 import { SidebarProfileCard } from "@/features/sidebar/ui/SidebarProfileCard";
 import { SidebarRelayConnectionCard } from "@/features/sidebar/ui/SidebarRelayConnectionCard";
 import type { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
+import { formatVerifiedUserLabel } from "@/features/profile/lib/identity";
 import {
   SidebarLoadingContent,
   useSidebarLoadingShape,
@@ -473,13 +474,17 @@ export function AppSidebar({
     immediate: isSelectedDirectMessage,
     timeoutMs: 400,
   });
+  const resolvedProfileDisplayName = formatVerifiedUserLabel(
+    profile?.displayName,
+    profile?.verifiedName,
+  );
   const { dmChannelLabels, dmParticipantsByChannelId, dmPresenceByChannelId } =
     useDmSidebarMetadata({
       currentPubkey,
       directMessages,
       enabled: shouldLoadDmMetadata,
       fallbackDisplayName,
-      profileDisplayName: profile?.verifiedName ?? profile?.displayName,
+      profileDisplayName: resolvedProfileDisplayName,
     });
   const sortedDirectMessages = React.useMemo(
     () =>
@@ -499,8 +504,7 @@ export function AppSidebar({
     streamChannels,
   });
   const resolvedDisplayName =
-    profile?.verifiedName?.trim() ||
-    profile?.displayName?.trim() ||
+    resolvedProfileDisplayName ||
     fallbackDisplayName?.trim() ||
     "Current identity";
   const {

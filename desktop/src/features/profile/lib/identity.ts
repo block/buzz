@@ -5,6 +5,20 @@ export type UserProfileLookup = Record<string, UserProfileSummary>;
 
 export { truncatePubkey };
 
+export function formatVerifiedUserLabel(
+  chosenName: string | null | undefined,
+  verifiedName: string | null | undefined,
+): string | null {
+  const chosen = chosenName?.trim();
+  const verified = verifiedName?.trim();
+
+  if (chosen && verified && chosen !== verified) {
+    return `${chosen} (${verified})`;
+  }
+
+  return chosen || verified || null;
+}
+
 /**
  * Deep-equal two profile lookups by value. Used to stabilise the merged
  * `messageProfiles` reference at the ChannelScreen boundary: the underlying
@@ -120,21 +134,14 @@ export function resolveUserLabel(input: {
   const profile = getResolvedProfile(pubkey, profiles);
   const verifiedName = profile?.verifiedName?.trim();
   const displayName = profile?.displayName?.trim();
-  if (verifiedName) {
-    return verifiedName;
-  }
-  if (displayName) {
-    return displayName;
-  }
-
   const nip05Handle = profile?.nip05Handle?.trim();
-  if (nip05Handle) {
-    return nip05Handle;
-  }
-
   const safeFallback = fallbackName?.trim();
-  if (safeFallback) {
-    return safeFallback;
+  const label = formatVerifiedUserLabel(
+    displayName || nip05Handle || safeFallback,
+    verifiedName,
+  );
+  if (label) {
+    return label;
   }
 
   return truncatePubkey(pubkey);

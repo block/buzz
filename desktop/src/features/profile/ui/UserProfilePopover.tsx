@@ -25,6 +25,7 @@ import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
+  formatVerifiedUserLabel,
   formatOwnerLabel,
   ownsAuthorAgent,
 } from "@/features/profile/lib/identity";
@@ -236,13 +237,8 @@ export function UserProfilePopover({
       managedAgentsQuery.isPending ||
       usersBatchQuery.isPending);
   const displayName =
-    profile?.verifiedName ?? profile?.displayName ?? truncatePubkey(pubkey);
-  const profileAlias =
-    profile?.verifiedName &&
-    profile.displayName &&
-    profile.verifiedName !== profile.displayName
-      ? profile.displayName
-      : null;
+    formatVerifiedUserLabel(profile?.displayName, profile?.verifiedName) ??
+    truncatePubkey(pubkey);
   // Owner signal mirrors UserProfilePanel: a declared NIP-OA owner whose agent
   // runs elsewhere holds no local seckey, so key custody (`isOwner`) alone
   // wrongly hides the affordance from them — and gating on bot-ness alone shows
@@ -539,11 +535,6 @@ export function UserProfilePopover({
             />
           ) : null}
         </div>
-        {profileAlias ? (
-          <p className="mt-0.5 truncate text-xs leading-4 text-muted-foreground">
-            {profileAlias}
-          </p>
-        ) : null}
         {isBotProfile && ownerLabel ? (
           <p
             className="mt-0.5 truncate text-xs leading-4 text-muted-foreground"
