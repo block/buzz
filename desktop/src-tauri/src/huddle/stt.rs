@@ -31,6 +31,8 @@ use std::{
 
 use tokio::sync::mpsc as tokio_mpsc;
 
+use super::models::SttFamily;
+
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
 /// Bounded audio queue capacity.
@@ -75,6 +77,13 @@ impl SttPipeline {
     /// pipeline only accumulates speech while the flag is true (key held).
     /// When `None`, the pipeline runs in continuous VAD mode.
     ///
+    /// `live_tx` (optional) switches the pipeline into live-transcript mode
+    /// (used by composer dictation): the in-progress phrase is re-decoded
+    /// every `PARTIAL_DECODE_STEP` new samples and sent as `(text, false)`,
+    /// and finals are sent as `(text, true)` — all on this one channel so
+    /// ordering is preserved. In this mode nothing is sent on the returned
+    /// text receiver. Pass `None` for huddle transcription (finals only).
+    ///
     /// Returns `Err` only if the thread cannot be spawned (OS error).
     /// If model files are missing, the worker logs and exits cleanly —
     /// the pipeline handle is still returned but will never produce text.
@@ -85,9 +94,11 @@ impl SttPipeline {
     /// thread on every `recv_timeout` call).
     pub fn new(
         model_dir: PathBuf,
+        family: SttFamily,
         tts_active: Arc<AtomicBool>,
         tts_cancel: Option<Arc<AtomicBool>>,
         ptt_active: Option<Arc<AtomicBool>>,
+        live_tx: Option<tokio_mpsc::Sender<(String, bool)>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
@@ -101,12 +112,14 @@ impl SttPipeline {
             .spawn(move || {
                 stt_worker(
                     model_dir,
+                    family,
                     audio_rx,
                     text_tx,
                     shutdown_worker,
                     tts_active,
                     tts_cancel_worker,
                     ptt_active_worker,
+                    live_tx,
                 )
             })
             .map_err(|e| format!("failed to spawn stt-worker thread: {e}"))?;
@@ -167,6 +180,17 @@ impl Drop for SttPipeline {
 /// Previous value (28 frames / 450 ms) felt sluggish in conversation.
 const SILENCE_FLUSH_FRAMES: usize = 19;
 
+/// Silence-flush threshold for live (dictation) mode: ~608 ms.
+///
+/// Parakeet only commits sentence-final punctuation and capitalization when
+/// the decoded audio ends in ≥600 ms of silence (measured: 300 ms → "is there
+/// anything we can do about that", 600 ms → "…about that?"). The huddle's
+/// ~300 ms window cut finals just under that threshold, so dictated text lost
+/// its punctuation at every phrase commit. The longer window also merges
+/// mid-sentence thinking pauses into fuller phrases; perceived latency is
+/// unchanged because partials keep streaming while the window runs.
+const LIVE_SILENCE_FLUSH_FRAMES: usize = 38;
+
 /// Consecutive VAD speech frames required before triggering barge-in during TTS.
 /// 20 frames × 256 samples / 16 kHz ≈ 320 ms — must be long enough to filter
 /// speaker-to-mic feedback (TTS audio bleeding through the mic) while still
@@ -183,6 +207,20 @@ const VAD_THRESHOLD: f32 = 0.5;
 
 /// How long the worker waits on the audio channel before checking the shutdown flag.
 const RECV_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Live-transcript mode: re-decode the in-progress phrase every this many new
+/// 16 kHz samples (~300 ms) so words stream out while the user is talking.
+/// The model is an offline recognizer, so "streaming" is repeated decoding of
+/// the growing phrase buffer — phrases reset at every VAD pause, but a long
+/// unbroken ramble grows toward MAX_SPEECH_SAMPLES. Decode cost grows with the
+/// buffer (~70 ms per second of audio for the 0.6B model, measured in
+/// `v3_long_buffer`), so this is only the MINIMUM step: the worker also waits
+/// at least the previous decode's duration worth of new audio before the next
+/// partial. Without that back-off the worker falls behind real time past ~5 s
+/// of phrase, the bounded audio queue overflows, and mic audio is silently
+/// dropped — splicing the phrase and making later decodes remove words that
+/// earlier partials showed.
+const PARTIAL_DECODE_STEP: usize = 4800;
 
 /// 50 ms cooldown after TTS stops before STT re-enables.
 /// Prevents the tail of TTS audio from being transcribed as speech.
@@ -201,14 +239,25 @@ const TTS_COOLDOWN: Duration = Duration::from_millis(50);
 /// shows it's safe on the minimum-spec target.
 const STT_NUM_THREADS: i32 = 1;
 
+/// ONNX threads in live-transcript (dictation) mode. Live mode re-decodes the
+/// whole in-progress phrase every ~300 ms, so per-decode latency bounds how
+/// fresh the streamed words are. Measured with Parakeet v3 0.6B int8
+/// (`v3_punctuation` experiment): a 6.5 s phrase decodes in ~1.4 s at 1
+/// thread but ~460 ms at 4 — the difference between laggy and live. No
+/// huddle/LiveKit stack runs during dictation, so the extra cores are free.
+const LIVE_STT_NUM_THREADS: i32 = 4;
+
+#[allow(clippy::too_many_arguments)]
 fn stt_worker(
     model_dir: PathBuf,
+    family: SttFamily,
     audio_rx: Receiver<Vec<u8>>,
     text_tx: tokio_mpsc::Sender<String>,
     shutdown: Arc<AtomicBool>,
     tts_active: Arc<AtomicBool>,
     tts_cancel: Option<Arc<AtomicBool>>,
     ptt_active: Option<Arc<AtomicBool>>,
+    live_tx: Option<tokio_mpsc::Sender<(String, bool)>>,
 ) {
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
     use rubato::{Fft, FixedSync, Resampler};
@@ -228,18 +277,21 @@ fn stt_worker(
 
     // ── 3. Initialise sherpa-onnx recognizer ─────────────────────────────────
     //
-    // Parakeet TDT-CTC 110M ships as a single `model.int8.onnx` (CTC head) plus
-    // `tokens.txt`. sherpa-onnx infers the model family from which inner config
-    // has a `model` path set, so we don't need to set `model_type` explicitly.
-    // (See rust-api-examples/parakeet_tdt_ctc_simulate_streaming_microphone.rs
-    // in k2-fsa/sherpa-onnx.)
+    // sherpa-onnx infers the model family from which inner config has model
+    // paths set, so we populate exactly one family sub-config (issue #2478):
+    //
+    //   NemoCtc     — single `model.int8.onnx` (CTC head), e.g. Parakeet 110M en.
+    //   Transducer  — `encoder/decoder/joiner.int8.onnx`, e.g. Parakeet 0.6B v3
+    //                 (multilingual). See k2-fsa/sherpa-onnx offline-transducer
+    //                 NeMo examples.
+    //
+    // `tokens.txt` is shared by every family and lives on the parent config.
     use sherpa_onnx::{OfflineRecognizer, OfflineRecognizerConfig};
 
     let tokens_path = model_dir.join("tokens.txt");
-    let model_path = model_dir.join("model.int8.onnx");
-    if !tokens_path.exists() || !model_path.exists() {
+    if !tokens_path.exists() {
         eprintln!(
-            "buzz-desktop: STT model not found at {} — STT disabled",
+            "buzz-desktop: STT tokens.txt not found at {} — STT disabled",
             model_dir.display()
         );
         drain_until_shutdown(audio_rx, &shutdown);
@@ -247,9 +299,43 @@ fn stt_worker(
     }
 
     let mut cfg = OfflineRecognizerConfig::default();
-    cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+    match family {
+        SttFamily::NemoCtc => {
+            let model_path = model_dir.join("model.int8.onnx");
+            if !model_path.exists() {
+                eprintln!(
+                    "buzz-desktop: STT model.int8.onnx not found at {} — STT disabled",
+                    model_dir.display()
+                );
+                drain_until_shutdown(audio_rx, &shutdown);
+                return;
+            }
+            cfg.model_config.nemo_ctc.model = Some(model_path.to_string_lossy().into_owned());
+        }
+        SttFamily::Transducer => {
+            let encoder = model_dir.join("encoder.int8.onnx");
+            let decoder = model_dir.join("decoder.int8.onnx");
+            let joiner = model_dir.join("joiner.int8.onnx");
+            if !encoder.exists() || !decoder.exists() || !joiner.exists() {
+                eprintln!(
+                    "buzz-desktop: STT transducer files (encoder/decoder/joiner) missing at {} \
+                     — STT disabled",
+                    model_dir.display()
+                );
+                drain_until_shutdown(audio_rx, &shutdown);
+                return;
+            }
+            cfg.model_config.transducer.encoder = Some(encoder.to_string_lossy().into_owned());
+            cfg.model_config.transducer.decoder = Some(decoder.to_string_lossy().into_owned());
+            cfg.model_config.transducer.joiner = Some(joiner.to_string_lossy().into_owned());
+        }
+    }
     cfg.model_config.tokens = Some(tokens_path.to_string_lossy().into_owned());
-    cfg.model_config.num_threads = STT_NUM_THREADS;
+    cfg.model_config.num_threads = if live_tx.is_some() {
+        LIVE_STT_NUM_THREADS
+    } else {
+        STT_NUM_THREADS
+    };
     // Explicit — defaults are not part of the API contract, and noisy debug
     // logging in release builds would be expensive on every VAD chunk.
     cfg.model_config.debug = false;
@@ -276,6 +362,15 @@ fn stt_worker(
     let mut in_speech = false;
     // Consecutive speech frames seen during TTS — used for barge-in debounce.
     let mut barge_in_frames: usize = 0;
+    // Live mode: speech_buf length at the last partial decode.
+    let mut last_partial_len: usize = 0;
+    // Live mode: minimum new samples before the next partial decode —
+    // PARTIAL_DECODE_STEP, raised to the last decode's duration so partial
+    // decoding never outruns real time (see PARTIAL_DECODE_STEP docs).
+    let mut partial_step: usize = PARTIAL_DECODE_STEP;
+    // Live mode: most recent partial decode of the current phrase that ended
+    // with terminal punctuation — see prefer_punctuated.
+    let mut punct_partial: Option<String> = None;
     // Timestamp when TTS last stopped — used for the 200 ms cooldown.
     let mut tts_stopped_at: Option<std::time::Instant> = None;
 
@@ -305,10 +400,18 @@ fn stt_worker(
         if let Some(ref ptt) = ptt_active {
             let ptt_now = ptt.load(Ordering::Acquire);
             if ptt_was_active && !ptt_now && in_speech && !speech_buf.is_empty() {
-                flush_to_stt(&speech_buf, &recognizer, &text_tx);
+                flush_to_stt(
+                    &speech_buf,
+                    &recognizer,
+                    &text_tx,
+                    live_tx.as_ref(),
+                    punct_partial.take(),
+                );
                 speech_buf.clear();
                 silence_frames = 0;
                 in_speech = false;
+                last_partial_len = 0;
+                partial_step = PARTIAL_DECODE_STEP;
             }
             ptt_was_active = ptt_now;
         }
@@ -349,6 +452,10 @@ fn stt_worker(
                     tts_cancel.as_deref(),
                     &mut tts_stopped_at,
                     ptt_active.as_ref(),
+                    live_tx.as_ref(),
+                    &mut last_partial_len,
+                    &mut partial_step,
+                    &mut punct_partial,
                 );
             }
         }
@@ -411,6 +518,10 @@ fn process_16k_samples(
     tts_cancel: Option<&AtomicBool>,
     tts_stopped_at: &mut Option<std::time::Instant>,
     ptt_active: Option<&Arc<AtomicBool>>,
+    live_tx: Option<&tokio_mpsc::Sender<(String, bool)>>,
+    last_partial_len: &mut usize,
+    partial_step: &mut usize,
+    punct_partial: &mut Option<String>,
 ) {
     leftover.extend_from_slice(samples);
 
@@ -495,10 +606,12 @@ fn process_16k_samples(
 
             // OOM guard: flush and reset if the buffer exceeds 30 s of audio.
             if speech_buf.len() >= MAX_SPEECH_SAMPLES {
-                flush_to_stt(speech_buf, recognizer, text_tx);
+                flush_to_stt(speech_buf, recognizer, text_tx, live_tx, punct_partial.take());
                 speech_buf.clear();
                 *silence_frames = 0;
                 *in_speech = false;
+                *last_partial_len = 0;
+                *partial_step = PARTIAL_DECODE_STEP;
             }
         } else if *in_speech {
             // Still accumulate during brief silence gaps.
@@ -509,45 +622,141 @@ fn process_16k_samples(
             // key-hold as one utterance. The PTT release edge in the main
             // loop handles the flush. In VAD mode, flush after the silence
             // threshold so each natural pause becomes a separate message.
-            if ptt_active.is_none() && *silence_frames >= SILENCE_FLUSH_FRAMES {
+            let flush_frames = if live_tx.is_some() {
+                LIVE_SILENCE_FLUSH_FRAMES
+            } else {
+                SILENCE_FLUSH_FRAMES
+            };
+            if ptt_active.is_none() && *silence_frames >= flush_frames {
                 // End of utterance — transcribe.
-                flush_to_stt(speech_buf, recognizer, text_tx);
+                flush_to_stt(speech_buf, recognizer, text_tx, live_tx, punct_partial.take());
                 speech_buf.clear();
                 *silence_frames = 0;
                 *in_speech = false;
+                *last_partial_len = 0;
+                *partial_step = PARTIAL_DECODE_STEP;
             }
         }
         // If not in speech and not accumulating, just discard the frame.
+
+        // Live mode: re-decode the in-progress phrase every PARTIAL_DECODE_STEP
+        // new samples so words appear while the user is still talking. Later
+        // partials of the same phrase supersede earlier ones — the frontend
+        // replaces the partial region — so decode wobble is self-correcting.
+        if let Some(tx) = live_tx {
+            if *in_speech && speech_buf.len() >= *last_partial_len + *partial_step {
+                *last_partial_len = speech_buf.len();
+                let t0 = std::time::Instant::now();
+                let text = decode_speech(speech_buf, recognizer);
+                // Wait at least 2× this decode's duration (in samples: 16/ms
+                // at 16 kHz) before the next partial, capping decode duty
+                // cycle at ~50% so the worker can't fall behind the mic and
+                // overflow the audio queue (which silently drops samples).
+                // 1× measured at ~100% duty on a 35 s ramble — no headroom.
+                *partial_step =
+                    PARTIAL_DECODE_STEP.max(32 * t0.elapsed().as_millis() as usize);
+                if !text.is_empty() {
+                    if text.ends_with(['.', '?', '!', ',']) {
+                        *punct_partial = Some(text.clone());
+                    }
+                    if let Err(e) = tx.blocking_send((text, false)) {
+                        eprintln!("buzz-desktop: STT live channel closed: {e}");
+                    }
+                }
+            }
+        }
     }
 }
 
 /// Run sherpa-onnx on the accumulated speech buffer and send the text.
 ///
 /// Uses `blocking_send` because this runs on a `std::thread` (not async).
+/// Lowercased words only — all punctuation and case stripped. Two decodes of
+/// the same audio that differ only in the model's (unstable) punctuation and
+/// capitalization normalize to the same string.
+fn norm_words(s: &str) -> String {
+    let mapped: String = s
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '\'' {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    mapped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Punctuation from the 110M model is unstable: re-decodes of the same phrase
+/// flicker between "…that" and "…that?" (and internally, "question." vs
+/// "question,") depending on the exact trailing-noise composition — see the
+/// `silence_experiment` tests. If a partial of this phrase ended in
+/// punctuation, prefer it:
+/// - same words as the final (punctuation/case-insensitive) → keep the whole
+///   punctuated hint;
+/// - words differ but the last word agrees and the hint ends a sentence
+///   (. ? !) → graft just that mark onto the final.
+///
+/// Never invents words: any word-level difference and the final decode wins.
+fn prefer_punctuated(final_text: String, punct_hint: Option<&str>) -> String {
+    let Some(hint) = punct_hint else {
+        return final_text;
+    };
+    if final_text.is_empty() || hint.is_empty() {
+        return final_text;
+    }
+    let norm_final = norm_words(&final_text);
+    if norm_words(hint) == norm_final {
+        return hint.to_string();
+    }
+    let term = hint.chars().last().unwrap_or(' ');
+    if matches!(term, '.' | '?' | '!') && !final_text.ends_with(['.', '?', '!']) {
+        let last_word = |s: &str| s.rsplit(' ').next().map(str::to_string);
+        if last_word(&norm_final) == last_word(&norm_words(hint)) {
+            let mut grafted = final_text.trim_end_matches([',', ' ']).to_string();
+            grafted.push(term);
+            return grafted;
+        }
+    }
+    final_text
+}
+
 /// The tokio channel's `blocking_send` is safe to call from sync contexts.
 fn flush_to_stt(
     speech_buf: &[f32],
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
+    live_tx: Option<&tokio_mpsc::Sender<(String, bool)>>,
+    punct_hint: Option<String>,
 ) {
-    if speech_buf.is_empty() {
-        return;
-    }
-
-    let stream = recognizer.create_stream();
-    stream.accept_waveform(16_000, speech_buf);
-    recognizer.decode(&stream);
-
-    let text = stream
-        .get_result()
-        .map(|r| r.text.trim().to_string())
-        .unwrap_or_default();
-
+    let text = prefer_punctuated(decode_speech(speech_buf, recognizer), punct_hint.as_deref());
     if !text.is_empty() {
-        if let Err(e) = text_tx.blocking_send(text) {
+        // In live mode finals ride the same channel as partials so the
+        // receiver never sees a stale partial after its final.
+        let send_err = match live_tx {
+            Some(tx) => tx.blocking_send((text, true)).err().map(|e| e.to_string()),
+            None => text_tx.blocking_send(text).err().map(|e| e.to_string()),
+        };
+        if let Some(e) = send_err {
             eprintln!("buzz-desktop: STT text channel closed: {e}");
         }
     }
+}
+
+/// Run sherpa-onnx on the accumulated speech and return the trimmed text
+/// (empty on empty input or decode failure).
+fn decode_speech(speech_buf: &[f32], recognizer: &sherpa_onnx::OfflineRecognizer) -> String {
+    if speech_buf.is_empty() {
+        return String::new();
+    }
+    let stream = recognizer.create_stream();
+    stream.accept_waveform(16_000, speech_buf);
+    recognizer.decode(&stream);
+    stream
+        .get_result()
+        .map(|r| r.text.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Convert raw bytes (f32 LE) to f32 samples.
@@ -565,3 +774,400 @@ fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
 
 // drain_until_shutdown lives in super (huddle/mod.rs) — shared with tts.rs.
 use super::drain_until_shutdown;
+
+#[cfg(test)]
+mod prefer_punctuated_tests {
+    use super::prefer_punctuated;
+
+    #[test]
+    fn keeps_dropped_terminal_punctuation() {
+        let hint = Some("Is there anything we can do about that?");
+        assert_eq!(
+            prefer_punctuated("is there anything we can do about that".into(), hint),
+            "Is there anything we can do about that?"
+        );
+    }
+
+    #[test]
+    fn internal_punctuation_flicker_still_matches() {
+        // Observed in live_partial_sequence: the final decode swapped an
+        // internal "." for "," — same words, so the punctuated hint wins.
+        let hint = Some("I'm going to ask a question. Do you know why that happened?");
+        assert_eq!(
+            prefer_punctuated(
+                "I'm going to ask a question, Do you know why that happened".into(),
+                hint
+            ),
+            "I'm going to ask a question. Do you know why that happened?"
+        );
+    }
+
+    #[test]
+    fn grafts_terminal_mark_when_only_last_word_agrees() {
+        assert_eq!(
+            prefer_punctuated(
+                "do you know er why that happened,".into(),
+                Some("Do you know why that happened?")
+            ),
+            "do you know er why that happened?"
+        );
+    }
+
+    #[test]
+    fn comma_hint_is_never_grafted() {
+        assert_eq!(
+            prefer_punctuated("hello there friend".into(), Some("hello there,")),
+            "hello there friend"
+        );
+    }
+
+    #[test]
+    fn ignores_hint_when_text_differs() {
+        assert_eq!(
+            prefer_punctuated("hello world again".into(), Some("hello world.")),
+            "hello world again"
+        );
+    }
+
+    #[test]
+    fn never_replaces_empty_final() {
+        assert_eq!(prefer_punctuated(String::new(), Some("hello.")), "");
+    }
+
+    #[test]
+    fn no_hint_passes_through() {
+        assert_eq!(prefer_punctuated("hello".into(), None), "hello");
+    }
+}
+
+#[cfg(test)]
+mod silence_experiment {
+    use super::{decode_speech, prefer_punctuated};
+
+    /// Manual experiment: does Parakeet v3 (0.6B transducer) produce stable
+    /// punctuation under noisy pauses where the 110M CTC model flickers?
+    /// Also times each decode — the live mode re-decodes the whole phrase
+    /// every ~300 ms, so per-decode latency bounds the streaming cadence.
+    /// Run: cargo test v3_punctuation -- --ignored --nocapture
+    /// Needs ~/.buzz/models/parakeet-tdt-0.6b-v3 downloaded (see models.rs).
+    #[test]
+    #[ignore]
+    fn v3_punctuation() {
+        for threads in [1i32, 2, 4] {
+            let recognizer = v3_recognizer(threads);
+            println!("--- num_threads = {threads} ---");
+            run_decodes(&recognizer);
+        }
+    }
+
+    fn v3_recognizer(threads: i32) -> sherpa_onnx::OfflineRecognizer {
+        let model_dir = dirs::home_dir()
+            .unwrap()
+            .join(".buzz/models/parakeet-tdt-0.6b-v3");
+        let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
+        cfg.model_config.transducer.encoder = Some(
+            model_dir
+                .join("encoder.int8.onnx")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.model_config.transducer.decoder = Some(
+            model_dir
+                .join("decoder.int8.onnx")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.model_config.transducer.joiner = Some(
+            model_dir
+                .join("joiner.int8.onnx")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.model_config.tokens =
+            Some(model_dir.join("tokens.txt").to_string_lossy().into_owned());
+        cfg.model_config.debug = false;
+        cfg.model_config.num_threads = threads;
+        sherpa_onnx::OfflineRecognizer::create(&cfg).unwrap()
+    }
+
+    fn read_wav_16k(path: &str) -> Vec<f32> {
+        let bytes = std::fs::read(path).unwrap();
+        let data_pos = bytes
+            .windows(4)
+            .position(|w| w == b"data")
+            .expect("no data chunk")
+            + 8;
+        bytes[data_pos..]
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect()
+    }
+
+    /// Manual experiment: chl reported that during a long continuous ramble
+    /// "a whole bunch of text just got removed from the end". Two suspects:
+    /// (a) v3 transducer output degrades/truncates as the phrase buffer grows
+    ///     toward the 30 s MAX_SPEECH_SAMPLES cap, so a later partial decode
+    ///     yields LESS text than an earlier one and the frontend diff deletes
+    ///     the tail;
+    /// (b) per-decode latency on long buffers (~70 ms/s of audio) blows past
+    ///     the 300 ms partial cadence, the worker falls behind and the 5 s
+    ///     audio queue overflows.
+    /// This decodes growing prefixes of a 35 s ramble, timing each decode and
+    /// flagging any shrinkage between consecutive prefixes.
+    /// Run: cargo test v3_long_buffer -- --ignored --nocapture
+    /// Setup: say -v Samantha "<long ~35s text>" -o /tmp/dict_long.wav
+    ///   --data-format=LEF32@16000
+    #[test]
+    #[ignore]
+    fn v3_long_buffer() {
+        let recognizer = v3_recognizer(super::LIVE_STT_NUM_THREADS);
+        let samples = read_wav_16k("/tmp/dict_long.wav");
+        println!("total: {:.1}s", samples.len() as f32 / 16_000.0);
+        let mut prev = String::new();
+        for secs in [4, 8, 12, 16, 20, 22, 24, 26, 28, 30] {
+            let end = (16_000 * secs).min(samples.len());
+            let t0 = std::time::Instant::now();
+            let text = decode_speech(&samples[..end], &recognizer);
+            let shrink = if text.len() < prev.len() { "  <<< SHRANK" } else { "" };
+            println!(
+                "@{secs:>2}s [{:>6.0?}ms] {} chars{shrink}: {text:?}",
+                t0.elapsed().as_millis(),
+                text.len()
+            );
+            prev = text;
+            if end == samples.len() {
+                break;
+            }
+        }
+
+        // Simulate the worker's adaptive partial cadence over the same audio:
+        // next partial waits max(PARTIAL_DECODE_STEP, last decode duration).
+        // Real-time safe iff cumulative decode time stays under audio time.
+        println!("--- adaptive cadence simulation ---");
+        let mut last_len = 0usize;
+        let mut step = super::PARTIAL_DECODE_STEP;
+        let mut decode_total = std::time::Duration::ZERO;
+        let mut n = 0u32;
+        while last_len + step <= samples.len() {
+            last_len += step;
+            let t0 = std::time::Instant::now();
+            let text = decode_speech(&samples[..last_len], &recognizer);
+            let dt = t0.elapsed();
+            decode_total += dt;
+            step = super::PARTIAL_DECODE_STEP.max(32 * dt.as_millis() as usize);
+            n += 1;
+            println!(
+                "partial {n} @ audio {:>4.1}s: decode {:>4.0?}ms, next step {:.1}s, tail {:?}",
+                last_len as f32 / 16_000.0,
+                dt.as_millis(),
+                step as f32 / 16_000.0,
+                &text[text.len().saturating_sub(40)..]
+            );
+        }
+        let audio_secs = last_len as f32 / 16_000.0;
+        println!(
+            "{n} partials over {audio_secs:.1}s audio, total decode {:.1}s → real-time safe: {}",
+            decode_total.as_secs_f32(),
+            decode_total.as_secs_f32() < audio_secs
+        );
+    }
+
+    fn run_decodes(recognizer: &sherpa_onnx::OfflineRecognizer) {
+        for path in ["/tmp/dict_multi.wav", "/tmp/dict_q.wav"] {
+            let bytes = std::fs::read(path).unwrap();
+            let data_pos = bytes
+                .windows(4)
+                .position(|w| w == b"data")
+                .expect("no data chunk")
+                + 8;
+            let samples: Vec<f32> = bytes[data_pos..]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            println!(
+                "=== {path} ({:.1}s speech) ===",
+                samples.len() as f32 / 16_000.0
+            );
+            for (label, amp, tail_ms) in [
+                ("bare", 0.0f32, 0usize),
+                ("300ms noise", 0.01, 300),
+                ("608ms noise", 0.01, 608),
+                ("608ms loud noise", 0.03, 608),
+            ] {
+                let mut buf = samples.clone();
+                let mut state = 0x2545_f491u32;
+                for _ in 0..(16 * tail_ms) {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    buf.push((state as f32 / u32::MAX as f32 - 0.5) * 2.0 * amp);
+                }
+                let t0 = std::time::Instant::now();
+                let text = decode_speech(&buf, recognizer);
+                println!("  +{label}: [{:?}] {text:?}", t0.elapsed());
+            }
+        }
+    }
+
+    /// Manual experiment: simulate the live worker's exact cadence over real
+    /// (synthesized) speech with a noisy tail — decode the growing buffer
+    /// every PARTIAL_DECODE_STEP samples, track `punct_partial` like the
+    /// worker does, then run the final flush through `prefer_punctuated`.
+    /// Shows whether the sticky-punctuation hint actually matches on
+    /// multi-sentence phrases.
+    /// Run: cargo test live_partial_sequence -- --ignored --nocapture
+    /// Setup: say -v Samantha "It missed the full stop on the first
+    ///   sentence. I'm now going to try and ask a question. Do you know why
+    ///   that happened" -o /tmp/dict_multi.wav --data-format=LEF32@16000
+    #[test]
+    #[ignore]
+    fn live_partial_sequence() {
+        let model_dir = dirs::home_dir()
+            .unwrap()
+            .join(".buzz/models/parakeet-tdt-ctc-110m-en");
+        let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
+        cfg.model_config.nemo_ctc.model = Some(
+            model_dir
+                .join("model.int8.onnx")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.model_config.tokens =
+            Some(model_dir.join("tokens.txt").to_string_lossy().into_owned());
+        cfg.model_config.num_threads = 1;
+        cfg.model_config.debug = false;
+        let recognizer = sherpa_onnx::OfflineRecognizer::create(&cfg).unwrap();
+
+        for (path, amp) in [
+            ("/tmp/dict_multi.wav", 0.01f32),
+            ("/tmp/dict_q.wav", 0.01f32),
+        ] {
+            let bytes = std::fs::read(path).unwrap();
+            let data_pos = bytes
+                .windows(4)
+                .position(|w| w == b"data")
+                .expect("no data chunk")
+                + 8;
+            let mut samples: Vec<f32> = bytes[data_pos..]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            // Noisy silence tail up to the live flush window (~608 ms).
+            let mut state = 0x2545_f491u32;
+            for _ in 0..(16 * 608) {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                samples.push((state as f32 / u32::MAX as f32 - 0.5) * 2.0 * amp);
+            }
+            println!("=== {path} (noise amp {amp}) ===");
+            let mut punct_partial: Option<String> = None;
+            let mut last_len = 0usize;
+            while last_len + super::PARTIAL_DECODE_STEP <= samples.len() {
+                last_len += super::PARTIAL_DECODE_STEP;
+                let text = decode_speech(&samples[..last_len], &recognizer);
+                if text.ends_with(['.', '?', '!', ',']) {
+                    punct_partial = Some(text.clone());
+                }
+                println!("  partial@{last_len}: {text:?}");
+            }
+            let final_text = decode_speech(&samples, &recognizer);
+            println!("  FINAL:  {final_text:?}");
+            println!("  HINT:   {punct_partial:?}");
+            println!(
+                "  KEPT:   {:?}",
+                prefer_punctuated(final_text, punct_partial.as_deref())
+            );
+            // Rejected candidate fix (measured 2026-07-24): replacing the
+            // noisy VAD hangover with digital zeros at flush time sometimes
+            // REMOVES punctuation the noisy final had — tail composition is
+            // non-monotonic, so don't retry audio-level recipes.
+            let speech_end = samples.len() - 16 * 608;
+            let mut zeroed = samples[..speech_end].to_vec();
+            zeroed.extend(std::iter::repeat_n(0.0f32, 16 * 600));
+            println!("  ZEROED-TAIL: {:?}", decode_speech(&zeroed, &recognizer));
+            // Same but with noise overlaid on the speech itself (real mics
+            // pick up room noise under the voice too, not just in pauses).
+            let mut state = 0x1234_5678u32;
+            let mut noisy: Vec<f32> = samples[..speech_end]
+                .iter()
+                .map(|s| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    s + (state as f32 / u32::MAX as f32 - 0.5) * 2.0 * amp
+                })
+                .collect();
+            noisy.extend(std::iter::repeat_n(0.0f32, 16 * 600));
+            println!(
+                "  NOISY-SPEECH+ZEROED-TAIL: {:?}",
+                decode_speech(&noisy, &recognizer)
+            );
+        }
+    }
+
+    /// Manual experiment: how much trailing silence does the model need before
+    /// it commits sentence-final punctuation? (Answer when tuned: ≥600 ms —
+    /// see LIVE_SILENCE_FLUSH_FRAMES.)
+    /// Run: cargo test silence_vs_punctuation -- --ignored --nocapture
+    /// Setup: say -v Samantha "is there anything we can do about that?" \
+    ///          -o /tmp/dict_q.wav --data-format=LEF32@16000   (same for dict_s)
+    #[test]
+    #[ignore]
+    fn silence_vs_punctuation() {
+        let model_dir = dirs::home_dir()
+            .unwrap()
+            .join(".buzz/models/parakeet-tdt-ctc-110m-en");
+        let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
+        cfg.model_config.nemo_ctc.model = Some(
+            model_dir
+                .join("model.int8.onnx")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.model_config.tokens =
+            Some(model_dir.join("tokens.txt").to_string_lossy().into_owned());
+        cfg.model_config.num_threads = 1;
+        cfg.model_config.debug = false;
+        let recognizer = sherpa_onnx::OfflineRecognizer::create(&cfg).unwrap();
+
+        for path in ["/tmp/dict_q.wav", "/tmp/dict_s.wav"] {
+            let bytes = std::fs::read(path).unwrap();
+            // Naive WAV parse: find the "data" chunk, samples are f32 LE.
+            let data_pos = bytes
+                .windows(4)
+                .position(|w| w == b"data")
+                .expect("no data chunk")
+                + 8;
+            let samples: Vec<f32> = bytes[data_pos..]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect();
+            println!("=== {path} ({} samples) ===", samples.len());
+            for silence_ms in [0usize, 100, 300, 600] {
+                let mut buf = samples.clone();
+                buf.extend(std::iter::repeat_n(0.0f32, 16 * silence_ms));
+                println!(
+                    "  +{silence_ms}ms zeros: {:?}",
+                    decode_speech(&buf, &recognizer)
+                );
+            }
+            // Real mic "silence" is room noise, not zeros — simulate with
+            // low-level deterministic pseudo-noise (LCG; no rand dep) at
+            // amplitudes well below the VAD speech threshold.
+            for amp in [0.002f32, 0.01, 0.03] {
+                let noise = |len: usize| {
+                    let mut state = 0x2545_f491u32;
+                    (0..len)
+                        .map(|_| {
+                            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                            (state as f32 / u32::MAX as f32 - 0.5) * 2.0 * amp
+                        })
+                        .collect::<Vec<f32>>()
+                };
+                let mut buf = samples.clone();
+                buf.extend(noise(16 * 608));
+                println!("  +608ms noise(amp {amp}): {:?}", decode_speech(&buf, &recognizer));
+                buf.extend(std::iter::repeat_n(0.0f32, 16 * 600));
+                println!(
+                    "  +608ms noise(amp {amp}) + 600ms zeros: {:?}",
+                    decode_speech(&buf, &recognizer)
+                );
+            }
+        }
+    }
+}
