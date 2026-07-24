@@ -97,6 +97,70 @@ function huddleStarted(overrides = {}) {
 // late edit/delete for a visible old message would silently render stale.
 // ---------------------------------------------------------------------------
 
+test("imported message shows import_author name and strips the body prefix", () => {
+  const imported = streamMessage({
+    content: "**Ren Koya**: hello from slack",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["import", "slack"],
+      ["import_author", "U060", "Ren Koya"],
+      ["import_ts", "1700000000.000100"],
+    ],
+  });
+  const out = formatTimelineMessages([imported], null, undefined, null);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].imported, true, "row is flagged imported");
+  assert.equal(out[0].author, "Ren Koya", "author from import_author tag");
+  assert.equal(
+    out[0].body,
+    "hello from slack",
+    "redundant **Name**: prefix stripped for display",
+  );
+});
+
+test("bound import identity renders under the person's profile", () => {
+  const imported = streamMessage({
+    content: "**Ren Koya**: bound message",
+    tags: [
+      ["h", CHANNEL_ID],
+      ["import", "slack"],
+      ["import_author", "U060", "Ren Koya"],
+    ],
+  });
+  const profiles = {
+    [PUBKEY_B]: { displayName: "Ren (verified)", avatarUrl: "https://x/a.png" },
+  };
+  // Binding key is `<source>:<id>`; the `import` tag says source=slack.
+  const bindings = new Map([["slack:U060", PUBKEY_B]]);
+  const out = formatTimelineMessages(
+    [imported],
+    null,
+    undefined,
+    null,
+    profiles,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    bindings,
+  );
+  assert.equal(out[0].pubkey, PUBKEY_B, "row attributed to the bound pubkey");
+  assert.equal(out[0].author, "Ren (verified)", "name from bound profile");
+  assert.equal(
+    out[0].avatarUrl,
+    "https://x/a.png",
+    "avatar from bound profile",
+  );
+});
+
+test("native **bold**: content is not stripped on non-imported messages", () => {
+  const native = streamMessage({ content: "**heads up**: read this" });
+  const out = formatTimelineMessages([native], null, undefined, null);
+  assert.ok(!out[0].imported, "not flagged imported");
+  assert.equal(out[0].body, "**heads up**: read this", "native body untouched");
+});
+
 test("a far-future edit still rewrites the body of an old message", () => {
   const old = streamMessage({ created_at: 1_700_000_000 });
   const lateEdit = streamEdit(HEX64_A, "edited body", {
