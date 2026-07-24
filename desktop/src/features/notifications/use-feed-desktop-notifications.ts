@@ -110,7 +110,11 @@ export function useFeedDesktopNotifications(
   const deliverFeedNotification = React.useEffectEvent(
     async (item: FeedItem, senderName?: string) => {
       const threadRootId = getThreadReference(item.tags).rootId ?? null;
-      const didSend = await sendDesktopNotification({
+      const slot = slotForFeedKind(item.kind, item.category);
+      // Sound is independent of OS toast delivery — WebKitGTK / permission
+      // failures must not mute the chosen alert (#2562).
+      void playNotificationSound(resolveSlotSound(settings, slot));
+      await sendDesktopNotification({
         body: notificationBody(item),
         target: {
           channelId: item.channelId,
@@ -124,11 +128,6 @@ export function useFeedDesktopNotifications(
         },
         title: notificationTitle(item, senderName),
       });
-
-      if (didSend) {
-        const slot = slotForFeedKind(item.kind, item.category);
-        playNotificationSound(resolveSlotSound(settings, slot));
-      }
     },
   );
 
