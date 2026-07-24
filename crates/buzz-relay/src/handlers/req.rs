@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC, KIND_DM_VISIBILITY,
-    P_GATED_KINDS, RESULT_GATED_KINDS,
+    is_unshared_persona_event, AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC,
+    KIND_DM_VISIBILITY, KIND_PERSONA, P_GATED_KINDS, RESULT_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -388,6 +388,13 @@ pub async fn handle_req(
                 continue;
             }
 
+            // Persona shared-read gate: kind 30175 events are author-only by
+            // default; only events carrying ["shared","true"] are community-
+            // readable. Foreign unshared personas are silently omitted.
+            if is_unshared_persona_event(&stored.event, &pubkey_bytes) {
+                continue;
+            }
+
             // Dedup AFTER acceptance — an event that fails filter A's constraints
             // must remain eligible for filter B (NIP-01 OR semantics).
             if !seen_ids.insert(stored.event.id) {
@@ -707,6 +714,11 @@ async fn handle_search_req(
                         continue;
                     }
                     if is_author_only_event(&stored.event, reader_pubkey_bytes) {
+                        continue;
+                    }
+                    // Persona shared-read gate (search lane): same semantics as
+                    // the main delivery loop — foreign unshared personas are omitted.
+                    if is_unshared_persona_event(&stored.event, reader_pubkey_bytes) {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -1139,6 +1151,21 @@ pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
         ks.iter()
             .any(|k| AUTHOR_ONLY_KINDS.contains(&(k.as_u16() as u32)))
     })
+}
+
+/// Returns `true` if the filter CAN match kind 30175 (persona) — meaning it
+/// either has no `kinds` constraint (wildcard) or explicitly includes 30175.
+///
+/// Used by the COUNT handler to force the per-event fallback path, which calls
+/// `is_unshared_persona_event` on each row. The fast SQL `count_events()` path
+/// has no per-event access check, so it would over-count foreign unshared
+/// persona events — leaking the existence of persona activity even without
+/// returning content.
+pub(crate) fn filter_can_match_persona_shared_kinds(filter: &Filter) -> bool {
+    filter
+        .kinds
+        .as_ref()
+        .is_none_or(|ks| ks.iter().any(|k| k.as_u16() as u32 == KIND_PERSONA))
 }
 
 /// Returns `true` if the filter CAN match result-gated kinds — meaning it

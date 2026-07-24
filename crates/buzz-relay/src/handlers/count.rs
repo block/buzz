@@ -7,10 +7,12 @@ use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
-    filter_can_match_result_gated_kinds, is_author_only_event, result_gated_count_safe_for_pushdown,
+    filter_can_match_persona_shared_kinds, filter_can_match_result_gated_kinds,
+    is_author_only_event, result_gated_count_safe_for_pushdown,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
+use buzz_core::kind::is_unshared_persona_event;
 
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
@@ -102,6 +104,11 @@ pub async fn handle_count(
         // fast-path count_events() cannot be used because it doesn't do
         // per-event author filtering.
         let needs_author_only_filtering = super::req::filter_can_match_author_only_kinds(filter);
+        // Determine if this filter can match kind 30175 (persona) — if so, the
+        // fast-path must be bypassed because it has no per-event shared-tag check.
+        // A fast count over 30175 would include foreign unshared persona events,
+        // leaking the existence of private agent activity.
+        let needs_persona_filtering = filter_can_match_persona_shared_kinds(filter);
         // Determine if this filter can match result-gated kinds (44200, 30622)
         // that require a per-event owner check. When the fast SQL path would
         // count matching rows without calling reader_authorized_for_event, a
@@ -160,6 +167,7 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_persona_filtering
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -188,6 +196,9 @@ pub async fn handle_count(
                                 continue;
                             }
                             if is_author_only_event(&se.event, &pubkey_bytes) {
+                                continue;
+                            }
+                            if is_unshared_persona_event(&se.event, &pubkey_bytes) {
                                 continue;
                             }
                             if !buzz_core::filter::reader_authorized_for_event(
@@ -230,6 +241,7 @@ pub async fn handle_count(
             if super::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_persona_filtering
             {
                 query.limit = None; // COUNT doesn't need a row limit
                 match state.db.count_events(&query).await {
@@ -258,6 +270,9 @@ pub async fn handle_count(
                                 continue;
                             }
                             if is_author_only_event(&se.event, &pubkey_bytes) {
+                                continue;
+                            }
+                            if is_unshared_persona_event(&se.event, &pubkey_bytes) {
                                 continue;
                             }
                             if !buzz_core::filter::reader_authorized_for_event(
