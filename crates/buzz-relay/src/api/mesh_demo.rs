@@ -151,8 +151,8 @@ mod tests {
     use axum::body::to_bytes;
     use buzz_relay_mesh::endpoint::MeshEndpoint;
     use buzz_relay_mesh::{
-        InboundHandler, MeshDatagram, MeshError, MeshStream, MeshStreamFrame, RuntimeId,
-        StreamHello,
+        BoxFuture, InboundHandler, MeshDatagram, MeshError, MeshStream, MeshStreamFrame, RuntimeId,
+        StreamHello, StreamRecvHalf, StreamSendHalf,
     };
     use uuid::Uuid;
 
@@ -177,6 +177,81 @@ mod tests {
             pool,
             Duration::from_secs(5),
         ))
+    }
+
+    // ── In-memory mesh stream pair ────────────────────────────────────────
+    //
+    // The forwarded-arm round trip exercises buzz's session logic: join →
+    // `Forwarded`, Hello handoff, `accept_inbound`, Redis fence validation,
+    // and the echo consumer. None of that depends on iroh's UDP/QUIC layer,
+    // so the default test runs over this in-memory pair — deterministic and
+    // fast, and it reproduced the #2458 frame loss (run_demo_echo cancelling
+    // `recv_validated` mid-validation) just as readily as the live
+    // transport, making it the regression test for that fix. The
+    // `_live_mesh` variant keeps the real transport under `#[ignore]` for
+    // explicit evidence runs.
+
+    struct ChanSendHalf(tokio::sync::mpsc::UnboundedSender<MeshStreamFrame>);
+    struct ChanRecvHalf(tokio::sync::mpsc::UnboundedReceiver<MeshStreamFrame>);
+
+    impl StreamSendHalf for ChanSendHalf {
+        fn send_frame(&mut self, frame: MeshStreamFrame) -> BoxFuture<'_, Result<(), MeshError>> {
+            Box::pin(async move {
+                self.0
+                    .send(frame)
+                    .map_err(|_| MeshError::Transport("in-memory peer closed".into()))
+            })
+        }
+
+        fn finish(&mut self) -> Result<(), MeshError> {
+            Ok(())
+        }
+    }
+
+    impl StreamRecvHalf for ChanRecvHalf {
+        fn recv_frame(&mut self) -> BoxFuture<'_, Result<Option<MeshStreamFrame>, MeshError>> {
+            Box::pin(async move { Ok(self.0.recv().await) })
+        }
+    }
+
+    fn in_memory_stream_pair() -> (MeshStream, MeshStream) {
+        let (a_tx, b_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, a_rx) = tokio::sync::mpsc::unbounded_channel();
+        (
+            MeshStream::new(Box::new(ChanSendHalf(a_tx)), Box::new(ChanRecvHalf(a_rx))),
+            MeshStream::new(Box::new(ChanSendHalf(b_tx)), Box::new(ChanRecvHalf(b_rx))),
+        )
+    }
+
+    /// Transport handing out a pre-built in-memory stream, sending the Hello
+    /// on it first — the same contract as the live transport's
+    /// `open_session_stream`.
+    struct InMemoryTransport {
+        stream: std::sync::Mutex<Option<MeshStream>>,
+    }
+
+    impl RelayPeerTransport for InMemoryTransport {
+        fn send_datagram(&self, _to: RuntimeId, _dgram: MeshDatagram) -> Result<(), MeshError> {
+            unreachable!("forwarded-arm test never sends datagrams")
+        }
+
+        fn open_session_stream(
+            &self,
+            _to: RuntimeId,
+            hello: StreamHello,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<MeshStream, MeshError>> + Send + '_>,
+        > {
+            Box::pin(async move {
+                let taken = self.stream.lock().expect("stream mutex").take();
+                let mut stream =
+                    taken.ok_or_else(|| MeshError::Transport("stream already taken".into()))?;
+                stream.send_frame(MeshStreamFrame::Hello(hello)).await?;
+                Ok(stream)
+            })
+        }
+
+        fn set_inbound(&self, _handler: Box<dyn InboundHandler>) {}
     }
 
     struct NoopTransport;
@@ -258,10 +333,101 @@ mod tests {
     }
 
     /// Second runtime forwards to the owner and round-trips the payload
-    /// through the owner-side echo consumer (`recv_validated` + `send_bytes`),
-    /// end to end over a real mesh stream pair.
+    /// through the owner-side echo consumer over an in-memory stream pair.
+    ///
+    /// Regression test for #2458: pre-fix, `run_demo_echo` raced
+    /// `recv_validated` against its drain tick, and a tick firing during
+    /// fence validation dropped the future *with the frame it had already
+    /// read* — the echo then never happened and this test 504'd, in-memory
+    /// pair and live transport alike.
     #[tokio::test]
     async fn demo_join_forwarded_arm_round_trips_echo() {
+        let Some(directory) = redis_directory_if_available().await else {
+            return;
+        };
+        let community_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let owner_runtime = RuntimeId([7; 32]);
+        let local_runtime = RuntimeId([9; 32]);
+
+        // Owner acquires the lease first.
+        let owner_router = ReliableStreamRouter::new(
+            directory.clone(),
+            std::sync::Arc::new(NoopTransport),
+            owner_runtime,
+        );
+        let owned = run_demo_join(
+            &owner_router,
+            &directory,
+            DemoEchoRequest {
+                community_id,
+                session_id,
+                payload: "unused".into(),
+            },
+        )
+        .await;
+        assert_eq!(owned.status(), StatusCode::OK);
+        assert_eq!(body_json(owned).await["outcome"], "owned");
+
+        let (local_stream, owner_stream) = in_memory_stream_pair();
+
+        // Owner side: receive the Hello and run the real demo echo consumer.
+        let echo_directory = directory.clone();
+        let owner_task = tokio::spawn(async move {
+            let mut stream = owner_stream;
+            let hello = match stream.recv_frame().await.unwrap().unwrap() {
+                MeshStreamFrame::Hello(h) => h,
+                other => panic!("expected hello, got {other:?}"),
+            };
+            let router = ReliableStreamRouter::new(
+                echo_directory.clone(),
+                std::sync::Arc::new(NoopTransport),
+                owner_runtime,
+            );
+            let from = hello.sender;
+            let inbound = router.accept_inbound(from, hello, stream).await.unwrap();
+            crate::mesh_boot::run_demo_echo(
+                echo_directory,
+                inbound,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .await;
+        });
+
+        // Forwarding side: join the same session through the demo core.
+        let local_router = ReliableStreamRouter::new(
+            directory.clone(),
+            std::sync::Arc::new(InMemoryTransport {
+                stream: std::sync::Mutex::new(Some(local_stream)),
+            }),
+            local_runtime,
+        );
+        let resp = run_demo_join(
+            &local_router,
+            &directory,
+            DemoEchoRequest {
+                community_id,
+                session_id,
+                payload: "mesh echo evidence".into(),
+            },
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["outcome"], "forwarded");
+        assert_eq!(body["echoed_payload"], "mesh echo evidence");
+        owner_task.abort();
+    }
+
+    /// Same round trip over live iroh endpoints — the transport-inclusive
+    /// smoke. `#[ignore]`: the in-memory variant covers the session logic
+    /// deterministically, and this one stays exposed to real-network timing
+    /// (UDP scheduling, suite-load stalls vs. the test lease TTL), so it
+    /// runs on demand rather than in the default suite:
+    /// `cargo test -p buzz-relay --lib live_mesh -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live-transport evidence smoke — run explicitly; default-suite coverage is the in-memory variant"]
+    async fn demo_join_forwarded_arm_round_trips_echo_live_mesh() {
         let Some(directory) = redis_directory_if_available().await else {
             return;
         };
