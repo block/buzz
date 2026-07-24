@@ -58,6 +58,7 @@ test("join-slack callback: automatically connects before self-claim", async ({
           relayUrl: "ws://localhost:3000",
           communityName: "E2E Test",
           slackService: "http://mock.local",
+          slackOidcVerifier: "v".repeat(43),
           createdAt,
           updatedAt: createdAt,
         }),
@@ -73,6 +74,7 @@ test("join-slack callback: automatically connects before self-claim", async ({
   // not server-trusted.
   let finalize: {
     code?: string;
+    verifier?: string;
     claim?: { kind?: number; tags?: string[][] };
   } = {};
   await page.route("**/oidc/finalize", async (route) => {
@@ -118,6 +120,7 @@ test("join-slack callback: automatically connects before self-claim", async ({
   // awaited inside the finalize helper, so poll until the route captured it.
   await expect(() => {
     expect(finalize.code).toBe("oidc-code-1");
+    expect(finalize.verifier).toBe("v".repeat(43));
     expect(finalize.claim?.kind).toBe(30624);
     expect(finalize.claim?.tags).toContainEqual(["d", "slack:T060:U060"]);
   }).toPass({ timeout: 10_000 });

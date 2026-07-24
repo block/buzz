@@ -58,6 +58,8 @@ export type CommunityOnboardingTransaction = {
   addedCommunity?: boolean;
   /** Claim-service base URL for the Slack-migration join (`deep-link-join-slack`). */
   slackService?: string;
+  /** Device-held verifier that binds the Slack callback to this transaction. */
+  slackOidcVerifier?: string;
   /**
    * Verified imported identity waiting to be self-claimed after the target
    * community connection is active.
@@ -83,6 +85,7 @@ export type CommunityOnboardingTransactionPatch = Partial<
     | "error"
     | "acknowledged"
     | "slackSubject"
+    | "slackOidcVerifier"
   >
 >;
 
@@ -187,6 +190,9 @@ export function startCommunityOnboarding(
       policyReceipt: input.policyReceipt ?? existing.policyReceipt,
       slackService: input.slackService ?? existing.slackService,
       slackSubject: input.slackService ? undefined : existing.slackSubject,
+      slackOidcVerifier: input.slackService
+        ? undefined
+        : existing.slackOidcVerifier,
       source: input.slackService ? input.source : existing.source,
       // A re-opened Slack-join link restarts the browser sign-in.
       stage: input.slackService ? "slack-auth" : existing.stage,

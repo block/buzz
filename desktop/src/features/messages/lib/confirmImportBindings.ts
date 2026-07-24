@@ -11,7 +11,7 @@ import {
  * Given a mix of owner/admin **attestations** (kind
  * `KIND_IMPORT_IDENTITY_BINDING`, `p` = attested pubkey) and subject
  * **claims** (kind `KIND_IMPORT_IDENTITY_CLAIM`, self-signed, no `p`), returns
- * `<source>:<foreign id>` (e.g. `slack:U060`) → bound pubkey (lowercase hex)
+ * `<source>:<foreign id>` (e.g. `slack:T0266FRGM:U060`) → bound pubkey
  * ONLY where an attestation and a claim agree: the attested pubkey must equal
  * the claim's author for the same key.
  *
@@ -29,9 +29,9 @@ export function buildConfirmedImportBindings(
     (a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id),
   );
 
-  // slack:<id> -> attested pubkey (owner/admin-signed, relay-gated).
+  // slack:<team>:<user> -> attested pubkey (owner/admin-signed, relay-gated).
   const attested = new Map<string, string>();
-  // Self-signed consents, keyed `slack:<id>#<claimant pubkey>`.
+  // Self-signed consents, keyed `slack:<team>:<user>#<claimant pubkey>`.
   const claimed = new Set<string>();
 
   for (const event of ordered) {

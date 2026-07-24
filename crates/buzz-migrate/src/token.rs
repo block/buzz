@@ -7,7 +7,7 @@
 //!
 //! # What a token deliberately does NOT carry
 //!
-//! A token binds only `subject` (`slack:<user id>`), an expiry, and a random
+//! A token binds only `subject` (`slack:<team id>:<user id>`), an expiry, and a random
 //! nonce. It does **not** carry a Buzz pubkey. The pubkey is supplied later, by
 //! the app that opens the deep link — i.e. the recipient's own client, using
 //! its own key. This closes a phishing-takeover: an attacker who calls
@@ -59,7 +59,7 @@ impl MagicToken {
 /// The verified contents of a token: the foreign identity it proves control of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedToken {
-    /// `<source>:<foreign id>`, e.g. `slack:U060976D0QN`.
+    /// `<source>:<foreign id>`, e.g. `slack:T0266FRGM:U060976D0QN`.
     pub subject: String,
     /// Unix seconds after which the token is invalid.
     pub exp: u64,

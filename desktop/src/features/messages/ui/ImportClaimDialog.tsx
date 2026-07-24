@@ -21,42 +21,13 @@ import {
 
 import { importIdentityBindingsQueryKey } from "../useImportIdentityBindings";
 import {
+  completeEmailImportClaim,
   finalizeSlackOidcAttestation,
   publishImportIdentityClaim,
-} from "../lib/publishImportIdentityClaim";
+} from "../lib/importIdentityClaims";
+import { assertMatchesSlackJoin } from "../lib/slackMigrationOidc";
 
 type Phase = "confirm" | "working" | "done" | "error";
-
-function normalizedUrl(value: string): string | null {
-  try {
-    const url = new URL(value);
-    url.protocol = url.protocol.toLowerCase();
-    url.hostname = url.hostname.toLowerCase();
-    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
-    return url.toString().replace(/\/$/, "");
-  } catch {
-    return null;
-  }
-}
-
-function assertMatchesSlackJoin(
-  payload: ImportClaimDeepLinkPayload,
-  relayUrl: string,
-  serviceUrl: string | undefined,
-): void {
-  if (
-    payload.via !== "oidc" ||
-    !payload.relayUrl ||
-    !payload.service ||
-    !payload.code ||
-    normalizedUrl(payload.relayUrl) !== normalizedUrl(relayUrl) ||
-    normalizedUrl(payload.service) !== normalizedUrl(serviceUrl ?? "")
-  ) {
-    throw new Error(
-      "This Slack response doesn't match the pending community join. Restart from the original Slack join link.",
-    );
-  }
-}
 
 /**
  * Completes a zero-touch Slack→Buzz identity migration when the operator's
@@ -106,7 +77,12 @@ export function ImportClaimDialog() {
               "Start Slack sign-in from your team's Slack migration link.",
             );
           }
-          assertMatchesSlackJoin(next, pending.relayUrl, pending.slackService);
+          assertMatchesSlackJoin(
+            next,
+            pending.relayUrl,
+            pending.slackService,
+            pending.slackOidcVerifier,
+          );
           const service = next.service;
           const code = next.code;
           if (!service || !code) {
@@ -118,12 +94,14 @@ export function ImportClaimDialog() {
             service,
             code,
             subject: next.subject,
+            verifier: pending.slackOidcVerifier,
           })
             .then(() => {
               update(
                 {
                   stage: "connecting",
                   slackSubject: next.subject,
+                  slackOidcVerifier: undefined,
                   error: undefined,
                 },
                 pending.id,
@@ -175,7 +153,7 @@ export function ImportClaimDialog() {
 
       // Email channel: redeem the token so the operator publishes the
       // attestation. The token proves inbox control; the pubkey is ours.
-      await completeEmailClaim(payload.service, payload.token, pubkey);
+      await completeEmailImportClaim(payload.service, payload.token, pubkey);
 
       // Email fallback claims run inside an already-connected community.
       await publishImportIdentityClaim(payload.subject);
@@ -253,30 +231,4 @@ export function ImportClaimDialog() {
       </DialogContent>
     </Dialog>
   );
-}
-
-/**
- * POST the magic-link token + this device's pubkey to the operator's
- * claim-service. On success the operator has published the attestation.
- */
-async function completeEmailClaim(
-  service: string,
-  token: string,
-  pubkey: string,
-): Promise<void> {
-  const base = service.replace(/\/+$/, "");
-  const response = await fetch(`${base}/email/complete`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token, pubkey }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  const json = (await response.json().catch(() => ({}))) as {
-    error?: unknown;
-  };
-  if (!response.ok) {
-    const message =
-      typeof json.error === "string" ? json.error : `HTTP ${response.status}`;
-    throw new Error(message);
-  }
 }

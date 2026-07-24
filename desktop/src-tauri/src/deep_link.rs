@@ -363,7 +363,7 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImportClaimDeepLinkPayload {
-    /// `<source>:<foreign id>`, e.g. `slack:U060976D0QN`.
+    /// `<source>:<foreign id>`, e.g. `slack:T0266FRGM:U060976D0QN`.
     subject: String,
     /// Email channel: the single-use magic-link token to redeem at `service`.
     token: Option<String>,
@@ -382,7 +382,7 @@ struct ImportClaimDeepLinkPayload {
 }
 
 /// A foreign-identity subject is `<source>:<id>` with both parts present and an
-/// alphanumeric source (e.g. `slack:U060`).
+/// alphanumeric source (e.g. `slack:T0266FRGM:U060`).
 fn validate_import_claim_subject(subject: &str) -> Result<(), String> {
     let (source, id) = subject
         .split_once(':')
@@ -413,11 +413,28 @@ fn validate_claim_service(service: &str) -> Result<(), String> {
     if url.query().is_some() || url.fragment().is_some() {
         return Err("service must not include a query or fragment".into());
     }
+    if url.path() != "/" {
+        return Err("service must be an origin without a path".into());
+    }
+    if url.scheme() == "http" && !is_loopback_host(&url) {
+        return Err("service must use https unless it is local development".into());
+    }
     Ok(())
 }
 
-/// `buzz://import-claim?subject=slack:U060&token=…&service=https://…` (email)
-/// or `buzz://import-claim?subject=slack:U060&via=oidc&relay=wss://…&service=https://…`
+fn is_loopback_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+/// `buzz://import-claim?subject=slack:T0266FRGM:U060&token=…&service=https://…`
+/// (email), or
+/// `buzz://import-claim?subject=slack:T0266FRGM:U060&via=oidc&relay=wss://…&service=https://…`
 /// (OIDC). Rejects a link that identifies neither complete channel so the
 /// dialog never sees a half-formed one.
 fn parse_import_claim_deep_link(url: &Url) -> Result<ImportClaimDeepLinkPayload, String> {

@@ -5,13 +5,12 @@
 //! members and automates the owner/admin attestation half of a two-party import
 //! identity binding. See the crate docs for the model.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use buzz_migrate::oidc::OidcConfig;
 use buzz_migrate::roster::Roster;
-use buzz_migrate::server::{router, AppState, Inner, Mailer};
+use buzz_migrate::server::{router, AppState, Inner, Mailer, OidcSessions};
 use buzz_migrate::token::ConsumedNonces;
 use clap::Parser;
 use nostr::Keys;
@@ -134,10 +133,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--token-ttl-secs must be greater than zero".into());
     }
 
-    let base_url = normalize_public_base_url(
+    let base_url = normalize_service_origin(
         &args
             .base_url
             .unwrap_or_else(|| format!("http://{}", args.bind)),
+        args.dev,
     )?;
 
     let oidc = match (args.slack_client_id, args.slack_client_secret) {
@@ -145,6 +145,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let redirect_uri = args
                 .oidc_redirect_uri
                 .unwrap_or_else(|| format!("{base_url}/oidc/callback"));
+            validate_oidc_redirect_uri(&redirect_uri, args.dev)?;
             tracing::info!(%redirect_uri, "OIDC channel enabled (Sign in with Slack)");
             Some(OidcConfig {
                 client_id,
@@ -168,13 +169,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!("--dev enabled: /oidc/dev-complete is active; do NOT use in production");
     }
 
+    let relay_url = to_ws_url(&args.relay_url);
+    if oidc.is_some() {
+        let join_url = slack_join_url(&relay_url, &base_url);
+        tracing::info!(
+            %join_url,
+            "share this migration link only with members of the imported Slack workspace"
+        );
+    }
+
     let inner = Inner {
         roster,
         token_secret,
         consumed: Mutex::new(ConsumedNonces::new()),
         admin,
         team_id: args.slack_team_id,
-        relay_url: to_ws_url(&args.relay_url),
+        relay_url,
         auth_tag,
         base_url,
         token_ttl_secs: args.token_ttl_secs,
@@ -185,8 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         http: reqwest::Client::new(),
         oidc,
-        oidc_states: Mutex::new(HashMap::new()),
-        oidc_codes: Mutex::new(HashMap::new()),
+        oidc_sessions: OidcSessions::default(),
         dev: args.dev,
     };
     let state = AppState(Arc::new(inner));
@@ -209,10 +218,21 @@ fn to_ws_url(url: &str) -> String {
     }
 }
 
-fn normalize_public_base_url(value: &str) -> Result<String, String> {
+fn slack_join_url(relay_url: &str, service_origin: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("relay", relay_url)
+        .append_pair("service", service_origin)
+        .finish();
+    format!("buzz://join-slack?{query}")
+}
+
+fn normalize_service_origin(value: &str, allow_insecure: bool) -> Result<String, String> {
     let parsed = url::Url::parse(value).map_err(|error| format!("invalid --base-url: {error}"))?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("--base-url must be an http(s) URL with a host".into());
+    }
+    if parsed.scheme() != "https" && !allow_insecure {
+        return Err("--base-url must use https unless --dev is enabled".into());
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("--base-url must not include credentials".into());
@@ -220,7 +240,28 @@ fn normalize_public_base_url(value: &str) -> Result<String, String> {
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("--base-url must not include a query or fragment".into());
     }
-    Ok(value.trim_end_matches('/').to_string())
+    if parsed.path() != "/" {
+        return Err("--base-url must be an origin without a path".into());
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn validate_oidc_redirect_uri(value: &str, allow_insecure: bool) -> Result<(), String> {
+    let parsed =
+        url::Url::parse(value).map_err(|error| format!("invalid --oidc-redirect-uri: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("--oidc-redirect-uri must be an http(s) URL with a host".into());
+    }
+    if parsed.scheme() != "https" && !allow_insecure {
+        return Err("--oidc-redirect-uri must use https unless --dev is enabled".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("--oidc-redirect-uri must not include credentials".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("--oidc-redirect-uri must not include a query or fragment".into());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -236,14 +277,41 @@ mod tests {
     }
 
     #[test]
+    fn slack_join_url_encodes_both_operator_origins() {
+        assert_eq!(
+            slack_join_url(
+                "wss://buzz.example.com",
+                "https://migrate.example.com"
+            ),
+            "buzz://join-slack?relay=wss%3A%2F%2Fbuzz.example.com&service=https%3A%2F%2Fmigrate.example.com"
+        );
+    }
+
+    #[test]
     fn public_base_url_is_validated_and_normalized() {
         assert_eq!(
-            normalize_public_base_url("https://migrate.example/").unwrap(),
+            normalize_service_origin("https://migrate.example/", false).unwrap(),
             "https://migrate.example"
         );
-        assert!(normalize_public_base_url("file:///tmp/migrate").is_err());
-        assert!(normalize_public_base_url("https://user@migrate.example").is_err());
-        assert!(normalize_public_base_url("https://migrate.example?next=evil").is_err());
-        assert!(normalize_public_base_url("https://migrate.example#fragment").is_err());
+        assert_eq!(
+            normalize_service_origin("http://localhost:8787/", true).unwrap(),
+            "http://localhost:8787"
+        );
+        assert!(normalize_service_origin("http://migrate.example", false).is_err());
+        assert!(normalize_service_origin("file:///tmp/migrate", true).is_err());
+        assert!(normalize_service_origin("https://user@migrate.example", false).is_err());
+        assert!(normalize_service_origin("https://migrate.example/path", false).is_err());
+        assert!(normalize_service_origin("https://migrate.example?next=evil", false).is_err());
+        assert!(normalize_service_origin("https://migrate.example#fragment", false).is_err());
+    }
+
+    #[test]
+    fn oidc_redirect_uri_requires_https_outside_dev() {
+        assert!(validate_oidc_redirect_uri("https://migrate.example/oidc/callback", false).is_ok());
+        assert!(validate_oidc_redirect_uri("http://localhost:8787/oidc/callback", true).is_ok());
+        assert!(validate_oidc_redirect_uri("http://migrate.example/oidc/callback", false).is_err());
+        assert!(
+            validate_oidc_redirect_uri("https://user@migrate.example/callback", false).is_err()
+        );
     }
 }

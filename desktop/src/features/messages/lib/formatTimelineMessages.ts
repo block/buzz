@@ -79,7 +79,7 @@ function getDeletionTargets(tags: string[][]) {
  * `["import", <source>]` and `["import_author", <foreign id>, <display name>]`
  * provenance tags. Returns `null` for natively authored messages.
  *
- * `bindingKey` is `<source>:<foreign id>` (e.g. `slack:U060`), the exact key
+ * `bindingKey` is `<source>:<foreign id>` (e.g. `slack:T0266FRGM:U060`), the exact key
  * an owner-signed identity binding uses, so callers can look up the bound
  * pubkey without knowing the source scheme.
  */
@@ -233,7 +233,7 @@ export function formatTimelineMessages(
   ownerProfiles?: UserProfileLookup,
   /**
    * Owner/admin-signed import identity bindings: foreign id (e.g.
-   * `slack:U060…`) → bound Buzz pubkey (lowercase hex). Lets imported history
+   * `slack:T0266FRGM:U060…`) → bound Buzz pubkey (lowercase hex). Lets imported history
    * render under the real person's profile. Absent → imported rows still show
    * the name from their `import_author` tag, just without the bound avatar.
    */

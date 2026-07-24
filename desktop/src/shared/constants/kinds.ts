@@ -71,7 +71,7 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 export const KIND_DM_VISIBILITY = 30622;
 
 // Import identity binding — the owner/admin attestation half: d =
-// `<source>:<foreign id>` (e.g. `slack:U060`), one `p` tag = the attested Buzz
+// `<source>:<foreign id>` (e.g. `slack:T0266FRGM:U060`), one `p` tag = the attested Buzz
 // pubkey. Relay accepts it only from a community owner/admin. On its own it
 // does NOT attribute history — a matching subject claim is also required.
 export const KIND_IMPORT_IDENTITY_BINDING = 30623;

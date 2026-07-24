@@ -163,6 +163,15 @@ impl<'a> Importer<'a> {
         let channel_uuid = self.ensure_channel(channel).await?;
 
         // Messages, oldest first; thread roots always precede replies.
+        //
+        // `channel_messages` already dropped every non-importable message and
+        // sorted the rest chronologically, so an importable thread root always
+        // appears before — and is imported before — its replies. Any root that
+        // is *not* in this set (an empty `bot_message` root, a system subtype)
+        // can never be imported, so a reply pointing at it must not be deferred
+        // forever; it is promoted to a top-level message instead.
+        let importable_ts: std::collections::HashSet<&str> =
+            messages.iter().map(|m| m.ts.as_str()).collect();
         let mut consecutive_failures = 0usize;
         let mut imported_in_channel = 0u64;
         for msg in &messages {
@@ -191,12 +200,26 @@ impl<'a> Importer<'a> {
                         })
                     }
                     None => {
+                        // Root importable but not yet in state → an earlier run
+                        // was interrupted between root and reply; re-running
+                        // resumes. Root absent from the importable set → Slack
+                        // filtered it (empty bot root / system subtype) and it
+                        // will never import, so keep the reply's real content as
+                        // a top-level message rather than deferring it forever.
+                        let root_ts = msg.thread_ts.as_deref().unwrap_or_default();
+                        if importable_ts.contains(root_ts) {
+                            self.summary.warn(format!(
+                                "thread root {root_key} is not imported yet — deferring reply \
+                                 {key}; re-run to resume"
+                            ));
+                            self.summary.skipped += 1;
+                            continue;
+                        }
                         self.summary.warn(format!(
-                            "thread root {root_key} is not imported yet — deferring reply {key}; \
-                             re-run to resume"
+                            "thread root {root_key} was filtered out of the import (empty or \
+                             system message); importing reply {key} as a top-level message"
                         ));
-                        self.summary.skipped += 1;
-                        continue;
+                        None
                     }
                 },
                 None => None,
