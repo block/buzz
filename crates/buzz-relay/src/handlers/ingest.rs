@@ -21,15 +21,16 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_IMPORT_IDENTITY_BINDING, KIND_LONG_FORM, KIND_MANAGED_AGENT,
-    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
-    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
-    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
-    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
-    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
-    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
-    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
-    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_IMPORT_IDENTITY_BINDING, KIND_IMPORT_IDENTITY_CLAIM,
+    KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
+    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
+    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
+    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
+    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
+    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -304,6 +305,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         // owner/admin role check that actually authorizes it runs in
         // `validate_import_identity_binding` before storage.
         KIND_IMPORT_IDENTITY_BINDING => Ok(Scope::AdminUsers),
+        // Import identity claim — the subject's self-signed consent. Any
+        // authenticated member may publish one, but only for themselves: the
+        // relay's signer==author rule means the claim's author IS the consent.
+        KIND_IMPORT_IDENTITY_CLAIM => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
 }
@@ -357,6 +362,38 @@ fn validate_import_identity_binding(event: &Event) -> Result<(), IngestError> {
             "invalid: identity binding requires exactly one p tag (the bound pubkey)".into(),
         )),
     }
+}
+
+/// Validate the shape of a `KIND_IMPORT_IDENTITY_CLAIM` event before storage.
+///
+/// Requires a non-empty `d` tag (the `<source>:<foreign id>` key matching the
+/// attestation) and **no** `p` tag: a claim's consent is its own signature, so
+/// the signer's author pubkey is the bound identity. Rejecting a `p` tag keeps
+/// the wire form unambiguous — a claim can never appear to speak for a pubkey
+/// other than its signer. No role check: any member may claim on their own
+/// behalf (the caller enforces signer==author).
+fn validate_import_identity_claim(event: &Event) -> Result<(), IngestError> {
+    let has_nonempty_d = event.tags.iter().any(|t| {
+        let parts = t.as_slice();
+        parts.first().map(|s| s.as_str()) == Some("d")
+            && parts.get(1).is_some_and(|s| !s.is_empty())
+    });
+    if !has_nonempty_d {
+        return Err(IngestError::Rejected(
+            "invalid: identity claim requires a non-empty d tag (e.g. slack:U123)".into(),
+        ));
+    }
+    if event
+        .tags
+        .iter()
+        .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
+    {
+        return Err(IngestError::Rejected(
+            "invalid: identity claim must not carry a p tag — the signer is the bound identity"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
@@ -1552,8 +1589,9 @@ async fn ingest_event_inner(
     // operator), scoped per event instead of relay-wide, with no restart.
     // Note: the event is still signed by the submitter (bot mode) — the
     // pubkey==submitter check below is NOT waived; attribution to real people
-    // is carried by `import_author` tags plus owner-signed identity bindings
-    // (kind KIND_IMPORT_IDENTITY_BINDING), never by third-party signatures.
+    // is carried by `import_author` tags plus a two-party binding (an
+    // owner/admin KIND_IMPORT_IDENTITY_BINDING attestation AND the subject's
+    // own KIND_IMPORT_IDENTITY_CLAIM), never by third-party signatures.
     let import_exempt = has_import_tag(&event) && caller_is_community_admin;
 
     // Identity bindings are owner/admin-only: this is what stops a member from
@@ -1566,6 +1604,15 @@ async fn ingest_event_inner(
             ));
         }
         validate_import_identity_binding(&event)?;
+    }
+
+    // Identity claims are the subject's own consent: no role gate (the
+    // signer==author check below guarantees a claim only ever speaks for its
+    // signer), just a shape check. A binding attributes history only when an
+    // owner/admin attestation and a matching subject claim agree — neither
+    // half alone does anything.
+    if kind_u32 == KIND_IMPORT_IDENTITY_CLAIM {
+        validate_import_identity_claim(&event)?;
     }
 
     // Future drift is a fixed bound — a future timestamp is always a clock
@@ -2791,6 +2838,45 @@ mod tests {
             tag(&["p", pk]),
         ]);
         assert!(validate_import_identity_binding(&two_p).is_err());
+    }
+
+    #[test]
+    fn identity_claim_shape_validation() {
+        use buzz_core::kind::KIND_IMPORT_IDENTITY_CLAIM;
+        let pk = "8f3904246ba9d9cc7e821e7752e123d435234d17c2513d85785f4a0b1ca07e56";
+        let keys = nostr::Keys::generate();
+        let build = |tags: Vec<nostr::Tag>| {
+            EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_CLAIM as u16), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .expect("sign claim")
+        };
+        let tag = |parts: &[&str]| nostr::Tag::parse(parts.iter().copied()).expect("tag");
+
+        // Well-formed: non-empty d, no p tag.
+        let ok = build(vec![tag(&["d", "slack:U1"])]);
+        assert!(validate_import_identity_claim(&ok).is_ok());
+
+        // Missing / empty d tag.
+        assert!(validate_import_identity_claim(&build(vec![])).is_err());
+        assert!(validate_import_identity_claim(&build(vec![tag(&["d", ""])])).is_err());
+
+        // A p tag is rejected: a claim must never appear to speak for another
+        // pubkey — the signer is the bound identity.
+        let with_p = build(vec![tag(&["d", "slack:U1"]), tag(&["p", pk])]);
+        assert!(validate_import_identity_claim(&with_p).is_err());
+    }
+
+    #[test]
+    fn identity_claim_uses_members_write_scope() {
+        use buzz_core::kind::KIND_IMPORT_IDENTITY_CLAIM;
+        let dummy = make_dummy_event();
+        // Any member may claim on their own behalf — no admin scope, unlike the
+        // owner/admin-only attestation (KIND_IMPORT_IDENTITY_BINDING).
+        assert_eq!(
+            required_scope_for_kind(KIND_IMPORT_IDENTITY_CLAIM, &dummy).unwrap(),
+            Scope::MessagesWrite,
+        );
     }
 
     #[test]

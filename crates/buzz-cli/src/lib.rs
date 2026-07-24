@@ -930,10 +930,11 @@ pub enum ImportCmd {
         after_help = "History is signed by the CLI identity (bot mode) and tagged with the \
 original author (import_author) and timestamp. No private key is ever \
 generated for or distributed to anyone.\n\n\
-To attribute history to real people, publish owner/admin-signed identity \
-bindings mapping a Slack user id to that person's own PUBLIC key (npub or \
-hex) — via --identity-map here, or `buzz import bind` later. A member cannot \
-claim another person's history: only an owner/admin can publish a binding.\n\n\
+Attributing history to a real person takes TWO signatures: an owner/admin \
+attestation (Slack id → that person's PUBLIC key) via --identity-map here or \
+`buzz import bind`, AND the person's own consent via `buzz import claim`, run \
+by them with their key. An attestation alone does not attribute history, so an \
+admin cannot make someone appear to author messages they never wrote.\n\n\
 Re-running resumes from the state file — completed writes are skipped.\n\n\
 Examples:\n  \
 buzz import slack --export-dir ./export --dry-run\n  \
@@ -961,11 +962,12 @@ buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1d
         #[arg(long)]
         identity_map: Option<String>,
     },
-    /// Publish one owner/admin-signed identity binding (Slack id → public key)
+    /// Attest that a Slack id maps to a person's public key (owner/admin half)
     #[command(
-        after_help = "Attributes imported history to a real person. The pubkey is PUBLIC \
-(npub or hex) — never an nsec. Requires the CLI identity to be a community \
-owner or admin.\n\nExample:\n  \
+        after_help = "The owner/admin half of a two-party identity binding. The pubkey is \
+PUBLIC (npub or hex) — never an nsec. Requires the CLI identity to be a \
+community owner or admin. History is attributed only once the person also runs \
+`buzz import claim` with their own key.\n\nExample:\n  \
 buzz import bind --slack-id U060976D0QN --pubkey npub1abc..."
     )]
     Bind {
@@ -975,6 +977,19 @@ buzz import bind --slack-id U060976D0QN --pubkey npub1abc..."
         /// The person's PUBLIC key: npub1… or 64-char hex
         #[arg(long)]
         pubkey: String,
+    },
+    /// Consent to being attributed a Slack id — the subject half of a binding
+    #[command(
+        after_help = "The subject half of a two-party identity binding. Run this yourself, \
+with your own key: it self-signs your consent that the Slack id is you. It \
+attributes history only once a community owner/admin has published the \
+matching `buzz import bind` attestation for your pubkey.\n\nExample:\n  \
+buzz import claim --slack-id U060976D0QN"
+    )]
+    Claim {
+        /// Your Slack user id (e.g. U060976D0QN)
+        #[arg(long)]
+        slack_id: String,
     },
 }
 
@@ -1989,7 +2004,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
-        assert_eq!(names(&cmd, "import"), vec!["bind", "slack"]);
+        assert_eq!(names(&cmd, "import"), vec!["bind", "claim", "slack"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2060,7 +2075,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("import", 2),
+            ("import", 3),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),

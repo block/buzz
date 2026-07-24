@@ -70,11 +70,18 @@ export const KIND_GIT_STATUS_DRAFT = 1633;
 // h-tags = currently-hidden DM channel ids).
 export const KIND_DM_VISIBILITY = 30622;
 
-// Owner/admin-signed import identity binding: d = `<source>:<foreign id>`
-// (e.g. `slack:U060`), one `p` tag = the bound Buzz pubkey. Maps imported
-// (bot-signed) history to the real person. Relay accepts it only from a
-// community owner/admin, so it can't be used to claim another's history.
+// Import identity binding — the owner/admin attestation half: d =
+// `<source>:<foreign id>` (e.g. `slack:U060`), one `p` tag = the attested Buzz
+// pubkey. Relay accepts it only from a community owner/admin. On its own it
+// does NOT attribute history — a matching subject claim is also required.
 export const KIND_IMPORT_IDENTITY_BINDING = 30623;
+
+// Import identity claim — the subject's self-signed consent half: d =
+// `<source>:<foreign id>` (same key as the attestation), no `p` tag. The
+// signer's own pubkey is the consent. Imported history renders under the real
+// person only when an attestation and a claim agree (attestation `p` === claim
+// author) for the same key.
+export const KIND_IMPORT_IDENTITY_CLAIM = 30624;
 
 // Human-visible "new content" message kinds. Used as the unread trigger set
 // (sidebar badges, catch-up queries) and as the Home-feed mention query.

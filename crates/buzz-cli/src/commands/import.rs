@@ -3,15 +3,25 @@
 //! v1 supports Slack workspace exports; see `docs/slack-import.md` for the
 //! full design (attribution model, security, limitations).
 //!
-//! ## Attribution model (zero key custody)
+//! ## Attribution model (zero key custody, two-party consent)
 //!
 //! Every imported event is signed by the CLI identity (bot mode) and carries
 //! `import`/`import_author`/`import_ts` provenance tags. Real people are
-//! attributed by **owner/admin-signed identity bindings** (kind
-//! `KIND_IMPORT_IDENTITY_BINDING`) that map a Slack user id to that person's
-//! own Buzz pubkey — using **public keys only**. No private key is ever
-//! generated for or distributed to anyone, and because only an owner/admin
-//! can publish a binding, nobody can claim another person's imported history.
+//! attributed by a **two-party identity binding**, using **public keys only** —
+//! no private key is ever generated for or distributed to anyone:
+//!
+//! 1. An owner/admin **attestation** (kind `KIND_IMPORT_IDENTITY_BINDING`)
+//!    mapping a Slack user id to a person's Buzz pubkey — `buzz import bind` /
+//!    `--identity-map`.
+//! 2. The subject's own **claim** (kind `KIND_IMPORT_IDENTITY_CLAIM`),
+//!    self-signed with their key — `buzz import claim`.
+//!
+//! History renders under the real person only when both exist for the same
+//! Slack id and the attestation's pubkey equals the claim's signer. So a member
+//! cannot claim another person's history (no admin attestation), and an admin
+//! cannot make someone appear to author history they never wrote (no subject
+//! claim). See `docs/slack-import.md` for the residual trust in a colluding
+//! admin + subject.
 
 mod export;
 mod mrkdwn;
@@ -116,7 +126,9 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
     importer.finish()
 }
 
-/// Publish a single owner/admin-signed identity binding.
+/// Publish the owner/admin half of a two-party binding: an attestation that
+/// `slack_id` maps to `pubkey`. Inert until the subject also runs
+/// `cmd_import_claim` with their own key.
 pub async fn cmd_import_bind(
     client: &BuzzClient,
     slack_id: &str,
@@ -128,6 +140,24 @@ pub async fn cmd_import_bind(
         "event_id": event_id,
         "slack_id": slack_id,
         "pubkey": pubkey_hex,
+        "accepted": true,
+    }))
+}
+
+/// Publish the subject half of a two-party binding: the caller's self-signed
+/// consent to being attributed `slack_id`. Signed by the CLI identity, so the
+/// person whose history it is runs this with their own key. Inert until a
+/// community owner/admin has published the matching attestation for this
+/// pubkey.
+pub async fn cmd_import_claim(client: &BuzzClient, slack_id: &str) -> Result<(), CliError> {
+    let d_tag = buzz_sdk::slack_identity_binding_d_tag(slack_id);
+    let builder = buzz_sdk::build_import_identity_claim(&d_tag)
+        .map_err(|e| CliError::Other(format!("build_import_identity_claim failed: {e}")))?;
+    let event_id = submit(client, builder).await?;
+    print_json(&serde_json::json!({
+        "event_id": event_id,
+        "slack_id": slack_id,
+        "pubkey": client.keys().public_key().to_hex(),
         "accepted": true,
     }))
 }
@@ -707,6 +737,7 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
         crate::ImportCmd::Bind { slack_id, pubkey } => {
             cmd_import_bind(client, &slack_id, &pubkey).await
         }
+        crate::ImportCmd::Claim { slack_id } => cmd_import_claim(client, &slack_id).await,
     }
 }
 
