@@ -252,6 +252,15 @@ Each channel has at most one prompt in flight. Multiple channels can be processe
 
 > **Note:** On startup, the harness replays all unprocessed @mentions since the last run. Expect a burst of activity if there are stale events in the channel.
 
+### Agent response timing
+
+With `BUZZ_ACP_RELAY_OBSERVER=true`, the observer feed includes content-free
+`mention_reply_latency` samples and rolling warm/cold p50, p95, and max stage
+summaries. See the
+[mention-to-reply benchmark](../../benchmarks/agent-reply-latency/README.md) for
+the event boundaries, repeatable live procedure, privacy scope, and current
+limitations.
+
 ## Using Any ACP Agent
 
 The harness works with any agent that implements the [ACP spec](https://agentclientprotocol.com/) over stdio. The requirements are:

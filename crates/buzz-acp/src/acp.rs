@@ -172,6 +172,10 @@ pub struct AcpClient {
     observer_agent_index: Option<usize>,
     /// Best-effort context attached to raw ACP wire events.
     observer_context: ObserverContext,
+    /// Whether the current prompt has produced its first semantic ACP frame.
+    /// Reset immediately before each `session/prompt` write so cancel cleanup
+    /// cannot emit a duplicate first-output boundary.
+    first_turn_output_observed: bool,
     /// Most recently observed `_meta.goose.activeRunId` from a
     /// `session/update` notification of kind `session_info_update`.
     ///
@@ -493,6 +497,7 @@ impl AcpClient {
             observer: None,
             observer_agent_index: None,
             observer_context: ObserverContext::default(),
+            first_turn_output_observed: false,
             active_run_id: None,
             steer_rx: None,
             goose_usage: UsageTracker::default(),
@@ -688,6 +693,7 @@ impl AcpClient {
         // prompt so that any setup notifications recorded earlier are not
         // misattributed to this turn.
         self.goose_usage.begin_turn(session_id);
+        self.first_turn_output_observed = false;
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -706,6 +712,7 @@ impl AcpClient {
             self.current_hard_deadline = None;
             return Err(e);
         }
+        self.observe("prompt_dispatched", serde_json::json!({ "requestId": id }));
 
         let result = self
             .read_until_response_with_idle_timeout(
@@ -1411,6 +1418,10 @@ impl AcpClient {
                             continue;
                         }
                     };
+                    if !self.first_turn_output_observed && is_semantic_turn_output(&msg) {
+                        self.first_turn_output_observed = true;
+                        self.observe("turn_first_output", serde_json::json!({}));
+                    }
                     self.observe("acp_read", msg.clone());
 
                     let activity_now = Instant::now();
@@ -1762,6 +1773,26 @@ impl AcpClient {
         StopReason::from_str(raw)
             .ok_or_else(|| AcpError::Protocol(format!("unknown stopReason: {raw:?}")))
     }
+}
+
+/// Whether an ACP frame represents the first model/tool output for the current
+/// turn. Lifecycle, usage, keepalive, and capability updates are intentionally
+/// excluded so they cannot make time-to-first-output look artificially fast.
+fn is_semantic_turn_output(msg: &serde_json::Value) -> bool {
+    if msg.get("method").and_then(|value| value.as_str()) != Some("session/update") {
+        return false;
+    }
+
+    matches!(
+        msg["params"]["update"]["sessionUpdate"].as_str(),
+        Some(
+            "agent_message_chunk"
+                | "agent_thought_chunk"
+                | "tool_call"
+                | "tool_call_update"
+                | "plan"
+        )
+    )
 }
 
 /// Build `session/prompt` params from one or more text content blocks.
@@ -2605,6 +2636,77 @@ mod tests {
         AcpClient::spawn("bash", &["-c".into(), script.into()], &[], false)
             .await
             .expect("failed to spawn test script")
+    }
+
+    #[tokio::test]
+    async fn prompt_emits_content_free_dispatch_and_first_output_boundaries() {
+        let script = r#"
+IFS= read -r line
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"keepalive"}}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"test-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"private model output"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"result":{"stopReason":"end_turn"}}'
+"#;
+        let mut client = spawn_script(script).await;
+        let observer = ObserverHandle::in_process();
+        client.set_observer(Some(observer.clone()), 0);
+        client.set_observer_context(crate::observer::context_for_turn(
+            None,
+            Some("test-session".into()),
+            "turn-1".into(),
+            "2026-07-22T00:00:00Z".into(),
+        ));
+
+        let result = client
+            .session_prompt_with_idle_timeout(
+                "test-session",
+                "private prompt",
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+        assert_eq!(result.unwrap(), StopReason::EndTurn);
+
+        let events = observer.snapshot();
+        let semantic: Vec<_> = events
+            .iter()
+            .filter(|event| event.kind == "prompt_dispatched" || event.kind == "turn_first_output")
+            .collect();
+        assert_eq!(
+            semantic
+                .iter()
+                .filter(|event| event.kind == "prompt_dispatched")
+                .count(),
+            1
+        );
+        assert_eq!(
+            semantic
+                .iter()
+                .filter(|event| event.kind == "turn_first_output")
+                .count(),
+            1
+        );
+        let first_output = semantic
+            .iter()
+            .find(|event| event.kind == "turn_first_output")
+            .expect("first semantic output boundary");
+        let keepalive = events
+            .iter()
+            .find(|event| {
+                event.kind == "acp_read"
+                    && event.payload["params"]["update"]["sessionUpdate"] == "keepalive"
+            })
+            .expect("keepalive raw observer frame");
+        assert!(
+            keepalive.seq < first_output.seq,
+            "keepalive must not close the first semantic output boundary"
+        );
+        assert!(semantic.windows(2).all(|pair| {
+            pair[0].monotonic_ms <= pair[1].monotonic_ms && pair[0].seq < pair[1].seq
+        }));
+
+        let serialized = serde_json::to_string(&semantic).unwrap();
+        assert!(!serialized.contains("private prompt"));
+        assert!(!serialized.contains("private model output"));
     }
 
     #[tokio::test]
