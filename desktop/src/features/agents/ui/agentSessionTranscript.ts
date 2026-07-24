@@ -773,7 +773,11 @@ export function processTranscriptEvent(
     const payload = asRecord(event.payload);
     const outcome = asString(payload.outcome) ?? "error";
     const error = asString(payload.error) ?? "Unknown error";
-    const displayError = friendlyTurnErrorCopy(error, payload.code);
+    const displayError = friendlyTurnErrorCopy(
+      error,
+      payload.code,
+      payload.data,
+    );
     const title =
       event.kind === "agent_panic" ? "Agent error (crash)" : "Turn error";
     upsertTextItem(
