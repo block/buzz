@@ -1,5 +1,11 @@
 //! User-group validation helpers.
 
+/// Maximum number of members in one user group or membership command.
+pub const MAX_USER_GROUP_MEMBERS: usize = 256;
+
+/// Maximum number of default channels attached to one user group.
+pub const MAX_USER_GROUP_DEFAULT_CHANNELS: usize = 32;
+
 /// Returns whether `handle` matches `^[a-z0-9][a-z0-9_-]{1,31}$`.
 ///
 /// Handles are ASCII-only, contain between 2 and 32 characters, and must

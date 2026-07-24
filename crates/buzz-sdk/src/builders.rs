@@ -609,6 +609,18 @@ pub fn build_group_create(
             "group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".into(),
         ));
     }
+    if members.len() > buzz_core::user_group::MAX_USER_GROUP_MEMBERS {
+        return Err(SdkError::InvalidInput(format!(
+            "user groups support at most {} members",
+            buzz_core::user_group::MAX_USER_GROUP_MEMBERS
+        )));
+    }
+    if default_channels.len() > buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS {
+        return Err(SdkError::InvalidInput(format!(
+            "user groups support at most {} default channels",
+            buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS
+        )));
+    }
 
     let group_id = Uuid::new_v4();
     let mut tags = vec![
@@ -655,6 +667,14 @@ pub fn build_group_edit(
             "group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".into(),
         ));
     }
+    if default_channels.is_some_and(|channels| {
+        channels.len() > buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS
+    }) {
+        return Err(SdkError::InvalidInput(format!(
+            "user groups support at most {} default channels",
+            buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS
+        )));
+    }
 
     let mut tags = vec![tag(&["g", &group_id.to_string()])?];
     if let Some(value) = handle {
@@ -690,6 +710,12 @@ fn group_membership_tags(group_id: Uuid, pubkeys: &[&str]) -> Result<Vec<Tag>, S
         return Err(SdkError::InvalidTag(
             "at least one member pubkey must be provided".into(),
         ));
+    }
+    if pubkeys.len() > buzz_core::user_group::MAX_USER_GROUP_MEMBERS {
+        return Err(SdkError::InvalidInput(format!(
+            "user-group membership commands support at most {} members",
+            buzz_core::user_group::MAX_USER_GROUP_MEMBERS
+        )));
     }
 
     let mut tags = Vec::with_capacity(pubkeys.len() + 1);
@@ -2567,6 +2593,21 @@ mod tests {
         ));
         assert!(matches!(
             build_group_create("qa", "QA", None, &["not-a-pubkey"], &[]),
+            Err(SdkError::InvalidInput(_))
+        ));
+
+        let members = vec![
+            "abababababababababababababababababababababababababababababababab";
+            buzz_core::user_group::MAX_USER_GROUP_MEMBERS + 1
+        ];
+        assert!(matches!(
+            build_group_create("qa", "QA", None, &members, &[]),
+            Err(SdkError::InvalidInput(_))
+        ));
+
+        let channels = vec![uuid(); buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS + 1];
+        assert!(matches!(
+            build_group_create("qa", "QA", None, &[], &channels),
             Err(SdkError::InvalidInput(_))
         ));
     }

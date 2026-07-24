@@ -888,6 +888,7 @@ mod tests {
         assert!(user_groups.contains("CREATE TABLE user_group_members"));
         assert!(user_groups.contains("CREATE TABLE user_group_default_channels"));
         assert!(user_groups.contains("idx_user_groups_active_handle"));
+        assert!(user_groups.contains("snapshot_version BIGINT"));
     }
 
     #[test]

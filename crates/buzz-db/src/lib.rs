@@ -1440,7 +1440,7 @@ impl Db {
     /// Returns [`DbError::UserGroupHandleConflict`] when an active group in
     /// the same community already owns `handle`.
     #[allow(clippy::too_many_arguments)]
-    pub async fn create_group(
+    pub async fn create_user_group(
         &self,
         community: CommunityId,
         group_id: Uuid,
@@ -1466,7 +1466,7 @@ impl Db {
     }
 
     /// Returns an active user group by its community-scoped UUID.
-    pub async fn get_group_by_id(
+    pub async fn get_user_group_by_id(
         &self,
         community: CommunityId,
         group_id: Uuid,
@@ -1475,7 +1475,7 @@ impl Db {
     }
 
     /// Returns an active user group by mention handle, if present.
-    pub async fn get_group_by_handle(
+    pub async fn get_user_group_by_handle(
         &self,
         community: CommunityId,
         handle: &str,
@@ -1484,7 +1484,7 @@ impl Db {
     }
 
     /// Lists active user groups in a community.
-    pub async fn list_groups(
+    pub async fn list_user_groups(
         &self,
         community: CommunityId,
     ) -> Result<Vec<user_group::UserGroupRecord>> {
@@ -1492,7 +1492,7 @@ impl Db {
     }
 
     /// Updates user-group metadata and optionally replaces default channels.
-    pub async fn update_group(
+    pub async fn update_user_group(
         &self,
         community: CommunityId,
         group_id: Uuid,
@@ -1502,12 +1502,16 @@ impl Db {
     }
 
     /// Soft-deletes a user group.
-    pub async fn soft_delete_group(&self, community: CommunityId, group_id: Uuid) -> Result<bool> {
+    pub async fn soft_delete_user_group(
+        &self,
+        community: CommunityId,
+        group_id: Uuid,
+    ) -> Result<Option<i64>> {
         user_group::soft_delete_group(&self.pool, community, group_id).await
     }
 
     /// Adds members to an active user group.
-    pub async fn add_members(
+    pub async fn add_user_group_members(
         &self,
         community: CommunityId,
         group_id: Uuid,
@@ -1518,17 +1522,17 @@ impl Db {
     }
 
     /// Removes members from an active user group.
-    pub async fn remove_members(
+    pub async fn remove_user_group_members(
         &self,
         community: CommunityId,
         group_id: Uuid,
         pubkeys: &[String],
-    ) -> Result<u64> {
+    ) -> Result<user_group::RemoveMembersResult> {
         user_group::remove_members(&self.pool, community, group_id, pubkeys).await
     }
 
     /// Lists members of an active user group.
-    pub async fn list_members(
+    pub async fn list_user_group_members(
         &self,
         community: CommunityId,
         group_id: Uuid,
@@ -1537,12 +1541,29 @@ impl Db {
     }
 
     /// Lists default channels of an active user group.
-    pub async fn list_default_channels(
+    pub async fn list_user_group_default_channels(
         &self,
         community: CommunityId,
         group_id: Uuid,
     ) -> Result<Vec<Uuid>> {
         user_group::list_default_channels(&self.pool, community, group_id).await
+    }
+
+    /// Atomically stores a user-group command event and applies its SQL mutation.
+    pub async fn insert_user_group_command_event(
+        &self,
+        community: CommunityId,
+        event: &nostr::Event,
+        mutation: user_group::UserGroupMutation,
+    ) -> Result<user_group::UserGroupCommandEventResult> {
+        let result =
+            user_group::insert_command_event(&self.pool, community, event, mutation).await?;
+        if result.was_inserted {
+            if let Err(error) = insert_mentions(&self.pool, community, event, None).await {
+                tracing::warn!(event_id = %event.id, "Failed to insert mentions: {error}");
+            }
+        }
+        Ok(result)
     }
 
     /// Creates a new channel, bootstraps the creator as owner, and returns the record.
@@ -1973,6 +1994,15 @@ impl Db {
         pubkey: &[u8],
     ) -> Result<Option<(String, Option<Vec<u8>>)>> {
         user::get_agent_channel_policy(&self.pool, community_id, pubkey).await
+    }
+
+    /// Bulk-load stored community membership and channel-add policy facts.
+    pub async fn get_community_member_facts(
+        &self,
+        community_id: CommunityId,
+        pubkeys: &[Vec<u8>],
+    ) -> Result<Vec<user::CommunityMemberFacts>> {
+        user::get_community_member_facts(&self.pool, community_id, pubkeys).await
     }
 
     /// Check whether `actor_pubkey` is the agent owner of `target_pubkey`.

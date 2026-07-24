@@ -2411,7 +2411,38 @@ async fn ingest_event_inner(
         });
     }
 
-    let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
+    let mut user_group_mutation_result = None;
+    let (stored_event, was_inserted) = if let Some(command) = validated_user_group_command {
+        let mutation = crate::handlers::side_effects::user_group_mutation(&event, command);
+        let result = match state
+            .db
+            .insert_user_group_command_event(tenant.community(), &event, mutation)
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return match crate::handlers::side_effects::map_user_group_db_error(error) {
+                    crate::handlers::side_effects::UserGroupCommandValidationError::Duplicate(
+                        message,
+                    ) => Ok(IngestResult {
+                        event_id: event_id_hex,
+                        accepted: false,
+                        message,
+                    }),
+                    crate::handlers::side_effects::UserGroupCommandValidationError::Rejected(
+                        message,
+                    ) => Err(IngestError::Rejected(message)),
+                    crate::handlers::side_effects::UserGroupCommandValidationError::Internal => {
+                        Err(IngestError::Internal(
+                            "error: internal user-group command failure".into(),
+                        ))
+                    }
+                };
+            }
+        };
+        user_group_mutation_result = result.mutation;
+        (result.stored_event, result.was_inserted)
+    } else if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
         state
@@ -2478,21 +2509,19 @@ async fn ingest_event_inner(
         });
     }
 
-    let user_group_side_effect_error = if let Some(command) = validated_user_group_command {
-        crate::handlers::side_effects::handle_user_group_command(tenant, state, &event, command)
-            .await
-            .err()
-    } else {
-        if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
-            if let Err(e) =
-                crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
-                    .await
-            {
-                warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
-            }
+    if let Some(mutation) = user_group_mutation_result {
+        crate::handlers::side_effects::handle_user_group_post_commit(
+            tenant, state, &event, mutation,
+        )
+        .await;
+    } else if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+        if let Err(e) =
+            crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
+                .await
+        {
+            warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
         }
-        None
-    };
+    }
 
     // A freshly inserted reply changed its thread's counters (updated in the
     // same transaction as the insert) — push a fresh relay-signed 39005 so
@@ -2547,24 +2576,6 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
-
-    if let Some(error) = user_group_side_effect_error {
-        return match error {
-            crate::handlers::side_effects::UserGroupCommandValidationError::Duplicate(message) => {
-                Ok(IngestResult {
-                    event_id: event_id_hex,
-                    accepted: false,
-                    message,
-                })
-            }
-            crate::handlers::side_effects::UserGroupCommandValidationError::Rejected(message) => {
-                Err(IngestError::Rejected(message))
-            }
-            crate::handlers::side_effects::UserGroupCommandValidationError::Internal => Err(
-                IngestError::Internal("error: internal user-group side-effect failure".into()),
-            ),
-        };
-    }
 
     info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 

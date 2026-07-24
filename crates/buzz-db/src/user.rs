@@ -33,6 +33,23 @@ pub struct UserSearchProfile {
     pub nip05_handle: Option<String>,
 }
 
+/// Stored facts used by relay-side community admission and channel consent checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityMemberFacts {
+    /// Requested pubkey.
+    pub pubkey: Vec<u8>,
+    /// Whether the community has a user row for this pubkey.
+    pub user_exists: bool,
+    /// Whether the pubkey is a direct relay member.
+    pub relay_member: bool,
+    /// Stored NIP-OA owner, if this user is an agent.
+    pub agent_owner: Option<Vec<u8>>,
+    /// Whether the stored owner is a direct relay member.
+    pub owner_relay_member: bool,
+    /// Target's channel-add consent policy.
+    pub channel_add_policy: String,
+}
+
 /// Ensure a user record exists for the given pubkey (upsert).
 /// Creates with minimal fields if not present; no-op if already exists.
 ///
@@ -348,6 +365,47 @@ pub async fn get_agent_channel_policy(
     .transpose()
 }
 
+/// Bulk-load community admission and channel-add policy facts for pubkeys.
+pub async fn get_community_member_facts(
+    pool: &PgPool,
+    community_id: CommunityId,
+    pubkeys: &[Vec<u8>],
+) -> Result<Vec<CommunityMemberFacts>> {
+    if pubkeys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let rows = sqlx::query(
+        "SELECT requested.pubkey, users.pubkey IS NOT NULL AS user_exists, \
+                direct.pubkey IS NOT NULL AS relay_member, users.agent_owner_pubkey, \
+                owner.pubkey IS NOT NULL AS owner_relay_member, \
+                COALESCE(users.channel_add_policy::text, 'anyone') AS channel_add_policy \
+         FROM UNNEST($2::bytea[]) AS requested(pubkey) \
+         LEFT JOIN users ON users.community_id = $1 AND users.pubkey = requested.pubkey \
+         LEFT JOIN relay_members direct \
+           ON direct.community_id = $1 AND direct.pubkey = encode(requested.pubkey, 'hex') \
+         LEFT JOIN relay_members owner \
+           ON owner.community_id = $1 \
+          AND owner.pubkey = encode(users.agent_owner_pubkey, 'hex')",
+    )
+    .bind(community_id.as_uuid())
+    .bind(pubkeys)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            Ok(CommunityMemberFacts {
+                pubkey: row.try_get("pubkey")?,
+                user_exists: row.try_get("user_exists")?,
+                relay_member: row.try_get("relay_member")?,
+                agent_owner: row.try_get("agent_owner_pubkey")?,
+                owner_relay_member: row.try_get("owner_relay_member")?,
+                channel_add_policy: row.try_get("channel_add_policy")?,
+            })
+        })
+        .collect()
+}
+
 /// Check whether `actor_pubkey` is the `agent_owner_pubkey` of `target_pubkey`.
 /// Queries `agent_owner_pubkey` directly rather than going through
 /// `get_agent_channel_policy`, which would fetch unrelated fields.
@@ -404,7 +462,7 @@ mod tests {
     use crate::Db;
     use nostr::Keys;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_db() -> Db {
         let pool = PgPool::connect(TEST_DB_URL)

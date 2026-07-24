@@ -10,6 +10,7 @@ CREATE TABLE user_groups (
     name         TEXT NOT NULL,
     description  TEXT,
     created_by   TEXT NOT NULL,
+    snapshot_version BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM clock_timestamp())::BIGINT,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at   TIMESTAMPTZ,

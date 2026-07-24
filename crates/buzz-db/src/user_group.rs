@@ -9,9 +9,10 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row as _, Transaction};
 use uuid::Uuid;
 
 use crate::error::{DbError, Result};
-use buzz_core::CommunityId;
+use buzz_core::{CommunityId, StoredEvent};
 
 const ACTIVE_HANDLE_INDEX: &str = "idx_user_groups_active_handle";
+const PRIMARY_KEY_CONSTRAINT: &str = "user_groups_pkey";
 
 /// A user-group metadata row.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,8 @@ pub struct UserGroupRecord {
     pub description: Option<String>,
     /// Hex pubkey of the group creator.
     pub created_by: String,
+    /// Monotonic Nostr timestamp used to order relay-signed snapshots.
+    pub snapshot_version: i64,
     /// When the group was created.
     pub created_at: DateTime<Utc>,
     /// When metadata, membership, or default channels were last updated.
@@ -58,6 +61,17 @@ pub struct AddMembersResult {
     pub added_pubkeys: Vec<String>,
     /// Default channels observed atomically with the membership insert.
     pub default_channels: Vec<Uuid>,
+    /// Snapshot version assigned to this mutation.
+    pub snapshot_version: i64,
+}
+
+/// Result of removing members from a user group.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoveMembersResult {
+    /// Number of memberships removed.
+    pub removed: u64,
+    /// Snapshot version assigned to this mutation.
+    pub snapshot_version: i64,
 }
 
 /// Partial user-group update.
@@ -73,6 +87,195 @@ pub struct UserGroupUpdate {
     /// Full replacement default-channel list, or `None` to leave it unchanged.
     /// An empty vector clears the list.
     pub default_channels: Option<Vec<Uuid>>,
+}
+
+/// Parsed user-group mutation to commit atomically with its command event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserGroupMutation {
+    /// Create a group.
+    Create {
+        /// New group UUID.
+        group_id: Uuid,
+        /// Mention handle.
+        handle: String,
+        /// Display name.
+        name: String,
+        /// Optional description.
+        description: Option<String>,
+        /// Initial member pubkeys.
+        members: Vec<String>,
+        /// Initial default channels.
+        default_channels: Vec<Uuid>,
+        /// Creator pubkey.
+        created_by: String,
+    },
+    /// Edit metadata or default channels.
+    Edit {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Requested updates.
+        updates: UserGroupUpdate,
+    },
+    /// Soft-delete a group.
+    Delete {
+        /// Group UUID.
+        group_id: Uuid,
+    },
+    /// Add members.
+    AddMembers {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Pubkeys to add.
+        members: Vec<String>,
+        /// Actor pubkey.
+        added_by: String,
+    },
+    /// Remove members.
+    RemoveMembers {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Pubkeys to remove.
+        members: Vec<String>,
+    },
+}
+
+/// Committed user-group mutation details used by relay post-commit effects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserGroupMutationResult {
+    /// Group created.
+    Created {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Handle used for logging.
+        handle: String,
+        /// Snapshot version.
+        snapshot_version: i64,
+    },
+    /// Group edited.
+    Edited {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Snapshot version.
+        snapshot_version: i64,
+    },
+    /// Group deleted.
+    Deleted {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Tombstone snapshot version.
+        snapshot_version: i64,
+    },
+    /// Members added.
+    MembersAdded {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Membership result.
+        result: AddMembersResult,
+    },
+    /// Members removed.
+    MembersRemoved {
+        /// Group UUID.
+        group_id: Uuid,
+        /// Membership result.
+        result: RemoveMembersResult,
+    },
+}
+
+/// Result of atomically inserting a command event and applying its mutation.
+#[derive(Debug)]
+pub struct UserGroupCommandEventResult {
+    /// Stored command event.
+    pub stored_event: StoredEvent,
+    /// Whether this command event was new.
+    pub was_inserted: bool,
+    /// Mutation result; absent for an identical event duplicate.
+    pub mutation: Option<UserGroupMutationResult>,
+}
+
+/// Atomically stores a signed user-group command and applies its SQL mutation.
+pub async fn insert_command_event(
+    pool: &PgPool,
+    community: CommunityId,
+    event: &nostr::Event,
+    mutation: UserGroupMutation,
+) -> Result<UserGroupCommandEventResult> {
+    let mut tx = pool.begin().await?;
+    let (stored_event, was_inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, community, event, None, None)
+            .await?;
+    if !was_inserted {
+        tx.rollback().await?;
+        return Ok(UserGroupCommandEventResult {
+            stored_event,
+            was_inserted,
+            mutation: None,
+        });
+    }
+
+    let mutation = match mutation {
+        UserGroupMutation::Create {
+            group_id,
+            handle,
+            name,
+            description,
+            members,
+            default_channels,
+            created_by,
+        } => {
+            let record = create_group_tx(
+                &mut tx,
+                community,
+                group_id,
+                &handle,
+                &name,
+                description.as_deref(),
+                &created_by,
+                &members,
+                &default_channels,
+            )
+            .await?;
+            UserGroupMutationResult::Created {
+                group_id,
+                handle,
+                snapshot_version: record.snapshot_version,
+            }
+        }
+        UserGroupMutation::Edit { group_id, updates } => {
+            let record = update_group_tx(&mut tx, community, group_id, &updates).await?;
+            UserGroupMutationResult::Edited {
+                group_id,
+                snapshot_version: record.snapshot_version,
+            }
+        }
+        UserGroupMutation::Delete { group_id } => {
+            let snapshot_version = soft_delete_group_tx(&mut tx, community, group_id)
+                .await?
+                .ok_or(DbError::UserGroupNotFound(group_id))?;
+            UserGroupMutationResult::Deleted {
+                group_id,
+                snapshot_version,
+            }
+        }
+        UserGroupMutation::AddMembers {
+            group_id,
+            members,
+            added_by,
+        } => {
+            let result = add_members_tx(&mut tx, community, group_id, &members, &added_by).await?;
+            UserGroupMutationResult::MembersAdded { group_id, result }
+        }
+        UserGroupMutation::RemoveMembers { group_id, members } => {
+            let result = remove_members_tx(&mut tx, community, group_id, &members).await?;
+            UserGroupMutationResult::MembersRemoved { group_id, result }
+        }
+    };
+
+    tx.commit().await?;
+    Ok(UserGroupCommandEventResult {
+        stored_event,
+        was_inserted,
+        mutation: Some(mutation),
+    })
 }
 
 /// Creates a user group, including its initial members and default channels.
@@ -91,40 +294,19 @@ pub async fn create_group(
     members: &[String],
     default_channels: &[Uuid],
 ) -> Result<UserGroupRecord> {
-    if group_id.is_nil() {
-        return Err(DbError::InvalidData(
-            "user group id must not be nil".to_owned(),
-        ));
-    }
-    if !buzz_core::user_group::is_valid_group_handle(handle) {
-        return Err(DbError::InvalidData(
-            "user group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".to_owned(),
-        ));
-    }
-
     let mut tx = pool.begin().await?;
-    let row = match sqlx::query(
-        "INSERT INTO user_groups \
-         (community_id, id, handle, name, description, created_by) \
-         VALUES ($1, $2, $3, $4, $5, $6) \
-         RETURNING id, handle, name, description, created_by, created_at, updated_at, deleted_at",
+    let record = create_group_tx(
+        &mut tx,
+        community,
+        group_id,
+        handle,
+        name,
+        description,
+        created_by,
+        members,
+        default_channels,
     )
-    .bind(community.as_uuid())
-    .bind(group_id)
-    .bind(handle)
-    .bind(name)
-    .bind(description)
-    .bind(created_by)
-    .fetch_one(&mut *tx)
-    .await
-    {
-        Ok(row) => row,
-        Err(error) => return Err(map_handle_conflict(error, handle)),
-    };
-
-    let record = row_to_group_record(row)?;
-    let _ = insert_members_tx(&mut tx, community, group_id, members, created_by).await?;
-    insert_default_channels_tx(&mut tx, community, group_id, default_channels).await?;
+    .await?;
     tx.commit().await?;
     Ok(record)
 }
@@ -136,7 +318,7 @@ pub async fn get_group_by_id(
     group_id: Uuid,
 ) -> Result<UserGroupRecord> {
     let row = sqlx::query(
-        "SELECT id, handle, name, description, created_by, created_at, updated_at, deleted_at \
+        "SELECT id, handle, name, description, created_by, snapshot_version, created_at, updated_at, deleted_at \
          FROM user_groups \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
@@ -156,7 +338,7 @@ pub async fn get_group_by_handle(
     handle: &str,
 ) -> Result<Option<UserGroupRecord>> {
     let row = sqlx::query(
-        "SELECT id, handle, name, description, created_by, created_at, updated_at, deleted_at \
+        "SELECT id, handle, name, description, created_by, snapshot_version, created_at, updated_at, deleted_at \
          FROM user_groups \
          WHERE community_id = $1 AND handle = $2 AND deleted_at IS NULL",
     )
@@ -171,7 +353,7 @@ pub async fn get_group_by_handle(
 /// Lists all active user groups in a community, ordered by handle.
 pub async fn list_groups(pool: &PgPool, community: CommunityId) -> Result<Vec<UserGroupRecord>> {
     let rows = sqlx::query(
-        "SELECT id, handle, name, description, created_by, created_at, updated_at, deleted_at \
+        "SELECT id, handle, name, description, created_by, snapshot_version, created_at, updated_at, deleted_at \
          FROM user_groups \
          WHERE community_id = $1 AND deleted_at IS NULL \
          ORDER BY handle ASC, id ASC",
@@ -193,93 +375,25 @@ pub async fn update_group(
     group_id: Uuid,
     updates: UserGroupUpdate,
 ) -> Result<UserGroupRecord> {
-    if updates.handle.is_none()
-        && updates.name.is_none()
-        && updates.description.is_none()
-        && updates.default_channels.is_none()
-    {
-        return Err(DbError::InvalidData(
-            "at least one field must be provided for user group update".to_owned(),
-        ));
-    }
-    if updates
-        .handle
-        .as_deref()
-        .is_some_and(|handle| !buzz_core::user_group::is_valid_group_handle(handle))
-    {
-        return Err(DbError::InvalidData(
-            "user group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".to_owned(),
-        ));
-    }
-
-    let description_changed = updates.description.is_some();
-    let description = updates
-        .description
-        .as_ref()
-        .and_then(|value| value.as_deref());
-    let conflict_handle = updates.handle.as_deref().unwrap_or_default();
-
     let mut tx = pool.begin().await?;
-    let row = match sqlx::query(
-        "UPDATE user_groups SET \
-             handle = COALESCE($1, handle), \
-             name = COALESCE($2, name), \
-             description = CASE WHEN $3 THEN $4 ELSE description END, \
-             updated_at = now() \
-         WHERE community_id = $5 AND id = $6 AND deleted_at IS NULL \
-         RETURNING id, handle, name, description, created_by, created_at, updated_at, deleted_at",
-    )
-    .bind(updates.handle.as_deref())
-    .bind(updates.name.as_deref())
-    .bind(description_changed)
-    .bind(description)
-    .bind(community.as_uuid())
-    .bind(group_id)
-    .fetch_optional(&mut *tx)
-    .await
-    {
-        Ok(Some(row)) => row,
-        Ok(None) => return Err(DbError::UserGroupNotFound(group_id)),
-        Err(error) => return Err(map_handle_conflict(error, conflict_handle)),
-    };
-
-    if let Some(default_channels) = updates.default_channels.as_deref() {
-        sqlx::query(
-            "DELETE FROM user_group_default_channels \
-             WHERE community_id = $1 AND group_id = $2",
-        )
-        .bind(community.as_uuid())
-        .bind(group_id)
-        .execute(&mut *tx)
-        .await?;
-        insert_default_channels_tx(&mut tx, community, group_id, default_channels).await?;
-    }
-
-    let record = row_to_group_record(row)?;
+    let record = update_group_tx(&mut tx, community, group_id, &updates).await?;
     tx.commit().await?;
     Ok(record)
 }
 
 /// Soft-deletes a user group.
 ///
-/// Returns `true` when an active row was deleted and `false` when the group was
-/// already deleted or absent.
+/// Returns the tombstone snapshot version, or `None` when the group was already
+/// deleted or absent.
 pub async fn soft_delete_group(
     pool: &PgPool,
     community: CommunityId,
     group_id: Uuid,
-) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE user_groups \
-         SET deleted_at = now(), updated_at = now() \
-         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
-    )
-    .bind(community.as_uuid())
-    .bind(group_id)
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected() > 0)
+) -> Result<Option<i64>> {
+    let mut tx = pool.begin().await?;
+    let version = soft_delete_group_tx(&mut tx, community, group_id).await?;
+    tx.commit().await?;
+    Ok(version)
 }
 
 /// Adds members to an active user group.
@@ -295,19 +409,9 @@ pub async fn add_members(
     added_by: &str,
 ) -> Result<AddMembersResult> {
     let mut tx = pool.begin().await?;
-    lock_active_group(&mut tx, community, group_id).await?;
-    let mut added_pubkeys =
-        insert_members_tx(&mut tx, community, group_id, pubkeys, added_by).await?;
-    if !added_pubkeys.is_empty() {
-        touch_group_tx(&mut tx, community, group_id).await?;
-    }
-    let default_channels = list_default_channels_tx(&mut tx, community, group_id).await?;
+    let result = add_members_tx(&mut tx, community, group_id, pubkeys, added_by).await?;
     tx.commit().await?;
-    added_pubkeys.sort_unstable();
-    Ok(AddMembersResult {
-        added_pubkeys,
-        default_channels,
-    })
+    Ok(result)
 }
 
 /// Removes members from an active user group.
@@ -318,27 +422,11 @@ pub async fn remove_members(
     community: CommunityId,
     group_id: Uuid,
     pubkeys: &[String],
-) -> Result<u64> {
-    if pubkeys.is_empty() {
-        return Ok(0);
-    }
-
+) -> Result<RemoveMembersResult> {
     let mut tx = pool.begin().await?;
-    lock_active_group(&mut tx, community, group_id).await?;
-    let result = sqlx::query(
-        "DELETE FROM user_group_members \
-         WHERE community_id = $1 AND group_id = $2 AND pubkey = ANY($3)",
-    )
-    .bind(community.as_uuid())
-    .bind(group_id)
-    .bind(pubkeys)
-    .execute(&mut *tx)
-    .await?;
-    if result.rows_affected() > 0 {
-        touch_group_tx(&mut tx, community, group_id).await?;
-    }
+    let result = remove_members_tx(&mut tx, community, group_id, pubkeys).await?;
     tx.commit().await?;
-    Ok(result.rows_affected())
+    Ok(result)
 }
 
 /// Lists members of an active user group, ordered by insertion time and pubkey.
@@ -397,6 +485,174 @@ pub async fn list_default_channels(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn create_group_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    group_id: Uuid,
+    handle: &str,
+    name: &str,
+    description: Option<&str>,
+    created_by: &str,
+    members: &[String],
+    default_channels: &[Uuid],
+) -> Result<UserGroupRecord> {
+    let row = match sqlx::query(
+        "INSERT INTO user_groups \
+         (community_id, id, handle, name, description, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         RETURNING id, handle, name, description, created_by, snapshot_version, created_at, updated_at, deleted_at",
+    )
+    .bind(community.as_uuid())
+    .bind(group_id)
+    .bind(handle)
+    .bind(name)
+    .bind(description)
+    .bind(created_by)
+    .fetch_one(&mut **tx)
+    .await
+    {
+        Ok(row) => row,
+        Err(error) => return Err(map_create_conflict(error, group_id, handle)),
+    };
+
+    let record = row_to_group_record(row)?;
+    let _ = insert_members_tx(tx, community, group_id, members, created_by).await?;
+    insert_default_channels_tx(tx, community, group_id, default_channels).await?;
+    Ok(record)
+}
+
+async fn update_group_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    group_id: Uuid,
+    updates: &UserGroupUpdate,
+) -> Result<UserGroupRecord> {
+    let description_changed = updates.description.is_some();
+    let description = updates
+        .description
+        .as_ref()
+        .and_then(|value| value.as_deref());
+    let conflict_handle = updates.handle.as_deref().unwrap_or_default();
+    let row = match sqlx::query(
+        "UPDATE user_groups SET \
+             handle = COALESCE($1, handle), \
+             name = COALESCE($2, name), \
+             description = CASE WHEN $3 THEN $4 ELSE description END, \
+             snapshot_version = GREATEST(snapshot_version + 1, EXTRACT(EPOCH FROM clock_timestamp())::BIGINT), \
+             updated_at = now() \
+         WHERE community_id = $5 AND id = $6 AND deleted_at IS NULL \
+         RETURNING id, handle, name, description, created_by, snapshot_version, created_at, updated_at, deleted_at",
+    )
+    .bind(updates.handle.as_deref())
+    .bind(updates.name.as_deref())
+    .bind(description_changed)
+    .bind(description)
+    .bind(community.as_uuid())
+    .bind(group_id)
+    .fetch_optional(&mut **tx)
+    .await
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return Err(DbError::UserGroupNotFound(group_id)),
+        Err(error) => return Err(map_handle_conflict(error, conflict_handle)),
+    };
+
+    if let Some(default_channels) = updates.default_channels.as_deref() {
+        sqlx::query(
+            "DELETE FROM user_group_default_channels \
+             WHERE community_id = $1 AND group_id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(group_id)
+        .execute(&mut **tx)
+        .await?;
+        insert_default_channels_tx(tx, community, group_id, default_channels).await?;
+    }
+
+    row_to_group_record(row)
+}
+
+async fn soft_delete_group_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    group_id: Uuid,
+) -> Result<Option<i64>> {
+    sqlx::query_scalar(
+        "UPDATE user_groups \
+         SET deleted_at = now(), updated_at = now(), \
+             snapshot_version = GREATEST(snapshot_version + 1, EXTRACT(EPOCH FROM clock_timestamp())::BIGINT) \
+         WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL \
+         RETURNING snapshot_version",
+    )
+    .bind(community.as_uuid())
+    .bind(group_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(DbError::from)
+}
+
+async fn add_members_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    group_id: Uuid,
+    pubkeys: &[String],
+    added_by: &str,
+) -> Result<AddMembersResult> {
+    lock_active_group(tx, community, group_id).await?;
+    let mut added_pubkeys = insert_members_tx(tx, community, group_id, pubkeys, added_by).await?;
+    let member_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM user_group_members \
+         WHERE community_id = $1 AND group_id = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(group_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if member_count > buzz_core::user_group::MAX_USER_GROUP_MEMBERS as i64 {
+        return Err(DbError::UserGroupMemberLimit(
+            buzz_core::user_group::MAX_USER_GROUP_MEMBERS,
+        ));
+    }
+    if !added_pubkeys.is_empty() {
+        touch_group_tx(tx, community, group_id).await?;
+    }
+    let default_channels = list_default_channels_tx(tx, community, group_id).await?;
+    let snapshot_version = get_snapshot_version_tx(tx, community, group_id).await?;
+    added_pubkeys.sort_unstable();
+    Ok(AddMembersResult {
+        added_pubkeys,
+        default_channels,
+        snapshot_version,
+    })
+}
+
+async fn remove_members_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    group_id: Uuid,
+    pubkeys: &[String],
+) -> Result<RemoveMembersResult> {
+    lock_active_group(tx, community, group_id).await?;
+    let result = sqlx::query(
+        "DELETE FROM user_group_members \
+         WHERE community_id = $1 AND group_id = $2 AND pubkey = ANY($3)",
+    )
+    .bind(community.as_uuid())
+    .bind(group_id)
+    .bind(pubkeys)
+    .execute(&mut **tx)
+    .await?;
+    if result.rows_affected() > 0 {
+        touch_group_tx(tx, community, group_id).await?;
+    }
+    let snapshot_version = get_snapshot_version_tx(tx, community, group_id).await?;
+    Ok(RemoveMembersResult {
+        removed: result.rows_affected(),
+        snapshot_version,
+    })
+}
+
 fn row_to_group_record(row: sqlx::postgres::PgRow) -> Result<UserGroupRecord> {
     Ok(UserGroupRecord {
         id: row.try_get("id")?,
@@ -404,6 +660,7 @@ fn row_to_group_record(row: sqlx::postgres::PgRow) -> Result<UserGroupRecord> {
         name: row.try_get("name")?,
         description: row.try_get("description")?,
         created_by: row.try_get("created_by")?,
+        snapshot_version: row.try_get("snapshot_version")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         deleted_at: row.try_get("deleted_at")?,
@@ -417,6 +674,19 @@ fn row_to_member_record(row: sqlx::postgres::PgRow) -> Result<UserGroupMemberRec
         added_by: row.try_get("added_by")?,
         added_at: row.try_get("added_at")?,
     })
+}
+
+fn map_create_conflict(error: sqlx::Error, group_id: Uuid, handle: &str) -> DbError {
+    if let sqlx::Error::Database(database_error) = &error {
+        if database_error.code().as_deref() == Some("23505") {
+            return match database_error.constraint() {
+                Some(ACTIVE_HANDLE_INDEX) => DbError::UserGroupHandleConflict(handle.to_owned()),
+                Some(PRIMARY_KEY_CONSTRAINT) => DbError::UserGroupIdConflict(group_id),
+                _ => error.into(),
+            };
+        }
+    }
+    error.into()
 }
 
 fn map_handle_conflict(error: sqlx::Error, handle: &str) -> DbError {
@@ -462,6 +732,11 @@ async fn insert_members_tx(
     if pubkeys.is_empty() {
         return Ok(Vec::new());
     }
+    if pubkeys.len() > buzz_core::user_group::MAX_USER_GROUP_MEMBERS {
+        return Err(DbError::UserGroupMemberLimit(
+            buzz_core::user_group::MAX_USER_GROUP_MEMBERS,
+        ));
+    }
 
     let mut query = QueryBuilder::<Postgres>::new(
         "INSERT INTO user_group_members \
@@ -492,6 +767,12 @@ async fn insert_default_channels_tx(
     if channel_ids.is_empty() {
         return Ok(0);
     }
+    if channel_ids.len() > buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS {
+        return Err(DbError::InvalidData(format!(
+            "user groups support at most {} default channels",
+            buzz_core::user_group::MAX_USER_GROUP_DEFAULT_CHANNELS
+        )));
+    }
 
     let mut query = QueryBuilder::<Postgres>::new(
         "INSERT INTO user_group_default_channels \
@@ -513,7 +794,8 @@ async fn touch_group_tx(
     group_id: Uuid,
 ) -> Result<()> {
     sqlx::query(
-        "UPDATE user_groups SET updated_at = now() \
+        "UPDATE user_groups SET updated_at = now(), \
+             snapshot_version = GREATEST(snapshot_version + 1, EXTRACT(EPOCH FROM clock_timestamp())::BIGINT) \
          WHERE community_id = $1 AND id = $2 AND deleted_at IS NULL",
     )
     .bind(community.as_uuid())
@@ -521,6 +803,22 @@ async fn touch_group_tx(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+async fn get_snapshot_version_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    community: CommunityId,
+    group_id: Uuid,
+) -> Result<i64> {
+    sqlx::query_scalar(
+        "SELECT snapshot_version FROM user_groups \
+         WHERE community_id = $1 AND id = $2",
+    )
+    .bind(community.as_uuid())
+    .bind(group_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(DbError::from)
 }
 
 async fn list_default_channels_tx(
@@ -644,6 +942,47 @@ mod tests {
             DbError::UserGroupHandleConflict(ref handle) if handle == "ios-team"
         ));
 
+        let command_event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_GROUP_CREATE as u16),
+            "",
+        )
+        .tags([
+            nostr::Tag::parse(["g", &Uuid::new_v4().to_string()]).expect("g tag"),
+            nostr::Tag::parse(["handle", "ios-team"]).expect("handle tag"),
+            nostr::Tag::parse(["name", "Conflicting Team"]).expect("name tag"),
+        ])
+        .sign_with_keys(&nostr::Keys::generate())
+        .expect("sign command event");
+        let command_id = command_event.id.to_bytes().to_vec();
+        let atomic_conflict = insert_command_event(
+            &pool,
+            community,
+            &command_event,
+            UserGroupMutation::Create {
+                group_id: Uuid::new_v4(),
+                handle: "ios-team".to_owned(),
+                name: "Conflicting Team".to_owned(),
+                description: None,
+                members: Vec::new(),
+                default_channels: Vec::new(),
+                created_by: creator.clone(),
+            },
+        )
+        .await
+        .expect_err("atomic handle conflict");
+        assert!(matches!(
+            atomic_conflict,
+            DbError::UserGroupHandleConflict(ref handle) if handle == "ios-team"
+        ));
+        let stored_command_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE community_id = $1 AND id = $2")
+                .bind(community.as_uuid())
+                .bind(command_id)
+                .fetch_one(&pool)
+                .await
+                .expect("query rolled-back command");
+        assert_eq!(stored_command_count, 0);
+
         create_group(
             &pool,
             community,
@@ -699,10 +1038,12 @@ mod tests {
         .expect("add members");
         assert_eq!(added.added_pubkeys, vec![pubkey('c'), pubkey('d')]);
         assert_eq!(added.default_channels, vec![channel_a]);
+        assert!(added.snapshot_version > created.snapshot_version);
         assert_eq!(
             remove_members(&pool, community, group_id, &[pubkey('b')])
                 .await
-                .expect("remove member"),
+                .expect("remove member")
+                .removed,
             1
         );
         assert_eq!(
@@ -750,10 +1091,29 @@ mod tests {
 
         assert!(soft_delete_group(&pool, community, group_id)
             .await
-            .expect("soft delete"));
+            .expect("soft delete")
+            .is_some());
         assert!(matches!(
             get_group_by_id(&pool, community, group_id).await,
             Err(DbError::UserGroupNotFound(id)) if id == group_id
+        ));
+
+        let reused_id = create_group(
+            &pool,
+            community,
+            group_id,
+            "reused-id",
+            "Reused ID",
+            None,
+            &creator,
+            &[],
+            &[],
+        )
+        .await
+        .expect_err("soft-deleted ids remain reserved");
+        assert!(matches!(
+            reused_id,
+            DbError::UserGroupIdConflict(id) if id == group_id
         ));
 
         create_group(
