@@ -15,12 +15,13 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { CheckCheck, Link2, Plus, Settings2 } from "lucide-react";
+import { CheckCheck, Link2, Plus, Settings2, Ticket } from "lucide-react";
 import * as React from "react";
 
 import type { Community } from "@/features/communities/types";
 import { EditCommunityDialog } from "@/features/communities/ui/EditCommunityDialog";
 import { useCommunityIcons } from "@/features/communities/useCommunityIcons";
+import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import {
   useCommunityUnread,
   type CommunityUnreadState,
@@ -141,7 +142,7 @@ function CommunityButton({
                   isActive
                     ? "rounded-xl bg-primary text-primary-foreground"
                     : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
-                  pending && "opacity-60",
+                  pending && !isActive && "opacity-60",
                 )}
               >
                 {iconUrl ? (
@@ -214,6 +215,8 @@ function SortableCommunityButton({
   activeCommunityId,
   iconsByCommunity,
   unreadByCommunity,
+  canInvite,
+  onInvite,
   onSwitchCommunity,
   onMarkAllRead,
   onSetEditingCommunity,
@@ -222,6 +225,8 @@ function SortableCommunityButton({
   activeCommunityId: string | null;
   iconsByCommunity: Record<string, string | null | undefined>;
   unreadByCommunity: Record<string, CommunityUnreadState>;
+  canInvite: boolean;
+  onInvite: () => void;
   onSwitchCommunity: (id: string) => void;
   onMarkAllRead: (community: Community) => void;
   onSetEditingCommunity: (community: Community) => void;
@@ -255,15 +260,21 @@ function SortableCommunityButton({
               <CheckCheck className="h-4 w-4" />
               Mark all as read
             </ContextMenuItem>
+            <ContextMenuSeparator />
             <ContextMenuItem
               onClick={() => {
                 void writeTextToClipboard(community.relayUrl);
               }}
             >
               <Link2 className="h-4 w-4" />
-              Copy relay URL
+              Copy community URL
             </ContextMenuItem>
-            <ContextMenuSeparator />
+            {canInvite ? (
+              <ContextMenuItem onClick={onInvite}>
+                <Ticket className="h-4 w-4" />
+                Invite to community
+              </ContextMenuItem>
+            ) : null}
             <ContextMenuItem onClick={() => onSetEditingCommunity(community)}>
               <Settings2 className="h-4 w-4" />
               Community settings
@@ -286,7 +297,7 @@ function SortableCommunityButton({
  * Discord/Slack-style vertical rail of communities on the far left of the app.
  * Shows a mention-count badge for inactive communities (observed via
  * `useCommunityUnread`) and switches relays on click. Right-click opens a
- * per-community menu: mark all as read, copy relay URL, community settings.
+ * per-community menu for read state, community URL, invites, and settings.
  *
  * Hidden entirely with a single community — a rail of one adds no value.
  */
@@ -305,7 +316,12 @@ export function CommunityRail({
   );
   const iconsByCommunity = useCommunityIcons(communities);
   const isFullscreen = useIsFullscreen();
-  const { markAllChannelsRead } = useAppShell();
+  const { markAllChannelsRead, onOpenSettings } = useAppShell();
+  const myMembershipQuery = useMyRelayMembershipLookupQuery();
+  const activeRole = myMembershipQuery.data?.membership?.role;
+  const canInviteToActiveCommunity =
+    onOpenSettings !== null &&
+    (activeRole === "owner" || activeRole === "admin");
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
   const [draggingId, setDraggingId] = React.useState<string | null>(null);
@@ -382,9 +398,13 @@ export function CommunityRail({
             <SortableCommunityButton
               key={community.id}
               activeCommunityId={activeCommunityId}
+              canInvite={
+                community.id === activeCommunityId && canInviteToActiveCommunity
+              }
               community={community}
               iconsByCommunity={iconsByCommunity}
               unreadByCommunity={unreadByCommunity}
+              onInvite={() => onOpenSettings?.("community-members")}
               onMarkAllRead={handleMarkAllRead}
               onSetEditingCommunity={setEditingCommunity}
               onSwitchCommunity={onSwitchCommunity}

@@ -4,6 +4,9 @@ import { installMockBridge } from "../helpers/bridge";
 import { openSettings } from "../helpers/settings";
 
 test.beforeEach(async ({ page }) => {
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], {
+    origin: "http://127.0.0.1:4173",
+  });
   await installMockBridge(page, {
     relayRequiresMembership: true,
   });
@@ -20,20 +23,18 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("invite QR reuses the media menu and saves its PNG", async ({ page }) => {
+test("copies a freshly minted invite link without showing a URL or QR code", async ({
+  page,
+}) => {
   await page.goto("/");
   await openSettings(page, "community-members");
   await expect(page.getByTestId("settings-community-members")).toBeVisible();
 
-  await page.getByTestId("create-invite-link").click();
-  const qrCode = page.getByTestId("invite-link-qr-code");
-  await expect(qrCode).toBeVisible();
-
-  await qrCode.click({ button: "right", position: { x: 32, y: 32 } });
-  const menu = page.locator("[data-invite-qr-context-menu]");
-  await expect(menu).toBeVisible();
-  await menu.getByRole("button", { name: "Download image" }).click();
-  await expect(menu).not.toBeVisible();
+  await page.getByTestId("community-invite-dialog-trigger").click();
+  await expect(page.getByTestId("invite-link-url")).toHaveCount(0);
+  await expect(page.getByTestId("invite-link-qr-code")).toHaveCount(0);
+  await page.getByTestId("copy-invite-link").click();
+  await expect(page.getByTestId("copy-invite-link")).toContainText("Copied");
 
   const payload = await page.evaluate(() => {
     const log = (
@@ -44,9 +45,11 @@ test("invite QR reuses the media menu and saves its PNG", async ({ page }) => {
         }>;
       }
     ).__BUZZ_E2E_COMMAND_LOG__;
-    return log?.find(({ command }) => command === "save_png_data_url")?.payload;
+    return log?.findLast(({ command }) => command === "copy_text_to_clipboard")
+      ?.payload;
   });
 
-  expect(payload?.filename).toBe("buzz-community-invite.png");
-  expect(payload?.dataUrl).toMatch(/^data:image\/png;base64,/);
+  expect(payload).toEqual({
+    text: "buzz://join?relay=wss%3A%2F%2Frelay.example.com&code=qr-download-test",
+  });
 });

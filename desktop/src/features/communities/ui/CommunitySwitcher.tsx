@@ -2,8 +2,11 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  Link2,
   MoreHorizontal,
   Plus,
+  Settings2,
+  Ticket,
   WifiOff,
 } from "lucide-react";
 import * as React from "react";
@@ -29,6 +32,7 @@ import {
   isRelayConnectionDegraded,
   useRelayConnection,
 } from "@/shared/api/useRelayConnection";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 import { useActiveCommunityIcon } from "@/features/communities/useCommunityIcons";
 import { EditCommunityDialog } from "./EditCommunityDialog";
 
@@ -45,6 +49,8 @@ type CommunitySwitcherProps = {
   activeCommunity: Community | null;
   communities: Community[];
   variant?: "sidebar" | "profile" | "profile-menu";
+  canInvite?: boolean;
+  onInvite?: () => void;
   onSwitchCommunity: (id: string) => void;
   onAddCommunity: () => void;
   onUpdateCommunity: (
@@ -87,6 +93,8 @@ export function CommunitySwitcher({
   activeCommunity,
   communities,
   variant = "sidebar",
+  canInvite = false,
+  onInvite,
   onSwitchCommunity,
   onAddCommunity,
   onUpdateCommunity,
@@ -204,7 +212,7 @@ export function CommunitySwitcher({
             aria-label={
               degraded
                 ? `${activeCommunity?.name ?? "Community"} — ${connectionLabel}`
-                : "Switch community"
+                : "Community actions"
             }
             className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-popover-foreground outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none data-[state=open]:bg-muted/50 data-[state=open]:text-popover-foreground"
             data-testid="community-switcher"
@@ -221,50 +229,60 @@ export function CommunitySwitcher({
           className="w-60 p-1"
           onMouseEnter={() => scheduleProfileMenu(true)}
           onMouseLeave={() => scheduleProfileMenu(false)}
+          onOpenAutoFocus={(event) => event.preventDefault()}
           side="right"
           sideOffset={0}
         >
-          <div aria-label="Communities" role="menu">
-            {communities.map((community) => (
-              <div
-                className="group flex min-h-9 items-center rounded-lg transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
-                key={community.id}
-              >
+          <div
+            aria-label="Community actions"
+            data-testid="profile-community-actions"
+            role="menu"
+          >
+            {activeCommunity ? (
+              <>
                 <button
-                  className="flex min-h-9 min-w-0 flex-1 items-center gap-2 py-2 pl-2 pr-1 text-left text-sm outline-hidden focus:outline-none"
+                  className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
                   onClick={() => {
-                    onSwitchCommunity(community.id);
                     setDropdownOpen(false);
+                    void writeTextToClipboard(activeCommunity.relayUrl);
                   }}
                   role="menuitem"
                   type="button"
                 >
-                  <span className="flex h-4 w-4 shrink-0 items-center justify-center">
-                    {activeCommunity?.id === community.id ? (
-                      <Check className="h-4 w-4 text-primary" />
-                    ) : null}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate">
-                    {community.name}
-                  </span>
+                  <Link2 className="h-4 w-4" />
+                  <span>Copy community URL</span>
                 </button>
+                {canInvite && onInvite ? (
+                  <button
+                    className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
+                    onClick={() => {
+                      setDropdownOpen(false);
+                      onInvite();
+                    }}
+                    role="menuitem"
+                    type="button"
+                  >
+                    <Ticket className="h-4 w-4" />
+                    <span>Invite to community</span>
+                  </button>
+                ) : null}
                 <button
-                  aria-label={`Edit ${community.name}`}
-                  className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 hover:bg-muted/70 group-hover:opacity-100 group-focus-within:opacity-100"
-                  onClick={(e) => {
-                    e.stopPropagation();
+                  className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
+                  onClick={() => {
                     setDropdownOpen(false);
-                    setEditingCommunity(community);
+                    setEditingCommunity(activeCommunity);
                   }}
+                  role="menuitem"
                   type="button"
                 >
-                  <MoreHorizontal className="h-4 w-4" />
+                  <Settings2 className="h-4 w-4" />
+                  <span>Community settings</span>
                 </button>
-              </div>
-            ))}
-            <div className="-mx-1 my-1 h-px bg-muted" />
+                <hr className="-mx-1 my-1 h-px border-0 bg-muted" />
+              </>
+            ) : null}
             <button
-              className="flex min-h-9 w-full items-center gap-2 rounded-lg py-2 pl-2 pr-4 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
+              className="flex min-h-9 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm outline-hidden transition-colors hover:bg-muted/50 focus:bg-muted/50 focus:outline-none focus-visible:bg-muted/50 focus-visible:outline-none"
               onClick={() => {
                 setDropdownOpen(false);
                 onAddCommunity();
@@ -273,7 +291,7 @@ export function CommunitySwitcher({
               type="button"
             >
               <Plus className="h-4 w-4" />
-              <span>Add Community</span>
+              <span>Add a community</span>
             </button>
           </div>
         </PopoverContent>
@@ -354,7 +372,7 @@ export function CommunitySwitcher({
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onAddCommunity}>
           <Plus className="h-4 w-4" />
-          <span>Add Community</span>
+          <span>Add a community</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

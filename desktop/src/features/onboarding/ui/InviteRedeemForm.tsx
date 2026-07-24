@@ -44,17 +44,19 @@ type InviteRedeemFormProps = {
    */
   defaultRelayUrl?: string;
   error: string | null;
+  initialValue?: string;
   isRedeeming: boolean;
   onCancel: () => void;
   onConnect?: (relayWsUrl: string) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
   placeholder?: string;
-  variant?: "default" | "onboarding-spotlight";
+  variant?: "add-community" | "default" | "onboarding-spotlight";
 };
 
 export function InviteRedeemForm({
   defaultRelayUrl,
   error,
+  initialValue = "",
   isRedeeming,
   onCancel,
   onConnect,
@@ -63,7 +65,7 @@ export function InviteRedeemForm({
   variant = "default",
 }: InviteRedeemFormProps) {
   const formId = React.useId();
-  const [inviteInput, setInviteInput] = React.useState("");
+  const [inviteInput, setInviteInput] = React.useState(initialValue);
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
     defaultRelayUrl ?? "",
   );
@@ -129,6 +131,7 @@ export function InviteRedeemForm({
         (isBareCode && bareCodeRelayUrl.trim().length > 0))) ||
     normalizedRelayUrl !== null;
   const isOnboardingSpotlight = variant === "onboarding-spotlight";
+  const isAddCommunity = variant === "add-community";
   const showInvalidInviteTip =
     isOnboardingSpotlight && inviteInput.trim().length > 0 && !canSubmit;
 
@@ -232,7 +235,11 @@ export function InviteRedeemForm({
   const submitButton = (
     <Button
       className={
-        isOnboardingSpotlight ? ONBOARDING_PRIMARY_CTA_CLASS : "h-10 w-full"
+        isOnboardingSpotlight
+          ? ONBOARDING_PRIMARY_CTA_CLASS
+          : isAddCommunity
+            ? "h-10"
+            : "h-10 w-full"
       }
       data-testid="invite-redeem-submit"
       disabled={
@@ -256,6 +263,12 @@ export function InviteRedeemForm({
         />
       ) : isOnboardingSpotlight ? (
         "Next"
+      ) : isAddCommunity ? (
+        joinPolicy ? (
+          "Accept and join"
+        ) : (
+          "Join community"
+        )
       ) : joinPolicy ? (
         "Accept and redeem invite"
       ) : (
@@ -284,7 +297,11 @@ export function InviteRedeemForm({
     <form
       className={cn(
         "flex w-full flex-col",
-        isOnboardingSpotlight ? "relative items-center" : "gap-3",
+        isOnboardingSpotlight
+          ? "relative items-center"
+          : isAddCommunity
+            ? "gap-4"
+            : "gap-3",
       )}
       id={formId}
       onSubmit={handleSubmit}
@@ -331,18 +348,28 @@ export function InviteRedeemForm({
             className="text-sm font-medium text-foreground"
             htmlFor="invite-input"
           >
-            Invite link or code
+            {isAddCommunity
+              ? "Community URL or invite link"
+              : "Invite link or code"}
           </label>
           <Input
             autoComplete="off"
             autoCorrect="off"
             autoFocus
-            className="h-10 bg-background"
+            className={
+              isAddCommunity
+                ? "h-11 rounded-xl border-input bg-muted/40 px-3 shadow-none transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-visible:border-muted-foreground/50 focus-visible:ring-0"
+                : "h-10 bg-background"
+            }
             data-testid="invite-redeem-input"
             disabled={isRedeeming}
             id="invite-input"
             onChange={handleInviteInputChange}
-            placeholder="https://relay.example.com/invite/abc123 or paste a code"
+            placeholder={
+              isAddCommunity
+                ? "https://community.example.com or paste an invite link"
+                : "https://relay.example.com/invite/abc123 or paste a code"
+            }
             spellCheck={false}
             type="text"
             value={inviteInput}
@@ -457,6 +484,8 @@ export function InviteRedeemForm({
           {submitButton}
           {cancelButton}
         </OnboardingFooter>
+      ) : isAddCommunity ? (
+        <div className="flex justify-end pt-1">{submitButton}</div>
       ) : (
         <>
           {submitButton}
