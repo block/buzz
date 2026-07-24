@@ -34,6 +34,8 @@ pub mod presence;
 pub mod relay;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
+/// User-group validation helpers.
+pub mod user_group;
 /// Schnorr signature and event ID verification.
 pub mod verification;
 

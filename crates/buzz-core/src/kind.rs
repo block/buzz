@@ -301,6 +301,8 @@ pub const KIND_THREAD_SUMMARY: u32 = 39005;
 /// content = `{has_more, next_cursor}`. The only authority on exhaustion —
 /// clients must not infer `has_more` from row counts.
 pub const KIND_WINDOW_BOUNDS: u32 = 39006;
+/// Relay-published user-group state snapshot (parameterized replaceable, `d` = group id).
+pub const KIND_GROUP_STATE: u32 = 39100;
 
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
@@ -446,6 +448,16 @@ pub const KIND_WORKFLOW_APPROVAL_GRANTED: u32 = 46011;
 pub const KIND_WORKFLOW_APPROVAL_DENIED: u32 = 46012;
 
 // User groups (47000–47999)
+/// Create a user group.
+pub const KIND_GROUP_CREATE: u32 = 47000;
+/// Edit a user group's metadata or default channels.
+pub const KIND_GROUP_EDIT: u32 = 47001;
+/// Delete a user group.
+pub const KIND_GROUP_DELETE: u32 = 47002;
+/// Add one or more members to a user group.
+pub const KIND_GROUP_ADD_MEMBER: u32 = 47003;
+/// Remove one or more members from a user group.
+pub const KIND_GROUP_REMOVE_MEMBER: u32 = 47004;
 
 // System / admin custom range (48000–48999)
 /// An audit log entry was recorded.
@@ -545,6 +557,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_NIP29_GROUP_ROLES,
     KIND_THREAD_SUMMARY,
     KIND_WINDOW_BOUNDS,
+    KIND_GROUP_STATE,
     KIND_PRESENCE_UPDATE,
     KIND_TYPING_INDICATOR,
     KIND_HUDDLE_REACTION,
@@ -598,6 +611,11 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_WORKFLOW_APPROVAL_REQUESTED,
     KIND_WORKFLOW_APPROVAL_GRANTED,
     KIND_WORKFLOW_APPROVAL_DENIED,
+    KIND_GROUP_CREATE,
+    KIND_GROUP_EDIT,
+    KIND_GROUP_DELETE,
+    KIND_GROUP_ADD_MEMBER,
+    KIND_GROUP_REMOVE_MEMBER,
     KIND_AUDIT_ENTRY,
     KIND_HUDDLE_STARTED,
     KIND_HUDDLE_PARTICIPANT_JOINED,
@@ -688,6 +706,7 @@ pub const fn is_relay_only_kind(kind: u32) -> bool {
             | KIND_DM_VISIBILITY
             | KIND_THREAD_SUMMARY
             | KIND_WINDOW_BOUNDS
+            | KIND_GROUP_STATE
     )
 }
 
@@ -713,6 +732,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 303
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WINDOW_BOUNDS)); // 39006 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_GROUP_STATE)); // 39100 ∈ 30000–39999
 
 // Compile-time: NIP-34 parameterized replaceable kinds are in the correct range.
 const _: () = assert!(
@@ -768,8 +788,32 @@ mod tests {
         assert!(is_parameterized_replaceable(30000));
         assert!(is_parameterized_replaceable(30023)); // NIP-23 long-form
         assert!(is_parameterized_replaceable(39000)); // NIP-29 group metadata
+        assert!(is_parameterized_replaceable(KIND_GROUP_STATE));
         assert!(is_parameterized_replaceable(39999));
         assert!(!is_parameterized_replaceable(40000));
+    }
+
+    #[test]
+    fn user_group_kinds_are_registered() {
+        for kind in [
+            KIND_GROUP_CREATE,
+            KIND_GROUP_EDIT,
+            KIND_GROUP_DELETE,
+            KIND_GROUP_ADD_MEMBER,
+            KIND_GROUP_REMOVE_MEMBER,
+            KIND_GROUP_STATE,
+        ] {
+            assert!(
+                ALL_KINDS.contains(&kind),
+                "unregistered user-group kind: {kind}"
+            );
+        }
+    }
+
+    #[test]
+    fn user_group_state_is_relay_only() {
+        assert!(is_relay_only_kind(KIND_GROUP_STATE));
+        assert!(!is_relay_only_kind(KIND_GROUP_CREATE));
     }
 
     #[test]

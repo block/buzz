@@ -9,10 +9,11 @@ use buzz_core::{
         KIND_DM_ADD_MEMBER, KIND_DM_OPEN, KIND_EMOJI_SET, KIND_GIT_ISSUE, KIND_GIT_PATCH,
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
-        KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_GIT_STATUS_OPEN, KIND_GROUP_ADD_MEMBER, KIND_GROUP_CREATE, KIND_GROUP_DELETE,
+        KIND_GROUP_EDIT, KIND_GROUP_REMOVE_MEMBER, KIND_IA_ARCHIVE_REQUEST,
+        KIND_IA_UNARCHIVE_REQUEST, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -589,6 +590,142 @@ pub fn build_remove_member(
         tag(&["p", &target_pubkey.to_ascii_lowercase()])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(9001), "").tags(tags))
+}
+
+/// Build a user-group create command (kind 47000).
+///
+/// A new UUID is generated for the `g` tag. Member pubkeys are validated and
+/// normalized to lowercase; `description`, members, and default channels may
+/// be omitted.
+pub fn build_group_create(
+    handle: &str,
+    name: &str,
+    description: Option<&str>,
+    members: &[&str],
+    default_channels: &[Uuid],
+) -> Result<EventBuilder, SdkError> {
+    if !buzz_core::user_group::is_valid_group_handle(handle) {
+        return Err(SdkError::InvalidInput(
+            "group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".into(),
+        ));
+    }
+
+    let group_id = Uuid::new_v4();
+    let mut tags = vec![
+        tag(&["g", &group_id.to_string()])?,
+        tag(&["handle", handle])?,
+        tag(&["name", name])?,
+    ];
+    if let Some(value) = description {
+        tags.push(tag(&["description", value])?);
+    }
+    for member in members {
+        let pubkey = check_pubkey_hex(member, "member pubkey")?;
+        tags.push(tag(&["p", &pubkey])?);
+    }
+    for channel_id in default_channels {
+        tags.push(tag(&["channel", &channel_id.to_string()])?);
+    }
+
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_GROUP_CREATE as u16), "")
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
+/// Build a user-group edit command (kind 47001).
+///
+/// Only supplied fields are emitted. `default_channels` replaces the entire
+/// list when present; `Some(&[])` emits `["channel", ""]` to clear it.
+pub fn build_group_edit(
+    group_id: Uuid,
+    handle: Option<&str>,
+    name: Option<&str>,
+    description: Option<&str>,
+    default_channels: Option<&[Uuid]>,
+) -> Result<EventBuilder, SdkError> {
+    if handle.is_none() && name.is_none() && description.is_none() && default_channels.is_none() {
+        return Err(SdkError::InvalidTag(
+            "at least one group field must be provided".into(),
+        ));
+    }
+    if handle.is_some_and(|value| !buzz_core::user_group::is_valid_group_handle(value)) {
+        return Err(SdkError::InvalidInput(
+            "group handle must match ^[a-z0-9][a-z0-9_-]{1,31}$".into(),
+        ));
+    }
+
+    let mut tags = vec![tag(&["g", &group_id.to_string()])?];
+    if let Some(value) = handle {
+        tags.push(tag(&["handle", value])?);
+    }
+    if let Some(value) = name {
+        tags.push(tag(&["name", value])?);
+    }
+    if let Some(value) = description {
+        tags.push(tag(&["description", value])?);
+    }
+    if let Some(channel_ids) = default_channels {
+        if channel_ids.is_empty() {
+            tags.push(tag(&["channel", ""])?);
+        } else {
+            for channel_id in channel_ids {
+                tags.push(tag(&["channel", &channel_id.to_string()])?);
+            }
+        }
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_GROUP_EDIT as u16), "").tags(tags))
+}
+
+/// Build a user-group delete command (kind 47002).
+pub fn build_group_delete(group_id: Uuid) -> Result<EventBuilder, SdkError> {
+    let tags = vec![tag(&["g", &group_id.to_string()])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_GROUP_DELETE as u16), "").tags(tags))
+}
+
+fn group_membership_tags(group_id: Uuid, pubkeys: &[&str]) -> Result<Vec<Tag>, SdkError> {
+    if pubkeys.is_empty() {
+        return Err(SdkError::InvalidTag(
+            "at least one member pubkey must be provided".into(),
+        ));
+    }
+
+    let mut tags = Vec::with_capacity(pubkeys.len() + 1);
+    tags.push(tag(&["g", &group_id.to_string()])?);
+    for pubkey in pubkeys {
+        let pubkey = check_pubkey_hex(pubkey, "member pubkey")?;
+        tags.push(tag(&["p", &pubkey])?);
+    }
+    Ok(tags)
+}
+
+/// Build a user-group add-members command (kind 47003).
+///
+/// At least one valid 64-hex member pubkey is required.
+pub fn build_group_add_members(group_id: Uuid, pubkeys: &[&str]) -> Result<EventBuilder, SdkError> {
+    let tags = group_membership_tags(group_id, pubkeys)?;
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_GROUP_ADD_MEMBER as u16), "")
+            .tags(tags)
+            .allow_self_tagging(),
+    )
+}
+
+/// Build a user-group remove-members command (kind 47004).
+///
+/// At least one valid 64-hex member pubkey is required.
+pub fn build_group_remove_members(
+    group_id: Uuid,
+    pubkeys: &[&str],
+) -> Result<EventBuilder, SdkError> {
+    let tags = group_membership_tags(group_id, pubkeys)?;
+    Ok(
+        EventBuilder::new(Kind::Custom(KIND_GROUP_REMOVE_MEMBER as u16), "")
+            .tags(tags)
+            .allow_self_tagging(),
+    )
 }
 
 /// Build a NIP-29 leave-request event (kind 9022).
@@ -2380,6 +2517,140 @@ mod tests {
         let ev = sign(build_remove_member(cid, pubkey).unwrap());
         assert_eq!(ev.kind.as_u16(), 9001);
         assert!(has_tag(&ev, "p", pubkey));
+    }
+
+    #[test]
+    fn group_create_emits_exact_command_tags() {
+        let member_a = "A".repeat(64);
+        let member_b = "b".repeat(64);
+        let channels = [uuid(), uuid()];
+        let ev = sign(
+            build_group_create(
+                "ios-team",
+                "iOS Team",
+                Some("Mobile platform"),
+                &[member_a.as_str(), member_b.as_str()],
+                &channels,
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), KIND_GROUP_CREATE as u16);
+        assert!(ev.content.is_empty());
+        let group_ids = tag_values(&ev, "g");
+        assert_eq!(group_ids.len(), 1);
+        assert!(Uuid::parse_str(&group_ids[0]).is_ok());
+        assert_eq!(tag_values(&ev, "handle"), ["ios-team"]);
+        assert_eq!(tag_values(&ev, "name"), ["iOS Team"]);
+        assert_eq!(tag_values(&ev, "description"), ["Mobile platform"]);
+        assert_eq!(
+            tag_values(&ev, "p"),
+            [member_a.to_ascii_lowercase(), member_b]
+        );
+        assert_eq!(
+            tag_values(&ev, "channel"),
+            channels.map(|channel_id| channel_id.to_string())
+        );
+        assert!(tag_values(&ev, "h").is_empty());
+    }
+
+    #[test]
+    fn group_create_supports_optional_empty_lists_and_validates_inputs() {
+        let ev = sign(build_group_create("qa", "QA", None, &[], &[]).unwrap());
+        assert!(tag_values(&ev, "description").is_empty());
+        assert!(tag_values(&ev, "p").is_empty());
+        assert!(tag_values(&ev, "channel").is_empty());
+
+        assert!(matches!(
+            build_group_create("-qa", "QA", None, &[], &[]),
+            Err(SdkError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            build_group_create("qa", "QA", None, &["not-a-pubkey"], &[]),
+            Err(SdkError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn group_edit_emits_updates_and_default_channel_replacement() {
+        let group_id = uuid();
+        let channels = [uuid(), uuid()];
+        let ev = sign(
+            build_group_edit(
+                group_id,
+                Some("mobile"),
+                Some("Mobile"),
+                Some("Updated description"),
+                Some(&channels),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(ev.kind.as_u16(), KIND_GROUP_EDIT as u16);
+        assert_eq!(tag_values(&ev, "g"), [group_id.to_string()]);
+        assert_eq!(tag_values(&ev, "handle"), ["mobile"]);
+        assert_eq!(tag_values(&ev, "name"), ["Mobile"]);
+        assert_eq!(tag_values(&ev, "description"), ["Updated description"]);
+        assert_eq!(
+            tag_values(&ev, "channel"),
+            channels.map(|channel_id| channel_id.to_string())
+        );
+    }
+
+    #[test]
+    fn group_edit_uses_empty_channel_sentinel_and_rejects_noop() {
+        let group_id = uuid();
+        let ev = sign(build_group_edit(group_id, None, None, None, Some(&[])).unwrap());
+        assert_eq!(tag_values(&ev, "channel"), [""]);
+
+        assert!(matches!(
+            build_group_edit(group_id, None, None, None, None),
+            Err(SdkError::InvalidTag(_))
+        ));
+    }
+
+    #[test]
+    fn group_delete_emits_only_group_reference() {
+        let group_id = uuid();
+        let ev = sign(build_group_delete(group_id).unwrap());
+
+        assert_eq!(ev.kind.as_u16(), KIND_GROUP_DELETE as u16);
+        assert!(ev.content.is_empty());
+        assert_eq!(tag_values(&ev, "g"), [group_id.to_string()]);
+        assert_eq!(ev.tags.len(), 1);
+    }
+
+    #[test]
+    fn group_membership_builders_emit_bulk_pubkey_tags() {
+        let group_id = uuid();
+        let member_a = "A".repeat(64);
+        let member_b = "b".repeat(64);
+        let members = [member_a.as_str(), member_b.as_str()];
+
+        let add = sign(build_group_add_members(group_id, &members).unwrap());
+        assert_eq!(add.kind.as_u16(), KIND_GROUP_ADD_MEMBER as u16);
+        assert_eq!(tag_values(&add, "g"), [group_id.to_string()]);
+        assert_eq!(
+            tag_values(&add, "p"),
+            [member_a.to_ascii_lowercase(), member_b.clone()]
+        );
+
+        let remove = sign(build_group_remove_members(group_id, &members).unwrap());
+        assert_eq!(remove.kind.as_u16(), KIND_GROUP_REMOVE_MEMBER as u16);
+        assert_eq!(tag_values(&remove, "g"), [group_id.to_string()]);
+        assert_eq!(
+            tag_values(&remove, "p"),
+            [member_a.to_ascii_lowercase(), member_b]
+        );
+
+        assert!(matches!(
+            build_group_add_members(group_id, &[]),
+            Err(SdkError::InvalidTag(_))
+        ));
+        assert!(matches!(
+            build_group_remove_members(group_id, &[]),
+            Err(SdkError::InvalidTag(_))
+        ));
     }
 
     #[test]
