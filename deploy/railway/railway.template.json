@@ -1,0 +1,187 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "name": "Buzz",
+  "description": "Self-host a Buzz Nostr relay with Postgres, Redis, Typesense, and S3-compatible media storage.",
+  "services": {
+    "buzz": {
+      "name": "Buzz",
+      "source": {
+        "image": "ghcr.io/block/buzz:main"
+      },
+      "deploy": {
+        "healthcheckPath": "/_readiness",
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      },
+      "networking": {
+        "serviceDomains": {
+          "buzz": {}
+        }
+      },
+      "variables": {
+        "BUZZ_BIND_ADDR": "0.0.0.0:${{PORT}}",
+        "BUZZ_METRICS_PORT": "9102",
+        "BUZZ_RELAY_PRIVATE_KEY": "${{secret(64, 'abcdef0123456789')}}",
+        "BUZZ_REQUIRE_AUTH_TOKEN": "true",
+        "BUZZ_REQUIRE_RELAY_MEMBERSHIP": "true",
+        "BUZZ_ALLOW_NIP_OA_AUTH": "true",
+        "BUZZ_CORS_ORIGINS": "https://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "BUZZ_GIT_REPO_PATH": "/data/git",
+        "BUZZ_GIT_HOOK_HMAC_SECRET": "${{secret(64, 'abcdef0123456789')}}",
+        "BUZZ_GIT_CONFORMANCE_PROBE": "true",
+        "BUZZ_S3_ENDPOINT": "http://${{MinIO.RAILWAY_PRIVATE_DOMAIN}}:${{MinIO.PORT}}",
+        "BUZZ_S3_ACCESS_KEY": "${{MinIO.MINIO_ROOT_USER}}",
+        "BUZZ_S3_SECRET_KEY": "${{MinIO.MINIO_ROOT_PASSWORD}}",
+        "BUZZ_S3_BUCKET": "buzz-media",
+        "BUZZ_MEDIA_BASE_URL": "https://${{RAILWAY_PUBLIC_DOMAIN}}/media",
+        "DATABASE_URL": "${{Postgres.DATABASE_URL}}",
+        "REDIS_URL": "${{Redis.REDIS_URL}}",
+        "RELAY_OWNER_PUBKEY": {
+          "description": "Required: 64-character hex Nostr public key for the relay owner. Generate or back up the matching private key outside Railway.",
+          "isOptional": false
+        },
+        "RELAY_URL": "wss://${{RAILWAY_PUBLIC_DOMAIN}}",
+        "TYPESENSE_API_KEY": "${{Typesense.TYPESENSE_API_KEY}}",
+        "TYPESENSE_URL": "http://${{Typesense.RAILWAY_PRIVATE_DOMAIN}}:${{Typesense.PORT}}"
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/data",
+          "volumeName": "buzz-data"
+        }
+      ]
+    },
+    "postgres": {
+      "name": "Postgres",
+      "source": {
+        "image": "ghcr.io/railwayapp-templates/postgres-ssl:17"
+      },
+      "deploy": {
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      },
+      "variables": {
+        "PGDATA": "/var/lib/postgresql/data",
+        "POSTGRES_DB": "buzz",
+        "POSTGRES_PASSWORD": "${{secret(32)}}",
+        "POSTGRES_USER": "buzz"
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/var/lib/postgresql/data",
+          "volumeName": "postgres-data",
+          "backupSchedules": [
+            "DAILY"
+          ]
+        }
+      ]
+    },
+    "redis": {
+      "name": "Redis",
+      "source": {
+        "image": "redis:8-alpine"
+      },
+      "deploy": {
+        "startCommand": "/bin/sh -c \"rm -rf $RAILWAY_VOLUME_MOUNT_PATH/lost+found && exec redis-server --requirepass $REDIS_PASSWORD --appendonly yes --dir $RAILWAY_VOLUME_MOUNT_PATH\"",
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      },
+      "variables": {
+        "REDIS_PASSWORD": "${{secret(32)}}",
+        "REDIS_URL": "redis://:${{REDIS_PASSWORD}}@${{RAILWAY_PRIVATE_DOMAIN}}:6379"
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/data",
+          "volumeName": "redis-data"
+        }
+      ]
+    },
+    "typesense": {
+      "name": "Typesense",
+      "source": {
+        "image": "typesense/typesense:30.2"
+      },
+      "deploy": {
+        "startCommand": "typesense-server --data-dir $RAILWAY_VOLUME_MOUNT_PATH --api-key $TYPESENSE_API_KEY --enable-cors",
+        "healthcheckPath": "/health",
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      },
+      "variables": {
+        "PORT": "8108",
+        "TYPESENSE_API_KEY": "${{secret(32)}}"
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/data",
+          "volumeName": "typesense-data"
+        }
+      ]
+    },
+    "minio": {
+      "name": "MinIO",
+      "source": {
+        "image": "minio/minio:RELEASE.2025-09-07T16-13-09Z"
+      },
+      "deploy": {
+        "startCommand": "server $RAILWAY_VOLUME_MOUNT_PATH --address :$PORT",
+        "healthcheckPath": "/minio/health/live",
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      },
+      "variables": {
+        "MINIO_BROWSER": "off",
+        "MINIO_ROOT_PASSWORD": "${{secret(32)}}",
+        "MINIO_ROOT_USER": "buzz",
+        "PORT": "9000",
+        "MINIO_DOMAIN": "${{RAILWAY_PRIVATE_DOMAIN}}"
+      },
+      "volumeMounts": [
+        {
+          "mountPath": "/data",
+          "volumeName": "minio-data"
+        }
+      ]
+    },
+    "minio-init": {
+      "name": "MinIO Init",
+      "source": {
+        "image": "minio/mc:RELEASE.2025-08-13T08-35-41Z"
+      },
+      "deploy": {
+        "startCommand": "/bin/sh -c \"until mc alias set local http://${{MinIO.RAILWAY_PRIVATE_DOMAIN}}:${{MinIO.PORT}} ${{MinIO.MINIO_ROOT_USER}} ${{MinIO.MINIO_ROOT_PASSWORD}}; do sleep 2; done; mc mb --ignore-existing local/buzz-media; mc anonymous set none local/buzz-media\"",
+        "restartPolicyType": "ON_FAILURE",
+        "restartPolicyMaxRetries": 10
+      }
+    }
+  },
+  "canvasConfig": {
+    "services": {
+      "buzz": {
+        "x": 0,
+        "y": 0
+      },
+      "postgres": {
+        "x": -280,
+        "y": 180
+      },
+      "redis": {
+        "x": 0,
+        "y": 180
+      },
+      "typesense": {
+        "x": 280,
+        "y": 180
+      },
+      "minio": {
+        "x": 560,
+        "y": 180
+      },
+      "minio-init": {
+        "x": 560,
+        "y": 360
+      }
+    }
+  }
+}
