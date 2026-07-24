@@ -69,6 +69,20 @@ hooks:
 reset:
     ./scripts/dev-reset.sh --yes
 
+# Back up local PostgreSQL and MinIO data under an absolute directory outside this repository
+backup-local-workspace TARGET:
+    ./scripts/backup-local-workspace.sh "{{TARGET}}"
+
+# Restore a validated local workspace backup
+restore-local-workspace BACKUP:
+    ./scripts/restore-local-workspace.sh "{{BACKUP}}"
+
+_local-workspace-migrate:
+    cargo run -p buzz-admin -- migrate
+
+_local-workspace-ready:
+    ./scripts/check-local-services.sh --start --require minio
+
 # Stop all dev services (keep data)
 down:
     docker compose down
