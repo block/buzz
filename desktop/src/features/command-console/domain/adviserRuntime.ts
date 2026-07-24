@@ -295,7 +295,9 @@ function canonicalLiteralLoopbackEndpoint(endpoint: string): string | null {
   const match = LOOPBACK_ENDPOINT.exec(endpoint);
   if (!match) return null;
   const port = Number(match[1]);
-  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return null;
+  if (!Number.isSafeInteger(port) || port < 1 || port === 80 || port > 65_535) {
+    return null;
+  }
   return match[2] === "/" ? endpoint.slice(0, -1) : endpoint;
 }
 

@@ -369,6 +369,39 @@ test("accepts and canonicalizes all four Rust-authorized root endpoint spellings
   }
 });
 
+test("matches Rust URL normalization for explicit HTTP ports", () => {
+  for (const endpoint of [
+    "http://127.0.0.1:80",
+    "http://127.0.0.1:80/",
+    "http://[::1]:80",
+    "http://[::1]:80/",
+  ]) {
+    assert.throws(
+      () =>
+        buildLmStudioNativeModelRoute({
+          endpoint,
+          model: "local-model",
+          permittedTools: [],
+          rustEgressDecision: { allowed: false, rationale: "denied" },
+        }),
+      TypeError,
+    );
+  }
+
+  for (const port of [1, 443, 1234, 65_535]) {
+    for (const host of ["127.0.0.1", "[::1]"]) {
+      const endpoint = `http://${host}:${port}`;
+      const route = buildLmStudioNativeModelRoute({
+        endpoint,
+        model: "local-model",
+        permittedTools: [],
+        rustEgressDecision: { allowed: true, rationale: "allowed" },
+      });
+      assert.equal(route.selectedEndpoint, endpoint);
+    }
+  }
+});
+
 test("the display route rejects non-literal-local endpoints and invalid policy input", () => {
   for (const endpoint of [
     "http://localhost:1234",
