@@ -896,6 +896,7 @@ dependencies = [
  "dirs",
  "hex",
  "infer",
+ "mime_guess",
  "nostr",
  "rand 0.10.1",
  "reqwest 0.13.4",

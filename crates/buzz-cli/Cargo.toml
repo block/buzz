@@ -63,6 +63,9 @@ bytes = "1"
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
 
+# Extension-backed MIME labels for generic text attachments such as Markdown
+mime_guess = "2"
+
 # URL parsing — extract server domain for Blossom auth tag
 url = { workspace = true }
 

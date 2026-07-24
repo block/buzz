@@ -13,6 +13,36 @@ use buzz_sdk::mentions::{
     MENTION_CAP,
 };
 
+fn escape_markdown_link_label(label: &str) -> String {
+    label
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]")
+}
+
+fn attachment_display_label(desc: &crate::client::BlobDescriptor) -> String {
+    desc.filename
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| desc.url.rsplit('/').next().map(ToOwned::to_owned))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "file".to_string())
+}
+
+fn format_attachment_markdown_line(desc: &crate::client::BlobDescriptor) -> String {
+    if desc.mime_type.starts_with("video/") {
+        return format!("\n![video]({})", desc.url);
+    }
+    if desc.mime_type.starts_with("image/") {
+        return format!("\n![image]({})", desc.url);
+    }
+
+    let label = escape_markdown_link_label(&attachment_display_label(desc));
+    format!("\n[{label}]({})", desc.url)
+}
+
 /// Extract the thread root event ID from a Nostr tag array.
 ///
 /// Parses `"e"` tags with NIP-10 markers:
@@ -504,13 +534,7 @@ pub async fn cmd_send_message(
             .await
             .map_err(|e| CliError::Other(format!("upload failed for {file_path}: {e}")))?;
         media_tags.push(crate::client::build_imeta_tag(&desc));
-        if desc.mime_type.starts_with("video/") {
-            media_content.push_str("\n![video](");
-        } else {
-            media_content.push_str("\n![image](");
-        }
-        media_content.push_str(&desc.url);
-        media_content.push(')');
+        media_content.push_str(&format_attachment_markdown_line(&desc));
     }
     let final_content = if media_content.is_empty() {
         p.content.clone()
@@ -876,7 +900,11 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
+    use super::{
+        find_root_from_tags, format_attachment_markdown_line, match_profiles_by_name,
+        parse_member_pubkeys,
+    };
+    use crate::client::BlobDescriptor;
     use buzz_sdk::mentions::{
         extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
     };
@@ -891,6 +919,46 @@ mod tests {
     const PK_VALID_A: &str = "35c18ae273fccfaf80d629e20e7f8721b90499379addff533054acc2504c12b4";
     const PK_VALID_B: &str = "c6237ef84fa537c78dcee78efd2d4e59f728859c7f194da42ac51ededfa0be05";
     const PK_VALID_C: &str = "f4a42a97e594b77bdbd8ee35191c8b28a94a4cb871d96f32921558275421fb68";
+
+    fn attachment_desc(mime_type: &str, filename: Option<&str>) -> BlobDescriptor {
+        BlobDescriptor {
+            url: "https://relay.test/media/doc.bin".to_string(),
+            sha256: "a".repeat(64),
+            size: 12,
+            mime_type: mime_type.to_string(),
+            uploaded: 0,
+            dim: None,
+            blurhash: None,
+            thumb: None,
+            duration: None,
+            filename: filename.map(ToOwned::to_owned),
+        }
+    }
+
+    #[test]
+    fn generic_attachment_uses_file_link_markdown_with_escaped_filename() {
+        let desc = attachment_desc("text/markdown", Some("Run[book]\\v1.md"));
+
+        assert_eq!(
+            format_attachment_markdown_line(&desc),
+            "\n[Run\\[book\\]\\\\v1.md](https://relay.test/media/doc.bin)"
+        );
+    }
+
+    #[test]
+    fn media_attachments_keep_inline_markdown() {
+        let image = attachment_desc("image/png", Some("image.png"));
+        let video = attachment_desc("video/mp4", Some("clip.mp4"));
+
+        assert_eq!(
+            format_attachment_markdown_line(&image),
+            "\n![image](https://relay.test/media/doc.bin)"
+        );
+        assert_eq!(
+            format_attachment_markdown_line(&video),
+            "\n![video](https://relay.test/media/doc.bin)"
+        );
+    }
 
     #[test]
     fn root_marker_wins_over_reply_marker() {
