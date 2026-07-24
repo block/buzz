@@ -628,8 +628,8 @@ export function AgentDefinitionDialog({
           : selectedRuntime.availability === "adapter_outdated"
             ? `${selectedRuntime.label} ACP adapter is outdated — reinstall to continue.`
             : selectedRuntime.availability === "cli_missing"
-              ? `${selectedRuntime.label} ACP adapter is installed but the CLI is missing.`
-              : `${selectedRuntime.label} is not installed.`}{" "}
+              ? `${selectedRuntime.label} CLI is missing. ${selectedRuntime.installHint}`
+              : selectedRuntime.installHint || "CLI not installed."}{" "}
         Visit Settings &gt; Agents to set it up.
       </p>
     ) : null;

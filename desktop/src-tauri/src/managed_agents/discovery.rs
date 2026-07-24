@@ -73,10 +73,11 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("goose"),
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
-        cli_install_commands_windows: &[], // goose install script is already Windows-aware
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://github.com/aaif-goose/goose/releases/download/stable/download_cli.ps1 | iex\""],
         adapter_install_commands: &[],
-        install_instructions_url: "https://block.github.io/goose/",
-        cli_install_hint: "Install Goose via the official install script.",
+        cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
+        adapter_install_instructions_url: "",
+        cli_install_hint: "Buzz requires the Goose CLI; the desktop app alone is not enough.",
         adapter_install_hint: "",
         skill_dir: Some(".goose/skills"),
         supports_acp_model_switching: false,
@@ -106,8 +107,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands: &["curl -fsSL https://claude.ai/install.sh | bash"],
         cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""],
         adapter_install_commands: &["npm install -g @agentclientprotocol/claude-agent-acp"],
-        install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
-        cli_install_hint: "Install the Claude Code CLI via the official install script.",
+        cli_install_instructions_url: "https://code.claude.com/docs/en/getting-started",
+        adapter_install_instructions_url: "https://github.com/agentclientprotocol/claude-agent-acp",
+        cli_install_hint: "Buzz requires the Claude Code CLI; the desktop app alone is not enough.",
         adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
@@ -137,8 +139,9 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands: &["curl -fsSL https://chatgpt.com/codex/install.sh | sh"],
         cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://chatgpt.com/codex/install.ps1 | iex\""],
         adapter_install_commands: &["npm install -g @agentclientprotocol/codex-acp"],
-        install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
-        cli_install_hint: "Install the Codex CLI via the official install script.",
+        cli_install_instructions_url: "https://developers.openai.com/codex/cli/",
+        adapter_install_instructions_url: "https://github.com/agentclientprotocol/codex-acp",
+        cli_install_hint: "Buzz requires the Codex CLI; the desktop app alone is not enough.",
         adapter_install_hint: "Install the Codex ACP adapter via npm.",
         skill_dir: Some(".codex/skills"),
         supports_acp_model_switching: false,
@@ -169,7 +172,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         cli_install_commands: &[],
         cli_install_commands_windows: &[],
         adapter_install_commands: &[],
-        install_instructions_url: "https://github.com/block/buzz",
+        cli_install_instructions_url: "https://github.com/block/buzz",
+        adapter_install_instructions_url: "https://github.com/block/buzz",
         cli_install_hint: "Ships with the Buzz desktop app.",
         adapter_install_hint: "",
         skill_dir: None,
@@ -1224,6 +1228,14 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                     }
                 }
             };
+            let install_instructions_url = match availability {
+                AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::AdapterOutdated => {
+                    runtime.adapter_install_instructions_url
+                }
+                AcpAvailabilityStatus::Available
+                | AcpAvailabilityStatus::CliMissing
+                | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
+            };
 
             // node_required now means Buzz cannot provide npm for this platform.
             // On supported desktop platforms, Buzz downloads a private Node/npm
@@ -1251,7 +1263,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                     provider_env_var: runtime.provider_env_var.map(str::to_string),
                     thinking_env_var: runtime.thinking_env_var.map(str::to_string),
                     install_hint,
-                    install_instructions_url: runtime.install_instructions_url.to_string(),
+                    install_instructions_url: install_instructions_url.to_string(),
                     can_auto_install,
                     underlying_cli_path,
                     node_required,

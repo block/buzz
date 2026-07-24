@@ -385,7 +385,10 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
     return "ACP adapter detected but outdated — reinstall required.";
   }
   if (runtime.availability === "cli_missing") {
-    return "ACP adapter detected; CLI missing.";
+    return "CLI not detected; the desktop app alone isn’t enough.";
+  }
+  if (runtime.availability === "not_installed") {
+    return "CLI not detected; the desktop app alone isn’t enough.";
   }
   return "";
 }
@@ -596,8 +599,8 @@ function RuntimeProvidersSection({
           Set up your agent harnesses
         </h1>
         <p className="mx-auto mt-3 max-w-[760px] text-sm leading-6 text-foreground/90">
-          Buzz detected the harnesses available on this machine. Install or sign
-          in to at least one to continue.
+          Buzz checks for command-line harnesses on this machine. Install the
+          CLI or sign in to at least one to continue.
         </p>
       </div>
 
@@ -624,8 +627,8 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No supported command-line harnesses were detected yet. Install a
+            supported CLI, then check again.
           </p>
         )}
 

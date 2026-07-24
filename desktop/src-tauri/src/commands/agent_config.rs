@@ -596,8 +596,6 @@ fn parse_models(raw: Option<&serde_json::Value>) -> (Vec<AcpModelEntry>, Option<
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use super::*;
     use crate::managed_agents::{BackendKind, RespondTo};
 
@@ -614,7 +612,8 @@ mod tests {
             cli_install_commands: &[],
             cli_install_commands_windows: &[],
             adapter_install_commands: &[],
-            install_instructions_url: "",
+            cli_install_instructions_url: "",
+            adapter_install_instructions_url: "",
             cli_install_hint: "",
             adapter_install_hint: "",
             skill_dir: None,
@@ -654,7 +653,7 @@ mod tests {
             parallelism: 1,
             system_prompt: None,
             model: None,
-            env_vars: BTreeMap::new(),
+            env_vars: Default::default(),
             start_on_app_launch: false,
             auto_restart_on_config_change: true,
             runtime_pid: None,
@@ -705,7 +704,7 @@ mod tests {
             is_active: true,
             source_team: None,
             source_team_persona_slug: None,
-            env_vars: BTreeMap::new(),
+            env_vars: Default::default(),
             respond_to: None,
             respond_to_allowlist: Vec::new(),
             parallelism: None,
