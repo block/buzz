@@ -45,6 +45,7 @@ pub fn apply_relay_mesh_env(
 }
 
 /// Insert `value` only when `key` is missing or empty/whitespace.
+#[cfg(feature = "mesh-llm")]
 fn insert_default_if_unset(
     env: &mut std::collections::BTreeMap<String, String>,
     key: &str,
