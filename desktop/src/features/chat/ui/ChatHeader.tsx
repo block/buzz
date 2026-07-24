@@ -15,6 +15,7 @@ import { toast } from "sonner";
 
 import type { ChannelType, ChannelVisibility } from "@/shared/api/types";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
+import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { cn } from "@/shared/lib/cn";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { Button } from "@/shared/ui/button";
@@ -35,6 +36,7 @@ type ChatHeaderProps = {
   statusBadge?: React.ReactNode;
   /** Render the chrome wrapper without an individual backdrop when a parent supplies shared blur. */
   transparentChrome?: boolean;
+  dmUserPubkey?: string;
 };
 
 const HEADER_ICON_CLASS = "h-4 w-4 text-muted-foreground";
@@ -97,6 +99,7 @@ export function ChatHeader({
   overlaysContent = false,
   statusBadge,
   transparentChrome = false,
+  dmUserPubkey,
 }: ChatHeaderProps) {
   const trimmedDescription = description?.trim() ?? "";
 
@@ -133,27 +136,51 @@ export function ChatHeader({
                 />
               )}
             </div>
-            <h1
-              className={cn(
-                "min-w-0 truncate text-base font-semibold leading-6 tracking-tight",
-                channelType !== "dm" && "translate-y-px",
-              )}
-              data-testid="chat-title"
-              title={trimmedDescription || undefined}
-            >
-              {title}
-            </h1>
-            <Button
-              aria-label={`Copy channel name: ${title}`}
-              className="h-6 w-6 shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
-              onClick={() => void handleCopyTitle()}
-              size="icon-xs"
-              title="Copy channel name"
-              type="button"
-              variant="ghost"
-            >
-              <Copy className="h-3.5 w-3.5" />
-            </Button>
+            {dmUserPubkey ? (
+              <UserProfilePopover
+                pubkey={dmUserPubkey}
+                hideMessageAction
+                triggerElement="span"
+              >
+                <button
+                  className="min-w-0 text-left rounded leading-6 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring hover:underline"
+                  type="button"
+                  data-testid="chat-header-title-button"
+                >
+                  <h1
+                    className="min-w-0 truncate text-base font-semibold leading-6 tracking-tight"
+                    data-testid="chat-title"
+                    title={trimmedDescription || undefined}
+                  >
+                    {title}
+                  </h1>
+                </button>
+              </UserProfilePopover>
+            ) : (
+              <h1
+                className={cn(
+                  "min-w-0 truncate text-base font-semibold leading-6 tracking-tight",
+                  channelType !== "dm" && "translate-y-px",
+                )}
+                data-testid="chat-title"
+                title={trimmedDescription || undefined}
+              >
+                {title}
+              </h1>
+            )}
+            {channelType !== "dm" && (
+              <Button
+                aria-label={`Copy channel name: ${title}`}
+                className="h-6 w-6 shrink-0 opacity-0 text-muted-foreground transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover/title:opacity-100"
+                onClick={() => void handleCopyTitle()}
+                size="icon-xs"
+                title="Copy channel name"
+                type="button"
+                variant="ghost"
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </Button>
+            )}
             {statusBadge ? (
               <div className="flex shrink-0 flex-wrap items-center gap-1">
                 {statusBadge}
