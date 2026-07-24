@@ -183,28 +183,26 @@ impl Llm {
                 let r = self
                     .openai_request(cfg, effective_model, |use_responses| {
                         if use_responses {
-                            (
-                                json!({
-                                    "model": effective_model,
-                                    "max_output_tokens": max_output_tokens,
-                                    "instructions": system_prompt,
-                                    "input": user_prompt,
-                                }),
-                                parse_responses as OpenAiParse,
-                            )
+                            let mut body = json!({
+                                "model": effective_model,
+                                "max_output_tokens": max_output_tokens,
+                                "instructions": system_prompt,
+                                "input": user_prompt,
+                            });
+                            apply_openai_service_tier(cfg, &mut body);
+                            (body, parse_responses as OpenAiParse)
                         } else {
-                            (
-                                json!({
-                                    "model": effective_model,
-                                    "stream": false,
-                                    "max_completion_tokens": max_output_tokens,
-                                    "messages": [
-                                        { "role": "system", "content": system_prompt },
-                                        { "role": "user", "content": user_prompt },
-                                    ],
-                                }),
-                                parse_openai as OpenAiParse,
-                            )
+                            let mut body = json!({
+                                "model": effective_model,
+                                "stream": false,
+                                "max_completion_tokens": max_output_tokens,
+                                "messages": [
+                                    { "role": "system", "content": system_prompt },
+                                    { "role": "user", "content": user_prompt },
+                                ],
+                            });
+                            apply_openai_service_tier(cfg, &mut body);
+                            (body, parse_openai as OpenAiParse)
                         }
                     })
                     .await?;
@@ -545,6 +543,7 @@ fn openai_body(
     if let Some(e) = effort {
         body["reasoning_effort"] = json!(e.openai_effort_str());
     }
+    apply_openai_service_tier(cfg, &mut body);
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
         body["tool_choice"] = json!("auto");
@@ -664,11 +663,20 @@ fn responses_body(
     if let Some(e) = effort {
         body["reasoning"] = json!({ "effort": e.openai_effort_str() });
     }
+    apply_openai_service_tier(cfg, &mut body);
     if !tools_json.is_empty() {
         body["tools"] = Value::Array(tools_json);
         body["tool_choice"] = json!("auto");
     }
     body
+}
+
+fn apply_openai_service_tier(cfg: &Config, body: &mut Value) {
+    if matches!(cfg.provider, Provider::OpenAi) {
+        if let Some(tier) = cfg.service_tier {
+            body["service_tier"] = json!(tier.as_str());
+        }
+    }
 }
 
 /// Narrow matcher for "you should be on the Responses API" provider errors,
@@ -1251,6 +1259,7 @@ mod tests {
             openai_api: OpenAiApi::Chat,
             hints_enabled: true,
             thinking_effort: None,
+            service_tier: None,
         }
     }
 
@@ -1844,6 +1853,22 @@ mod tests {
             body.get("reasoning_effort").is_none(),
             "reasoning_effort must be absent when effort is None"
         );
+    }
+
+    #[test]
+    fn openai_body_emits_service_tier_when_configured() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.service_tier = Some(crate::config::OpenAiServiceTier::Flex);
+        let body = openai_body(&cfg, "system", &[], &[], "model", None);
+        assert_eq!(body["service_tier"], "flex");
+    }
+
+    #[test]
+    fn responses_body_emits_service_tier_when_configured() {
+        let mut cfg = cfg(Provider::OpenAi);
+        cfg.service_tier = Some(crate::config::OpenAiServiceTier::Priority);
+        let body = responses_body(&cfg, "system", &[], &[], "model", None);
+        assert_eq!(body["service_tier"], "priority");
     }
 
     #[test]
