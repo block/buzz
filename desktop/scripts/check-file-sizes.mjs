@@ -60,7 +60,8 @@ const overrides = new Map([
   // tests were split into events/group_tags.rs. The remaining +13 lines are
   // the group_tags parameters and append calls across the existing stream and
   // forum builders; extracting those signatures would obscure the builders.
-  ["src-tauri/src/events.rs", 1012],
+  // (+1: clippy too_many_arguments allow on the build_message wrapper.)
+  ["src-tauri/src/events.rs", 1013],
   // persona-events rebase: build_deploy_payload threads `state` for the
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the
