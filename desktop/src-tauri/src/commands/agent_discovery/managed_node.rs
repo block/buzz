@@ -93,12 +93,13 @@ fn managed_node_runtime_ready() -> bool {
     if !node.is_file() {
         return false;
     }
-    let output = std::process::Command::new(&node)
-        .arg("--version")
+    let mut cmd = std::process::Command::new(&node);
+    cmd.arg("--version")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output();
+        .stderr(std::process::Stdio::null());
+    crate::util::configure_no_window(&mut cmd);
+    let output = cmd.output();
     output
         .ok()
         .filter(|output| output.status.success())

@@ -5,6 +5,7 @@ import {
   deriveModelDiscoveryPending,
   getDiscoveredPersonaModelOptions,
   isCacheableDiscoveryResponse,
+  isSuccessfulEmptyDiscovery,
   synthesizeEmptyDiscoveryStatus,
 } from "./usePersonaModelDiscovery.ts";
 
@@ -254,6 +255,59 @@ test("deriveModelDiscoveryPending_noKey_isNotPending", () => {
       modelDiscoveryKey: null,
       activeModelDiscoveryData: null,
       activeModelDiscoveryStatus: null,
+    }),
+    false,
+  );
+});
+
+// ── isSuccessfulEmptyDiscovery ────────────────────────────────────────────────
+
+test("isSuccessfulEmptyDiscovery_resolvedEmptyResponse_isTrue", () => {
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: response({ models: [] }),
+      discoveredModelOptions: null,
+      modelDiscoveryPending: false,
+    }),
+    true,
+  );
+});
+
+test("isSuccessfulEmptyDiscovery_thrownFailure_isFalse", () => {
+  // Failure path leaves data null — must not be treated as successful empty.
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: null,
+      discoveredModelOptions: null,
+      modelDiscoveryPending: false,
+    }),
+    false,
+  );
+});
+
+test("isSuccessfulEmptyDiscovery_withUsableModels_isFalse", () => {
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: response({
+        models: [
+          { id: "claude-sonnet-5", name: "Claude Sonnet 5", description: null },
+        ],
+      }),
+      discoveredModelOptions: [
+        { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
+      ],
+      modelDiscoveryPending: false,
+    }),
+    false,
+  );
+});
+
+test("isSuccessfulEmptyDiscovery_stillPending_isFalse", () => {
+  assert.equal(
+    isSuccessfulEmptyDiscovery({
+      activeModelDiscoveryData: null,
+      discoveredModelOptions: null,
+      modelDiscoveryPending: true,
     }),
     false,
   );

@@ -9,6 +9,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'animated_image_sanitizer.dart';
 import 'media_auth.dart';
 import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
@@ -37,16 +38,14 @@ final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
 
-const _allowedImageMimeTypes = {'image/jpeg', 'image/png', 'image/webp'};
+const _allowedImageMimeTypes = {
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+};
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
-const _unsupportedAnimatedImageMimeTypes = {'image/gif'};
-const _unsupportedGifUploadMessage =
-    'GIF uploads are not supported on mobile yet';
-const _unsupportedAnimatedPngUploadMessage =
-    'Animated PNG uploads are not supported on mobile yet';
-const _unsupportedAnimatedWebpUploadMessage =
-    'Animated WebP uploads are not supported on mobile yet';
 const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
@@ -179,7 +178,10 @@ class MediaUploadService {
 
   Future<BlobDescriptor> uploadImage(XFile image) async {
     final preparedImage = await _prepareUploadImage(image);
-    return uploadBytes(preparedImage.bytes, mimeType: preparedImage.mimeType);
+    return _uploadPreparedBytes(
+      preparedImage.bytes,
+      mimeType: preparedImage.mimeType,
+    );
   }
 
   Future<bool> clipboardHasImage() async {
@@ -236,7 +238,22 @@ class MediaUploadService {
     Uint8List bytes, {
     required String mimeType,
   }) async {
-    _validateUpload(bytes, mimeType);
+    if (mimeType == 'image/gif' ||
+        (mimeType == 'image/png' && _isAnimatedPng(bytes)) ||
+        (mimeType == 'image/webp' && _isAnimatedWebp(bytes))) {
+      try {
+        bytes = sanitizeAnimatedImageForUpload(bytes, mimeType);
+      } on FormatException {
+        throw Exception('failed to sanitize image for upload');
+      }
+    }
+    return _uploadPreparedBytes(bytes, mimeType: mimeType);
+  }
+
+  Future<BlobDescriptor> _uploadPreparedBytes(
+    Uint8List bytes, {
+    required String mimeType,
+  }) async {
     if (!_allowedImageMimeTypes.contains(mimeType) &&
         !_allowedVideoMimeTypes.contains(mimeType)) {
       throw Exception('unsupported file type: $mimeType');
@@ -360,7 +377,6 @@ class MediaUploadService {
     Uint8List bytes,
     String mimeType,
   ) async {
-    _validateUpload(bytes, mimeType);
     final preparedBytes = await _sanitizeImageBytesIfNeeded(bytes, mimeType);
     return _buildPreparedUploadImage(preparedBytes);
   }
@@ -383,6 +399,16 @@ class MediaUploadService {
     Uint8List bytes,
     String mimeType,
   ) async {
+    if (mimeType == 'image/gif' ||
+        (mimeType == 'image/png' && _isAnimatedPng(bytes)) ||
+        (mimeType == 'image/webp' && _isAnimatedWebp(bytes))) {
+      try {
+        return sanitizeAnimatedImageForUpload(bytes, mimeType);
+      } on FormatException {
+        throw Exception('failed to sanitize image for upload');
+      }
+    }
+
     if (!_shouldSanitizePickedImage(mimeType)) {
       return bytes;
     }
@@ -405,18 +431,6 @@ String? _tryDetectImageMimeType(Uint8List bytes) {
     return _detectImageMimeType(bytes);
   } on Exception {
     return null;
-  }
-}
-
-void _validateUpload(Uint8List bytes, String mimeType) {
-  if (_unsupportedAnimatedImageMimeTypes.contains(mimeType)) {
-    throw Exception(_unsupportedGifUploadMessage);
-  }
-  if (mimeType == 'image/png' && _isAnimatedPng(bytes)) {
-    throw Exception(_unsupportedAnimatedPngUploadMessage);
-  }
-  if (mimeType == 'image/webp' && _isAnimatedWebp(bytes)) {
-    throw Exception(_unsupportedAnimatedWebpUploadMessage);
   }
 }
 

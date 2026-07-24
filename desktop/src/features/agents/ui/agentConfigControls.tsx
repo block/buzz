@@ -63,6 +63,7 @@ export function AgentDropdownSelect({
   ariaRequired,
   className,
   disabled = false,
+  emptyOptionsLabel = "No options available",
   id,
   onValueChange,
   options,
@@ -77,6 +78,8 @@ export function AgentDropdownSelect({
   ariaRequired?: boolean;
   className?: string;
   disabled?: boolean;
+  /** Shown when the option list is empty (not a search filter miss). */
+  emptyOptionsLabel?: string;
   id: string;
   onValueChange: (value: string) => void;
   options: readonly AgentDropdownOption[];
@@ -184,8 +187,15 @@ export function AgentDropdownSelect({
               />
             </div>
           ) : null}
-          {showSearch && filteredOptions.length === 0 ? (
-            <p className="px-3 py-2 text-sm text-foreground/55">No matches</p>
+          {filteredOptions.length === 0 ? (
+            <p
+              className="px-3 py-2 text-sm text-foreground/55"
+              data-testid={testId ? `${testId}-empty` : undefined}
+            >
+              {showSearch && query.trim().length > 0
+                ? "No matches"
+                : emptyOptionsLabel}
+            </p>
           ) : null}
           {filteredOptions.map((option) => {
             const selected = option.value === value;
@@ -470,6 +480,7 @@ export function AgentModelField({
       ariaRequired={isRequired}
       className={selectClassName}
       disabled={selectDisabled}
+      emptyOptionsLabel="Couldn't load models"
       id={id}
       onValueChange={handleModelSelectChange}
       options={modelOptions}
