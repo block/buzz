@@ -672,3 +672,170 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
   await expect.poll(() => readSavedRuntime(page)).toBe("codex");
 });
+
+/**
+ * Two installs started concurrently — claude fails with a multiline error
+ * (rich hint+stderr in the tooltip) while codex succeeds. Each card must
+ * keep its own independent spinner and its own terminal result; neither card
+ * may show the other's outcome.
+ *
+ * This is the behavioral regression test for the per-card mutation fix
+ * (Bug B) and the multiline tooltip fix (Bug A / F3 from Thufir pass 1).
+ */
+test("concurrent installs each keep their own state — one fails, one succeeds", async ({
+  page,
+}) => {
+  // Realistic 512-head + 1024-tail shape: many short lines followed by one
+  // long unbroken Windows path.  This exercises both overflow axes:
+  //   • vertical: enough lines to exceed max-h-48 (192px at ~16px/line)
+  //   • horizontal: the long path has no spaces, so only break-words prevents
+  //     scrollWidth > clientWidth.
+  const longWindowsPath =
+    "C:\\Users\\willp\\AppData\\Roaming\\npm\\node_modules\\@agentclientprotocol\\claude-agent-acp\\dist\\bin\\claude-agent-acp.exe";
+  const multilineError = [
+    "npm ERR! code EACCES",
+    "npm ERR! syscall mkdir",
+    "npm ERR! path C:\\Users\\willp\\AppData\\Roaming\\npm",
+    "npm ERR! errno -4048",
+    "npm ERR! Error: EACCES: permission denied, mkdir 'C:\\Users\\willp\\AppData\\Roaming\\npm'",
+    "npm ERR!  { [Error: EACCES: permission denied, mkdir 'C:\\Users\\willp\\AppData\\Roaming\\npm']",
+    "npm ERR!   errno: -4048,",
+    "npm ERR!   code: 'EACCES',",
+    "npm ERR!   syscall: 'mkdir',",
+    "npm ERR!   path: 'C:\\\\Users\\\\willp\\\\AppData\\\\Roaming\\\\npm' }",
+    "npm ERR!",
+    "npm ERR! The operation was rejected by your operating system.",
+    "npm ERR! It is likely you do not have the permissions to access this file as the current user",
+    "npm ERR!",
+    `npm ERR! If you believe this might be a permissions issue, please double-check the`,
+    `npm ERR! permissions of the file and its containing directories, or try running`,
+    `npm ERR! the command again as root/Administrator.`,
+    "",
+    `Hint: Run as Administrator or change npm prefix: npm config set prefix ${longWindowsPath}`,
+  ].join("\n");
+  const claudeNotInstalled = runtime("claude", "adapter_missing", {
+    status: "unknown",
+  });
+  const codexNotInstalled = runtime("codex", "adapter_missing", {
+    status: "unknown",
+  });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [claudeNotInstalled, codexNotInstalled],
+      // Claude: long delay then failure with multiline stderr + hint.
+      // Codex: short delay then success.
+      // Per-runtime config lets both be in flight simultaneously.
+      installAcpRuntimeByRuntime: {
+        claude: {
+          delayMs: 600,
+          result: {
+            success: false,
+            steps: [
+              {
+                step: "adapter",
+                command: "npm install -g @agentclientprotocol/claude-agent-acp",
+                success: false,
+                stdout: "",
+                stderr: multilineError,
+                exit_code: 1,
+              },
+            ],
+          },
+        },
+        codex: {
+          delayMs: 200,
+          result: {
+            success: true,
+            steps: [
+              {
+                step: "adapter",
+                command: "npm install -g @zed-industries/codex-acp",
+                success: true,
+                stdout: "added 1 package",
+                stderr: "",
+                exit_code: 0,
+              },
+            ],
+          },
+        },
+      },
+      acpRuntimesCatalogAfterInstall: [
+        runtime("claude", "adapter_missing", { status: "unknown" }),
+        runtime("codex", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const claudeInstall = page.getByTestId("onboarding-runtime-install-claude");
+  const codexInstall = page.getByTestId("onboarding-runtime-install-codex");
+
+  // Start both installs before either settles.
+  await claudeInstall.click();
+  await codexInstall.click();
+
+  // While in flight: both install buttons must be absent (no duplicate clicks).
+  await expect(claudeInstall).toHaveCount(0);
+  await expect(codexInstall).toHaveCount(0);
+
+  // Codex settles first (shorter delay): success indicator, no error.
+  await expect(page.getByTestId("onboarding-runtime-ready-codex")).toBeVisible({
+    timeout: 3_000,
+  });
+  await expect(page.getByTestId("onboarding-runtime-error-codex")).toHaveCount(
+    0,
+  );
+
+  // Claude still in flight: its install button must still be absent.
+  await expect(claudeInstall).toHaveCount(0);
+
+  // Claude settles: failure error visible; codex still shows ready (not reset).
+  const claudeError = page.getByTestId("onboarding-runtime-error-claude");
+  await expect(claudeError).toBeVisible({ timeout: 3_000 });
+  await expect(
+    page.getByTestId("onboarding-runtime-ready-codex"),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-error-codex")).toHaveCount(
+    0,
+  );
+
+  // The error trigger has the full aria-label (label + detail).
+  await expect(claudeError).toHaveAttribute("aria-label", /npm ERR!/);
+  // Open the tooltip and verify the detail span handles overflow correctly:
+  //   • vertical overflow exists and is scrollable (max-h-48 + overflow-y-auto)
+  //   • no horizontal overflow (break-words forces the long unbroken path to wrap)
+  await claudeError.focus();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toBeVisible({ timeout: 2_000 });
+  await expect(tooltip).toContainText("npm ERR! code EACCES");
+  await expect(tooltip).toContainText("Hint: Run as Administrator");
+
+  // Locate the scroll container using page-level locator since Radix portals
+  // can place content outside the tooltip role element's subtree in the DOM.
+  // Use .first() because Radix keeps a hidden duplicate in the light DOM.
+  const detailSpan = page.locator("span.overflow-y-auto").first();
+  await expect(detailSpan).toBeVisible();
+
+  // Vertical: scrollHeight must exceed clientHeight (content taller than max-h-48).
+  // Scroll position must advance when set, proving scrollability.
+  const isVerticallyScrollable = await detailSpan.evaluate((el) => {
+    return el.scrollHeight > el.clientHeight;
+  });
+  expect(isVerticallyScrollable).toBe(true);
+
+  // Confirm scroll position can actually advance.
+  await detailSpan.evaluate((el) => {
+    el.scrollTop = 9999;
+  });
+  const scrolledDown = await detailSpan.evaluate((el) => el.scrollTop > 0);
+  expect(scrolledDown).toBe(true);
+
+  // Horizontal: break-words must prevent horizontal overflow.
+  const hasHorizontalOverflow = await detailSpan.evaluate((el) => {
+    return el.scrollWidth > el.clientWidth;
+  });
+  expect(hasHorizontalOverflow).toBe(false);
+});
