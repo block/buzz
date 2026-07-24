@@ -2,7 +2,11 @@
 set -euo pipefail
 
 default_required_services=(postgres redis)
-default_optional_services=(adminer keycloak minio minio-init prometheus)
+default_optional_services=(adminer keycloak minio minio-init prometheus memory)
+# The Memory image and protected token secret are provisioned by the separate
+# AgentMemory phase. Keep it observable/promotable here without making normal
+# Buzz `--start` claim or require that deployment.
+default_start_optional_services=(adminer keycloak minio minio-init prometheus)
 required_services=("${default_required_services[@]}")
 timeout_seconds="${BUZZ_LOCAL_SERVICES_TIMEOUT_SECONDS:-120}"
 interval_seconds="${BUZZ_LOCAL_SERVICES_POLL_SECONDS:-3}"
@@ -206,7 +210,7 @@ start_local_services() {
   if run_bounded \
     "${optional_output}" \
     "${optional_start_timeout_seconds}" \
-    docker compose up -d "${default_optional_services[@]}"; then
+    docker compose up -d "${default_start_optional_services[@]}"; then
     cat "${optional_output}"
   else
     start_status=$?
@@ -262,7 +266,7 @@ state_is_ready() {
   local service="$1"
   local state="$2"
   case "${service}:${state}" in
-    postgres:healthy | redis:healthy | keycloak:healthy | minio:healthy)
+    postgres:healthy | redis:healthy | keycloak:healthy | minio:healthy | memory:healthy)
       return 0
       ;;
     adminer:running | prometheus:running | minio-init:completed)

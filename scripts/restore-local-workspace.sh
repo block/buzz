@@ -106,8 +106,8 @@ local_workspace_run_bounded \
   "${docker_timeout_seconds}" \
   docker compose config --services >"${compose_services_file}"
 
-known_services=(postgres redis adminer keycloak minio minio-init prometheus relay)
-known_writer_services=(adminer keycloak minio minio-init relay)
+known_services=(postgres redis adminer keycloak minio minio-init prometheus memory relay)
+known_writer_services=(adminer keycloak minio minio-init memory relay)
 writer_services=()
 while IFS= read -r service; do
   [[ -n "${service}" ]] || continue

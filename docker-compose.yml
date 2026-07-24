@@ -155,6 +155,62 @@ services:
       com.buzz.env: "dev"
     restart: "no"
 
+  # Phase 3 Mac-local command Memory authority. This profile is deliberately
+  # opt-in: Buzz does not claim the companion AgentMemory image is built or
+  # deployed merely because the topology is present.
+  memory:
+    image: ${BUZZ_MEMORY_MCP_IMAGE:-memory-mcp:local}
+    pull_policy: never
+    profiles: ["command-memory"]
+    container_name: buzz-memory
+    entrypoint: ["/bin/sh", "-eu", "-c"]
+    command:
+      - |
+        export MEMORY_REPLICATION_TOKENS="$$(cat /run/secrets/memory-replication-tokens)"
+        exec memory-mcp
+    environment:
+      MEMORY_HOST: 0.0.0.0
+      MEMORY_PORT: "8006"
+      MEMORY_VAULT_ROOT: /data/memory
+      MEMORY_INDEX_ROOT: /data/index
+      MEMORY_NODE_ID: ${BUZZ_MEMORY_NODE_ID:-node:macbook-command}
+      MEMORY_REPLICATION_MAX_ITEMS: "200"
+      MEMORY_REPLICATION_MAX_BYTES: "2097152"
+    ports:
+      - "127.0.0.1:${BUZZ_MEMORY_PORT:-18006}:8006"
+    volumes:
+      - memory-vault:/data/memory
+      - memory-index:/data/index
+    secrets:
+      - memory-replication-tokens
+    networks:
+      - buzz-net
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c 'import json,urllib.request; t=json.load(open(\"/run/secrets/memory-replication-tokens\", encoding=\"utf-8\"))[\"read\"]; q=urllib.request.Request(\"http://127.0.0.1:8006/replication/readiness\", headers={\"Authorization\":\"Bearer \"+t,\"Accept\":\"application/json\"}); r=urllib.request.build_opener(urllib.request.ProxyHandler({})).open(q, timeout=3); v=json.load(r); assert v[\"status\"]==\"ready\" and v[\"node_id\"]==\"${BUZZ_MEMORY_NODE_ID:-node:macbook-command}\"'",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    labels:
+      com.buzz.service: "memory"
+      com.buzz.env: "command-memory"
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:latest
     container_name: buzz-prometheus
@@ -189,6 +245,16 @@ volumes:
     name: buzz-prometheus-data
     labels:
       com.buzz.volume: "prometheus"
+  memory-vault:
+    name: buzz-memory-vault
+    labels:
+      com.buzz.volume: "memory-vault"
+      com.buzz.backup: "canonical"
+  memory-index:
+    name: buzz-memory-index
+    labels:
+      com.buzz.volume: "memory-index"
+      com.buzz.backup: "rebuildable"
 
 networks:
   buzz-net:
@@ -196,3 +262,7 @@ networks:
     driver: bridge
     labels:
       com.buzz.network: "dev"
+
+secrets:
+  memory-replication-tokens:
+    file: ${BUZZ_MEMORY_REPLICATION_TOKENS_FILE:-.local/memory-replication-tokens.json}

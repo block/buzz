@@ -6,6 +6,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/lib/local-workspace-backup.sh
 source "${script_dir}/lib/local-workspace-backup.sh"
 
+# The Phase 3 Memory vault is an independently revisioned canonical authority
+# with its own authenticated backup/export operation. It is intentionally not
+# copied into this PostgreSQL/MinIO workspace archive; restore still knows the
+# `memory` writer and stops it before destructive workspace mutation.
+
 if [[ $# -ne 1 ]]; then
   printf 'Usage: %s /absolute/existing/backup-parent\n' "$0" >&2
   exit 2

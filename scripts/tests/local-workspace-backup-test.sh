@@ -107,7 +107,7 @@ if [[ "${MOCK_DOCKER_FAIL_ON:-}" != "" && "$*" == *"$MOCK_DOCKER_FAIL_ON"* ]]; t
 fi
 case "$*" in
   *"compose config --services"*)
-    printf '%s\n' ${MOCK_COMPOSE_SERVICES:-postgres redis adminer keycloak minio minio-init prometheus relay}
+    printf '%s\n' ${MOCK_COMPOSE_SERVICES:-postgres redis adminer keycloak minio minio-init prometheus memory relay}
     ;;
   *"pg_stat_activity"*)
     printf '%s\n' "${MOCK_DB_SESSIONS:-0}"
@@ -275,7 +275,7 @@ printf 'ok - known host writer refuses before mutation\n'
 : >"$MOCK_LOG"
 "$restore_script" "$backup_dir" --confirm
 assert_contains "$MOCK_LOG" \
-  "stop adminer keycloak minio minio-init relay" \
+  "stop adminer keycloak minio minio-init memory relay" \
   "restore stops every present known Compose writer"
 assert_contains "$MOCK_LOG" "pg_stat_activity" \
   "restore proves PostgreSQL writer quiescence"

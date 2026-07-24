@@ -897,6 +897,8 @@ pub fn run() {
             is_auto_update_supported,
             set_window_vibrancy,
             command_services::apple_inputs::read_apple_inputs,
+            command_services::memory::get_memory_service_readiness,
+            command_services::memory::sync_memory_service,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
