@@ -26,6 +26,23 @@ export function coerceConfigValues(
   return result;
 }
 
+function enumOptions(prop: Record<string, unknown>): {
+  value: string;
+  label: string;
+}[] {
+  const raw = prop.enum;
+  if (!Array.isArray(raw) || raw.length === 0) return [];
+  const labels =
+    (prop.enumLabels as Record<string, string> | undefined) ??
+    (prop["x-enumLabels"] as Record<string, string> | undefined) ??
+    {};
+  return raw.map((entry) => {
+    const value = entry == null ? "" : String(entry);
+    const label = labels[value] ?? (value === "" ? "Default" : value);
+    return { value, label };
+  });
+}
+
 export function ProviderConfigFields({
   schema,
   config,
@@ -51,33 +68,67 @@ export function ProviderConfigFields({
 
   return (
     <div className="space-y-3">
-      {entries.map(([key, prop]) => (
-        <div key={key} className="space-y-1.5">
-          <label
-            className="text-sm font-medium"
-            htmlFor={`provider-cfg-${key}`}
-          >
-            {typeof prop.title === "string" ? prop.title : key}
-            {required.has(key) ? (
-              <span className="ml-1 text-destructive">*</span>
+      {entries.map(([key, prop]) => {
+        const options = enumOptions(prop);
+        const defaultValue =
+          prop.default == null
+            ? ""
+            : typeof prop.default === "boolean"
+              ? prop.default
+                ? "true"
+                : "false"
+              : String(prop.default);
+        const value = config[key] ?? defaultValue;
+        const fieldId = `provider-cfg-${key}`;
+        const title = typeof prop.title === "string" ? prop.title : key;
+        const description =
+          typeof prop.description === "string" ? prop.description : null;
+
+        return (
+          <div key={key} className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor={fieldId}>
+              {title}
+              {required.has(key) ? (
+                <span className="ml-1 text-destructive">*</span>
+              ) : null}
+            </label>
+            {options.length > 0 ? (
+              <select
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+                id={fieldId}
+                onChange={(e) => onChange({ ...config, [key]: e.target.value })}
+                value={value}
+              >
+                {options.map((option) => (
+                  <option key={option.value || "__empty"} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            ) : prop.type === "boolean" ? (
+              <select
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+                id={fieldId}
+                onChange={(e) => onChange({ ...config, [key]: e.target.value })}
+                value={value === "true" ? "true" : "false"}
+              >
+                <option value="false">No</option>
+                <option value="true">Yes</option>
+              </select>
+            ) : (
+              <Input
+                id={fieldId}
+                onChange={(e) => onChange({ ...config, [key]: e.target.value })}
+                placeholder={description ?? ""}
+                value={value}
+              />
+            )}
+            {description ? (
+              <p className="text-xs text-muted-foreground">{description}</p>
             ) : null}
-          </label>
-          <Input
-            id={`provider-cfg-${key}`}
-            onChange={(e) => onChange({ ...config, [key]: e.target.value })}
-            placeholder={
-              typeof prop.description === "string" ? prop.description : ""
-            }
-            value={
-              config[key] ??
-              (typeof prop.default === "string" ? prop.default : "")
-            }
-          />
-          {typeof prop.description === "string" ? (
-            <p className="text-xs text-muted-foreground">{prop.description}</p>
-          ) : null}
-        </div>
-      ))}
+          </div>
+        );
+      })}
     </div>
   );
 }

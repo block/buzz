@@ -1,13 +1,24 @@
-use crate::managed_agents::{discover_provider_candidates, invoke_provider, BackendProviderInfo};
+use crate::managed_agents::{
+    discover_provider_candidates, invoke_provider, probe_provider_info, BackendProviderInfo,
+};
 
 #[tauri::command]
 pub async fn discover_backend_providers() -> Result<Vec<BackendProviderInfo>, String> {
+    // Best-effort `info` probe per candidate so the Desktop "Run on" picker can
+    // show friendly names (e.g. "Crabbox") instead of raw ids. Probe failures
+    // never drop a candidate — they fall back to the id as the label.
     tokio::task::spawn_blocking(|| {
         discover_provider_candidates()
             .into_iter()
-            .map(|(id, path)| BackendProviderInfo {
-                id,
-                binary_path: path.display().to_string(),
+            .map(|(id, path)| {
+                let (name, description, version) = probe_provider_info(&path);
+                BackendProviderInfo {
+                    id,
+                    binary_path: path.display().to_string(),
+                    name,
+                    description,
+                    version,
+                }
             })
             .collect()
     })

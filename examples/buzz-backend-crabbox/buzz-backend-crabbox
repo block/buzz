@@ -1,0 +1,840 @@
+#!/usr/bin/env python3
+"""Buzz Desktop backend: run managed agents on Crabbox leases.
+
+Install
+-------
+``just install-backend-crabbox`` (or symlink this file to
+``~/.local/bin/buzz-backend-crabbox``). Desktop discovers ``buzz-backend-*``
+on PATH and shows **Crabbox** under **Run on**.
+
+Protocol (JSON stdin → JSON stdout)
+-----------------------------------
+info     → name, version, description, config_schema
+deploy   → warm/reuse lease, stage toolchain, start harness → agent_id
+stop     → kill remote harness, keep lease
+destroy  → kill harness + ``crabbox stop`` (Desktop agent delete)
+
+Secrets use Crabbox ``--env-from-profile`` / ``--allow-env`` / ``--env-helper``
+— never shell argv. Loopback relay URLs are rejected.
+
+See docs/backend-providers/crabbox.md.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import uuid
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator
+
+PROVIDER_VERSION = "0.4.0"
+PROVIDER_NAME = "Crabbox"
+PROVIDER_DESCRIPTION = (
+    "Run this agent on a Crabbox remote box (https://crabbox.sh). "
+    "Buzz keeps identity, keys, and the relay; Crabbox hosts the harness. "
+    "Shutdown soft-stops the agent; delete releases the lease."
+)
+
+REQUIRED_BINARIES = ("buzz-acp",)
+OPTIONAL_BINARIES = (
+    "buzz",
+    "buzz-agent",
+    "buzz-dev-mcp",
+    "git-credential-nostr",
+    "git-sign-nostr",
+)
+
+# Always allowlisted for Crabbox env forwarding when set.
+BASE_FORWARDED_ENV = (
+    "PATH",
+    "BUZZ_PRIVATE_KEY",
+    "BUZZ_RELAY_URL",
+    "BUZZ_AUTH_TAG",
+    "BUZZ_ACP_AGENT_COMMAND",
+    "BUZZ_ACP_AGENT_ARGS",
+    "BUZZ_ACP_MCP_COMMAND",
+    "BUZZ_ACP_SYSTEM_PROMPT",
+    "BUZZ_ACP_IDLE_TIMEOUT",
+    "BUZZ_ACP_MAX_TURN_DURATION",
+    "BUZZ_ACP_AGENTS",
+    "BUZZ_ACP_MULTIPLE_EVENT_HANDLING",
+    "BUZZ_ACP_DEDUP",
+    "BUZZ_ACP_LAZY_POOL",
+    "BUZZ_ACP_RESPOND_TO",
+    "BUZZ_ACP_RESPOND_TO_ALLOWLIST",
+    "BUZZ_MANAGED_AGENT",
+)
+
+# Cap how far we walk up the filesystem looking for cargo/Desktop binaries.
+_MAX_PARENT_WALK = 6
+
+CONFIG_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "provider": {
+            "type": "string",
+            "title": "Cloud / sandbox provider",
+            "description": (
+                "Where Crabbox leases capacity. Empty = your crabbox default. "
+                "local-container is free local Docker/Podman."
+            ),
+            "default": "",
+            "enum": [
+                "",
+                "local-container",
+                "hetzner",
+                "aws",
+                "azure",
+                "gcp",
+                "digitalocean",
+                "e2b",
+                "daytona",
+            ],
+            "enumLabels": {
+                "": "Crabbox default",
+                "local-container": "Local container (Docker/Podman)",
+                "hetzner": "Hetzner",
+                "aws": "AWS",
+                "azure": "Azure",
+                "gcp": "Google Cloud",
+                "digitalocean": "DigitalOcean",
+                "e2b": "E2B",
+                "daytona": "Daytona",
+            },
+        },
+        "class": {
+            "type": "string",
+            "title": "Machine class",
+            "description": "Crabbox machine class. Empty = default.",
+            "default": "",
+            "enum": ["", "fast", "beast"],
+            "enumLabels": {"": "Default", "fast": "Fast", "beast": "Beast"},
+        },
+        "idle_timeout": {
+            "type": "string",
+            "title": "Idle timeout",
+            "description": "Release the box after this much idle time (cost guardrail).",
+            "default": "4h",
+            "enum": ["30m", "90m", "4h", "12h"],
+            "enumLabels": {
+                "30m": "30 minutes",
+                "90m": "90 minutes",
+                "4h": "4 hours",
+                "12h": "12 hours",
+            },
+        },
+        "lease_id": {
+            "type": "string",
+            "title": "Existing lease",
+            "description": "Reuse a warm lease id (cbx_…) or slug instead of warming a new box.",
+            "default": "",
+        },
+        "workdir": {
+            "type": "string",
+            "title": "Remote workdir",
+            "description": "Directory on the box for binaries, logs, and state.",
+            "default": "/work/buzz-agent",
+        },
+    },
+    "required": [],
+}
+
+
+# ─── I/O ──────────────────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            return fail("empty stdin; expected one JSON request object")
+        request = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return fail(f"invalid JSON on stdin: {exc}")
+
+    if not isinstance(request, dict):
+        return fail("request must be a JSON object")
+
+    try:
+        op = request.get("op")
+        if op == "info":
+            return ok(
+                {
+                    "name": PROVIDER_NAME,
+                    "version": PROVIDER_VERSION,
+                    "description": PROVIDER_DESCRIPTION,
+                    "config_schema": CONFIG_SCHEMA,
+                }
+            )
+        if op == "deploy":
+            return deploy(request)
+        if op == "stop":
+            return stop_remote(request, destroy_lease=False)
+        if op == "destroy":
+            return stop_remote(request, destroy_lease=True)
+        return fail(
+            f"unsupported op: {op!r} (supported: info, deploy, stop, destroy)"
+        )
+    except ProviderError as exc:
+        return fail(str(exc))
+    except Exception as exc:  # noqa: BLE001 — always return JSON at the boundary
+        return fail(f"internal error: {exc}")
+
+
+def ok(payload: dict[str, Any]) -> int:
+    sys.stdout.write(json.dumps({"ok": True, **payload}, separators=(",", ":")))
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return 0
+
+
+def fail(message: str) -> int:
+    sys.stdout.write(
+        json.dumps(
+            {"ok": False, "error": redact_secrets(message)},
+            separators=(",", ":"),
+        )
+    )
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    return 1
+
+
+class ProviderError(Exception):
+    """User-facing failure that becomes {ok:false, error:...}."""
+
+
+def redact_secrets(text: str) -> str:
+    """Best-effort scrub before Desktop surfaces last_error."""
+    out = text
+    out = re.sub(r"nsec1[0-9a-z]+", "nsec1[REDACTED]", out, flags=re.I)
+    out = re.sub(r"sprt_tok_[A-Za-z0-9_-]+", "sprt_tok_[REDACTED]", out)
+    out = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "sk-[REDACTED]", out)
+    return out
+
+
+# ─── Deploy ───────────────────────────────────────────────────────────────────
+
+
+def deploy(request: dict[str, Any]) -> int:
+    agent = request.get("agent")
+    if not isinstance(agent, dict):
+        raise ProviderError("deploy requires agent object")
+
+    provider_config = request.get("provider_config") or {}
+    if not isinstance(provider_config, dict):
+        raise ProviderError("provider_config must be an object")
+
+    private_key = str(agent.get("private_key_nsec") or "").strip()
+    if not private_key:
+        raise ProviderError("agent.private_key_nsec is required")
+
+    relay_url = str(agent.get("relay_url") or "").strip()
+    if not relay_url:
+        raise ProviderError("agent.relay_url is required")
+    if is_loopback_relay(relay_url):
+        raise ProviderError(
+            "agent.relay_url points at loopback; the Crabbox box cannot reach it. "
+            "Point the agent at a reachable relay URL (or tunnel into the box)."
+        )
+
+    crabbox = require_crabbox()
+    toolchain = resolve_toolchain(agent)
+    if "buzz-acp" not in toolchain:
+        raise ProviderError(
+            "buzz-acp not found on PATH or in Desktop/cargo locations. "
+            "Run `just install-backend-crabbox`."
+        )
+
+    workdir = normalize_workdir(provider_config.get("workdir"))
+
+    with claim_repo() as repo:
+        lease_id = str(provider_config.get("lease_id") or "").strip()
+        if not lease_id:
+            lease_id = warmup_lease(crabbox, agent, provider_config, cwd=repo)
+
+        stage_remote_tree(crabbox, lease_id, workdir, toolchain, cwd=repo)
+        profile_path = write_env_profile(agent, remote_bin=f"{workdir}/bin")
+        try:
+            install_env_helper(crabbox, lease_id, profile_path, cwd=repo)
+            start_agent(crabbox, lease_id, workdir, cwd=repo)
+        finally:
+            try:
+                profile_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    return ok({"agent_id": lease_id})
+
+
+def stop_remote(request: dict[str, Any], *, destroy_lease: bool) -> int:
+    agent_id = str(request.get("agent_id") or "").strip()
+    if not agent_id:
+        raise ProviderError("agent_id is required")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", agent_id):
+        raise ProviderError("agent_id contains invalid characters")
+
+    provider_config = request.get("provider_config") or {}
+    if not isinstance(provider_config, dict):
+        raise ProviderError("provider_config must be an object")
+    workdir = normalize_workdir(provider_config.get("workdir"))
+
+    crabbox = require_crabbox()
+    q_workdir = shlex.quote(workdir)
+    q_agent = shlex.quote(agent_id)
+
+    with claim_repo() as repo:
+        kill_cmd = (
+            "set +e; "
+            f"pkill -f {shlex.quote(workdir + '/bin/buzz-acp')} 2>/dev/null; "
+            "pkill -f buzz-acp 2>/dev/null; "
+            "true"
+        )
+        try:
+            run_or_raise(
+                [
+                    crabbox,
+                    "run",
+                    "--id",
+                    agent_id,
+                    "--no-sync",
+                    "--shell",
+                    kill_cmd,
+                ],
+                timeout=120,
+                label="stop remote harness",
+                cwd=repo,
+            )
+        except ProviderError:
+            if not destroy_lease:
+                raise
+            # Lease may already be gone — still try crabbox stop.
+
+        if destroy_lease:
+            completed = run([crabbox, "stop", agent_id], timeout=180, cwd=repo)
+            if completed.returncode != 0:
+                combined = f"{completed.stdout}\n{completed.stderr}".lower()
+                if not any(
+                    t in combined
+                    for t in ("not found", "no such", "already", "unknown lease")
+                ):
+                    raise_from_cli(
+                        "crabbox stop failed",
+                        completed.stdout,
+                        completed.stderr,
+                    )
+
+    _ = (q_workdir, q_agent)  # reserved for future structured remote scripts
+    return ok({"agent_id": agent_id, "destroyed": destroy_lease})
+
+
+# ─── Crabbox operations ───────────────────────────────────────────────────────
+
+
+def require_crabbox() -> str:
+    path = shutil.which("crabbox")
+    if not path:
+        raise ProviderError(
+            "crabbox CLI not found on PATH. Install: brew install openclaw/tap/crabbox"
+        )
+    return path
+
+
+def normalize_workdir(raw: Any) -> str:
+    workdir = str(raw or "/work/buzz-agent").strip() or "/work/buzz-agent"
+    if not workdir.startswith("/") or ".." in workdir.split("/"):
+        raise ProviderError("provider_config.workdir must be an absolute clean path")
+    if not re.fullmatch(r"/[A-Za-z0-9._/-]+", workdir):
+        raise ProviderError("provider_config.workdir has invalid characters")
+    return workdir.rstrip("/") or "/work/buzz-agent"
+
+
+@contextmanager
+def claim_repo() -> Iterator[Path]:
+    """Tiny throwaway git repo — Desktop providers often run with HOME as cwd."""
+    with tempfile.TemporaryDirectory(prefix="buzz-crabbox-repo-") as tmp:
+        repo = Path(tmp)
+        run_or_raise(["git", "init", "-q"], timeout=30, label="git init", cwd=repo)
+        (repo / "README.buzz-backend-crabbox").write_text(
+            "Throwaway Crabbox claim root for Buzz agent deploy.\n",
+            encoding="utf-8",
+        )
+        run_or_raise(
+            ["git", "add", "README.buzz-backend-crabbox"],
+            timeout=30,
+            label="git add",
+            cwd=repo,
+        )
+        run_or_raise(
+            [
+                "git",
+                "-c",
+                "user.email=buzz-backend-crabbox@localhost",
+                "-c",
+                "user.name=buzz-backend-crabbox",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ],
+            timeout=30,
+            label="git commit",
+            cwd=repo,
+        )
+        yield repo
+
+
+def warmup_lease(
+    crabbox: str,
+    agent: dict[str, Any],
+    provider_config: dict[str, Any],
+    *,
+    cwd: Path,
+) -> str:
+    slug = slug_for_agent(agent)
+    idle = str(provider_config.get("idle_timeout") or "4h").strip() or "4h"
+    cmd = [
+        crabbox,
+        "warmup",
+        "--slug",
+        slug,
+        "--idle-timeout",
+        idle,
+        "--timing-json",
+    ]
+    provider = str(provider_config.get("provider") or "").strip()
+    if provider:
+        cmd.extend(["--provider", provider])
+    machine_class = str(provider_config.get("class") or "").strip()
+    if machine_class:
+        cmd.extend(["--class", machine_class])
+
+    completed = run(cmd, timeout=600, cwd=cwd)
+    if completed.returncode != 0:
+        raise_from_cli("crabbox warmup failed", completed.stdout, completed.stderr)
+
+    lease = parse_lease_identity(completed.stdout, completed.stderr, fallback_slug=slug)
+    if not lease:
+        raise ProviderError(
+            "crabbox warmup succeeded but no lease id/slug was found in output"
+        )
+    return lease
+
+
+def stage_remote_tree(
+    crabbox: str,
+    lease_id: str,
+    workdir: str,
+    toolchain: dict[str, str],
+    *,
+    cwd: Path,
+) -> None:
+    q_workdir = shlex.quote(workdir)
+    run_or_raise(
+        [
+            crabbox,
+            "run",
+            "--id",
+            lease_id,
+            "--no-sync",
+            "--shell",
+            f"mkdir -p {q_workdir}/bin {q_workdir}/logs",
+        ],
+        timeout=300,
+        label="create remote workdir",
+        cwd=cwd,
+    )
+
+    for basename, local_path in toolchain.items():
+        run_or_raise(
+            [
+                crabbox,
+                "cp",
+                "--id",
+                lease_id,
+                local_path,
+                f"SANDBOX:{workdir}/bin/{basename}",
+            ],
+            timeout=300,
+            label=f"copy {basename}",
+            cwd=cwd,
+        )
+
+    run_or_raise(
+        [
+            crabbox,
+            "run",
+            "--id",
+            lease_id,
+            "--no-sync",
+            "--shell",
+            f"chmod +x {q_workdir}/bin/* 2>/dev/null || true",
+        ],
+        timeout=120,
+        label="chmod remote binaries",
+        cwd=cwd,
+    )
+
+
+def install_env_helper(
+    crabbox: str, lease_id: str, profile_path: Path, *, cwd: Path
+) -> None:
+    keys = set(BASE_FORWARDED_ENV) | set(read_profile_keys(profile_path))
+    allow = ",".join(sorted(keys))
+    run_or_raise(
+        [
+            crabbox,
+            "run",
+            "--id",
+            lease_id,
+            "--no-sync",
+            "--env-from-profile",
+            str(profile_path),
+            "--allow-env",
+            allow,
+            "--env-helper",
+            "buzz-agent",
+            "--",
+            "true",
+        ],
+        timeout=300,
+        label="install env helper",
+        cwd=cwd,
+    )
+
+
+def start_agent(crabbox: str, lease_id: str, workdir: str, *, cwd: Path) -> int:
+    q_workdir = shlex.quote(workdir)
+    q_bin = shlex.quote(f"{workdir}/bin")
+    q_log = shlex.quote(f"{workdir}/logs/agent.log")
+    q_acp = shlex.quote(f"{workdir}/bin/buzz-acp")
+    remote = (
+        "set -euo pipefail; "
+        "HELPER=''; "
+        "for c in ./.crabbox/env/buzz-agent "
+        "/work/crabbox/.crabbox/env/buzz-agent "
+        "\"$HOME/.crabbox/env/buzz-agent\"; do "
+        "  if [ -x \"$c\" ]; then HELPER=\"$c\"; break; fi; "
+        "done; "
+        "if [ -z \"$HELPER\" ]; then "
+        "  echo 'env helper buzz-agent not found' >&2; exit 1; "
+        "fi; "
+        f"mkdir -p {q_workdir}/logs; "
+        f"export PATH={q_bin}:\"$PATH\"; "
+        f"pkill -f {q_acp} 2>/dev/null || true; "
+        f"nohup \"$HELPER\" {q_acp} >{q_log} 2>&1 < /dev/null & "
+        "pid=$!; echo \"BUZZ_BACKEND_CRABBOX_PID=$pid\"; "
+        "sleep 1; "
+        "if ! kill -0 \"$pid\" 2>/dev/null; then "
+        "  echo 'agent process exited immediately' >&2; "
+        f"  tail -n 80 {q_log} >&2 || true; "
+        "  exit 1; "
+        "fi"
+    )
+    run_or_raise(
+        [crabbox, "run", "--id", lease_id, "--no-sync", "--shell", remote],
+        timeout=300,
+        label="start remote agent",
+        cwd=cwd,
+    )
+    return 0
+
+
+# ─── Toolchain / env ──────────────────────────────────────────────────────────
+
+
+def resolve_toolchain(agent: dict[str, Any]) -> dict[str, str]:
+    wanted: list[str] = list(REQUIRED_BINARIES)
+    wanted.extend(OPTIONAL_BINARIES)
+    for field in ("agent_command", "mcp_command"):
+        raw = str(agent.get(field) or "").strip()
+        if raw:
+            wanted.append(Path(raw).name)
+
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for name in wanted:
+        base = Path(name).name
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        ordered.append(base)
+
+    found: dict[str, str] = {}
+    for name in ordered:
+        path = resolve_local_binary(name)
+        if path:
+            found[name] = path
+    return found
+
+
+def resolve_local_binary(name: str) -> str | None:
+    which = shutil.which(name)
+    if which:
+        return which
+
+    home = Path.home()
+    candidates: list[Path] = [
+        home / ".local" / "bin" / name,
+        home / ".buzz" / "bin" / name,
+        home / ".buzz-dev" / "bin" / name,
+        Path("/Applications/Buzz.app/Contents/MacOS") / name,
+        home / "Applications" / "Buzz.app" / "Contents" / "MacOS" / name,
+    ]
+
+    # Bounded walk from CWD and this script toward a monorepo root.
+    for root in (Path.cwd(), Path(__file__).resolve().parent):
+        parent = root
+        for _ in range(_MAX_PARENT_WALK):
+            for rel in (
+                Path("target") / "release" / name,
+                Path("target") / "debug" / name,
+            ):
+                candidates.append(parent / rel)
+            bin_dir = parent / "desktop" / "src-tauri" / "binaries"
+            if bin_dir.is_dir():
+                for entry in bin_dir.iterdir():
+                    if entry.name == name or entry.name.startswith(f"{name}-"):
+                        candidates.append(entry)
+            if not parent.parent or parent.parent == parent:
+                break
+            parent = parent.parent
+
+    for path in candidates:
+        try:
+            if path.is_file() and os.access(path, os.X_OK):
+                return str(path.resolve())
+        except OSError:
+            continue
+    return None
+
+
+def write_env_profile(agent: dict[str, Any], *, remote_bin: str | None = None) -> Path:
+    env = build_agent_env(agent, remote_bin=remote_bin)
+    fd, name = tempfile.mkstemp(prefix="buzz-crabbox-env-", suffix=".profile")
+    path = Path(name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            for key, value in env.items():
+                if "\n" in value or "\r" in value:
+                    raise ProviderError(f"env value for {key} contains a newline")
+                handle.write(f"{key}={value}\n")
+        os.chmod(path, 0o600)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def build_agent_env(
+    agent: dict[str, Any], *, remote_bin: str | None = None
+) -> dict[str, str]:
+    agent_cmd = str(agent.get("agent_command") or "buzz-agent").strip() or "buzz-agent"
+    mcp_cmd = str(agent.get("mcp_command") or "").strip()
+    agent_basename = Path(agent_cmd).name
+    mcp_basename = Path(mcp_cmd).name if mcp_cmd else ""
+
+    env: dict[str, str] = {
+        "BUZZ_PRIVATE_KEY": str(agent.get("private_key_nsec") or ""),
+        "BUZZ_RELAY_URL": str(agent.get("relay_url") or ""),
+        "BUZZ_ACP_AGENT_COMMAND": agent_basename,
+        "BUZZ_ACP_AGENT_ARGS": join_agent_args(agent.get("agent_args")),
+        "BUZZ_ACP_MCP_COMMAND": mcp_basename,
+        "BUZZ_ACP_MULTIPLE_EVENT_HANDLING": "steer",
+        "BUZZ_ACP_DEDUP": "queue",
+        "BUZZ_ACP_LAZY_POOL": "true",
+        "BUZZ_MANAGED_AGENT": "1",
+    }
+    if remote_bin:
+        env["PATH"] = f"{remote_bin}:/usr/local/bin:/usr/bin:/bin"
+
+    if agent.get("auth_tag"):
+        env["BUZZ_AUTH_TAG"] = str(agent["auth_tag"])
+    if agent.get("system_prompt"):
+        env["BUZZ_ACP_SYSTEM_PROMPT"] = str(agent["system_prompt"])
+    if agent.get("idle_timeout_seconds") is not None:
+        env["BUZZ_ACP_IDLE_TIMEOUT"] = str(agent["idle_timeout_seconds"])
+    if agent.get("max_turn_duration_seconds") is not None:
+        env["BUZZ_ACP_MAX_TURN_DURATION"] = str(agent["max_turn_duration_seconds"])
+    if agent.get("parallelism") is not None:
+        env["BUZZ_ACP_AGENTS"] = str(agent["parallelism"])
+
+    # Inbound author gate — same fields Desktop serializes in deploy_payload_json.
+    respond_to = agent.get("respond_to")
+    if respond_to is not None:
+        if isinstance(respond_to, dict):
+            # Serialized enum forms vary; stringify carefully.
+            mode = respond_to.get("type") or respond_to.get("mode") or respond_to
+            env["BUZZ_ACP_RESPOND_TO"] = str(mode)
+        else:
+            env["BUZZ_ACP_RESPOND_TO"] = str(respond_to)
+    allowlist = agent.get("respond_to_allowlist")
+    if isinstance(allowlist, list) and allowlist:
+        env["BUZZ_ACP_RESPOND_TO_ALLOWLIST"] = ",".join(str(x) for x in allowlist)
+
+    reserved = set(env.keys()) | {"BUZZ_ACP_SETUP_PAYLOAD"}
+    extra = agent.get("env_vars") or {}
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            if key in reserved:
+                continue
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                continue
+            env[key] = value
+
+    return {k: v for k, v in env.items() if v != ""}
+
+
+# ─── Parsing helpers ──────────────────────────────────────────────────────────
+
+
+def slug_for_agent(agent: dict[str, Any]) -> str:
+    name = str(agent.get("name") or "agent")
+    base = re.sub(r"[^a-z0-9-]+", "-", name.lower()).strip("-")
+    base = re.sub(r"-{2,}", "-", base)[:24] or "agent"
+    return f"buzz-{base}-{uuid.uuid4().hex[:6]}"
+
+
+def parse_lease_identity(
+    stdout: str, stderr: str, fallback_slug: str
+) -> str | None:
+    combined = "\n".join(p for p in (stdout, stderr) if p)
+
+    for candidate in (stdout.strip(), stderr.strip(), combined.strip()):
+        if not candidate:
+            continue
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            found = lease_from_mapping(data)
+            if found:
+                return found
+        for line in candidate.splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                found = lease_from_mapping(data)
+                if found:
+                    return found
+
+    match = re.search(r"\bcbx_[0-9a-fA-F]{12,}\b", combined)
+    if match:
+        return match.group(0)
+    slug_match = re.search(r"\bslug=([a-z0-9][a-z0-9-]*)", combined)
+    if slug_match:
+        return slug_match.group(1)
+    if fallback_slug:
+        return fallback_slug
+    return None
+
+
+def lease_from_mapping(data: dict[str, Any]) -> str | None:
+    for key in ("id", "lease_id", "leaseId", "leaseID", "slug"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    for nest_key in ("lease", "result", "data"):
+        nested = data.get(nest_key)
+        if isinstance(nested, dict):
+            found = lease_from_mapping(nested)
+            if found:
+                return found
+    return None
+
+
+def join_agent_args(raw: Any) -> str:
+    if raw is None:
+        return ""
+    if isinstance(raw, list):
+        return ",".join(str(item) for item in raw)
+    return str(raw)
+
+
+def read_profile_keys(path: Path) -> list[str]:
+    keys: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, _, _ = line.partition("=")
+        key = key.strip()
+        if key:
+            keys.append(key)
+    return keys
+
+
+def is_loopback_relay(url: str) -> bool:
+    lowered = url.lower()
+    return any(
+        host in lowered
+        for host in (
+            "://localhost",
+            "://127.0.0.1",
+            "://[::1]",
+            "://0.0.0.0",
+        )
+    )
+
+
+# ─── Process helpers ──────────────────────────────────────────────────────────
+
+
+def run(
+    cmd: list[str], timeout: int, *, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=str(cwd) if cwd is not None else None,
+    )
+
+
+def run_or_raise(
+    cmd: list[str],
+    timeout: int,
+    label: str,
+    *,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        completed = run(cmd, timeout=timeout, cwd=cwd)
+    except subprocess.TimeoutExpired as exc:
+        raise ProviderError(f"{label} timed out after {timeout}s") from exc
+    if completed.returncode != 0:
+        raise_from_cli(f"{label} failed", completed.stdout, completed.stderr)
+    return completed
+
+
+def raise_from_cli(message: str, stdout: str, stderr: str) -> None:
+    parts = [message]
+    for label, body in (("stdout", stdout), ("stderr", stderr)):
+        body = (body or "").strip()
+        if body:
+            parts.append(f"{label}: {body[:4000]}")
+    raise ProviderError("\n".join(parts))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

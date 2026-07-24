@@ -156,6 +156,8 @@ export async function deleteManagedAgentWithRules({
       preferredChannelId,
       relayAgents,
     });
+    const backendLabel = agent.backend.id;
+    const leaseLabel = agent.backendAgentId;
 
     if (channelId) {
       if (presence === "online" || presence === "away") {
@@ -165,9 +167,8 @@ export async function deleteManagedAgentWithRules({
 
         if (!skipRemoteDeleteConfirm) {
           const confirmed = window.confirm(
-            "Shutdown command sent, but the agent may still be running. " +
-              "Deleting now removes the local record — the remote deployment " +
-              "will be orphaned if shutdown hasn't completed. Continue?",
+            `Shutdown sent to the agent. Delete will also ask ${backendLabel} ` +
+              `to release remote capacity (${leaseLabel}). Continue?`,
           );
           if (!confirmed) {
             return { cancelled: true };
@@ -176,8 +177,8 @@ export async function deleteManagedAgentWithRules({
       } else {
         if (!skipRemoteDeleteConfirm) {
           const confirmed = window.confirm(
-            "This agent is offline but the remote deployment may still exist. " +
-              "Deleting removes the local management record. Continue?",
+            `This agent is offline. Delete will remove the local record and ask ` +
+              `${backendLabel} to release ${leaseLabel}. Continue?`,
           );
           if (!confirmed) {
             return { cancelled: true };
@@ -187,8 +188,8 @@ export async function deleteManagedAgentWithRules({
     } else {
       if (!skipRemoteDeleteConfirm) {
         const confirmed = window.confirm(
-          "This agent is deployed but not in any channel. " +
-            "Deleting will orphan the remote deployment (it will keep running). Continue?",
+          `This agent is on ${backendLabel} (${leaseLabel}) but not in any channel. ` +
+            `Delete will remove the local record and try to release remote capacity. Continue?`,
         );
         if (!confirmed) {
           return { cancelled: true };
