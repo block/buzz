@@ -1,6 +1,6 @@
 use crate::command_services::ssh::{
-    reserve_loopback_port, start_tunnel_with_binary, validate_host_pin, validate_host_target,
-    PinnedHostEvidence, SshError, SshTunnelConfig,
+    start_tunnel_with_reservation, validate_host_target, PinnedHostEvidence, ProtectedFile,
+    ReservedLoopbackPort, SshError, SshTunnel, SshTunnelConfig,
 };
 use crate::secret_store::SecretStore;
 use base64::Engine;
@@ -13,12 +13,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Mutex, TryLockError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, TryLockError};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tauri::Manager;
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
 
 const CONFIG_FILE_NAME: &str = "command-memory.json";
 const SSH_BINARY: &str = "/usr/bin/ssh";
@@ -43,10 +41,10 @@ const EXACT_MEMORY_TOOLS: &[&str] = &[
     "timeline",
     "upsert_entity",
 ];
-static SYNC_GATE: Mutex<()> = Mutex::new(());
+static SYNC_GATE: LazyLock<Arc<SyncGate>> = LazyLock::new(|| Arc::new(SyncGate::default()));
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum MemoryError {
+pub(crate) enum MemoryError {
     NotConfigured,
     InvalidConfig,
     CredentialsUnavailable,
@@ -96,9 +94,7 @@ impl From<SshError> for MemoryError {
             | SshError::InvalidKnownHosts
             | SshError::UnprotectedFile
             | SshError::InvalidConfiguration => Self::SshPinInvalid,
-            SshError::Spawn | SshError::EarlyExit | SshError::StartupTimeout => {
-                Self::SshUnavailable
-            }
+            SshError::Spawn | SshError::EarlyExit => Self::SshUnavailable,
             SshError::Teardown => Self::Teardown,
         }
     }
@@ -161,6 +157,122 @@ struct TrustedMemoryConfig {
     secrets: MemorySecrets,
 }
 
+struct ProtectedExecutable {
+    file: ProtectedFile,
+    original_path: PathBuf,
+}
+
+impl ProtectedExecutable {
+    fn open(path: &Path) -> Result<Self, MemoryError> {
+        let file = ProtectedFile::open(path, MAXIMUM_CONFIG_BYTES)
+            .map_err(|_| MemoryError::InvalidConfig)?;
+        if file.mode() & 0o111 == 0 || file.mode() & 0o022 != 0 {
+            return Err(MemoryError::InvalidConfig);
+        }
+        Ok(Self {
+            file,
+            original_path: path.to_path_buf(),
+        })
+    }
+
+    fn command_path(&self) -> Result<&Path, MemoryError> {
+        if !self.file.matches_path(&self.original_path) {
+            return Err(MemoryError::InvalidConfig);
+        }
+        Ok(&self.original_path)
+    }
+
+    #[cfg(test)]
+    fn spawn_for_test(&self) -> Result<String, MemoryError> {
+        let output = Command::new(self.command_path()?)
+            .env_clear()
+            .output()
+            .map_err(|_| MemoryError::Spawn)?;
+        if !output.status.success() {
+            return Err(MemoryError::Exit);
+        }
+        String::from_utf8(output.stdout).map_err(|_| MemoryError::InvalidResponse)
+    }
+}
+
+#[derive(Default)]
+struct SyncGate {
+    mutex: Mutex<()>,
+}
+
+impl SyncGate {
+    fn try_enter(&self) -> Result<MutexGuard<'_, ()>, MemoryError> {
+        match self.mutex.try_lock() {
+            Ok(guard) => Ok(guard),
+            Err(TryLockError::WouldBlock) => Err(MemoryError::Busy),
+            Err(TryLockError::Poisoned(_)) => Err(MemoryError::Task),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SchedulerControl {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+pub(crate) struct MemorySyncScheduler {
+    control: Arc<SchedulerControl>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl MemorySyncScheduler {
+    fn start<F>(interval: Duration, gate: Arc<SyncGate>, mut task: F) -> Self
+    where
+        F: FnMut() -> Result<(), MemoryError> + Send + 'static,
+    {
+        let control = Arc::new(SchedulerControl::default());
+        let thread_control = Arc::clone(&control);
+        let thread = std::thread::spawn(move || loop {
+            let stopped = match thread_control.stopped.lock() {
+                Ok(stopped) => stopped,
+                Err(_) => return,
+            };
+            let waited = thread_control.wake.wait_timeout(stopped, interval);
+            let Ok((stopped, _)) = waited else {
+                return;
+            };
+            if *stopped {
+                return;
+            }
+            drop(stopped);
+            if let Ok(_guard) = gate.try_enter() {
+                let _ = task();
+            }
+        });
+        Self {
+            control,
+            thread: Mutex::new(Some(thread)),
+        }
+    }
+
+    #[cfg(test)]
+    fn start_for_test<F>(interval: Duration, gate: Arc<SyncGate>, task: F) -> Self
+    where
+        F: FnMut() -> Result<(), MemoryError> + Send + 'static,
+    {
+        Self::start(interval, gate, task)
+    }
+
+    pub(crate) fn stop_and_join(&self) -> Result<(), MemoryError> {
+        {
+            let mut stopped = self.control.stopped.lock().map_err(|_| MemoryError::Task)?;
+            *stopped = true;
+            self.control.wake.notify_all();
+        }
+        let thread = self.thread.lock().map_err(|_| MemoryError::Task)?.take();
+        if let Some(thread) = thread {
+            thread.join().map_err(|_| MemoryError::Task)?;
+        }
+        Ok(())
+    }
+}
+
 trait CredentialSource {
     fn load(&self, key: &str) -> Result<Option<String>, String>;
 }
@@ -196,47 +308,17 @@ fn valid_secret(value: &str) -> bool {
             .any(|byte| byte.is_ascii_control() || matches!(byte, b'\r' | b'\n'))
 }
 
-#[cfg(unix)]
 fn read_protected_config(path: &Path) -> Result<Vec<u8>, MemoryError> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(MemoryError::NotConfigured)
         }
         Err(_) => return Err(MemoryError::InvalidConfig),
-    };
-    if !path.is_absolute()
-        || metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > MAXIMUM_CONFIG_BYTES
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(MemoryError::InvalidConfig);
     }
-    std::fs::read(path).map_err(|_| MemoryError::InvalidConfig)
-}
-
-#[cfg(not(unix))]
-fn read_protected_config(_path: &Path) -> Result<Vec<u8>, MemoryError> {
-    Err(MemoryError::InvalidConfig)
-}
-
-#[cfg(unix)]
-fn validate_executable(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return false;
-    };
-    path.is_absolute()
-        && !metadata.file_type().is_symlink()
-        && metadata.is_file()
-        && metadata.permissions().mode() & 0o111 != 0
-        && metadata.permissions().mode() & 0o022 == 0
-}
-
-#[cfg(not(unix))]
-fn validate_executable(_path: &Path) -> bool {
-    false
+    ProtectedFile::open(path, MAXIMUM_CONFIG_BYTES)
+        .and_then(|file| file.read_all())
+        .map_err(|_| MemoryError::InvalidConfig)
 }
 
 fn validate_config(config: &MemoryConfig) -> Result<(), MemoryError> {
@@ -284,7 +366,6 @@ fn validate_config(config: &MemoryConfig) -> Result<(), MemoryError> {
             .as_deref()
             .is_none_or(|digest| digest.len() != 32)
         || validate_host_target(&config.home_host_alias, &config.home_user).is_err()
-        || !validate_executable(&config.replicate_cli_path)
     {
         return Err(MemoryError::InvalidConfig);
     }
@@ -310,6 +391,7 @@ fn load_trusted_config(
     let config: MemoryConfig =
         serde_json::from_slice(&bytes).map_err(|_| MemoryError::InvalidConfig)?;
     validate_config(&config)?;
+    let _replicate_cli = ProtectedExecutable::open(&config.replicate_cli_path)?;
     let secrets = MemorySecrets {
         local_read: load_secret(credentials, &config.credential_keys.local_read)?,
         local_replicate: load_secret(credentials, &config.credential_keys.local_replicate)?,
@@ -377,10 +459,35 @@ fn query_readiness(
     trusted: &TrustedMemoryConfig,
     timeout: Duration,
 ) -> Result<MemoryServiceReadiness, MemoryError> {
+    let endpoint = format!("http://127.0.0.1:{}", trusted.config.local_port);
+    let readiness = query_node_readiness(
+        &endpoint,
+        &trusted.secrets.local_read,
+        &trusted.config.local_node_id,
+        timeout,
+    )?;
+    Ok(MemoryServiceReadiness {
+        status: MemoryServiceStatus::Ready,
+        node_id: Some(readiness.node_id),
+        revision_count: readiness.revision_count,
+        conflict_count: readiness.conflict_count,
+        endpoint: Some(endpoint),
+        sync_interval_minutes: Some(trusted.config.sync_interval_minutes),
+        tool_allowlist: trusted.config.tool_allowlist.clone(),
+        observed_at: Utc::now().to_rfc3339(),
+        error: None,
+    })
+}
+
+fn query_node_readiness(
+    endpoint: &str,
+    bearer: &str,
+    expected_node_id: &str,
+    timeout: Duration,
+) -> Result<ServiceReadiness, MemoryError> {
     if timeout.is_zero() || timeout > Duration::from_secs(10) {
         return Err(MemoryError::InvalidConfig);
     }
-    let endpoint = format!("http://127.0.0.1:{}", trusted.config.local_port);
     let client = Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -390,10 +497,7 @@ fn query_readiness(
     let response = client
         .get(format!("{endpoint}/replication/readiness"))
         .header(ACCEPT, "application/json")
-        .header(
-            AUTHORIZATION,
-            format!("Bearer {}", trusted.secrets.local_read),
-        )
+        .header(AUTHORIZATION, format!("Bearer {bearer}"))
         .send()
         .map_err(|_| MemoryError::LocalServiceUnavailable)?;
     if response.status().as_u16() == 401 || response.status().as_u16() == 403 {
@@ -428,7 +532,7 @@ fn query_readiness(
         serde_json::from_slice(&bytes).map_err(|_| MemoryError::InvalidResponse)?;
     if readiness.status != "ready"
         || readiness.schema_version != 1
-        || readiness.node_id != trusted.config.local_node_id
+        || readiness.node_id != expected_node_id
         || readiness.max_page_items == 0
         || readiness.max_page_items > 200
         || readiness.max_envelope_bytes == 0
@@ -436,23 +540,46 @@ fn query_readiness(
         || !readiness.markdown_canonical
         || !readiness.sqlite_derived
     {
-        return if readiness.node_id != trusted.config.local_node_id {
+        return if readiness.node_id != expected_node_id {
             Err(MemoryError::NodeIdentityMismatch)
         } else {
             Err(MemoryError::InvalidResponse)
         };
     }
-    Ok(MemoryServiceReadiness {
-        status: MemoryServiceStatus::Ready,
-        node_id: Some(readiness.node_id),
-        revision_count: readiness.revision_count,
-        conflict_count: readiness.conflict_count,
-        endpoint: Some(endpoint),
-        sync_interval_minutes: Some(trusted.config.sync_interval_minutes),
-        tool_allowlist: trusted.config.tool_allowlist.clone(),
-        observed_at: Utc::now().to_rfc3339(),
-        error: None,
-    })
+    Ok(readiness)
+}
+
+fn wait_for_remote_readiness(
+    tunnel: &mut SshTunnel,
+    trusted: &TrustedMemoryConfig,
+    timeout: Duration,
+) -> Result<(), MemoryError> {
+    let deadline = Instant::now() + timeout;
+    let endpoint = format!("http://127.0.0.1:{}", tunnel.local_forward_port);
+    loop {
+        tunnel.ensure_running()?;
+        match query_node_readiness(
+            &endpoint,
+            &trusted.secrets.remote_read,
+            &trusted.config.home_node_id,
+            Duration::from_millis(500),
+        ) {
+            Ok(_) => return Ok(()),
+            Err(MemoryError::LocalServiceUnavailable) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(MemoryError::LocalServiceUnavailable) => return Err(MemoryError::SshUnavailable),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn run_after_remote_preflight<T>(
+    preflight: impl FnOnce() -> Result<(), MemoryError>,
+    operation: impl FnOnce() -> Result<T, MemoryError>,
+) -> Result<T, MemoryError> {
+    preflight()?;
+    operation()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -537,13 +664,13 @@ fn run_replication_cli(
         || tunnel_port == 0
         || timeout.is_zero()
         || timeout > Duration::from_secs(300)
-        || !validate_executable(binary)
     {
         return Err(MemoryError::InvalidConfig);
     }
+    let executable = ProtectedExecutable::open(binary)?;
     let local_url = format!("http://127.0.0.1:{}", trusted.config.local_port);
     let remote_url = format!("http://127.0.0.1:{tunnel_port}");
-    let mut child = Command::new(binary)
+    let mut child = Command::new(executable.command_path()?)
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")
@@ -694,13 +821,25 @@ fn fail_soft_sync(error: MemoryError) -> MemorySyncResponse {
     }
 }
 
+fn finish_after_tunnel_close<T>(
+    operation: Result<T, MemoryError>,
+    close: Result<(), SshError>,
+) -> Result<T, MemoryError> {
+    match (operation, close) {
+        (Ok(value), Ok(())) => Ok(value),
+        (_, Err(error)) => Err(error.into()),
+        (Err(error), Ok(())) => Err(error),
+    }
+}
+
 fn sync_memory_blocking(trusted: &TrustedMemoryConfig) -> Result<MemorySyncResponse, MemoryError> {
     let _local = query_readiness(trusted, READINESS_TIMEOUT)?;
-    let tunnel_port = reserve_loopback_port().map_err(|_| MemoryError::SshUnavailable)?;
+    let reservation = ReservedLoopbackPort::new().map_err(|_| MemoryError::SshUnavailable)?;
+    let tunnel_port = reservation.port();
     if tunnel_port == trusted.config.local_port {
         return Err(MemoryError::SshUnavailable);
     }
-    let tunnel_config = SshTunnelConfig {
+    let mut tunnel_config = SshTunnelConfig {
         home_host_alias: trusted.config.home_host_alias.clone(),
         home_user: trusted.config.home_user.clone(),
         pinned_host_fingerprint: trusted.config.pinned_host_fingerprint.clone(),
@@ -709,39 +848,43 @@ fn sync_memory_blocking(trusted: &TrustedMemoryConfig) -> Result<MemorySyncRespo
         remote_loopback_port: trusted.config.remote_loopback_port,
         local_forward_port: tunnel_port,
     };
-    let pin = validate_host_pin(&tunnel_config)?;
-    let tunnel = start_tunnel_with_binary(
+    let mut tunnel = start_tunnel_with_reservation(
         Path::new(SSH_BINARY),
-        &tunnel_config,
+        &mut tunnel_config,
+        reservation,
         TUNNEL_STARTUP_TIMEOUT,
     )?;
-    if tunnel.local_forward_port != tunnel_port || tunnel.evidence.fingerprint != pin.fingerprint {
-        return Err(MemoryError::SshPinInvalid);
-    }
-    let pull = run_replication_cli(
-        &trusted.config.replicate_cli_path,
-        "pull",
-        trusted,
-        tunnel_port,
-        REPLICATION_TIMEOUT,
-    )?;
-    let push = run_replication_cli(
-        &trusted.config.replicate_cli_path,
-        "push",
-        trusted,
-        tunnel_port,
-        REPLICATION_TIMEOUT,
-    )?;
-    let last_success = push.last_success.clone();
-    drop(tunnel);
-    Ok(MemorySyncResponse {
-        status: "ok".to_string(),
-        pull: Some(pull),
-        push: Some(push),
-        pinned_host: Some(pin.into()),
-        last_success: Some(last_success),
-        error: None,
-    })
+    let pin = tunnel.evidence.clone();
+    let operation = run_after_remote_preflight(
+        || wait_for_remote_readiness(&mut tunnel, trusted, TUNNEL_STARTUP_TIMEOUT),
+        || {
+            let pull = run_replication_cli(
+                &trusted.config.replicate_cli_path,
+                "pull",
+                trusted,
+                tunnel_port,
+                REPLICATION_TIMEOUT,
+            )?;
+            let push = run_replication_cli(
+                &trusted.config.replicate_cli_path,
+                "push",
+                trusted,
+                tunnel_port,
+                REPLICATION_TIMEOUT,
+            )?;
+            let last_success = push.last_success.clone();
+            Ok(MemorySyncResponse {
+                status: "ok".to_string(),
+                pull: Some(pull),
+                push: Some(push),
+                pinned_host: Some(pin.into()),
+                last_success: Some(last_success),
+                error: None,
+            })
+        },
+    );
+    let close = tunnel.close();
+    finish_after_tunnel_close(operation, close)
 }
 
 fn trusted_config_path<R: tauri::Runtime>(
@@ -751,6 +894,26 @@ fn trusted_config_path<R: tauri::Runtime>(
         .app_config_dir()
         .map(|directory| directory.join(CONFIG_FILE_NAME))
         .map_err(|_| MemoryError::InvalidConfig)
+}
+
+pub(crate) fn start_memory_sync_scheduler(
+    app: tauri::AppHandle,
+) -> Option<Arc<MemorySyncScheduler>> {
+    let path = trusted_config_path(&app).ok()?;
+    let store = SecretStore::shared(crate::app_state::keyring_service());
+    let trusted = load_trusted_config(&path, store).ok()?;
+    let interval = Duration::from_secs(u64::from(trusted.config.sync_interval_minutes) * 60);
+    let scheduler_app = app.clone();
+    Some(Arc::new(MemorySyncScheduler::start(
+        interval,
+        Arc::clone(&SYNC_GATE),
+        move || {
+            let path = trusted_config_path(&scheduler_app)?;
+            let store = SecretStore::shared(crate::app_state::keyring_service());
+            let trusted = load_trusted_config(&path, store)?;
+            sync_memory_blocking(&trusted).map(|_| ())
+        },
+    )))
 }
 
 #[tauri::command]
@@ -771,11 +934,7 @@ pub(crate) async fn get_memory_service_readiness(app: tauri::AppHandle) -> Memor
 #[tauri::command]
 pub(crate) async fn sync_memory_service(app: tauri::AppHandle) -> MemorySyncResponse {
     let task = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = match SYNC_GATE.try_lock() {
-            Ok(guard) => guard,
-            Err(TryLockError::WouldBlock) => return Err(MemoryError::Busy),
-            Err(TryLockError::Poisoned(_)) => return Err(MemoryError::Task),
-        };
+        let _guard = SYNC_GATE.try_enter()?;
         let path = trusted_config_path(&app)?;
         let store = SecretStore::shared(crate::app_state::keyring_service());
         let trusted = load_trusted_config(&path, store)?;

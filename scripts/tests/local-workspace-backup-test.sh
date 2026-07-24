@@ -118,6 +118,20 @@ case "$*" in
   *"pg_dump --format=custom"*)
     printf 'mock-custom-format-dump'
     ;;
+  *"tar -C /source -czf /backup/memory-vault.tar.gz"*)
+    for argument in "$@"; do
+      case "$argument" in
+        *:/backup)
+          destination="${argument%:/backup}"
+          source_dir="$(mktemp -d)"
+          printf 'canonical-memory-marker' >"$source_dir/revisions.jsonl"
+          tar -C "$source_dir" -czf \
+            "$destination/memory-vault.tar.gz" .
+          rm -rf "$source_dir"
+          ;;
+      esac
+    done
+    ;;
   *"mc mirror"*)
     for argument in "$@"; do
       case "$argument" in
@@ -148,6 +162,10 @@ export MOCK_LOG="$test_tmp/commands.log"
 export MOCK_ACTIVE_WORKTREE="$repo_root"
 export MOCK_MAIN_WORKTREE="$test_tmp/main-checkout"
 export MOCK_SIBLING_WORKTREE="$test_tmp/sibling-worktree"
+export BUZZ_MEMORY_BACKUP_KEY_FILE="$test_tmp/memory-backup.key"
+printf 'test-only-memory-backup-passphrase-32-bytes\n' \
+  >"$BUZZ_MEMORY_BACKUP_KEY_FILE"
+chmod 600 "$BUZZ_MEMORY_BACKUP_KEY_FILE"
 
 [[ -x "$backup_script" ]] || fail "backup script exists and is executable"
 [[ -x "$restore_script" ]] || fail "restore script exists and is executable"
@@ -171,8 +189,15 @@ backup_dir="$(find "$backup_parent" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 [[ -f "$backup_dir/minio/object.bin" ]] || fail "MinIO objects are mirrored"
 [[ -f "$backup_dir/minio-inventory.tsv" ]] || fail "MinIO inventory is recorded"
 [[ -f "$backup_dir/manifest.sha256" ]] || fail "checksummed manifest is recorded"
-assert_contains "$backup_dir/manifest" "format_version=1" \
+assert_contains "$backup_dir/manifest" "format_version=2" \
   "manifest has an explicit format version"
+[[ -f "$backup_dir/memory-vault.tar.gz.enc" ]] ||
+  fail "canonical Memory vault is included as encrypted ciphertext"
+[[ ! -e "$backup_dir/memory-vault.tar.gz" ]] ||
+  fail "plaintext Memory archive must never enter the backup"
+if grep -aFq 'canonical-memory-marker' "$backup_dir/memory-vault.tar.gz.enc"; then
+  fail "encrypted Memory archive must not expose canonical plaintext"
+fi
 (
   cd "$backup_dir"
   shasum -a 256 -c manifest.sha256 >/dev/null
@@ -181,6 +206,8 @@ printf 'ok - backup artifacts are checksummed\n'
 assert_contains "$MOCK_LOG" "pg_dump --format=custom" \
   "backup uses PostgreSQL custom format"
 assert_contains "$MOCK_LOG" "mc mirror" "backup mirrors MinIO objects"
+assert_contains "$MOCK_LOG" "buzz-memory-vault:/source:ro" \
+  "backup captures the canonical Memory volume"
 
 : >"$MOCK_LOG"
 assert_fails "restore requires explicit confirmation" "$restore_script" "$backup_dir"
@@ -283,6 +310,8 @@ assert_contains "$MOCK_LOG" \
   "pg_restore --clean --if-exists --exit-on-error --single-transaction --no-owner --no-acl" \
   "restore loads PostgreSQL atomically and fails on the first SQL error"
 assert_contains "$MOCK_LOG" "mc mirror" "restore mirrors MinIO objects"
+assert_contains "$MOCK_LOG" "buzz-memory-vault:/target" \
+  "restore replaces the canonical Memory vault"
 assert_contains "$MOCK_LOG" "migrate" "restore runs migrations"
 assert_contains "$MOCK_LOG" "ready" "restore verifies readiness"
 

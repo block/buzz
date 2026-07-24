@@ -114,6 +114,7 @@ flate2 = "1"
 sherpa-onnx = "1.12"
 regex = "1"
 rusqlite = { version = "0.37", features = ["bundled"] }
+rustix = { version = "1.1", features = ["fs", "process"] }
 axum = "0.8"
 rodio = "0.22"
 earshot = "1.0"

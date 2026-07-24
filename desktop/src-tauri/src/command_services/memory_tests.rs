@@ -8,7 +8,8 @@ mod tests {
     use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use std::time::Duration;
 
     #[derive(Default)]
@@ -27,6 +28,17 @@ mod tests {
         let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
         permissions.set_mode(if executable { 0o700 } else { 0o600 });
         fs::set_permissions(path, permissions).expect("protect fixture");
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        let base = if Path::new("/private/tmp").is_dir() {
+            Path::new("/private/tmp")
+        } else {
+            Path::new("/tmp")
+        };
+        tempfile::Builder::new()
+            .tempdir_in(base)
+            .expect("temporary directory")
     }
 
     fn config_json(directory: &Path, local_port: u16) -> serde_json::Value {
@@ -132,7 +144,7 @@ mod tests {
 
     #[test]
     fn trusted_config_rejects_unknown_fields_collisions_and_invalid_tools() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let (path, _) = write_config(directory.path(), 8006);
         let mut value = config_json(directory.path(), 8006);
         value
@@ -200,7 +212,7 @@ mod tests {
             "sqlite_derived": true
         });
         let (port, server) = fake_readiness_server(response, "local-read-token");
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let (path, _) = write_config(directory.path(), port);
         let trusted = load_trusted_config(&path, &credentials()).expect("load trusted config");
 
@@ -232,7 +244,7 @@ mod tests {
             "sqlite_derived": true
         });
         let (port, server) = fake_readiness_server(response, "local-read-token");
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let (path, _) = write_config(directory.path(), port);
         let trusted = load_trusted_config(&path, &credentials()).expect("load trusted config");
 
@@ -246,7 +258,7 @@ mod tests {
     #[test]
     fn replication_cli_is_direct_bounded_redacted_and_exactly_parsed() {
         std::env::set_var("BUZZ_MEMORY_INHERITED_SENTINEL", "must-clear");
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let log_path = directory.path().join("replicate-log");
         let fake_cli = directory.path().join("fake-replicate");
         let fixture = format!(
@@ -299,7 +311,7 @@ fi
 
     #[test]
     fn replication_timeout_kills_and_reaps_the_cli() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let fake_cli = directory.path().join("hung-replicate");
         protected_file(&fake_cli, b"#!/bin/sh\nexec /bin/sleep 30\n", true);
         let trusted = TrustedMemoryConfig {
@@ -338,11 +350,100 @@ fi
     }
 
     #[test]
-    fn scheduled_and_explicit_syncs_share_one_serial_gate() {
-        let gate = Arc::new(Mutex::new(()));
-        let first = gate.lock().expect("take sync gate");
-        assert!(gate.try_lock().is_err());
-        drop(first);
-        assert!(gate.try_lock().is_ok());
+    fn production_scheduler_runs_at_the_configured_interval_and_stops_cleanly() {
+        let gate = Arc::new(SyncGate::default());
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        let scheduler =
+            MemorySyncScheduler::start_for_test(Duration::from_millis(20), gate, move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while executions.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(executions.load(Ordering::SeqCst) >= 1);
+
+        scheduler
+            .stop_and_join()
+            .expect("scheduler stops and joins");
+        let stopped_count = executions.load(Ordering::SeqCst);
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(executions.load(Ordering::SeqCst), stopped_count);
+    }
+
+    #[test]
+    fn scheduled_and_explicit_syncs_use_the_same_real_gate() {
+        let gate = Arc::new(SyncGate::default());
+        let manual_guard = gate.try_enter().expect("manual sync owns gate");
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&executions);
+        let scheduler = MemorySyncScheduler::start_for_test(
+            Duration::from_millis(20),
+            Arc::clone(&gate),
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
+        drop(manual_guard);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while executions.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        scheduler.stop_and_join().expect("scheduler joins");
+    }
+
+    #[test]
+    fn remote_authentication_and_node_identity_precede_any_cli_credentials() {
+        let cli_started = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&cli_started);
+
+        let error = run_after_remote_preflight(
+            || Err(MemoryError::NodeIdentityMismatch),
+            move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .expect_err("remote node mismatch must block replication");
+
+        assert_eq!(error, MemoryError::NodeIdentityMismatch);
+        assert_eq!(cli_started.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn tunnel_close_failure_overrides_an_otherwise_successful_sync() {
+        let error = finish_after_tunnel_close::<()>(
+            Ok(()),
+            Err(crate::command_services::ssh::SshError::Teardown),
+        )
+        .expect_err("unreaped tunnel cannot report sync success");
+
+        assert_eq!(error, MemoryError::Teardown);
+    }
+
+    #[test]
+    fn verified_cli_revalidation_rejects_path_replacement() {
+        let directory = tempdir();
+        let cli_path = directory.path().join("memory-mcp-replicate");
+        protected_file(&cli_path, b"#!/bin/sh\nprintf '%s\\n' verified\n", true);
+        let executable =
+            ProtectedExecutable::open(&cli_path).expect("open verified executable descriptor");
+        fs::rename(&cli_path, directory.path().join("original")).expect("move verified inode away");
+        protected_file(&cli_path, b"#!/bin/sh\nprintf '%s\\n' swapped\n", true);
+
+        let error = executable
+            .spawn_for_test()
+            .expect_err("replaced executable path must fail closed");
+
+        assert_eq!(error, MemoryError::InvalidConfig);
     }
 }

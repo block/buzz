@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION=1
+LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION=2
 
 local_workspace_die() {
   printf '[local-workspace] error: %s\n' "$*" >&2
@@ -173,9 +173,34 @@ local_workspace_write_checksums() {
     ) >>"${output_file}"
   done < <(
     cd "${backup_dir}"
-    find manifest postgres.dump minio-inventory.tsv minio -type f -print |
+    find manifest postgres.dump minio-inventory.tsv memory-vault.tar.gz.enc minio \
+      -type f -print |
       LC_ALL=C sort
   )
+}
+
+local_workspace_memory_key_file() {
+  local key_file="${BUZZ_MEMORY_BACKUP_KEY_FILE:-}"
+  local mode
+
+  [[ "${key_file}" == /* ]] ||
+    local_workspace_die \
+      "BUZZ_MEMORY_BACKUP_KEY_FILE must name an absolute protected file" ||
+    return
+  [[ -f "${key_file}" && ! -L "${key_file}" ]] ||
+    local_workspace_die "Memory backup key must be a regular non-symlink file" ||
+    return
+  if stat -f '%Lp' "${key_file}" >/dev/null 2>&1; then
+    mode="$(stat -f '%Lp' "${key_file}")"
+  else
+    mode="$(stat -c '%a' "${key_file}")"
+  fi
+  [[ "${mode}" == "600" || "${mode}" == "400" ]] ||
+    local_workspace_die "Memory backup key permissions must be 0600 or 0400" ||
+    return
+  [[ -s "${key_file}" ]] ||
+    local_workspace_die "Memory backup key must not be empty" || return
+  printf '%s\n' "${key_file}"
 }
 
 local_workspace_validate_backup() {
@@ -197,7 +222,9 @@ local_workspace_validate_backup() {
     return
   fi
 
-  for required in manifest manifest.sha256 postgres.dump minio-inventory.tsv minio; do
+  for required in \
+    manifest manifest.sha256 postgres.dump minio-inventory.tsv \
+    memory-vault.tar.gz.enc minio; do
     [[ -e "${resolved}/${required}" ]] ||
       local_workspace_die "backup is missing ${required}" || return
   done
@@ -212,12 +239,16 @@ local_workspace_validate_backup() {
     local_workspace_die "MinIO inventory must be a regular file" || return
   [[ -d "${resolved}/minio" && ! -L "${resolved}/minio" ]] ||
     local_workspace_die "MinIO mirror must be a directory" || return
+  [[ -f "${resolved}/memory-vault.tar.gz.enc" &&
+    ! -L "${resolved}/memory-vault.tar.gz.enc" ]] ||
+    local_workspace_die "Memory vault ciphertext must be a regular file" ||
+    return
   if find "${resolved}/minio" ! -type d ! -type f -print -quit | grep -q .; then
     local_workspace_die "MinIO mirror contains a non-regular file"
     return
   fi
 
-  [[ "$(wc -l <"${resolved}/manifest" | tr -d ' ')" == "5" ]] ||
+  [[ "$(wc -l <"${resolved}/manifest" | tr -d ' ')" == "6" ]] ||
     local_workspace_die "manifest has an unexpected shape" || return
   grep -Fxq "format_version=${LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION}" \
     "${resolved}/manifest" ||
@@ -230,6 +261,10 @@ local_workspace_validate_backup() {
     local_workspace_die "manifest has an invalid MinIO directory path" || return
   grep -Fxq 'minio_inventory=minio-inventory.tsv' "${resolved}/manifest" ||
     local_workspace_die "manifest has an invalid MinIO inventory path" || return
+  grep -Fxq 'memory_vault_archive=memory-vault.tar.gz.enc' \
+    "${resolved}/manifest" ||
+    local_workspace_die "manifest has an invalid Memory vault archive path" ||
+    return
 
   expected_checksums="$(mktemp)"
   local_workspace_write_checksums "${resolved}" "${expected_checksums}"

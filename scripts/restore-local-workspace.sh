@@ -17,6 +17,7 @@ copy_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_COPY_TIMEOUT_SECONDS:-${default_tim
 docker_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_DOCKER_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 database_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_DATABASE_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 minio_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MINIO_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
+memory_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MEMORY_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 migration_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MIGRATION_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 readiness_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_READINESS_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 for timeout_pair in \
@@ -25,11 +26,13 @@ for timeout_pair in \
   "${docker_timeout_seconds}:Docker operation" \
   "${database_timeout_seconds}:database restore" \
   "${minio_timeout_seconds}:MinIO restore" \
+  "${memory_timeout_seconds}:Memory restore" \
   "${migration_timeout_seconds}:migration" \
   "${readiness_timeout_seconds}:readiness"; do
   local_workspace_require_positive_timeout \
     "${timeout_pair%%:*}" "${timeout_pair#*:} timeout"
 done
+memory_key_file="$(local_workspace_memory_key_file)"
 
 repo_root="$(local_workspace_repo_root)"
 staging_dir="$(mktemp -d)"
@@ -80,6 +83,32 @@ local_workspace_run_bounded \
 # Only the private snapshot is trusted after this point. Revalidation detects a
 # source replacement or partial/mixed copy before confirmation or mutation.
 backup_dir="$(local_workspace_validate_backup "${staging_dir}")"
+memory_plaintext_archive="${runtime_tmp}/memory-vault.tar.gz"
+local_workspace_run_bounded \
+  "Memory vault decryption" \
+  "${memory_timeout_seconds}" \
+  openssl enc -d -aes-256-cbc -pbkdf2 -md sha256 \
+    -pass "file:${memory_key_file}" \
+    -in "${backup_dir}/memory-vault.tar.gz.enc" \
+    -out "${memory_plaintext_archive}"
+local_workspace_run_bounded \
+  "Memory vault archive validation" \
+  "${validation_timeout_seconds}" \
+  tar -tzf "${memory_plaintext_archive}" >"${runtime_tmp}/memory-vault-files"
+if awk '
+  /^\// { exit 1 }
+  /(^|\/)\.\.(\/|$)/ { exit 1 }
+' "${runtime_tmp}/memory-vault-files"; then
+  :
+else
+  local_workspace_die "Memory vault archive contains an unsafe path"
+fi
+local_workspace_run_bounded \
+  "Memory vault type validation" \
+  "${validation_timeout_seconds}" \
+  bash -c \
+  'tar -tvzf "$1" | awk '\''$1 !~ /^[-d]/ { exit 1 }'\''' \
+  _ "${memory_plaintext_archive}"
 (
   cd "${repo_root}"
   local_workspace_run_bounded \
@@ -90,7 +119,7 @@ backup_dir="$(local_workspace_validate_backup "${staging_dir}")"
 )
 
 if [[ "${2:-}" != "--confirm" ]]; then
-  printf '[local-workspace] restore replaces local PostgreSQL and MinIO data.\n' >&2
+  printf '[local-workspace] restore replaces local PostgreSQL, MinIO, and Memory data.\n' >&2
   if ! read -r -p 'Type RESTORE to continue: ' confirmation ||
     [[ "${confirmation}" != "RESTORE" ]]; then
     local_workspace_die "restore was not explicitly confirmed"
@@ -221,6 +250,18 @@ local_workspace_run_bounded \
       mc alias set destination http://minio:9000 "$user" "$password" >/dev/null
       mc mb --ignore-existing destination/buzz-media >/dev/null
       mc mirror --overwrite --remove /backup destination/buzz-media >/dev/null
+    '
+
+local_workspace_run_bounded \
+  "Memory vault restore" \
+  "${memory_timeout_seconds}" \
+  docker compose run --rm -T --no-deps \
+    --entrypoint /bin/sh \
+    --volume "buzz-memory-vault:/target" \
+    --volume "${runtime_tmp}:/backup:ro" \
+    minio-init -eu -c '
+      find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+      tar -xzf /backup/memory-vault.tar.gz -C /target
     '
 
 # Migrations need the normal local credential, but every known writer remains

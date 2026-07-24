@@ -904,6 +904,8 @@ pub fn run() {
         .expect("error while building tauri application");
 
     let shutdown_done = Arc::new(AtomicBool::new(false));
+    let memory_sync_scheduler =
+        command_services::memory::start_memory_sync_scheduler(app.handle().clone());
 
     #[cfg(unix)]
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
@@ -915,9 +917,15 @@ pub fn run() {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);
             }
+            if let Some(scheduler) = &memory_sync_scheduler {
+                let _ = scheduler.stop_and_join();
+            }
             shut_down_app(app_handle, &run_shutdown_done);
         }
         RunEvent::Exit => {
+            if let Some(scheduler) = &memory_sync_scheduler {
+                let _ = scheduler.stop_and_join();
+            }
             shut_down_app(app_handle, &run_shutdown_done);
             app_handle.state::<ClipboardState>().release();
 

@@ -1,13 +1,14 @@
 use base64::Engine;
+use rustix::fs::{fstat, openat, FileType, Mode, OFlags, Stat};
+use rustix::process::geteuid;
 use sha2::{Digest, Sha256};
-use std::io;
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::{self, Read, Seek};
+use std::net::{IpAddr, TcpListener};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::time::Duration;
 
 const MAXIMUM_PIN_FILE_BYTES: u64 = 64 * 1024;
 
@@ -38,7 +39,6 @@ pub(super) enum SshError {
     HostFingerprintMismatch,
     Spawn,
     EarlyExit,
-    StartupTimeout,
     Teardown,
 }
 
@@ -65,26 +65,119 @@ pub(super) fn validate_host_target(alias: &str, user: &str) -> Result<(), SshErr
     Ok(())
 }
 
-#[cfg(unix)]
-fn validate_protected_file(path: &Path, maximum: u64) -> Result<Vec<u8>, SshError> {
-    if !path.is_absolute() {
-        return Err(SshError::UnprotectedFile);
-    }
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| SshError::UnprotectedFile)?;
-    if metadata.file_type().is_symlink()
-        || !metadata.is_file()
-        || metadata.len() == 0
-        || metadata.len() > maximum
-        || metadata.permissions().mode() & 0o077 != 0
-    {
-        return Err(SshError::UnprotectedFile);
-    }
-    std::fs::read(path).map_err(|_| SshError::UnprotectedFile)
+#[derive(Debug)]
+pub(super) struct ProtectedFile {
+    file: File,
+    stat: Stat,
+    maximum: u64,
 }
 
-#[cfg(not(unix))]
-fn validate_protected_file(_path: &Path, _maximum: u64) -> Result<Vec<u8>, SshError> {
-    Err(SshError::UnprotectedFile)
+impl ProtectedFile {
+    pub(super) fn open(path: &Path, maximum: u64) -> Result<Self, SshError> {
+        if !path.is_absolute() || maximum == 0 {
+            return Err(SshError::UnprotectedFile);
+        }
+        let mut directory = File::open("/").map_err(|_| SshError::UnprotectedFile)?;
+        let mut components = path.components().peekable();
+        if !matches!(components.next(), Some(Component::RootDir)) {
+            return Err(SshError::UnprotectedFile);
+        }
+        let mut final_name = None;
+        while let Some(component) = components.next() {
+            let Component::Normal(name) = component else {
+                return Err(SshError::UnprotectedFile);
+            };
+            if components.peek().is_none() {
+                final_name = Some(name.to_owned());
+                break;
+            }
+            let owned = openat(
+                &directory,
+                name,
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| SshError::UnprotectedFile)?;
+            directory = File::from(owned);
+        }
+        let name = final_name.ok_or(SshError::UnprotectedFile)?;
+        // Intentionally omit CLOEXEC: SSH and the replication CLI consume this
+        // exact verified inode through /dev/fd or /proc/self/fd.
+        let owned: OwnedFd = openat(
+            &directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )
+        .map_err(|_| SshError::UnprotectedFile)?;
+        let file = File::from(owned);
+        let stat = fstat(&file).map_err(|_| SshError::UnprotectedFile)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
+            || stat.st_uid != geteuid().as_raw()
+            || stat.st_size <= 0
+            || stat.st_size as u64 > maximum
+            || stat.st_mode & 0o077 != 0
+        {
+            return Err(SshError::UnprotectedFile);
+        }
+        Ok(Self {
+            file,
+            stat,
+            maximum,
+        })
+    }
+
+    pub(super) fn read_all(&self) -> Result<Vec<u8>, SshError> {
+        let before = fstat(&self.file).map_err(|_| SshError::UnprotectedFile)?;
+        if !same_inode(&self.stat, &before) {
+            return Err(SshError::UnprotectedFile);
+        }
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|_| SshError::UnprotectedFile)?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| SshError::UnprotectedFile)?;
+        let mut bytes = Vec::new();
+        file.take(self.maximum + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| SshError::UnprotectedFile)?;
+        let after = fstat(&self.file).map_err(|_| SshError::UnprotectedFile)?;
+        if !same_inode(&self.stat, &after)
+            || bytes.is_empty()
+            || bytes.len() as u64 > self.maximum
+            || bytes.len() as i64 != self.stat.st_size
+        {
+            return Err(SshError::UnprotectedFile);
+        }
+        Ok(bytes)
+    }
+
+    pub(super) fn descriptor_path(&self) -> PathBuf {
+        #[cfg(target_os = "linux")]
+        let prefix = "/proc/self/fd";
+        #[cfg(not(target_os = "linux"))]
+        let prefix = "/dev/fd";
+        PathBuf::from(prefix).join(self.file.as_raw_fd().to_string())
+    }
+
+    pub(super) fn mode(&self) -> u32 {
+        self.stat.st_mode.into()
+    }
+
+    pub(super) fn matches_path(&self, path: &Path) -> bool {
+        Self::open(path, self.maximum)
+            .ok()
+            .is_some_and(|candidate| same_inode(&self.stat, &candidate.stat))
+    }
+}
+
+fn same_inode(expected: &Stat, observed: &Stat) -> bool {
+    expected.st_dev == observed.st_dev
+        && expected.st_ino == observed.st_ino
+        && expected.st_uid == observed.st_uid
+        && expected.st_mode == observed.st_mode
+        && expected.st_size == observed.st_size
 }
 
 pub(super) fn sha256_fingerprint(key_blob: &[u8]) -> String {
@@ -95,7 +188,18 @@ pub(super) fn sha256_fingerprint(key_blob: &[u8]) -> String {
     )
 }
 
+#[cfg(test)]
 pub(super) fn validate_host_pin(config: &SshTunnelConfig) -> Result<PinnedHostEvidence, SshError> {
+    validate_host_material(config).map(|material| material.evidence)
+}
+
+struct VerifiedHostMaterial {
+    evidence: PinnedHostEvidence,
+    known_hosts: ProtectedFile,
+    identity: ProtectedFile,
+}
+
+fn validate_host_material(config: &SshTunnelConfig) -> Result<VerifiedHostMaterial, SshError> {
     validate_host_target(&config.home_host_alias, &config.home_user)?;
     if config.remote_loopback_port == 0
         || config.local_forward_port == 0
@@ -103,8 +207,9 @@ pub(super) fn validate_host_pin(config: &SshTunnelConfig) -> Result<PinnedHostEv
     {
         return Err(SshError::InvalidConfiguration);
     }
-    let known_hosts = validate_protected_file(&config.known_hosts_path, MAXIMUM_PIN_FILE_BYTES)?;
-    let _identity = validate_protected_file(&config.identity_file, MAXIMUM_PIN_FILE_BYTES)?;
+    let known_hosts_file = ProtectedFile::open(&config.known_hosts_path, MAXIMUM_PIN_FILE_BYTES)?;
+    let identity = ProtectedFile::open(&config.identity_file, MAXIMUM_PIN_FILE_BYTES)?;
+    let known_hosts = known_hosts_file.read_all()?;
     let known_hosts = std::str::from_utf8(&known_hosts).map_err(|_| SshError::InvalidKnownHosts)?;
     let mut lines = known_hosts.lines();
     let line = lines.next().ok_or(SshError::InvalidKnownHosts)?;
@@ -129,21 +234,49 @@ pub(super) fn validate_host_pin(config: &SshTunnelConfig) -> Result<PinnedHostEv
     if fingerprint != config.pinned_host_fingerprint {
         return Err(SshError::HostFingerprintMismatch);
     }
-    Ok(PinnedHostEvidence {
-        host_alias: config.home_host_alias.clone(),
-        fingerprint,
-        key_type: fields[1].to_string(),
+    Ok(VerifiedHostMaterial {
+        evidence: PinnedHostEvidence {
+            host_alias: config.home_host_alias.clone(),
+            fingerprint,
+            key_type: fields[1].to_string(),
+        },
+        known_hosts: known_hosts_file,
+        identity,
     })
 }
 
+pub(super) struct ReservedLoopbackPort {
+    listener: TcpListener,
+}
+
+impl ReservedLoopbackPort {
+    pub(super) fn new() -> io::Result<Self> {
+        TcpListener::bind(("127.0.0.1", 0)).map(|listener| Self { listener })
+    }
+
+    pub(super) fn port(&self) -> u16 {
+        self.listener
+            .local_addr()
+            .map(|address| address.port())
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    fn at(port: u16) -> io::Result<Self> {
+        TcpListener::bind(("127.0.0.1", port)).map(|listener| Self { listener })
+    }
+}
+
+#[cfg(test)]
 pub(super) fn reserve_loopback_port() -> io::Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))?;
-    listener.local_addr().map(|address| address.port())
+    ReservedLoopbackPort::new().map(|reservation| reservation.port())
 }
 
 #[derive(Debug)]
 pub(super) struct SshTunnel {
-    child: Child,
+    child: Option<Child>,
+    _known_hosts: ProtectedFile,
+    _identity: ProtectedFile,
     pub evidence: PinnedHostEvidence,
     pub local_forward_port: u16,
 }
@@ -162,29 +295,65 @@ fn terminate(child: &mut Child) -> Result<(), SshError> {
 
 impl Drop for SshTunnel {
     fn drop(&mut self) {
-        let _ = terminate(&mut self.child);
+        if let Some(child) = self.child.as_mut() {
+            let _ = terminate(child);
+        }
     }
 }
 
+impl SshTunnel {
+    pub(super) fn ensure_running(&mut self) -> Result<(), SshError> {
+        match self.child.as_mut().ok_or(SshError::Teardown)?.try_wait() {
+            Ok(None) => Ok(()),
+            Ok(Some(_)) => Err(SshError::EarlyExit),
+            Err(_) => Err(SshError::Teardown),
+        }
+    }
+
+    pub(super) fn close(mut self) -> Result<(), SshError> {
+        let mut child = self.child.take().ok_or(SshError::Teardown)?;
+        terminate(&mut child)
+    }
+}
+
+#[cfg(test)]
 pub(super) fn start_tunnel_with_binary(
     ssh_binary: &Path,
     config: &SshTunnelConfig,
     startup_timeout: Duration,
 ) -> Result<SshTunnel, SshError> {
+    let reservation =
+        ReservedLoopbackPort::at(config.local_forward_port).map_err(|_| SshError::Spawn)?;
+    let mut config = config.clone();
+    start_tunnel_with_reservation(ssh_binary, &mut config, reservation, startup_timeout)
+}
+
+pub(super) fn start_tunnel_with_reservation(
+    ssh_binary: &Path,
+    config: &mut SshTunnelConfig,
+    reservation: ReservedLoopbackPort,
+    startup_timeout: Duration,
+) -> Result<SshTunnel, SshError> {
     if startup_timeout.is_zero() || startup_timeout > Duration::from_secs(30) {
         return Err(SshError::InvalidConfiguration);
     }
-    let evidence = validate_host_pin(config)?;
+    if reservation.port() == 0 || config.local_forward_port != reservation.port() {
+        return Err(SshError::InvalidConfiguration);
+    }
+    let material = validate_host_material(config)?;
     let forward = format!(
         "127.0.0.1:{}:127.0.0.1:{}",
         config.local_forward_port, config.remote_loopback_port
     );
-    let host_key_algorithms = format!("HostKeyAlgorithms={}", evidence.key_type);
+    let host_key_algorithms = format!("HostKeyAlgorithms={}", material.evidence.key_type);
     let known_hosts = format!(
         "UserKnownHostsFile={}",
-        config.known_hosts_path.to_string_lossy()
+        material.known_hosts.descriptor_path().to_string_lossy()
     );
-    let identity = format!("IdentityFile={}", config.identity_file.to_string_lossy());
+    let identity = format!(
+        "IdentityFile={}",
+        material.identity.descriptor_path().to_string_lossy()
+    );
     let host_alias = format!("HostKeyAlias={}", config.home_host_alias);
     let target = format!("{}@{}", config.home_user, config.home_host_alias);
     let mut child = Command::new(ssh_binary)
@@ -245,30 +414,20 @@ pub(super) fn start_tunnel_with_binary(
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| SshError::Spawn)?;
-
-    let deadline = Instant::now() + startup_timeout;
-    let address = SocketAddr::from(([127, 0, 0, 1], config.local_forward_port));
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return Err(SshError::EarlyExit),
-            Ok(None) => {}
-            Err(_) => {
-                let _ = terminate(&mut child);
-                return Err(SshError::Teardown);
-            }
-        }
-        if TcpStream::connect_timeout(&address, Duration::from_millis(25)).is_ok() {
-            return Ok(SshTunnel {
-                child,
-                evidence,
-                local_forward_port: config.local_forward_port,
-            });
-        }
-        if Instant::now() >= deadline {
-            let teardown = terminate(&mut child);
-            return teardown.and(Err(SshError::StartupTimeout));
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    drop(reservation);
+    // ExitOnForwardFailure makes an already-lost handoff fail closed. Actual
+    // readiness is established later by an authenticated node-ID probe.
+    std::thread::sleep(startup_timeout.min(Duration::from_millis(25)));
+    match child.try_wait() {
+        Ok(None) => Ok(SshTunnel {
+            child: Some(child),
+            _known_hosts: material.known_hosts,
+            _identity: material.identity,
+            evidence: material.evidence,
+            local_forward_port: config.local_forward_port,
+        }),
+        Ok(Some(_)) => Err(SshError::EarlyExit),
+        Err(_) => terminate(&mut child).and(Err(SshError::Teardown)),
     }
 }
 
@@ -288,6 +447,17 @@ mod tests {
         permissions.set_mode(0o600);
         fs::set_permissions(&path, permissions).expect("protect fixture");
         path
+    }
+
+    fn tempdir() -> tempfile::TempDir {
+        let base = if Path::new("/private/tmp").is_dir() {
+            Path::new("/private/tmp")
+        } else {
+            Path::new("/tmp")
+        };
+        tempfile::Builder::new()
+            .tempdir_in(base)
+            .expect("temporary directory")
     }
 
     fn tunnel_config(directory: &std::path::Path, local_forward_port: u16) -> SshTunnelConfig {
@@ -314,7 +484,7 @@ mod tests {
 
     #[test]
     fn validates_exact_dedicated_known_host_fingerprint() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let config = tunnel_config(directory.path(), 43123);
 
         let evidence = validate_host_pin(&config).expect("valid pin");
@@ -329,7 +499,7 @@ mod tests {
 
     #[test]
     fn rejects_ip_alias_mismatch_symlinks_and_unprotected_credentials() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let mut ip_alias = tunnel_config(directory.path(), 43124);
         ip_alias.home_host_alias = "192.168.1.26".to_string();
         assert_eq!(
@@ -369,7 +539,7 @@ mod tests {
     #[test]
     fn spawns_direct_ssh_with_fixed_hardened_arguments_and_cleared_environment() {
         std::env::set_var("BUZZ_MEMORY_INHERITED_SENTINEL", "secret");
-        let directory = tempfile::tempdir().expect("temporary directory");
+        let directory = tempdir();
         let arguments_log = directory.path().join("ssh-arguments");
         let environment_log = directory.path().join("ssh-environment");
         let fake_ssh = directory.path().join("fake-ssh");
@@ -414,6 +584,12 @@ while True:
         let tunnel = start_tunnel_with_binary(&fake_ssh, &config, Duration::from_secs(2))
             .expect("start fake tunnel");
 
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while (!arguments_log.exists() || !environment_log.exists())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let arguments = fs::read_to_string(&arguments_log).expect("read arguments log");
         assert!(arguments.contains("StrictHostKeyChecking=yes"));
         assert!(arguments.contains("ForwardAgent=no"));
@@ -432,8 +608,8 @@ while True:
     }
 
     #[test]
-    fn startup_timeout_kills_and_reaps_fake_ssh() {
-        let directory = tempfile::tempdir().expect("temporary directory");
+    fn spawn_handoff_does_not_treat_an_arbitrary_listener_as_authenticated_readiness() {
+        let directory = tempdir();
         let fake_ssh = directory.path().join("hung-ssh");
         fs::write(&fake_ssh, "#!/bin/sh\nexec /bin/sleep 30\n").expect("write hung fake");
         let mut permissions = fs::metadata(&fake_ssh)
@@ -445,12 +621,81 @@ while True:
             directory.path(),
             reserve_loopback_port().expect("reserve loopback port"),
         );
-        let started = std::time::Instant::now();
+        let tunnel = start_tunnel_with_binary(&fake_ssh, &config, Duration::from_millis(100))
+            .expect("spawn handoff succeeds without claiming HTTP readiness");
+        tunnel
+            .close()
+            .expect("hung SSH is explicitly killed and reaped");
+    }
 
-        let error = start_tunnel_with_binary(&fake_ssh, &config, Duration::from_millis(100))
-            .expect_err("hung tunnel must time out");
+    #[test]
+    fn reserved_loopback_listener_is_held_until_ssh_spawn_handoff() {
+        let reservation = ReservedLoopbackPort::new().expect("reserve loopback listener");
+        let port = reservation.port();
+        assert!(TcpListener::bind(("127.0.0.1", port)).is_err());
 
-        assert_eq!(error, SshError::StartupTimeout);
-        assert!(started.elapsed() < Duration::from_secs(2));
+        let directory = tempdir();
+        let fake_ssh = directory.path().join("fake-ssh");
+        fs::write(
+            &fake_ssh,
+            r#"#!/bin/sh
+set -eu
+forward=''
+previous=''
+for argument in "$@"; do
+  if [ "$previous" = '-L' ]; then forward="$argument"; break; fi
+  previous="$argument"
+done
+port=$(printf '%s' "$forward" | cut -d: -f2)
+exec /usr/bin/python3 -c 'import socket,sys,time
+s=socket.socket()
+s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+s.bind(("127.0.0.1",int(sys.argv[1])))
+s.listen()
+time.sleep(30)' "$port"
+"#,
+        )
+        .expect("write fake ssh");
+        let mut permissions = fs::metadata(&fake_ssh)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, permissions).expect("make executable");
+        let mut config = tunnel_config(directory.path(), port);
+
+        let tunnel = start_tunnel_with_reservation(
+            &fake_ssh,
+            &mut config,
+            reservation,
+            Duration::from_secs(1),
+        )
+        .expect("spawn owns reservation handoff");
+
+        assert_eq!(tunnel.local_forward_port, port);
+        tunnel.close().expect("explicitly reap ssh");
+    }
+
+    #[test]
+    fn protected_file_open_rejects_symlinked_ancestor_and_pins_inode() {
+        let directory = tempdir();
+        let real = directory.path().join("real");
+        fs::create_dir(&real).expect("create real directory");
+        let file = protected_file(&real, "known_hosts", b"original\n");
+        let alias = directory.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).expect("create ancestor symlink");
+
+        assert_eq!(
+            ProtectedFile::open(&alias.join("known_hosts"), 1024)
+                .expect_err("symlinked ancestor must fail"),
+            SshError::UnprotectedFile
+        );
+
+        let protected = ProtectedFile::open(&file, 1024).expect("open protected inode");
+        fs::rename(&file, real.join("old")).expect("replace protected path");
+        protected_file(&real, "known_hosts", b"swapped\n");
+        assert_eq!(
+            protected.read_all().expect("read pinned descriptor"),
+            b"original\n"
+        );
     }
 }

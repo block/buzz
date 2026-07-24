@@ -46,7 +46,11 @@ grep -Eq 'known_services=.*memory' "${restore_script}" ||
   fail "restore fail-closed service inventory allowlists Memory"
 grep -Eq 'known_writer_services=.*memory' "${restore_script}" ||
   fail "restore stops Memory before destructive workspace mutation"
-grep -Fq 'memory' "${backup_script}" ||
-  fail "backup script documents Memory as a separately managed canonical authority"
+grep -Fq 'buzz-memory-vault:/source:ro' "${backup_script}" ||
+  fail "backup captures the canonical Memory authority"
+grep -Fq 'memory-vault.tar.gz.enc' "${backup_script}" ||
+  fail "backup encrypts the canonical Memory authority"
+grep -Fq 'buzz-memory-vault:/target' "${restore_script}" ||
+  fail "restore replaces the canonical Memory authority"
 
 printf 'command memory service contract passed\n'

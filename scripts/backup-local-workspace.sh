@@ -6,11 +6,6 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/lib/local-workspace-backup.sh
 source "${script_dir}/lib/local-workspace-backup.sh"
 
-# The Phase 3 Memory vault is an independently revisioned canonical authority
-# with its own authenticated backup/export operation. It is intentionally not
-# copied into this PostgreSQL/MinIO workspace archive; restore still knows the
-# `memory` writer and stops it before destructive workspace mutation.
-
 if [[ $# -ne 1 ]]; then
   printf 'Usage: %s /absolute/existing/backup-parent\n' "$0" >&2
   exit 2
@@ -19,10 +14,14 @@ fi
 default_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_TIMEOUT_SECONDS:-300}"
 database_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_DATABASE_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 minio_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MINIO_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
+memory_timeout_seconds="${BUZZ_LOCAL_WORKSPACE_MEMORY_TIMEOUT_SECONDS:-${default_timeout_seconds}}"
 local_workspace_require_positive_timeout \
   "${database_timeout_seconds}" "database backup timeout"
 local_workspace_require_positive_timeout \
   "${minio_timeout_seconds}" "MinIO backup timeout"
+local_workspace_require_positive_timeout \
+  "${memory_timeout_seconds}" "Memory backup timeout"
+memory_key_file="$(local_workspace_memory_key_file)"
 
 backup_parent="$(local_workspace_require_absolute_outside_repo "$1")"
 created_utc="$(date -u '+%Y%m%dT%H%M%SZ')"
@@ -33,7 +32,8 @@ backup_dir="${backup_parent}/buzz-local-workspace-${created_utc}"
 mkdir -m 700 "${backup_dir}"
 mkdir -m 700 "${backup_dir}/minio"
 credentials_file="$(mktemp)"
-trap 'rm -f "${credentials_file}"' EXIT
+memory_tmp="$(mktemp -d)"
+trap 'rm -f "${credentials_file}"; rm -rf "${memory_tmp}"' EXIT
 
 (
   cd "$(local_workspace_repo_root)"
@@ -60,8 +60,29 @@ trap 'rm -f "${credentials_file}"' EXIT
         mc alias set source http://minio:9000 "$user" "$password" >/dev/null
         mc mirror --overwrite source/buzz-media /backup >/dev/null
       '
+
+  local_workspace_run_bounded \
+    "Memory vault backup" \
+    "${memory_timeout_seconds}" \
+    docker compose run --rm -T --no-deps \
+      --user "$(id -u):$(id -g)" \
+      --entrypoint /bin/sh \
+      --volume "buzz-memory-vault:/source:ro" \
+      --volume "${memory_tmp}:/backup" \
+      minio-init -eu -c \
+      'tar -C /source -czf /backup/memory-vault.tar.gz .'
 )
+[[ -s "${memory_tmp}/memory-vault.tar.gz" ]] ||
+  local_workspace_die "Memory vault backup did not produce an archive"
+local_workspace_run_bounded \
+  "Memory vault encryption" \
+  "${memory_timeout_seconds}" \
+  openssl enc -aes-256-cbc -pbkdf2 -salt -md sha256 \
+    -pass "file:${memory_key_file}" \
+    -in "${memory_tmp}/memory-vault.tar.gz" \
+    -out "${backup_dir}/memory-vault.tar.gz.enc"
 rm -f "${credentials_file}"
+rm -rf "${memory_tmp}"
 trap - EXIT
 
 local_workspace_write_inventory \
@@ -72,6 +93,7 @@ created_utc=${created_utc}
 postgres_archive=postgres.dump
 minio_directory=minio
 minio_inventory=minio-inventory.tsv
+memory_vault_archive=memory-vault.tar.gz.enc
 EOF
 local_workspace_write_checksums \
   "${backup_dir}" "${backup_dir}/manifest.sha256"
