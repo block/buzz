@@ -1466,10 +1466,7 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // there. DMs are always 1:1 with a human, so they always anchor.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        thread_tags.root_event_id.clone()
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -3907,9 +3904,13 @@ mod tests {
     fn test_reply_instruction_present_for_dm_thread_reply() {
         let ch = Uuid::new_v4();
         let root_id = "b".repeat(64);
+        let parent_id = "c".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![
+                vec!["e".into(), root_id.clone(), "".into(), "root".into()],
+                vec!["e".into(), parent_id.clone(), "".into(), "reply".into()],
+            ],
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
@@ -3936,8 +3937,16 @@ mod tests {
         )
         .join("\n\n");
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "DM thread reply should anchor to the thread root"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "DM thread reply should not anchor to the triggering event"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {parent_id}")),
+            "DM thread reply should not anchor to the parent event"
         );
     }
 
