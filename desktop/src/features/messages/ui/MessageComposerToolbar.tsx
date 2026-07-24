@@ -1,13 +1,14 @@
 import * as React from "react";
 import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
-import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
+import { ALargeSmall, ArrowUp, AtSign, Mic, Paperclip, X } from "lucide-react";
 
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
 import { FormattingToolbar } from "./FormattingToolbar";
 import { SelectionFormattingTray } from "./SelectionFormattingTray";
+import type { ComposerDictationStatus } from "./useComposerDictation";
 
 /** Spring for enter/exit of button groups — all fire simultaneously. */
 const presenceSpring = {
@@ -22,6 +23,7 @@ export const MessageComposerToolbar = React.memo(
     editor,
     extraActions,
     formattingDisabled,
+    dictationStatus = "idle",
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
@@ -30,6 +32,7 @@ export const MessageComposerToolbar = React.memo(
     onEmojiPickerOpenChange,
     onEmojiSelect,
     onFormattingToggle,
+    onDictationToggle,
     onLinkButton,
     onOpenMentionPicker,
     onPaperclip,
@@ -39,6 +42,7 @@ export const MessageComposerToolbar = React.memo(
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    dictationStatus?: ComposerDictationStatus;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
@@ -47,6 +51,7 @@ export const MessageComposerToolbar = React.memo(
     onEmojiPickerOpenChange: (open: boolean) => void;
     onEmojiSelect: (emoji: string) => void;
     onFormattingToggle: (pressed: boolean) => void;
+    onDictationToggle?: () => void;
     onLinkButton: () => void;
     onOpenMentionPicker: () => void;
     onPaperclip: () => void;
@@ -231,6 +236,61 @@ export const MessageComposerToolbar = React.memo(
 
         <div className="flex items-center gap-2">
           {extraActions}
+          {onDictationToggle ? (
+            <Tooltip disableHoverableContent>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label={
+                    dictationStatus === "recording"
+                      ? "Stop dictation"
+                      : dictationStatus === "stopping"
+                        ? "Finishing dictation"
+                        : dictationStatus === "starting"
+                          ? "Starting dictation"
+                          : "Dictate message"
+                  }
+                  aria-pressed={dictationStatus === "recording"}
+                  data-testid="message-dictation"
+                  disabled={
+                    composerDisabled ||
+                    dictationStatus === "starting" ||
+                    dictationStatus === "stopping"
+                  }
+                  onClick={onDictationToggle}
+                  onMouseDown={onCaptureSelection}
+                  size="icon"
+                  type="button"
+                  variant={
+                    dictationStatus === "recording" ? "destructive" : "ghost"
+                  }
+                >
+                  {dictationStatus === "starting" ||
+                  dictationStatus === "stopping" ? (
+                    <span
+                      aria-hidden
+                      className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent"
+                    />
+                  ) : (
+                    <Mic
+                      aria-hidden
+                      className={
+                        dictationStatus === "recording" ? "animate-pulse" : ""
+                      }
+                    />
+                  )}
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {dictationStatus === "recording"
+                  ? "Stop dictation"
+                  : dictationStatus === "stopping"
+                    ? "Finishing dictation"
+                    : dictationStatus === "starting"
+                      ? "Starting dictation"
+                      : "Dictate message"}
+              </TooltipContent>
+            </Tooltip>
+          ) : null}
           <Button
             aria-label={isSending ? "Sending" : "Send message"}
             className="rounded-full"

@@ -11060,6 +11060,11 @@ export function maybeInstallE2eTauriMocks() {
         }
         return null;
       }
+      case "start_dictation":
+        return 1;
+      case "stop_dictation":
+      case "push_dictation_audio_pcm":
+        return null;
       default:
         throw new Error(`Unsupported mocked Tauri command: ${command}`);
     }

@@ -53,6 +53,7 @@ export default defineConfig({
         "**/file-attachment.spec.ts",
         "**/image-attachment-gallery.spec.ts",
         "**/composer-image-draw.spec.ts",
+        "**/composer-dictation.spec.ts",
         "**/video-attachment.spec.ts",
         "**/spoiler.spec.ts",
         "**/composer-link-shortcut.spec.ts",
