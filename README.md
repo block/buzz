@@ -222,6 +222,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** · **[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** · **[SECURITY.md](SECURITY.md)** · **[GOVERNANCE.md](GOVERNANCE.md)**
+- **Community:** [awesome-buzz](https://github.com/mpiv-ai/awesome-buzz) — curated index of third-party hook servers, deployment kits, SDKs, clients, and independent teardowns
 
 <details>
 <summary><strong>Configuration</strong> (env vars, defaults work for local dev)</summary>
