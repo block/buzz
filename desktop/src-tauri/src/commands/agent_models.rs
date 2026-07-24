@@ -689,8 +689,11 @@ async fn discover_anthropic_models(
         return Ok(None);
     }
 
-    let api_key = match provider.required_env(env, "ANTHROPIC_API_KEY")? {
-        Some(api_key) => api_key,
+    // Claude Code users typically authenticate via OAuth (`claude setup-token`),
+    // not ANTHROPIC_API_KEY. Missing key must fall through to `buzz-acp models`
+    // rather than abort discovery with a hard error (#2581).
+    let api_key = match env_or_process_value(env, "ANTHROPIC_API_KEY") {
+        Some(key) => key,
         None => return Ok(None),
     };
     let redaction_env = redaction_env_with_value(env, "ANTHROPIC_API_KEY", &api_key);
