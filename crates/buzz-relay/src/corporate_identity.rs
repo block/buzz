@@ -16,14 +16,15 @@ use jsonwebtoken::{
     jwk::{Jwk, JwkSet},
     Algorithm, DecodingKey, Validation,
 };
-use nostr::{FromBech32, PublicKey};
+use nostr::{Event, EventBuilder, FromBech32, Kind, PublicKey, Tag, Timestamp};
 use serde::Deserialize;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-use buzz_core::CommunityId;
+use buzz_core::{kind::KIND_USER_TRUSTED_ASSERTION, CommunityId};
+use buzz_db::event::EventQuery;
 use buzz_db::identity_binding::{BindIdentityResult, SOURCE_DB_BINDING, SOURCE_JWT_NPUB};
 
 use crate::config::CorporateIdentityConfig;
@@ -355,6 +356,26 @@ async fn enforce_corporate_identity_inner(
             )
             .await;
         }
+        if let Err(error) = ensure_identity_assertion(
+            state,
+            community_id,
+            signer,
+            &claims.display_name,
+            &service.config.issuer,
+        )
+        .await
+        {
+            // The binding remains the authorization authority. A projection
+            // failure removes the verified affordance but must not lock an
+            // otherwise authorized user out of the relay.
+            warn!(
+                signer = %signer.to_hex(),
+                error = %error,
+                "failed to publish corporate identity assertion"
+            );
+            metrics::counter!("buzz_corporate_identity_assertions_total", "result" => "error")
+                .increment(1);
+        }
 
         debug!(
             uid = %claims.uid,
@@ -377,6 +398,104 @@ async fn enforce_corporate_identity_inner(
         auth_tag_json,
     )
     .await
+}
+
+fn build_identity_assertion(
+    relay_keypair: &nostr::Keys,
+    subject: PublicKey,
+    display_name: &str,
+    issuer: &str,
+    created_at: Timestamp,
+) -> Result<Event, String> {
+    let subject = subject.to_hex();
+    let tags = [
+        Tag::parse(["d", subject.as_str()]),
+        Tag::parse(["p", subject.as_str()]),
+        Tag::parse(["verified", "corporate"]),
+        Tag::parse(["display_name", display_name]),
+        Tag::parse(["issuer", issuer]),
+    ]
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .map_err(|error| format!("invalid corporate identity assertion tag: {error}"))?;
+
+    EventBuilder::new(Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16), "")
+        .tags(tags)
+        .custom_created_at(created_at)
+        .sign_with_keys(relay_keypair)
+        .map_err(|error| format!("failed to sign corporate identity assertion: {error}"))
+}
+
+fn identity_assertion_matches(
+    event: &Event,
+    subject: &str,
+    display_name: &str,
+    issuer: &str,
+) -> bool {
+    let has_tag = |name: &str, value: &str| {
+        event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.len() == 2 && parts[0] == name && parts[1] == value
+        })
+    };
+    has_tag("d", subject)
+        && has_tag("p", subject)
+        && has_tag("verified", "corporate")
+        && has_tag("display_name", display_name)
+        && has_tag("issuer", issuer)
+}
+
+async fn ensure_identity_assertion(
+    state: &AppState,
+    community_id: CommunityId,
+    subject: PublicKey,
+    display_name: &str,
+    issuer: &str,
+) -> Result<(), String> {
+    let subject_hex = subject.to_hex();
+    let existing = state
+        .db
+        .query_events(&EventQuery {
+            kinds: Some(vec![KIND_USER_TRUSTED_ASSERTION as i32]),
+            pubkey: Some(state.relay_keypair.public_key().to_bytes().to_vec()),
+            d_tag: Some(subject_hex.clone()),
+            global_only: true,
+            limit: Some(1),
+            ..EventQuery::for_community(community_id)
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .next();
+
+    if existing.as_ref().is_some_and(|stored| {
+        identity_assertion_matches(&stored.event, &subject_hex, display_name, issuer)
+    }) {
+        return Ok(());
+    }
+
+    let now = Timestamp::now().as_secs();
+    let created_at = existing
+        .as_ref()
+        .map(|stored| stored.event.created_at.as_secs().saturating_add(1))
+        .unwrap_or(now)
+        .max(now);
+    let event = build_identity_assertion(
+        &state.relay_keypair,
+        subject,
+        display_name,
+        issuer,
+        Timestamp::from(created_at),
+    )?;
+
+    state
+        .db
+        .replace_parameterized_event(community_id, &event, &subject_hex, None)
+        .await
+        .map_err(|error| error.to_string())?;
+    metrics::counter!("buzz_corporate_identity_assertions_total", "result" => "published")
+        .increment(1);
+    Ok(())
 }
 
 async fn enforce_delegated_corporate_identity(
@@ -596,6 +715,38 @@ mod tests {
             display_claim: "email".to_string(),
             npub_claim: Some("buzz_npub".to_string()),
         }
+    }
+
+    #[test]
+    fn corporate_identity_projects_as_relay_signed_nip85_assertion() {
+        let relay = Keys::generate();
+        let subject = Keys::generate().public_key();
+        let event = build_identity_assertion(
+            &relay,
+            subject,
+            "Franco Sola",
+            "cf-doorman-production",
+            Timestamp::from(123),
+        )
+        .unwrap();
+
+        assert_eq!(event.kind.as_u16() as u32, KIND_USER_TRUSTED_ASSERTION);
+        assert_eq!(event.pubkey, relay.public_key());
+        assert!(event.verify_id());
+        assert!(event.verify_signature());
+        assert!(identity_assertion_matches(
+            &event,
+            &subject.to_hex(),
+            "Franco Sola",
+            "cf-doorman-production"
+        ));
+        assert!(
+            !event
+                .tags
+                .iter()
+                .any(|tag| tag.as_slice().first().is_some_and(|name| name == "uid")),
+            "the public assertion must not expose the stable corporate uid"
+        );
     }
 
     #[test]

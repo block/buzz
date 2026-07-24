@@ -28,6 +28,8 @@ pub struct IdentityInfo {
 pub struct ProfileInfo {
     pub pubkey: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub verified_name: Option<String>,
     pub avatar_url: Option<String>,
     pub about: Option<String>,
     pub nip05_handle: Option<String>,
@@ -42,6 +44,8 @@ pub struct ProfileInfo {
 #[derive(Serialize, Deserialize)]
 pub struct UserProfileSummaryInfo {
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub verified_name: Option<String>,
     /// Kind-0 `name` field, carried separately from `display_name` so clients
     /// can match @mention text against either alias (agents and the CLI
     /// resolve mentions server-side against `display_name` *or* `name`).
@@ -64,6 +68,8 @@ pub struct UsersBatchResponse {
 pub struct UserSearchResultInfo {
     pub pubkey: String,
     pub display_name: Option<String>,
+    #[serde(default)]
+    pub verified_name: Option<String>,
     pub avatar_url: Option<String>,
     pub nip05_handle: Option<String>,
     pub owner_pubkey: Option<String>,

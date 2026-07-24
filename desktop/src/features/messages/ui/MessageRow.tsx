@@ -11,7 +11,10 @@ import { useKnownAgentPubkeys } from "@/features/agents/useKnownAgentPubkeys";
 import { HuddleAttachment } from "@/features/huddle/components/HuddleAttachment";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
-import type { UserProfileLookup } from "@/features/profile/lib/identity";
+import {
+  resolveUserVerification,
+  type UserProfileLookup,
+} from "@/features/profile/lib/identity";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import {
@@ -31,6 +34,7 @@ import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAu
 import { cn } from "@/shared/lib/cn";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
+import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/shared/ui/markdown/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
@@ -460,6 +464,9 @@ export const MessageRow = React.memo(
     ) : (
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
+    const verifiedName = message.pubkey
+      ? resolveUserVerification({ pubkey: message.pubkey, profiles })
+      : null;
     const agentOwnerNode = message.isAgent ? (
       <MessageAgentOwner
         ownerLabel={message.ownerLabel}
@@ -550,6 +557,9 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
+        {verifiedName ? (
+          <VerifiedBadge verifiedName={verifiedName} />
+        ) : null}
         {agentOwnerNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&

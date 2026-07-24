@@ -11,6 +11,7 @@ import type {
 type RawProfile = {
   pubkey: string;
   display_name: string | null;
+  verified_name?: string | null;
   avatar_url: string | null;
   about: string | null;
   nip05_handle: string | null;
@@ -39,6 +40,7 @@ function fromRawProfile(profile: RawProfile): Profile {
   return {
     pubkey: profile.pubkey,
     displayName: profile.display_name,
+    verifiedName: profile.verified_name ?? null,
     avatarUrl: profile.avatar_url,
     about: profile.about,
     nip05Handle: profile.nip05_handle,
@@ -52,6 +54,7 @@ function fromRawUserProfileSummary(
 ): UserProfileSummary {
   return {
     displayName: profile.display_name,
+    verifiedName: profile.verified_name ?? null,
     name: profile.name ?? null,
     avatarUrl: profile.avatar_url,
     nip05Handle: profile.nip05_handle,
@@ -64,6 +67,7 @@ function fromRawUserSearchResult(user: RawUserSearchResult): UserSearchResult {
   return {
     pubkey: user.pubkey,
     displayName: user.display_name,
+    verifiedName: user.verified_name ?? null,
     avatarUrl: user.avatar_url,
     nip05Handle: user.nip05_handle,
     ownerPubkey: user.owner_pubkey,

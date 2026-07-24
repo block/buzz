@@ -37,6 +37,7 @@ export function profileLookupsEqual(
     if (
       next === undefined ||
       prev.displayName !== next.displayName ||
+      prev.verifiedName !== next.verifiedName ||
       prev.name !== next.name ||
       prev.avatarUrl !== next.avatarUrl ||
       prev.nip05Handle !== next.nip05Handle ||
@@ -64,7 +65,10 @@ function getResolvedProfile(
 export function mergeCurrentProfileIntoLookup(
   profiles: UserProfileLookup | undefined,
   currentProfile:
-    | Pick<Profile, "pubkey" | "displayName" | "avatarUrl" | "nip05Handle">
+    | Pick<
+        Profile,
+        "pubkey" | "displayName" | "verifiedName" | "avatarUrl" | "nip05Handle"
+      >
     | null
     | undefined,
 ) {
@@ -76,6 +80,7 @@ export function mergeCurrentProfileIntoLookup(
     ...(profiles ?? {}),
     [normalizePubkey(currentProfile.pubkey)]: {
       displayName: currentProfile.displayName,
+      verifiedName: currentProfile.verifiedName ?? null,
       // `Profile` does not carry the kind-0 `name`; keep whatever the batch
       // lookup already resolved so mention aliases survive the merge.
       name: profiles?.[normalizePubkey(currentProfile.pubkey)]?.name ?? null,
@@ -113,7 +118,11 @@ export function resolveUserLabel(input: {
   }
 
   const profile = getResolvedProfile(pubkey, profiles);
+  const verifiedName = profile?.verifiedName?.trim();
   const displayName = profile?.displayName?.trim();
+  if (verifiedName) {
+    return verifiedName;
+  }
   if (displayName) {
     return displayName;
   }
@@ -129,6 +138,16 @@ export function resolveUserLabel(input: {
   }
 
   return truncatePubkey(pubkey);
+}
+
+export function resolveUserVerification(input: {
+  pubkey: string;
+  profiles?: UserProfileLookup;
+}): string | null {
+  return (
+    getResolvedProfile(input.pubkey, input.profiles)?.verifiedName?.trim() ||
+    null
+  );
 }
 
 /**

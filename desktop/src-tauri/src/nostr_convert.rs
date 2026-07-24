@@ -300,6 +300,7 @@ pub fn profile_info_from_event(event: &Event) -> Result<ProfileInfo, String> {
     Ok(ProfileInfo {
         pubkey: event.pubkey.to_hex(),
         display_name,
+        verified_name: None,
         avatar_url,
         about,
         nip05_handle,
@@ -319,6 +320,9 @@ pub fn users_batch_from_events(
     // Keep only the most recent kind:0 per pubkey.
     let mut latest: HashMap<String, &Event> = HashMap::new();
     for ev in events {
+        if ev.kind.as_u16() != 0 {
+            continue;
+        }
         let pk = ev.pubkey.to_hex();
         let take = match latest.get(&pk) {
             None => true,
@@ -339,6 +343,7 @@ pub fn users_batch_from_events(
                 .and_then(Value::as_str)
                 .or_else(|| v.get("name").and_then(Value::as_str))
                 .map(str::to_string),
+            verified_name: None,
             name: v.get("name").and_then(Value::as_str).map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),

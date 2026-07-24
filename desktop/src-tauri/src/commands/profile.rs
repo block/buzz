@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use buzz_core_pkg::PresenceStatus;
+use buzz_core_pkg::{kind::KIND_USER_TRUSTED_ASSERTION, PresenceStatus};
 use serde_json::Value;
 use tauri::State;
 
 use crate::{
     app_state::AppState,
+    commands::identity_archive::fetch_relay_self,
     events,
     managed_agents::persona_events::monotonic_created_at,
     models::{ProfileInfo, SearchUsersResponse, UserNotesResponse, UsersBatchResponse},
@@ -16,24 +17,93 @@ use crate::{
     },
 };
 
+async fn query_profiles_with_assertions(
+    state: &AppState,
+    pubkeys: &[String],
+) -> Result<(Vec<nostr::Event>, Option<String>), String> {
+    if pubkeys.is_empty() {
+        return Ok((Vec::new(), None));
+    }
+
+    let relay_self = fetch_relay_self(state).await.unwrap_or(None);
+    let mut filters = vec![serde_json::json!({
+        "kinds": [0],
+        "authors": pubkeys,
+    })];
+    if let Some(author) = relay_self.as_ref() {
+        filters.push(serde_json::json!({
+            "kinds": [KIND_USER_TRUSTED_ASSERTION],
+            "authors": [author],
+            "#d": pubkeys,
+        }));
+    }
+    Ok((query_relay(state, &filters).await?, relay_self))
+}
+
+fn verified_identities(
+    events: &[nostr::Event],
+    relay_self: Option<&str>,
+) -> HashMap<String, String> {
+    let Some(relay_self) = relay_self else {
+        return HashMap::new();
+    };
+    let mut verified = HashMap::<String, (u64, String)>::new();
+    for event in events {
+        if event.kind.as_u16() as u32 != KIND_USER_TRUSTED_ASSERTION
+            || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
+            || !event.verify_id()
+            || !event.verify_signature()
+        {
+            continue;
+        }
+        let tag_value = |name: &str| {
+            event.tags.iter().find_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() == 2 && parts[0] == name).then(|| parts[1].as_str())
+            })
+        };
+        if tag_value("verified") != Some("corporate") {
+            continue;
+        }
+        let (Some(subject), Some(display_name)) = (tag_value("d"), tag_value("display_name"))
+        else {
+            continue;
+        };
+        if tag_value("p") != Some(subject)
+            || subject.len() != 64
+            || !subject.chars().all(|value| value.is_ascii_hexdigit())
+            || display_name.trim().is_empty()
+        {
+            continue;
+        }
+        let entry = verified
+            .entry(subject.to_ascii_lowercase())
+            .or_insert_with(|| (0, String::new()));
+        if event.created_at.as_secs() >= entry.0 {
+            *entry = (event.created_at.as_secs(), display_name.to_string());
+        }
+    }
+    verified
+        .into_iter()
+        .map(|(pubkey, (_, display_name))| (pubkey, display_name))
+        .collect()
+}
+
 #[tauri::command]
 pub async fn get_profile(state: State<'_, AppState>) -> Result<ProfileInfo, String> {
     let my_pubkey = current_pubkey_hex(&state)?;
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "authors": [my_pubkey],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let (events, relay_self) =
+        query_profiles_with_assertions(&state, std::slice::from_ref(&my_pubkey)).await?;
 
-    Ok(events
-        .first()
+    let mut profile = events
+        .iter()
+        .find(|event| event.kind.as_u16() == 0 && event.pubkey.to_hex() == my_pubkey)
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
-        .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state))))
+        .unwrap_or_else(|| empty_profile_info(&current_pubkey_hex_unwrap(&state)));
+    profile.verified_name = verified_identities(&events, relay_self.as_deref())
+        .remove(&profile.pubkey);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -187,21 +257,18 @@ pub async fn get_user_profile(
         None => current_pubkey_hex(&state)?,
     };
 
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "authors": [target.clone()],
-            "limit": 1
-        })],
-    )
-    .await?;
+    let (events, relay_self) =
+        query_profiles_with_assertions(&state, std::slice::from_ref(&target)).await?;
 
-    Ok(events
-        .first()
+    let mut profile = events
+        .iter()
+        .find(|event| event.kind.as_u16() == 0 && event.pubkey.to_hex() == target)
         .map(nostr_convert::profile_info_from_event)
         .transpose()?
-        .unwrap_or_else(|| empty_profile_info(&target)))
+        .unwrap_or_else(|| empty_profile_info(&target));
+    profile.verified_name = verified_identities(&events, relay_self.as_deref())
+        .remove(&profile.pubkey);
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -215,16 +282,14 @@ pub async fn get_users_batch(
             missing: Vec::new(),
         });
     }
-    let events = query_relay(
-        &state,
-        &[serde_json::json!({
-            "kinds": [0],
-            "authors": pubkeys,
-        })],
-    )
-    .await?;
+    let (events, relay_self) = query_profiles_with_assertions(&state, &pubkeys).await?;
 
-    Ok(nostr_convert::users_batch_from_events(&events, &pubkeys))
+    let mut response = nostr_convert::users_batch_from_events(&events, &pubkeys);
+    let verified = verified_identities(&events, relay_self.as_deref());
+    for (pubkey, profile) in &mut response.profiles {
+        profile.verified_name = verified.get(pubkey).cloned();
+    }
+    Ok(response)
 }
 
 #[tauri::command]
@@ -406,6 +471,7 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
     ProfileInfo {
         pubkey: pubkey.to_string(),
         display_name: None,
+        verified_name: None,
         avatar_url: None,
         about: None,
         nip05_handle: None,
@@ -417,6 +483,28 @@ fn empty_profile_info(pubkey: &str) -> ProfileInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verified_identity_requires_relay_signed_nip85_assertion() {
+        let relay = nostr::Keys::generate();
+        let subject = nostr::Keys::generate().public_key().to_hex();
+        let event = nostr::EventBuilder::new(
+            nostr::Kind::Custom(KIND_USER_TRUSTED_ASSERTION as u16),
+            "",
+        )
+        .tags([
+            nostr::Tag::parse(["d", subject.as_str()]).unwrap(),
+            nostr::Tag::parse(["p", subject.as_str()]).unwrap(),
+            nostr::Tag::parse(["verified", "corporate"]).unwrap(),
+            nostr::Tag::parse(["display_name", "Franco Sola"]).unwrap(),
+            nostr::Tag::parse(["issuer", "cf-doorman-production"]).unwrap(),
+        ])
+        .sign_with_keys(&relay)
+        .unwrap();
+
+        let verified = verified_identities(&[event], Some(&relay.public_key().to_hex()));
+        assert_eq!(verified.get(&subject).map(String::as_str), Some("Franco Sola"));
+    }
 
     #[test]
     fn deferred_profile_signer_is_captured_and_rejects_wrong_identity() {

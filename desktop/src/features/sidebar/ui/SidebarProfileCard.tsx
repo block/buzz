@@ -16,6 +16,7 @@ import { useMyRelayMembershipLookupQuery } from "@/features/community-members/ho
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type { PresenceStatus, Profile, UserStatus } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 
 type SidebarProfileCardProps = {
   activeCommunity: Community | null;
@@ -152,6 +153,7 @@ export function SidebarProfileCard({
             avatarUrl={profile?.avatarUrl ?? null}
             currentStatus={selfPresenceStatus}
             displayName={resolvedDisplayName}
+            verifiedName={profile?.verifiedName}
             isStatusPending={isPresencePending}
             onClearUserStatus={onClearUserStatus}
             onOpenSettings={onOpenSettings}
@@ -190,12 +192,17 @@ export function SidebarProfileCard({
               data-testid="open-settings"
               type="button"
             >
-              <p
-                className="truncate text-sm font-semibold leading-tight text-current"
-                data-testid="sidebar-profile-name"
-              >
-                {resolvedDisplayName}
-              </p>
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span
+                  className="truncate text-sm font-semibold leading-tight text-current"
+                  data-testid="sidebar-profile-name"
+                >
+                  {resolvedDisplayName}
+                </span>
+                {profile?.verifiedName ? (
+                  <VerifiedBadge verifiedName={profile.verifiedName} />
+                ) : null}
+              </span>
             </button>
           </ProfilePopover>
 
