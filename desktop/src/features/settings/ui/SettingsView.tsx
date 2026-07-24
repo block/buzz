@@ -61,6 +61,7 @@ const settingsNavGroups: Array<{
       "shortcuts",
       "custom-emoji",
       "local-archive",
+      "migrate",
     ],
   },
   {

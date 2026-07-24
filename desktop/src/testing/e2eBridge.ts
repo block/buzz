@@ -33,6 +33,8 @@ import {
   KIND_GIT_STATUS_MERGED,
   KIND_GIT_STATUS_OPEN,
   KIND_HUDDLE_STARTED,
+  KIND_IMPORT_IDENTITY_BINDING,
+  KIND_IMPORT_IDENTITY_CLAIM,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_REPO_ANNOUNCEMENT,
@@ -8810,6 +8812,19 @@ function sendToMockSocket(args: {
 
       recordMockUserStatus(event);
       emitMockGlobalEvent(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    // Import identity attestation/claim (zero-touch Slack migration). These are
+    // channel-less parameterized-replaceable events; the real relay accepts
+    // them (30623 owner/admin-gated, 30624 self-signed), so acknowledge here so
+    // the import-claim dialog can reach its done state instead of tripping the
+    // channel-tag requirement below.
+    if (
+      event.kind === KIND_IMPORT_IDENTITY_BINDING ||
+      event.kind === KIND_IMPORT_IDENTITY_CLAIM
+    ) {
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
