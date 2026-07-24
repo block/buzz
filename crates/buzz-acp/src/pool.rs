@@ -1978,7 +1978,8 @@ pub async fn run_prompt_task(
                             agent,
                             source,
                             PromptOutcome::Ok(StopReason::EndTurn),
-                            None, // turn succeeded — batch was processed, no requeue
+                            // Keep batch for silent-reply detection; Ok must not requeue.
+                            batch,
                         );
                         return;
                     }
@@ -2041,7 +2042,8 @@ pub async fn run_prompt_task(
                 agent,
                 source,
                 PromptOutcome::Ok(stop_reason),
-                None,
+                // Keep batch for silent-reply detection; Ok must not requeue.
+                batch,
             );
         }
         Err(AcpError::AgentExited) => {

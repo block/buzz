@@ -141,6 +141,15 @@ pub struct EventQueue {
     in_flight_deadlines: HashMap<Uuid, Instant>,
     /// Number of events in each in-flight batch (for expiry logging).
     in_flight_batch_sizes: HashMap<Uuid, usize>,
+    /// Agent-authored stream messages observed on the wire while a channel
+    /// turn is in flight (or during a post-Ok silent-reply grace watch).
+    /// Used to detect silent reply loss when ACP reports Ok but
+    /// `buzz messages send` never landed (#2459).
+    in_flight_self_publishes: HashMap<Uuid, u64>,
+    /// Channels whose Ok turn is waiting on a deferred silent-reply check.
+    /// Counts in [`in_flight_self_publishes`] survive [`mark_complete`] while
+    /// a watch is armed so a late ws echo can still clear the notice.
+    silent_reply_watches: HashSet<Uuid>,
     retry_after: HashMap<Uuid, Instant>,
     /// Per-channel retry attempt counter for exponential backoff / dead-lettering.
     retry_counts: HashMap<Uuid, u32>,
@@ -182,6 +191,8 @@ impl EventQueue {
             in_flight_channels: HashSet::new(),
             in_flight_deadlines: HashMap::new(),
             in_flight_batch_sizes: HashMap::new(),
+            in_flight_self_publishes: HashMap::new(),
+            silent_reply_watches: HashSet::new(),
             retry_after: HashMap::new(),
             retry_counts: HashMap::new(),
             dedup_mode,
@@ -278,6 +289,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.in_flight_self_publishes.remove(&id);
             // Recover any withheld goose-native steer events for the expired
             // channel back to the queue front so normal dispatch delivers
             // them. Unlike the in-flight batch above (already delivered to a
@@ -393,6 +405,11 @@ impl EventQueue {
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
+        // Keep publish counts while a silent-reply grace watch is armed so a
+        // late echo can still arrive after turn completion (#2459).
+        if !self.silent_reply_watches.contains(&channel_id) {
+            self.in_flight_self_publishes.remove(&channel_id);
+        }
         let now = Instant::now();
         match self.retry_after.get(&channel_id) {
             // Active throttle → channel was requeued; keep retry_counts intact.
@@ -574,6 +591,7 @@ impl EventQueue {
             );
             self.in_flight_channels.remove(&id);
             self.in_flight_deadlines.remove(&id);
+            self.in_flight_self_publishes.remove(&id);
             // Symmetric with the flush_next expiry block: recover withheld
             // goose-native steer events for the expired channel so they are
             // not permanently orphaned in the side table.
@@ -644,6 +662,38 @@ impl EventQueue {
     /// Whether a prompt is currently in-flight for the given channel.
     pub fn is_channel_in_flight(&self, channel_id: Uuid) -> bool {
         self.in_flight_channels.contains(&channel_id)
+    }
+
+    /// Record a self-authored stream message seen on the wire for an in-flight
+    /// channel turn, or during a deferred silent-reply grace watch.
+    pub fn note_self_publish(&mut self, channel_id: Uuid) {
+        if self.in_flight_channels.contains(&channel_id)
+            || self.silent_reply_watches.contains(&channel_id)
+        {
+            *self.in_flight_self_publishes.entry(channel_id).or_insert(0) += 1;
+        }
+    }
+
+    /// Take and clear the self-publish count for `channel_id` (0 if none).
+    pub fn take_self_publishes(&mut self, channel_id: Uuid) -> u64 {
+        self.in_flight_self_publishes
+            .remove(&channel_id)
+            .unwrap_or(0)
+    }
+
+    /// Arm a post-Ok silent-reply watch so publish counts survive
+    /// [`mark_complete`] until [`take_silent_reply_watch`].
+    pub fn arm_silent_reply_watch(&mut self, channel_id: Uuid) {
+        self.silent_reply_watches.insert(channel_id);
+    }
+
+    /// End a silent-reply watch and take the accumulated publish count.
+    /// Returns `None` if no watch was armed (already consumed / never armed).
+    pub fn take_silent_reply_watch(&mut self, channel_id: Uuid) -> Option<u64> {
+        if !self.silent_reply_watches.remove(&channel_id) {
+            return None;
+        }
+        Some(self.take_self_publishes(channel_id))
     }
 
     // ── Goose-native steer withhold (side table) ──────────────────────────
@@ -4755,5 +4805,39 @@ mod tests {
             after_second >= after_first,
             "second extend must not move deadline backward (monotonic)"
         );
+    }
+
+    #[test]
+    fn silent_reply_watch_survives_mark_complete_and_counts_late_echo() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.in_flight_channels.insert(ch);
+        q.note_self_publish(ch);
+        assert_eq!(q.take_self_publishes(ch), 1);
+
+        // Re-note during in-flight, arm watch, then complete — count must survive.
+        q.in_flight_channels.insert(ch);
+        q.note_self_publish(ch);
+        q.arm_silent_reply_watch(ch);
+        q.mark_complete(ch);
+        assert!(!q.is_channel_in_flight(ch));
+        // Late echo after completion still counts.
+        q.note_self_publish(ch);
+        assert_eq!(q.take_silent_reply_watch(ch), Some(2));
+        // Second take is a no-op.
+        assert_eq!(q.take_silent_reply_watch(ch), None);
+        // Without a watch, post-complete echoes are ignored.
+        q.note_self_publish(ch);
+        assert_eq!(q.take_self_publishes(ch), 0);
+    }
+
+    #[test]
+    fn mark_complete_clears_publishes_without_silent_reply_watch() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.in_flight_channels.insert(ch);
+        q.note_self_publish(ch);
+        q.mark_complete(ch);
+        assert_eq!(q.take_self_publishes(ch), 0);
     }
 }

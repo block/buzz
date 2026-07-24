@@ -7,8 +7,10 @@ description: |
   PostgreSQL and Redis. Configurable for single-node evaluation
   (subcharts on) and HA production (external services, existingSecret).
 type: application
-version: 0.1.6
-appVersion: "0.1.0"
+version: 0.1.7
+# Post-auto-migrate image (see #988). Empty values.image.tag falls back here —
+# keep this on a tag that understands BUZZ_AUTO_MIGRATE (compose uses `:main`).
+appVersion: "main"
 home: https://github.com/block/buzz
 sources:
   - https://github.com/block/buzz
@@ -23,8 +25,8 @@ maintainers:
     url: https://github.com/block
 annotations:
   artifacthub.io/changes: |
-    - kind: added
-      description: Optional READ_DATABASE_URL env (secretKeyRef) enabling relay read-replica routing; absent key preserves prior behavior.
+    - kind: fixed
+      description: Default appVersion tracks ghcr.io/block/buzz:main so BUZZ_AUTO_MIGRATE works out of the box (#2473).
   artifacthub.io/license: Apache-2.0
 
 # Optional eval-only subcharts. Production deploys disable both and point

@@ -114,6 +114,38 @@ echo "==> Symlinking system GStreamer plugin directory"
 rm -rf "$LIBDIR/gstreamer-1.0"
 ln -s "/usr/lib/$MULTIARCH/gstreamer-1.0" "$LIBDIR/gstreamer-1.0"
 
+# WebKitGTK's dmabuf renderer cores on Intel Mesa + rootless XWayland
+# (KDE Plasma Wayland, etc.). Setting this is a no-op where dmabuf already
+# works and is required for a usable window on the failing path (#2338).
+echo "==> Disabling WebKitGTK dmabuf renderer for AppImage launches"
+HOOK_DIR="$WORKDIR/squashfs-root/apprun-hooks"
+mkdir -p "$HOOK_DIR"
+cat > "$HOOK_DIR/99-buzz-webkit-dmabuf.sh" <<'EOF'
+# Allow operators to override (e.g. WEBKIT_DISABLE_DMABUF_RENDERER=0) if needed.
+export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+EOF
+# linuxdeploy AppRun sources apprun-hooks/*.sh; if this layout ever skips that,
+# inject the export near the top of AppRun so the env still applies.
+if [[ -f "$WORKDIR/squashfs-root/AppRun" ]] \
+  && ! grep -q 'WEBKIT_DISABLE_DMABUF_RENDERER' "$WORKDIR/squashfs-root/AppRun"; then
+  if ! grep -q 'apprun-hooks' "$WORKDIR/squashfs-root/AppRun"; then
+    # Insert after the shebang (or at line 1 if shebang-less).
+    tmp_apprun="$(mktemp)"
+    {
+      if head -n1 "$WORKDIR/squashfs-root/AppRun" | grep -q '^#!'; then
+        head -n1 "$WORKDIR/squashfs-root/AppRun"
+        echo 'export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"'
+        tail -n +2 "$WORKDIR/squashfs-root/AppRun"
+      else
+        echo 'export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"'
+        cat "$WORKDIR/squashfs-root/AppRun"
+      fi
+    } > "$tmp_apprun"
+    mv "$tmp_apprun" "$WORKDIR/squashfs-root/AppRun"
+    chmod +x "$WORKDIR/squashfs-root/AppRun"
+  fi
+fi
+
 echo "==> Repacking AppImage"
 # Pass a pinned type2 runtime when provided (CI sets APPIMAGETOOL_RUNTIME_FILE);
 # without it appimagetool downloads the runtime from its mutable `continuous`
