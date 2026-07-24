@@ -778,11 +778,12 @@ fn verify_signed_catalogue(
 }
 
 fn valid_catalogue_name(value: &str) -> bool {
-    !value.is_empty()
+    let mut bytes = value.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
         && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn fail_soft_readiness(error: RagError) -> RagServiceReadiness {

@@ -286,6 +286,20 @@ fn rejects_signed_catalogues_outside_the_exact_producer_document_contract() {
 }
 
 #[test]
+fn catalogue_names_match_the_producer_safe_name_grammar_exactly() {
+    for invalid in ["-doc", ".hidden", "_collection"] {
+        assert!(!valid_catalogue_name(invalid), "{invalid} must be rejected");
+    }
+    for valid in ["A", "0", "doc-._9"] {
+        assert!(valid_catalogue_name(valid), "{valid} must be accepted");
+    }
+    let maximum = format!("a{}", "-".repeat(127));
+    assert_eq!(maximum.len(), 128);
+    assert!(valid_catalogue_name(&maximum));
+    assert!(!valid_catalogue_name(&format!("{maximum}-")));
+}
+
+#[test]
 fn verifies_manifest_signature_and_pinned_public_key_fingerprint() {
     let (_config, mut manifest, _catalogue, _activation, _readiness, _probe) = fixture();
     let signing_key = SigningKey::from_bytes(&[7; 32]);
