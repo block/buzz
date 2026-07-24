@@ -163,27 +163,11 @@ _ensure-sidecar-stubs:
 _ensure-services:
     #!/usr/bin/env bash
     set -euo pipefail
-    pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
-    redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
-    if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
-        echo "Services already healthy"
-        exit 0
+    if ! ./scripts/check-local-services.sh --start; then
+        echo "Error: required local services did not become ready." >&2
+        docker ps --all --filter 'label=com.buzz.env=dev' >&2 || true
+        exit 1
     fi
-    echo "Starting services..."
-    docker compose up -d || true
-    echo -n "Waiting for services"
-    for i in $(seq 1 40); do
-        pg=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-postgres 2>/dev/null || echo "not_found")
-        redis=$(docker inspect --format '{{"{{"}}.State.Health.Status{{"}}"}}' buzz-redis 2>/dev/null || echo "not_found")
-        if [[ "$pg" == "healthy" && "$redis" == "healthy" ]]; then
-            echo " ready"
-            exit 0
-        fi
-        echo -n "."
-        sleep 3
-    done
-    echo " timed out"
-    exit 1
 
 # Apply database migrations and seed the local dev community if the dev database is running
 _ensure-migrations: _ensure-services
