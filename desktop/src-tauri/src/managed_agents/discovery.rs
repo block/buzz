@@ -11,7 +11,8 @@ use crate::managed_agents::{
 
 mod runtime_metadata;
 
-pub(crate) use runtime_metadata::KnownAcpRuntime;
+use runtime_metadata::LM_STUDIO_RUNTIME;
+pub(crate) use runtime_metadata::{KnownAcpRuntime, NativeModelDiscovery};
 
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
@@ -83,6 +84,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
+        locked_provider_id: None,
+        locked_provider_label: None,
+        native_model_discovery: None,
+        base_url_env_var: None,
+        classification_env_var: None,
+        integrations_env_var: None,
+        keychain_token_key: None,
         default_env: &[("GOOSE_MODE", "auto")],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),
@@ -114,6 +122,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: None,
         provider_env_var: None,
         provider_locked: true,
+        locked_provider_id: Some("anthropic"),
+        locked_provider_label: Some("Anthropic"),
+        native_model_discovery: None,
+        base_url_env_var: None,
+        classification_env_var: None,
+        integrations_env_var: None,
+        keychain_token_key: None,
         default_env: &[],
         config_file_path: Some("~/.claude/settings.json"),
         config_file_format: Some("json"),
@@ -145,6 +160,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: None,
         provider_env_var: None,
         provider_locked: false,
+        locked_provider_id: None,
+        locked_provider_label: None,
+        native_model_discovery: None,
+        base_url_env_var: None,
+        classification_env_var: None,
+        integrations_env_var: None,
+        keychain_token_key: None,
         default_env: &[],
         config_file_path: Some("~/.codex/config.toml"),
         config_file_format: Some("toml"),
@@ -177,6 +199,13 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
+        locked_provider_id: None,
+        locked_provider_label: None,
+        native_model_discovery: None,
+        base_url_env_var: None,
+        classification_env_var: None,
+        integrations_env_var: None,
+        keychain_token_key: None,
         default_env: &[],
         config_file_path: None,
         config_file_format: None,
@@ -188,6 +217,7 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    LM_STUDIO_RUNTIME,
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -343,8 +373,14 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
-        "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
-        | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        "codex"
+        | "codex-acp"
+        | "claude-agent-acp"
+        | "claude-code-acp"
+        | "claude-code"
+        | "claudecode"
+        | "buzz-agent"
+        | "buzz-lmstudio-agent" => Some(Vec::new()),
         _ => None,
     }
 }
@@ -1249,6 +1285,15 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                     mcp_command: runtime.mcp_command.map(str::to_string),
                     model_env_var: runtime.model_env_var.map(str::to_string),
                     provider_env_var: runtime.provider_env_var.map(str::to_string),
+                    locked_provider_id: runtime.locked_provider_id.map(str::to_string),
+                    locked_provider_label: runtime.locked_provider_label.map(str::to_string),
+                    native_model_discovery: runtime.native_model_discovery.map(|kind| match kind {
+                        NativeModelDiscovery::LmStudioV1 => "lm_studio_v1".to_string(),
+                    }),
+                    base_url_env_var: runtime.base_url_env_var.map(str::to_string),
+                    classification_env_var: runtime.classification_env_var.map(str::to_string),
+                    integrations_env_var: runtime.integrations_env_var.map(str::to_string),
+                    keychain_token_key: runtime.keychain_token_key.map(str::to_string),
                     thinking_env_var: runtime.thinking_env_var.map(str::to_string),
                     install_hint,
                     install_instructions_url: runtime.install_instructions_url.to_string(),

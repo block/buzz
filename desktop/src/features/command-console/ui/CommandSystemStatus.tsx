@@ -76,8 +76,8 @@ export function CommandSystemStatus({
           System status
         </h2>
         <p className="text-sm text-muted-foreground">
-          Read-only status from the active Buzz relay connection and this
-          Mac&apos;s local-compute probe.
+          Read-only status from the active Buzz relay, local compute, and the
+          native LM Studio probe.
         </p>
       </div>
 
@@ -90,7 +90,7 @@ export function CommandSystemStatus({
       <div className="mb-4 mt-6">
         <h3 className="text-base font-semibold">Later capabilities</h3>
         <p className="text-sm text-muted-foreground">
-          These integrations are intentionally not connected in Phase 1.
+          These integrations are intentionally not connected yet.
         </p>
       </div>
 

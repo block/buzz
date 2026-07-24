@@ -4,6 +4,14 @@ use nostr::Keys;
 use serde::Deserialize;
 use tauri::{AppHandle, State};
 
+mod lmstudio;
+use lmstudio::discover_lmstudio_native_models;
+pub use lmstudio::get_lmstudio_readiness;
+#[cfg(test)]
+use lmstudio::{lmstudio_readiness_from_models, normalize_lmstudio_models, LmStudioReadinessState};
+mod discovery_config;
+use discovery_config::{saved_agent_model_discovery_config, DiscoverAgentModelsInput};
+
 use super::agent_model_process::run_agent_models_command;
 use super::agent_update_rollback::{rollback_failed_agent_update, AgentUpdateRollback};
 
@@ -87,6 +95,12 @@ pub async fn get_agent_models(
     }; // store lock released — subprocess runs without holding the lock
 
     let merged_env = discovery_env_with_baked_floor(merged_env);
+    if let Some(models) =
+        discover_lmstudio_native_models(&agent_command, &merged_env, persisted_model.clone())
+            .await?
+    {
+        return Ok(models);
+    }
     if let Some(models) = discover_openai_compatible_models(
         &state.http_client,
         effective_provider.as_deref(),
@@ -128,51 +142,6 @@ pub async fn get_agent_models(
         merged_env,
     )
     .await
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct SavedAgentModelDiscoveryConfig {
-    model: Option<String>,
-    provider: Option<String>,
-    env: BTreeMap<String, String>,
-}
-
-fn saved_agent_model_discovery_config(
-    record: &crate::managed_agents::ManagedAgentRecord,
-    agent_command: &str,
-) -> SavedAgentModelDiscoveryConfig {
-    let mut derived_env = BTreeMap::new();
-    if let Some(meta) = known_acp_runtime(agent_command) {
-        for (key, value) in crate::managed_agents::runtime_metadata_env_vars(
-            meta.model_env_var,
-            meta.provider_env_var,
-            meta.provider_locked,
-            record.model.as_deref(),
-            record.provider.as_deref(),
-        ) {
-            derived_env.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    SavedAgentModelDiscoveryConfig {
-        model: record.model.clone(),
-        provider: record.provider.clone(),
-        env: crate::managed_agents::merged_user_env(&derived_env, &record.env_vars),
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiscoverAgentModelsInput {
-    #[serde(default)]
-    pub acp_command: Option<String>,
-    pub agent_command: String,
-    #[serde(default)]
-    pub agent_args: Vec<String>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub env_vars: BTreeMap<String, String>,
 }
 
 /// Query available models from an unsaved agent configuration.
@@ -219,7 +188,13 @@ pub async fn discover_agent_models(
         }
     }
     let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
-    let merged_env = discovery_env_with_baked_floor(merged_env);
+    let mut merged_env = discovery_env_with_baked_floor(merged_env);
+    let runtime = known_acp_runtime(agent_command);
+    crate::managed_agents::apply_runtime_security_env(&mut merged_env, runtime);
+
+    if let Some(models) = discover_lmstudio_native_models(agent_command, &merged_env, None).await? {
+        return Ok(models);
+    }
 
     // Buzz shared compute discovery must not depend on the local OpenAI ingress: that
     // client endpoint is started only after a live target is selected.
@@ -252,6 +227,10 @@ pub async fn discover_agent_models(
                     id: model.id,
                     name: model.name,
                     description: None,
+                    loaded_instance_ids: Vec::new(),
+                    is_loaded: false,
+                    max_context_length: None,
+                    capabilities: None,
                 })
                 .collect(),
             agent_default_model: None,
@@ -476,6 +455,10 @@ fn normalize_openai_compatible_models(
             name: Some(openai_model_display_name(&item.id)),
             id: item.id,
             description: None,
+            loaded_instance_ids: Vec::new(),
+            is_loaded: false,
+            max_context_length: None,
+            capabilities: None,
         })
         .collect()
 }
@@ -593,6 +576,10 @@ fn normalize_anthropic_models(response: AnthropicModelListResponse) -> Vec<Agent
             id: item.id,
             name: item.display_name,
             description: None,
+            loaded_instance_ids: Vec::new(),
+            is_loaded: false,
+            max_context_length: None,
+            capabilities: None,
         })
         .collect()
 }
@@ -754,6 +741,10 @@ async fn discover_databricks_models(
             id: e.id,
             name: Some(e.name),
             description: None,
+            loaded_instance_ids: Vec::new(),
+            is_loaded: false,
+            max_context_length: None,
+            capabilities: None,
         })
         .collect();
 
@@ -1016,6 +1007,10 @@ pub(super) fn normalize_agent_models(
                                     .and_then(|v| v.as_str())
                                     .map(str::to_string),
                                 description: None,
+                                loaded_instance_ids: Vec::new(),
+                                is_loaded: false,
+                                max_context_length: None,
+                                capabilities: None,
                             });
                         }
                     }
@@ -1039,6 +1034,10 @@ pub(super) fn normalize_agent_models(
                                 .get("description")
                                 .and_then(|v| v.as_str())
                                 .map(str::to_string),
+                            loaded_instance_ids: Vec::new(),
+                            is_loaded: false,
+                            max_context_length: None,
+                            capabilities: None,
                         });
                     }
                 }

@@ -22,6 +22,13 @@ function runtime(id, metadata = {}) {
     mcpCommand: null,
     modelEnvVar: null,
     providerEnvVar: null,
+    lockedProviderId: null,
+    lockedProviderLabel: null,
+    nativeModelDiscovery: null,
+    baseUrlEnvVar: null,
+    classificationEnvVar: null,
+    integrationsEnvVar: null,
+    keychainTokenKey: null,
     thinkingEnvVar: null,
     installHint: "",
     installInstructionsUrl: "",
@@ -124,6 +131,46 @@ test("Codex omits separate effort because model IDs own it", () => {
   assert.deepEqual(model.omissions, [
     { kind: "effort", reason: "ownedByModelId" },
   ]);
+});
+
+test("LM Studio projects the catalog locked provider and native model picker", () => {
+  const model = deriveAgentConfigFieldModel({
+    config: {
+      ...config,
+      model: "qwen/qwen3.6-27b",
+      provider: null,
+    },
+    runtime: runtime("buzz-lmstudio-agent", {
+      baseUrlEnvVar: "LM_STUDIO_BASE_URL",
+      classificationEnvVar: "BUZZ_AGENT_CLASSIFICATION",
+      integrationsEnvVar: "LM_STUDIO_MCP_INTEGRATIONS",
+      keychainTokenKey: "lm-studio-api-token",
+      lockedProviderId: "lmstudio-native",
+      lockedProviderLabel: "LM Studio native",
+      modelEnvVar: "LM_STUDIO_MODEL",
+      nativeModelDiscovery: "lm_studio_v1",
+      providerEnvVar: "BUZZ_AGENT_PROVIDER",
+    }),
+    scope: "global",
+  });
+
+  assert.deepEqual(
+    model.fields.map((item) => item.kind),
+    ["provider", "model"],
+  );
+  assert.deepEqual(field(model, "provider"), {
+    kind: "provider",
+    optionSource: "lockedProvider",
+    persistence: { kind: "unavailable" },
+    targetApplication: {
+      kind: "envVar",
+      key: "BUZZ_AGENT_PROVIDER",
+    },
+    render: "control",
+    value: "lmstudio-native",
+    label: "LM Studio native",
+  });
+  assert.equal(field(model, "model").optionSource, "acpModels");
 });
 
 test("catalog mismatch cleanup is named and restricted to onboarding", () => {

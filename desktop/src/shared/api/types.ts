@@ -543,6 +543,16 @@ export type AcpRuntimeCatalogEntry = {
   modelEnvVar: string | null;
   /** Environment variable used to apply the selected LLM provider, when supported. */
   providerEnvVar: string | null;
+  /** Exact catalog-owned provider for provider-locked runtimes. */
+  lockedProviderId: string | null;
+  lockedProviderLabel: string | null;
+  /** Native model-catalog protocol; null means ACP/subprocess discovery. */
+  nativeModelDiscovery: string | null;
+  baseUrlEnvVar: string | null;
+  classificationEnvVar: string | null;
+  integrationsEnvVar: string | null;
+  /** OS-Keychain entry used for an optional runtime token. */
+  keychainTokenKey: string | null;
   /** Environment variable used to apply thinking effort, when supported. */
   thinkingEnvVar: string | null;
   installHint: string;
@@ -622,8 +632,11 @@ export type AgentModelInfo = {
   id: string;
   name: string | null;
   description: string | null;
+  loadedInstanceIds: string[];
+  isLoaded: boolean;
+  maxContextLength: number | null;
+  capabilities: unknown | null;
 };
-
 // ── Config bridge types ──────────────────────────────────────────────────────
 
 export type ConfigOrigin =

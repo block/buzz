@@ -181,6 +181,26 @@ fn reserved_keys_include_relay_url() {
     assert!(merged.is_empty());
 }
 
+#[test]
+fn reserved_keys_include_lmstudio_security_policy() {
+    for key in [
+        "BUZZ_AGENT_CLASSIFICATION",
+        "BUZZ_AGENT_PROVIDER",
+        "LM_STUDIO_BASE_URL",
+        "LM_STUDIO_MCP_INTEGRATIONS",
+        "LM_STUDIO_FALLBACK_PROVIDER",
+        "LM_STUDIO_API_TOKEN",
+        "LM_STUDIO_MODEL",
+    ] {
+        assert!(is_reserved_env_key(key), "{key} should be reserved");
+        let agent = map(&[(key, "attacker-controlled")]);
+        assert!(
+            merged_user_env(&BTreeMap::new(), &agent).is_empty(),
+            "{key} must be stripped from saved user configuration"
+        );
+    }
+}
+
 // ── validate_user_env_keys ─────────────────────────────────────────
 
 #[test]

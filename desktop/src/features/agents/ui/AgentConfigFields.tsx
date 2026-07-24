@@ -22,8 +22,9 @@ import { EnvVarsEditor } from "@/features/agents/ui/EnvVarsEditor";
 import type { InheritedEnvRow } from "@/features/agents/ui/EnvVarsEditor";
 import {
   deriveAgentConfigFieldModel,
+  getLockedProviderOptions,
   getRenderableEffortField,
-  hasRenderableAgentConfigField,
+  getRenderableProviderState,
 } from "@/features/agents/lib/agentConfigCore";
 import {
   getBakedProviderInheritLabel,
@@ -276,13 +277,13 @@ export function AgentConfigFields({
     [bakedEnv],
   );
   const selectedRuntimeId = selectedRuntime?.id ?? "";
-  const providerFieldVisible = hasRenderableAgentConfigField(
-    fieldModel,
-    "provider",
-  );
-  const effectiveProvider = providerFieldVisible
-    ? config.provider?.trim() || bakedProvider || ""
-    : "";
+  const {
+    field: providerField,
+    locked: providerLocked,
+    visible: providerFieldVisible,
+    value: providerValue,
+    effective: effectiveProvider,
+  } = getRenderableProviderState(fieldModel, config.provider, bakedProvider);
   const fallbackModel = React.useMemo(
     () => getGlobalModelFallback(bakedEnv, effectiveProvider, config.env_vars),
     [bakedEnv, config.env_vars, effectiveProvider],
@@ -306,8 +307,6 @@ export function AgentConfigFields({
     () => bakedEnv.filter((e) => !BAKED_STRUCTURED_KEYS.has(e.key)),
     [bakedEnv],
   );
-
-  const providerValue = providerFieldVisible ? (config.provider ?? "") : "";
   const providerForDiscovery =
     providerFieldVisible && !isCustomProvider
       ? providerValue || bakedProvider || ""
@@ -600,12 +599,14 @@ export function AgentConfigFields({
     }
     return hidden;
   }, [bakedEnvKeys, selectedRuntimeId]);
-  const providerOptions = getPersonaProviderOptions(
-    providerValue,
-    credentialRuntimeId,
-    undefined,
-    hideProviderIds,
-  );
+  const providerOptions = providerLocked
+    ? getLockedProviderOptions(providerField)
+    : getPersonaProviderOptions(
+        providerValue,
+        credentialRuntimeId,
+        undefined,
+        hideProviderIds,
+      );
   const providerSelectValue = isCustomProvider
     ? CUSTOM_PROVIDER_DROPDOWN_VALUE
     : providerValue || AUTO_PROVIDER_DROPDOWN_VALUE;
@@ -666,7 +667,7 @@ export function AgentConfigFields({
             : opt.label,
         value: opt.id || AUTO_PROVIDER_DROPDOWN_VALUE,
       })),
-    ...(showCustomProviderOption
+    ...(showCustomProviderOption && !providerLocked
       ? [{ label: "Custom provider…", value: CUSTOM_PROVIDER_DROPDOWN_VALUE }]
       : []),
   ];
@@ -674,6 +675,7 @@ export function AgentConfigFields({
     <AgentDropdownSelect
       className={selectClassName}
       id="global-agent-provider"
+      disabled={providerLocked}
       onValueChange={handleProviderChange}
       options={providerDropdownOptions}
       placeholder={
@@ -698,6 +700,7 @@ export function AgentConfigFields({
         selectClassName,
       )}
       id="global-agent-provider"
+      disabled={providerLocked}
       onChange={(e) => handleProviderChange(e.target.value)}
       value={providerSelectValue}
     >

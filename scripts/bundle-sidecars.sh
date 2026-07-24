@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SIDECARS=(buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz)
+SIDECARS=(buzz-acp buzz-agent buzz-lmstudio-agent buzz-dev-mcp git-credential-nostr buzz)
 HOST=$(rustc -vV | sed -n 's|host: ||p')
 TARGET=${1:-$HOST}
 BINARIES_DIR="desktop/src-tauri/binaries"
@@ -35,6 +35,8 @@ fi
 
 mkdir -p "$BINARIES_DIR"
 for bin in "${SIDECARS[@]}"; do
-    cp "$SRC_DIR/${bin}${EXE}" "$BINARIES_DIR/${bin}-${TARGET}${EXE}"
+    destination="$BINARIES_DIR/${bin}-${TARGET}${EXE}"
+    cp "$SRC_DIR/${bin}${EXE}" "$destination"
+    chmod 0755 "$destination"
 done
 echo "Sidecars bundled for $TARGET"

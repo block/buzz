@@ -5,6 +5,7 @@
 #   sprig            implementation binary
 #   buzz-acp       link to sprig (ACP harness)
 #   buzz-agent     link to sprig (ACP-compliant agent)
+#   buzz-lmstudio-agent link to sprig (local LM Studio-native ACP agent)
 #   buzz-dev-mcp   link to sprig (developer MCP server; also dispatches
 #                    rg/tree/buzz/git-credential-nostr/git-sign-nostr)
 #
@@ -34,6 +35,7 @@
 #   sprig
 #   buzz-acp
 #   buzz-agent
+#   buzz-lmstudio-agent
 #   buzz-dev-mcp
 #   README.md
 #   sprig.json        { version, git_sha, target, binaries: [{name, sha256, size}] }
@@ -59,7 +61,7 @@ else
 fi
 
 BUNDLE_BIN="sprig"
-COMMANDS=(buzz-acp buzz-agent buzz-dev-mcp)
+COMMANDS=(buzz-acp buzz-agent buzz-lmstudio-agent buzz-dev-mcp)
 
 echo "==> Building Sprig v${VERSION} for ${TARGET}"
 echo "    git_sha=${GIT_SHA}"
@@ -143,6 +145,8 @@ Commands:
 - `buzz-acp` — ACP harness that bridges Buzz channel events to an
   ACP-compliant agent over stdio.
 - `buzz-agent` — ACP-compliant agent (spawns MCP servers, calls LLMs).
+- `buzz-lmstudio-agent` — local ACP agent using LM Studio's native REST API
+  and native MCP integrations.
 - `buzz-dev-mcp` — Developer MCP server (shell, str_replace, todo) and
   multicall entrypoint for `rg`, `tree`, `buzz`, `git-credential-nostr`,
   `git-sign-nostr`.
@@ -163,6 +167,12 @@ export PATH="/opt/sprig:$PATH"
 export BUZZ_AGENT_PROVIDER=anthropic            # or openai
 export ANTHROPIC_API_KEY=sk-...
 export ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+# Or local-only LM Studio native routing
+export BUZZ_AGENT_PROVIDER=lmstudio-native
+export BUZZ_AGENT_CLASSIFICATION=OFFICIAL
+export LM_STUDIO_BASE_URL=http://127.0.0.1:1234
+export LM_STUDIO_MODEL=qwen/qwen3.6-27b
 
 # Nostr identity (shared by buzz-acp, git auth, signing, and buzz CLI)
 export NOSTR_PRIVATE_KEY=nsec1...

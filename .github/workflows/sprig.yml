@@ -3,6 +3,7 @@ name: Sprig
 # Builds and publishes Sprig — one deploy-anywhere Linux multicall binary for:
 #   buzz-acp       ACP harness that bridges Buzz events to the LLM agent
 #   buzz-agent     ACP-compliant agent (spawns MCP, calls LLMs)
+#   buzz-lmstudio-agent  local LM Studio-native ACP agent
 #   buzz-dev-mcp   Developer MCP server (multicall: rg, tree, buzz,
 #                    git-credential-nostr, git-sign-nostr)
 #
@@ -137,7 +138,7 @@ jobs:
           set -euo pipefail
           TAG="sprig-latest"
           TITLE="Sprig (rolling)"
-          NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
+          NOTES="Rolling Linux build of Sprig (all-in-one buzz-acp + buzz-agent + buzz-lmstudio-agent + buzz-dev-mcp), tracking \`main\` (\`${SHA}\`)."
 
           gh release edit "$TAG" \
             --prerelease \
@@ -180,5 +181,5 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" \
             --title "Sprig v${VERSION}" \
-            --notes "Sprig v${VERSION} — Linux all-in-one builds of buzz-acp + buzz-agent + buzz-dev-mcp." \
+            --notes "Sprig v${VERSION} — Linux all-in-one builds of buzz-acp + buzz-agent + buzz-lmstudio-agent + buzz-dev-mcp." \
             dist/*

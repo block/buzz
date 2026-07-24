@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use tauri::AppHandle;
 
@@ -20,6 +20,12 @@ pub(crate) use path::compose_path_entries;
 pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
+mod lmstudio;
+pub(crate) use lmstudio::apply_runtime_security_env;
+
+mod env;
+pub(crate) use env::runtime_metadata_env_vars;
+
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
@@ -39,6 +45,8 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "buzz_acp",
     "buzz-agent",
     "buzz_agent",
+    "buzz-lmstudio-agent",
+    "buzz_lmstudio_agent",
     "claude-agent-acp",
     "claude_agent_acp",
     "claude-code-acp",
@@ -1903,6 +1911,7 @@ pub fn spawn_agent_child(
             meta.model_env_var,
             meta.provider_env_var,
             meta.provider_locked,
+            meta.locked_provider_id,
             effective_model,
             effective_provider,
         ) {
@@ -1990,6 +1999,21 @@ pub fn spawn_agent_child(
     );
     for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
         command.env(key, value);
+    }
+    let mut security_env = BTreeMap::new();
+    apply_runtime_security_env(&mut security_env, runtime_meta);
+    for (key, value) in security_env {
+        command.env(key, value);
+    }
+    command.env_remove("LM_STUDIO_FALLBACK_PROVIDER");
+    command.env_remove("LM_STUDIO_API_TOKEN");
+    if let Some(token_key) = runtime_meta.and_then(|meta| meta.keychain_token_key) {
+        if let Ok(Some(token)) =
+            crate::secret_store::SecretStore::shared(crate::app_state::keyring_service())
+                .load(token_key)
+        {
+            command.env("LM_STUDIO_API_TOKEN", token);
+        }
     }
     configure_runtime_cli(&mut command, runtime_meta);
 
@@ -2150,32 +2174,6 @@ pub fn start_managed_agent_process(
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())
-}
-
-/// Returns the (key, value) env var pairs that should be forwarded to the
-/// agent process for model and provider selection.
-///
-/// Model injection is unconditional — even agents that support ACP model
-/// switching need the initial bootstrap value. Provider injection is skipped
-/// when `provider_locked` is true (e.g. Claude runtimes that only work with
-/// Anthropic).
-pub(crate) fn runtime_metadata_env_vars<'a>(
-    model_env_var: Option<&'a str>,
-    provider_env_var: Option<&'a str>,
-    provider_locked: bool,
-    effective_model: Option<&'a str>,
-    effective_provider: Option<&'a str>,
-) -> Vec<(&'a str, &'a str)> {
-    let mut vars = Vec::new();
-    if let (Some(env_key), Some(model)) = (model_env_var, effective_model) {
-        vars.push((env_key, model));
-    }
-    if !provider_locked {
-        if let (Some(env_key), Some(provider)) = (provider_env_var, effective_provider) {
-            vars.push((env_key, provider));
-        }
-    }
-    vars
 }
 
 /// Resolve the effective (prompt, model, provider) triple for a persona-linked agent.

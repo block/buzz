@@ -48,6 +48,13 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("GOOSE_MODEL"),
         provider_env_var: Some("GOOSE_PROVIDER"),
         provider_locked: false,
+        locked_provider_id: None,
+        locked_provider_label: None,
+        native_model_discovery: None,
+        base_url_env_var: None,
+        classification_env_var: None,
+        integrations_env_var: None,
+        keychain_token_key: None,
         default_env: &[],
         config_file_path: Some("~/.config/goose/config.yaml"),
         config_file_format: Some("yaml"),
@@ -211,11 +218,16 @@ fn provider_locked_shows_locked() {
     let record = test_record();
     let runtime = &KnownAcpRuntime {
         provider_locked: true,
+        locked_provider_id: Some("anthropic"),
+        locked_provider_label: Some("Anthropic"),
         ..*test_runtime()
     };
     let surface = read_config_surface(&record, Some(runtime), None, None);
     let provider = surface.normalized.provider.unwrap();
-    assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
+    assert_eq!(
+        provider.value.as_deref(),
+        Some("Anthropic (anthropic, locked)")
+    );
     assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
 }
 
@@ -623,6 +635,13 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         model_env_var: Some("BUZZ_AGENT_MODEL"),
         provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
         provider_locked: false,
+        locked_provider_id: None,
+        locked_provider_label: None,
+        native_model_discovery: None,
+        base_url_env_var: None,
+        classification_env_var: None,
+        integrations_env_var: None,
+        keychain_token_key: None,
         default_env: &[],
         config_file_path: None,
         config_file_format: None,
@@ -762,8 +781,16 @@ fn buzz_agent_thinking_effort_env_var_not_double_surfaced_in_advanced() {
 
 #[test]
 fn missing_required_provider_still_returns_dropdown_field() {
-    let provider = build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, true)
-        .expect("required provider field should be surfaced even when empty");
+    let provider = build_provider_field(
+        &None,
+        &None,
+        Some("GOOSE_PROVIDER"),
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("required provider field should be surfaced even when empty");
 
     assert_eq!(provider.value, None);
     assert_eq!(provider.origin, ConfigOrigin::EnvVar);
@@ -772,5 +799,14 @@ fn missing_required_provider_still_returns_dropdown_field() {
 
 #[test]
 fn missing_optional_provider_stays_hidden() {
-    assert!(build_provider_field(&None, &None, Some("GOOSE_PROVIDER"), false, false).is_none());
+    assert!(build_provider_field(
+        &None,
+        &None,
+        Some("GOOSE_PROVIDER"),
+        false,
+        None,
+        None,
+        false,
+    )
+    .is_none());
 }

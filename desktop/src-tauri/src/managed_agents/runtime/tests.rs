@@ -498,54 +498,7 @@ fn non_persona_agent_never_drifts() {
     assert!(!orphaned);
 }
 
-use super::runtime_metadata_env_vars;
-
-#[test]
-fn runtime_metadata_env_vars_injects_model_and_provider() {
-    let vars = runtime_metadata_env_vars(
-        Some("GOOSE_MODEL"),
-        Some("GOOSE_PROVIDER"),
-        false,
-        Some("gpt-4o"),
-        Some("openai"),
-    );
-    assert_eq!(
-        vars,
-        vec![("GOOSE_MODEL", "gpt-4o"), ("GOOSE_PROVIDER", "openai")]
-    );
-}
-
-#[test]
-fn runtime_metadata_env_vars_skips_provider_when_locked() {
-    let vars = runtime_metadata_env_vars(
-        None, // claude has no model_env_var
-        None, // claude has no provider_env_var
-        true, // provider_locked = true
-        Some("claude-opus-4-7"),
-        Some("anthropic"),
-    );
-    assert!(vars.is_empty());
-}
-
-#[test]
-fn runtime_metadata_env_vars_injects_model_even_with_acp_model_switching() {
-    // buzz-agent has supports_acp_model_switching=true but we still inject
-    // the model env var because ACP model switching is post-bootstrap
-    let vars = runtime_metadata_env_vars(
-        Some("BUZZ_AGENT_MODEL"),
-        Some("BUZZ_AGENT_PROVIDER"),
-        false,
-        Some("goose-claude-4-6-opus"),
-        Some("databricks"),
-    );
-    assert_eq!(
-        vars,
-        vec![
-            ("BUZZ_AGENT_MODEL", "goose-claude-4-6-opus"),
-            ("BUZZ_AGENT_PROVIDER", "databricks"),
-        ]
-    );
-}
+mod lmstudio;
 
 // ── name_matches_known_binary / name_matches_interpreter tests ───────────
 

@@ -29,6 +29,7 @@ pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
     "GOOSE_PROVIDER",
     "BUZZ_AGENT_MODEL",
     "BUZZ_AGENT_PROVIDER",
+    "LM_STUDIO_MODEL",
 ];
 
 /// Returns `true` if `key` is a derived provider/model env key that should be
@@ -81,6 +82,17 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // ambient env var must not be able to forge setup mode (NotReady) on a
     // Ready agent or suppress it (empty/stale payload) on a NotReady one.
     "BUZZ_ACP_SETUP_PAYLOAD",
+    // LM Studio-native policy is selected by the trusted runtime catalog and
+    // force-written after user layering. Saved/global/persona env must never
+    // downgrade classification, redirect egress, enable a fallback, broaden
+    // MCP integrations, or inject credentials.
+    "BUZZ_AGENT_CLASSIFICATION",
+    "BUZZ_AGENT_PROVIDER",
+    "LM_STUDIO_MODEL",
+    "LM_STUDIO_BASE_URL",
+    "LM_STUDIO_MCP_INTEGRATIONS",
+    "LM_STUDIO_FALLBACK_PROVIDER",
+    "LM_STUDIO_API_TOKEN",
 ];
 
 pub(crate) fn is_reserved_env_key(key: &str) -> bool {

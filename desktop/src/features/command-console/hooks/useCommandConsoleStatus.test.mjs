@@ -152,6 +152,7 @@ test("does not treat daemon reachability without serve mode as local compute", (
 
 test("marks later-phase capabilities as not configured instead of probing or simulating them", () => {
   const viewModel = createCommandConsoleStatusViewModel({
+    lmStudio: { error: null, status: null },
     localCompute: { error: null, status: null },
     relayConnection: "connecting",
   });
@@ -163,11 +164,6 @@ test("marks later-phase capabilities as not configured instead of probing or sim
       statusLabel,
     })),
     [
-      {
-        label: "LM Studio",
-        state: "not_configured",
-        statusLabel: "Not configured",
-      },
       {
         label: "Memory",
         state: "not_configured",
@@ -185,4 +181,35 @@ test("marks later-phase capabilities as not configured instead of probing or sim
       },
     ],
   );
+});
+
+test("reports LM Studio from its own native readiness probe, never mesh", () => {
+  const viewModel = createCommandConsoleStatusViewModel({
+    lmStudio: {
+      error: null,
+      status: {
+        configuredModel: "qwen/qwen3.6-27b",
+        detail: "Loaded model is ready; authentication is not enabled.",
+        loadedModels: ["qwen/qwen3.6-27b"],
+        securityWarnings: ["LM Studio API authentication is not enabled."],
+        status: "ready",
+      },
+    },
+    localCompute: {
+      error: "mesh_node_status is unavailable",
+      status: null,
+    },
+    relayConnection: "connected",
+  });
+
+  const lmStudio = viewModel.liveServices.find(
+    (service) => service.id === "lm-studio",
+  );
+  assert.deepEqual(lmStudio, {
+    detail: "Loaded model is ready; authentication is not enabled.",
+    id: "lm-studio",
+    label: "LM Studio",
+    state: "degraded",
+    statusLabel: "Degraded",
+  });
 });

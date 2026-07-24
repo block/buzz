@@ -1,3 +1,10 @@
+/// Native model-catalog protocol owned by a known runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeModelDiscovery {
+    /// LM Studio's native `GET /api/v1/models` contract.
+    LmStudioV1,
+}
+
 /// Static capabilities and installation metadata for a known ACP runtime.
 pub(crate) struct KnownAcpRuntime {
     pub id: &'static str,
@@ -39,6 +46,19 @@ pub(crate) struct KnownAcpRuntime {
     pub model_env_var: Option<&'static str>,
     pub provider_env_var: Option<&'static str>,
     pub provider_locked: bool,
+    /// Exact provider value forced when `provider_locked` is true.
+    pub locked_provider_id: Option<&'static str>,
+    /// Human-readable label for the catalog-owned locked provider.
+    pub locked_provider_label: Option<&'static str>,
+    /// Native model discovery protocol, when discovery must not spawn ACP.
+    pub native_model_discovery: Option<NativeModelDiscovery>,
+    /// Trusted runtime-policy environment keys. These are projected to the
+    /// frontend but remain enforced in Rust after every user environment layer.
+    pub base_url_env_var: Option<&'static str>,
+    pub classification_env_var: Option<&'static str>,
+    pub integrations_env_var: Option<&'static str>,
+    /// Optional OS-Keychain entry name for an API bearer token.
+    pub keychain_token_key: Option<&'static str>,
     pub default_env: &'static [(&'static str, &'static str)],
     pub config_file_path: Option<&'static str>,
     #[allow(dead_code)] // reserved for format-based dispatch when readers are unified
@@ -78,3 +98,43 @@ impl KnownAcpRuntime {
         self.cli_install_commands
     }
 }
+
+/// Canonical capabilities for Buzz's bundled LM Studio-native ACP runtime.
+pub(super) const LM_STUDIO_RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
+    id: "buzz-lmstudio-agent",
+    label: "Buzz LM Studio Agent",
+    commands: &["buzz-lmstudio-agent"],
+    aliases: &[],
+    avatar_url: super::BUZZ_AGENT_AVATAR_URL,
+    mcp_command: None,
+    mcp_hooks: false,
+    underlying_cli: None,
+    cli_install_commands: &[],
+    cli_install_commands_windows: &[],
+    adapter_install_commands: &[],
+    install_instructions_url: "https://lmstudio.ai/docs/developer/rest",
+    cli_install_hint: "Ships with Buzz; LM Studio must be installed separately.",
+    adapter_install_hint: "",
+    skill_dir: None,
+    supports_acp_model_switching: true,
+    model_env_var: Some("LM_STUDIO_MODEL"),
+    provider_env_var: Some("BUZZ_AGENT_PROVIDER"),
+    provider_locked: true,
+    locked_provider_id: Some("lmstudio-native"),
+    locked_provider_label: Some("LM Studio native"),
+    native_model_discovery: Some(NativeModelDiscovery::LmStudioV1),
+    base_url_env_var: Some("LM_STUDIO_BASE_URL"),
+    classification_env_var: Some("BUZZ_AGENT_CLASSIFICATION"),
+    integrations_env_var: Some("LM_STUDIO_MCP_INTEGRATIONS"),
+    keychain_token_key: Some("lm-studio-api-token"),
+    default_env: &[],
+    config_file_path: None,
+    config_file_format: None,
+    supports_acp_native_config: false,
+    thinking_env_var: Some("LM_STUDIO_REASONING"),
+    max_tokens_env_var: Some("BUZZ_AGENT_MAX_OUTPUT_TOKENS"),
+    context_limit_env_var: Some("BUZZ_AGENT_MAX_CONTEXT_TOKENS"),
+    required_normalized_fields: &["model"],
+    login_hint: None,
+    auth_probe_args: None,
+};

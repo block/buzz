@@ -217,6 +217,92 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
 // ---------------------------------------------------------------------------
 //
 // Parse/filter/pagination tests live in crates/buzz-agent/src/catalog.rs
+
+#[test]
+fn lmstudio_models_filter_non_llm_and_preserve_loaded_facts() {
+    let value = serde_json::json!({
+        "models": [
+            {
+                "type": "llm",
+                "key": "qwen/qwen3.6-27b",
+                "display_name": "Qwen3.6 27B",
+                "loaded_instances": [{"id": "qwen/qwen3.6-27b"}],
+                "max_context_length": 262144,
+                "capabilities": {
+                    "vision": true,
+                    "trained_for_tool_use": true,
+                    "reasoning": {"allowed_options": ["off", "on"], "default": "on"}
+                }
+            },
+            {
+                "type": "embedding",
+                "key": "nomic/embed",
+                "display_name": "Embed",
+                "loaded_instances": []
+            }
+        ]
+    });
+
+    let models = super::normalize_lmstudio_models(value).expect("valid native catalog");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].id, "qwen/qwen3.6-27b");
+    assert!(models[0].is_loaded);
+    assert_eq!(models[0].loaded_instance_ids, ["qwen/qwen3.6-27b"]);
+    assert_eq!(models[0].max_context_length, Some(262_144));
+    assert_eq!(
+        models[0]
+            .capabilities
+            .as_ref()
+            .and_then(|value| value.get("trained_for_tool_use"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+}
+
+#[test]
+fn lmstudio_readiness_distinguishes_no_loaded_mismatch_and_ready() {
+    let unloaded = vec![crate::managed_agents::AgentModelInfo {
+        id: "installed".to_string(),
+        name: Some("Installed".to_string()),
+        description: None,
+        loaded_instance_ids: Vec::new(),
+        is_loaded: false,
+        max_context_length: Some(8_192),
+        capabilities: None,
+    }];
+    assert_eq!(
+        super::lmstudio_readiness_from_models(true, None, unloaded, false).status,
+        super::LmStudioReadinessState::NoLoadedModel
+    );
+
+    let loaded = vec![crate::managed_agents::AgentModelInfo {
+        id: "loaded".to_string(),
+        name: Some("Loaded".to_string()),
+        description: None,
+        loaded_instance_ids: vec!["loaded".to_string()],
+        is_loaded: true,
+        max_context_length: Some(262_144),
+        capabilities: None,
+    }];
+    assert_eq!(
+        super::lmstudio_readiness_from_models(
+            true,
+            Some("different".to_string()),
+            loaded.clone(),
+            true,
+        )
+        .status,
+        super::LmStudioReadinessState::ConfiguredModelUnavailable
+    );
+    let ready =
+        super::lmstudio_readiness_from_models(true, Some("loaded".to_string()), loaded, false);
+    assert_eq!(ready.status, super::LmStudioReadinessState::Ready);
+    assert_eq!(
+        ready.security_warnings,
+        ["LM Studio API authentication is not enabled."]
+    );
+    assert_eq!(ready.bind_exposure, "unknown");
+}
 // (they moved there with the Option C refactor).
 
 // ---------------------------------------------------------------------------

@@ -3,6 +3,10 @@ import * as React from "react";
 import { useMeshNodeStatus } from "@/features/mesh-compute/hooks/useMeshNodeStatus";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import type { MeshNodeStatus } from "@/shared/api/tauriMesh";
+import {
+  getLmStudioReadiness,
+  type LmStudioReadiness,
+} from "@/shared/api/tauriLmStudio";
 import { useRelayConnection } from "@/shared/api/useRelayConnection";
 
 export type CommandServiceState =
@@ -48,16 +52,13 @@ type LocalComputeFreshnessOptions = {
 type CommandConsoleStatusSources = {
   readonly relayConnection: ConnectionState;
   readonly localCompute: LocalComputeProbe;
+  readonly lmStudio?: {
+    readonly status: LmStudioReadiness | null;
+    readonly error: string | null;
+  };
 };
 
 const LATER_CAPABILITIES: readonly CommandServiceStatus[] = [
-  {
-    detail: "No runtime integration is configured in Phase 1.",
-    id: "lm-studio",
-    label: "LM Studio",
-    state: "not_configured",
-    statusLabel: "Not configured",
-  },
   {
     detail: "No memory integration is configured in Phase 1.",
     id: "memory",
@@ -133,6 +134,60 @@ function relayStatus(connection: ConnectionState): CommandServiceStatus {
         statusLabel: "Unavailable",
       };
   }
+}
+
+function lmStudioStatus(probe: {
+  status: LmStudioReadiness | null;
+  error: string | null;
+}): CommandServiceStatus {
+  const base = { id: "lm-studio" as const, label: "LM Studio" };
+  if (probe.error !== null) {
+    return {
+      ...base,
+      detail: `Status probe failed: ${probe.error}`,
+      state: "unavailable",
+      statusLabel: "Unavailable",
+    };
+  }
+  if (probe.status === null) {
+    return {
+      ...base,
+      detail: "Waiting for the native LM Studio readiness probe.",
+      state: "unavailable",
+      statusLabel: "Unavailable",
+    };
+  }
+  const status = probe.status;
+  if (status.status === "app_missing") {
+    return {
+      ...base,
+      detail: status.detail,
+      state: "offline",
+      statusLabel: "Offline",
+    };
+  }
+  if (status.status === "api_unreachable") {
+    return {
+      ...base,
+      detail: status.detail,
+      state: "unavailable",
+      statusLabel: "Unavailable",
+    };
+  }
+  if (status.status === "ready" && status.securityWarnings.length === 0) {
+    return {
+      ...base,
+      detail: status.detail,
+      state: "connected",
+      statusLabel: "Connected",
+    };
+  }
+  return {
+    ...base,
+    detail: status.detail,
+    state: "degraded",
+    statusLabel: "Degraded",
+  };
 }
 
 function localComputeStatus({
@@ -232,6 +287,7 @@ function localComputeStatus({
 }
 
 export function createCommandConsoleStatusViewModel({
+  lmStudio,
   localCompute,
   relayConnection,
 }: CommandConsoleStatusSources): CommandConsoleStatusViewModel {
@@ -240,8 +296,42 @@ export function createCommandConsoleStatusViewModel({
     liveServices: [
       relayStatus(relayConnection),
       localComputeStatus(localCompute),
+      ...(lmStudio ? [lmStudioStatus(lmStudio)] : []),
     ],
   };
+}
+
+function useLmStudioReadiness(): {
+  status: LmStudioReadiness | null;
+  error: string | null;
+} {
+  const [status, setStatus] = React.useState<LmStudioReadiness | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const value = await getLmStudioReadiness();
+        if (!cancelled) {
+          setStatus(value);
+          setError(null);
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      }
+    };
+    void probe();
+    const interval = window.setInterval(() => void probe(), 5_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
+
+  return { status, error };
 }
 
 export function useFreshCommandConsoleLocalCompute(
@@ -280,13 +370,15 @@ export function useCommandConsoleStatus(): CommandConsoleStatusViewModel {
   const relayConnection = useRelayConnection({ degradedAfterMs: 0 });
   const localComputeProbe = useMeshNodeStatus();
   const localCompute = useFreshCommandConsoleLocalCompute(localComputeProbe);
+  const lmStudio = useLmStudioReadiness();
 
   return React.useMemo(
     () =>
       createCommandConsoleStatusViewModel({
         localCompute,
+        lmStudio,
         relayConnection,
       }),
-    [localCompute, relayConnection],
+    [lmStudio, localCompute, relayConnection],
   );
 }

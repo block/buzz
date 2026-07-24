@@ -579,6 +579,21 @@ pub struct AcpRuntimeCatalogEntry {
     pub model_env_var: Option<String>,
     /// Environment variable used to apply the selected LLM provider, when supported.
     pub provider_env_var: Option<String>,
+    /// Exact provider value enforced by this runtime, when provider selection
+    /// is a harness constraint rather than a user choice.
+    pub locked_provider_id: Option<String>,
+    /// Human-readable label for the enforced provider.
+    pub locked_provider_label: Option<String>,
+    /// Native model-catalog protocol owned by this runtime.
+    pub native_model_discovery: Option<String>,
+    /// Environment variable that selects the runtime's native API origin.
+    pub base_url_env_var: Option<String>,
+    /// Environment variable that carries the enforced data classification.
+    pub classification_env_var: Option<String>,
+    /// Environment variable that carries the allowlisted native integrations.
+    pub integrations_env_var: Option<String>,
+    /// OS-Keychain entry name for an optional runtime API token.
+    pub keychain_token_key: Option<String>,
     /// Environment variable used to apply thinking effort, when supported.
     pub thinking_env_var: Option<String>,
     pub install_hint: String,
@@ -668,13 +683,21 @@ pub struct AgentModelsResponse {
 }
 
 /// A single model available from an agent.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentModelInfo {
     /// Canonical ID used for persistence and round-tripping.
     pub id: String,
     pub name: Option<String>,
     pub description: Option<String>,
+    /// Native runtime instance IDs currently loaded for this model.
+    pub loaded_instance_ids: Vec<String>,
+    /// True only when the native catalog reported at least one loaded instance.
+    pub is_loaded: bool,
+    /// Maximum context supported by the installed model, when reported.
+    pub max_context_length: Option<u64>,
+    /// Provider-native capability facts retained for diagnostics and UI hints.
+    pub capabilities: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

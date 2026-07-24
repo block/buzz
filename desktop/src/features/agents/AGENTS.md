@@ -100,6 +100,15 @@ with a TypeScript lookup table or an id comparison in a component.
    Edit. In Edit,
    selecting Custom command keeps its required command field beside the harness
    picker rather than hiding it in Advanced.
+10. **Provider locks and native discovery are catalog facts.** A locked
+    provider carries its exact ID and display label in `KnownAcpRuntime`;
+    renderers project that read-only value and never infer it from the runtime
+    ID. Native model discovery is also declared by the catalog and routed
+    through its Rust egress client. For `buzz-lmstudio-agent`, classification,
+    provider, base URL, MCP integration policy, fallback, model, and token keys
+    are reserved from user env configuration and trusted values are applied
+    after all user layers. The optional API token comes only from the OS
+    Keychain; `default_env` is never a security boundary or readiness signal.
 
 ## The tests that enforce this
 

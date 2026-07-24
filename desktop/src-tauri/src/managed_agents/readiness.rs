@@ -111,6 +111,7 @@ pub(crate) fn resolve_effective_agent_env(
             rt.model_env_var,
             rt.provider_env_var,
             rt.provider_locked,
+            rt.locked_provider_id,
             effective_model,
             effective_provider,
         ) {
@@ -134,6 +135,10 @@ pub(crate) fn resolve_effective_agent_env(
         &record.env_vars,
     );
     env.extend(user_env);
+
+    // Security-owned native runtime values are always projected after the
+    // user layers, matching the actual child-process spawn order.
+    super::runtime::apply_runtime_security_env(&mut env, runtime);
 
     // Buzz shared compute is a native Buzz provider. Translate it to buzz-agent's
     // OpenAI-compatible transport only in the effective runtime environment.
@@ -879,6 +884,13 @@ mod tests {
             model_env_var: None,
             provider_env_var: None,
             provider_locked: false,
+            locked_provider_id: None,
+            locked_provider_label: None,
+            native_model_discovery: None,
+            base_url_env_var: None,
+            classification_env_var: None,
+            integrations_env_var: None,
+            keychain_token_key: None,
             default_env: &[],
             supports_acp_native_config: false,
             thinking_env_var: None,
@@ -1073,6 +1085,13 @@ mod tests {
             model_env_var: None,
             provider_env_var: None,
             provider_locked: false,
+            locked_provider_id: None,
+            locked_provider_label: None,
+            native_model_discovery: None,
+            base_url_env_var: None,
+            classification_env_var: None,
+            integrations_env_var: None,
+            keychain_token_key: None,
             default_env: &[],
             supports_acp_native_config: false,
             thinking_env_var: None,

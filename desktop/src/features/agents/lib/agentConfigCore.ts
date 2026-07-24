@@ -38,11 +38,12 @@ type UnavailablePersistence = {
 export type AgentConfigFieldDescriptor =
   | {
       kind: "provider";
-      optionSource: "providerCatalog";
-      persistence: NormalizedFieldPersistence;
+      optionSource: "providerCatalog" | "lockedProvider";
+      persistence: NormalizedFieldPersistence | UnavailablePersistence;
       targetApplication: { kind: "envVar"; key: string };
       render: "control";
       value: string | null;
+      label?: string;
     }
   | {
       kind: "model";
@@ -105,7 +106,21 @@ export function deriveAgentConfigFieldModel({
   const fields: AgentConfigFieldDescriptor[] = [];
   const omissions: AgentConfigOmission[] = [];
 
-  if (runtime?.providerEnvVar) {
+  if (
+    runtime?.providerEnvVar &&
+    runtime.lockedProviderId &&
+    runtime.lockedProviderLabel
+  ) {
+    fields.push({
+      kind: "provider",
+      optionSource: "lockedProvider",
+      persistence: { kind: "unavailable" },
+      targetApplication: { kind: "envVar", key: runtime.providerEnvVar },
+      render: "control",
+      value: runtime.lockedProviderId,
+      label: runtime.lockedProviderLabel,
+    });
+  } else if (runtime?.providerEnvVar) {
     fields.push({
       kind: "provider",
       optionSource: "providerCatalog",
@@ -181,6 +196,49 @@ export function hasRenderableAgentConfigField(
   return model.fields.some(
     (field) => field.kind === kind && field.render === "control",
   );
+}
+
+/** Resolves the catalog-owned provider field into renderer-ready state. */
+export function getRenderableProviderState(
+  model: AgentConfigFieldModel,
+  configuredProvider: string | null,
+  bakedProvider: string | null,
+) {
+  const field = model.fields.find(
+    (candidate) =>
+      candidate.kind === "provider" && candidate.render === "control",
+  );
+  const visible = hasRenderableAgentConfigField(model, "provider");
+  const locked = field?.optionSource === "lockedProvider";
+  const value = visible
+    ? locked
+      ? (field?.value ?? "")
+      : (configuredProvider ?? "")
+    : "";
+  return {
+    field,
+    locked,
+    visible,
+    value,
+    effective: visible
+      ? field?.value?.trim() ||
+        configuredProvider?.trim() ||
+        bakedProvider ||
+        ""
+      : "",
+  };
+}
+
+/** Creates the sole selectable option for a catalog-locked provider field. */
+export function getLockedProviderOptions(
+  field: ReturnType<typeof getRenderableProviderState>["field"],
+) {
+  return [
+    {
+      id: field?.value ?? "",
+      label: field?.label ?? field?.value ?? "Locked",
+    },
+  ];
 }
 
 export function getRenderableEffortField(
