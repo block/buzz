@@ -4,8 +4,8 @@ Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
-If you have questions that aren't answered here, open a GitHub issue or
-reach out in the community channels.
+If you have questions that aren't answered here, [open a question issue](https://github.com/block/buzz/issues/new?template=question.yml)
+or reach out in the community channels.
 
 ---
 
@@ -20,8 +20,9 @@ reach out in the community channels.
 7. [Architecture Overview](#architecture-overview)
 8. [Ecosystem](#ecosystem)
 9. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-11. [License and CLA](#license-and-cla)
+10. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
+11. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+12. [License and CLA](#license-and-cla)
 
 ---
 
@@ -35,48 +36,37 @@ unacceptable behavior to **conduct@buzz-relay.org**.
 
 ## Before You Open a PR
 
-This section exists to help your PR land quickly. The most common reason
-PRs are closed without review is a duplicate — there's already an open PR
-or issue for the same thing.
+A two-minute search can save you from building something that's already in
+review. Since launch we've had several people independently build the same
+fix — a quick look at open PRs and issues first makes everyone's time count.
 
 ### Check for duplicates first
 
 Search [open PRs](https://github.com/block/buzz/pulls) and
 [open issues](https://github.com/block/buzz/issues) before you start.
 When you open your PR, name the closest existing one in the description
-(or "none found"). That one field saves maintainers a lot of triage time.
+(or "none found"). When two PRs address the same thing, we keep the earlier
+one unless the later one is clearly more complete, and close the other with
+a pointer.
 
-**Duplicate-triage policy:** when two PRs address the same thing, the
-earlier one wins unless the later one is clearly more complete. Duplicates
-are closed with a pointer to the surviving PR — no hard feelings, just
-keeping the queue manageable.
+### Features: open an issue first (strongly recommended)
 
-### Features need an issue first
-
-For anything beyond a typo fix, doc improvement, or obvious bug:
-
-1. Open an issue describing the problem and proposed solution.
-2. Wait for a maintainer to acknowledge the approach (a comment or label is enough).
-3. Comment on the issue to claim it — so two people don't build the same thing.
-4. Then open a PR.
+For anything beyond a typo fix, doc improvement, or obvious bug, opening
+an issue first is the best way to avoid spending a weekend on something
+someone else is already building. Describe the problem and proposed
+solution, and comment to claim it once a maintainer has acknowledged the
+approach — that way two people don't build the same thing in parallel.
 
 Small fixes (typos, doc improvements, obvious bugs with clear fixes) can
-skip straight to a PR.
+go straight to a PR.
 
 ### AI / agent-assisted contributions
 
 Buzz is an agent platform — AI-assisted PRs are welcome and encouraged.
-But the **human submitter is accountable**: you personally verified the
-change builds and behaves as described, you searched for duplicates, and
-you will respond to review feedback. Unattended agent-generated PRs that
-don't meet this bar will be closed without detailed review. The PR
-template has a checkbox for this — please use it honestly.
-
-### Duplicate-check in your PR template
-
-The PR template will ask you to name the closest existing PR or issue.
-This isn't a formality — it's the main mechanism that keeps us from
-reviewing the same change five times.
+The **human submitter is accountable**: you personally verified the change
+builds and behaves as described, you searched for duplicates, and you will
+respond to review feedback. PRs that don't meet this bar may be closed
+with a pointer to this section.
 
 ### PR titles follow Conventional Commits
 
@@ -332,7 +322,7 @@ required. The scope (in parentheses) is optional but encouraged.
 
 ### Review Process
 
-- A maintainer will review your PR within a few business days.
+- We prioritize focused PRs that follow this guide and review as capacity allows.
 - Address review comments by pushing new commits (don't force-push during
   review; it makes it hard to see what changed).
 - Once approved, a maintainer will squash-merge your PR.

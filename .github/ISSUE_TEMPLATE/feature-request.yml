@@ -8,7 +8,7 @@ body:
       value: |
         Before opening a feature request, please [search open issues and PRs](https://github.com/block/buzz/issues?q=is%3Aopen) — someone may have already proposed or started work on the same idea.
 
-        Features need an issue with maintainer acknowledgment before a PR. Opening this issue is the first step.
+        Opening an issue first (before a PR) is strongly recommended for new features — it's the best way to avoid spending a weekend on something someone else is already building.
 
   - type: input
     id: existing

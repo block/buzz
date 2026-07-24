@@ -55,8 +55,8 @@ body:
     id: version
     attributes:
       label: Buzz version
-      description: "Find this in Help → About, or run `buzz --version`."
-      placeholder: "e.g. 0.4.2"
+      description: "Find this at the bottom of the Settings sidebar (Desktop). Write \"unknown\" if you can't determine it."
+      placeholder: "e.g. 0.4.2 or unknown"
     validations:
       required: true
 
