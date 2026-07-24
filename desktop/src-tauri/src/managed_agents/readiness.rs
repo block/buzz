@@ -289,6 +289,11 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "hermes" => cli_login::requirements(
+            &["hermes", "config", "get", "model.provider"],
+            "run `hermes model`",
+            rt,
+        ),
         _ => vec![],
     }
 }
@@ -508,6 +513,35 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_unconfigured_provider_is_not_ready() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bin = dir.path().join("hermes");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").expect("write fake Hermes binary");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fake Hermes binary");
+
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{original_path}", dir.path().display()));
+        crate::managed_agents::clear_resolve_cache();
+
+        let result = agent_readiness(&make_env("hermes", BTreeMap::new()));
+
+        std::env::set_var("PATH", &original_path);
+        crate::managed_agents::clear_resolve_cache();
+
+        assert!(!result.is_ready(), "unconfigured Hermes must not be ready");
+        assert!(result.requirements().iter().any(|requirement| matches!(
+            requirement,
+            Requirement::CliLogin { setup_copy, .. }
+                if setup_copy == "run `hermes model`"
+        )));
     }
 
     // ── buzz-agent tests ──────────────────────────────────────────────────

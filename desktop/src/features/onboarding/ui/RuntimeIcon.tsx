@@ -13,6 +13,7 @@ const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
   codex: chatgptLogoUrl,
   goose: gooseLogoUrl,
+  hermes: "/runtime-icons/hermes.png",
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {

@@ -18,6 +18,8 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const HERMES_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/static/img/apple-touch-icon.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
@@ -156,6 +158,39 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "hermes",
+        label: "Hermes Agent",
+        commands: &["hermes"],
+        aliases: &["hermes-agent"],
+        avatar_url: HERMES_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("hermes"),
+        cli_install_commands: &[
+            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+        ],
+        cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\""],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://hermes-agent.nousresearch.com/docs/",
+        cli_install_hint: "Install Hermes Agent via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".hermes/skills"),
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.hermes/config.yaml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `hermes model` to configure a provider and model."),
+        auth_probe_args: Some(&["hermes", "config", "get", "model.provider"]),
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -342,7 +377,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "hermes" | "hermes-agent" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

@@ -20,6 +20,7 @@ pub(crate) fn read_config_surface(
         .map(|m| m.id)
         .and_then(|id| match id {
             "goose" => super::goose::read_config_file().map(|c| (c, true)),
+            "hermes" => super::hermes::read_config_file().map(|c| (c, true)),
             "claude" => super::claude::read_config_file().map(|c| (c, true)),
             "codex" => super::codex::read_config_file().map(|c| (c, true)),
             "buzz-agent" => super::buzz_agent::read_config_file().map(|c| (c, true)),
@@ -217,6 +218,9 @@ fn mcp_config_file_path_for_runtime(runtime: &KnownAcpRuntime) -> Option<String>
     match runtime.id {
         "goose" => {
             super::goose::goose_config_path().map(|path| path.to_string_lossy().into_owned())
+        }
+        "hermes" => {
+            super::hermes::hermes_config_path().map(|path| path.to_string_lossy().into_owned())
         }
         "claude" => Some(resolve_tilde("~/.claude.json")),
         "codex" => {

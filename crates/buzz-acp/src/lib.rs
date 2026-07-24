@@ -66,6 +66,66 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
+/// Hermes performs substantially more Python/module initialization than the
+/// lightweight ACP adapters: live probes on this machine completed in roughly
+/// 13–21 seconds. Keep the fast fail for every other harness while giving
+/// Hermes enough cold-start headroom to return its native ACP model catalog.
+#[allow(dead_code)]
+fn model_probe_timeout_for_agent(agent_command: &str) -> Duration {
+    match config::normalize_agent_command_identity(agent_command).as_str() {
+        "hermes" | "hermes-agent" => Duration::from_secs(45),
+        _ => MODELS_TIMEOUT,
+    }
+}
+
+/// Environment overrides required when Buzz owns a Hermes ACP session.
+///
+/// Hermes normally starts every configured MCP server before entering its ACP
+/// JSON-RPC loop. Buzz passes the session's MCP servers explicitly through
+/// `session/new` (an empty list when none are configured), so unrelated global
+/// Hermes MCP startup must not block either discovery or a managed session.
+/// The marker is Hermes-specific; all other ACP runtimes are unchanged.
+#[allow(dead_code)]
+fn acp_env_for_agent(agent_command: &str) -> Vec<(String, String)> {
+    match config::normalize_agent_command_identity(agent_command).as_str() {
+        "hermes" | "hermes-agent" => vec![(
+            "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
+            "1".to_string(),
+        )],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod model_probe_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn hermes_gets_a_cold_start_model_probe_budget() {
+        assert_eq!(
+            model_probe_timeout_for_agent("hermes"),
+            Duration::from_secs(45)
+        );
+        assert_eq!(
+            model_probe_timeout_for_agent("/Users/test/.local/bin/hermes-agent"),
+            Duration::from_secs(45)
+        );
+        assert_eq!(model_probe_timeout_for_agent("codex-acp"), MODELS_TIMEOUT);
+    }
+
+    #[test]
+    fn hermes_acp_sessions_skip_unrelated_configured_mcp_startup() {
+        assert_eq!(
+            acp_env_for_agent("/Users/test/.local/bin/hermes"),
+            vec![(
+                "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
+                "1".to_string()
+            )]
+        );
+        assert!(acp_env_for_agent("codex-acp").is_empty());
+    }
+}
+
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
 /// Ephemeral kinds (20000-29999) are rejected by the HTTP bridge, so presence
