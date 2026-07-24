@@ -213,10 +213,15 @@ impl LmStudioNativeClient {
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .body(body.to_vec());
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|e| AgentError::Llm(format!("LM Studio transport: {e}")))?;
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                AgentError::Llm("LM Studio native request timed out".into())
+            } else if error.is_connect() {
+                AgentError::Llm("LM Studio native service unavailable".into())
+            } else {
+                AgentError::Llm("LM Studio native transport failed".into())
+            }
+        })?;
         let status = response.status();
         let limit = if status.is_success() {
             MAX_NATIVE_RESPONSE_BYTES
@@ -225,9 +230,22 @@ impl LmStudioNativeClient {
         };
         let bytes = read_bounded_native_body(response, limit).await?;
         if !status.is_success() {
-            return Err(AgentError::Llm(format!(
-                "LM Studio native request failed with {status}"
-            )));
+            return Err(match status.as_u16() {
+                401 | 403 => {
+                    AgentError::LlmAuth("LM Studio authentication required".into())
+                }
+                404 => AgentError::LlmModelNotFound(
+                    "configured LM Studio model is unavailable".into(),
+                ),
+                400 | 409 | 410 if purpose == NativeRequestPurpose::Continuation => {
+                    AgentError::Llm(format!(
+                        "LM Studio native continuation state unavailable ({status}); start a new ACP session"
+                    ))
+                }
+                _ => AgentError::Llm(format!(
+                    "LM Studio native request failed with {status}"
+                )),
+            });
         }
         Ok(bytes)
     }
@@ -1485,6 +1503,7 @@ mod tests {
             openai_api: OpenAiApi::Chat,
             hints_enabled: true,
             thinking_effort: None,
+            lmstudio_reasoning: crate::lmstudio::LmStudioReasoning::Off,
             lmstudio_runtime: None,
         }
     }
@@ -3342,10 +3361,7 @@ mod tests {
         assert!(!error.contains("OFFICIAL navigation prompt"), "{error}");
         assert!(!error.contains('\n'), "{error:?}");
         assert!(!error.contains('\u{1b}'), "{error:?}");
-        assert_eq!(
-            error,
-            "llm: LM Studio native request failed with 401 Unauthorized"
-        );
+        assert_eq!(error, "llm auth: LM Studio authentication required");
     }
 
     #[test]

@@ -5,16 +5,19 @@ use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::JoinSet;
 
 use crate::builtin;
-use crate::config::{Config, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES};
+use crate::config::{
+    Config, Provider, MAX_PROMPT_BYTES, MAX_TOOL_CALLS_PER_TURN, MAX_TOOL_RESULT_BYTES,
+};
 use crate::handoff::HandoffOutcome;
 use crate::hints::SkillEntry;
-use crate::llm::Llm;
+use crate::llm::{Llm, LmStudioNativeClient};
+use crate::lmstudio::{LmStudioChatRequest, LmStudioOutput};
 use crate::mcp::McpRegistry;
 use crate::mcp::ResultBudget;
 
 use crate::types::{
-    AgentError, ContentBlock, HistoryItem, ProviderStop, StopReason, ToolCall, ToolResult,
-    ToolResultContent,
+    clamp, AgentError, ContentBlock, ExecutedToolCall, ExecutedToolProvider, HistoryItem,
+    ProviderStop, StopReason, ToolCall, ToolResult, ToolResultContent,
 };
 use crate::wire::{self, WireSender};
 
@@ -29,6 +32,8 @@ pub struct RunCtx<'a> {
     pub session_id: &'a str,
     pub system_prompt: &'a str,
     pub llm: &'a Llm,
+    /// Dedicated stateful native transport, present only for LM Studio sessions.
+    pub native_llm: Option<&'a Arc<LmStudioNativeClient>>,
     pub mcp: &'a Arc<McpRegistry>,
     /// Skills discovered at session creation; used by the built-in `load_skill` tool.
     pub skills: &'a [SkillEntry],
@@ -60,10 +65,17 @@ pub struct RunCtx<'a> {
     /// Accumulated output tokens across all LLM rounds in this turn, for
     /// NIP-AM metric publishing. Reset to `None` at turn start in `run()`.
     pub turn_output_tokens: &'a mut Option<u64>,
+    /// Private native response state for this ACP session.
+    pub native_response_id: &'a mut Option<String>,
+    /// Per-session request sequence used for stable native evidence identifiers.
+    pub native_request_sequence: &'a mut u64,
 }
 
 impl RunCtx<'_> {
     pub async fn run(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
+        if self.cfg.provider == Provider::LmStudioNative {
+            return self.run_native(prompt).await;
+        }
         let user_text = prompt_to_text(prompt)?;
         if user_text.len() > MAX_PROMPT_BYTES {
             return Err(AgentError::InvalidParams(format!(
@@ -254,6 +266,171 @@ impl RunCtx<'_> {
             if let Some(stop) = self.execute_calls(&calls).await {
                 return Ok(stop);
             }
+        }
+    }
+
+    async fn run_native(&mut self, prompt: Vec<ContentBlock>) -> Result<StopReason, AgentError> {
+        let user_text = prompt_to_text(prompt)?;
+        if user_text.len() > MAX_PROMPT_BYTES {
+            return Err(AgentError::InvalidParams(format!(
+                "prompt: exceeds {MAX_PROMPT_BYTES} bytes"
+            )));
+        }
+        *self.turn_input_tokens = None;
+        *self.turn_output_tokens = None;
+        let client = self.native_llm.ok_or_else(|| {
+            AgentError::InvalidParams(
+                "LM Studio native runtime is missing its dedicated client".into(),
+            )
+        })?;
+        let runtime = self.cfg.lmstudio_runtime.as_ref().ok_or_else(|| {
+            AgentError::InvalidParams(
+                "LM Studio native runtime is missing validated egress policy".into(),
+            )
+        })?;
+        let mut request = LmStudioChatRequest::new(
+            self.effective_model,
+            user_text.as_str(),
+            self.system_prompt,
+            runtime.wire_integrations(),
+            self.cfg.lmstudio_reasoning,
+            self.cfg.max_output_tokens,
+            self.cfg.max_context_tokens,
+        )?;
+        if let Some(previous_response_id) = self.native_response_id.as_deref() {
+            request = request.continue_from(previous_response_id)?;
+        }
+        let history_start = self.history.len();
+        let original_task_was_empty = self.original_task.is_none();
+        if original_task_was_empty {
+            *self.original_task = Some(user_text.clone());
+        }
+        self.history.push(HistoryItem::User(user_text));
+        if *self.cancel.borrow() {
+            self.rollback_native_prompt(history_start, original_task_was_empty);
+            return Ok(StopReason::Cancelled);
+        }
+        if self.native_response_id.is_some() && self.should_handoff() {
+            self.rollback_native_prompt(history_start, original_task_was_empty);
+            return Err(AgentError::InvalidParams(
+                "LM Studio native context handoff is unavailable; start a new ACP session".into(),
+            ));
+        }
+
+        let request_sequence = self.native_request_sequence.saturating_add(1);
+        *self.native_request_sequence = request_sequence;
+        let request_identity = format!("{}:{request_sequence}", self.session_id);
+        let response_result = tokio::select! {
+            biased;
+            _ = self.cancel.changed() => Err(AgentError::Cancelled),
+            result = async {
+                if request.previous_response_id().is_some() {
+                    client.continue_chat(&request, &request_identity).await
+                } else {
+                    client.chat(&request, &request_identity).await
+                }
+            } => result,
+            _ = async {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                interval.tick().await;
+                loop {
+                    interval.tick().await;
+                    wire::send(
+                        self.wire,
+                        wire::session_update(
+                            self.session_id,
+                            json!({ "sessionUpdate": "keepalive" }),
+                        ),
+                    )
+                    .await;
+                }
+            } => unreachable!(),
+        };
+        let response = match response_result {
+            Ok(response) => response,
+            Err(AgentError::Cancelled) => {
+                self.rollback_native_prompt(history_start, original_task_was_empty);
+                return Ok(StopReason::Cancelled);
+            }
+            Err(error) => {
+                self.rollback_native_prompt(history_start, original_task_was_empty);
+                return Err(error);
+            }
+        };
+
+        *self.native_response_id = Some(response.response_id.clone());
+        *self.last_request_input_tokens = Some(response.stats.input_tokens);
+        *self.last_request_history_bytes = Some(
+            self.history
+                .iter()
+                .map(HistoryItem::context_pressure_bytes)
+                .sum(),
+        );
+        *self.turn_input_tokens = Some(response.stats.input_tokens);
+        *self.turn_output_tokens = Some(response.stats.total_output_tokens);
+
+        let mut assistant_text = Vec::new();
+        for (output_index, output) in response.output.into_iter().enumerate() {
+            let message_id = format!(
+                "lmstudio_{}_{}",
+                request_identity.replace(':', "_"),
+                output_index
+            );
+            match output {
+                LmStudioOutput::Reasoning { content } => {
+                    let content = clamp(content, MAX_PROMPT_BYTES);
+                    wire::send(
+                        self.wire,
+                        wire::session_update(
+                            self.session_id,
+                            json!({
+                                "sessionUpdate": "agent_thought_chunk",
+                                "messageId": message_id,
+                                "content": { "type": "text", "text": content }
+                            }),
+                        ),
+                    )
+                    .await;
+                }
+                LmStudioOutput::Message { content } => {
+                    let content = clamp(content, MAX_PROMPT_BYTES);
+                    assistant_text.push(content.clone());
+                    wire::send(
+                        self.wire,
+                        wire::session_update(
+                            self.session_id,
+                            json!({
+                                "sessionUpdate": "agent_message_chunk",
+                                "messageId": message_id,
+                                "content": { "type": "text", "text": content }
+                            }),
+                        ),
+                    )
+                    .await;
+                }
+                LmStudioOutput::ToolCall(call) => {
+                    emit_native_completed(
+                        self.wire,
+                        self.session_id,
+                        &call,
+                        &response.model_instance_id,
+                        self.cfg.max_tool_result_text_bytes,
+                    )
+                    .await;
+                }
+            }
+        }
+        self.history.push(HistoryItem::Assistant {
+            text: assistant_text.join("\n"),
+            tool_calls: Vec::new(),
+        });
+        Ok(StopReason::EndTurn)
+    }
+
+    fn rollback_native_prompt(&mut self, history_start: usize, original_task_was_empty: bool) {
+        self.history.truncate(history_start);
+        if original_task_was_empty {
+            *self.original_task = None;
         }
     }
 
@@ -597,6 +774,80 @@ async fn emit_completed(wire: &WireSender, sid: &str, call: &ToolCall, result: &
         ),
     )
     .await;
+}
+
+async fn emit_native_completed(
+    wire: &WireSender,
+    sid: &str,
+    call: &ExecutedToolCall,
+    model_instance_id: &str,
+    evidence_text_limit: usize,
+) {
+    let provider = match &call.provider {
+        ExecutedToolProvider::EphemeralMcp { server_label } => {
+            json!({ "type": "ephemeral_mcp", "serverLabel": server_label })
+        }
+        ExecutedToolProvider::Plugin { plugin_id } => {
+            json!({ "type": "plugin", "pluginId": plugin_id })
+        }
+    };
+    let bounded_arguments = bounded_native_arguments(&call.arguments, evidence_text_limit);
+    let bounded_output = clamp(call.output.clone(), evidence_text_limit);
+    wire::send(
+        wire,
+        wire::session_update(
+            sid,
+            json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": call.provider_id,
+                "title": call.name,
+                "kind": "other",
+                "status": "pending",
+                "rawInput": bounded_arguments,
+                "rawOutput": {
+                    "executedByProvider": true,
+                    "provider": provider.clone(),
+                    "modelInstanceId": model_instance_id,
+                },
+            }),
+        ),
+    )
+    .await;
+    wire::send(
+        wire,
+        wire::session_update(
+            sid,
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call.provider_id,
+                "status": "completed",
+                "content": [{
+                    "type": "content",
+                    "content": { "type": "text", "text": bounded_output }
+                }],
+                "rawOutput": {
+                    "isError": false,
+                    "executedByProvider": true,
+                    "provider": provider,
+                    "modelInstanceId": model_instance_id,
+                    "tool": call.name,
+                },
+            }),
+        ),
+    )
+    .await;
+}
+
+fn bounded_native_arguments(arguments: &serde_json::Value, limit: usize) -> serde_json::Value {
+    let serialized = serde_json::to_string(arguments).unwrap_or_else(|_| "{}".into());
+    if serialized.len() <= limit {
+        return arguments.clone();
+    }
+    let preview_limit = limit.saturating_sub(128);
+    json!({
+        "_buzzTruncated": true,
+        "preview": clamp(serialized, preview_limit),
+    })
 }
 
 async fn emit_failed(wire: &WireSender, sid: &str, call: &ToolCall, err: &str) {

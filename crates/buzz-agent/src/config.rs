@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::egress::LmStudioRuntimeConfig;
+use crate::lmstudio::LmStudioReasoning;
 
 pub const PROTOCOL_VERSION: u32 = 2;
 
@@ -736,6 +737,8 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Exact native reasoning mode for LM Studio, defaulting to `off`.
+    pub lmstudio_reasoning: LmStudioReasoning,
     /// Validated native runtime policy. Present only for
     /// [`Provider::LmStudioNative`].
     pub lmstudio_runtime: Option<LmStudioRuntimeConfig>,
@@ -867,6 +870,11 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            lmstudio_reasoning: if provider == Provider::LmStudioNative {
+                parse_lmstudio_reasoning(env("LM_STUDIO_REASONING").as_deref())?
+            } else {
+                LmStudioReasoning::Off
+            },
             lmstudio_runtime,
         };
         cfg.validate()?;
@@ -908,6 +916,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            lmstudio_reasoning: LmStudioReasoning::Off,
             lmstudio_runtime: None,
         }
     }
@@ -1070,6 +1079,19 @@ fn resolve_lmstudio_entrypoint_provider(requested: Option<&str>) -> Result<Provi
         None | Some("") | Some("lmstudio-native") => Ok(Provider::LmStudioNative),
         Some(other) => Err(format!(
             "config: buzz-lmstudio-agent refuses provider {other:?}; only lmstudio-native is permitted"
+        )),
+    }
+}
+
+fn parse_lmstudio_reasoning(raw: Option<&str>) -> Result<LmStudioReasoning, String> {
+    match raw {
+        None | Some("") | Some("off") => Ok(LmStudioReasoning::Off),
+        Some("low") => Ok(LmStudioReasoning::Low),
+        Some("medium") => Ok(LmStudioReasoning::Medium),
+        Some("high") => Ok(LmStudioReasoning::High),
+        Some("on") => Ok(LmStudioReasoning::On),
+        Some(other) => Err(format!(
+            "config: LM_STUDIO_REASONING={other:?} not supported (use off|low|medium|high|on)"
         )),
     }
 }

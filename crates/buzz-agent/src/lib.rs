@@ -55,6 +55,7 @@ use crate::wire::{
 struct App {
     cfg: Config,
     llm: Arc<Llm>,
+    native_llm: Option<Arc<LmStudioNativeClient>>,
     sessions: Mutex<HashMap<String, Session>>,
     /// Cached model catalog for Databricks providers. Populated lazily on the
     /// first successful `session/new` discovery call. When discovery fails (e.g.
@@ -103,6 +104,10 @@ struct Session {
     accumulated_input_tokens: u64,
     /// Session-cumulative output tokens across all turns.
     accumulated_output_tokens: u64,
+    /// Stateful native response ID scoped exclusively to this ACP session.
+    native_response_id: Option<String>,
+    /// Monotonic per-session request sequence used to derive stable observer IDs.
+    native_request_sequence: u64,
 }
 
 fn die(msg: String) -> ! {
@@ -187,10 +192,17 @@ async fn async_main(lmstudio_only: bool) {
     }
     .unwrap_or_else(|e| die(e));
     let llm = Arc::new(Llm::new(&cfg).unwrap_or_else(|e| die(e.to_string())));
+    let native_llm = cfg.lmstudio_runtime.clone().map(|runtime| {
+        Arc::new(
+            LmStudioNativeClient::new(runtime, cfg.llm_timeout)
+                .unwrap_or_else(|e| die(e.to_string())),
+        )
+    });
     let max_line = cfg.max_line_bytes;
     let app = Arc::new(App {
         cfg,
         llm,
+        native_llm,
         sessions: Mutex::new(HashMap::new()),
         models_cache: tokio::sync::OnceCell::new(),
     });
@@ -463,6 +475,8 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
             effective_model: None,
             accumulated_input_tokens: 0,
             accumulated_output_tokens: 0,
+            native_response_id: None,
+            native_request_sequence: 0,
         },
     );
     drop(sessions);
@@ -551,6 +565,15 @@ async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &W
         )
         .await;
     }
+    if app.cfg.provider == Provider::LmStudioNative && p.model_id != app.cfg.model {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "session/set_model: LM Studio native sessions are pinned to the configured model",
+        )
+        .await;
+    }
     let mut sessions = app.sessions.lock().await;
     let Some(s) = sessions.get_mut(&p.session_id) else {
         return reject(
@@ -561,7 +584,9 @@ async fn set_model_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &W
         )
         .await;
     };
-    s.effective_model = Some(p.model_id.clone());
+    if app.cfg.provider != Provider::LmStudioNative {
+        s.effective_model = Some(p.model_id.clone());
+    }
     tracing::info!(
         session_id = %p.session_id,
         model_id = %p.model_id,
@@ -593,6 +618,15 @@ async fn steer_session(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireS
         Ok(p) => p,
         Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
     };
+    if app.cfg.provider == Provider::LmStudioNative {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "steer: not supported by the stateful LM Studio native runtime",
+        )
+        .await;
+    }
     if p.prompt.is_empty() {
         return reject(
             wire_tx,
@@ -680,6 +714,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         effective_model_override,
         run_id,
         mut steer_rx,
+        mut native_response_id,
+        mut native_request_sequence,
     ) = match acquire_session(&app, &p.session_id).await {
         Ok(v) => v,
         Err(reason) => {
@@ -715,6 +751,7 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         session_id: &sid,
         system_prompt: &effective_system_prompt,
         llm: &app.llm,
+        native_llm: app.native_llm.as_ref(),
         mcp: &mcp,
         skills: &skills,
         wire: &wire_tx,
@@ -727,6 +764,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         last_request_history_bytes: &mut last_request_history_bytes,
         turn_input_tokens: &mut turn_input_tokens,
         turn_output_tokens: &mut turn_output_tokens,
+        native_response_id: &mut native_response_id,
+        native_request_sequence: &mut native_request_sequence,
     };
     let result = ctx.run(p.prompt).await;
     if let Some(s) = app.sessions.lock().await.get_mut(&sid) {
@@ -739,6 +778,8 @@ async fn run_prompt(app: Arc<App>, id: Value, params: Value, wire_tx: WireSender
         s.handoff_count = handoff_count;
         s.last_request_input_tokens = last_request_input_tokens;
         s.last_request_history_bytes = last_request_history_bytes;
+        s.native_response_id = native_response_id;
+        s.native_request_sequence = native_request_sequence;
     }
     // Update session-cumulative token counters and emit the usage notification
     // BEFORE sending the session/prompt response. buzz-acp's UsageTracker
@@ -816,6 +857,8 @@ async fn acquire_session(
         Option<String>,
         String,
         mpsc::UnboundedReceiver<Vec<ContentBlock>>,
+        Option<String>,
+        u64,
     ),
     &'static str,
 > {
@@ -852,6 +895,8 @@ async fn acquire_session(
         effective_model,
         run_id,
         steer_rx,
+        s.native_response_id.take(),
+        s.native_request_sequence,
     ))
 }
 

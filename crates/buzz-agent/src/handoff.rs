@@ -106,7 +106,7 @@ impl RunCtx<'_> {
         HandoffOutcome::Performed
     }
 
-    fn should_handoff(&self) -> bool {
+    pub(crate) fn should_handoff(&self) -> bool {
         match *self.last_request_input_tokens {
             Some(_) => {
                 self.projected_handoff_input_tokens()
