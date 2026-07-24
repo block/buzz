@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -8,6 +9,10 @@ use crate::auth::{PkceOAuthConfig, PkceOAuthTokenSource, StaticTokenSource, Toke
 use crate::config::{
     is_openai_host, normalize_effort_for_anthropic_route, normalize_effort_for_openai_route,
     Config, OpenAiApi, Provider, ThinkingEffort,
+};
+use crate::egress::{LmStudioRuntimeConfig, NativeRequestPurpose};
+use crate::lmstudio::{
+    parse_chat_response, LmStudioChatRequest, LmStudioChatResponse, MAX_NATIVE_RESPONSE_BYTES,
 };
 use crate::types::{
     AgentError, HistoryItem, LlmResponse, ProviderStop, ToolCall, ToolDef, ToolResultContent,
@@ -22,6 +27,9 @@ const DATABRICKS_OAUTH_SCOPES: &[&str] = &["all-apis", "offline_access"];
 const MAX_LLM_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LLM_ERROR_BODY_BYTES: usize = 4 * 1024;
 const STALL_NOTICE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_NATIVE_ERROR_BODY_BYTES: usize = 4 * 1024;
+const MAX_NATIVE_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_NATIVE_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Parser for an OpenAI-family JSON response. Per-endpoint pair lives
 /// alongside its `_body` serializer.
@@ -46,7 +54,219 @@ pub struct Llm {
     /// (the `DATABRICKS_TOKEN` env var); a refreshable PKCE engine for
     /// Databricks otherwise. Anthropic doesn't use this — it always
     /// reads `cfg.api_key` directly because the API expects `x-api-key`.
-    auth: Arc<dyn TokenSource>,
+    auth: Option<Arc<dyn TokenSource>>,
+}
+
+/// Dedicated non-retrying HTTP transport for LM Studio's native REST API.
+///
+/// Native chat requests may store state and execute MCP tools, so ambiguous
+/// failures are returned immediately and are never retried.
+pub struct LmStudioNativeClient {
+    http: Client,
+    runtime: LmStudioRuntimeConfig,
+}
+
+impl std::fmt::Debug for LmStudioNativeClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LmStudioNativeClient")
+            .field("runtime", &self.runtime)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LmStudioNativeClient {
+    /// Builds a no-proxy, no-redirect client with bounded timeouts.
+    pub fn new(runtime: LmStudioRuntimeConfig, timeout: Duration) -> Result<Self, AgentError> {
+        if timeout < Duration::from_secs(1) || timeout > MAX_NATIVE_TIMEOUT {
+            return Err(AgentError::InvalidParams(format!(
+                "LM Studio timeout must be between 1 and {} seconds",
+                MAX_NATIVE_TIMEOUT.as_secs()
+            )));
+        }
+        let connect_timeout = timeout.min(Duration::from_secs(5));
+        let http = Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(connect_timeout)
+            .read_timeout(timeout)
+            .timeout(timeout)
+            .build()
+            .map_err(|e| AgentError::Llm(format!("LM Studio HTTP client: {e}")))?;
+        Ok(Self { http, runtime })
+    }
+
+    /// Discovers models through the authorized native model path.
+    pub async fn discover_models(&self) -> Result<Value, AgentError> {
+        let purpose = NativeRequestPurpose::ModelDiscovery;
+        let url = self
+            .runtime
+            .request_url(purpose)
+            .map_err(AgentError::InvalidParams)?;
+        let bytes = self
+            .send_authorized(purpose, reqwest::Method::GET, url, None)
+            .await?;
+        serde_json::from_slice(&bytes)
+            .map_err(|e| AgentError::Llm(format!("LM Studio models JSON: {e}")))
+    }
+
+    /// Starts a new native stateful chat request.
+    pub async fn chat(
+        &self,
+        request: &LmStudioChatRequest,
+        request_identity: &str,
+    ) -> Result<LmStudioChatResponse, AgentError> {
+        self.send_chat(NativeRequestPurpose::Chat, request, request_identity)
+            .await
+    }
+
+    /// Continues an existing native stateful chat request.
+    pub async fn continue_chat(
+        &self,
+        request: &LmStudioChatRequest,
+        request_identity: &str,
+    ) -> Result<LmStudioChatResponse, AgentError> {
+        self.send_chat(
+            NativeRequestPurpose::Continuation,
+            request,
+            request_identity,
+        )
+        .await
+    }
+
+    /// Sends a summary request through the separately authorized summary path.
+    pub async fn summarize(
+        &self,
+        request: &LmStudioChatRequest,
+        request_identity: &str,
+    ) -> Result<LmStudioChatResponse, AgentError> {
+        self.send_chat(NativeRequestPurpose::Summary, request, request_identity)
+            .await
+    }
+
+    async fn send_chat(
+        &self,
+        purpose: NativeRequestPurpose,
+        request: &LmStudioChatRequest,
+        request_identity: &str,
+    ) -> Result<LmStudioChatResponse, AgentError> {
+        match purpose {
+            NativeRequestPurpose::Continuation if request.previous_response_id().is_none() => {
+                return Err(AgentError::InvalidParams(
+                    "LM Studio continuation requires a previous response ID".into(),
+                ));
+            }
+            NativeRequestPurpose::Chat | NativeRequestPurpose::Summary
+                if request.previous_response_id().is_some() =>
+            {
+                return Err(AgentError::InvalidParams(
+                    "new LM Studio chat and summary requests cannot carry prior state".into(),
+                ));
+            }
+            _ => {}
+        }
+        let approved_integrations = self.runtime.wire_integrations();
+        if request.integrations() != approved_integrations.as_slice() {
+            return Err(AgentError::InvalidParams(
+                "LM Studio request integrations do not exactly match the validated runtime policy"
+                    .into(),
+            ));
+        }
+        let url = self
+            .runtime
+            .request_url(purpose)
+            .map_err(AgentError::InvalidParams)?;
+        let body = serde_json::to_vec(request)
+            .map_err(|e| AgentError::InvalidParams(format!("LM Studio request JSON: {e}")))?;
+        if body.len() > MAX_NATIVE_REQUEST_BYTES {
+            return Err(AgentError::InvalidParams(format!(
+                "LM Studio request exceeds {MAX_NATIVE_REQUEST_BYTES} bytes"
+            )));
+        }
+        let bytes = self
+            .send_authorized(purpose, reqwest::Method::POST, url, Some(&body))
+            .await?;
+        let response = parse_chat_response(request_identity, &bytes)?;
+        self.runtime
+            .validate_response_evidence(&response)
+            .map_err(AgentError::Llm)?;
+        Ok(response)
+    }
+
+    async fn send_authorized(
+        &self,
+        purpose: NativeRequestPurpose,
+        method: reqwest::Method,
+        url: reqwest::Url,
+        body: Option<&[u8]>,
+    ) -> Result<Vec<u8>, AgentError> {
+        self.runtime
+            .authorize_request(purpose, &url)
+            .map_err(AgentError::InvalidParams)?;
+
+        let mut request = self.http.request(method, url);
+        if let Some(token) = self.runtime.api_token() {
+            request = request.bearer_auth(token);
+        }
+        if let Some(body) = body {
+            request = request
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_vec());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|e| AgentError::Llm(format!("LM Studio transport: {e}")))?;
+        let status = response.status();
+        let limit = if status.is_success() {
+            MAX_NATIVE_RESPONSE_BYTES
+        } else {
+            MAX_NATIVE_ERROR_BODY_BYTES
+        };
+        let bytes = read_bounded_native_body(response, limit).await?;
+        if !status.is_success() {
+            let mut diagnostic = String::from_utf8_lossy(&bytes).into_owned();
+            if let Some(token) = self.runtime.api_token().filter(|token| !token.is_empty()) {
+                diagnostic = diagnostic.replace(token, "[REDACTED]");
+            }
+            return Err(AgentError::Llm(format!(
+                "LM Studio native request failed with {status}: {diagnostic}"
+            )));
+        }
+        Ok(bytes)
+    }
+}
+
+async fn read_bounded_native_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, AgentError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(AgentError::Llm(format!(
+            "LM Studio response exceeds {limit} bytes"
+        )));
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|e| AgentError::Llm(format!("LM Studio response body: {e}")))?
+    {
+        if body
+            .len()
+            .checked_add(chunk.len())
+            .is_none_or(|size| size > limit)
+        {
+            return Err(AgentError::Llm(format!(
+                "LM Studio response exceeds {limit} bytes"
+            )));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 impl Llm {
@@ -56,7 +276,11 @@ impl Llm {
             .read_timeout(cfg.llm_timeout)
             .build()
             .map_err(|e| AgentError::Llm(format!("http: {e}")))?;
-        let auth = build_token_source(cfg)?;
+        let auth = if cfg.provider == Provider::LmStudioNative {
+            None
+        } else {
+            Some(build_token_source(cfg)?)
+        };
         Ok(Self {
             http,
             auto_upgraded: AtomicBool::new(false),
@@ -142,6 +366,9 @@ impl Llm {
                 })
                 .await
             }
+            Provider::LmStudioNative => Err(AgentError::InvalidParams(
+                "LM Studio native requests must use the dedicated stateful native client".into(),
+            )),
         };
         // Stamp the effective model into Llm errors so log lines carry
         // `llm: (model-name) 404 Not Found: …` instead of the bare status.
@@ -250,6 +477,9 @@ impl Llm {
                     .await?;
                 Ok(r.text)
             }
+            Provider::LmStudioNative => Err(AgentError::InvalidParams(
+                "LM Studio native summaries must use the dedicated native summary path".into(),
+            )),
         }
     }
 
@@ -354,13 +584,18 @@ impl Llm {
         // rejection can never suppress a later turn's legitimate retry. Both
         // statuses map to `LlmAuth` in `post`: a 403 is indistinguishable from
         // an expired-token 403 here, so we refresh once and let it propagate.
-        let mut bearer = self.auth.bearer().await?;
+        let auth = self.auth.as_ref().ok_or_else(|| {
+            AgentError::InvalidParams(
+                "cloud token source unavailable for LM Studio native runtime".into(),
+            )
+        })?;
+        let mut bearer = auth.bearer().await?;
         let mut refreshed = false;
         loop {
             match post(&self.http, &url, body_ref, |r| r.bearer_auth(&bearer)).await {
                 Err(AgentError::LlmAuth(_)) if !refreshed => {
                     refreshed = true;
-                    bearer = self.auth.refresh_now(&bearer).await?;
+                    bearer = auth.refresh_now(&bearer).await?;
                 }
                 result => return result,
             }
@@ -1197,6 +1432,9 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
             };
             Ok(PkceOAuthTokenSource::new(pkce)?)
         }
+        Provider::LmStudioNative => Err(AgentError::InvalidParams(
+            "LM Studio native runtime does not use a cloud token source".into(),
+        )),
     }
 }
 
@@ -1251,6 +1489,7 @@ mod tests {
             openai_api: OpenAiApi::Chat,
             hints_enabled: true,
             thinking_effort: None,
+            lmstudio_runtime: None,
         }
     }
 
@@ -2693,7 +2932,7 @@ mod tests {
                 .build()
                 .unwrap(),
             auto_upgraded: std::sync::atomic::AtomicBool::new(false),
-            auth,
+            auth: Some(auth),
         }
     }
 
@@ -2890,5 +3129,355 @@ mod tests {
             }]
         });
         assert_eq!(parse_responses(v).unwrap().output_tokens, None);
+    }
+
+    async fn spawn_native_router(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind native test server");
+        let address = listener.local_addr().expect("native test address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{address}")
+    }
+
+    fn native_request_with(
+        integrations: Vec<crate::lmstudio::EphemeralMcpIntegration>,
+    ) -> crate::lmstudio::LmStudioChatRequest {
+        crate::lmstudio::LmStudioChatRequest::new(
+            "qwen/test",
+            "hello",
+            "system",
+            integrations,
+            crate::lmstudio::LmStudioReasoning::Off,
+            1024,
+            8192,
+        )
+        .expect("valid native request")
+    }
+
+    fn native_request() -> crate::lmstudio::LmStudioChatRequest {
+        native_request_with(Vec::new())
+    }
+
+    fn native_response(output: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "model_instance_id": "qwen/test",
+            "output": output,
+            "stats": {
+                "input_tokens": 12,
+                "total_output_tokens": 4,
+                "reasoning_output_tokens": 0
+            },
+            "response_id": "resp_native_1"
+        })
+    }
+
+    #[tokio::test]
+    async fn native_chat_authorizes_then_parses_without_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let route_hits = hits.clone();
+        let router = axum::Router::new().route(
+            "/api/v1/chat",
+            axum::routing::post(move || {
+                let route_hits = route_hits.clone();
+                async move {
+                    route_hits.fetch_add(1, Ordering::SeqCst);
+                    axum::Json(native_response(serde_json::json!([
+                        {"type":"message","content":"answer"}
+                    ])))
+                }
+            }),
+        );
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, None)
+            .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        let response = client
+            .chat(&native_request(), "request-1")
+            .await
+            .expect("native response");
+        assert_eq!(response.response_id, "resp_native_1");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn native_transport_never_retries_ambiguous_server_failures() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let route_hits = hits.clone();
+        let router = axum::Router::new().route(
+            "/api/v1/chat",
+            axum::routing::post(move || {
+                let route_hits = route_hits.clone();
+                async move {
+                    route_hits.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "ambiguous failure",
+                    )
+                }
+            }),
+        );
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, None)
+            .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        assert!(client.chat(&native_request(), "request-1").await.is_err());
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "native store=true/MCP requests must never retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_transport_refuses_redirects() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let redirected_hits = Arc::new(AtomicUsize::new(0));
+        let capture_hits = redirected_hits.clone();
+        let router = axum::Router::new()
+            .route(
+                "/api/v1/models",
+                axum::routing::get(|| async { axum::response::Redirect::temporary("/capture") }),
+            )
+            .route(
+                "/capture",
+                axum::routing::get(move || {
+                    let capture_hits = capture_hits.clone();
+                    async move {
+                        capture_hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"models":[]}))
+                    }
+                }),
+            );
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, None)
+            .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        assert!(client.discover_models().await.is_err());
+        assert_eq!(
+            redirected_hits.load(Ordering::SeqCst),
+            0,
+            "redirect target must never be requested"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_transport_applies_optional_bearer_without_leaking_it() {
+        use axum::http::HeaderMap;
+
+        let router = axum::Router::new().route(
+            "/api/v1/models",
+            axum::routing::get(|headers: HeaderMap| async move {
+                if headers
+                    .get("authorization")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("Bearer native-secret")
+                {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(serde_json::json!({"models":[]})),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        axum::Json(serde_json::json!({"error":"missing auth"})),
+                    )
+                }
+            }),
+        );
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse_with_token(
+            None,
+            &base,
+            None,
+            None,
+            Some("native-secret"),
+        )
+        .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        client
+            .discover_models()
+            .await
+            .expect("authenticated models");
+
+        let debug = format!("{client:?}");
+        assert!(!debug.contains("native-secret"), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn native_transport_redacts_token_echoed_in_error_body() {
+        let router = axum::Router::new().route(
+            "/api/v1/models",
+            axum::routing::get(|| async {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "rejected native-secret",
+                )
+            }),
+        );
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse_with_token(
+            None,
+            &base,
+            None,
+            None,
+            Some("native-secret"),
+        )
+        .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        let error = client
+            .discover_models()
+            .await
+            .expect_err("401 must fail")
+            .to_string();
+        assert!(!error.contains("native-secret"), "{error}");
+        assert!(error.contains("[REDACTED]"), "{error}");
+    }
+
+    #[test]
+    fn native_provider_never_builds_a_cloud_token_source() {
+        let c = cfg(Provider::LmStudioNative);
+        assert!(matches!(
+            build_token_source(&c),
+            Err(AgentError::InvalidParams(_))
+        ));
+        Llm::new(&c).expect("generic holder can initialize without cloud auth");
+    }
+
+    #[tokio::test]
+    async fn authorization_denial_happens_before_network_emission() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let route_hits = hits.clone();
+        let router = axum::Router::new().fallback(move || {
+            let route_hits = route_hits.clone();
+            async move {
+                route_hits.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::OK
+            }
+        });
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, None)
+            .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        let denied =
+            reqwest::Url::parse(&format!("{base}/v1/chat/completions")).expect("denied test URL");
+        assert!(client
+            .send_authorized(
+                crate::egress::NativeRequestPurpose::Chat,
+                reqwest::Method::POST,
+                denied,
+                Some(br#"{}"#)
+            )
+            .await
+            .is_err());
+        tokio::task::yield_now().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn oversized_native_request_is_denied_before_network_emission() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let hits = Arc::new(AtomicUsize::new(0));
+        let route_hits = hits.clone();
+        let router = axum::Router::new().fallback(move || {
+            let route_hits = route_hits.clone();
+            async move {
+                route_hits.fetch_add(1, Ordering::SeqCst);
+                axum::http::StatusCode::OK
+            }
+        });
+        let base = spawn_native_router(router).await;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, None)
+            .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        let request = crate::lmstudio::LmStudioChatRequest::new(
+            "qwen/test",
+            "x".repeat(MAX_NATIVE_REQUEST_BYTES + 1),
+            "system",
+            Vec::new(),
+            crate::lmstudio::LmStudioReasoning::Off,
+            1024,
+            8192,
+        )
+        .expect("wire request");
+        assert!(client.chat(&request, "oversized").await.is_err());
+        tokio::task::yield_now().await;
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn native_response_rejects_plugin_or_unallowlisted_tool_evidence() {
+        let responses = Arc::new(tokio::sync::Mutex::new(vec![
+            native_response(serde_json::json!([
+                {
+                    "type":"tool_call",
+                    "tool":"search",
+                    "arguments":{},
+                    "output":"x",
+                    "provider_info":{"type":"plugin","plugin_id":"hidden"}
+                },
+                {"type":"message","content":"answer"}
+            ])),
+            native_response(serde_json::json!([
+                {
+                    "type":"tool_call",
+                    "tool":"write",
+                    "arguments":{},
+                    "output":"x",
+                    "provider_info":{"type":"ephemeral_mcp","server_label":"memory"}
+                },
+                {"type":"message","content":"answer"}
+            ])),
+        ]));
+        let route_responses = responses.clone();
+        let router = axum::Router::new().route(
+            "/api/v1/chat",
+            axum::routing::post(move || {
+                let route_responses = route_responses.clone();
+                async move {
+                    let mut locked = route_responses.lock().await;
+                    let value = if locked.is_empty() {
+                        native_response(serde_json::json!([
+                            {"type":"message","content":"answer"}
+                        ]))
+                    } else {
+                        locked.remove(0)
+                    };
+                    axum::Json(value)
+                }
+            }),
+        );
+        let base = spawn_native_router(router).await;
+        let mcp = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"]}]"#;
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, Some(mcp))
+            .expect("runtime policy");
+        let client =
+            LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
+        let request = native_request_with(client.runtime.wire_integrations());
+        let continued = native_request_with(client.runtime.wire_integrations())
+            .continue_from("resp_prior")
+            .expect("continued native request");
+        assert!(client.chat(&request, "plugin").await.is_err());
+        assert!(client
+            .continue_chat(&continued, "unallowlisted")
+            .await
+            .is_err());
     }
 }

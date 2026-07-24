@@ -4,6 +4,7 @@ pub mod auth;
 mod builtin;
 pub mod catalog;
 pub mod config;
+pub mod egress;
 mod handoff;
 mod hints;
 mod llm;
@@ -14,6 +15,7 @@ mod wire;
 
 pub use catalog::{discover_databricks_models, ModelEntry, DATABRICKS_V2_KNOWN_MODELS};
 pub use config::Provider;
+pub use llm::LmStudioNativeClient;
 pub use types::AgentError;
 
 /// Environment keys the Windows Git Bash resolver may inspect. `spawn_one()`
@@ -119,7 +121,27 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(async_main());
+        .block_on(async_main(false));
+    Ok(())
+}
+
+/// Runs the dedicated LM Studio-native ACP executable.
+///
+/// This entry point accepts no generic provider/auth subcommands, refuses any
+/// explicitly selected non-native provider, and defaults classification to
+/// `OFFICIAL`.
+pub fn run_lmstudio() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().len() > 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "buzz-lmstudio-agent does not accept subcommands",
+        )
+        .into());
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(true));
     Ok(())
 }
 
@@ -153,12 +175,17 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 }
 
-async fn async_main() {
+async fn async_main(lmstudio_only: bool) {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
         .init();
-    let cfg = Config::from_env().unwrap_or_else(|e| die(e));
+    let cfg = if lmstudio_only {
+        Config::from_lmstudio_env()
+    } else {
+        Config::from_env()
+    }
+    .unwrap_or_else(|e| die(e));
     let llm = Arc::new(Llm::new(&cfg).unwrap_or_else(|e| die(e.to_string())));
     let max_line = cfg.max_line_bytes;
     let app = Arc::new(App {

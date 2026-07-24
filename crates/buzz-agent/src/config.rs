@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use crate::egress::LmStudioRuntimeConfig;
+
 pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Reasoning/thinking effort level for providers that support it.
@@ -637,6 +639,7 @@ pub fn parse_thinking_effort(raw: Option<&str>) -> Result<Option<ThinkingEffort>
 
 pub const MAX_PROMPT_BYTES: usize = 1024 * 1024;
 pub const MAX_SYSTEM_PROMPT_BYTES: usize = 512 * 1024;
+const MAX_NATIVE_MODEL_BYTES: usize = 256;
 /// Total per-result byte ceiling (text + images). Sized for image-bearing
 /// results — view_image can legitimately return multi-MiB base64 payloads.
 /// Text is governed by the much smaller `BUZZ_AGENT_MAX_TOOL_RESULT_TEXT_BYTES`.
@@ -662,6 +665,9 @@ const DEFAULT_SYSTEM_PROMPT: &str =
 pub enum Provider {
     Anthropic,
     OpenAi,
+    /// LM Studio's native REST API with an application-enforced local-only
+    /// egress policy and native MCP integrations.
+    LmStudioNative,
     /// Databricks model serving. Routes to `{base_url}/serving-endpoints/{model}/invocations`
     /// with a dynamically-acquired bearer (OAuth 2.0 PKCE, or static `DATABRICKS_TOKEN`).
     /// Wire format is OpenAI-chat-compatible — reuses the same body builder and parser.
@@ -730,17 +736,33 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// Validated native runtime policy. Present only for
+    /// [`Provider::LmStudioNative`].
+    pub lmstudio_runtime: Option<LmStudioRuntimeConfig>,
 }
 
 impl Config {
     pub fn from_env() -> Result<Self, String> {
-        let databricks_host = env("DATABRICKS_HOST");
-        let databricks_model = env("DATABRICKS_MODEL");
         let provider = resolve_provider(
             env("BUZZ_AGENT_PROVIDER").as_deref(),
             env("ANTHROPIC_API_KEY").as_deref(),
             env("OPENAI_COMPAT_API_KEY").as_deref(),
         )?;
+        Self::from_env_for_provider(provider)
+    }
+
+    /// Loads configuration for the dedicated LM Studio-native executable.
+    ///
+    /// Unlike the generic entry point, an omitted provider selects
+    /// `lmstudio-native`; any explicit different provider is refused.
+    pub fn from_lmstudio_env() -> Result<Self, String> {
+        let provider = resolve_lmstudio_entrypoint_provider(env("BUZZ_AGENT_PROVIDER").as_deref())?;
+        Self::from_env_for_provider(provider)
+    }
+
+    fn from_env_for_provider(provider: Provider) -> Result<Self, String> {
+        let databricks_host = env("DATABRICKS_HOST");
+        let databricks_model = env("DATABRICKS_MODEL");
 
         // Universal model override — takes priority over provider-specific model
         // env vars (ANTHROPIC_MODEL, OPENAI_COMPAT_MODEL, DATABRICKS_MODEL) when
@@ -775,6 +797,16 @@ impl Config {
                 env_or("OPENAI_COMPAT_BASE_URL", "https://api.openai.com/v1"),
                 parse_openai_api(env("OPENAI_COMPAT_API").as_deref())?,
             ),
+            Provider::LmStudioNative => (
+                String::new(),
+                resolve_model(
+                    buzz_agent_model.as_deref(),
+                    env("LM_STUDIO_MODEL").as_deref(),
+                )
+                .ok_or_else(|| "config: LM_STUDIO_MODEL required".to_string())?,
+                env_or("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234"),
+                OpenAiApi::Auto,
+            ),
             Provider::Databricks | Provider::DatabricksV2 => (
                 env("DATABRICKS_TOKEN").unwrap_or_default(),
                 resolve_model(buzz_agent_model.as_deref(), databricks_model.as_deref())
@@ -782,6 +814,17 @@ impl Config {
                 databricks_host.ok_or_else(|| "config: DATABRICKS_HOST required".to_string())?,
                 OpenAiApi::Chat, // only read by OpenAI/legacy Databricks dispatch
             ),
+        };
+        let lmstudio_runtime = if provider == Provider::LmStudioNative {
+            Some(LmStudioRuntimeConfig::parse_with_token(
+                env("BUZZ_AGENT_CLASSIFICATION").as_deref(),
+                &base_url,
+                env("LM_STUDIO_FALLBACK_PROVIDER").as_deref(),
+                env("LM_STUDIO_MCP_INTEGRATIONS").as_deref(),
+                env("LM_STUDIO_API_TOKEN").as_deref(),
+            )?)
+        } else {
+            None
         };
         let system_prompt = match (env("BUZZ_AGENT_SYSTEM_PROMPT"), env("BUZZ_AGENT_SYSTEM_PROMPT_FILE")) {
             (Some(_), Some(_)) => return Err(
@@ -824,6 +867,7 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            lmstudio_runtime,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -864,6 +908,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            lmstudio_runtime: None,
         }
     }
 
@@ -873,6 +918,16 @@ impl Config {
         const MIN_TOOL_RESULT_TEXT_BYTES: usize = 1024;
         const MIN_TIMEOUT: Duration = Duration::from_secs(1);
 
+        if self.provider == Provider::LmStudioNative
+            && (self.model.is_empty()
+                || self.model.len() > MAX_NATIVE_MODEL_BYTES
+                || self.model.trim() != self.model
+                || self.model.bytes().any(|byte| byte.is_ascii_control()))
+        {
+            return Err(format!(
+                "config: LM Studio model must be 1..={MAX_NATIVE_MODEL_BYTES} bytes without surrounding whitespace or control characters"
+            ));
+        }
         if self.max_output_tokens < 1 {
             return Err("config: BUZZ_AGENT_MAX_OUTPUT_TOKENS must be >= 1".into());
         }
@@ -998,6 +1053,7 @@ fn resolve_provider(
                 ),
                 "databricks" => Ok(Provider::Databricks),
                 "databricks_v2" | "databricks-v2" => Ok(Provider::DatabricksV2),
+                "lmstudio-native" => Ok(Provider::LmStudioNative),
                 _ => Err(format!(
                     "config: BUZZ_AGENT_PROVIDER={raw} not supported"
                 )),
@@ -1006,6 +1062,15 @@ fn resolve_provider(
         None => Err(
             "config: BUZZ_AGENT_PROVIDER is required — set it to your provider (e.g. anthropic, openai, databricks)".into(),
         ),
+    }
+}
+
+fn resolve_lmstudio_entrypoint_provider(requested: Option<&str>) -> Result<Provider, String> {
+    match requested {
+        None | Some("") | Some("lmstudio-native") => Ok(Provider::LmStudioNative),
+        Some(other) => Err(format!(
+            "config: buzz-lmstudio-agent refuses provider {other:?}; only lmstudio-native is permitted"
+        )),
     }
 }
 
@@ -1261,6 +1326,42 @@ mod tests {
     fn resolve_provider_unsupported_error_preserves_user_casing() {
         let err = resolve_provider(Some("OpenAIish"), None, None).unwrap_err();
         assert!(err.contains("BUZZ_AGENT_PROVIDER=OpenAIish"));
+    }
+
+    #[test]
+    fn resolve_provider_accepts_explicit_lmstudio_native_without_cloud_credentials() {
+        assert_eq!(
+            resolve_provider(Some("lmstudio-native"), None, None).unwrap(),
+            Provider::LmStudioNative
+        );
+    }
+
+    #[test]
+    fn dedicated_lmstudio_entrypoint_defaults_native_and_refuses_other_providers() {
+        assert_eq!(
+            resolve_lmstudio_entrypoint_provider(None).unwrap(),
+            Provider::LmStudioNative
+        );
+        assert_eq!(
+            resolve_lmstudio_entrypoint_provider(Some("lmstudio-native")).unwrap(),
+            Provider::LmStudioNative
+        );
+        let err = resolve_lmstudio_entrypoint_provider(Some("openai")).unwrap_err();
+        assert!(err.contains("refuses provider"), "{err}");
+    }
+
+    #[test]
+    fn native_model_identifier_is_bounded_and_nonempty() {
+        let mut cfg = Config::for_discovery(Provider::LmStudioNative, String::new(), String::new());
+        cfg.mcp_max_restart_attempts = 1;
+        cfg.mcp_restart_base_ms = 1;
+        cfg.mcp_restart_max_ms = 1;
+        cfg.model = "m".repeat(MAX_NATIVE_MODEL_BYTES);
+        assert!(cfg.validate().is_ok());
+        cfg.model.push('x');
+        assert!(cfg.validate().is_err());
+        cfg.model.clear();
+        assert!(cfg.validate().is_err());
     }
 
     #[test]

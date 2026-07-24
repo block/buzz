@@ -131,6 +131,16 @@ impl LmStudioChatRequest {
         self.previous_response_id = Some(response_id);
         Ok(self)
     }
+
+    /// Returns the exact native MCP integrations carried by this request.
+    pub fn integrations(&self) -> &[EphemeralMcpIntegration] {
+        &self.integrations
+    }
+
+    /// Returns the prior native response ID for a continuation request.
+    pub fn previous_response_id(&self) -> Option<&str> {
+        self.previous_response_id.as_deref()
+    }
 }
 
 fn validate_response_id(response_id: &str) -> Result<(), AgentError> {

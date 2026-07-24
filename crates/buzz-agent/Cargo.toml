@@ -18,6 +18,10 @@ path = "src/lib.rs"
 name = "buzz-agent"
 path = "src/main.rs"
 
+[[bin]]
+name = "buzz-lmstudio-agent"
+path = "src/bin/buzz-lmstudio-agent.rs"
+
 # Test-only fake MCP server. Built unconditionally because cargo can't gate
 # bins on `cfg(test)`, but it's tiny and only used by integration tests.
 [[bin]]
