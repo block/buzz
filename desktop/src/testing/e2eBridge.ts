@@ -467,6 +467,7 @@ type RawUserProfileSummary = {
   display_name: string | null;
   name?: string | null;
   avatar_url: string | null;
+  about?: string | null;
   nip05_handle: string | null;
   owner_pubkey: string | null;
   is_agent?: boolean;
@@ -5491,6 +5492,7 @@ async function handleGetUsersBatch(
         display_name: profile.display_name,
         name: profile.name ?? null,
         avatar_url: profile.avatar_url,
+        about: profile.about,
         nip05_handle: profile.nip05_handle,
         owner_pubkey: profile.owner_pubkey,
         is_agent: profile.is_agent ?? false,
@@ -5516,6 +5518,7 @@ async function handleGetUsersBatch(
       display_name: content.display_name ?? content.name ?? null,
       name: content.name ?? null,
       avatar_url: content.picture ?? null,
+      about: content.about ?? null,
       nip05_handle: content.nip05 ?? null,
       owner_pubkey:
         ((ev.tags ?? []) as string[][]).find(
@@ -5545,6 +5548,7 @@ async function handleGetUsersBatch(
       display_name: profile.display_name,
       name: profile.name ?? null,
       avatar_url: profile.avatar_url,
+      about: profile.about,
       nip05_handle: profile.nip05_handle,
       owner_pubkey: profile.owner_pubkey,
       is_agent: profile.is_agent ?? false,
@@ -5602,6 +5606,7 @@ async function handleSearchUsers(
         pubkey: profile.pubkey,
         display_name: profile.display_name,
         avatar_url: profile.avatar_url,
+        about: profile.about,
         nip05_handle: profile.nip05_handle,
         owner_pubkey: profile.owner_pubkey,
         is_agent: profile.is_agent ?? false,
@@ -5628,6 +5633,7 @@ async function handleSearchUsers(
       pubkey: ev.pubkey ?? "",
       display_name: content.display_name ?? content.name ?? null,
       avatar_url: content.picture ?? null,
+      about: content.about ?? null,
       nip05_handle: content.nip05 ?? null,
       owner_pubkey:
         ((ev.tags ?? []) as string[][]).find(

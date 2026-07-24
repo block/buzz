@@ -341,6 +341,7 @@ pub fn users_batch_from_events(
                 .map(str::to_string),
             name: v.get("name").and_then(Value::as_str).map(str::to_string),
             avatar_url: v.get("picture").and_then(Value::as_str).map(str::to_string),
+            about: v.get("about").and_then(Value::as_str).map(str::to_string),
             nip05_handle: v.get("nip05").and_then(Value::as_str).map(str::to_string),
             is_agent: owner_pubkey.is_some(),
             owner_pubkey,
@@ -833,6 +834,28 @@ mod tests {
             resp.profiles[&pubkey].owner_pubkey.as_deref(),
             Some(owner_pubkey.as_str())
         );
+    }
+
+    #[test]
+    fn users_batch_carries_about_when_present() {
+        let with_about = ev(
+            0,
+            r#"{"display_name":"Bumble","about":"Researcher — deep dives & sourcing"}"#,
+            vec![],
+        );
+        let without_about = ev(0, r#"{"display_name":"Fizz"}"#, vec![]);
+        let pk_with = with_about.pubkey.to_hex();
+        let pk_without = without_about.pubkey.to_hex();
+
+        let resp = users_batch_from_events(
+            &[with_about, without_about],
+            &[pk_with.clone(), pk_without.clone()],
+        );
+        assert_eq!(
+            resp.profiles[&pk_with].about.as_deref(),
+            Some("Researcher — deep dives & sourcing")
+        );
+        assert_eq!(resp.profiles[&pk_without].about, None);
     }
 
     #[test]

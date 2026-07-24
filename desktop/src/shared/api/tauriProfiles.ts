@@ -18,7 +18,7 @@ type RawProfile = {
   has_profile_event?: boolean;
 };
 
-type RawUserProfileSummary = Omit<RawProfile, "pubkey" | "about"> & {
+type RawUserProfileSummary = Omit<RawProfile, "pubkey"> & {
   name?: string | null;
   is_agent?: boolean;
 };
@@ -54,6 +54,7 @@ function fromRawUserProfileSummary(
     displayName: profile.display_name,
     name: profile.name ?? null,
     avatarUrl: profile.avatar_url,
+    about: profile.about,
     nip05Handle: profile.nip05_handle,
     ownerPubkey: profile.owner_pubkey,
     isAgent: profile.is_agent ?? false,
@@ -65,6 +66,7 @@ function fromRawUserSearchResult(user: RawUserSearchResult): UserSearchResult {
     pubkey: user.pubkey,
     displayName: user.display_name,
     avatarUrl: user.avatar_url,
+    about: user.about,
     nip05Handle: user.nip05_handle,
     ownerPubkey: user.owner_pubkey,
     isAgent: user.is_agent ?? false,
