@@ -260,9 +260,11 @@ complete in that environment, so no DMG success is claimed. Signed and
 notarised release packaging remains governed by
 [RELEASING.md](../../RELEASING.md).
 
-## Phase 3 dependencies
+## Phase 3 handoff
 
-Phase 3 must supply and verify:
+Phase 3 implements the local Memory/RAG and Apple-input contracts described in
+[Phase 3 knowledge and productivity](phase-3-knowledge-productivity.md).
+The Phase 2 handoff required:
 
 - a read-only local Memory/RAG MCP service on canonical literal loopback;
 - the encrypted signed RAG snapshot, encoders, sparse search, reranker, golden
@@ -272,3 +274,8 @@ Phase 3 must supply and verify:
 - host-level LM Studio network/update/telemetry containment evidence;
 - offline restart exercises with internet and home LAN disabled; and
 - proof that the configured Buzz relay is the MacBook-local authority.
+
+The first three items are implemented and hermetically verified. Real-key
+deployment, a real signed home snapshot, full host containment, air-gapped
+restart, clean-profile restore, and local-relay proof remain controlled
+deployment acceptance. Phase 3 does not claim those live exercises.

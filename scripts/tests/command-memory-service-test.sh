@@ -31,12 +31,25 @@ grep -Fq 'MEMORY_INDEX_ROOT: /data/index' <<<"${memory_block}" ||
 grep -Fq 'MEMORY_NODE_ID: ${BUZZ_MEMORY_NODE_ID:-node:macbook-command}' \
   <<<"${memory_block}" ||
   fail "Memory has a stable local node identity"
+grep -Fq 'MEMORY_MCP_REQUIRE_AUTH: "true"' <<<"${memory_block}" ||
+  fail "Memory MCP authentication is mandatory in the command profile"
+grep -Fq 'MEMORY_ATTESTATION_SECRET="$$(cat /run/secrets/memory-attestation-secret)"' \
+  <<<"${memory_block}" ||
+  fail "Memory loads a separate server-attestation secret"
+grep -Fq 'memory-attestation-secret' <<<"${memory_block}" ||
+  fail "Memory mounts the server-attestation secret"
+grep -Fq 'next(k for k,v in tokens.items() if \"read\" in v)' <<<"${memory_block}" ||
+  fail "Memory readiness derives a read token from token-to-capability JSON"
 grep -Fq '/replication/readiness' <<<"${memory_block}" ||
   fail "Memory has an authenticated replication readiness probe"
 grep -Fq 'memory-vault:/data' <<<"${memory_block}" ||
   fail "Memory mounts the canonical vault volume"
 grep -Fq 'memory-index:/data/index' <<<"${memory_block}" ||
   fail "Memory mounts the rebuildable index volume"
+grep -Fq 'memory-attestation-secret:' "${compose_file}" ||
+  fail "Compose declares the separate Memory attestation secret"
+grep -Fq 'BUZZ_MEMORY_ATTESTATION_SECRET_FILE' "${compose_file}" ||
+  fail "Memory attestation secret path is operator-configurable"
 
 grep -Eq 'default_optional_services=.*memory' "${checker}" ||
   fail "local service readiness allowlists Memory"

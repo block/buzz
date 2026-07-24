@@ -209,6 +209,10 @@ apple-inputs-test:
       -destination 'platform=macOS' \
       CODE_SIGNING_ALLOWED=NO
 
+# Run the hermetic Phase 3 knowledge, replication, admission, and Apple-input gates.
+check-command-knowledge:
+    ./scripts/check-command-knowledge.sh
+
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
     #!/usr/bin/env bash

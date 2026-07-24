@@ -167,6 +167,7 @@ services:
     command:
       - |
         export MEMORY_REPLICATION_TOKENS="$$(cat /run/secrets/memory-replication-tokens)"
+        export MEMORY_ATTESTATION_SECRET="$$(cat /run/secrets/memory-attestation-secret)"
         exec memory-mcp
     environment:
       MEMORY_HOST: 0.0.0.0
@@ -174,6 +175,7 @@ services:
       MEMORY_VAULT_ROOT: /data/current
       MEMORY_INDEX_ROOT: /data/index
       MEMORY_NODE_ID: ${BUZZ_MEMORY_NODE_ID:-node:macbook-command}
+      MEMORY_MCP_REQUIRE_AUTH: "true"
       MEMORY_REPLICATION_MAX_ITEMS: "200"
       MEMORY_REPLICATION_MAX_BYTES: "2097152"
     ports:
@@ -183,13 +185,14 @@ services:
       - memory-index:/data/index
     secrets:
       - memory-replication-tokens
+      - memory-attestation-secret
     networks:
       - buzz-net
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "python3 -c 'import json,urllib.request; t=json.load(open(\"/run/secrets/memory-replication-tokens\", encoding=\"utf-8\"))[\"read\"]; q=urllib.request.Request(\"http://127.0.0.1:8006/replication/readiness\", headers={\"Authorization\":\"Bearer \"+t,\"Accept\":\"application/json\"}); r=urllib.request.build_opener(urllib.request.ProxyHandler({})).open(q, timeout=3); v=json.load(r); assert v[\"status\"]==\"ready\" and v[\"node_id\"]==\"${BUZZ_MEMORY_NODE_ID:-node:macbook-command}\"'",
+          "python3 -c 'import json,urllib.request; tokens=json.load(open(\"/run/secrets/memory-replication-tokens\", encoding=\"utf-8\")); t=next(k for k,v in tokens.items() if \"read\" in v); q=urllib.request.Request(\"http://127.0.0.1:8006/replication/readiness\", headers={\"Authorization\":\"Bearer \"+t,\"Accept\":\"application/json\"}); r=urllib.request.build_opener(urllib.request.ProxyHandler({})).open(q, timeout=3); v=json.load(r); assert v[\"status\"]==\"ready\" and v[\"node_id\"]==\"${BUZZ_MEMORY_NODE_ID:-node:macbook-command}\"'",
         ]
       interval: 10s
       timeout: 5s
@@ -266,3 +269,5 @@ networks:
 secrets:
   memory-replication-tokens:
     file: ${BUZZ_MEMORY_REPLICATION_TOKENS_FILE:-.local/memory-replication-tokens.json}
+  memory-attestation-secret:
+    file: ${BUZZ_MEMORY_ATTESTATION_SECRET_FILE:-.local/memory-attestation-secret}
