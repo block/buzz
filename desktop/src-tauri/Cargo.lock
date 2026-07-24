@@ -1046,6 +1046,7 @@ dependencies = [
  "mesh-llm-sdk",
  "mesh-llm-system",
  "neteq",
+ "nix 0.31.3",
  "nostr",
  "notify-rust",
  "objc2-app-kit",

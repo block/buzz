@@ -223,14 +223,25 @@ fn bundled_helper_path() -> Result<PathBuf, SupervisionError> {
 }
 
 fn terminate(child: &mut Child) -> Result<(), SupervisionError> {
-    match child.try_wait() {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => {
+    let exited = child.try_wait().map_err(|_| SupervisionError::Teardown)?;
+    #[cfg(unix)]
+    {
+        use nix::errno::Errno;
+        use nix::sys::signal::{killpg, Signal};
+        use nix::unistd::Pid;
+        match killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL) {
+            Ok(()) | Err(Errno::ESRCH) => {}
+            Err(_) => return Err(SupervisionError::Teardown),
+        }
+    }
+    match exited {
+        Some(_) => Ok(()),
+        None => {
+            #[cfg(not(unix))]
             child.kill().map_err(|_| SupervisionError::Teardown)?;
             child.wait().map_err(|_| SupervisionError::Teardown)?;
             Ok(())
         }
-        Err(_) => Err(SupervisionError::Teardown),
     }
 }
 
@@ -321,7 +332,8 @@ fn supervise_helper(
         return Err(SupervisionError::RequestEncoding);
     }
 
-    let mut child = Command::new(helper_path)
+    let mut command = Command::new(helper_path);
+    command
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")
@@ -329,9 +341,13 @@ fn supervise_helper(
         .current_dir(working_directory)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| SupervisionError::Spawn)?;
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().map_err(|_| SupervisionError::Spawn)?;
     let mut stdin = child.stdin.take().ok_or(SupervisionError::Spawn)?;
     let stdout = child.stdout.take().ok_or(SupervisionError::Spawn)?;
     let stderr = child.stderr.take().ok_or(SupervisionError::Spawn)?;
@@ -383,7 +399,7 @@ fn supervise_helper(
             };
         }
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
+            Ok(Some(status)) => break terminate(&mut child).map(|()| status),
             Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(5));
             }
@@ -571,15 +587,29 @@ printf '%s\n' '{}'
     }
 
     #[test]
-    fn kills_helper_at_deadline() {
-        let (_directory, helper) =
-            fixture_script("IFS= read -r _request\nsleep 5\nprintf '%s\\n' '{}'");
+    fn kills_helper_process_group_at_deadline() {
+        let (_directory, helper) = fixture_script(
+            "IFS= read -r _request\ntrap '' HUP TERM\n(trap '' HUP TERM; sleep 5) &\nwait",
+        );
         let started = std::time::Instant::now();
 
-        let error = supervise_helper(&helper, &permission_request(), Duration::from_millis(100))
+        let error = supervise_helper(&helper, &permission_request(), Duration::from_millis(500))
             .expect_err("hung helper must time out");
 
         assert_ne!(error.code(), "unimplemented");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn kills_pipe_holding_descendants_after_helper_exits() {
+        let (_directory, helper) =
+            fixture_script("IFS= read -r _request\n(trap '' HUP TERM; sleep 5) &\nexit 0");
+        let started = std::time::Instant::now();
+
+        let error = supervise_helper(&helper, &permission_request(), Duration::from_secs(2))
+            .expect_err("an exited helper without a response must fail");
+
+        assert_eq!(error, SupervisionError::Protocol);
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 

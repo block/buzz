@@ -31,6 +31,7 @@ tauri-build = { version = "2", features = [] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+nix = { version = "0.31", default-features = false, features = ["process", "signal"] }
 ctrlc = { version = "3", features = ["termination"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
