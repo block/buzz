@@ -48,7 +48,7 @@ void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
     // Only adding counts as a use — removing a reaction shouldn't promote the
     // emoji in the frequently-used ranking.
     ref.read(recentEmojiProvider.notifier).record(emoji);
-    actions.addReaction(message.id, emoji);
+    actions.addReaction(message.id, message.pubkey, emoji);
   }
 }
 
@@ -81,7 +81,9 @@ void showAddReactionPicker({
     onSelect: (emoji) {
       ref.read(recentEmojiProvider.notifier).record(emoji);
       armReactionBurst(ref, message, emoji);
-      ref.read(channelActionsProvider).addReaction(message.id, emoji);
+      ref
+          .read(channelActionsProvider)
+          .addReaction(message.id, message.pubkey, emoji);
     },
   );
 }
