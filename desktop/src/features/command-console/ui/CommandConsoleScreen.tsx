@@ -16,6 +16,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/shared/ui/card";
+import { useCommandConsoleStatus } from "../hooks/useCommandConsoleStatus";
+import { CommandSystemStatus } from "./CommandSystemStatus";
 
 const ADVISERS = [
   {
@@ -51,6 +53,8 @@ const ADVISERS = [
 ] as const;
 
 export function CommandConsoleScreen() {
+  const systemStatus = useCommandConsoleStatus();
+
   return (
     <div
       className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto"
@@ -83,6 +87,8 @@ export function CommandConsoleScreen() {
             simulated advice or readiness.
           </p>
         </header>
+
+        <CommandSystemStatus status={systemStatus} />
 
         <section aria-labelledby="adviser-placeholders-heading">
           <div className="mb-4">
