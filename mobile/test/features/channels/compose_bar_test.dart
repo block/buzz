@@ -18,6 +18,8 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
@@ -141,9 +143,11 @@ Widget _buildComposeBar({
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  List<CustomEmoji> customEmoji = const <CustomEmoji>[],
 }) {
   return ProviderScope(
     overrides: [
+      customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
@@ -170,7 +174,10 @@ Widget _buildComposeBar({
             ),
       home: Scaffold(
         body: SafeArea(
-          child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          ),
         ),
       ),
     ),
@@ -255,6 +262,42 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('inserts a community emoji at the cursor from the action row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          customEmoji: const [
+            CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
+          ],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello world');
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.controller!.selection = const TextSelection.collapsed(
+        offset: 6,
+      );
+
+      await tester.tap(find.byIcon(LucideIcons.smilePlus));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.sparkles));
+      await tester.pump();
+      await tester.tap(find.byTooltip(':meow:'));
+      await tester.pumpAndSettle();
+
+      expect(textField.controller!.text, 'hello :meow:world');
+      expect(textField.controller!.selection.baseOffset, 12);
+    });
+
     testWidgets('uploads an image and sends markdown plus imeta tags', (
       tester,
     ) async {
@@ -299,14 +342,14 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
       await tester.pumpAndSettle();
 
@@ -318,6 +361,48 @@ void main() {
         contains('url https://relay.example/media/test.png'),
       );
       expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('keeps upload progress visible after the picker closes', (
+      tester,
+    ) async {
+      final pickedImage = Completer<XFile?>();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () => pickedImage.future,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsOneWidget,
+      );
+      expect(find.text('Uploading attachment…'), findsOneWidget);
+
+      pickedImage.complete(null);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsNothing,
+      );
     });
 
     testWidgets('pasted image follows the attachment preview and send path', (
@@ -370,6 +455,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final insertionConfiguration = textField.contentInsertionConfiguration;
       expect(insertionConfiguration, isNotNull);
@@ -400,7 +486,7 @@ void main() {
       );
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -450,6 +536,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -513,6 +600,7 @@ void main() {
         );
         await tester.pump();
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -581,6 +669,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -631,6 +720,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       textField.contentInsertionConfiguration!.onContentInserted(
         const KeyboardInsertedContent(
@@ -669,6 +759,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -712,6 +803,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
@@ -767,9 +859,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       final attachmentFinder = find.byKey(
@@ -824,9 +915,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -866,9 +956,8 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Photo'));
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Photos'));
         await tester.pumpAndSettle();
 
         expect(
@@ -916,9 +1005,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
@@ -981,12 +1069,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -1082,12 +1171,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
 
       expect(didSend, isFalse);
@@ -1142,9 +1232,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
@@ -1216,8 +1305,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
+        await _openAttachmentMenu(tester);
         await tester.tap(find.text('Video'));
         // Pump enough frames for the async file read + upload to complete.
         // Can't use pumpAndSettle here — the upload spinner's animation
@@ -1229,7 +1317,7 @@ void main() {
         // Video attachment should show a video icon (not a broken image).
         expect(find.byIcon(LucideIcons.video), findsOneWidget);
 
-        await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
         await tester.pumpAndSettle();
 
@@ -1454,13 +1542,25 @@ AgentDirectoryEntry _testAgent(String pubkey) {
   );
 }
 
+Future<void> _expandComposer(WidgetTester tester) async {
+  if (find.byType(TextField).evaluate().isNotEmpty) return;
+  await tester.tap(find.text('Message\u2026'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openAttachmentMenu(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Add attachment').hitTestable());
+  await tester.pumpAndSettle();
+}
+
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
+  await _expandComposer(tester);
   await tester.enterText(find.byType(TextField), '@hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-  await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+  await tester.tap(find.byIcon(LucideIcons.arrowUp));
   await tester.pumpAndSettle();
 }
 

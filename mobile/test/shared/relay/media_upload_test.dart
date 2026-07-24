@@ -68,6 +68,15 @@ final _heicBytes = Uint8List.fromList([
   0x63,
 ]);
 
+class _NamedXFile extends XFile {
+  final String _name;
+
+  _NamedXFile(super.bytes, this._name) : super.fromData();
+
+  @override
+  String get name => _name;
+}
+
 final _gifBytes = Uint8List.fromList([
   ...ascii.encode('GIF89a'),
   0x02,
@@ -1146,6 +1155,69 @@ void main() {
           ),
         ),
       );
+    });
+
+    test('rejects empty generic file attachments before upload', () async {
+      var uploadRequested = false;
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          uploadRequested = true;
+          return http.Response('', HttpStatus.ok);
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickAttachmentFile: () async =>
+            XFile.fromData(Uint8List(0), name: 'empty.txt'),
+      );
+
+      await expectLater(
+        service.pickAndUploadFile(),
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            contains('File is empty'),
+          ),
+        ),
+      );
+      expect(uploadRequested, isFalse);
+    });
+
+    test('sanitizes generic filenames to relay imeta constraints', () async {
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/test.bin',
+              'sha256':
+                  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+              'size': request.bodyBytes.length,
+              'type': 'application/octet-stream',
+              'uploaded': 1,
+            }),
+            HttpStatus.ok,
+          );
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickAttachmentFile: () async => _NamedXFile(
+          Uint8List.fromList([1]),
+          'folder\\draft\u0000${List.filled(200, 'é').join()}.txt',
+        ),
+      );
+
+      final descriptor = await service.pickAndUploadFile();
+      final filename = descriptor!.filename!;
+
+      expect(filename, startsWith('draft'));
+      expect(filename, isNot(contains('\u0000')));
+      expect(filename, isNot(contains('/')));
+      expect(filename, isNot(contains('\\')));
+      expect(utf8.encode(filename).length, lessThanOrEqualTo(255));
     });
   });
 

@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:collection';
 
+import 'package:camera/camera.dart' as camera;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
@@ -16,6 +19,7 @@ import '../profile/user_cache_provider.dart';
 import '../profile/user_profile.dart';
 import '../custom_emoji/custom_emoji.dart';
 import '../custom_emoji/custom_emoji_provider.dart';
+import 'camera_capture_cleanup.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
@@ -28,6 +32,7 @@ part 'compose_bar/helpers.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
+part 'compose_bar/camera_preview.dart';
 part 'compose_bar/send_button.dart';
 
 const _pastedImageMimeTypes = <String>[
@@ -71,6 +76,9 @@ class ComposeBar extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final controller = useTextEditingController();
     final focusNode = useFocusNode();
+    final isComposerExpanded = useState(false);
+    final showAttachments = useState(false);
+    final showCamera = useState(false);
     final isSending = useState(false);
     final showFormatting = useState(false);
     final attachments = useState<List<BlobDescriptor>>([]);
@@ -80,10 +88,40 @@ class ComposeBar extends HookConsumerWidget {
     final hasAttachments = attachments.value.isNotEmpty;
     final hasPendingUploads = uploadingCount.value > 0;
     final customEmoji = ref.watch(customEmojiListProvider);
+    final reducedMotion = MediaQuery.disableAnimationsOf(context);
+    final composerExpansionController = useAnimationController(
+      initialValue: 0,
+      upperBound: 1.05,
+    );
+    final composerExpansionValue = useAnimation(composerExpansionController);
+    final composerExpansionProgress = composerExpansionValue
+        .clamp(0.0, 1.0)
+        .toDouble();
 
     final resolvedHint =
         hintText ??
         (channelName.isNotEmpty ? 'Message #$channelName' : 'Message\u2026');
+
+    useEffect(() {
+      final target = isComposerExpanded.value ? 1.0 : 0.0;
+      if (reducedMotion) {
+        composerExpansionController.value = target;
+      } else if ((composerExpansionController.value - target).abs() > 0.001) {
+        composerExpansionController.animateWith(
+          SpringSimulation(
+            SpringDescription.withDurationAndBounce(
+              duration: const Duration(milliseconds: 280),
+              bounce: 0.16,
+            ),
+            composerExpansionController.value,
+            target,
+            0,
+            snapToEnd: true,
+          ),
+        );
+      }
+      return null;
+    }, [isComposerExpanded.value, reducedMotion]);
 
     useEffect(() {
       if (defaultTargetPlatform != TargetPlatform.iOS) return null;
@@ -288,12 +326,28 @@ class ComposeBar extends HookConsumerWidget {
     // Insert `#` at the cursor to manually trigger channel mode.
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
 
+    // Insert a selected emoji at the cursor without replacing the draft.
+    void insertEmoji(String emoji) {
+      final text = controller.text;
+      final selection = controller.selection;
+      final cursor = selection.isValid
+          ? selection.baseOffset.clamp(0, text.length)
+          : text.length;
+      controller.value = TextEditingValue(
+        text: text.replaceRange(cursor, cursor, emoji),
+        selection: TextSelection.collapsed(offset: cursor + emoji.length),
+      );
+      focusNode.requestFocus();
+    }
+
     void clearComposer() {
       controller.clear();
       attachments.value = [];
       mentionMap.value.clear();
       mentionQuery.value = null;
       channelQuery.value = null;
+      showAttachments.value = false;
+      showCamera.value = false;
       showFormatting.value = false;
       uploadError.value = null;
       focusNode.requestFocus();
@@ -490,21 +544,6 @@ class ComposeBar extends HookConsumerWidget {
       );
     }
 
-    // Insert an emoji at the cursor.
-    void insertEmoji(String emoji) {
-      final text = controller.text;
-      final cursor = controller.selection.isValid
-          ? controller.selection.baseOffset
-          : text.length;
-      final before = text.substring(0, cursor);
-      final after = text.substring(cursor);
-      controller.text = '$before$emoji$after';
-      controller.selection = TextSelection.collapsed(
-        offset: cursor + emoji.length,
-      );
-      focusNode.requestFocus();
-    }
-
     // Wrap (or insert) markdown formatting around the current selection.
     void applyFormat(String prefix, [String? suffix]) {
       suffix ??= prefix;
@@ -539,61 +578,150 @@ class ComposeBar extends HookConsumerWidget {
 
     // ----- Widget tree ----------------------------------------------------
 
-    final hasSuggestions =
-        suggestions.isNotEmpty || channelSuggestions.isNotEmpty;
+    void chooseAttachment(Future<BlobDescriptor?> Function() pick) {
+      showAttachments.value = false;
+      showCamera.value = false;
+      pickAndUpload(pick);
+    }
 
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        // Channel suggestions (above the compose chrome).
-        if (channelSuggestions.isNotEmpty)
-          _ChannelSuggestions(
-            suggestions: channelSuggestions,
-            onSelect: insertChannel,
-          ),
+    void toggleAttachments() {
+      if (showCamera.value) {
+        showCamera.value = false;
+        showAttachments.value = false;
+        return;
+      }
+      showCamera.value = false;
+      showAttachments.value = !showAttachments.value;
+    }
 
-        // Mention suggestions (above the compose chrome).
-        if (suggestions.isNotEmpty)
-          _MentionSuggestions(
-            suggestions: suggestions,
-            userCache: userCache,
-            currentPubkey: currentPubkey,
-            isDmChannel: isDmChannel,
-            onSelect: insertMention,
-          ),
+    void openCamera() {
+      focusNode.unfocus();
+      showAttachments.value = false;
+      showCamera.value = true;
+    }
 
-        // Compose chrome — bottom-sheet style container.
-        Container(
+    final motionDuration = reducedMotion
+        ? Duration.zero
+        : const Duration(milliseconds: 180);
+    final suggestionOverlayController = useMemoized(
+      OverlayPortalController.new,
+    );
+
+    useEffect(() {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) suggestionOverlayController.show();
+      });
+      return null;
+    }, [suggestionOverlayController]);
+
+    void expandComposer() {
+      if (isComposerExpanded.value) return;
+      showAttachments.value = false;
+      showCamera.value = false;
+      isComposerExpanded.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) focusNode.requestFocus();
+      });
+    }
+
+    final suggestionPanel = channelSuggestions.isNotEmpty
+        ? KeyedSubtree(
+            key: const ValueKey('channel-suggestions'),
+            child: _ChannelSuggestions(
+              suggestions: channelSuggestions,
+              onSelect: insertChannel,
+            ),
+          )
+        : suggestions.isNotEmpty
+        ? KeyedSubtree(
+            key: const ValueKey('mention-suggestions'),
+            child: _MentionSuggestions(
+              suggestions: suggestions,
+              userCache: userCache,
+              currentPubkey: currentPubkey,
+              isDmChannel: isDmChannel,
+              onSelect: insertMention,
+            ),
+          )
+        : const SizedBox.shrink(key: ValueKey('no-suggestions'));
+    final overlayPanel = showCamera.value
+        ? KeyedSubtree(
+            key: const ValueKey('camera-preview'),
+            child: _InlineCameraPreview(
+              onClose: () => showCamera.value = false,
+              onCapture: (image) async {
+                await pickAndUpload(
+                  () => ref.read(mediaUploadServiceProvider).uploadImage(image),
+                );
+                if (context.mounted) showCamera.value = false;
+              },
+            ),
+          )
+        : showAttachments.value
+        ? KeyedSubtree(
+            key: const ValueKey('attachment-menu'),
+            child: Align(
+              alignment: Alignment.bottomLeft,
+              heightFactor: 1,
+              child: _AttachmentMenu(
+                onCamera: openCamera,
+                onPhotos: () => chooseAttachment(
+                  ref.read(mediaUploadServiceProvider).pickAndUploadImage,
+                ),
+                onVideo: () => chooseAttachment(
+                  ref.read(mediaUploadServiceProvider).pickAndUploadVideo,
+                ),
+                onFiles: () => chooseAttachment(
+                  ref.read(mediaUploadServiceProvider).pickAndUploadFile,
+                ),
+              ),
+            ),
+          )
+        : suggestionPanel;
+
+    // Suggestions and attachments live in the overlay so showing them cannot
+    // reflow the composer. Both stay anchored just above the capsule.
+    return Padding(
+      padding: EdgeInsets.only(
+        left: Grid.twelve,
+        right: Grid.twelve,
+        bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.xxs,
+      ),
+      child: OverlayPortal.overlayChildLayoutBuilder(
+        controller: suggestionOverlayController,
+        overlayChildBuilder: (context, layoutInfo) {
+          final composerOrigin = MatrixUtils.transformPoint(
+            layoutInfo.childPaintTransform,
+            Offset.zero,
+          );
+          return Positioned(
+            left: composerOrigin.dx,
+            bottom: layoutInfo.overlaySize.height - composerOrigin.dy,
+            width: layoutInfo.childSize.width,
+            child: ClipRect(
+              child: Padding(
+                padding: const EdgeInsets.only(bottom: Grid.xxs),
+                child: _SuggestionPanelMotion(
+                  duration: motionDuration,
+                  child: overlayPanel,
+                ),
+              ),
+            ),
+          );
+        },
+        child: Container(
           decoration: BoxDecoration(
             color: context.colors.surfaceContainerHighest,
-            borderRadius: !hasSuggestions
-                ? const BorderRadius.vertical(
-                    top: Radius.circular(Radii.dialog),
-                  )
-                : BorderRadius.zero,
-            boxShadow: !hasSuggestions
-                ? [
-                    BoxShadow(
-                      color: context.colors.shadow.withValues(alpha: 0.08),
-                      blurRadius: 8,
-                      offset: const Offset(0, -2),
-                    ),
-                  ]
-                : null,
+            borderRadius: BorderRadius.circular(Radii.dialog),
+            border: Border.all(
+              color: Colors.black.withValues(alpha: 0.04),
+              width: 1,
+            ),
           ),
-          padding: EdgeInsets.only(
-            left: Grid.gutter,
-            right: Grid.gutter,
-            top: Grid.xs,
-            bottom: MediaQuery.viewPaddingOf(context).bottom + Grid.twelve,
-          ),
+          padding: const EdgeInsets.all(Grid.xxs),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Formatting toolbar (toggled via Aa button).
-              if (showFormatting.value)
-                _FormattingToolbar(onFormat: applyFormat),
-
               if (hasAttachments || hasPendingUploads) ...[
                 _AttachmentStrip(
                   attachments: attachments.value,
@@ -616,110 +744,185 @@ class ComposeBar extends HookConsumerWidget {
                 const SizedBox(height: Grid.xxs),
               ],
 
-              // Row 1 — text input (full width, grows).
-              TextField(
-                controller: controller,
-                focusNode: focusNode,
-                textInputAction: TextInputAction.send,
-                contextMenuBuilder: buildContextMenu,
-                contentInsertionConfiguration: ContentInsertionConfiguration(
-                  allowedMimeTypes: _pastedImageMimeTypes,
-                  onContentInserted: uploadPastedImage,
-                ),
-                onSubmitted: (_) => send(),
-                minLines: 1,
-                maxLines: 5,
-                style: context.textTheme.bodyMedium,
-                decoration: InputDecoration(
-                  hintText: resolvedHint,
-                  hintStyle: context.textTheme.bodyMedium?.copyWith(
-                    color: context.colors.onSurfaceVariant,
+              // Keep the default state out of the focus system entirely so
+              // restored native focus cannot expand a newly opened channel.
+              if (isComposerExpanded.value)
+                TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  textInputAction: TextInputAction.send,
+                  contextMenuBuilder: buildContextMenu,
+                  contentInsertionConfiguration: ContentInsertionConfiguration(
+                    allowedMimeTypes: _pastedImageMimeTypes,
+                    onContentInserted: uploadPastedImage,
                   ),
-                  border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: Grid.half,
-                    vertical: Grid.half,
+                  onSubmitted: (_) => send(),
+                  minLines: 1,
+                  maxLines: 5,
+                  style: context.textTheme.bodyLarge,
+                  decoration: InputDecoration(
+                    hintText: resolvedHint,
+                    hintStyle: context.textTheme.bodyLarge?.copyWith(
+                      color: context.colors.onSurfaceVariant,
+                    ),
+                    border: InputBorder.none,
+                    enabledBorder: InputBorder.none,
+                    focusedBorder: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: Grid.half,
+                      vertical: Grid.half,
+                    ),
+                    isDense: true,
                   ),
-                  isDense: true,
-                ),
-              ),
-
-              const SizedBox(height: Grid.xxs),
-
-              // Row 2 — action buttons [paperclip, emoji, @, Aa] ... [send].
-              Row(
-                children: [
-                  _ComposeAction(
-                    icon: LucideIcons.paperclip,
-                    onTap: () {
-                      showModalBottomSheet<void>(
-                        context: context,
-                        showDragHandle: true,
-                        builder: (sheetContext) => SafeArea(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              ListTile(
-                                leading: const Icon(LucideIcons.image),
-                                title: const Text('Photo'),
-                                onTap: () {
-                                  Navigator.of(sheetContext).pop();
-                                  pickAndUpload(
-                                    ref
-                                        .read(mediaUploadServiceProvider)
-                                        .pickAndUploadImage,
-                                  );
-                                },
+                )
+              else
+                Row(
+                  children: [
+                    _AttachmentTrigger(
+                      open: showAttachments.value || showCamera.value,
+                      onTap: toggleAttachments,
+                    ),
+                    const SizedBox(width: Grid.xxs),
+                    Expanded(
+                      child: Semantics(
+                        button: true,
+                        label: resolvedHint,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: expandComposer,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: Grid.half,
+                            ),
+                            child: Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text(
+                                resolvedHint,
+                                style: context.textTheme.bodyLarge?.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                ),
                               ),
-                              ListTile(
-                                leading: const Icon(LucideIcons.video),
-                                title: const Text('Video'),
-                                onTap: () {
-                                  Navigator.of(sheetContext).pop();
-                                  pickAndUpload(
-                                    ref
-                                        .read(mediaUploadServiceProvider)
-                                        .pickAndUploadVideo,
-                                  );
-                                },
-                              ),
-                            ],
+                            ),
                           ),
                         ),
-                      );
-                    },
-                  ),
-                  _ComposeAction(
-                    icon: LucideIcons.smilePlus,
-                    onTap: () => showEmojiPicker(
-                      context: context,
-                      onSelect: insertEmoji,
+                      ),
+                    ),
+                  ],
+                ),
+
+              ClipRect(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  heightFactor: composerExpansionValue,
+                  child: IgnorePointer(
+                    ignoring: composerExpansionValue < 0.98,
+                    child: Opacity(
+                      opacity: composerExpansionProgress,
+                      child: Transform.translate(
+                        offset: Offset(
+                          0,
+                          Grid.xxs * (1 - composerExpansionProgress),
+                        ),
+                        child: Column(
+                          children: [
+                            const SizedBox(height: Grid.xxs),
+                            Row(
+                              children: [
+                                _AttachmentTrigger(
+                                  open:
+                                      showAttachments.value ||
+                                      showCamera.value ||
+                                      showFormatting.value,
+                                  onTap: () {
+                                    if (showFormatting.value) {
+                                      showFormatting.value = false;
+                                    } else {
+                                      toggleAttachments();
+                                    }
+                                  },
+                                ),
+                                const SizedBox(width: Grid.half),
+                                Expanded(
+                                  child: AnimatedSwitcher(
+                                    duration: motionDuration,
+                                    switchInCurve: Curves.easeOutCubic,
+                                    switchOutCurve: Curves.easeInCubic,
+                                    layoutBuilder:
+                                        (currentChild, previousChildren) =>
+                                            Stack(
+                                              alignment: Alignment.centerLeft,
+                                              children: [
+                                                ...previousChildren,
+                                                ?currentChild,
+                                              ],
+                                            ),
+                                    child: showFormatting.value
+                                        ? _FormattingToolbar(
+                                            onFormat: applyFormat,
+                                          )
+                                        : Row(
+                                            key: const ValueKey(
+                                              'standard-actions',
+                                            ),
+                                            children: [
+                                              _ComposeAction(
+                                                icon: LucideIcons.atSign,
+                                                onTap: () {
+                                                  showAttachments.value = false;
+                                                  showCamera.value = false;
+                                                  triggerMention();
+                                                },
+                                              ),
+                                              _ComposeAction(
+                                                icon: LucideIcons.hash,
+                                                onTap: () {
+                                                  showAttachments.value = false;
+                                                  showCamera.value = false;
+                                                  triggerChannel();
+                                                },
+                                              ),
+                                              _ComposeAction(
+                                                icon: LucideIcons.smilePlus,
+                                                onTap: () {
+                                                  showAttachments.value = false;
+                                                  showCamera.value = false;
+                                                  showEmojiPicker(
+                                                    context: context,
+                                                    onSelect: insertEmoji,
+                                                  );
+                                                },
+                                              ),
+                                              _ComposeAction(
+                                                icon: LucideIcons.aLargeSmall,
+                                                onTap: () {
+                                                  showAttachments.value = false;
+                                                  showCamera.value = false;
+                                                  showFormatting.value = true;
+                                                },
+                                              ),
+                                              const Spacer(),
+                                              _SendButton(
+                                                isDisabled: hasPendingUploads,
+                                                isSending: isSending.value,
+                                                onTap: send,
+                                              ),
+                                            ],
+                                          ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                  _ComposeAction(
-                    icon: LucideIcons.atSign,
-                    onTap: triggerMention,
-                  ),
-                  _ComposeAction(icon: LucideIcons.hash, onTap: triggerChannel),
-                  _ComposeAction(
-                    icon: LucideIcons.aLargeSmall,
-                    active: showFormatting.value,
-                    onTap: () => showFormatting.value = !showFormatting.value,
-                  ),
-                  const Spacer(),
-                  _SendButton(
-                    isDisabled: hasPendingUploads,
-                    isSending: isSending.value,
-                    onTap: send,
-                  ),
-                ],
+                ),
               ),
             ],
           ),
         ),
-      ],
+      ),
     );
   }
 }
