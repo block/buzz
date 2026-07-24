@@ -219,6 +219,7 @@ pub(crate) struct RagEvidenceRecord {
 )]
 pub(crate) fn extract_verified_rag_evidence(
     snapshot: &VerifiedRagSnapshot,
+    expected_query: &str,
     value: &Value,
 ) -> Result<Vec<RagEvidenceRecord>, RagSnapshotError> {
     let policy = crate::command_services::policy::AdviserContextPolicy {
@@ -228,6 +229,9 @@ pub(crate) fn extract_verified_rag_evidence(
     };
     crate::command_services::policy::validate_rag_context(&policy, value)
         .map_err(|_| RagSnapshotError::Invalid)?;
+    if value.get("query").and_then(Value::as_str) != Some(expected_query) {
+        return Err(RagSnapshotError::Invalid);
+    }
     let retrieved_at = value
         .get("retrieved_at")
         .and_then(Value::as_str)
@@ -242,6 +246,18 @@ pub(crate) fn extract_verified_rag_evidence(
                 .get("source")
                 .and_then(Value::as_object)
                 .ok_or(RagSnapshotError::Invalid)?;
+            if source
+                .get("collection")
+                .and_then(Value::as_str)
+                .is_none_or(|collection| {
+                    !snapshot
+                        .collections
+                        .iter()
+                        .any(|allowed| allowed == collection)
+                })
+            {
+                return Err(RagSnapshotError::Invalid);
+            }
             let text = |key: &str| {
                 source
                     .get(key)

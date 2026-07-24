@@ -11,20 +11,26 @@ use super::types::{AdviserId, BriefSection, SourceKind, MAX_ARRAY_ITEMS, MAX_TEX
 use crate::command_services::apple_inputs::{
     AppleBriefSelection, AppleInputRequest, AppleInputResponse,
 };
+use crate::command_services::memory::extract_verified_memory_evidence;
+use crate::command_services::policy::canonical_json_bytes;
 use crate::command_services::rag::VerifiedRagSnapshot;
+use sha2::{Digest, Sha256};
 
 const SNAPSHOT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const SNAPSHOT_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const OBSERVED_AT: &str = "2026-07-25T06:00:00+10:00";
+const RUN_A: &str = "brief-run:alpha";
+const RUN_B: &str = "brief-run:bravo";
 
 #[derive(Default)]
 struct FakeState {
     rag_results: VecDeque<Result<Value, SourceReadError>>,
-    memory_results: VecDeque<Result<Vec<Value>, SourceReadError>>,
+    memory_results: VecDeque<Result<Value, SourceReadError>>,
     apple_results: VecDeque<AppleInputResponse>,
     requests: Vec<Value>,
     recheck_snapshot: Option<String>,
     memory_conflict_count: u64,
+    bind_rag_query: bool,
 }
 
 struct FakeBackend {
@@ -46,11 +52,7 @@ impl FakeBackend {
                     "rag:operations",
                     "Operational readiness is green.",
                 ))]),
-                memory_results: VecDeque::from([Ok(vec![memory_context(
-                    "memory:operations",
-                    json!({"readiness": "green"}),
-                    Vec::new(),
-                )])]),
+                memory_results: VecDeque::from([Ok(phase3_memory_wrapper())]),
                 apple_results: VecDeque::from([
                     apple_response(
                         "calendar",
@@ -70,6 +72,7 @@ impl FakeBackend {
                     apple_response("files", "authorized", vec![file_record()], false, None),
                 ]),
                 recheck_snapshot: Some(SNAPSHOT_A.to_string()),
+                bind_rag_query: true,
                 ..FakeState::default()
             }),
         }
@@ -101,21 +104,21 @@ impl SourceBackend for FakeBackend {
             "snapshot": snapshot.snapshot_id(),
             "intent": intent,
         }));
-        self.state
-            .lock()
-            .expect("fake state")
-            .rag_results
-            .pop_front()
-            .unwrap_or_else(|| {
-                Ok(rag_evidence(
-                    snapshot.snapshot_id(),
-                    "rag:fallback",
-                    "No change.",
-                ))
-            })
+        let mut state = self.state.lock().expect("fake state");
+        let mut value = state.rag_results.pop_front().unwrap_or_else(|| {
+            Ok(rag_evidence(
+                snapshot.snapshot_id(),
+                "rag:fallback",
+                "No change.",
+            ))
+        })?;
+        if state.bind_rag_query {
+            value["query"] = json!(intent.query());
+        }
+        Ok(value)
     }
 
-    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Vec<Value>, SourceReadError> {
+    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Value, SourceReadError> {
         self.state
             .lock()
             .expect("fake state")
@@ -126,7 +129,7 @@ impl SourceBackend for FakeBackend {
             .expect("fake state")
             .memory_results
             .pop_front()
-            .unwrap_or_else(|| Ok(Vec::new()))
+            .unwrap_or_else(|| Ok(empty_memory_wrapper()))
     }
 
     fn memory_conflict_count(&self) -> u64 {
@@ -163,7 +166,7 @@ impl SourceBackend for FakeBackend {
 }
 
 fn selection() -> AppleBriefSelection {
-    AppleBriefSelection::parse(json!({
+    AppleBriefSelection::for_test(json!({
         "schema_version": 1,
         "calendar_ids": ["calendar-command"],
         "reminder_list_ids": ["reminders-command"],
@@ -175,7 +178,16 @@ fn selection() -> AppleBriefSelection {
 }
 
 fn collector(backend: FakeBackend, request: &str) -> SourceCollector<FakeBackend> {
-    SourceCollector::new(backend, request, OBSERVED_AT, selection()).expect("valid collector")
+    collector_for_run(backend, RUN_A, request)
+}
+
+fn collector_for_run(
+    backend: FakeBackend,
+    run_id: &str,
+    request: &str,
+) -> SourceCollector<FakeBackend> {
+    SourceCollector::new(backend, run_id, request, OBSERVED_AT, selection())
+        .expect("valid collector")
 }
 
 fn rag_evidence(snapshot: &str, source_id: &str, quote: &str) -> Value {
@@ -208,19 +220,188 @@ fn rag_evidence(snapshot: &str, source_id: &str, quote: &str) -> Value {
     })
 }
 
-fn memory_context(entity_id: &str, content: Value, conflicted_fields: Vec<&str>) -> Value {
-    let event_id = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+fn rag_evidence_many(snapshot: &str, count: usize, quote_bytes: usize) -> Value {
+    let quote = "x".repeat(quote_bytes);
+    let mut wrapper = rag_evidence(snapshot, "rag:000", &quote);
+    let template = wrapper["results"][0].clone();
+    wrapper["results"] = Value::Array(
+        (0..count)
+            .map(|index| {
+                let mut result = template.clone();
+                result["source"]["source_id"] = json!(format!("rag:{index:03}"));
+                result["source"]["document_id"] = json!(format!("doc-{index:03}"));
+                result["source"]["chunk_id"] = json!(format!("chunk-{index:03}"));
+                result
+            })
+            .collect(),
+    );
+    wrapper["total"] = json!(count);
+    wrapper
+}
+
+fn rag_evidence_batch(snapshot: &str, batch: usize, count: usize) -> Value {
+    let mut wrapper = rag_evidence_many(snapshot, count, 16);
+    for (index, result) in wrapper["results"]
+        .as_array_mut()
+        .expect("result array")
+        .iter_mut()
+        .enumerate()
+    {
+        result["source"]["source_id"] = json!(format!("rag:{batch}:{index:03}"));
+        result["source"]["document_id"] = json!(format!("doc-{batch}-{index:03}"));
+        result["source"]["chunk_id"] = json!(format!("chunk-{batch}-{index:03}"));
+    }
+    wrapper
+}
+
+fn sha(value: &Value) -> String {
+    format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            canonical_json_bytes(value).expect("canonical fixture")
+        ))
+    )
+}
+
+fn phase3_memory_wrapper() -> Value {
+    let entity_id = "01K10QH8AF7M8N8VP1KX3J4H5T";
+    let content = json!({
+        "id": entity_id,
+        "event_date": "2026-07-24T20:00:00+10:00",
+        "recorded_at": "2026-07-24T20:00:01+10:00",
+        "entities": ["hmas-supply"],
+        "tags": ["readiness"],
+        "agent": "CODEX",
+        "content": "Historical machinery evidence from the Mac node.",
+        "markdown": "synthetic fixture"
+    });
+    let content_hash = sha(&json!({
+        "schema_version": 1,
+        "kind": "event",
+        "payload": content,
+    }));
+    let revision_hash = sha(&json!({
+        "schema_version": 1,
+        "node_id": "node:mac-command",
+        "subject_type": "event",
+        "subject_id": entity_id,
+        "object_id": content_hash,
+        "parent_ids": [],
+        "created_at": "2026-07-24T20:00:01+10:00",
+    }));
+    let revision = json!({
+        "kind": "memory-revision",
+        "version": 1,
+        "classification": "OFFICIAL",
+        "entityId": entity_id,
+        "eventId": revision_hash,
+        "parentRevisionIds": [],
+        "nodeId": "node:mac-command",
+        "timestamp": "2026-07-24T20:00:01+10:00",
+        "hashes": {"content": content_hash, "revision": revision_hash},
+        "tombstone": false,
+        "cursor": "7",
+        "content": content
+    });
+    let envelope_basis = json!({
+        "kind": "replication-envelope",
+        "version": 1,
+        "classification": "OFFICIAL",
+        "entityId": entity_id,
+        "eventId": format!("replication:{revision_hash}:7"),
+        "parentRevisionIds": [revision_hash],
+        "nodeId": "node:mac-command",
+        "timestamp": "2026-07-24T20:00:01+10:00",
+        "hashes": {"payload": revision_hash},
+        "tombstone": false,
+        "cursor": "7",
+        "payload": revision
+    });
+    let envelope_hash = sha(&envelope_basis);
+    let mut envelope = envelope_basis;
+    envelope["hashes"]["envelope"] = json!(envelope_hash);
     json!({
-        "entity_id": entity_id,
-        "content": content,
-        "conflicted_fields": conflicted_fields,
-        "citation": {
-            "event_id": event_id,
-            "revision_hash": event_id,
-            "node_id": "node:macbook-command",
-            "timestamp": "2026-07-25T05:58:00+10:00"
-        }
+        "schema": "memory-evidence-v1",
+        "tool_policy": {
+            "mode": "read_only",
+            "retrieved_content": "untrusted_evidence",
+            "instruction_effect": "none"
+        },
+        "serving_node_id": "node:mac-command",
+        "retrieved_at": "2026-07-25T05:59:40+10:00",
+        "total": 1,
+        "results": [{
+            "untrusted_evidence": true,
+            "revision": envelope["payload"].clone(),
+            "replication_envelope": envelope,
+            "conflicted_fields": [],
+            "quoted_text": "Historical machinery evidence from the Mac node.",
+            "citation": {
+                "event_id": revision_hash,
+                "revision_hash": revision_hash,
+                "node_id": "node:mac-command",
+                "timestamp": "2026-07-24T20:00:01+10:00"
+            }
+        }]
     })
+}
+
+fn empty_memory_wrapper() -> Value {
+    json!({
+        "schema": "memory-evidence-v1",
+        "tool_policy": {
+            "mode": "read_only",
+            "retrieved_content": "untrusted_evidence",
+            "instruction_effect": "none"
+        },
+        "serving_node_id": "node:mac-command",
+        "retrieved_at": "2026-07-25T05:59:40+10:00",
+        "total": 0,
+        "results": []
+    })
+}
+
+#[test]
+fn exact_phase3_memory_wrapper_is_verified_and_every_binding_mutation_fails_closed() {
+    let valid = phase3_memory_wrapper();
+    let evidence = extract_verified_memory_evidence(&valid).expect("real Phase 3 shape");
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(
+        evidence[0].quoted_text(),
+        "Historical machinery evidence from the Mac node."
+    );
+    assert_eq!(evidence[0].cursor(), 7);
+    assert_eq!(evidence[0].serving_node_id(), "node:mac-command");
+
+    for mutation in [
+        {
+            let mut value = valid.clone();
+            value["results"][0]["revision"]["content"]["content"] = json!("mutated");
+            value
+        },
+        {
+            let mut value = valid.clone();
+            value["results"][0]["revision"]["cursor"] = json!("8");
+            value
+        },
+        {
+            let mut value = valid.clone();
+            value["results"][0]["replication_envelope"]["cursor"] = json!("8");
+            value
+        },
+        {
+            let mut value = valid.clone();
+            value["results"][0]["citation"]["timestamp"] = json!("2026-07-25T05:59:40+10:00");
+            value
+        },
+        {
+            let mut value = valid;
+            value["results"][0]["quoted_text"] = json!("different quote");
+            value
+        },
+    ] {
+        assert!(extract_verified_memory_evidence(&mutation).is_err());
+    }
 }
 
 fn apple_response(
@@ -285,6 +466,27 @@ fn file_record() -> Value {
         "device": "1",
         "inode": "2"
     })
+}
+
+fn valid_apple_responses() -> VecDeque<AppleInputResponse> {
+    VecDeque::from([
+        apple_response(
+            "calendar",
+            "authorized",
+            vec![calendar_record("event-1", false, false, true)],
+            false,
+            None,
+        ),
+        apple_response(
+            "reminders",
+            "authorized",
+            vec![reminder_record("reminder-1", false, false)],
+            false,
+            None,
+        ),
+        apple_response("notes", "authorized", vec![note_record()], false, None),
+        apple_response("files", "authorized", vec![file_record()], false, None),
+    ])
 }
 
 fn source_kinds(context: &FrozenSourceContext) -> Vec<SourceKind> {
@@ -435,6 +637,44 @@ fn permission_denial_and_source_failure_degrade_only_daily_routine() {
 }
 
 #[test]
+fn apple_failure_limitations_are_truthful_fixed_and_never_include_helper_text() {
+    for (response, expected) in [
+        (
+            apple_response("reminders", "authorized", Vec::new(), false, None),
+            "source binding",
+        ),
+        (
+            apple_response(
+                "calendar",
+                "authorized",
+                Vec::new(),
+                false,
+                Some("private helper path and diagnostic"),
+            ),
+            "signed helper",
+        ),
+    ] {
+        let backend = FakeBackend::with_state(|state| {
+            let mut responses = valid_apple_responses();
+            responses[0] = response;
+            state.apple_results = responses;
+        });
+        let context = collector(backend, "Daily routine")
+            .freeze()
+            .expect("Apple failure remains fail soft");
+        let limitation = context
+            .limitations()
+            .iter()
+            .find(|item| item.contains("Apple calendar"))
+            .expect("fixed Apple limitation");
+
+        assert!(limitation.contains(expected));
+        assert!(!limitation.contains("authorized"));
+        assert!(!limitation.contains("private helper"));
+    }
+}
+
+#[test]
 fn malformed_apple_observation_time_degrades_only_daily_routine() {
     let mut invalid = serde_json::to_value(apple_response(
         "calendar",
@@ -459,6 +699,88 @@ fn malformed_apple_observation_time_degrades_only_daily_routine() {
         .limitations()
         .iter()
         .any(|item| item.contains("calendar") && item.contains("observation time")));
+}
+
+#[test]
+fn apple_records_require_exact_per_source_schema_and_freshness_fields() {
+    let mut calendar_extra = calendar_record("extra", false, false, false);
+    calendar_extra["unexpected"] = json!("field");
+    let mut reminder_missing_freshness = reminder_record("missing", false, false);
+    reminder_missing_freshness
+        .as_object_mut()
+        .expect("record")
+        .remove("is_stale");
+    let mut note_extra = note_record();
+    note_extra["is_stale"] = json!("false");
+    let mut file_extra = file_record();
+    file_extra["title"] = json!("unexpected");
+
+    for (index, record, kind) in [
+        (0, calendar_extra, SourceKind::Calendar),
+        (1, reminder_missing_freshness, SourceKind::Reminders),
+        (2, note_extra, SourceKind::Notes),
+        (3, file_extra, SourceKind::File),
+    ] {
+        let backend = FakeBackend::with_state(|state| {
+            let mut responses = valid_apple_responses();
+            responses[index] = apple_response(
+                ["calendar", "reminders", "notes", "files"][index],
+                "authorized",
+                vec![record],
+                false,
+                None,
+            );
+            state.apple_results = responses;
+        });
+        let context = collector(backend, "Daily routine")
+            .freeze()
+            .expect("malformed Apple record remains fail soft");
+
+        assert!(!source_kinds(&context).contains(&kind));
+        assert!(context
+            .degraded_sections()
+            .contains(&BriefSection::DailyRoutine));
+    }
+}
+
+#[test]
+fn eventkit_timestamps_and_booleans_are_typed_and_bound_to_requested_day() {
+    let mut bad_calendar_time = calendar_record("bad-time", false, false, false);
+    bad_calendar_time["start"] = json!("2026-07-24T23:59:59+10:00");
+    let mut bad_calendar_bool = calendar_record("bad-bool", false, false, false);
+    bad_calendar_bool["is_recurring"] = json!("yes");
+    let mut bad_reminder_time = reminder_record("bad-time", false, false);
+    bad_reminder_time["due_date"] = json!("2026-07-26T00:00:00+10:00");
+    let mut bad_reminder_bool = reminder_record("bad-bool", false, false);
+    bad_reminder_bool["is_completed"] = json!("no");
+
+    for (index, record, kind) in [
+        (0, bad_calendar_time, SourceKind::Calendar),
+        (0, bad_calendar_bool, SourceKind::Calendar),
+        (1, bad_reminder_time, SourceKind::Reminders),
+        (1, bad_reminder_bool, SourceKind::Reminders),
+    ] {
+        let backend = FakeBackend::with_state(|state| {
+            let mut responses = valid_apple_responses();
+            responses[index] = apple_response(
+                ["calendar", "reminders"][index],
+                "authorized",
+                vec![record],
+                false,
+                None,
+            );
+            state.apple_results = responses;
+        });
+        let context = collector(backend, "Daily routine")
+            .freeze()
+            .expect("bad EventKit record remains fail soft");
+
+        assert!(!source_kinds(&context).contains(&kind));
+        assert!(context
+            .limitations()
+            .iter()
+            .any(|item| item.contains("malformed")));
+    }
 }
 
 #[test]
@@ -541,38 +863,30 @@ fn unavailable_memory_degrades_only_memory_dependent_specialists() {
 }
 
 #[test]
-fn conflicted_memory_fields_are_removed_and_conflict_is_visible() {
+fn conflicted_memory_result_is_rejected_and_memory_sections_degrade() {
     let backend = FakeBackend::with_state(|state| {
-        state.memory_results = VecDeque::from([Ok(vec![memory_context(
-            "memory:conflicted",
-            json!({"readiness": "green", "status": "disputed"}),
-            vec!["status"],
-        )])]);
+        let mut wrapper = phase3_memory_wrapper();
+        wrapper["results"][0]["conflicted_fields"] = json!(["content"]);
+        state.memory_results = VecDeque::from([Ok(wrapper)]);
     });
     let context = collector(backend, "Brief")
         .freeze()
-        .expect("conflicted field is excluded");
+        .expect("invalid Memory evidence remains fail soft");
 
-    let memory = context
-        .ledger()
-        .iter()
-        .find(|source| source.source_kind() == SourceKind::Memory)
-        .expect("safe memory remains");
-    assert!(memory.quote().contains("readiness"));
-    assert!(!memory.quote().contains("disputed"));
+    assert!(!source_kinds(&context).contains(&SourceKind::Memory));
     assert!(context
         .limitations()
         .iter()
-        .any(|item| item.contains("conflict") && item.contains("status")));
+        .any(|item| item.contains("revision") && item.contains("citation")));
     assert!(context
         .degraded_sections()
-        .contains(&BriefSection::ConflictsAndGaps));
+        .contains(&BriefSection::Operations));
 }
 
 #[test]
 fn unresolved_memory_heads_are_visible_when_conflict_safe_context_omits_them() {
     let backend = FakeBackend::with_state(|state| {
-        state.memory_results = VecDeque::from([Ok(Vec::new())]);
+        state.memory_results = VecDeque::from([Ok(empty_memory_wrapper())]);
         state.memory_conflict_count = 2;
     });
     let context = collector(backend, "Brief")
@@ -736,20 +1050,9 @@ fn oversized_source_text_is_utf8_safely_truncated_and_reported() {
 
 #[test]
 fn frozen_limitations_are_deterministically_bounded_with_visible_omission() {
-    let conflicted = (0..64)
-        .map(|index| format!("field_{index:02}"))
-        .collect::<Vec<_>>();
-    let mut content = serde_json::Map::new();
-    for field in &conflicted {
-        content.insert(field.clone(), json!("conflicted"));
-    }
-    content.insert("safe".to_string(), json!("retained"));
     let backend = FakeBackend::with_state(|state| {
-        state.memory_results = VecDeque::from([Ok(vec![memory_context(
-            "memory:many-conflicts",
-            Value::Object(content),
-            conflicted.iter().map(String::as_str).collect(),
-        )])]);
+        state.rag_results =
+            VecDeque::from([Ok(rag_evidence_many(SNAPSHOT_A, 70, MAX_TEXT_BYTES + 1))]);
         state.apple_results = VecDeque::from([
             apple_response(
                 "calendar",
@@ -781,6 +1084,27 @@ fn frozen_limitations_are_deterministically_bounded_with_visible_omission() {
 }
 
 #[test]
+fn ledger_truncation_tracks_omitted_kinds_and_degrades_affected_sections() {
+    let backend = FakeBackend::with_state(|state| {
+        state.rag_results = (0..5)
+            .map(|batch| Ok(rag_evidence_batch(SNAPSHOT_A, batch, 200)))
+            .collect();
+    });
+    let context = collector(backend, "Brief")
+        .freeze()
+        .expect("bounded ledger");
+
+    assert_eq!(context.ledger().len(), 256);
+    assert!(context
+        .degraded_sections()
+        .contains(&BriefSection::DailyRoutine));
+    assert!(context
+        .limitations()
+        .iter()
+        .any(|item| item.contains("calendar") && item.contains("omitted")));
+}
+
+#[test]
 fn apple_selection_rejects_unknown_keys_duplicates_relative_files_and_bad_bounds() {
     let valid = json!({
         "schema_version": 1,
@@ -798,8 +1122,16 @@ fn apple_selection_rejects_unknown_keys_duplicates_relative_files_and_bad_bounds
     ] {
         let mut value = valid.clone();
         value[mutation.0] = mutation.1;
-        assert!(AppleBriefSelection::parse(value).is_err());
+        assert!(AppleBriefSelection::for_test(value).is_err());
     }
+}
+
+#[test]
+fn production_apple_selection_api_has_no_unprotected_constructor() {
+    let source = include_str!("../command_services/apple_inputs.rs");
+    assert!(!source.contains("pub(crate) fn parse("));
+    assert!(source.contains("pub(crate) fn for_test("));
+    assert!(source.contains("pub(crate) fn load_protected("));
 }
 
 #[cfg(unix)]
@@ -849,6 +1181,51 @@ fn apple_selection_loads_only_from_a_protected_native_config_file() {
 }
 
 #[test]
+fn rag_evidence_requires_exact_native_query_and_verified_catalogue_membership() {
+    for mut wrapper in [
+        rag_evidence(SNAPSHOT_A, "rag:wrong-query", "Wrong query."),
+        {
+            let mut value = rag_evidence(SNAPSHOT_A, "rag:outside", "Outside catalogue.");
+            value["results"][0]["source"]["collection"] = json!("unverified");
+            value
+        },
+        {
+            let mut value = rag_evidence_many(SNAPSHOT_A, 2, 16);
+            value["results"][1]["source"]["collection"] = json!("unverified");
+            value
+        },
+    ] {
+        let mismatched_query = wrapper["results"][0]["source"]["source_id"] == "rag:wrong-query";
+        if mismatched_query {
+            wrapper["query"] = json!("renderer supplied query");
+        }
+        let backend = FakeBackend::with_state(|state| {
+            state.bind_rag_query = false;
+            state.rag_results = VecDeque::from([Ok(wrapper)]);
+        });
+        let context = collector(backend, "Brief")
+            .freeze()
+            .expect("invalid retrieval evidence degrades fail soft");
+
+        assert!(context
+            .ledger()
+            .iter()
+            .filter(|source| source.source_kind() == SourceKind::Rag)
+            .all(|source| source.collection() == "verified_catalogue"));
+        assert!(context
+            .degraded_sections()
+            .contains(&BriefSection::Navigation));
+    }
+
+    let valid = collector(FakeBackend::fresh(), "Brief")
+        .freeze()
+        .expect("verified catalogue result");
+    assert!(valid.ledger().iter().any(
+        |source| source.source_kind() == SourceKind::Rag && source.collection() == "documents"
+    ));
+}
+
+#[test]
 fn canonical_ledger_ids_are_stable_across_backend_order() {
     let context_a = collector(FakeBackend::fresh(), "Brief")
         .freeze()
@@ -871,5 +1248,50 @@ fn canonical_ledger_ids_are_stable_across_backend_order() {
         if let Some(other) = ids_b.get(source_id) {
             assert_eq!(ledger_id, *other);
         }
+    }
+}
+
+#[test]
+fn canonical_ledger_ids_are_run_bound_but_stable_under_reorder_within_one_run() {
+    let first = collector_for_run(FakeBackend::fresh(), RUN_A, "Brief")
+        .freeze()
+        .expect("first run view");
+    let reordered_backend = FakeBackend::with_state(|state| {
+        state.apple_results.make_contiguous().reverse();
+    });
+    let reordered = collector_for_run(reordered_backend, RUN_A, "Brief")
+        .freeze()
+        .expect("reordered same run");
+    let second_run = collector_for_run(FakeBackend::fresh(), RUN_B, "Brief")
+        .freeze()
+        .expect("second run");
+    assert_eq!(first.run_id(), RUN_A);
+    assert_eq!(reordered.run_id(), RUN_A);
+    assert_eq!(second_run.run_id(), RUN_B);
+
+    let ids = |context: &FrozenSourceContext| {
+        context
+            .ledger()
+            .iter()
+            .map(|source| {
+                (
+                    source.source_id().to_string(),
+                    source.ledger_id().to_string(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let first_ids = ids(&first);
+    let reordered_ids = ids(&reordered);
+    let second_ids = ids(&second_run);
+    for (source_id, ledger_id) in &first_ids {
+        if let Some(reordered_id) = reordered_ids.get(source_id) {
+            assert_eq!(ledger_id, reordered_id);
+        }
+        assert_ne!(
+            Some(ledger_id),
+            second_ids.get(source_id),
+            "{source_id} must be bound to the trusted run"
+        );
     }
 }

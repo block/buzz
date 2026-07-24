@@ -22,7 +22,7 @@ use super::types::{
 use crate::command_services::apple_inputs::{
     AppleBriefSelection, AppleInputPermission, AppleInputRequest, AppleInputResponse,
 };
-use crate::command_services::memory::sanitize_command_memory_context;
+use crate::command_services::memory::extract_verified_memory_evidence;
 use crate::command_services::rag::{
     extract_verified_rag_evidence, RagSnapshotError, VerifiedRagSnapshot,
 };
@@ -113,7 +113,7 @@ pub(crate) trait SourceBackend {
         intent: &FixedRetrievalIntent,
     ) -> Result<Value, SourceReadError>;
 
-    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Vec<Value>, SourceReadError>;
+    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Value, SourceReadError>;
 
     fn collect_apple(&self, request: &AppleInputRequest) -> AppleInputResponse;
 
@@ -125,6 +125,7 @@ pub(crate) trait SourceBackend {
 
 /// All source evidence frozen before any adviser runs.
 pub(crate) struct FrozenSourceContext {
+    run_id: String,
     snapshot: VerifiedRagSnapshot,
     observed_at: String,
     ledger: Vec<SourceLedgerEntry>,
@@ -135,6 +136,10 @@ pub(crate) struct FrozenSourceContext {
 }
 
 impl FrozenSourceContext {
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     pub(crate) fn snapshot_id(&self) -> &str {
         self.snapshot.snapshot_id()
     }
@@ -171,6 +176,7 @@ impl FrozenSourceContext {
 /// Trusted source collector which freezes one verified local knowledge view.
 pub(crate) struct SourceCollector<B> {
     backend: B,
+    run_id: String,
     co_request: String,
     observed_at: String,
     apple_selection: AppleBriefSelection,
@@ -179,11 +185,16 @@ pub(crate) struct SourceCollector<B> {
 impl<B: SourceBackend> SourceCollector<B> {
     pub(crate) fn new(
         backend: B,
+        run_id: &str,
         co_request: &str,
         observed_at: &str,
         apple_selection: AppleBriefSelection,
     ) -> Result<Self, SourceCollectionError> {
-        if co_request.is_empty()
+        if run_id.is_empty()
+            || run_id.trim() != run_id
+            || run_id.len() > 256
+            || run_id.chars().any(char::is_control)
+            || co_request.is_empty()
             || co_request.trim() != co_request
             || co_request.len() > MAX_CO_REQUEST_BYTES
             || co_request.chars().any(char::is_control)
@@ -195,6 +206,7 @@ impl<B: SourceBackend> SourceCollector<B> {
         }
         Ok(Self {
             backend,
+            run_id: run_id.to_string(),
             co_request: co_request.to_string(),
             observed_at: observed_at.to_string(),
             apple_selection,
@@ -227,30 +239,34 @@ impl<B: SourceBackend> SourceCollector<B> {
         for intent in &intents {
             if rag_available {
                 match self.backend.collect_rag(&snapshot, intent) {
-                    Ok(value) => match extract_verified_rag_evidence(&snapshot, &value) {
-                        Ok(records) => {
-                            candidates.extend(records.into_iter().map(|record| CandidateSource {
-                                source_id: record.source_id,
-                                source_kind: SourceKind::Rag,
-                                collection: record.collection,
-                                document_id: record.document_id,
-                                chunk_id: record.chunk_id,
-                                timestamp: record.retrieved_at.clone(),
-                                location: record.location,
-                                retrieved_at: record.retrieved_at,
-                                observed_at: self.observed_at.clone(),
-                                quote: record.quote,
-                            }));
+                    Ok(value) => {
+                        match extract_verified_rag_evidence(&snapshot, intent.query(), &value) {
+                            Ok(records) => {
+                                candidates.extend(records.into_iter().map(|record| {
+                                    CandidateSource {
+                                        source_id: record.source_id,
+                                        source_kind: SourceKind::Rag,
+                                        collection: record.collection,
+                                        document_id: record.document_id,
+                                        chunk_id: record.chunk_id,
+                                        timestamp: record.retrieved_at.clone(),
+                                        location: record.location,
+                                        retrieved_at: record.retrieved_at,
+                                        observed_at: self.observed_at.clone(),
+                                        quote: record.quote,
+                                    }
+                                }));
+                            }
+                            Err(_) => {
+                                rag_available = false;
+                                degrade_all(
+                                    &mut degraded,
+                                    &mut limitations,
+                                    "RAG evidence was malformed or bound to a different snapshot.",
+                                );
+                            }
                         }
-                        Err(_) => {
-                            rag_available = false;
-                            degrade_all(
-                                &mut degraded,
-                                &mut limitations,
-                                "RAG evidence was malformed or bound to a different snapshot.",
-                            );
-                        }
-                    },
+                    }
                     Err(error) => {
                         rag_available = false;
                         degrade_all(
@@ -264,52 +280,36 @@ impl<B: SourceBackend> SourceCollector<B> {
 
             if memory_available {
                 match self.backend.collect_memory(intent) {
-                    Ok(records) => {
-                        for value in records {
-                            match sanitize_command_memory_context(&value) {
-                                Ok(record) => {
-                                    if !record.conflicted_fields().is_empty() {
-                                        degraded.insert(BriefSection::ConflictsAndGaps);
-                                        for field in record.conflicted_fields() {
-                                            limitations.insert(format!(
-                                                "Memory conflict excluded field {field} from entity {}.",
-                                                record.entity_id()
-                                            ));
-                                        }
-                                    }
-                                    let quote = serde_jcs::to_vec(record.content())
-                                        .ok()
-                                        .and_then(|bytes| String::from_utf8(bytes).ok());
-                                    if let Some(quote) = quote.filter(|quote| quote != "{}") {
-                                        candidates.push(CandidateSource {
-                                            source_id: record.event_id().to_string(),
-                                            source_kind: SourceKind::Memory,
-                                            collection: "command_memory".to_string(),
-                                            document_id: record.entity_id().to_string(),
-                                            chunk_id: record.event_id().to_string(),
-                                            timestamp: record.timestamp().to_string(),
-                                            location: format!(
-                                                "entity {} conflict-safe revision",
-                                                record.entity_id()
-                                            ),
-                                            retrieved_at: self.observed_at.clone(),
-                                            observed_at: self.observed_at.clone(),
-                                            quote,
-                                        });
-                                    }
-                                }
-                                Err(_) => {
-                                    memory_available = false;
-                                    degrade_all(
-                                        &mut degraded,
-                                        &mut limitations,
-                                        "Memory command context was invalid or unsafe.",
-                                    );
-                                    break;
-                                }
-                            }
+                    Ok(value) => match extract_verified_memory_evidence(&value) {
+                        Ok(records) => {
+                            candidates.extend(records.into_iter().map(|record| CandidateSource {
+                                source_id: record.revision_hash().to_string(),
+                                source_kind: SourceKind::Memory,
+                                collection: "command_memory".to_string(),
+                                document_id: record.entity_id().to_string(),
+                                chunk_id: record.envelope_hash().to_string(),
+                                timestamp: record.origin_timestamp().to_string(),
+                                location: format!(
+                                    "origin {} cursor {} revision {} served by {}",
+                                    record.origin_node_id(),
+                                    record.cursor(),
+                                    record.revision_hash(),
+                                    record.serving_node_id()
+                                ),
+                                retrieved_at: record.retrieved_at().to_string(),
+                                observed_at: self.observed_at.clone(),
+                                quote: record.quoted_text().to_string(),
+                            }));
                         }
-                    }
+                        Err(_) => {
+                            memory_available = false;
+                            degrade_all(
+                                &mut degraded,
+                                &mut limitations,
+                                "Memory evidence failed revision, envelope, or citation verification.",
+                            );
+                        }
+                    },
                     Err(error) => {
                         memory_available = false;
                         degrade_all(
@@ -337,15 +337,21 @@ impl<B: SourceBackend> SourceCollector<B> {
             );
         }
 
-        let (ledger, mut canonical_limitations) =
-            canonical_ledger(snapshot.snapshot_id(), candidates)?;
-        limitations.append(&mut canonical_limitations);
-        let validated_sources = ledger.iter().cloned().map(ValidatedSource::from).collect();
+        let mut canonical = canonical_ledger(&self.run_id, snapshot.snapshot_id(), candidates)?;
+        limitations.append(&mut canonical.limitations);
+        apply_ledger_omissions(&canonical.omitted_by_kind, &mut degraded, &mut limitations);
+        let validated_sources = canonical
+            .ledger
+            .iter()
+            .cloned()
+            .map(ValidatedSource::from)
+            .collect();
         let limitations = bounded_limitations(limitations);
         let context = FrozenSourceContext {
+            run_id: self.run_id.clone(),
             snapshot,
             observed_at: self.observed_at.clone(),
-            ledger,
+            ledger: canonical.ledger,
             validated_sources,
             degraded_sections: degraded.into_iter().collect(),
             limitations,
@@ -458,14 +464,25 @@ fn collect_apple_response(
     limitations: &mut BTreeSet<String>,
 ) {
     let expected_source = request.source_name();
-    if response.source_name() != expected_source
-        || response.permission() != AppleInputPermission::Authorized
-        || response.error().is_some()
-    {
+    if response.source_name() != expected_source {
         degraded.insert(BriefSection::DailyRoutine);
         limitations.insert(format!(
-            "Apple {expected_source} input is {}.",
+            "Apple {expected_source} input failed signed-helper source binding."
+        ));
+        return;
+    }
+    if response.permission() != AppleInputPermission::Authorized {
+        degraded.insert(BriefSection::DailyRoutine);
+        limitations.insert(format!(
+            "Apple {expected_source} input permission is {}.",
             response.permission().name()
+        ));
+        return;
+    }
+    if response.error().is_some() {
+        degraded.insert(BriefSection::DailyRoutine);
+        limitations.insert(format!(
+            "Apple {expected_source} input failed in the signed helper."
         ));
         return;
     }
@@ -516,7 +533,7 @@ fn collect_apple_response(
             ));
             continue;
         }
-        if let Some(candidate) = apple_candidate(expected_source, response.observed_at(), fields) {
+        if let Some(candidate) = apple_candidate(request, response.observed_at(), fields) {
             candidates.push(candidate);
         } else {
             degraded.insert(BriefSection::DailyRoutine);
@@ -534,12 +551,33 @@ fn bool_field(fields: &BTreeMap<String, String>, key: &str) -> Option<bool> {
 }
 
 fn apple_candidate(
-    source: &str,
+    request: &AppleInputRequest,
     observed_at: &str,
     fields: &BTreeMap<String, String>,
 ) -> Option<CandidateSource> {
+    let source = request.source_name();
     let (kind, identity, collection, location) = match source {
         "calendar" => {
+            if !exact_apple_fields(
+                fields,
+                &[
+                    "identifier",
+                    "calendar_identifier",
+                    "title",
+                    "start",
+                    "end",
+                    "is_recurring",
+                    "recurrence_identifier",
+                    "is_deleted",
+                    "is_stale",
+                ],
+            ) || bool_field(fields, "is_recurring").is_none()
+                || bool_field(fields, "is_deleted").is_none()
+                || bool_field(fields, "is_stale").is_none()
+                || !calendar_record_in_window(request, fields)
+            {
+                return None;
+            }
             let identifier = fields.get("identifier")?;
             let recurrence = fields.get("recurrence_identifier")?;
             let location = if recurrence.is_empty() {
@@ -555,6 +593,26 @@ fn apple_candidate(
             )
         }
         "reminders" => {
+            if !exact_apple_fields(
+                fields,
+                &[
+                    "identifier",
+                    "list_identifier",
+                    "title",
+                    "is_completed",
+                    "recurrence_identifier",
+                    "due_date",
+                    "completion_date",
+                    "is_deleted",
+                    "is_stale",
+                ],
+            ) || bool_field(fields, "is_completed").is_none()
+                || bool_field(fields, "is_deleted").is_none()
+                || bool_field(fields, "is_stale").is_none()
+                || !reminder_record_in_window(request, fields)
+            {
+                return None;
+            }
             let identifier = fields.get("identifier")?;
             let recurrence = fields.get("recurrence_identifier")?;
             let location = if recurrence.is_empty() {
@@ -570,6 +628,12 @@ fn apple_candidate(
             )
         }
         "notes" => {
+            if !exact_apple_fields(
+                fields,
+                &["identifier", "folder_identifier", "title", "body"],
+            ) {
+                return None;
+            }
             let identifier = fields.get("identifier")?;
             (
                 SourceKind::Notes,
@@ -579,6 +643,18 @@ fn apple_candidate(
             )
         }
         "files" => {
+            if !exact_apple_fields(fields, &["path", "contents", "device", "inode"])
+                || fields
+                    .get("device")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_none()
+                || fields
+                    .get("inode")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .is_none()
+            {
+                return None;
+            }
             let path = fields.get("path")?;
             let identity = format!(
                 "file:{}",
@@ -614,10 +690,91 @@ fn apple_candidate(
     })
 }
 
+fn exact_apple_fields(fields: &BTreeMap<String, String>, expected: &[&str]) -> bool {
+    fields.len() == expected.len()
+        && expected.iter().all(|key| fields.contains_key(*key))
+        && fields.iter().all(|(key, value)| {
+            value.len() <= 1024 * 1024
+                && (matches!(
+                    key.as_str(),
+                    "title"
+                        | "body"
+                        | "contents"
+                        | "recurrence_identifier"
+                        | "due_date"
+                        | "completion_date"
+                ) || (!value.is_empty()
+                    && value.trim() == value
+                    && !value.chars().any(char::is_control)))
+        })
+}
+
+fn calendar_record_in_window(
+    request: &AppleInputRequest,
+    fields: &BTreeMap<String, String>,
+) -> bool {
+    let Some((window_start, window_end)) = request.read_window() else {
+        return false;
+    };
+    let (Ok(window_start), Ok(window_end), Some(start), Some(end)) = (
+        DateTime::parse_from_rfc3339(window_start),
+        DateTime::parse_from_rfc3339(window_end),
+        fields
+            .get("start")
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok()),
+        fields
+            .get("end")
+            .and_then(|value| DateTime::parse_from_rfc3339(value).ok()),
+    ) else {
+        return false;
+    };
+    start >= window_start && start < end && end <= window_end
+}
+
+fn reminder_record_in_window(
+    request: &AppleInputRequest,
+    fields: &BTreeMap<String, String>,
+) -> bool {
+    let Some((window_start, window_end)) = request.read_window() else {
+        return false;
+    };
+    let (Ok(window_start), Ok(window_end), Some(completed)) = (
+        DateTime::parse_from_rfc3339(window_start),
+        DateTime::parse_from_rfc3339(window_end),
+        bool_field(fields, "is_completed"),
+    ) else {
+        return false;
+    };
+    let parse_optional = |key: &str| {
+        fields.get(key).and_then(|value| {
+            if value.is_empty() {
+                Some(None)
+            } else {
+                DateTime::parse_from_rfc3339(value).ok().map(Some)
+            }
+        })
+    };
+    let (Some(due), Some(completion)) = (
+        parse_optional("due_date"),
+        parse_optional("completion_date"),
+    ) else {
+        return false;
+    };
+    let inside = |value: &DateTime<_>| *value >= window_start && *value < window_end;
+    due.as_ref().is_none_or(&inside)
+        && completion.as_ref().is_none_or(&inside)
+        && if completed {
+            completion.as_ref().is_some_and(inside)
+        } else {
+            due.as_ref().is_some_and(inside)
+        }
+}
+
 fn canonical_ledger(
+    run_id: &str,
     snapshot_id: &str,
     candidates: Vec<CandidateSource>,
-) -> Result<(Vec<SourceLedgerEntry>, BTreeSet<String>), SourceCollectionError> {
+) -> Result<CanonicalLedgerOutput, SourceCollectionError> {
     let mut by_source = BTreeMap::<String, CandidateSource>::new();
     let mut limitations = BTreeSet::new();
     for mut candidate in candidates {
@@ -653,11 +810,12 @@ fn canonical_ledger(
             .cmp(&source_priority(right.source_kind))
             .then_with(|| left.source_id.cmp(&right.source_id))
     });
+    let mut omitted_by_kind = [0_usize; 6];
     if candidates.len() > MAX_SOURCE_LEDGER_ITEMS {
+        for candidate in &candidates[MAX_SOURCE_LEDGER_ITEMS..] {
+            omitted_by_kind[source_priority(candidate.source_kind) as usize] += 1;
+        }
         candidates.truncate(MAX_SOURCE_LEDGER_ITEMS);
-        limitations.insert(format!(
-            "Source ledger was truncated to {MAX_SOURCE_LEDGER_ITEMS} entries."
-        ));
     }
     let ledger = candidates
         .into_iter()
@@ -665,7 +823,7 @@ fn canonical_ledger(
             let ledger_id = format!(
                 "source-{}",
                 &digest_text(&format!(
-                    "{}:{}:{snapshot_id}",
+                    "{run_id}:{}:{}:{snapshot_id}",
                     source_priority(candidate.source_kind),
                     candidate.source_id
                 ))[..24]
@@ -691,7 +849,57 @@ fn canonical_ledger(
                 .map_err(|_| SourceCollectionError::RagInvalid)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((ledger, limitations))
+    Ok(CanonicalLedgerOutput {
+        ledger,
+        limitations,
+        omitted_by_kind,
+    })
+}
+
+struct CanonicalLedgerOutput {
+    ledger: Vec<SourceLedgerEntry>,
+    limitations: BTreeSet<String>,
+    omitted_by_kind: [usize; 6],
+}
+
+fn apply_ledger_omissions(
+    omitted_by_kind: &[usize; 6],
+    degraded: &mut BTreeSet<BriefSection>,
+    limitations: &mut BTreeSet<String>,
+) {
+    for (kind, count) in [
+        (SourceKind::Rag, omitted_by_kind[0]),
+        (SourceKind::Memory, omitted_by_kind[1]),
+        (SourceKind::Calendar, omitted_by_kind[2]),
+        (SourceKind::Reminders, omitted_by_kind[3]),
+        (SourceKind::Notes, omitted_by_kind[4]),
+        (SourceKind::File, omitted_by_kind[5]),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        limitations.insert(format!(
+            "{count} {} sources were omitted by the canonical ledger limit.",
+            source_kind_name(kind)
+        ));
+        match kind {
+            SourceKind::Rag | SourceKind::Memory => degraded.extend(RAG_MEMORY_SECTIONS),
+            SourceKind::Calendar | SourceKind::Reminders | SourceKind::Notes | SourceKind::File => {
+                degraded.insert(BriefSection::DailyRoutine);
+            }
+        }
+    }
+}
+
+const fn source_kind_name(kind: SourceKind) -> &'static str {
+    match kind {
+        SourceKind::Rag => "RAG",
+        SourceKind::Memory => "Memory",
+        SourceKind::Calendar => "calendar",
+        SourceKind::Reminders => "reminder",
+        SourceKind::Notes => "note",
+        SourceKind::File => "file",
+    }
 }
 
 fn same_source_content(left: &CandidateSource, right: &CandidateSource) -> bool {

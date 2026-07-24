@@ -162,6 +162,14 @@ impl AppleInputRequest {
             AppleInputSource::Files => "files",
         }
     }
+
+    pub(crate) fn read_window(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::ReadCalendar(arguments) => Some((&arguments.start, &arguments.end)),
+            Self::ReadReminders(arguments) => Some((&arguments.start, &arguments.end)),
+            _ => None,
+        }
+    }
 }
 
 #[cfg_attr(
@@ -259,7 +267,7 @@ pub(crate) struct AppleBriefSelection {
     allow(dead_code, reason = "Phase 5 wires the local source backend")
 )]
 impl AppleBriefSelection {
-    pub(crate) fn parse(value: Value) -> Result<Self, &'static str> {
+    fn parse_protected(value: Value) -> Result<Self, &'static str> {
         let raw: RawAppleBriefSelection =
             serde_json::from_value(value).map_err(|_| "invalid_apple_brief_config")?;
         let valid_list = |values: &[String]| {
@@ -304,7 +312,12 @@ impl AppleBriefSelection {
             .and_then(|file| file.read_all())
             .map_err(|_| "invalid_apple_brief_config")?;
         let value = serde_json::from_slice(&bytes).map_err(|_| "invalid_apple_brief_config")?;
-        Self::parse(value)
+        Self::parse_protected(value)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(value: Value) -> Result<Self, &'static str> {
+        Self::parse_protected(value)
     }
 
     pub(crate) fn brief_requests(
