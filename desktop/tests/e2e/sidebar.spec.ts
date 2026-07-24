@@ -1,8 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { openSettings } from "../helpers/settings";
 
 const SIDEBAR_WIDTH_STORAGE_KEY = "buzz-sidebar-width";
+const COMMUNITY_ONBOARDING_STORAGE_KEY =
+  "buzz-community-onboarding-transaction.v1";
 const DEFAULT_SIDEBAR_WIDTH = 300;
 
 test.beforeEach(async ({ page }) => {
@@ -127,7 +130,7 @@ test("automatically shows community join requirements near the community URL", a
   await page.getByTestId("add-community-join").click();
   await page
     .getByLabel("Community URL or invite link")
-    .fill("https://policy.example.com/invite/community-code");
+    .fill("https://policy.example.com");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -156,6 +159,61 @@ test("automatically shows community join requirements near the community URL", a
   const joinButtonBox = await joinCommunityButton.boundingBox();
   expect(consentBox?.y).toBeGreaterThan(communityInput?.y ?? Number.MAX_VALUE);
   expect(consentBox?.y).toBeLessThan(joinButtonBox?.y ?? 0);
+
+  await joinCommunityButton.click();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_STORAGE_KEY,
+      ),
+    )
+    .toContain('"relayUrl":"wss://policy.example.com"');
+});
+
+test("supports API tokens without cluttering the default join form", async ({
+  page,
+}) => {
+  await installMockBridge(page, { applyCommunityDelayMs: 1_000 });
+  await page.route(
+    "https://token.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({ status: 404 });
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByText("Add a community", { exact: true }).click();
+  await page.getByTestId("add-community-join").click();
+
+  await expect(page.getByLabel("API token")).toHaveCount(0);
+  await expect(page.getByTestId("community-api-token-reveal")).toHaveCount(0);
+
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("https://token.example.com");
+  await page.getByTestId("community-api-token-reveal").click();
+  await page.getByLabel("API token").fill("buzz_secret");
+  await page.getByTestId("invite-redeem-submit").click();
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        COMMUNITY_ONBOARDING_STORAGE_KEY,
+      ),
+    )
+    .toContain('"token":"buzz_secret"');
+});
+
+test("hides Invites settings on open relays", async ({ page }) => {
+  await page.goto("/");
+  await openSettings(page);
+
+  await expect(page.getByTestId("settings-nav-community-members")).toHaveCount(
+    0,
+  );
 });
 
 test("leaving a channel from the context menu never freezes the app", async ({

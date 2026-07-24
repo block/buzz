@@ -47,7 +47,7 @@ type InviteRedeemFormProps = {
   initialValue?: string;
   isRedeeming: boolean;
   onCancel: () => void;
-  onConnect?: (relayWsUrl: string) => void;
+  onConnect?: (relayWsUrl: string, token?: string) => void;
   onRedeem: (relayWsUrl: string, code: string, policyReceipt?: string) => void;
   placeholder?: string;
   variant?: "add-community" | "default" | "onboarding-spotlight";
@@ -69,10 +69,12 @@ export function InviteRedeemForm({
   const [bareCodeRelayUrl, setBareCodeRelayUrl] = React.useState(
     defaultRelayUrl ?? "",
   );
+  const [apiToken, setApiToken] = React.useState("");
+  const [showApiToken, setShowApiToken] = React.useState(false);
   const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
-  const [policyInvite, setPolicyInvite] = React.useState<{
+  const [policyTarget, setPolicyTarget] = React.useState<{
     relayWsUrl: string;
-    code: string;
+    code?: string;
   } | null>(null);
   const [ageConfirmed, setAgeConfirmed] = React.useState(false);
   const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
@@ -93,22 +95,23 @@ export function InviteRedeemForm({
   const needsRelayField = isBareCode && defaultRelayUrl !== undefined;
 
   React.useEffect(() => {
-    if (!parsedInvite) return;
-
-    const relayWsUrl =
-      "relayWsUrl" in parsedInvite &&
-      typeof parsedInvite.relayWsUrl === "string"
+    const relayWsUrl = normalizedRelayUrl
+      ? normalizedRelayUrl
+      : parsedInvite && "relayWsUrl" in parsedInvite
         ? parsedInvite.relayWsUrl
-        : bareCodeRelayUrl.trim();
+        : parsedInvite
+          ? bareCodeRelayUrl.trim()
+          : "";
     if (!relayWsUrl || !isJoinPolicyDiscoveryCandidate(relayWsUrl)) return;
 
+    const code = parsedInvite?.code;
     let cancelled = false;
     const timeoutId = window.setTimeout(() => {
       void getJoinPolicy(relayWsUrl)
         .then((policy) => {
           if (cancelled || !policy) return;
           setJoinPolicy(policy);
-          setPolicyInvite({ relayWsUrl, code: parsedInvite.code });
+          setPolicyTarget({ relayWsUrl, code });
           setAgeConfirmed(false);
           setAgreementConfirmed(false);
           setPolicyError(null);
@@ -123,7 +126,7 @@ export function InviteRedeemForm({
       cancelled = true;
       window.clearTimeout(timeoutId);
     };
-  }, [bareCodeRelayUrl, parsedInvite]);
+  }, [bareCodeRelayUrl, normalizedRelayUrl, parsedInvite]);
 
   const canSubmit =
     (parsedInvite !== null &&
@@ -139,7 +142,46 @@ export function InviteRedeemForm({
     async (event: React.FormEvent) => {
       event.preventDefault();
       if (normalizedRelayUrl) {
-        onConnect?.(normalizedRelayUrl);
+        setPolicyError(null);
+        setIsLoadingPolicy(true);
+        try {
+          const policy = await getJoinPolicy(normalizedRelayUrl);
+          if (!policy) {
+            onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
+            return;
+          }
+
+          if (
+            !joinPolicy ||
+            joinPolicy.version !== policy.version ||
+            policyTarget?.relayWsUrl !== normalizedRelayUrl ||
+            policyTarget.code !== undefined
+          ) {
+            setJoinPolicy(policy);
+            setPolicyTarget({ relayWsUrl: normalizedRelayUrl });
+            setAgeConfirmed(false);
+            setAgreementConfirmed(false);
+            return;
+          }
+
+          if (policy.ageAttestationRequired && !ageConfirmed) {
+            setPolicyError("Confirm that you are at least 18 years old.");
+            return;
+          }
+          if (
+            (policy.termsMarkdown || policy.privacyMarkdown) &&
+            !agreementConfirmed
+          ) {
+            setPolicyError("Agree to the Terms of Service and Privacy Policy.");
+            return;
+          }
+
+          onConnect?.(normalizedRelayUrl, apiToken.trim() || undefined);
+        } catch (policyFetchError) {
+          setPolicyError(inviteErrorMessage(policyFetchError));
+        } finally {
+          setIsLoadingPolicy(false);
+        }
         return;
       }
       if (!parsedInvite) return;
@@ -162,11 +204,11 @@ export function InviteRedeemForm({
         if (
           !joinPolicy ||
           joinPolicy.version !== policy.version ||
-          policyInvite?.relayWsUrl !== relayWsUrl ||
-          policyInvite.code !== parsedInvite.code
+          policyTarget?.relayWsUrl !== relayWsUrl ||
+          policyTarget.code !== parsedInvite.code
         ) {
           setJoinPolicy(policy);
-          setPolicyInvite({ relayWsUrl, code: parsedInvite.code });
+          setPolicyTarget({ relayWsUrl, code: parsedInvite.code });
           setAgeConfirmed(false);
           setAgreementConfirmed(false);
           return;
@@ -200,13 +242,14 @@ export function InviteRedeemForm({
     [
       ageConfirmed,
       agreementConfirmed,
+      apiToken,
       bareCodeRelayUrl,
       joinPolicy,
-      onRedeem,
       normalizedRelayUrl,
       onConnect,
+      onRedeem,
       parsedInvite,
-      policyInvite,
+      policyTarget,
     ],
   );
 
@@ -215,7 +258,7 @@ export function InviteRedeemForm({
   ) => {
     setInviteInput(event.target.value);
     setJoinPolicy(null);
-    setPolicyInvite(null);
+    setPolicyTarget(null);
     setAgeConfirmed(false);
     setAgreementConfirmed(false);
     setPolicyError(null);
@@ -226,7 +269,7 @@ export function InviteRedeemForm({
   ) => {
     setBareCodeRelayUrl(event.target.value);
     setJoinPolicy(null);
-    setPolicyInvite(null);
+    setPolicyTarget(null);
     setAgeConfirmed(false);
     setAgreementConfirmed(false);
     setPolicyError(null);
@@ -416,6 +459,55 @@ export function InviteRedeemForm({
         </div>
       ) : null}
 
+      {isAddCommunity && normalizedRelayUrl ? (
+        showApiToken ? (
+          <div className="space-y-1.5 text-left">
+            <div className="flex items-center justify-between gap-3">
+              <label
+                className="text-sm font-medium text-foreground"
+                htmlFor="community-api-token"
+              >
+                API token
+                <span className="ml-1 text-xs font-normal text-muted-foreground">
+                  (optional)
+                </span>
+              </label>
+              <button
+                className="text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+                onClick={() => {
+                  setApiToken("");
+                  setShowApiToken(false);
+                }}
+                type="button"
+              >
+                Remove
+              </button>
+            </div>
+            <Input
+              autoComplete="off"
+              className="h-10 bg-background"
+              data-testid="community-api-token"
+              disabled={isRedeeming}
+              id="community-api-token"
+              onChange={(event) => setApiToken(event.target.value)}
+              placeholder="buzz_…"
+              type="password"
+              value={apiToken}
+            />
+          </div>
+        ) : (
+          <button
+            className="w-fit text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
+            data-testid="community-api-token-reveal"
+            disabled={isRedeeming}
+            onClick={() => setShowApiToken(true)}
+            type="button"
+          >
+            Use an API token
+          </button>
+        )
+      ) : null}
+
       {policyError ? (
         <p className="text-center text-sm text-destructive">{policyError}</p>
       ) : null}
@@ -425,7 +517,7 @@ export function InviteRedeemForm({
       ) : null}
 
       <AnimatePresence initial={false}>
-        {joinPolicy && policyInvite ? (
+        {joinPolicy && policyTarget ? (
           <motion.div
             animate={{
               height: "auto",
@@ -454,7 +546,7 @@ export function InviteRedeemForm({
                     transform: "translateY(-0.25rem)",
                   }
             }
-            key={`${policyInvite.relayWsUrl}:${joinPolicy.version}`}
+            key={`${policyTarget.relayWsUrl}:${joinPolicy.version}`}
             transition={
               shouldReduceMotion
                 ? { duration: 0 }
@@ -473,7 +565,7 @@ export function InviteRedeemForm({
                 setPolicyError(null);
               }}
               policy={joinPolicy}
-              relayWsUrl={policyInvite.relayWsUrl}
+              relayWsUrl={policyTarget.relayWsUrl}
             />
           </motion.div>
         ) : null}

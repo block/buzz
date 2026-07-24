@@ -4,7 +4,7 @@ import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
 import {
-  canEditCommunityProfile,
+  canManageCommunityMembers,
   shouldWarnMissingMembershipSnapshot,
 } from "@/shared/api/relayMembers";
 import { getFeature } from "@/shared/features/manifest";
@@ -139,10 +139,10 @@ export function SettingsView({
           return false;
         }
       }
-      // Closed relays require a discovered admin/owner role. Open relays have
-      // no NIP-43 snapshot, so expose only the relay-authorized profile editor.
+      // Invites and member management require a discovered owner/admin role.
+      // Open relays have no membership snapshot or invite controls.
       if (s.value === "community-members") {
-        return canEditCommunityProfile(myMembershipQuery.data);
+        return canManageCommunityMembers(myMembershipQuery.data);
       }
       return true;
     });
