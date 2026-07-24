@@ -29,8 +29,12 @@ pub fn to_storage_precision(created_at: DateTime<Utc>) -> DateTime<Utc> {
 /// `community_id` is hashed first so chain identity carries the tenant: an entry
 /// cannot be lifted out of one community's chain and re-verified inside another.
 ///
-/// `created_at` must already be at [`to_storage_precision`] — see that function
-/// for why sub-microsecond digits break verification.
+/// `created_at` is normalized through [`to_storage_precision`] here rather than
+/// hashed as given. Write paths truncate before storing so the row matches the
+/// in-memory entry, but normalizing again at the single point that consumes the
+/// value means no future caller can reintroduce the write/read preimage split
+/// by forgetting to. Values already at storage precision are unaffected —
+/// truncation is idempotent — so this does not change any digest.
 ///
 /// `detail` is serialized via [`canonical_json`] (sorted keys) so the hash is
 /// stable across machines and Rust versions. A serialization failure is a hard
@@ -40,7 +44,11 @@ pub fn compute_hash(entry: &AuditEntry) -> Result<[u8; 32], AuditError> {
     // Tenant binding: community_id leads the hash.
     hasher.update(entry.community_id.as_bytes());
     hasher.update(entry.seq.to_be_bytes());
-    hasher.update(entry.created_at.to_rfc3339().as_bytes());
+    hasher.update(
+        to_storage_precision(entry.created_at)
+            .to_rfc3339()
+            .as_bytes(),
+    );
     hasher.update(entry.action.as_str().as_bytes());
     match &entry.actor_pubkey {
         Some(pk) => {
@@ -157,19 +165,34 @@ mod tests {
     }
 
     #[test]
-    fn nanosecond_timestamps_cannot_survive_a_database_round_trip() {
-        // The trap `to_storage_precision` exists to close. `compute_hash`
-        // covers an RFC-3339 string whose sub-second digit count follows the
-        // value, so hashing a nanosecond `created_at` produces a digest that
-        // cannot be recomputed once Postgres has truncated it to microseconds:
-        // every entry would then fail `verify_chain` with `HashMismatch`.
+    fn rfc3339_sub_second_width_follows_the_value() {
+        // The underlying trap, pinned on the preimage rather than the digest:
+        // chrono emits 0/3/6/9 fractional digits depending on the value, so a
+        // nanosecond timestamp and its microsecond truncation are *different
+        // strings*. Hashing the untruncated value therefore produces a digest
+        // that cannot be recomputed from the stored row — which is what made
+        // every entry fail `verify_chain` with `HashMismatch`.
+        let ns = nanosecond_instant();
+        assert_eq!(ns.to_rfc3339(), "2023-11-14T22:13:20.123456789+00:00");
+        assert_eq!(
+            after_database_round_trip(ns).to_rfc3339(),
+            "2023-11-14T22:13:20.123456+00:00"
+        );
+        assert_ne!(ns.to_rfc3339(), after_database_round_trip(ns).to_rfc3339());
+    }
+
+    #[test]
+    fn compute_hash_normalizes_sub_microsecond_timestamps() {
+        // The enforcement point: even handed an untruncated `created_at`,
+        // `compute_hash` digests the storage-precision value, so a write path
+        // that forgot to truncate cannot split the write/read preimage.
         let ns = nanosecond_instant();
         let mut written = sample_entry();
         written.created_at = ns;
         let mut read_back = sample_entry();
         read_back.created_at = after_database_round_trip(ns);
 
-        assert_ne!(
+        assert_eq!(
             compute_hash(&written).unwrap(),
             compute_hash(&read_back).unwrap()
         );
