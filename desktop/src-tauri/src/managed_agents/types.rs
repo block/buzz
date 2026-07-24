@@ -552,11 +552,17 @@ pub enum AcpAvailabilityStatus {
 pub enum AuthStatus {
     /// The CLI reported a successful login.
     LoggedIn,
-    /// The CLI exited non-zero without a config-parse signal.
+    /// The CLI explicitly reported that authentication is absent.
     LoggedOut,
     /// The CLI exited non-zero and its stderr contains a config-parse error.
     ConfigInvalid {
         /// Trimmed excerpt of the stderr message.
+        diagnostic: String,
+    },
+    /// The CLI probe itself failed (for example, a broken launcher or missing
+    /// native executable), so re-authenticating would not resolve the issue.
+    ProbeFailed {
+        /// Trimmed excerpt of the CLI failure.
         diagnostic: String,
     },
     /// This runtime does not have a login step (e.g. goose, buzz-agent).

@@ -35,6 +35,8 @@ function requirementKey(
       return `cli_login:${req.probe_args.join(",")}:${index}`;
     case "cli_config_invalid":
       return `cli_config_invalid:${req.probe_args.join(",")}:${index}`;
+    case "cli_probe_failed":
+      return `cli_probe_failed:${req.probe_args.join(",")}:${index}`;
     case "git_bash":
       return `git_bash:${index}`;
   }
@@ -53,6 +55,10 @@ function hasGitBashRequirement(
   return reqs.some((r) => r.surface === "git_bash");
 }
 
+function hasCliProbeFailure(reqs: ConfigNudgePayload["requirements"]): boolean {
+  return reqs.some((r) => r.surface === "cli_probe_failed");
+}
+
 function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
   return reqs.length > 0 && reqs.every((r) => r.surface === "cli_login");
 }
@@ -60,7 +66,11 @@ function isAllCliLogin(reqs: ConfigNudgePayload["requirements"]): boolean {
 export function shouldOpenDoctor(
   reqs: ConfigNudgePayload["requirements"],
 ): boolean {
-  return isAllCliLogin(reqs) || hasGitBashRequirement(reqs);
+  return (
+    isAllCliLogin(reqs) ||
+    hasGitBashRequirement(reqs) ||
+    hasCliProbeFailure(reqs)
+  );
 }
 
 /**
@@ -381,6 +391,26 @@ function RequirementRow({
           </span>
         </div>
       );
+    case "cli_probe_failed": {
+      const cli = requirement.probe_args[0] ?? "the CLI";
+      return (
+        <div className="flex items-center gap-2 text-xs leading-4 text-muted-foreground">
+          <span className="flex-1 [overflow-wrap:anywhere]">
+            {cli} login-status check failed:{" "}
+            <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs text-foreground">
+              {requirement.diagnostic}
+            </code>
+          </span>
+          <button
+            className="relative z-20 shrink-0 font-medium text-muted-foreground hover:underline"
+            onClick={onOpenDoctor}
+            type="button"
+          >
+            Open Agent runtimes →
+          </button>
+        </div>
+      );
+    }
     case "cli_config_invalid": {
       // Config-invalid rows are purely informational — the user must edit an
       // external file. No Agent runtimes CTA (Buzz can't repair ~/.codex/config.toml)

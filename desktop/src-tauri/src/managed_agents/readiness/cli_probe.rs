@@ -24,14 +24,19 @@ pub(crate) fn augmented_path() -> Option<String> {
 pub(crate) enum ProbeOutcome {
     /// The CLI reported a successful login (exit 0).
     LoggedIn,
-    /// The CLI exited non-zero without a config-parse signal — treat as
-    /// "not authenticated."
+    /// The CLI explicitly reported that authentication is absent.
     LoggedOut,
     /// The CLI exited non-zero and its stderr contains a config-parse error
     /// (e.g. from `~/.codex/config.toml`). The user needs to fix their
     /// config, not re-run login.
     ConfigInvalid {
         /// A trimmed excerpt of the stderr message to surface in the nudge.
+        stderr_excerpt: String,
+    },
+    /// The CLI could not complete its auth probe for a reason other than being
+    /// logged out (for example, a broken npm shim or missing native binary).
+    ProbeFailed {
+        /// A trimmed excerpt of the failure to surface in Doctor/onboarding.
         stderr_excerpt: String,
     },
 }
@@ -46,6 +51,30 @@ pub(crate) enum ProbeOutcome {
 /// present, avoiding false positives from unrelated errors that mention only
 /// one term.
 const CONFIG_PARSE_SIGNALS: &[&str] = &["error loading configuration", "unknown variant"];
+
+/// Signals used by supported CLIs when auth is genuinely absent. Empty stderr
+/// also remains `LoggedOut` for compatibility with CLIs that only communicate
+/// the state through their exit code.
+const LOGGED_OUT_SIGNALS: &[&str] = &[
+    "not authenticated",
+    "not logged in",
+    "logged out",
+    "authentication required",
+    "login required",
+];
+
+const MAX_DIAGNOSTIC_CHARS: usize = 512;
+
+fn diagnostic_excerpt(stderr: &str) -> String {
+    stderr
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(stderr)
+        .trim()
+        .chars()
+        .take(MAX_DIAGNOSTIC_CHARS)
+        .collect()
+}
 
 /// Run the probe at the resolved absolute path so the GUI-PATH gap is
 /// bypassed. Injects the same augmented PATH used for launched agents so
@@ -66,7 +95,9 @@ pub(crate) fn login_probe(
     match command.output() {
         Ok(o) if o.status.success() => ProbeOutcome::LoggedIn,
         Ok(o) => classify_probe_output(&o.stderr, false),
-        Err(_) => ProbeOutcome::LoggedOut,
+        Err(error) => ProbeOutcome::ProbeFailed {
+            stderr_excerpt: format!("failed to run {}: {error}", binary_path.display()),
+        },
     }
 }
 
@@ -85,18 +116,26 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
         .iter()
         .all(|sig| stderr_lower.contains(sig))
     {
-        let excerpt = stderr.trim().lines().next().unwrap_or("").to_string();
+        let excerpt = diagnostic_excerpt(&stderr);
         ProbeOutcome::ConfigInvalid {
             stderr_excerpt: excerpt,
         }
-    } else {
+    } else if stderr.trim().is_empty()
+        || LOGGED_OUT_SIGNALS
+            .iter()
+            .any(|signal| stderr_lower.contains(signal))
+    {
         ProbeOutcome::LoggedOut
+    } else {
+        ProbeOutcome::ProbeFailed {
+            stderr_excerpt: diagnostic_excerpt(&stderr),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+    use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS, LOGGED_OUT_SIGNALS};
 
     #[cfg(unix)]
     #[test]
@@ -227,19 +266,58 @@ mod tests {
         assert_eq!(
             outcome,
             ProbeOutcome::LoggedOut,
-            "non-config stderr should produce LoggedOut"
+            "recognized logged-out stderr should produce LoggedOut"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_probe_failed_on_unexpected_cli_error() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let script_path = temp.path().join("fake-codex-broken");
+        fs::write(
+            &script_path,
+            "#!/bin/sh\necho 'Error: spawn /opt/codex/vendor/bin/codex ENOENT' >&2\nexit 1\n",
+        )
+        .expect("write script");
+        fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).expect("chmod script");
+
+        let outcome = super::login_probe(
+            &script_path,
+            &["fake-codex-broken", "login", "status"],
+            None,
+        );
+        assert_eq!(
+            outcome,
+            ProbeOutcome::ProbeFailed {
+                stderr_excerpt: "Error: spawn /opt/codex/vendor/bin/codex ENOENT".to_string(),
+            },
+            "unexpected CLI failures must not be reported as logged out"
+        );
+    }
+
+    #[test]
+    fn login_probe_failed_when_binary_cannot_start() {
+        let missing = std::path::Path::new("/definitely/missing/codex");
+        let outcome = super::login_probe(missing, &["codex", "login", "status"], None);
+        assert!(
+            matches!(outcome, ProbeOutcome::ProbeFailed { .. }),
+            "spawn failures must remain distinguishable from logged-out state: {outcome:?}"
         );
     }
 
     /// Verify that every string in CONFIG_PARSE_SIGNALS is lowercased so the
     /// case-insensitive match works correctly.
     #[test]
-    fn config_parse_signals_are_lowercase() {
-        for sig in CONFIG_PARSE_SIGNALS {
+    fn probe_signals_are_lowercase() {
+        for sig in CONFIG_PARSE_SIGNALS.iter().chain(LOGGED_OUT_SIGNALS) {
             assert_eq!(
                 *sig,
                 sig.to_lowercase(),
-                "CONFIG_PARSE_SIGNAL must be lowercase for case-insensitive matching: {sig}"
+                "probe signal must be lowercase for case-insensitive matching: {sig}"
             );
         }
     }

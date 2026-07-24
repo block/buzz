@@ -527,6 +527,7 @@ export type AuthStatus =
   | { status: "logged_in" }
   | { status: "logged_out" }
   | { status: "config_invalid"; diagnostic: string }
+  | { status: "probe_failed"; diagnostic: string }
   | { status: "not_applicable" }
   | { status: "unknown" };
 

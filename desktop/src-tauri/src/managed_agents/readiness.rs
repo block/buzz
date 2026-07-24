@@ -193,6 +193,16 @@ pub enum Requirement {
         /// Shown verbatim in the nudge so the user can identify the problem.
         diagnostic: String,
     },
+    /// The CLI could not execute its login-status probe. This is distinct from
+    /// a logged-out state because starting another login flow cannot repair it.
+    CliProbeFailed {
+        /// Arguments used in the failed probe.
+        probe_args: Vec<String>,
+        /// Human-readable hint shown when no structured copy is available.
+        setup_copy: String,
+        /// One-line stderr excerpt identifying the CLI failure.
+        diagnostic: String,
+    },
     /// Git for Windows is missing, so buzz-agent cannot launch buzz-dev-mcp's
     /// Bash-based shell tool. Doctor owns installation and re-checking.
     GitBash,

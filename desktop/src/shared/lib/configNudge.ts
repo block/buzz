@@ -50,6 +50,14 @@ export type ConfigNudgeRequirement =
       /** One-line stderr excerpt from the CLI's parse error. */
       diagnostic: string;
     }
+  | {
+      /** The CLI failed before authentication state could be determined. */
+      surface: "cli_probe_failed";
+      probe_args: string[];
+      setup_copy: string;
+      /** One-line stderr excerpt from the failed CLI probe. */
+      diagnostic: string;
+    }
   | { surface: "git_bash" };
 
 /**
@@ -149,6 +157,7 @@ function isConfigNudgeRequirement(v: unknown): v is ConfigNudgeRequirement {
     case "git_bash":
       return true;
     case "cli_config_invalid":
+    case "cli_probe_failed":
       return (
         Array.isArray(r.probe_args) &&
         r.probe_args.every((a) => typeof a === "string") &&

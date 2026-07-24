@@ -923,7 +923,11 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
 
     let mut child = match command.spawn() {
         Ok(c) => c,
-        Err(_) => return AuthStatus::Unknown,
+        Err(error) => {
+            return AuthStatus::ProbeFailed {
+                diagnostic: format!("failed to run {}: {error}", binary_path.display()),
+            }
+        }
     };
 
     // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
@@ -993,6 +997,9 @@ fn probe_auth_status(binary_path: &Path, probe_args: &[&str]) -> AuthStatus {
         cli_probe::ProbeOutcome::LoggedIn => AuthStatus::LoggedIn,
         cli_probe::ProbeOutcome::LoggedOut => AuthStatus::LoggedOut,
         cli_probe::ProbeOutcome::ConfigInvalid { stderr_excerpt } => AuthStatus::ConfigInvalid {
+            diagnostic: stderr_excerpt,
+        },
+        cli_probe::ProbeOutcome::ProbeFailed { stderr_excerpt } => AuthStatus::ProbeFailed {
             diagnostic: stderr_excerpt,
         },
     }

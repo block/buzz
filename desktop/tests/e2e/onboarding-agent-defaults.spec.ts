@@ -155,6 +155,38 @@ test("unknown authentication can be checked again", async ({ page }) => {
   );
 });
 
+test("failed CLI probe shows its diagnostic instead of starting sign-in", async ({
+  page,
+}) => {
+  const diagnostic = "Error: spawn /opt/codex/bin/codex ENOENT";
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("codex", "available", {
+          status: "probe_failed",
+          diagnostic,
+        }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  await expect(
+    page.getByTestId("onboarding-runtime-probe-failed-codex"),
+  ).toHaveText("CLI ERROR");
+  await expect(
+    page.getByRole("button", { name: "Sign in to Codex" }),
+  ).toHaveCount(0);
+  const error = page.getByTestId("onboarding-runtime-auth-error-codex");
+  await expect(error).toHaveAttribute(
+    "aria-label",
+    `CLI check failed. ${diagnostic}`,
+  );
+});
+
 test("auth discovery failure stays actionable without exposing internals", async ({
   page,
 }) => {
