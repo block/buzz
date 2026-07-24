@@ -2,9 +2,11 @@ import * as React from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Bot, UserRoundPlus, X } from "lucide-react";
 import {
+  invalidateChannelState,
   useAddChannelMembersMutation,
   useChannelMembersQuery,
 } from "@/features/channels/hooks";
+import { attachManagedAgentToChannel } from "@/features/agents/channelAgents";
 import {
   coalesceAgentAutocompleteCandidates,
   isAgentIdentityInManagedList,
@@ -48,6 +50,11 @@ import {
   MODAL_SEARCH_SHELL_CLASS,
 } from "@/shared/ui/modalSearchStyles";
 import { MembersSidebarMemberCard } from "./MembersSidebarMemberCard";
+import { useManagedAgentRuntimesQuery } from "@/features/agents/managedAgentRuntimeHooks";
+import {
+  findManagedAgentRuntime,
+  managedAgentPairAction,
+} from "@/features/agents/managedAgentRuntimeStatus";
 import { EditRespondToDialog } from "./EditRespondToDialog";
 import { useMembersSidebarActions } from "./useMembersSidebarActions";
 import { useMembersSidebarModeration } from "./useMembersSidebarModeration";
@@ -122,6 +129,7 @@ type MembersSidebarProps = {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onViewActivity?: (pubkey: string) => void;
+  relayUrl?: string;
 };
 
 export function MembersSidebar({
@@ -130,8 +138,12 @@ export function MembersSidebar({
   open,
   onOpenChange,
   onViewActivity,
+  relayUrl,
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
+  const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
+    enabled: open,
+  });
   const queryClient = useQueryClient();
   const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -489,6 +501,7 @@ export function MembersSidebar({
     removableManagedBots,
     currentPubkey,
     onOpenChange,
+    relayUrl,
   });
 
   useFeedbackToasts(actionNoticeMessage, actionErrorMessage);
@@ -531,6 +544,35 @@ export function MembersSidebar({
     setAddingMemberPubkeys((prev) => new Set(prev).add(user.pubkey));
 
     try {
+      // A local managed agent needs a running harness pair in this community,
+      // not just channel membership — a bare membership add leaves it deaf
+      // until someone @mentions it or manually starts the pair. Route it
+      // through the attach helper, which adds membership AND ensures the active
+      // community's pair is running (idempotent: a live pair is left alone).
+      // Humans and provider agents keep the plain membership add.
+      const managedAgent = managedAgentByPubkey.get(
+        normalizePubkey(user.pubkey),
+      );
+      if (channelId && managedAgent?.backend.type === "local") {
+        try {
+          await attachManagedAgentToChannel(channelId, {
+            agent: managedAgent,
+            ensureRunning: true,
+          });
+          await invalidateChannelState(queryClient, channelId);
+        } catch (error) {
+          setInviteSubmissionErrors((prev) => [
+            ...prev,
+            {
+              pubkey: user.pubkey,
+              error:
+                error instanceof Error ? error.message : "Failed to add agent.",
+            },
+          ]);
+        }
+        return;
+      }
+
       const result = await addMembersMutation.mutateAsync({
         pubkeys: [user.pubkey],
         role: user.isAgent ? "bot" : "member",
@@ -553,6 +595,24 @@ export function MembersSidebar({
         currentPubkey &&
         memberProfile.ownerPubkey.toLowerCase() === currentPubkey.toLowerCase(),
     );
+    const managedAgent = memberIsBot
+      ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
+      : undefined;
+    const managedAgentRuntime =
+      memberIsBot && relayUrl
+        ? findManagedAgentRuntime(
+            managedAgentRuntimesQuery.data ?? [],
+            member.pubkey,
+            relayUrl,
+          )
+        : undefined;
+    // Mirrors the dispatch condition in useMembersSidebarActions: local
+    // agents in a community context act on the pair; provider agents keep
+    // the agent-wide deploy/!shutdown action.
+    const pairAction =
+      managedAgent?.backend.type === "local" && relayUrl
+        ? managedAgentPairAction(managedAgentRuntime)
+        : undefined;
     return (
       <div className="content-visibility-auto" key={member.pubkey}>
         <MembersSidebarMemberCard
@@ -565,11 +625,8 @@ export function MembersSidebar({
             isModerationPending
           }
           isArchived={isArchived}
-          managedAgent={
-            memberIsBot
-              ? managedAgentByPubkey.get(normalizePubkey(member.pubkey))
-              : undefined
-          }
+          managedAgent={managedAgent}
+          managedAgentRuntime={managedAgentRuntime}
           member={member}
           memberIsBot={memberIsBot}
           memberAvatarLabel={
@@ -585,7 +642,7 @@ export function MembersSidebar({
           }}
           onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
           onManagedAgentAction={(agent) => {
-            void handleAgentLifecycleAction(agent);
+            void handleAgentLifecycleAction(agent, managedAgentRuntime);
           }}
           onOpenProfile={handleOpenProfile}
           onRemoveMember={handleRemoveMember}
@@ -600,6 +657,7 @@ export function MembersSidebar({
                 }
               : undefined
           }
+          pairAction={pairAction}
           presenceStatus={
             memberPresenceQuery.data?.[member.pubkey.toLowerCase()] ?? null
           }

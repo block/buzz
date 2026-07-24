@@ -3,6 +3,7 @@
 //! Library crate — no Axum dependency for handlers. Axum handlers live in `buzz-relay`.
 
 pub mod auth;
+pub mod bucket_index;
 pub mod config;
 pub mod error;
 pub mod storage;
@@ -12,6 +13,10 @@ pub mod upload;
 pub mod upload_record;
 pub mod validation;
 
+pub use bucket_index::{
+    classify_key, fold_bucket_listing, BucketAggregate, BucketSnapshot, CommunityStorage, KeyClass,
+    Page, SweepError,
+};
 pub use config::MediaConfig;
 pub use error::MediaError;
 pub use storage::{BlobHeadMeta, BlobMeta, ByteStream, MediaStorage};

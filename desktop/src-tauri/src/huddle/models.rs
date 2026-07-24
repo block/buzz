@@ -38,12 +38,19 @@ use sha2::{Digest, Sha256};
 /// Computed from a known-good download. Update when upgrading model versions.
 const STT_ARCHIVE_SHA256: &str = "17f945007b52ccd8b7200ffc7c5652e9e8e961dfdf479cefcabd06cf5703630b";
 
-/// HuggingFace base URL for the sherpa-onnx Pocket TTS int8 repackage.
+/// HuggingFace base URL for the sherpa-onnx Pocket TTS fp32 repackage.
 ///
-/// Pinned to commit e715955cf50d18d919d37231513c0e914b83661a
+/// Pinned to commit 96d1e53ce3311ca6c2c6a35e2062d36b4cec6fa3
 /// (2026-02-10) for reproducible downloads.
+///
+/// fp32 (not int8): a direct same-runtime A/B (k2-fsa/sherpa-onnx#3172)
+/// found the ONNX int8 quantization audibly degraded Pocket TTS output and
+/// that fp32 "significantly improved quality even at 1 step". The runtime
+/// bundle grows from ~189 MB to ~473 MB; encoder, text conditioner, both
+/// JSON tables, and LICENSE are byte-identical between the two repos — only
+/// the three quantized sessions (lm_main, lm_flow, decoder) change.
 const POCKET_HF_BASE: &str =
-    "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26/resolve/e715955cf50d18d919d37231513c0e914b83661a";
+    "https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26/resolve/96d1e53ce3311ca6c2c6a35e2062d36b4cec6fa3";
 
 /// Reference voice WAV: "Mary (f, conversation)" from the Kyutai TTS demo
 /// voice set — VCTK speaker p333, ai-coustics-enhanced. Pinned to
@@ -61,10 +68,10 @@ const POCKET_REFERENCE_WAV_URL: &str =
 /// Computed from known-good pinned downloads. Update when upgrading model versions.
 #[rustfmt::skip]
 const TTS_FILE_HASHES: &[(&str, &str)] = &[
-    ("decoder.int8.onnx",     "12b0857402d31aead94df19d6783b4350d1f740e811f3a3202c70ad89ae11eea"),
+    ("decoder.onnx",          "f267880fde6c58b17b0a8f3647eaf8dcfad321f833f32d583ebc2fb2d1a15f10"),
     ("encoder.onnx",          "e8f2f6d301ffb96e398b138a7dc6d3038622d236044636b73d920bab85890260"),
-    ("lm_flow.int8.onnx",     "8d627d235c44a597da908e1085ebe241cbbe358964c502c5a5063d18851a5529"),
-    ("lm_main.int8.onnx",     "bfc0c7e7e3d72864fa3bb2ee499f62f21ddc1474b885f5f3ca570f8be73e787e"),
+    ("lm_flow.onnx",          "79c013a554a54e63319c33c0cc8830cbbedc9b7e448ae7e26f7923ae11f9873e"),
+    ("lm_main.onnx",          "255d1a9263c5abdf36034abfc19c11d21cc5f40f0f87d8361288e972cbd5c578"),
     ("text_conditioner.onnx", "0b84e837d7bfaf2c896627b03e3f080320309f37f4fc7df7698c644f7ba5e6b1"),
     ("vocab.json",            "6fb646346cf931016f70c4921aab0900ce7a304b893cb02135c74e294abfea01"),
     ("token_scores.json",     "5be2f278caf9b9800741f0fd82bff677f4943ec764c356f907213434b622d958"),
@@ -91,7 +98,9 @@ const STT_MODEL_VERSION: &str = "2";
 /// from kyutai/tts-voices. The hash mismatch on `reference_sample.wav` would
 /// fail readiness on its own, but the manifest bump makes the re-download
 /// reason explicit and skips the failing-then-re-fetching transient state.
-const TTS_MODEL_VERSION: &str = "2";
+/// Bumped "2" → "3" for the int8 → fp32 model swap (see `POCKET_HF_BASE`):
+/// existing int8 installs must re-download the suffixless fp32 sessions.
+const TTS_MODEL_VERSION: &str = "3";
 
 /// Filename for the version manifest written alongside model files.
 const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
@@ -101,8 +110,9 @@ const MANIFEST_FILENAME: &str = ".buzz-model-manifest";
 /// Maximum expected STT archive size (200 MB — actual is ~100 MB).
 const MAX_STT_DOWNLOAD_BYTES: u64 = 200 * 1024 * 1024;
 
-/// Maximum expected Pocket TTS file size (200 MB per file — largest is ~73 MB).
-const MAX_TTS_FILE_BYTES: u64 = 200 * 1024 * 1024;
+/// Maximum expected Pocket TTS file size (400 MB per file — largest is
+/// `lm_main.onnx` at ~303 MB fp32).
+const MAX_TTS_FILE_BYTES: u64 = 400 * 1024 * 1024;
 
 /// NVIDIA Parakeet TDT-CTC 110M (English, int8) — packaged for sherpa-onnx by
 /// k2-fsa. Single ONNX file (CTC head) + tokens.txt. Avg WER ~7.5% across
@@ -173,7 +183,7 @@ Mimi neural codec by Kyutai is bundled as part of the model.
 
 ONNX export by KevinAHM: https://huggingface.co/KevinAHM/pocket-tts-onnx
 Sherpa-onnx repackage by csukuangfj / k2-fsa:
-https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-int8-2026-01-26
+https://huggingface.co/csukuangfj2/sherpa-onnx-pocket-tts-2026-01-26
 
 Bundled reference voice (reference_sample.wav):
 \"Mary (f, conversation)\" preset from the Kyutai TTS demo voice catalogue
@@ -193,10 +203,10 @@ license text for full warranty disclaimer.
 
 /// All files that must be present for Pocket TTS to be considered ready.
 const TTS_EXPECTED_FILES: &[&str] = &[
-    "decoder.int8.onnx",
+    "decoder.onnx",
     "encoder.onnx",
-    "lm_flow.int8.onnx",
-    "lm_main.int8.onnx",
+    "lm_flow.onnx",
+    "lm_main.onnx",
     "text_conditioner.onnx",
     "vocab.json",
     "token_scores.json",
@@ -759,10 +769,10 @@ impl ModelManager {
         fresh_temp_dir(&temp_dir).await?;
 
         let model_files = [
-            "decoder.int8.onnx",
+            "decoder.onnx",
             "encoder.onnx",
-            "lm_flow.int8.onnx",
-            "lm_main.int8.onnx",
+            "lm_flow.onnx",
+            "lm_main.onnx",
             "text_conditioner.onnx",
             "vocab.json",
             "token_scores.json",

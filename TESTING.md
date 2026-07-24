@@ -235,6 +235,14 @@ The justfile also ships `just goose key="$AGENT_NSEC"` (foreground) and
 same env. See `crates/buzz-acp/README.md` for parallel agents, heartbeats,
 respond-to gates, and forum subscriptions.
 
+To exercise deferred ACP startup, add `BUZZ_ACP_LAZY_POOL=true` before launching
+`buzz-acp`. The harness should connect, authenticate, subscribe, and publish
+online presence without starting the configured ACP child. The first accepted,
+flushable mention should start exactly one child and then dispatch the queued
+message. Automated coverage in `pool_lifecycle_state` pins single-wake,
+retry/backoff, and stale-result behavior; it does not replace this real
+relay/process smoke test.
+
 Send the agent a task — switch your shell back to the **sender** identity
 from step 4 and @mention the agent:
 

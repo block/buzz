@@ -215,7 +215,14 @@ export function MachineOnboardingFlow({
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
                 next: (runtimeIds) => {
-                  setReadyRuntimeIds(Array.from(runtimeIds));
+                  const ids = Array.from(runtimeIds);
+                  setReadyRuntimeIds(ids);
+                  // Harness install can fail (Windows/PATH/network). Don't soft-lock
+                  // onboarding — users can finish setup later in Settings → Agents.
+                  if (ids.length === 0) {
+                    complete(selectedPubkey ?? undefined);
+                    return;
+                  }
                   setPage("config");
                 },
               }}

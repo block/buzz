@@ -15,6 +15,7 @@ use crate::{
         current_instance_id, known_acp_runtime, load_managed_agents, load_personas,
         resolve_effective_prompt_model_provider, save_managed_agents, sync_managed_agent_processes,
         AgentDefinition, GlobalAgentConfig, KnownAcpRuntime, ManagedAgentRecord,
+        ManagedAgentRuntimeKey,
     },
 };
 
@@ -357,7 +358,7 @@ pub async fn get_agent_config_surface(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
         records
             .into_iter()
@@ -368,7 +369,14 @@ pub async fn get_agent_config_surface(
     let personas = load_personas(&app).unwrap_or_default();
     let effective_cmd = crate::managed_agents::record_agent_command(&record, &personas);
     let runtime_meta = known_acp_runtime(&effective_cmd);
-    let session_cache = state.get_session_cache(&pubkey);
+    let runtime_key = ManagedAgentRuntimeKey::new(
+        pubkey.clone(),
+        &crate::relay::effective_agent_relay_url(
+            &record.relay_url,
+            &crate::relay::relay_ws_url_with_override(&state),
+        ),
+    )?;
+    let session_cache = state.get_session_cache(&runtime_key);
     let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
 
     Ok(resolve_config_surface(
@@ -391,16 +399,35 @@ pub fn put_agent_session_config(
     app: AppHandle,
     state: State<'_, AppState>,
 ) {
-    {
+    let record_relay_url = {
         let _guard = match state.managed_agents_store_lock.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         match load_managed_agents(&app) {
-            Ok(records) if records.iter().any(|r| r.pubkey == pubkey) => {}
+            Ok(records) => match records.into_iter().find(|r| r.pubkey == pubkey) {
+                Some(record) => record.relay_url,
+                None => return,
+            },
             _ => return,
         }
-    }
+    };
+
+    // Pair identity: prefer the relay URL the harness attached to the payload
+    // (same pattern as lifecycle frames). Older harnesses don't attach one;
+    // fall back to the record's effective relay — with no attached URL the
+    // frame can only have arrived over the active workspace relay, which is
+    // exactly what effective_agent_relay_url resolves to absent a pin.
+    let relay_url = payload
+        .get("relayUrl")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            crate::relay::effective_agent_relay_url(
+                &record_relay_url,
+                &crate::relay::relay_ws_url_with_override(&state),
+            )
+        });
 
     let config_options = parse_config_options(payload.get("configOptions"));
     let available_modes = parse_modes(&config_options, payload.get("modes"));
@@ -420,7 +447,10 @@ pub fn put_agent_session_config(
         captured_at: crate::util::now_iso(),
     };
 
-    state.put_session_cache(&pubkey, cache);
+    let Ok(runtime_key) = ManagedAgentRuntimeKey::new(pubkey, &relay_url) else {
+        return;
+    };
+    state.put_session_cache(runtime_key, cache);
 }
 
 fn parse_config_options(raw: Option<&serde_json::Value>) -> Vec<AcpConfigOptionEntry> {

@@ -1,0 +1,190 @@
+name: Signed macOS Canary
+
+# Produces a signed and notarized Apple Silicon DMG from main without creating
+# a tag, GitHub Release, or auto-updater artifact. The DMG is available only as
+# a short-lived GitHub Actions artifact for explicit testing.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build signed macOS canary
+    if: github.repository == 'block/buzz'
+    runs-on: macos-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write # required by block/apple-codesign-action for OIDC
+    steps:
+      - name: Require main
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: |
+          if [[ "$SOURCE_REF" != "refs/heads/main" ]]; then
+            echo "::error::Signed canary builds must run from main; got $SOURCE_REF"
+            exit 1
+          fi
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+
+      - name: Install desktop dependencies
+        run: just desktop-install-ci
+
+      - name: Derive canary version
+        id: version
+        run: |
+          set -euo pipefail
+          BASE_VERSION=$(node -p "require('./desktop/package.json').version")
+          if ! [[ "$BASE_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Desktop version '$BASE_VERSION' is not semver"
+            exit 1
+          fi
+          VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-test.${GITHUB_RUN_NUMBER}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building canary version $VERSION from $GITHUB_SHA"
+
+      - name: Patch canary version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cd desktop && node scripts/set-version-from-tag.mjs "$VERSION"
+          cd src-tauri && cargo update --workspace
+
+      - name: Generate non-updating bundle config
+        run: |
+          cat > desktop/src-tauri/tauri.canary.conf.json <<'JSON'
+          {
+            "bundle": {
+              "macOS": {
+                "minimumSystemVersion": "10.15"
+              },
+              "createUpdaterArtifacts": false
+            }
+          }
+          JSON
+
+      - name: Build sidecars
+        run: |
+          cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
+          ./scripts/bundle-sidecars.sh
+
+      # Mesh rev derived from Cargo.lock (no lockstep edit on dep bump); cache key tracks it.
+      - name: Resolve mesh-llm rev
+        id: mesh_rev
+        run: |
+          set -euo pipefail
+          REV=$(python3 -c 'import tomllib; d=tomllib.load(open("Cargo.lock", "rb")); p=next(p for p in d["package"] if p["name"] == "mesh-llm-sdk"); print(p["source"].rsplit("#", 1)[1])')
+          [[ -n "$REV" ]] || { echo "::error::could not resolve mesh-llm rev from Cargo.lock"; exit 1; }
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "short=${REV:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore mesh llama build cache
+        id: llama_cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ github.workspace }}/.cache/mesh-llama
+          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
+
+      - name: Build mesh llama native libraries
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        env:
+          MESH_REV_SHORT: ${{ steps.mesh_rev.outputs.short }}
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml
+          MESH_ROOT=$(find "${CARGO_HOME:-$HOME/.cargo}/git/checkouts" -path "*/$MESH_REV_SHORT" -type d -name "$MESH_REV_SHORT" | head -1)
+          if [[ -z "$MESH_ROOT" ]]; then
+            echo "::error::mesh-llm checkout for $MESH_REV_SHORT not found after cargo fetch"
+            exit 1
+          fi
+          export LLAMA_STAGE_BACKEND=metal
+          export LLAMA_STAGE_BUILD_DIR="$GITHUB_WORKSPACE/.cache/mesh-llama/build-stage-abi-metal"
+          export CMAKE_OSX_DEPLOYMENT_TARGET=10.15
+          "$MESH_ROOT/scripts/prepare-llama.sh" pinned
+          "$MESH_ROOT/scripts/build-llama.sh" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.15
+
+      - name: Save mesh llama build cache
+        if: steps.llama_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ github.workspace }}/.cache/mesh-llama
+          key: mesh-llama-${{ runner.os }}-metal-${{ steps.mesh_rev.outputs.rev }}
+
+      - name: Build unsigned Tauri app
+        run: cd desktop && pnpm tauri build --verbose --no-sign --features mesh-llm --config src-tauri/tauri.canary.conf.json
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+          MACOSX_DEPLOYMENT_TARGET: "10.15"
+          CMAKE_OSX_DEPLOYMENT_TARGET: "10.15"
+          LLAMA_STAGE_BACKEND: metal
+          LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
+          SKIPPY_LLAMA_AUTO_BUILD: "0"
+          TAURI_BUNDLER_DMG_IGNORE_CI: "true"
+
+      - name: Locate unsigned DMG
+        id: unsigned
+        run: |
+          DMG=$(find desktop/src-tauri/target/release/bundle/dmg -name '*.dmg' -type f | head -1)
+          if [[ -z "$DMG" ]]; then
+            echo "::error::No DMG found"
+            exit 1
+          fi
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Set DMG Finder label text size
+        env:
+          DMG_PATH: ${{ steps.unsigned.outputs.dmg }}
+        run: desktop/scripts/set-dmg-finder-text-size.sh "$DMG_PATH" 14
+
+      # mdx-ios-codesign-helper discovers this file by its exact lowercase basename.
+      - name: Stage signing entitlements
+        run: cp desktop/src-tauri/Entitlements.plist "${RUNNER_TEMP}/entitlements.plist"
+
+      - name: Codesign and notarize
+        id: codesign
+        uses: block/apple-codesign-action@679535d1ab7c5a7c18e6f9afcba3464512cc3dde # v1.1.0
+        with:
+          osx-codesign-role: ${{ secrets.OSX_CODESIGN_ROLE }}
+          codesign-s3-bucket: ${{ secrets.CODESIGN_S3_BUCKET }}
+          unsigned-artifact-path: ${{ steps.unsigned.outputs.dmg }}
+          entitlements-plist-path: ${{ runner.temp }}/entitlements.plist
+          artifact-name: buzz-canary-${{ github.sha }}-${{ github.run_id }}-arm64
+
+      - name: Verify signed app
+        env:
+          SIGNED_APP_ZIP: ${{ steps.codesign.outputs.signed-artifact-path }}
+        run: |
+          set -euo pipefail
+          EXTRACT_DIR="${RUNNER_TEMP}/signed-app-extract"
+          rm -rf "$EXTRACT_DIR" && mkdir -p "$EXTRACT_DIR"
+          ditto -x -k "$SIGNED_APP_ZIP" "$EXTRACT_DIR"
+          codesign --verify --deep --strict --verbose=2 "$EXTRACT_DIR/Buzz.app"
+          spctl --assess --type execute --verbose=4 "$EXTRACT_DIR/Buzz.app"
+          desktop/scripts/verify-macos-entitlements.sh "$EXTRACT_DIR/Buzz.app"
+
+      - name: Stage signed DMG
+        id: artifact
+        env:
+          SIGNED_DMG: ${{ steps.codesign.outputs.signed-dmg-path }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="Buzz_${VERSION}_aarch64-signed.dmg"
+          cp "$SIGNED_DMG" "$RUNNER_TEMP/$NAME"
+          echo "path=$RUNNER_TEMP/$NAME" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed canary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-macos-canary-${{ github.sha }}
+          path: ${{ steps.artifact.outputs.path }}
+          if-no-files-found: error
+          retention-days: 7

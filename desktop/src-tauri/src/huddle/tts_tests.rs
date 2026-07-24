@@ -915,3 +915,80 @@ fn clamp_to_full_scale_empty_buffer() {
     let out = clamp_to_full_scale(Vec::new());
     assert!(out.is_empty());
 }
+
+// ── group_sentences_into_chunks tests ─────────────────────────────────────
+
+fn s(v: &[&str]) -> Vec<String> {
+    v.iter().map(|x| x.to_string()).collect()
+}
+
+/// The first sentence always stands alone — it bounds time-to-first-audio.
+/// Even when the whole message would fit in one chunk, sentence one must
+/// not wait on synthesis of the rest.
+#[test]
+fn chunk_grouping_first_sentence_is_always_alone() {
+    let chunks = group_sentences_into_chunks(&s(&["Hi there.", "Short.", "Tiny."]), 200);
+    assert_eq!(chunks[0], "Hi there.");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[1], "Short. Tiny.");
+}
+
+/// Sentences after the first pack greedily up to the char budget, then
+/// spill into a new chunk. Fewer generate() calls = fewer prosody seams.
+#[test]
+fn chunk_grouping_packs_up_to_budget_then_spills() {
+    let a = "A".repeat(50) + ".";
+    let b = "B".repeat(50) + ".";
+    let c = "C".repeat(50) + ".";
+    let d = "D".repeat(50) + ".";
+    // Budget of 110: b+c fits (51+1+51 = 103), adding d (103+1+51) does not.
+    let chunks = group_sentences_into_chunks(&s(&[&a, &b, &c, &d]), 110);
+    assert_eq!(chunks.len(), 3, "chunks: {chunks:?}");
+    assert_eq!(chunks[0], a);
+    assert_eq!(chunks[1], format!("{b} {c}"));
+    assert_eq!(chunks[2], d);
+}
+
+/// A single sentence longer than the budget is passed through unsplit —
+/// long single sentences are fine (the LM cap bounds runaway); only seams
+/// are being minimized.
+#[test]
+fn chunk_grouping_oversized_sentence_passes_through() {
+    let long = "word ".repeat(60).trim_end().to_string() + ".";
+    assert!(long.len() > 200);
+    let chunks = group_sentences_into_chunks(&s(&["First.", &long]), 200);
+    assert_eq!(chunks, vec!["First.".to_string(), long]);
+}
+
+/// Single-sentence messages — the common huddle case, since agents are
+/// prompted to send one sentence per message — are unaffected by grouping.
+#[test]
+fn chunk_grouping_single_sentence_unchanged() {
+    let chunks = group_sentences_into_chunks(&s(&["Just one sentence here."]), 200);
+    assert_eq!(chunks, vec!["Just one sentence here.".to_string()]);
+}
+
+/// Empty and whitespace-only entries are dropped, and never produce
+/// empty chunks (which would synthesize as garbage).
+#[test]
+fn chunk_grouping_skips_blank_sentences() {
+    let chunks = group_sentences_into_chunks(&s(&["", "  ", "Real sentence.", "   ", "Two."]), 200);
+    assert_eq!(chunks[0], "Real sentence.");
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(chunks[1], "Two.");
+}
+
+/// Empty input produces no chunks (the worker loop then synthesizes nothing).
+#[test]
+fn chunk_grouping_empty_input() {
+    assert!(group_sentences_into_chunks(&[], 200).is_empty());
+}
+
+/// Chunks joined with a single space preserve each sentence's terminal
+/// punctuation — the model sees natural multi-sentence prose, matching the
+/// shape upstream's ~50-token chunker produces.
+#[test]
+fn chunk_grouping_preserves_punctuation_at_joins() {
+    let chunks = group_sentences_into_chunks(&s(&["Lead.", "Really?", "Yes!", "Good."]), 200);
+    assert_eq!(chunks[1], "Really? Yes! Good.");
+}

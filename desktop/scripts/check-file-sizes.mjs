@@ -114,7 +114,11 @@ const overrides = new Map([
   // keyring-dev-isolation: agent key migration added copy_agent_keys_between_stores
   // and load_readonly support; file grew past 1000 default. Queued to split.
   // +7 for try_delete_agent_key result-returning seam (snapshot-import rollback).
-  ["src-tauri/src/managed_agents/storage.rs", 1335],
+  // +48 (1335 -> 1383): agents-everywhere pair re-key — pair-scoped runtime
+  // receipts (write_agent_runtime_receipt atomic JSON + remove/read_all
+  // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
+  // runtime log path. Load-bearing crash-recovery surface; queued to split.
+  ["src-tauri/src/managed_agents/storage.rs", 1383],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -174,6 +178,10 @@ const overrides = new Map([
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
   ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
+  // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
+  // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1041],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -321,7 +329,11 @@ const overrides = new Map([
   // the relay_admission freshness-verification test. The loopback mock was
   // hardened (std::net + request-read-before-write) adding ~10 lines.
   // Queued to split test helpers to relay/tests.rs.
-  ["src-tauri/src/relay.rs", 1047],
+  // +30 (1047 -> 1077): agents-everywhere pair re-key — query_relay_at_with_keys
+  // (NIP-98 signed /query with explicit agent keys + optional x-auth-tag) for
+  // bounded-auth agent relay-membership discovery. Load-bearing; queued to
+  // split alongside the test-helper split.
+  ["src-tauri/src/relay.rs", 1077],
   // degraded-network resilience: visibleChannelId field + getter/setter, NOTICE
   // handler for relay back-pressure, and rate-limit gate imports add ~74 lines
   // of load-bearing degraded-network recovery code. Queued to split.
@@ -370,15 +382,6 @@ const overrides = new Map([
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
   ["src-tauri/src/secret_store.rs", 1307],
-  // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
-  // at the bottom of the Profile settings page. Load-bearing UX feature;
-  // queued to split when ProfileSettingsCard is broken into sub-components.
-  // +20 lines: scroll-position save/restore across avatar editor open/close
-  // to prevent layout shift from the Sign Out section causing a viewport jump.
-  // +11 lines: signout-dev-webview-state — clear localStorage/sessionStorage
-  // on successful signOut() resolve so dev-build webview state doesn't survive
-  // a reset and vouch for the fresh key. Comment explains the race/redundancy.
-  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1044],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
   // +10 (1042 -> 1052): media_fetch_client with redirect::Policy::none() so a
@@ -392,7 +395,12 @@ const overrides = new Map([
   // +5 (1068 -> 1073): merge with main, which independently added the
   // managed_agent_profile_reconcile_enabled flag (field + doc + init) under
   // its own 1042-line override. Union of two separately approved additions.
-  ["src-tauri/src/app_state.rs", 1073],
+  // +8 (1073 -> 1081): agents-everywhere pair re-key — managed_agent_processes
+  // and session_config_cache re-keyed by ManagedAgentRuntimeKey, the runtime
+  // transition lock doc broadened to cover all protected-PID transitions, and
+  // clear_agent_session_caches (per-pubkey retain) added alongside the
+  // per-key clear. Load-bearing identity-contract change; queued to split.
+  ["src-tauri/src/app_state.rs", 1081],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
@@ -462,7 +470,15 @@ const overrides = new Map([
   // is_safe_to_reveal allowlist + baked_env_thinking_effort_is_unmasked test.
   // +1: doctor-install-reliability: login_hint: None added to goose_runtime test stub.
   // +1: doctor-install-reliability review fixes: auth_probe_args: None added to stub.
-  ["src-tauri/src/commands/agent_config.rs", 1021],
+  // +11 (1021 -> 1032): agents-everywhere pair re-key — session-cache reads in
+  // get_agent_config_surface derive the ManagedAgentRuntimeKey (relay-URL
+  // fallback resolution) and put_agent_session_config gains a relay_url param.
+  // Load-bearing identity plumbing; queued to split.
+  // +18 (1032 -> 1050): review fix — put_agent_session_config reads the pair
+  // relay from the harness-attached payload relayUrl (with effective-relay
+  // fallback for older harnesses) instead of a required arg the frontend
+  // wrapper never passed, which silently broke the session-config cache.
+  ["src-tauri/src/commands/agent_config.rs", 1050],
   // codex-install-auto-restart review-fixes: should_restart_after_install
   // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
   // cache tests replaced with 6 pure availability_drift predicate tests;
