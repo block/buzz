@@ -471,30 +471,29 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
 // ── Profile ──────────────────────────────────────────────────────────────────
 
 /// Kind 0 — NIP-01 profile metadata (full snapshot).
+///
+/// kind:0 is replaceable: the built event replaces the author's *entire*
+/// profile. Callers must read-merge-write — pass the currently-published
+/// content as `current_content` so fields outside the parameters below
+/// (`bot`, `website`, `banner`, `lud16`, …) survive the rebuild. The merge
+/// rules live in `buzz_sdk_pkg::merge_profile_content` (pure JSON, no nostr
+/// types) so they cannot drift between the two nostr versions.
 pub fn build_profile(
+    current_content: Option<&str>,
     display_name: Option<&str>,
     name: Option<&str>,
     picture: Option<&str>,
     about: Option<&str>,
     nip05: Option<&str>,
 ) -> Result<EventBuilder, String> {
-    let mut map = serde_json::Map::new();
-    if let Some(v) = display_name {
-        map.insert("display_name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = name {
-        map.insert("name".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = picture {
-        map.insert("picture".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = about {
-        map.insert("about".into(), serde_json::Value::String(v.into()));
-    }
-    if let Some(v) = nip05 {
-        map.insert("nip05".into(), serde_json::Value::String(v.into()));
-    }
-    let content = serde_json::Value::Object(map).to_string();
+    let content = buzz_sdk_pkg::merge_profile_content(
+        current_content,
+        display_name,
+        name,
+        picture,
+        about,
+        nip05,
+    );
     Ok(EventBuilder::new(Kind::Custom(0), content))
 }
 
