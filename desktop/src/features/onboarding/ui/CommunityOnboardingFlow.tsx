@@ -55,6 +55,12 @@ const STARTER_PERSONA_ANIMATIONS: Record<string, string> = {
   Bumble: "/onboarding/starter-team/bumble.png",
 };
 
+const STARTER_PERSONA_DESCRIPTIONS: Record<string, string> = {
+  Fizz: "Turns ideas into plans, solutions, and finished work",
+  Honey: "Sharpens your writing and brings order to ideas",
+  Bumble: "Researches questions and checks assumptions",
+};
+
 /** Fade duration for the "entering" curtain over the mounting app. */
 const ENTERING_CURTAIN_FADE_MS = 500;
 /**
@@ -622,15 +628,17 @@ export function CommunityOnboardingFlow({
                 Buzz lets you bring multiple agents into the same workspace.
                 Your team will help you get started using Buzz.
               </p>
-              <div className="flex w-full flex-1 items-center justify-center py-10">
+              <div className="flex w-full flex-1 items-center justify-center py-8">
                 {starterPersonas.length > 0 ? (
                   <div className="flex flex-wrap justify-center gap-8">
                     {starterPersonas.map((persona) => {
                       const animationUrl =
                         STARTER_PERSONA_ANIMATIONS[persona.displayName];
+                      const description =
+                        STARTER_PERSONA_DESCRIPTIONS[persona.displayName];
                       return (
                         <div
-                          className="flex w-40 flex-col items-center gap-3"
+                          className="flex w-44 flex-col items-center gap-3"
                           key={persona.id}
                         >
                           {animationUrl ? (
@@ -647,9 +655,16 @@ export function CommunityOnboardingFlow({
                               label={persona.displayName}
                             />
                           )}
-                          <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
-                            {persona.displayName}
-                          </span>
+                          <div className="flex flex-col items-center gap-1.5">
+                            <span className="font-mono text-xs font-medium uppercase tracking-[0.15em]">
+                              {persona.displayName}
+                            </span>
+                            {description ? (
+                              <p className="text-xs leading-5 text-muted-foreground">
+                                {description}
+                              </p>
+                            ) : null}
+                          </div>
                         </div>
                       );
                     })}
