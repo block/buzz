@@ -1372,6 +1372,8 @@ pub struct FormatPromptArgs<'a> {
     /// For legacy agents it rides in the user message on every turn of the
     /// session, alongside `[Base]`/`[System]`/`[Agent Memory — core]`.
     pub agent_canvas: Option<&'a str>,
+    /// Buzz agent display name for Codex-style session list titles (#2334).
+    pub agent_display_name: Option<&'a str>,
 }
 
 /// Format the `[Base]` section for the base prompt.
@@ -1386,8 +1388,9 @@ pub(crate) fn base_section(base_prompt: &str) -> String {
 /// Format a [`FlushBatch`] into the per-section prompt blocks for the agent.
 ///
 /// Produces a stable prompt with these sections (in order):
-/// 0. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
-/// 1. `[System]` — system prompt (only for legacy agents without systemPrompt support)
+/// 0. `[Session]` — Buzz display name (legacy only; titles Codex/ACP session lists)
+/// 1. `[Base]` — base prompt (only for legacy agents without systemPrompt support)
+/// 2. `[System]` — system prompt (only for legacy agents without systemPrompt support)
 /// 2. `[Agent Memory — core]` — if agent core memory is set
 /// 3. `[Context]` — scope, channel name, and contextual hints for the agent
 /// 4. `[Thread Context]` or `[Conversation Context]` — if fetched
@@ -1427,6 +1430,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     // system_prompt as user-message sections. Modern agents receive these
     // via the system role in session/new.
     if !args.has_system_prompt_support {
+        // Session title first — Codex UIs often label from the first prompt text.
+        if let Some(name) = crate::pool::session_title_for_prompt(args.agent_display_name) {
+            sections.push(format!("[Session]\n{name}"));
+        }
         if let Some(bp) = args.base_prompt {
             sections.push(base_section(bp));
         }

@@ -529,6 +529,8 @@ pub struct PromptContext {
     /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
     /// mirroring the `managed_agent_runtime_lifecycle` frames.
     pub relay_url: String,
+    /// Human-visible Buzz agent name for ACP session list titles (#2334).
+    pub agent_display_name: Option<String>,
 }
 
 impl AgentPool {
@@ -817,7 +819,12 @@ async fn create_session_and_apply_model(
     let combined_system_prompt = with_canvas(
         with_core(
             with_team(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                framed_system_prompt(
+                    &ctx.cwd,
+                    ctx.base_prompt,
+                    ctx.system_prompt.as_deref(),
+                    ctx.agent_display_name.as_deref(),
+                ),
                 ctx.team_instructions.as_deref(),
             ),
             agent_core,
@@ -1091,13 +1098,22 @@ pub(crate) fn prepend_base_for_legacy(
     protocol_version: u32,
     base_prompt: Option<&str>,
     body: &str,
+    agent_display_name: Option<&str>,
 ) -> String {
-    match base_prompt {
+    let with_base = match base_prompt {
         Some(bp) if protocol_version < 2 => {
             format!("{}\n\n{body}", crate::queue::base_section(bp))
         }
         _ => body.to_string(),
+    };
+    // Legacy path: title before [Base] so Codex-style UIs that title from the
+    // first user message see the Buzz name (modern gets this via systemPrompt).
+    if protocol_version < 2 {
+        if let Some(title) = session_title_section(agent_display_name) {
+            return format!("{title}\n\n{with_base}");
+        }
     }
+    with_base
 }
 
 /// Prepend the `[Channel Canvas]` section to the legacy initial-message body.
@@ -1138,6 +1154,7 @@ fn framed_system_prompt(
     cwd: &str,
     base_prompt: Option<&str>,
     system_prompt: Option<&str>,
+    agent_display_name: Option<&str>,
 ) -> Option<String> {
     let body = match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
@@ -1151,9 +1168,56 @@ fn framed_system_prompt(
     // Anchor the workspace only when a base prompt is present — the workspace
     // section grounds the base prompt's layout description, so it is meaningless
     // for a persona-only (`[System]`-only) agent that never received that layout.
-    match (base_prompt, workspace_section(cwd)) {
-        (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
-        _ => Some(body),
+    let with_workspace = match (base_prompt, workspace_section(cwd)) {
+        (Some(_), Some(workspace)) => format!("{workspace}\n\n{body}"),
+        _ => body,
+    };
+    // Session title FIRST so Codex-style UIs that title from systemPrompt open
+    // text show the Buzz agent name instead of the shared [Base] prefix (#2334).
+    match session_title_section(agent_display_name) {
+        Some(title) => Some(format!("{title}\n\n{with_workspace}")),
+        None => Some(with_workspace),
+    }
+}
+
+fn session_title_section(agent_display_name: Option<&str>) -> Option<String> {
+    let name = session_title_for_prompt(agent_display_name)?;
+    Some(format!("[Session]\n{name}"))
+}
+
+/// Sanitized one-line agent title for ACP session lists (`[Session]` body).
+pub(crate) fn session_title_for_prompt(agent_display_name: Option<&str>) -> Option<String> {
+    sanitize_session_title(agent_display_name?)
+}
+
+fn sanitize_session_title(raw: &str) -> Option<String> {
+    let collapsed: String = raw
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    const MAX: usize = 80;
+    if trimmed.chars().count() <= MAX {
+        return Some(trimmed.to_string());
+    }
+    let mut out = String::new();
+    for (i, ch) in trimmed.chars().enumerate() {
+        if i >= MAX {
+            break;
+        }
+        out.push(ch);
+    }
+    let out = out.trim().to_string();
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -1598,6 +1662,7 @@ pub async fn run_prompt_task(
                 },
                 ctx.base_prompt,
                 initial_msg,
+                ctx.agent_display_name.as_deref(),
             );
             let init_msg = prepend_canvas_for_legacy(
                 if agent.has_system_prompt_support() {
@@ -1736,6 +1801,7 @@ pub async fn run_prompt_task(
             },
             ctx.base_prompt,
             &text,
+            ctx.agent_display_name.as_deref(),
         );
         vec![text]
     } else if let Some(ref b) = batch {
@@ -1780,6 +1846,7 @@ pub async fn run_prompt_task(
                 system_prompt: ctx.system_prompt.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
+                agent_display_name: ctx.agent_display_name.as_deref(),
             },
         )
     } else {
@@ -3661,7 +3728,8 @@ mod tests {
     fn test_initial_message_legacy_agent_gets_base_prepended() {
         // protocol_version 1 + Some(base_prompt): [Base] rides along in the
         // user message, composed as `[Base]\n{bp}\n\n{initial_msg}`.
-        let composed = prepend_base_for_legacy(1, Some("you are a helpful agent"), "hello channel");
+        let composed =
+            prepend_base_for_legacy(1, Some("you are a helpful agent"), "hello channel", None);
         assert_eq!(composed, "[Base]\nyou are a helpful agent\n\nhello channel");
         assert!(composed.starts_with("[Base]\nyou are a helpful agent\n\n"));
     }
@@ -3670,7 +3738,8 @@ mod tests {
     fn test_initial_message_modern_agent_omits_base() {
         // protocol_version 2 receives base_prompt via session/new, so the user
         // message is left untouched even when a base_prompt is present.
-        let composed = prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel");
+        let composed =
+            prepend_base_for_legacy(2, Some("you are a helpful agent"), "hello channel", None);
         assert_eq!(composed, "hello channel");
     }
 
@@ -3698,7 +3767,7 @@ mod tests {
     #[test]
     fn test_initial_message_legacy_agent_without_base_is_unchanged() {
         // No base_prompt configured: nothing to prepend regardless of version.
-        let composed = prepend_base_for_legacy(1, None, "hello channel");
+        let composed = prepend_base_for_legacy(1, None, "hello channel", None);
         assert_eq!(composed, "hello channel");
     }
 
@@ -3752,7 +3821,7 @@ mod tests {
         // Verify the full composition order when both base and canvas are present:
         // [Base] → canvas section → initial-message body.
         let canvas = "[Channel Canvas]\ncanvas content";
-        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing");
+        let base_composed = prepend_base_for_legacy(1, Some("be helpful"), "do the thing", None);
         let full = prepend_canvas_for_legacy(1, Some(canvas), &base_composed);
         assert!(
             full.starts_with("[Channel Canvas]"),
@@ -3781,14 +3850,15 @@ mod tests {
 
     #[test]
     fn test_framed_system_prompt_both_present_carries_both_headers() {
-        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
+        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"), None)
             .expect("both present yields Some");
         assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
     }
 
     #[test]
     fn test_framed_system_prompt_base_only_labels_base() {
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
+        let framed =
+            framed_system_prompt("/", Some("base text"), None, None).expect("base yields Some");
         assert_eq!(framed, "[Base]\nbase text");
     }
 
@@ -3796,19 +3866,19 @@ mod tests {
     fn test_framed_system_prompt_persona_only_labels_system() {
         // A bare persona would be mislabeled "Base" downstream — it must carry
         // its own [System] header even when no base prompt exists.
-        let framed =
-            framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
+        let framed = framed_system_prompt("/", None, Some("persona text"), None)
+            .expect("persona yields Some");
         assert_eq!(framed, "[System]\npersona text");
     }
 
     #[test]
     fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt("/", None, None).is_none());
+        assert!(framed_system_prompt("/", None, None, None).is_none());
     }
 
     #[test]
     fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
-        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
+        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None, None)
             .expect("base yields Some");
         assert!(
             framed.starts_with("[Workspace]\n"),
@@ -3825,7 +3895,7 @@ mod tests {
     fn test_framed_system_prompt_persona_only_omits_workspace() {
         // The workspace section grounds the base prompt's layout; a persona-only
         // agent never received that layout, so no [Workspace] anchor is emitted.
-        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
+        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"), None)
             .expect("persona yields Some");
         assert_eq!(framed, "[System]\npersona text");
     }
@@ -3833,8 +3903,55 @@ mod tests {
     #[test]
     fn test_framed_system_prompt_root_cwd_omits_workspace() {
         // The "/" fallback must never be named — it would invite a $HOME scan.
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
+        let framed =
+            framed_system_prompt("/", Some("base text"), None, None).expect("base yields Some");
         assert_eq!(framed, "[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_session_title_leads_base() {
+        let framed = framed_system_prompt("/", Some("base text"), None, Some("Fizz"))
+            .expect("base yields Some");
+        assert_eq!(framed, "[Session]\nFizz\n\n[Base]\nbase text");
+    }
+
+    #[test]
+    fn test_framed_system_prompt_session_title_before_workspace() {
+        let framed =
+            framed_system_prompt("/Users/me/.buzz", Some("base text"), None, Some("Varys"))
+                .expect("ok");
+        assert!(
+            framed.starts_with("[Session]\nVarys\n\n[Workspace]\n"),
+            "{framed}"
+        );
+        assert!(framed.contains("\n\n[Base]\nbase text"), "{framed}");
+    }
+
+    #[test]
+    fn test_sanitize_session_title_strips_controls_and_caps() {
+        assert_eq!(
+            sanitize_session_title("  Fizz\nBee  ").as_deref(),
+            Some("Fizz Bee")
+        );
+        assert_eq!(sanitize_session_title("   ").as_deref(), None);
+        assert_eq!(sanitize_session_title("").as_deref(), None);
+        let long = "x".repeat(100);
+        let s = sanitize_session_title(&long).unwrap();
+        assert_eq!(s.chars().count(), 80);
+    }
+
+    #[test]
+    fn test_prepend_base_legacy_includes_session_title() {
+        let composed = prepend_base_for_legacy(
+            1,
+            Some("you are a helpful agent"),
+            "hello channel",
+            Some("Hive"),
+        );
+        assert_eq!(
+            composed,
+            "[Session]\nHive\n\n[Base]\nyou are a helpful agent\n\nhello channel"
+        );
     }
 
     #[test]
@@ -5307,6 +5424,7 @@ mod tests {
             memory_enabled: false,
             harness_name: "goose".to_string(),
             relay_url: "ws://127.0.0.1:3000".to_string(),
+            agent_display_name: None,
         }
     }
 
