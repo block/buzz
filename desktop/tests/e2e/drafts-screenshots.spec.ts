@@ -345,13 +345,11 @@ test.describe("drafts screenshots", () => {
     );
   });
 
-  test("06 — active-draft badge on inbox trigger and filter option", async ({
+  test("06 — active-draft count appears only on the Drafts filter", async ({
     page,
   }) => {
-    // Captures both badge placements for the PR screenshot:
-    //   1. The status dot on the inbox filter trigger button.
-    //   2. The badge next to "Drafts" in the filter dropdown.
-    // Two active drafts are seeded so the count is 2.
+    // Draft counts stay beside the Drafts option instead of decorating the
+    // overall Activity filter trigger. Two drafts make the count explicit.
     await installMockBridge(page);
     await patchCommunityPubkey(page);
     await seedDraftStore(page, ACTIVE_DRAFTS);
@@ -361,13 +359,10 @@ test.describe("drafts screenshots", () => {
       timeout: 10_000,
     });
 
-    // The trigger uses a compact dot while retaining the count accessibly.
-    const triggerBadge = page.getByTestId("inbox-draft-badge");
-    await expect(triggerBadge).toBeVisible({ timeout: 6_000 });
-    await expect(triggerBadge).toBeEmpty();
+    await expect(page.getByTestId("inbox-draft-badge")).toHaveCount(0);
     await expect(page.getByTestId("inbox-filter-trigger")).toHaveAttribute(
       "aria-label",
-      "Filter inbox: All. 2 active drafts",
+      "Filter activity: All. 2 active drafts",
     );
 
     // Open the filter dropdown so the badge-option is visible too.
@@ -378,7 +373,7 @@ test.describe("drafts screenshots", () => {
 
     await waitForAnimations(page);
 
-    // Capture the full inbox header area including the open dropdown.
+    // Capture the Activity header and the dropdown-only count.
     await page.getByTestId("home-inbox").screenshot({
       path: `${SHOTS}/06-draft-badge.png`,
     });

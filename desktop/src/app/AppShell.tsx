@@ -96,7 +96,6 @@ import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
 import { useSidebarRelayConnectionCard } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
-import { useFeatureEnabled } from "@/shared/features";
 
 const LazySettingsScreen = React.lazy(async () => {
   const module = await import("@/features/settings/ui/SettingsScreen");
@@ -107,8 +106,6 @@ export function AppShell() {
   useWebviewZoomShortcuts();
   useTauriWindowDrag();
   useWebviewScrollBoundaryLock();
-  const activityEnabled = useFeatureEnabled("activity");
-
   const communitiesHook = useCommunities();
   const hasCommunityRail = communitiesHook.communities.length > 1;
   const addCommunityDialog = useAddCommunityDialogState();
@@ -342,7 +339,6 @@ export function AppShell() {
     muteThread,
     unmuteThread,
   } = useUnreadChannels(sidebarChannels, activeChannel, {
-    includeDmHomeActivity: activityEnabled,
     pubkey: identityQuery.data?.pubkey,
     relayClient,
     relayUrl: communitiesHook.activeCommunity?.relayUrl,
@@ -403,7 +399,6 @@ export function AppShell() {
     threadActivityItems,
     mutedRootIds,
     channels,
-    activityEnabled,
   );
 
   // Badge count consumes the shared NIP-RS read-state from useUnreadChannels.

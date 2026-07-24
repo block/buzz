@@ -10,7 +10,6 @@ import {
   hasInboxThreadContext,
   isInboxThreadContextEvent,
   matchesActivityAllView,
-  matchesActivityCustomView,
   matchesInboxFilter,
   toInboxContextMessage,
   toTimelineMessage,
@@ -21,8 +20,7 @@ test("Activity uses the dedicated reminder list instead of feed reminder rows", 
   const reminder = { item: { kind: 40007 } };
   const items = [message, reminder];
 
-  assert.equal(filterActivityInboxItems(items, false), items);
-  assert.deepEqual(filterActivityInboxItems(items, true), [message]);
+  assert.deepEqual(filterActivityInboxItems(items), [message]);
 });
 
 test("hasInboxThreadContext finds replies in the grouped row or loaded context", () => {
@@ -254,62 +252,6 @@ test("matchesInboxFilter matches thread rows by thread tags", () => {
       },
       "thread",
     ),
-    false,
-  );
-});
-
-test("matchesActivityCustomView uses union matching across selected sources", () => {
-  const item = {
-    categories: ["mention"],
-    item: {
-      id: "dm",
-      pubkey: "person",
-      channelType: "dm",
-      tags: [],
-    },
-  };
-  const custom = {
-    dms: false,
-    mentions: true,
-    threads: false,
-    needsAction: false,
-    agentReplies: false,
-    dueReminders: false,
-    drafts: false,
-  };
-
-  assert.equal(matchesActivityCustomView(item, custom, new Set()), true);
-  assert.equal(
-    matchesActivityCustomView(
-      { ...item, categories: [] },
-      { ...custom, dms: true },
-      new Set(),
-    ),
-    true,
-  );
-});
-
-test("matchesActivityCustomView only includes replies from owned agents", () => {
-  const item = {
-    categories: ["activity"],
-    item: { id: "reply", pubkey: "OWNED", channelType: "channel", tags: [] },
-  };
-  const custom = {
-    dms: false,
-    mentions: false,
-    threads: false,
-    needsAction: false,
-    agentReplies: true,
-    dueReminders: false,
-    drafts: false,
-  };
-
-  assert.equal(
-    matchesActivityCustomView(item, custom, new Set(["owned"])),
-    true,
-  );
-  assert.equal(
-    matchesActivityCustomView(item, custom, new Set(["other"])),
     false,
   );
 });
