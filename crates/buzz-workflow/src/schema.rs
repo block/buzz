@@ -19,6 +19,13 @@ pub struct WorkflowDef {
     pub description: Option<String>,
     /// The event trigger that starts this workflow.
     pub trigger: TriggerDef,
+    /// Optional evalexpr gate evaluated once, before any steps run. When it
+    /// evaluates to `false`, the run short-circuits with zero step actions
+    /// (no messages, webhooks, or agent turns) and is recorded as completed.
+    /// Uses the same variables as step `if:` expressions (trigger context).
+    /// Lets a scheduled poller cheaply skip empty runs (#2297).
+    #[serde(default)]
+    pub precheck: Option<String>,
     /// Ordered list of steps to execute when triggered.
     pub steps: Vec<Step>,
     /// Whether this workflow is active. Defaults to `true`.
@@ -283,6 +290,21 @@ mod tests {
 
         let reparsed: WorkflowDef = serde_json::from_str(&json).expect("json round-trip");
         assert_eq!(reparsed.name, def.name);
+    }
+
+    #[test]
+    fn parse_precheck_field_roundtrips_and_defaults_none() {
+        // Absent precheck defaults to None (existing workflows unaffected).
+        let yaml = "name: NoGate\ntrigger:\n  on: schedule\n  cron: '0 9 * * *'\nsteps:\n  - id: s\n    action: send_message\n    text: hi\n";
+        let (def, _) = parse_yaml(yaml).expect("parse failed");
+        assert_eq!(def.precheck, None);
+
+        // Present precheck parses and round-trips through canonical JSON.
+        let yaml2 = "name: Gated\ntrigger:\n  on: schedule\n  cron: '*/15 * * * *'\nprecheck: 'trigger_open_pr_count > 0'\nsteps:\n  - id: s\n    action: send_message\n    text: hi\n";
+        let (def2, json2) = parse_yaml(yaml2).expect("parse failed");
+        assert_eq!(def2.precheck.as_deref(), Some("trigger_open_pr_count > 0"));
+        let reparsed: WorkflowDef = serde_json::from_str(&json2).expect("json round-trip");
+        assert_eq!(reparsed.precheck, def2.precheck);
     }
 
     #[test]
