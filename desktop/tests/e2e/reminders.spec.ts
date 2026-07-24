@@ -162,7 +162,11 @@ test.describe("reminders", () => {
     ]);
 
     await openRemindersFilter(page);
-    await expect(page.getByText("Follow up on this message")).toBeVisible();
+    await expect(
+      page
+        .getByTestId("home-reminder-item-rem-active-01")
+        .getByText("Follow up on this message"),
+    ).toBeVisible();
     await waitForAnimations(page);
   });
 
@@ -211,8 +215,16 @@ test.describe("reminders", () => {
     ]);
 
     await openRemindersFilter(page);
-    await expect(page.getByText("Reply to Alice")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Overdue" })).toBeVisible();
+    await expect(
+      page
+        .getByTestId("home-reminder-item-rem-overdue-01")
+        .getByText("Reply to Alice"),
+    ).toBeVisible();
+    await expect(
+      page
+        .getByTestId("home-reminder-item-rem-overdue-01")
+        .getByText("2h overdue"),
+    ).toBeVisible();
     await waitForAnimations(page);
   });
 });
@@ -328,9 +340,17 @@ test.describe("reminders phase 2 — author, source, navigation", () => {
     ]);
 
     await openRemindersFilter(page);
-    // The reminder row body is a button whose preview text is the target
-    // message preview; clicking it navigates to the message in its channel.
-    await page.getByText("Reply to Alice").click();
+    // Selecting a reminder keeps the list visible and opens its detail pane.
+    // Navigation is an explicit action from that detail.
+    await page
+      .getByTestId("home-reminder-item-rem-phase2-nav-01")
+      .getByRole("button")
+      .first()
+      .click();
+    await page
+      .getByTestId("home-reminder-detail")
+      .getByRole("button", { name: "Open message" })
+      .click();
 
     // Lands in the #general chat view with the target message in context.
     await expect(page.getByTestId("chat-title")).toHaveText("general");

@@ -692,7 +692,7 @@ async function seedPreviewFeaturesEnabled(page: Page) {
   await page.addInitScript(
     ({ key, ids }) => {
       const overrides: Record<string, boolean> = {};
-      for (const id of ids) overrides[id] = id !== "activity";
+      for (const id of ids) overrides[id] = true;
       window.localStorage.setItem(key, JSON.stringify(overrides));
     },
     { key: FEATURE_OVERRIDES_STORAGE_KEY, ids: PREVIEW_FEATURE_IDS },

@@ -7,6 +7,7 @@ export type ActivityListRow =
       key: string;
       kind: "inbox";
       item: InboxItem;
+      dueReminder?: Reminder;
       sortAt: number;
     }
   | {
@@ -42,23 +43,59 @@ export function buildActivityListRows({
   items: readonly InboxItem[];
   reminders: readonly Reminder[];
 }): ActivityListRow[] {
+  const consumedReminderIds = new Set<string>();
+  const inboxRows = items.map((item): ActivityListRow => {
+    const eventIds = new Set([
+      item.id,
+      item.item.id,
+      ...item.groupItems.map((groupItem) => groupItem.id),
+    ]);
+    const matchingReminders = reminders
+      .filter(
+        (reminder) =>
+          reminder.content.status === "pending" &&
+          Boolean(
+            reminder.content.target?.eventId &&
+              eventIds.has(reminder.content.target.eventId),
+          ),
+      )
+      .sort(
+        (left, right) =>
+          (right.notBefore ?? right.createdAt) -
+          (left.notBefore ?? left.createdAt),
+      );
+    const dueReminder = matchingReminders[0];
+
+    for (const reminder of matchingReminders) {
+      consumedReminderIds.add(reminder.id);
+    }
+
+    return {
+      key: `inbox:${item.conversationId}`,
+      kind: "inbox",
+      item,
+      dueReminder,
+      sortAt: Math.max(
+        item.latestActivityAt,
+        dueReminder?.notBefore ?? dueReminder?.createdAt ?? 0,
+      ),
+    };
+  });
+
   return [
-    ...items.map(
-      (item): ActivityListRow => ({
-        key: `inbox:${item.conversationId}`,
-        kind: "inbox",
-        item,
-        sortAt: item.latestActivityAt,
-      }),
-    ),
+    ...inboxRows,
     ...reminders
-      .filter((reminder) => reminder.content.status === "pending")
+      .filter(
+        (reminder) =>
+          reminder.content.status === "pending" &&
+          !consumedReminderIds.has(reminder.id),
+      )
       .map(
         (reminder): ActivityListRow => ({
           key: `reminder:${reminder.id}`,
           kind: "reminder",
           reminder,
-          sortAt: reminder.createdAt,
+          sortAt: reminder.notBefore ?? reminder.createdAt,
         }),
       ),
     ...drafts

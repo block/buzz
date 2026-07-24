@@ -8,7 +8,6 @@ export function buildThreadActivityFeedItems(
   threadActivityItems: ThreadActivityItem[],
   mutedRootIds: ReadonlySet<string>,
   channels: Channel[],
-  includeDmHomeActivity = false,
 ): FeedItem[] {
   const channelById = new Map(channels.map((channel) => [channel.id, channel]));
 
@@ -20,13 +19,6 @@ export function buildThreadActivityFeedItems(
       // this filter is the last line of defense against cross-community leaks.
       const channel = channelById.get(item.channelId);
       if (channel === undefined) return false;
-      if (
-        channel.channelType === "dm" &&
-        getThreadReference(item.tags).parentId === null &&
-        !includeDmHomeActivity
-      ) {
-        return false;
-      }
       const rootId = getThreadReference(item.tags).rootId;
       return !rootId || !mutedRootIds.has(rootId);
     })
@@ -51,7 +43,6 @@ export function useThreadActivityFeedItems(
   threadActivityItems: ThreadActivityItem[],
   mutedRootIds: ReadonlySet<string>,
   channels: Channel[],
-  includeDmHomeActivity = false,
 ): FeedItem[] {
   const mutedRootIdsKey = [...mutedRootIds].sort().join("\0");
 
@@ -62,13 +53,6 @@ export function useThreadActivityFeedItems(
       threadActivityItems,
       mutedRootIds,
       channels,
-      includeDmHomeActivity,
     );
-  }, [
-    channels,
-    includeDmHomeActivity,
-    mutedRootIds,
-    mutedRootIdsKey,
-    threadActivityItems,
-  ]);
+  }, [channels, mutedRootIds, mutedRootIdsKey, threadActivityItems]);
 }

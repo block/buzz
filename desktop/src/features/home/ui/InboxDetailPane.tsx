@@ -443,14 +443,36 @@ export function InboxDetailPane({
                   </Button>
                 ) : null}
                 <div className="min-w-0">
-                  <h2
-                    className="min-w-0 text-sm font-semibold leading-5 tracking-tight text-foreground"
-                    title={item.fullTimestampLabel}
-                  >
-                    <span className="block min-w-0 translate-y-px truncate">
-                      {contextLabel}
-                    </span>
-                  </h2>
+                  {canOpenChannel && contextChannelId ? (
+                    <h2 className="min-w-0">
+                      <button
+                        className="block min-w-0 text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        data-testid="home-inbox-context-title"
+                        onClick={() =>
+                          onOpenContext(
+                            contextChannelId,
+                            sourceEventId,
+                            contextThreadRootId,
+                          )
+                        }
+                        title={openContextLabel}
+                        type="button"
+                      >
+                        <span className="block min-w-0 translate-y-px truncate">
+                          {contextLabel}
+                        </span>
+                      </button>
+                    </h2>
+                  ) : (
+                    <h2
+                      className="min-w-0 text-sm font-semibold leading-5 tracking-tight text-foreground"
+                      title={item.fullTimestampLabel}
+                    >
+                      <span className="block min-w-0 translate-y-px truncate">
+                        {contextLabel}
+                      </span>
+                    </h2>
+                  )}
                 </div>
               </div>
 

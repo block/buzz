@@ -4,7 +4,6 @@ import {
   type InboxFilter,
   type InboxItem,
 } from "@/features/home/lib/inbox";
-import type { ActivityCustomView } from "@/features/home/lib/activityViewPreferences";
 import {
   getChannelIdFromTags,
   getThreadReference,
@@ -25,13 +24,8 @@ function hasThreadReplyTags(tags: string[][]) {
   return thread.parentId !== null && !isBroadcastReply(tags);
 }
 
-export function filterActivityInboxItems(
-  items: InboxItem[],
-  activityEnabled: boolean,
-) {
-  return activityEnabled
-    ? items.filter((item) => item.item.kind !== KIND_REMINDER)
-    : items;
+export function filterActivityInboxItems(items: InboxItem[]) {
+  return items.filter((item) => item.item.kind !== KIND_REMINDER);
 }
 
 export function hasInboxThreadContext(
@@ -94,32 +88,6 @@ export function matchesActivityAllView(
       representative &&
         ownedAgentPubkeys.has(normalizePubkey(representative.pubkey)),
     )
-  );
-}
-
-export function matchesActivityCustomView(
-  item: {
-    categories: readonly string[];
-    groupItems?: readonly FeedItem[];
-    item?: FeedItem;
-  },
-  custom: ActivityCustomView,
-  ownedAgentPubkeys: ReadonlySet<string>,
-): boolean {
-  const representative = item.item ?? item.groupItems?.at(-1);
-  return (
-    (custom.dms && representative?.channelType === "dm") ||
-    (custom.mentions && item.categories.includes("mention")) ||
-    (custom.threads &&
-      [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
-        groupItem ? hasThreadReplyTags(groupItem.tags) : false,
-      )) ||
-    (custom.needsAction && item.categories.includes("needs_action")) ||
-    (custom.agentReplies &&
-      Boolean(
-        representative &&
-          ownedAgentPubkeys.has(normalizePubkey(representative.pubkey)),
-      ))
   );
 }
 

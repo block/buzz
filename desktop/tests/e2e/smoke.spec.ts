@@ -2,9 +2,6 @@ import { expect, test } from "@playwright/test";
 
 import { installMockBridge, openCreateChannelDialog } from "../helpers/bridge";
 
-const DEFAULT_AGENT_ACTIVITY_PUBKEY =
-  "db0b028cd36f4d3e36c8300cce87252c1f7fc9495ffecc53f393fcac341ffd36";
-
 async function getTimelineMetrics(page: import("@playwright/test").Page) {
   return page.getByTestId("message-timeline").evaluate((element) => {
     const timeline = element as HTMLDivElement;
@@ -72,12 +69,12 @@ async function expectHomeView(page: import("@playwright/test").Page) {
 
 async function selectHomeInboxFilter(
   page: import("@playwright/test").Page,
-  label: "Activity" | "Agents",
+  label: "Agents",
 ) {
   await page
     .getByTestId("home-inbox")
     .getByRole("button", {
-      name: /^Filter inbox:/,
+      name: /^Filter activity:/,
     })
     .click();
   await page.getByRole("menuitemradio", { name: label }).click();
@@ -298,77 +295,23 @@ test("opens a mocked channel from the inbox feed", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
-test("inbox feed shows channel and agent activity sections", async ({
+test("Activity excludes generic channel and unowned agent traffic", async ({
   page,
 }) => {
   const inboxList = page.getByTestId("home-inbox-list");
 
   await page.goto("/");
+  await expectHomeView(page);
 
-  await selectHomeInboxFilter(page, "Activity");
-  await expect(inboxList).toContainText(
+  await expect(inboxList).not.toContainText(
     "Engineering shipped the desktop build.",
+  );
+  await expect(inboxList).not.toContainText(
+    "Agent progress: channel index complete.",
   );
 
   await selectHomeInboxFilter(page, "Agents");
-  await expect(inboxList).toContainText(
-    "Agent progress: channel index complete.",
-  );
-  await inboxList.getByText("Agent progress: channel index complete.").click();
-  await expect(page.getByTestId("home-inbox-detail")).toContainText(
-    "Agent progress: channel index complete.",
-  );
-});
-
-test("inbox agent hover hides actions without agent access", async ({
-  page,
-}) => {
-  await page.goto("/");
-
-  await selectHomeInboxFilter(page, "Agents");
-  const agentRow = page.getByTestId("home-inbox-item-mock-feed-agent");
-  await expect(agentRow).toContainText(
-    "Agent progress: channel index complete.",
-  );
-
-  await agentRow.getByTestId("home-inbox-avatar-mock-feed-agent").hover();
-  const profilePopover = page.locator(
-    '[data-testid="user-profile-popover"][data-state="open"]',
-  );
-  await expect(profilePopover).toBeVisible();
-  await expect(
-    profilePopover.getByTestId(
-      `user-profile-popover-message-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-  await expect(
-    profilePopover.getByTestId(
-      `user-profile-popover-wave-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-  await expect(
-    profilePopover.getByTestId(
-      `user-profile-popover-huddle-${DEFAULT_AGENT_ACTIVITY_PUBKEY}`,
-    ),
-  ).toHaveCount(0);
-});
-
-test("opens a mocked forum activity item from the inbox feed", async ({
-  page,
-}) => {
-  await page.goto("/");
-
-  await selectHomeInboxFilter(page, "Activity");
-  await expect(page.getByTestId("home-inbox-list")).toContainText(
-    "Engineering shipped the desktop build.",
-  );
-  await page
-    .getByTestId("home-inbox-list")
-    .getByText("Engineering shipped the desktop build.")
-    .click();
-  await expect(page.getByTestId("home-inbox-detail")).toContainText(
-    "Engineering shipped the desktop build.",
-  );
+  await expect(inboxList).toContainText("No agent updates found");
 });
 
 test("inbox feed renders resolved author labels", async ({ page }) => {

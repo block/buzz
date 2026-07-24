@@ -1,7 +1,6 @@
 import { INBOX_COLUMN_MIN_WIDTH_PX } from "@/features/home/useResizableInboxListWidth";
 
 type HomePaneLayoutOptions = {
-  activityEnabled: boolean;
   hasAuxiliaryPane: boolean;
   homeWidthPx: number;
   inboxListWidthPx: number;
@@ -28,7 +27,6 @@ export function getHomePaneLayout(options: HomePaneLayoutOptions) {
     options.selectedDraft &&
     !options.isSinglePanelAuxiliaryView;
   const singleReminder =
-    options.activityEnabled &&
     options.isReminders &&
     options.isNarrow &&
     options.selectedReminder &&
@@ -42,9 +40,7 @@ export function getHomePaneLayout(options: HomePaneLayoutOptions) {
     !options.isSinglePanelAuxiliaryView &&
     ((options.isMessagesMode && (!options.isNarrow || singleMessage)) ||
       (options.isDrafts && (!options.isNarrow || singleDraft)) ||
-      (options.activityEnabled &&
-        options.isReminders &&
-        (!options.isNarrow || singleReminder)));
+      (options.isReminders && (!options.isNarrow || singleReminder)));
   const auxiliaryWidth = options.isSinglePanelAuxiliaryView
     ? options.homeWidthPx
     : options.threadPanelWidthPx;

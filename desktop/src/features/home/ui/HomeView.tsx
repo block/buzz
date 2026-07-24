@@ -16,13 +16,12 @@ import {
   getInboxConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
-import { useActivityInboxFilter } from "@/features/home/useActivityInboxFilter";
 import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
   filterActivityInboxItems,
-  matchesActivityCustomView,
   matchesInboxFilter,
 } from "@/features/home/lib/inboxViewHelpers";
+import { resolveActivityFilterSelection } from "@/features/home/lib/activitySelection";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
 import { useHomeInboxAutoSelection } from "@/features/home/useHomeInboxAutoSelection";
 import { useHomeInboxContextMessages } from "@/features/home/useHomeInboxContextMessages";
@@ -80,7 +79,6 @@ const INBOX_SEARCH_KEYS = [
 ] as const;
 
 type HomeViewProps = {
-  activityEnabled: boolean;
   feed?: HomeFeedResponse;
   isLoading?: boolean;
   errorMessage?: string;
@@ -95,7 +93,6 @@ type HomeViewProps = {
 };
 
 export function HomeView({
-  activityEnabled,
   feed,
   isLoading = false,
   errorMessage,
@@ -109,15 +106,8 @@ export function HomeView({
   const isNarrowHomeViewport =
     homeInboxWidthPx > 0 &&
     homeInboxWidthPx < INBOX_SINGLE_COLUMN_BREAKPOINT_PX;
-  const {
-    filter,
-    preferences: activityViewPreferences,
-    setCustomView,
-    setDefaultView,
-    setFilter,
-    setUnreadOnly,
-    unreadOnly,
-  } = useActivityInboxFilter(activityEnabled, currentPubkey);
+  const [filter, setFilter] = React.useState<InboxFilter>("all");
+  const [unreadOnly, setUnreadOnly] = React.useState(false);
   // Explicit selections are mirrored to the URL (`?item=`), so back/forward
   // restores the detail pane each history entry was showing and reloads
   // restore it from the URL. Default/automatic selection stays local-only —
@@ -127,8 +117,7 @@ export function HomeView({
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
   const isMessagesMode = !isReminders && !isDrafts;
-  const allowMixedPersonalSelection =
-    activityEnabled && (filter === "all" || filter === "custom");
+  const allowMixedPersonalSelection = filter === "all";
   const {
     drafts: {
       activeCount: activeDraftCount,
@@ -146,7 +135,6 @@ export function HomeView({
       select: setSelectedReminderId,
     },
   } = useHomePersonalActivity({
-    activityEnabled,
     allowMixedSelection: allowMixedPersonalSelection,
     currentPubkey,
     isDrafts,
@@ -334,7 +322,7 @@ export function HomeView({
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
   const ownedAgentPubkeys = useOwnedAgentPubkeys(
-    activityEnabled,
+    true,
     feedProfiles,
     currentPubkey,
   );
@@ -375,9 +363,8 @@ export function HomeView({
       getThreadReadAt,
       profiles: feedProfiles,
     });
-    return filterActivityInboxItems(items, activityEnabled);
+    return filterActivityInboxItems(items);
   }, [
-    activityEnabled,
     channels,
     currentPubkey,
     feed,
@@ -431,64 +418,35 @@ export function HomeView({
   const filteredItems = React.useMemo(() => {
     return inboxItems.filter(
       (item) =>
-        (activityEnabled && filter === "custom"
-          ? matchesActivityCustomView(
-              item,
-              activityViewPreferences.custom,
-              ownedAgentPubkeys,
-            )
-          : matchesInboxFilter(
-              item,
-              filter,
-              activityEnabled ? ownedAgentPubkeys : undefined,
-            )) &&
+        matchesInboxFilter(item, filter, ownedAgentPubkeys) &&
         (!unreadOnly ||
           !effectiveDoneSet.has(item.id) ||
           item.conversationId === selectedConversationId),
     );
   }, [
-    activityViewPreferences.custom,
     effectiveDoneSet,
-    activityEnabled,
     filter,
     inboxItems,
     ownedAgentPubkeys,
     selectedConversationId,
     unreadOnly,
   ]);
-  // Prefer the filtered view for the selected item so that filter/unread
-  // changes can still dismiss it, but fall back to the unfiltered row so a
-  // live representative-event change (which keeps the conversation in the
-  // filter) does not make selectedItem go null mid-session.
+  // A filter change may only retain detail for a conversation that remains
+  // visible. The filter handler selects the next valid row in the same update,
+  // so the detail pane never renders a stale conversation between states.
   const selectedItem = React.useMemo(() => {
     if (!selectedEventId) return null;
     const fromFiltered = findInboxItemByEventId(filteredItems, selectedEventId);
     if (fromFiltered) return fromFiltered;
-    // Secondary: event anchor is in an unfiltered row (e.g., dismissed item).
-    if (selectedItemFromAll) return selectedItemFromAll;
-    // Tertiary: anchor has been displaced from all groupItems (e.g., a very old
-    // event that fell off the feed window). Resolve by conversationId so the
-    // correct row stays selected and the auto-selection effect doesn't replace
-    // the anchor with a different conversation.
     if (selectedConversationId) {
       return (
         filteredItems.find(
           (item) => item.conversationId === selectedConversationId,
-        ) ??
-        inboxItems.find(
-          (item) => item.conversationId === selectedConversationId,
-        ) ??
-        null
+        ) ?? null
       );
     }
     return null;
-  }, [
-    filteredItems,
-    inboxItems,
-    selectedConversationId,
-    selectedEventId,
-    selectedItemFromAll,
-  ]);
+  }, [filteredItems, selectedConversationId, selectedEventId]);
   const unreadBoundaryEventId = React.useMemo(() => {
     if (!selectedItem) return null;
     if (unreadBoundary?.conversationId === selectedItem.conversationId) {
@@ -538,17 +496,49 @@ export function HomeView({
 
   const handleFilterChange = React.useCallback(
     (nextFilter: InboxFilter) => {
+      const nextItems = inboxItems.filter(
+        (item) =>
+          matchesInboxFilter(item, nextFilter, ownedAgentPubkeys) &&
+          (!unreadOnly ||
+            !effectiveDoneSet.has(item.id) ||
+            item.conversationId === selectedConversationId),
+      );
+      const selection = resolveActivityFilterSelection({
+        isNarrow: isNarrowHomeViewport,
+        items: nextItems,
+        selectedConversationId,
+      });
+
       setUnreadBoundary(null);
       setSelectedDraftKey(null);
       setSelectedReminderId(null);
-      handleUserSelectItem(null);
       setFilter(nextFilter);
+
+      if (
+        nextFilter === "reminders" ||
+        nextFilter === "drafts" ||
+        selection.preserveSelection
+      ) {
+        if (nextFilter === "reminders" || nextFilter === "drafts") {
+          setAutoSelectedEventId(null);
+          applyInboxSearchPatch({ item: null });
+        }
+        return;
+      }
+
+      applyInboxSearchPatch({ item: null });
+      setAutoSelectedEventId(selection.autoSelectedEventId);
     },
     [
-      handleUserSelectItem,
-      setFilter,
+      applyInboxSearchPatch,
+      effectiveDoneSet,
+      inboxItems,
+      isNarrowHomeViewport,
+      ownedAgentPubkeys,
+      selectedConversationId,
       setSelectedDraftKey,
       setSelectedReminderId,
+      unreadOnly,
     ],
   );
 
@@ -601,7 +591,6 @@ export function HomeView({
     showDetailPane,
     showListPane,
   } = getHomePaneLayout({
-    activityEnabled,
     hasAuxiliaryPane,
     homeWidthPx: homeInboxWidthPx,
     inboxListWidthPx,
@@ -651,20 +640,15 @@ export function HomeView({
 
           {showListPane ? (
             <InboxListPane
-              activityEnabled={activityEnabled}
               activeReminderEventIds={activeReminderEventIds}
               agentPubkeys={inboxAgentPubkeys}
               activeDraftCount={activeDraftCount}
-              customView={activityViewPreferences.custom}
-              defaultView={activityViewPreferences.defaultView}
               draftItems={draftItems}
               doneSet={effectiveDoneSet}
               dueReminderCount={dueReminderCount}
               filter={filter}
               items={filteredItems}
               onDeleteDraft={handleDeleteDraft}
-              onCustomViewChange={setCustomView}
-              onDefaultViewChange={setDefaultView}
               onFilterChange={handleFilterChange}
               onMarkRead={markItemRead}
               onMarkUnread={markItemUnread}

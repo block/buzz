@@ -21,11 +21,9 @@ export type InboxFilter =
   | "mention"
   | "thread"
   | "needs_action"
-  | "activity"
   | "agent_activity"
   | "reminders"
-  | "drafts"
-  | "custom";
+  | "drafts";
 
 export type InboxItem = {
   avatarUrl: string | null;

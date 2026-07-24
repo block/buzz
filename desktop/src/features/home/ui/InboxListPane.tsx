@@ -5,7 +5,6 @@ import {
   ExternalLink,
   FileText,
   MailOpen,
-  Star,
 } from "lucide-react";
 import * as React from "react";
 
@@ -16,10 +15,6 @@ import {
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
 import { buildActivityListRows } from "@/features/home/lib/activityListRows";
-import type {
-  ActivityCustomView,
-  ActivityViewId,
-} from "@/features/home/lib/activityViewPreferences";
 import { ActivityFilterMenu } from "@/features/home/ui/ActivityFilterMenu";
 import {
   DraftsPanel,
@@ -60,11 +55,9 @@ const ACTIVITY_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   mention: "No mentions found",
   thread: "No threads found",
   needs_action: "Nothing needs action",
-  activity: "No activity found",
   agent_activity: "No agent updates found",
   reminders: "No reminders",
   drafts: "No drafts",
-  custom: "No custom activity found",
 };
 
 const ACTIVITY_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
@@ -72,11 +65,9 @@ const ACTIVITY_UNREAD_EMPTY_STATE_TITLES: Record<InboxFilter, string> = {
   mention: "No unread mentions",
   thread: "No unread threads",
   needs_action: "No unread items needing action",
-  activity: "No unread activity",
   agent_activity: "No unread agent updates",
   reminders: "No unread reminders",
   drafts: "No unread drafts",
-  custom: "No unread custom activity",
 };
 
 const INBOX_HEADER_ICON_BUTTON_CLASS =
@@ -192,19 +183,14 @@ function PersonalItemRow({
 }
 
 type InboxListPaneProps = {
-  activityEnabled: boolean;
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
-  customView: ActivityCustomView;
-  defaultView: ActivityViewId;
   draftItems: DraftViewItem[];
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
   onFilterChange: (filter: InboxFilter) => void;
-  onCustomViewChange: (value: ActivityCustomView) => void;
-  onDefaultViewChange: (value: ActivityViewId) => void;
   onDeleteDraft: (draftKey: string) => void;
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
@@ -225,19 +211,14 @@ type InboxListPaneProps = {
 };
 
 export function InboxListPane({
-  activityEnabled,
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
-  customView,
-  defaultView,
   draftItems,
   doneSet,
   filter,
   items,
   onFilterChange,
-  onCustomViewChange,
-  onDefaultViewChange,
   onDeleteDraft,
   onMarkRead,
   onMarkUnread,
@@ -258,34 +239,27 @@ export function InboxListPane({
 }: InboxListPaneProps) {
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
-  const currentActivityView = activityEnabled
-    ? (filter as ActivityViewId)
-    : null;
-  const isMixedActivityView =
-    activityEnabled && (filter === "all" || filter === "custom");
-  const includeDrafts = filter === "all" || customView.drafts;
-  const includeDueReminders = filter === "all" || customView.dueReminders;
+  const isMixedActivityView = filter === "all";
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const activityRows = React.useMemo(
     () =>
       buildActivityListRows({
-        drafts: unreadOnly || !includeDrafts ? [] : draftItems,
+        drafts: unreadOnly || !isMixedActivityView ? [] : draftItems,
         items,
-        reminders:
-          unreadOnly || !includeDueReminders
-            ? []
-            : reminders.filter((reminder) =>
-                isDue(reminder, Math.floor(Date.now() / 1_000)),
-              ),
+        reminders: unreadOnly
+          ? []
+          : reminders.filter((reminder) =>
+              isDue(reminder, Math.floor(Date.now() / 1_000)),
+            ),
       }),
-    [
-      draftItems,
-      includeDrafts,
-      includeDueReminders,
-      items,
-      reminders,
-      unreadOnly,
-    ],
+    [draftItems, isMixedActivityView, items, reminders, unreadOnly],
+  );
+  const visibleActivityRows = React.useMemo(
+    () =>
+      isMixedActivityView
+        ? activityRows
+        : activityRows.filter((row) => row.kind === "inbox"),
+    [activityRows, isMixedActivityView],
   );
   const reminderSources = useReminderSources(reminders);
   const unreadVisibleItemCount = React.useMemo(
@@ -301,10 +275,14 @@ export function InboxListPane({
     }
   }, [doneSet, items, onMarkRead]);
 
-  const renderItem = (item: InboxItem) => {
+  const renderItem = (item: InboxItem, dueReminder?: Reminder) => {
     const isSelected = item.conversationId === selectedConversationId;
     const isDone = doneSet.has(item.id);
-    const hasActiveReminder = activeReminderEventIds?.has(item.id) ?? false;
+    const hasActiveReminder =
+      dueReminder !== undefined ||
+      [item.id, ...item.groupItems.map((groupItem) => groupItem.id)].some(
+        (eventId) => activeReminderEventIds?.has(eventId) ?? false,
+      );
     const hasChannelTarget = Boolean(item.item.channelId);
     const typeLabel = getInboxTypeLabel(item);
     const isSenderAgent =
@@ -423,6 +401,15 @@ export function InboxListPane({
                 isDone={isDone}
                 label={typeLabel}
               />
+              {dueReminder ? (
+                <div
+                  className="mt-1 flex items-center gap-1 text-2xs font-medium text-amber-600/80 dark:text-amber-300/80"
+                  data-testid="home-inbox-reminder-due"
+                >
+                  <Bell className="h-3 w-3" />
+                  Reminder due
+                </div>
+              ) : null}
 
               <div
                 className={cn(
@@ -541,7 +528,7 @@ export function InboxListPane({
               <Popover>
                 <PopoverTrigger asChild>
                   <button
-                    aria-label={`${activityEnabled ? "Activity" : "Inbox"} options`}
+                    aria-label="Activity options"
                     className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "-mr-4")}
                     data-testid="inbox-options-trigger"
                     type="button"
@@ -550,20 +537,6 @@ export function InboxListPane({
                   </button>
                 </PopoverTrigger>
                 <PopoverContent align="end" className="w-60 p-2">
-                  {currentActivityView ? (
-                    <>
-                      <button
-                        className="flex min-h-9 w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
-                        disabled={currentActivityView === defaultView}
-                        onClick={() => onDefaultViewChange(currentActivityView)}
-                        type="button"
-                      >
-                        <Star className="h-4 w-4 text-muted-foreground" />
-                        <span>Set as default</span>
-                      </button>
-                      <Separator className="my-1 bg-muted" />
-                    </>
-                  ) : null}
                   <div
                     className={cn(
                       "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
@@ -574,7 +547,7 @@ export function InboxListPane({
                       className="text-sm font-medium text-foreground"
                       htmlFor="inbox-unread-only-switch"
                     >
-                      {activityEnabled ? "Show unread only" : "Show unread"}
+                      Show unread only
                     </label>
                     <Switch
                       checked={unreadOnly}
@@ -604,13 +577,9 @@ export function InboxListPane({
             </div>
             <div className="order-1 flex shrink-0 items-center justify-start">
               <ActivityFilterMenu
-                activityEnabled={activityEnabled}
                 activeDraftCount={activeDraftCount}
-                customView={customView}
-                defaultView={defaultView}
                 dueReminderCount={dueReminderCount}
                 filter={filter}
-                onCustomViewChange={onCustomViewChange}
                 onFilterChange={onFilterChange}
                 reminderCount={reminders.length}
               />
@@ -626,9 +595,8 @@ export function InboxListPane({
         >
           {reminderPubkey ? (
             <RemindersPanel
-              includeDone={!activityEnabled}
-              onSelectReminder={activityEnabled ? onSelectReminder : undefined}
-              presentation={activityEnabled ? "activity-list" : "card"}
+              onSelectReminder={onSelectReminder}
+              presentation="activity-list"
               pubkey={reminderPubkey}
               selectedReminderId={selectedReminderId}
             />
@@ -652,13 +620,15 @@ export function InboxListPane({
           data-testid="home-inbox-list"
           ref={scrollRef}
         >
-          {isMixedActivityView && activityRows.length > 0 ? (
+          {visibleActivityRows.length > 0 ? (
             <VirtualizedList
               estimateSize={96}
               getItemKey={(row) => row.key}
-              items={activityRows}
+              items={visibleActivityRows}
               renderItem={(row) => {
-                if (row.kind === "inbox") return renderItem(row.item);
+                if (row.kind === "inbox") {
+                  return renderItem(row.item, row.dueReminder);
+                }
 
                 if (row.kind === "reminder") {
                   const source = reminderSources.get(row.reminder.id);
@@ -716,39 +686,23 @@ export function InboxListPane({
               }}
               scrollRef={scrollRef}
             />
-          ) : items.length === 0 ? (
+          ) : (
             <div className="flex h-full min-h-64 items-center justify-center px-6 text-center">
               <div>
                 <p className="text-sm font-medium text-foreground">
-                  {activityEnabled
-                    ? unreadOnly
-                      ? ACTIVITY_UNREAD_EMPTY_STATE_TITLES[filter]
-                      : ACTIVITY_EMPTY_STATE_TITLES[filter]
-                    : unreadOnly
-                      ? "No unread messages"
-                      : "No messages found"}
+                  {unreadOnly
+                    ? ACTIVITY_UNREAD_EMPTY_STATE_TITLES[filter]
+                    : ACTIVITY_EMPTY_STATE_TITLES[filter]}
                 </p>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {activityEnabled
-                    ? unreadOnly
-                      ? "Turn off Show unread only to see read activity."
-                      : filter === "all"
-                        ? "New activity will appear here."
-                        : "Switch back to All to see other activity."
-                    : unreadOnly
-                      ? "Turn off the unread filter to see read messages."
-                      : "Switch back to all mail to see more messages."}
+                  {unreadOnly
+                    ? "Turn off Show unread only to see read activity."
+                    : filter === "all"
+                      ? "New activity will appear here."
+                      : "Switch back to All to see other activity."}
                 </p>
               </div>
             </div>
-          ) : (
-            <VirtualizedList
-              estimateSize={96}
-              getItemKey={(item) => item.id}
-              items={items}
-              renderItem={renderItem}
-              scrollRef={scrollRef}
-            />
           )}
         </div>
       )}
