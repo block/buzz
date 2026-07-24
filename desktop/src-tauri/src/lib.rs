@@ -133,6 +133,46 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
     eprintln!("buzz-desktop: initial window geometry did not settle before reveal timeout");
 }
 
+#[cfg(target_os = "linux")]
+fn enable_webview_media_capture<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
+    use webkit2gtk::glib::prelude::Cast;
+    use webkit2gtk::{
+        PermissionRequestExt, SettingsExt, UserMediaPermissionRequest,
+        UserMediaPermissionRequestExt, WebViewExt,
+    };
+
+    // WebKitGTK keeps getUserMedia behind enable-media-stream, off by default,
+    // and denies any permission request that no handler claims. Without both,
+    // navigator.mediaDevices is undefined on Linux and huddle mic capture and
+    // avatar recording never start. macOS and Windows get this from the system
+    // webview, which defers to the OS permission prompt instead.
+    let result = window.with_webview(|webview| {
+        let webview = webview.inner();
+
+        match webview.settings() {
+            Some(settings) => settings.set_enable_media_stream(true),
+            None => eprintln!("buzz-desktop: no webview settings; media capture stays disabled"),
+        }
+
+        // Only device capture is granted here. The frontend never calls
+        // getDisplayMedia, so screen-capture requests keep WebKit's deny.
+        webview.connect_permission_request(|_, request| {
+            let Some(request) = request.downcast_ref::<UserMediaPermissionRequest>() else {
+                return false;
+            };
+            if !request.is_for_audio_device() && !request.is_for_video_device() {
+                return false;
+            }
+            request.allow();
+            true
+        });
+    });
+
+    if let Err(error) = result {
+        eprintln!("buzz-desktop: failed to enable webview media capture: {error}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // mesh-llm's async chains (model download, node start/join) overflow
@@ -358,6 +398,13 @@ pub fn run() {
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+
+            // Ahead of the reset-failure bail below so the webview is capture
+            // capable on every boot path, not just the healthy one.
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app_handle.get_webview_window("main") {
+                enable_webview_media_capture(&window);
+            }
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
