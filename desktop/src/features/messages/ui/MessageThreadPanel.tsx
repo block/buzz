@@ -23,9 +23,9 @@ import type { ThreadPanelLayoutProps } from "@/features/channels/lib/threadPanel
 import { useEscapeKey } from "@/shared/hooks/useEscapeKey";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { cn } from "@/shared/lib/cn";
-import { AuxiliaryPanel } from "@/shared/layout/AuxiliaryPanel";
-import { AuxiliaryPanelBody } from "@/shared/layout/AuxiliaryPanel";
 import {
+  AuxiliaryPanel,
+  AuxiliaryPanelBody,
   AuxiliaryPanelHeader,
   AuxiliaryPanelHeaderGroup,
   AuxiliaryPanelTitle,
@@ -35,6 +35,7 @@ import {
   THREAD_PANEL_COMPOSER_GUTTER_CLASS,
   THREAD_PANEL_MESSAGE_GUTTER_CLASS,
 } from "@/features/messages/lib/messageThreadPanelLayout";
+import { OverlayScrollbar } from "@/shared/ui/OverlayScrollbar";
 import { Button } from "@/shared/ui/button";
 import { Separator } from "@/shared/ui/separator";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
@@ -246,7 +247,6 @@ export function MessageThreadPanel({
     threadComposerWrapperRef,
     isSinglePanelView,
   );
-
   // Live ref so onCaptureSendContext can read reply state at submit time
   // (before any async mention-flow awaits change navigation state).
   const replyTargetMessageRef = React.useRef(replyTargetMessage);
@@ -522,7 +522,7 @@ export function MessageThreadPanel({
 
   const threadScrollRegion = (
     <AuxiliaryPanelBody
-      className="overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
+      className="buzz-content-scrollbar overflow-y-auto overflow-x-hidden overscroll-contain pb-24"
       data-buzz-conversation-scroll
       data-testid="message-thread-body"
       onScroll={onScroll}
@@ -914,7 +914,13 @@ export function MessageThreadPanel({
       transparentChrome={transparentChrome}
       widthPx={widthPx}
     >
-      {threadScrollRegion}
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        {threadScrollRegion}
+        <OverlayScrollbar
+          composerRef={threadComposerWrapperRef}
+          scrollRef={threadBodyRef}
+        />
+      </div>
     </AuxiliaryPanel>
   );
 }

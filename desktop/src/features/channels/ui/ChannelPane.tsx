@@ -66,6 +66,7 @@ import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
+import { OverlayScrollbar } from "@/shared/ui/OverlayScrollbar";
 export const ChannelPane = React.memo(function ChannelPane({
   activeChannel,
   agentPubkeys,
@@ -164,6 +165,12 @@ export const ChannelPane = React.memo(function ChannelPane({
   const timelineScrollRef = React.useRef<HTMLDivElement>(null);
   const messageTimelineRef = React.useRef<MessageTimelineHandle>(null);
   const composerWrapperRef = React.useRef<HTMLDivElement>(null);
+  const [activeTimelineScrollElement, setActiveTimelineScrollElement] =
+    React.useState<HTMLDivElement | null>(null);
+  const activeTimelineScrollRef = React.useMemo(
+    () => ({ current: activeTimelineScrollElement }),
+    [activeTimelineScrollElement],
+  );
   const completedWelcomeBannerChannelIdsRef = React.useRef(new Set<string>());
   const welcomeComposerDismissTimerRef = React.useRef<number | null>(null);
   const welcomeComposerHideTimerRef = React.useRef<number | null>(null);
@@ -682,6 +689,7 @@ export const ChannelPane = React.memo(function ChannelPane({
             onEdit={onEdit}
             onMarkUnread={onMarkUnread}
             onMarkRead={onMarkRead}
+            onActiveScrollContainerChange={setActiveTimelineScrollElement}
             onReply={activeChannel?.archivedAt ? undefined : onOpenThread}
             channelName={activeChannel?.name}
             channelType={activeChannel?.channelType ?? null}
@@ -701,6 +709,11 @@ export const ChannelPane = React.memo(function ChannelPane({
               Boolean(openThreadHeadId)
             }
             threadUnreadCounts={threadUnreadCounts}
+          />
+          <OverlayScrollbar
+            composerRef={composerWrapperRef}
+            resetKey={`${activeChannelId}:${hasMainComposerOverlay}`}
+            scrollRef={activeTimelineScrollRef}
           />
           {isNonMemberView ? (
             <div

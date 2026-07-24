@@ -349,11 +349,17 @@ const overrides = new Map([
   // new model-clear test. Load-bearing chimera fix.
   // keyring-dev-isolation: run_boot_migrations wires agent-key migration.
   ["src-tauri/src/migration.rs", 1436],
+  // Bounded overlay-scrollbar host wiring adds 13 lines to ChannelPane after
+  // focused-thread mode brought the upstream file to the default limit. The
+  // geometry and interaction logic remain extracted in the shared hook.
+  ["src/features/channels/ui/ChannelPane.tsx", 1013],
   // onMarkRead + isUnread prop threading (mirrors the onMarkUnread prop
   // already here) for the single-toggle mark-read/unread menu item — a small
   // overage from load-bearing per-message plumbing, not generic debt growth.
+  // +2 for the bounded overlay-scrollbar host wiring; shared geometry and
+  // interaction logic remain extracted outside this already-large panel.
   // Approved override; still queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageThreadPanel.tsx", 1006],
+  ["src/features/messages/ui/MessageThreadPanel.tsx", 1008],
   // AgentConfigPanel footer fold into ProfileFieldGroup for the config-bridge
   // panel — a small overage from load-bearing UI plumbing, not generic debt
   // growth. Approved override; still queued to split with the rest of this list.

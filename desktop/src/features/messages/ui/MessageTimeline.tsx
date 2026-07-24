@@ -67,6 +67,8 @@ type MessageTimelineProps = {
   /** Optional external ref to the scroll container — used by the parent to
    *  observe scroll position or adjust padding dynamically. */
   scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+  /** Reports the element that currently owns timeline scrolling. */
+  onActiveScrollContainerChange?: (element: HTMLDivElement | null) => void;
   /** True when the timeline has the composer overlay below it. */
   hasComposerOverlay?: boolean;
   isFetchingOlder?: boolean;
@@ -177,6 +179,7 @@ const MessageTimelineBase = React.forwardRef<
     onMarkUnread,
     onMarkRead,
     onReply,
+    onActiveScrollContainerChange,
     channelName,
     channelType,
     isSendingVideoReviewComment = false,
@@ -215,6 +218,9 @@ const MessageTimelineBase = React.forwardRef<
     }),
     [scrollContainerRef, virtualizerScrollParent],
   );
+  React.useLayoutEffect(() => {
+    onActiveScrollContainerChange?.(activeScrollContainerRef.current);
+  }, [activeScrollContainerRef, onActiveScrollContainerChange]);
 
   // Gate the heavy timeline render (each row runs a synchronous
   // react-markdown parse) behind React concurrency. `useDeferredValue` lets the
@@ -690,6 +696,7 @@ const MessageTimelineBase = React.forwardRef<
             (!useTimelineVirtualizer || !showMessageList) &&
               cn(
                 "overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-1",
+                "buzz-content-scrollbar",
                 hasComposerOverlay
                   ? "pb-[var(--composer-overlay-height,6rem)]"
                   : "pb-4",

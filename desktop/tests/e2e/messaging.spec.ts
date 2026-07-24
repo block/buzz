@@ -952,6 +952,63 @@ test("opens a single-level thread panel with inline expansion", async ({
   ).toHaveCount(0);
 });
 
+test("reveals a short thread scrollbar when hovering anywhere in the pane", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.waitForFunction(
+    () => typeof window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__ === "function",
+  );
+
+  const threadHeadId = await page.evaluate(() => {
+    const threadHead = window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+      channelName: "general",
+      content: "Scrollbar pane-hover thread",
+      createdAt: 1_710_000_000,
+    });
+    if (!threadHead) throw new Error("Failed to seed thread head");
+
+    for (let index = 0; index < 40; index += 1) {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "general",
+        content: `Scrollbar pane-hover reply ${index}`,
+        createdAt: 1_710_000_001 + index,
+        parentEventId: threadHead.id,
+      });
+    }
+
+    return threadHead.id;
+  });
+
+  await page.getByTestId("channel-general").click();
+  const threadSummary = page.locator(
+    `[data-testid="message-thread-summary"][data-thread-head-id="${threadHeadId}"]`,
+  );
+  await expect(threadSummary).toBeVisible();
+  await threadSummary.click();
+
+  const threadPanel = page.getByTestId("message-thread-panel");
+  const threadBody = threadPanel.getByTestId("message-thread-body");
+  const scrollbarThumb = threadPanel.locator("[data-buzz-overlay-scrollbar]");
+  await expect
+    .poll(() =>
+      threadBody.evaluate(
+        (element) => element.scrollHeight - element.clientHeight,
+      ),
+    )
+    .toBeGreaterThan(0);
+  await expect(scrollbarThumb).toHaveCSS("opacity", "0");
+
+  // Deliberately hover the message area, away from the narrow thumb gutter.
+  const threadBodyBox = await threadBody.boundingBox();
+  if (!threadBodyBox) throw new Error("Expected measurable thread body");
+  await page.mouse.move(
+    threadBodyBox.x + 20,
+    threadBodyBox.y + threadBodyBox.height / 2,
+  );
+  await expect(scrollbarThumb).toHaveCSS("opacity", "1");
+});
+
 test("thread panel width uses session storage and reset handle", async ({
   page,
 }) => {

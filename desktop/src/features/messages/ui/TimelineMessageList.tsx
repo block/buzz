@@ -699,7 +699,7 @@ function VirtualizedTimelineRows({
       <PreserveVirtualizedItemVisibilityContext value={isPrepend}>
         <VList
           ref={listRef}
-          className="h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
+          className="buzz-content-scrollbar h-full min-h-0 w-full overflow-y-auto overflow-x-hidden overscroll-contain px-2 pt-[var(--channel-top-chrome-height,4.5rem)]"
           data={items}
           item={VirtualizedTimelineItemShell}
           itemSize={estimateItemSize}
