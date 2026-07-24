@@ -1,18 +1,30 @@
+import 'dart:async';
+
 import 'package:buzz/features/pairing/pairing_qr_scanner.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 const _qrScannerPlatformChannel = MethodChannel('buzz/qr_scanner');
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final defaultScannerPlatform = MobileScannerPlatform.instance;
+  late _FakeMobileScannerPlatform fakeScannerPlatform;
+
+  setUp(() {
+    fakeScannerPlatform = _FakeMobileScannerPlatform();
+    MobileScannerPlatform.instance = fakeScannerPlatform;
+  });
 
   tearDown(() async {
     debugDefaultTargetPlatformOverride = null;
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_qrScannerPlatformChannel, null);
+    await fakeScannerPlatform.dispose();
+    MobileScannerPlatform.instance = defaultScannerPlatform;
   });
 
   group('DynamicIslandQrScannerGeometry', () {
@@ -222,4 +234,44 @@ void main() {
     expect(portal, findsNothing);
     debugDefaultTargetPlatformOverride = null;
   });
+}
+
+class _FakeMobileScannerPlatform extends MobileScannerPlatform {
+  final _barcodes = StreamController<BarcodeCapture?>.broadcast();
+  var _isDisposed = false;
+
+  @override
+  Stream<BarcodeCapture?> get barcodesStream => _barcodes.stream;
+
+  @override
+  Stream<TorchState> get torchStateStream =>
+      Stream.value(TorchState.unavailable);
+
+  @override
+  Stream<double> get zoomScaleStateStream => Stream.value(1);
+
+  @override
+  Future<MobileScannerViewAttributes> start(StartOptions startOptions) async {
+    return const MobileScannerViewAttributes(
+      cameraDirection: CameraFacing.back,
+      currentTorchMode: TorchState.unavailable,
+      size: Size(200, 200),
+      numberOfCameras: 1,
+    );
+  }
+
+  @override
+  Widget buildCameraView() => const SizedBox.expand();
+
+  @override
+  Future<void> stop() async {}
+
+  @override
+  Future<void> dispose() async {
+    if (_isDisposed) {
+      return;
+    }
+    _isDisposed = true;
+    await _barcodes.close();
+  }
 }
