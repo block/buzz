@@ -5,9 +5,11 @@
 //! two-party import identity binding so a team migrates with no per-person
 //! operator work and no account-takeover. See the crate docs for the model.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use buzz_migrate::oidc::OidcConfig;
 use buzz_migrate::roster::Roster;
 use buzz_migrate::server::{router, AppState, Inner, Mailer};
 use buzz_migrate::token::ConsumedNonces;
@@ -54,6 +56,28 @@ struct Args {
     /// Magic-link token lifetime in seconds (default 72h).
     #[arg(long, default_value_t = 72 * 3600)]
     token_ttl_secs: u64,
+
+    /// Slack OIDC client id (enables the Sign-in-with-Slack channel).
+    #[arg(long, env = "SLACK_CLIENT_ID")]
+    slack_client_id: Option<String>,
+
+    /// Slack OIDC client secret.
+    #[arg(long, env = "SLACK_CLIENT_SECRET")]
+    slack_client_secret: Option<String>,
+
+    /// Slack workspace id whose users may claim imported identities.
+    #[arg(long, env = "SLACK_TEAM_ID")]
+    slack_team_id: Option<String>,
+
+    /// OIDC redirect URI registered on the Slack app. Defaults to
+    /// `<base_url>/oidc/callback`.
+    #[arg(long)]
+    oidc_redirect_uri: Option<String>,
+
+    /// Enable dev-only routes (e.g. /oidc/dev-complete) for local testing
+    /// without a real Slack app. Never set this in production.
+    #[arg(long)]
+    dev: bool,
 }
 
 #[tokio::main]
@@ -101,10 +125,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             s
         }
     };
+    if token_secret.len() < 32 {
+        return Err("--token-secret must contain at least 32 bytes".into());
+    }
+    if args.token_ttl_secs == 0 {
+        return Err("--token-ttl-secs must be greater than zero".into());
+    }
 
     let base_url = args
         .base_url
-        .unwrap_or_else(|| format!("http://{}", args.bind));
+        .unwrap_or_else(|| format!("http://{}", args.bind))
+        .trim_end_matches('/')
+        .to_string();
+
+    let oidc = match (
+        args.slack_client_id,
+        args.slack_client_secret,
+        args.slack_team_id,
+    ) {
+        (Some(client_id), Some(client_secret), Some(team_id)) => {
+            let redirect_uri = args
+                .oidc_redirect_uri
+                .unwrap_or_else(|| format!("{base_url}/oidc/callback"));
+            tracing::info!(%redirect_uri, "OIDC channel enabled (Sign in with Slack)");
+            Some(OidcConfig {
+                client_id,
+                client_secret,
+                redirect_uri,
+                team_id,
+            })
+        }
+        (None, None, None) => {
+            tracing::info!("OIDC channel disabled (no Slack OIDC configuration)");
+            None
+        }
+        _ => {
+            return Err(
+                "set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_TEAM_ID together, or omit all"
+                    .into(),
+            );
+        }
+    };
+
+    if args.dev {
+        tracing::warn!("--dev enabled: /oidc/dev-complete is active; do NOT use in production");
+    }
 
     let inner = Inner {
         roster,
@@ -115,7 +180,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         auth_tag,
         base_url,
         token_ttl_secs: args.token_ttl_secs,
-        mailer: Mailer::Dev,
+        mailer: if args.dev {
+            Mailer::Dev
+        } else {
+            Mailer::Disabled
+        },
+        http: reqwest::Client::new(),
+        oidc,
+        oidc_states: Mutex::new(HashMap::new()),
+        dev: args.dev,
     };
     let state = AppState(Arc::new(inner));
 

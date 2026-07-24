@@ -35,3 +35,4 @@ axum = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+base64 = "0.22"
