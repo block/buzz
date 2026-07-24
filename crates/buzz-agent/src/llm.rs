@@ -672,10 +672,8 @@ fn responses_body(
 }
 
 fn apply_openai_service_tier(cfg: &Config, body: &mut Value) {
-    if matches!(cfg.provider, Provider::OpenAi) {
-        if let Some(tier) = cfg.service_tier {
-            body["service_tier"] = json!(tier.as_str());
-        }
+    if let (Provider::OpenAi, Some(tier)) = (cfg.provider, cfg.service_tier) {
+        body["service_tier"] = json!(tier.as_str());
     }
 }
 

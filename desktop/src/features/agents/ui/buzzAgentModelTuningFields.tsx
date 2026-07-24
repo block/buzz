@@ -223,7 +223,7 @@ export function BuzzAgentModelTuningFields({
     effortConfig;
 
   const currentEffort = envVars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
-  const isOpenAi = provider?.trim().toLowerCase() === "openai";
+  const isOpenAi = provider === "openai";
   useEffortAutoClear({
     currentEffort,
     effortValid,
@@ -286,7 +286,10 @@ export function BuzzAgentModelTuningFields({
                 </option>
               ))}
             </select>
-            <p className="text-xs text-muted-foreground" id="help-ba-service-tier">
+            <p
+              className="text-xs text-muted-foreground"
+              id="help-ba-service-tier"
+            >
               Controls OpenAI request processing priority. Leave blank to use
               the project default.
             </p>
