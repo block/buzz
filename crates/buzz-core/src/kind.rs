@@ -305,6 +305,13 @@ pub const KIND_WINDOW_BOUNDS: u32 = 39006;
 /// Workflow definition (parameterized replaceable, d=workflow_uuid).
 pub const KIND_WORKFLOW_DEF: u32 = 30620;
 
+/// Buzz project announcement (parameterized replaceable, d=project-id).
+///
+/// A project is an owner-authored grouping above NIP-34 repositories. Repeated
+/// `a` tags reference kind:30617 repository coordinates; exactly one is marked
+/// `primary` when the project contains repositories.
+pub const KIND_PROJECT_ANNOUNCEMENT: u32 = 30621;
+
 /// NIP-DV: per-viewer DM visibility snapshot (relay-signed, parameterized
 /// replaceable, d=viewer_pubkey). Carries one `h` tag per DM the viewer has
 /// hidden from their sidebar. Re-published by the relay on every hide/unhide so
@@ -579,6 +586,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
     KIND_WORKFLOW_DEF,
+    KIND_PROJECT_ANNOUNCEMENT,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
     KIND_READ_STATE,
@@ -709,6 +717,7 @@ const _: () = assert!(is_parameterized_replaceable(KIND_PERSONA)); // 30175 ∈ 
 const _: () = assert!(is_parameterized_replaceable(KIND_TEAM)); // 30176 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_MANAGED_AGENT)); // 30177 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_WORKFLOW_DEF)); // 30620 ∈ 30000–39999
+const _: () = assert!(is_parameterized_replaceable(KIND_PROJECT_ANNOUNCEMENT)); // 30621
 const _: () = assert!(is_parameterized_replaceable(KIND_EVENT_REMINDER)); // 30300 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_DM_VISIBILITY)); // 30622 ∈ 30000–39999
 const _: () = assert!(is_parameterized_replaceable(KIND_THREAD_SUMMARY)); // 39005 ∈ 30000–39999

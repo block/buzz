@@ -11,8 +11,8 @@ use buzz_core::{
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
         KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE,
+        KIND_PROJECT_ANNOUNCEMENT, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -89,35 +89,39 @@ fn check_hex_exact(s: &str, len: usize, field: &str) -> Result<String, SdkError>
 /// no `..`. Shared by `build_repo_announcement` and `GitRepoCoord` so a
 /// repo coordinate built directly through the SDK (bypassing CLI-side
 /// `validate_repo_id`) can't slip an invalid `d`-tag into an `a`-tag value.
-fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
-    if repo_id.is_empty() {
-        return Err(SdkError::InvalidInput("repo_id must not be empty".into()));
+fn check_addressable_id(id: &str, field: &str) -> Result<(), SdkError> {
+    if id.is_empty() {
+        return Err(SdkError::InvalidInput(format!("{field} must not be empty")));
     }
-    if repo_id.len() > 64 {
+    if id.len() > 64 {
         return Err(SdkError::InvalidInput(format!(
-            "repo_id exceeds 64 characters (got {})",
-            repo_id.len()
+            "{field} exceeds 64 characters (got {})",
+            id.len()
         )));
     }
-    if !repo_id
+    if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
     {
-        return Err(SdkError::InvalidInput(
-            "repo_id may only contain [a-zA-Z0-9._-]".into(),
-        ));
+        return Err(SdkError::InvalidInput(format!(
+            "{field} may only contain [a-zA-Z0-9._-]"
+        )));
     }
-    if repo_id.starts_with('.') {
-        return Err(SdkError::InvalidInput(
-            "repo_id must not start with a dot".into(),
-        ));
+    if id.starts_with('.') {
+        return Err(SdkError::InvalidInput(format!(
+            "{field} must not start with a dot"
+        )));
     }
-    if repo_id.contains("..") {
-        return Err(SdkError::InvalidInput(
-            "repo_id must not contain '..'".into(),
-        ));
+    if id.contains("..") {
+        return Err(SdkError::InvalidInput(format!(
+            "{field} must not contain '..'"
+        )));
     }
     Ok(())
+}
+
+fn check_repo_id(repo_id: &str) -> Result<(), SdkError> {
+    check_addressable_id(repo_id, "repo_id")
 }
 
 /// Validate and normalize a NIP-30 custom emoji shortcode.
@@ -978,6 +982,81 @@ impl GitRepoCoord {
         check_repo_id(&self.id)?;
         Ok(format!("30617:{owner}:{}", self.id))
     }
+}
+
+/// A repository membership entry in a Buzz project announcement.
+pub struct ProjectRepositoryRef<'a> {
+    /// The NIP-34 repository coordinate referenced by the project.
+    pub repository: &'a GitRepoCoord,
+    /// Whether this is the project's default repository.
+    pub primary: bool,
+}
+
+/// Build a Buzz project announcement event (kind:30621).
+///
+/// Projects are owner-authored, parameterized replaceable events that group
+/// existing NIP-34 repositories by their full kind:30617 coordinates. Empty
+/// projects are valid; a non-empty project must mark exactly one repository as
+/// primary. Publishing again with the same `project_id` updates the project.
+pub fn build_project_announcement(
+    project_id: &str,
+    name: &str,
+    description: Option<&str>,
+    repositories: &[ProjectRepositoryRef<'_>],
+    channel_id: Option<Uuid>,
+) -> Result<EventBuilder, SdkError> {
+    check_addressable_id(project_id, "project_id")?;
+    if name.trim().is_empty() {
+        return Err(SdkError::InvalidInput("name must not be empty".into()));
+    }
+    if name.len() > 128 {
+        return Err(SdkError::InvalidInput(format!(
+            "name exceeds 128 characters (got {})",
+            name.len()
+        )));
+    }
+
+    let description = description.unwrap_or("");
+    check_content(description, 1024)?;
+    if repositories.len() > 100 {
+        return Err(SdkError::InvalidInput(format!(
+            "too many repositories (max 100, got {})",
+            repositories.len()
+        )));
+    }
+
+    let primary_count = repositories.iter().filter(|repo| repo.primary).count();
+    if (!repositories.is_empty() && primary_count != 1)
+        || (repositories.is_empty() && primary_count != 0)
+    {
+        return Err(SdkError::InvalidInput(
+            "a non-empty project must have exactly one primary repository".into(),
+        ));
+    }
+
+    let mut tags = Vec::with_capacity(repositories.len() + 3);
+    tags.push(tag(&["d", project_id])?);
+    tags.push(tag(&["name", name])?);
+    if let Some(channel_id) = channel_id {
+        tags.push(tag(&["h", &channel_id.to_string()])?);
+    }
+
+    let mut seen = std::collections::HashSet::with_capacity(repositories.len());
+    for repository in repositories {
+        let coordinate = repository.repository.to_a_tag_value()?;
+        if !seen.insert(coordinate.clone()) {
+            return Err(SdkError::InvalidInput(format!(
+                "duplicate repository coordinate {coordinate}"
+            )));
+        }
+        if repository.primary {
+            tags.push(tag(&["a", &coordinate, "", "primary"])?);
+        } else {
+            tags.push(tag(&["a", &coordinate])?);
+        }
+    }
+
+    Ok(EventBuilder::new(Kind::Custom(KIND_PROJECT_ANNOUNCEMENT as u16), description).tags(tags))
 }
 
 /// Metadata for a git patch event (kind:1617, NIP-34).
@@ -2917,6 +2996,114 @@ mod tests {
         assert_eq!(vals.len(), 2);
         assert_eq!(vals[0], "https://relay.example.com/git/abc/multi-clone");
         assert_eq!(vals[1], "ssh://git@github.com/org/multi-clone.git");
+    }
+
+    #[test]
+    fn project_announcement_groups_repositories_and_marks_primary() {
+        let channel_id = uuid();
+        let primary = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "frontend".to_string(),
+        };
+        let secondary = GitRepoCoord {
+            owner: "b".repeat(64),
+            id: "backend".to_string(),
+        };
+        let repositories = [
+            ProjectRepositoryRef {
+                repository: &primary,
+                primary: true,
+            },
+            ProjectRepositoryRef {
+                repository: &secondary,
+                primary: false,
+            },
+        ];
+
+        let event = sign(
+            build_project_announcement(
+                "sprout",
+                "Sprout",
+                Some("The Sprout product"),
+                &repositories,
+                Some(channel_id),
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(event.kind.as_u16(), KIND_PROJECT_ANNOUNCEMENT as u16);
+        assert_eq!(event.content, "The Sprout product");
+        assert!(has_tag(&event, "d", "sprout"));
+        assert!(has_tag(&event, "name", "Sprout"));
+        assert!(has_tag(&event, "h", &channel_id.to_string()));
+
+        let repository_tags = event
+            .tags
+            .iter()
+            .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("a"))
+            .map(|tag| tag.as_slice())
+            .collect::<Vec<_>>();
+        assert_eq!(repository_tags.len(), 2);
+        assert_eq!(
+            repository_tags[0],
+            [
+                "a",
+                &format!("30617:{}:frontend", "a".repeat(64)),
+                "",
+                "primary"
+            ]
+        );
+        assert_eq!(
+            repository_tags[1],
+            ["a", &format!("30617:{}:backend", "b".repeat(64))]
+        );
+    }
+
+    #[test]
+    fn project_announcement_allows_empty_repository_set() {
+        let event = sign(build_project_announcement("sprout", "Sprout", None, &[], None).unwrap());
+
+        assert_eq!(event.kind.as_u16(), KIND_PROJECT_ANNOUNCEMENT as u16);
+        assert!(!event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().map(String::as_str) == Some("a")));
+    }
+
+    #[test]
+    fn project_announcement_requires_exactly_one_primary_when_non_empty() {
+        let primary = GitRepoCoord {
+            owner: "a".repeat(64),
+            id: "frontend".to_string(),
+        };
+        let secondary = GitRepoCoord {
+            owner: "b".repeat(64),
+            id: "backend".to_string(),
+        };
+
+        let no_primary = [ProjectRepositoryRef {
+            repository: &primary,
+            primary: false,
+        }];
+        assert!(matches!(
+            build_project_announcement("sprout", "Sprout", None, &no_primary, None),
+            Err(SdkError::InvalidInput(_))
+        ));
+
+        let duplicate_primary = [
+            ProjectRepositoryRef {
+                repository: &primary,
+                primary: true,
+            },
+            ProjectRepositoryRef {
+                repository: &secondary,
+                primary: true,
+            },
+        ];
+        assert!(matches!(
+            build_project_announcement("sprout", "Sprout", None, &duplicate_primary, None),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 
     #[test]

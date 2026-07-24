@@ -58,6 +58,8 @@ export const KIND_AGENT_TURN_METRIC = 44200;
 export const KIND_EVENT_REMINDER = 30300;
 export const KIND_REPO_ANNOUNCEMENT = 30617;
 export const KIND_REPO_STATE = 30618;
+// NIP-BP: owner-authored project grouping above NIP-34 repositories.
+export const KIND_PROJECT_ANNOUNCEMENT = 30621;
 export const KIND_GIT_PATCH = 1617;
 export const KIND_GIT_PULL_REQUEST = 1618;
 export const KIND_GIT_PR_UPDATE = 1619;
