@@ -1118,6 +1118,142 @@ struct SteerAckEvent {
     ack: std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
 }
 
+/// What the main loop should do with a withheld event once a goose-native
+/// steer attempt resolves.
+///
+/// - `release_withheld`: release the withheld event back to the queue so
+///   normal dispatch can redeliver it.
+/// - `drop_withheld`: remove the withheld event entirely (the steer already
+///   delivered it).
+/// - `signal_fallback`: fire the universal cancel+merge `ControlSignal::Steer`
+///   against the in-flight task so the message still reaches the agent.
+struct SteerDisposition {
+    release_withheld: bool,
+    drop_withheld: bool,
+    signal_fallback: bool,
+}
+
+/// Map a resolved steer ack to its [`SteerDisposition`]. Pure — the main loop's
+/// `PoolEvent::SteerAck` arm applies the result. Extracted so the delivery
+/// semantics are unit-testable without driving the whole event loop; see the
+/// prose contract on that arm for the rationale behind each case.
+fn steer_ack_disposition(
+    ack: &std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError>,
+) -> SteerDisposition {
+    let (release_withheld, drop_withheld, signal_fallback) = match ack {
+        Ok(pool::SteerAck::Success) => (false, true, false),
+        // -32601 = method_not_found: agent does not implement the steer
+        // extension. Fire cancel+merge so the message still reaches the agent.
+        Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. })) if *code == -32601 => {
+            (true, false, true)
+        }
+        // AgentError (other code): write landed, agent rejected it at the
+        // application level (e.g. wrong run id). Release for normal dispatch;
+        // no fallback signal (the turn is still running or just ended — either
+        // way there is nothing to cancel).
+        Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => (true, false, false),
+        // ExpectedRunIdMissing: the agent structurally cannot do a
+        // non-cancelling steer (never emits `activeRunId`). Cancelling here
+        // restarts the in-flight turn on every mid-turn mention and, under
+        // rapid mentions, becomes a cancel storm where no reply ever lands.
+        // Release for normal dispatch and do NOT cancel — the current turn
+        // finishes and replies, the released event runs next (queue semantics).
+        Ok(pool::SteerAck::Err(pool::SteerError::ExpectedRunIdMissing)) => (true, false, false),
+        // Transport: the write never landed on the wire. Release and fire the
+        // cancel+merge fallback so the message still reaches the agent.
+        Ok(pool::SteerAck::Err(_)) => (true, false, true),
+        Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
+        Err(_recv_err) => (true, false, false),
+    };
+    SteerDisposition {
+        release_withheld,
+        drop_withheld,
+        signal_fallback,
+    }
+}
+
+#[cfg(test)]
+mod steer_disposition_tests {
+    use super::*;
+
+    fn ok(
+        ack: pool::SteerAck,
+    ) -> std::result::Result<pool::SteerAck, tokio::sync::oneshot::error::RecvError> {
+        Ok(ack)
+    }
+
+    #[test]
+    fn success_drops_without_fallback() {
+        let d = steer_ack_disposition(&ok(pool::SteerAck::Success));
+        assert!(!d.release_withheld);
+        assert!(d.drop_withheld);
+        assert!(!d.signal_fallback);
+    }
+
+    #[test]
+    fn method_not_found_releases_and_falls_back() {
+        let d = steer_ack_disposition(&ok(pool::SteerAck::Err(pool::SteerError::AgentError {
+            code: -32601,
+            message: "method_not_found".into(),
+        })));
+        assert!(d.release_withheld);
+        assert!(!d.drop_withheld);
+        assert!(
+            d.signal_fallback,
+            "unimplemented extension must cancel+merge"
+        );
+    }
+
+    #[test]
+    fn other_agent_error_releases_without_fallback() {
+        let d = steer_ack_disposition(&ok(pool::SteerAck::Err(pool::SteerError::AgentError {
+            code: -32000,
+            message: "wrong run id".into(),
+        })));
+        assert!(d.release_withheld);
+        assert!(!d.drop_withheld);
+        assert!(!d.signal_fallback);
+    }
+
+    // Regression: a runtime that never emits `activeRunId` (e.g. claude-agent-acp)
+    // returns ExpectedRunIdMissing for every mid-turn mention. Cancelling here
+    // caused a cancel storm — the fix is to release without cancelling so the
+    // in-flight reply survives and the event runs as the next turn.
+    #[test]
+    fn expected_run_id_missing_releases_without_fallback() {
+        let d = steer_ack_disposition(&ok(pool::SteerAck::Err(
+            pool::SteerError::ExpectedRunIdMissing,
+        )));
+        assert!(d.release_withheld);
+        assert!(!d.drop_withheld);
+        assert!(
+            !d.signal_fallback,
+            "structural no-steer must NOT cancel the in-flight turn"
+        );
+    }
+
+    #[test]
+    fn transport_error_releases_and_falls_back() {
+        let d = steer_ack_disposition(&ok(pool::SteerAck::Err(pool::SteerError::Transport(
+            "write eof".into(),
+        ))));
+        assert!(d.release_withheld);
+        assert!(!d.drop_withheld);
+        assert!(
+            d.signal_fallback,
+            "a genuine wire failure must cancel+merge"
+        );
+    }
+
+    #[test]
+    fn prompt_completed_neutral_releases_without_fallback() {
+        let d = steer_ack_disposition(&ok(pool::SteerAck::PromptCompletedNeutral));
+        assert!(d.release_withheld);
+        assert!(!d.drop_withheld);
+        assert!(!d.signal_fallback);
+    }
+}
+
 /// RAII guard that ensures a `RespawnResult` is sent even if the task panics.
 /// Without this, a panicked respawn task would leave `respawn_in_flight = true`
 /// permanently, silently losing the slot forever.
@@ -2371,12 +2507,25 @@ async fn tokio_main() -> Result<()> {
                 //     path. Drop the withheld event so normal dispatch
                 //     never redelivers it.
                 //
-                //   Err(_) where the write never landed (Transport /
-                //   ExpectedRunIdMissing):
-                //     Delivery state of the underlying message is "never
-                //     attempted on the wire". Release withheld back to the
-                //     queue front AND issue the cancel+merge fallback so
-                //     the message still reaches the agent.
+                //   Err(Transport):
+                //     The write never landed on the wire. Delivery state of
+                //     the underlying message is "never attempted". Release
+                //     withheld back to the queue front AND issue the
+                //     cancel+merge fallback so the message still reaches the
+                //     agent.
+                //
+                //   Err(ExpectedRunIdMissing):
+                //     The agent structurally cannot do a non-cancelling steer
+                //     — it never emits `_meta.goose.activeRunId`, so
+                //     `active_run_id` is permanently `None` (e.g. the
+                //     `claude-agent-acp` runtime). This is NOT a transient
+                //     write failure: it recurs for every mid-turn event. Firing
+                //     cancel+merge here restarts the in-flight turn on every
+                //     mention; under rapid successive mentions that degenerates
+                //     into a cancel storm where no reply ever lands. So release
+                //     withheld for normal dispatch and do NOT fire the fallback
+                //     — the current turn completes and replies, and the
+                //     released event runs as the next turn (queue semantics).
                 //
                 //   Err(AgentError { code: -32601, .. })
                 //     The agent returned method_not_found — it does not
@@ -2416,31 +2565,11 @@ async fn tokio_main() -> Result<()> {
                 //     pending_steer on every return path. If it does,
                 //     treat as PromptCompletedNeutral to avoid leaking
                 //     the withheld event in `withheld_native_steer`.
-                let (release_withheld, drop_withheld, signal_fallback) = match &ack {
-                    Ok(pool::SteerAck::Success) => (false, true, false),
-                    // -32601 = method_not_found: agent does not implement the
-                    // steer extension. Fire cancel+merge so the message still
-                    // reaches the agent.
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { code, .. }))
-                        if *code == -32601 =>
-                    {
-                        (true, false, true)
-                    }
-                    // AgentError: write landed, agent rejected it at the
-                    // application level (e.g. wrong run id). Release for
-                    // normal dispatch; no fallback signal (the turn is still
-                    // running or just ended — either way there is nothing to
-                    // cancel).
-                    Ok(pool::SteerAck::Err(pool::SteerError::AgentError { .. })) => {
-                        (true, false, false)
-                    }
-                    // Transport / ExpectedRunIdMissing: write never landed.
-                    // Release and fire the cancel+merge fallback so the
-                    // message still reaches the agent.
-                    Ok(pool::SteerAck::Err(_)) => (true, false, true),
-                    Ok(pool::SteerAck::PromptCompletedNeutral) => (true, false, false),
-                    Err(_recv_err) => (true, false, false),
-                };
+                let SteerDisposition {
+                    release_withheld,
+                    drop_withheld,
+                    signal_fallback,
+                } = steer_ack_disposition(&ack);
                 tracing::info!(
                     channel = %channel_id,
                     event_id = %event_id,
