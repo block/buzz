@@ -251,6 +251,8 @@ type MockBridgeOptions = {
   channelWindowDelayMs?: number;
   profileReadDelayMs?: number;
   profileReadError?: string;
+  /** Override whether get_profile reports a real kind:0 event. */
+  profileHasEvent?: boolean;
   profileUpdateError?: string;
   profileUpdateErrors?: string[];
   searchProfiles?: MockSearchProfileSeed[];

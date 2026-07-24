@@ -238,6 +238,8 @@ type E2eConfig = {
     channelWindowDelayMs?: number;
     profileReadDelayMs?: number;
     profileReadError?: string;
+    /** Override whether get_profile reports a real kind:0 event. */
+    profileHasEvent?: boolean;
     profileUpdateError?: string;
     profileUpdateErrors?: string[];
     searchProfiles?: MockSearchProfileSeed[];
@@ -5290,6 +5292,13 @@ async function handleGetChannels(config: E2eConfig | undefined) {
 
 async function handleGetProfile(config: E2eConfig | undefined) {
   const identity = getIdentity(config);
+  const forcedHasProfileEvent = config?.mock?.profileHasEvent;
+  if (forcedHasProfileEvent !== undefined) {
+    return {
+      ...cloneProfile(ensureMockProfile(config)),
+      has_profile_event: forcedHasProfileEvent,
+    };
+  }
   if (!identity) {
     const profileReadDelayMs = config?.mock?.profileReadDelayMs ?? 0;
     if (profileReadDelayMs > 0) {
