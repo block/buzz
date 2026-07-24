@@ -518,13 +518,13 @@ fn runtime_metadata_env_vars_injects_model_and_provider() {
 #[test]
 fn runtime_metadata_env_vars_skips_provider_when_locked() {
     let vars = runtime_metadata_env_vars(
-        None, // claude has no model_env_var
+        Some("ANTHROPIC_MODEL"), // Claude reads its selected model from this key
         None, // claude has no provider_env_var
         true, // provider_locked = true
         Some("claude-opus-4-7"),
         Some("anthropic"),
     );
-    assert!(vars.is_empty());
+    assert_eq!(vars, vec![("ANTHROPIC_MODEL", "claude-opus-4-7")]);
 }
 
 #[test]

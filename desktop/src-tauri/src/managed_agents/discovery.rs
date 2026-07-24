@@ -111,7 +111,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
-        model_env_var: None,
+        // Claude Code reads the selected model from ANTHROPIC_MODEL at process
+        // startup. Keep this in the runtime catalog so the structured picker
+        // remains the source of truth for every spawn.
+        model_env_var: Some("ANTHROPIC_MODEL"),
         provider_env_var: None,
         provider_locked: true,
         default_env: &[],

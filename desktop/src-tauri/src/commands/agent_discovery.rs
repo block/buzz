@@ -536,21 +536,36 @@ fn persist_last_error_on_install(
     save_managed_agents(app, &records)
 }
 
-/// Build a login-shell `Command` for `command` with hermit env vars stripped,
-/// Buzz-managed npm locations set, and the user's PATH set. This is the
-/// single source of truth for
-/// the shell selection and environment cleanup shared by `run_install_command`
-/// and managed npm install path — keeping them in sync so the hermit-strip list
-/// can't drift between command execution paths.
+/// Build an install `Command` for `command` with hermit env vars stripped,
+/// Buzz-managed npm locations set, and the user's PATH set. This is the single
+/// source of truth for the shell selection and environment cleanup shared by
+/// `run_install_command` and managed npm install paths — keeping them in sync
+/// so the hermit-strip list can't drift between command execution paths.
 ///
-/// On Windows, resolves Git Bash via `resolve_bash_path` (skips `BUZZ_SHELL`
-/// since install commands require bash syntax). Returns `Err` when no shell
-/// can be found.
+/// On Windows, known PowerShell install commands run directly in PowerShell.
+/// Sending them through Git Bash enables MSYS path conversion, which corrupts
+/// paths consumed by native installers (for example, `C:` passed to `tar`).
+/// Other install commands use Git Bash via `resolve_bash_path`.
 fn install_shell_command(command: &str) -> Result<std::process::Command, String> {
-    let shell: std::path::PathBuf = resolve_install_shell()?;
+    #[cfg(windows)]
+    let mut cmd = if let Some(script) = powershell_install_script(command) {
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script]);
+        cmd
+    } else {
+        let shell = resolve_install_shell()?;
+        let mut cmd = std::process::Command::new(shell);
+        cmd.args(["-l", "-c", command]);
+        cmd
+    };
 
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.args(["-l", "-c", command]);
+    #[cfg(not(windows))]
+    let mut cmd = {
+        let shell = resolve_install_shell()?;
+        let mut cmd = std::process::Command::new(shell);
+        cmd.args(["-l", "-c", command]);
+        cmd
+    };
 
     // Strip hermit env vars so npm/node use the user's normal registry rather
     // than the project-local hermit-managed paths, then give npm defaults for
@@ -623,6 +638,20 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     }
 
     Ok(cmd)
+}
+
+const POWERSHELL_INSTALL_PREFIX: &str = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ";
+
+/// Extract the script from a catalogued PowerShell installer command.
+///
+/// The catalog owns these command strings, so this deliberately recognizes
+/// only the quoted form used by the Windows runtime installers. All other
+/// commands retain the login-shell execution path.
+fn powershell_install_script(command: &str) -> Option<&str> {
+    command
+        .strip_prefix(POWERSHELL_INSTALL_PREFIX)?
+        .strip_prefix('"')?
+        .strip_suffix('"')
 }
 
 /// Resolve the shell binary for install commands.
@@ -1262,6 +1291,16 @@ mod tests {
         assert!(result.is_ok(), "install_shell_command must succeed on Unix");
     }
 
+    #[test]
+    fn test_powershell_install_script_extracts_catalogued_script() {
+        let command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\"";
+        assert_eq!(
+            super::powershell_install_script(command),
+            Some("irm https://claude.ai/install.ps1 | iex")
+        );
+        assert_eq!(super::powershell_install_script("echo test"), None);
+    }
+
     // ── Phase A: Windows install shell selection ───────────────────────────────
 
     /// On Windows (CI runner has Git pre-installed), resolve_install_shell succeeds.
@@ -1309,6 +1348,34 @@ mod tests {
             result.is_ok(),
             "install_shell_command must succeed on Windows with Git; got: {:?}",
             result.err()
+        );
+    }
+
+    /// Catalogued PowerShell installers must bypass Git Bash so MSYS path
+    /// conversion cannot corrupt paths passed to native Windows tools.
+    #[cfg(windows)]
+    #[test]
+    fn test_powershell_installer_runs_natively_on_windows() {
+        let command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\"";
+        let cmd = super::install_shell_command(command)
+            .expect("PowerShell installer must not require Git Bash");
+
+        assert_eq!(
+            cmd.get_program(),
+            std::ffi::OsStr::new("powershell.exe"),
+            "catalogued PowerShell installers must run in PowerShell"
+        );
+        assert_eq!(
+            cmd.get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://claude.ai/install.ps1 | iex",
+            ]
         );
     }
 
