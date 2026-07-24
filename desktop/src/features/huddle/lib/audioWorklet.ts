@@ -51,6 +51,7 @@ export type AudioWorkletHandle = {
 export async function setupAudioWorklet(
   audioTrack: MediaStreamTrack,
   initialTransmitting = true,
+  command = "push_audio_pcm",
 ): Promise<AudioWorkletHandle> {
   const audioContext = new AudioContext({ sampleRate: 48000 });
 
@@ -89,7 +90,7 @@ export async function setupAudioWorklet(
     // Create a zero-copy Uint8Array view over the same underlying buffer.
     // Rust reinterprets the bytes as f32 on the other side.
     invokeRawBinary(
-      "push_audio_pcm",
+      command,
       new Uint8Array(float32.buffer, float32.byteOffset, float32.byteLength),
     ).catch(() => {
       /* silently drop — Rust handles backpressure */

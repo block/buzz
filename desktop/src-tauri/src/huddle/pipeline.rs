@@ -94,6 +94,9 @@ pub(crate) async fn maybe_start_stt_pipeline(
         return Ok(false); // Models not downloaded yet — voice-only mode.
     }
     let model_dir = models::stt_model_dir().ok_or("STT model directory not found")?;
+    // The selected model's family decides how the offline recognizer is
+    // configured (English CTC vs multilingual transducer — issue #2478).
+    let stt_family = models::stt_model_family();
 
     let channel_uuid = parse_channel_uuid(ephemeral_channel_id)?;
 
@@ -138,7 +141,14 @@ pub(crate) async fn maybe_start_stt_pipeline(
     drop(old_stt);
 
     let constructed = tokio::task::spawn_blocking(move || {
-        stt::SttPipeline::new(model_dir, tts_active, tts_cancel, ptt_active_for_stt)
+        stt::SttPipeline::new(
+            model_dir,
+            stt_family,
+            tts_active,
+            tts_cancel,
+            ptt_active_for_stt,
+            None,
+        )
     })
     .await;
     let (pipeline, text_rx) = match constructed {

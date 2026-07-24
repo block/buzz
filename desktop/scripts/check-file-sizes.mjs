@@ -76,6 +76,13 @@ const overrides = new Map([
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
   ["src-tauri/src/archive/mod_tests.rs", 1208],
+  // PR #2520 port (STT model registry): STT_MODELS registry data (two model
+  // entries with pinned checksums + license texts) + select_stt_model and its
+  // unit tests. Load-bearing model-selection surface from the upstream PR;
+  // queued to split when #2520 lands and this port is dropped in the rebase.
+  // composer-dictation model picker adds per-model slots + SttModelInfo +
+  // resolve_dictation_model (~110 lines); split rides the same rebase.
+  ["src-tauri/src/huddle/models.rs", 1432],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports
@@ -517,7 +524,12 @@ const overrides = new Map([
   // ownerPubkey) feeding the newly-added-mentions diff. Diff logic itself
   // lives in threading.ts (diffAddedMentionPubkeys); this is the minimal
   // composer-side wiring. Queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1114],
+  // +15: dictation wiring — useDictation hook instantiation, ⌃Space handoff in
+  // handleEditorKeyDown, the Enter-to-send submit callback, and two toolbar
+  // props. All session/keyboard logic lives in lib/useDictation.ts; this is
+  // the minimal composer-side wiring. Queued to split with the rest of this
+  // list.
+  ["src/features/messages/ui/MessageComposer.tsx", 1129],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing

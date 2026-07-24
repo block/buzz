@@ -4,6 +4,7 @@ mod archive;
 mod builderlab;
 mod commands;
 mod deep_link;
+mod dictation;
 mod event_sync;
 mod events;
 mod huddle;
@@ -35,6 +36,10 @@ use commands::*;
 use deep_link::{
     acknowledge_pending_community_deep_link, handle_deep_link_url,
     take_pending_community_deep_link, PendingCommunityDeepLinks,
+};
+use dictation::{
+    download_dictation_model, get_dictation_models, push_dictation_pcm, start_dictation,
+    stop_dictation,
 };
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
@@ -352,6 +357,7 @@ pub fn run() {
         })
         .manage(build_app_state())
         .manage(ClipboardState::new())
+        .manage(dictation::DictationState::default())
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
@@ -853,6 +859,11 @@ pub fn run() {
             end_huddle,
             get_huddle_state,
             push_audio_pcm,
+            start_dictation,
+            stop_dictation,
+            push_dictation_pcm,
+            get_dictation_models,
+            download_dictation_model,
             reconnect_huddle_audio,
             start_stt_pipeline,
             set_huddle_transcription_enabled,
