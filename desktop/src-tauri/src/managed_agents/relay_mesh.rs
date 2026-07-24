@@ -219,7 +219,10 @@ mod tests {
     #[test]
     fn apply_relay_mesh_env_preserves_user_max_output_tokens() {
         let mut env = BTreeMap::from([
-            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(), "1024".to_string()),
+            (
+                "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
+                "1024".to_string(),
+            ),
             ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "low".to_string()),
         ]);
         apply_relay_mesh_env(
