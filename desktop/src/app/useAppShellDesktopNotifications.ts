@@ -61,6 +61,7 @@ export function useAppShellDesktopNotifications({
       const body = truncateNotificationBody(event.content, "New message");
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
+      void playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
       void sendDesktopNotification({
         title: channelName,
         body,
@@ -76,7 +77,6 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(resolveSlotSound(notificationSettings, "dm"));
         void requestDockBounce();
       });
     },
@@ -106,6 +106,9 @@ export function useAppShellDesktopNotifications({
       const body = truncateNotificationBody(event.content, "New reply");
       const threadRootId = getThreadReference(event.tags).rootId ?? null;
 
+      void playNotificationSound(
+        resolveSlotSound(notificationSettings, "thread_reply"),
+      );
       void sendDesktopNotification({
         title: formatNotificationTitle({ prefix: "Reply", channelLabel }),
         body,
@@ -121,9 +124,6 @@ export function useAppShellDesktopNotifications({
         },
       }).then((didSend) => {
         if (!didSend) return;
-        playNotificationSound(
-          resolveSlotSound(notificationSettings, "thread_reply"),
-        );
         void requestDockBounce();
       });
     },
