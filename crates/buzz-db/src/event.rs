@@ -374,7 +374,7 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown: restrict to events in any of these channels
+    // Multi-channel array pushdown: restrict to events in any of these channels
     // OR global events (channel_id IS NULL). Used by NIP-45 COUNT to enforce
     // channel access at the SQL level without fetching all rows.
     //
@@ -386,12 +386,9 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
             qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
         } else {
             qb.push(format!(
-                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id IN ("
+                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id = ANY("
             ));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
+            qb.push_bind(ch_ids.clone());
             qb.push("))");
         }
     }
@@ -402,11 +399,8 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
         if ch_ids.is_empty() {
             qb.push(" AND FALSE");
         } else {
-            qb.push(format!(" AND {col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
+            qb.push(format!(" AND {col_prefix}channel_id = ANY("));
+            qb.push_bind(ch_ids.clone());
             qb.push(")");
         }
     }
@@ -619,19 +613,16 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel IN pushdown for COUNT: restrict to accessible channels + global.
+    // Multi-channel array pushdown for COUNT: restrict to accessible channels + global.
     // SECURITY: Some(empty vec) = no channel access → global events only.
     if let Some(ref ch_ids) = q.channel_ids {
         if ch_ids.is_empty() {
             qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
         } else {
             qb.push(format!(
-                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id IN ("
+                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id = ANY("
             ));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
+            qb.push_bind(ch_ids.clone());
             qb.push("))");
         }
     }
@@ -642,11 +633,8 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
         if ch_ids.is_empty() {
             qb.push(" AND FALSE");
         } else {
-            qb.push(format!(" AND {col_prefix}channel_id IN ("));
-            let mut sep = qb.separated(", ");
-            for ch in ch_ids {
-                sep.push_bind(*ch);
-            }
+            qb.push(format!(" AND {col_prefix}channel_id = ANY("));
+            qb.push_bind(ch_ids.clone());
             qb.push(")");
         }
     }
