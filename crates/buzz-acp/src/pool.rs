@@ -1410,6 +1410,42 @@ pub async fn run_prompt_task(
                     );
                     agent.state.core_sections.insert(*cid, rendered);
                 }
+
+                // NIP-DA grant consumption — same lifecycle as core: once per
+                // new channel session, owner-gated, fail-open, bounded. Fetches
+                // the agent's gift-wrapped grants, unwraps + decrypts them, and
+                // writes each granted scope into the engram store so the agent
+                // can read it on demand. Never blocks session creation; a
+                // stalled relay just means no grants applied this session.
+                const GRANT_SYNC_TIMEOUT: std::time::Duration =
+                    std::time::Duration::from_secs(3);
+                let grant_fetch =
+                    crate::grant_sync::sync_grants(&ctx.rest_client, &ctx.agent_keys, owner_pk);
+                match tokio::time::timeout(GRANT_SYNC_TIMEOUT, grant_fetch).await {
+                    Ok(applied) if !applied.is_empty() => {
+                        let scopes = applied
+                            .iter()
+                            .map(|g| g.scope_name.as_deref().unwrap_or(&g.slug))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        tracing::info!(
+                            target: "grant_sync",
+                            channel = %cid,
+                            count = applied.len(),
+                            scopes = %scopes,
+                            "applied NIP-DA grant(s) to engram memory"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "grant_sync",
+                            channel = %cid,
+                            timeout_ms = GRANT_SYNC_TIMEOUT.as_millis() as u64,
+                            "grant sync timed out — applied no grants this session"
+                        );
+                    }
+                }
             }
         }
     }

@@ -468,7 +468,7 @@ impl From<nostr::event::builder::Error> for RelayError {
 
 /// A parsed NIP-01 relay message.
 #[derive(Debug, Clone)]
-enum RelayMessage {
+pub(crate) enum RelayMessage {
     Event {
         subscription_id: String,
         event: Box<Event>,
