@@ -233,7 +233,26 @@ pub async fn delete_workflow(
     workflow_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let builder = events::build_workflow_delete(&workflow_id, &current_pubkey_hex(&state)?)?;
+    // The NIP-09 `a` coordinate must name the workflow's actual author, not
+    // the caller: kind:30620 is addressable by (author, d-tag), and workflows
+    // are commonly agent-created. Addressing the delete at the caller's own
+    // pubkey targets a record that doesn't exist — the relay accepts the
+    // kind:5 and deletes nothing.
+    let prior = query_relay(
+        &state,
+        &[serde_json::json!({
+            "kinds": [30620],
+            "#d": [workflow_id.clone()],
+            "limit": 1
+        })],
+    )
+    .await?;
+    let owner_pubkey = prior
+        .first()
+        .map(|ev| ev.pubkey.to_hex())
+        .ok_or_else(|| "workflow not found".to_string())?;
+
+    let builder = events::build_workflow_delete(&workflow_id, &owner_pubkey)?;
     submit_event(builder, &state).await?;
     Ok(())
 }
