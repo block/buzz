@@ -6,6 +6,7 @@ pub(crate) use agent_env::{
     baked_build_env, build_buzz_agent_provider_defaults, discovery_env_with_baked_floor,
 };
 mod backend;
+pub(crate) mod codex_home;
 pub(crate) mod config_bridge;
 pub(crate) mod custom_harnesses;
 mod discovery;
