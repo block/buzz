@@ -16,6 +16,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const OPENCODE_AVATAR_URL: &str = "https://github.com/sst.png";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -36,6 +37,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
         }
         if let Some(home) = dirs::home_dir() {
             paths.extend([
+                home.join(".opencode/bin"),
                 home.join(".local/share/mise/shims"),
                 home.join(".local/bin"),
                 home.join(".volta/bin"),
@@ -156,6 +158,37 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "opencode",
+        label: "OpenCode",
+        commands: &["opencode"],
+        aliases: &["open-code"],
+        avatar_url: OPENCODE_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("opencode"),
+        cli_install_commands: &["curl -fsSL https://opencode.ai/install | bash"],
+        cli_install_commands_windows: &["npm install -g opencode-ai"],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://opencode.ai/docs/",
+        cli_install_hint: "Install the OpenCode CLI via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: None,
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.config/opencode/opencode.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `opencode auth login` to authenticate."),
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -342,7 +375,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "opencode" | "open-code" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
