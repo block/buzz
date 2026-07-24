@@ -11,8 +11,9 @@ Mobile uses immutable release-candidate tags cut directly from remote `main`:
 
 The lanes version independently. Desktop reads its manifests, relay reads its
 crate manifest, and mobile derives both source and marketing version from the
-exact candidate tag. The mobile handoff to the private `buzz-releases` pipeline
-remains manual because OSS CI cannot trigger private CI.
+exact candidate tag. Publishing a candidate automatically triggers the private
+`buzz-releases` pipeline with that tag supplied as `mobile_ref`; the Buildkite
+input remains only as a fallback for manually started builds.
 
 ## Quick Start
 
@@ -72,14 +73,16 @@ Every push to `main` continues to publish the rolling relay `:main` and
    `mobile-vX.Y.Z-rc.N` tag there through the dedicated `buzz-release-bot`
    GitHub App. It never uses the operator's checked-out commit and never moves
    an existing candidate.
-2. **Build the exact tag.** Enter the candidate tag as `mobile_ref` in the
-   private Buzz mobile Buildkite pipeline. OSS CI deliberately cannot trigger
-   that private pipeline. The tag supplies both source commit and release
+2. **Build the exact tag.** Publishing the candidate automatically triggers the
+   private Buzz mobile Buildkite pipeline with the exact tag supplied as
+   `mobile_ref`. The pipeline's input step remains only as a fallback for
+   manually started builds. The tag supplies both source commit and release
    version. Flutter receives clean marketing version `X.Y.Z`; Buildkite's
    monotonically increasing build number supplies the platform build number.
-3. **Promote tested artifacts.** Promote the already-built signed artifact for
-   each platform through its store workflow. Record the exact tag with the
-   build or rollout record. No source ref is changed and no final build is cut.
+3. **Promote tested artifacts.** Every candidate build uploads to TestFlight and
+   Google Play. Decide what to submit or publish in App Store Connect and Play
+   Console, then record the exact tag with the build or rollout record. No source
+   ref is changed and no final build is cut.
 
 The iOS and Android artifacts for one marketing version may come from different
 RC tags. For example, iOS can ship `mobile-v0.5.0-rc.2` while Android ships

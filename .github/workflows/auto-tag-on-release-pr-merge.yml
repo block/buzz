@@ -12,18 +12,16 @@ name: Auto-tag on Release PR Merge
 #                       → tag chart-v<v>  → helm-chart.yml (helm chart)
 #
 # Mobile candidate tags do not come from merged PRs. Operators create immutable
-# mobile-v<v>-rc.N tags directly from remote main with scripts/mobile-release.sh,
-# then hand the exact tag to buzz-releases.
+# mobile-v<v>-rc.N tags directly from remote main with scripts/mobile-release.sh.
+# Publishing a candidate automatically triggers the private buzz-releases build
+# with the exact tag supplied as mobile_ref. The Buildkite input remains only as
+# a fallback for manually started builds; App Store Connect and Play Console own
+# the decisions to submit or publish each uploaded candidate.
 #
 # Release tags are created with a short-lived token from the dedicated
 # buzz-release-bot GitHub App. GitHub attributes the ref creation to that
 # App, so the consumer's `on.push.tags` trigger runs normally. The workflow's
 # default GITHUB_TOKEN remains read-only and is never used to create a tag.
-#
-# Mobile is manual-only by infosec necessity: OSS `block/buzz` CI must
-# not trigger CI in the private `buzz-releases` repo. A human feeds the exact
-# mobile candidate tag to the private Buildkite pipeline, which builds and
-# ships mobile.
 
 on:
   pull_request:
