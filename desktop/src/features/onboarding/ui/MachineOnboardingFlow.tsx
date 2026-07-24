@@ -15,18 +15,28 @@ import { LandingBees } from "./LandingBees";
 import { NostrKeyImportForm } from "./NostrKeyImportForm";
 import {
   ONBOARDING_LANDING_CTA_CLASS,
+  ONBOARDING_PRIMARY_CTA_CLASS,
   OnboardingChrome,
 } from "./OnboardingChrome";
-import { OnboardingFooterProvider } from "./OnboardingFooter";
+import { OnboardingFooter, OnboardingFooterProvider } from "./OnboardingFooter";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
+import {
+  machineOnboardingChromePosition,
+  type MachineOnboardingPage,
+  machineSetupBackTarget,
+} from "./machineOnboardingPages";
 
-export type MachineOnboardingPage =
-  | "identity"
-  | "key-import"
-  | "backup"
-  | "setup"
-  | "config";
+export type { MachineOnboardingPage } from "./machineOnboardingPages";
+
+/**
+ * The two screens that can kick off key creation. Backup's Back button
+ * returns to whichever one the user came from.
+ */
+type AccountEntryPage = Extract<
+  MachineOnboardingPage,
+  "signup" | "advanced-identity"
+>;
 
 export function MachineOnboardingFlow({
   complete,
@@ -44,6 +54,11 @@ export function MachineOnboardingFlow({
   const [page, setPage] = React.useState<MachineOnboardingPage>(
     identityLost ? "key-import" : (initialPage ?? "identity"),
   );
+  // Which account-entry screen led to key creation. Backup's Back button
+  // returns here, so a "Sign up without email" user is never dropped onto the
+  // signup form (and vice versa).
+  const [accountEntryPage, setAccountEntryPage] =
+    React.useState<AccountEntryPage>("advanced-identity");
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
@@ -109,6 +124,8 @@ export function MachineOnboardingFlow({
     [continueWithIdentity, queryClient],
   );
 
+  const chromePosition = machineOnboardingChromePosition(page);
+
   return (
     <div
       className={`buzz-onboarding-neutral-theme buzz-startup-shell flex max-h-dvh items-start justify-center overflow-x-hidden overflow-y-auto px-4 text-foreground ${
@@ -120,10 +137,8 @@ export function MachineOnboardingFlow({
     >
       <StartupWindowDragRegion />
       {page === "identity" ? <LandingBees /> : null}
-      {page !== "identity" ? (
-        <OnboardingChrome
-          current={page === "config" ? 4 : page === "setup" ? 3 : 2}
-        />
+      {chromePosition !== null ? (
+        <OnboardingChrome current={chromePosition} />
       ) : null}
       <OnboardingFooterProvider>
         <div
@@ -153,8 +168,133 @@ export function MachineOnboardingFlow({
               <div className="mt-10 flex flex-col items-center gap-3">
                 <Button
                   className={ONBOARDING_LANDING_CTA_CLASS}
+                  onClick={() => setPage("signup")}
+                  type="button"
+                >
+                  Get started
+                </Button>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
+                  onClick={() => setPage("login")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Log in
+                </Button>
+              </div>
+              {/* Tertiary entry to the no-email flow, docked to the bottom of
+                  the viewport via the shared footer slot rather than stacked
+                  under the primary CTAs. */}
+              <OnboardingFooter>
+                <button
+                  className="text-sm text-foreground/70 hover:text-foreground"
+                  onClick={() => setPage("advanced-identity")}
+                  type="button"
+                >
+                  Sign up without email
+                </button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "signup" ? (
+            <OnboardingSlideTransition
+              className="flex w-full max-w-[720px] flex-col items-center text-center"
+              direction="forward"
+              effect="fade"
+              transitionKey="machine-signup"
+            >
+              <h1 className="text-title font-normal text-foreground">
+                Sign up for Buzz
+              </h1>
+              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                Create an account with your email and a password. Your unique
+                identity key is created along with your account.
+              </p>
+              {error ? (
+                <p className="mt-4 text-sm text-destructive">{error}</p>
+              ) : null}
+              {/* Placeholder — the email + password form lands in the
+                  signup/login PR. "Create account" runs the same key creation
+                  the account will be tied to, keeping the flow walkable. */}
+              <OnboardingFooter>
+                <Button
+                  className={ONBOARDING_PRIMARY_CTA_CLASS}
+                  data-testid="onboarding-next"
                   disabled={isPending}
-                  onClick={() => void loadFreshIdentity()}
+                  onClick={() => {
+                    setAccountEntryPage("signup");
+                    void loadFreshIdentity();
+                  }}
+                  type="button"
+                >
+                  {isPending ? "Creating account…" : "Create account"}
+                </Button>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="onboarding-back"
+                  disabled={isPending}
+                  onClick={() => setPage("identity")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "login" ? (
+            <OnboardingSlideTransition
+              className="flex w-full max-w-[720px] flex-col items-center text-center"
+              direction="forward"
+              effect="fade"
+              transitionKey="machine-login"
+            >
+              <h1 className="text-title font-normal text-foreground">
+                Log in to Buzz
+              </h1>
+              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                Welcome back. Log in with the email and password you signed up
+                with.
+              </p>
+              {/* Placeholder — the login form lands in the signup/login PR. */}
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="onboarding-back"
+                  onClick={() => setPage("identity")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "advanced-identity" ? (
+            <OnboardingSlideTransition
+              className="flex w-full max-w-[720px] flex-col items-center text-center"
+              direction="forward"
+              effect="fade"
+              transitionKey="machine-advanced-identity"
+            >
+              {/* Placeholder — the advanced-entry PR replaces this content
+                  with the full create/import choice screen. The two actions
+                  below keep the no-email path walkable meanwhile. */}
+              <h1 className="text-title font-normal text-foreground">
+                Sign up without email
+              </h1>
+              <p className="mt-5 max-w-[440px] text-sm leading-6 text-foreground/80">
+                Use Buzz with an identity key alone — create a new key, or bring
+                one you already have.
+              </p>
+              {error ? (
+                <p className="mt-4 text-sm text-destructive">{error}</p>
+              ) : null}
+              <div className="mt-10 flex flex-col items-center gap-3">
+                <Button
+                  className={ONBOARDING_PRIMARY_CTA_CLASS}
+                  disabled={isPending}
+                  onClick={() => {
+                    setAccountEntryPage("advanced-identity");
+                    void loadFreshIdentity();
+                  }}
                   type="button"
                 >
                   {isPending ? "Saving identity…" : "Create a new identity key"}
@@ -170,6 +310,18 @@ export function MachineOnboardingFlow({
                 </Button>
               </div>
               <IdentityKeyHelpDialog />
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="onboarding-back"
+                  disabled={isPending}
+                  onClick={() => setPage("identity")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
             </OnboardingSlideTransition>
           ) : page === "key-import" ? (
             <OnboardingSlideTransition
@@ -196,7 +348,7 @@ export function MachineOnboardingFlow({
                   onBack={
                     identityLost
                       ? () => void replaceLostIdentity()
-                      : () => setPage("identity")
+                      : () => setPage("advanced-identity")
                   }
                   onImport={importExistingIdentity}
                   variant="spotlight"
@@ -206,14 +358,14 @@ export function MachineOnboardingFlow({
           ) : page === "backup" ? (
             <BackupStep
               direction="forward"
-              onBack={() => setPage("identity")}
+              onBack={() => setPage(accountEntryPage)}
               onNext={() => setPage("setup")}
             />
           ) : page === "setup" ? (
             <SetupStep
               actions={{
                 back: () =>
-                  setPage(identityWasImported ? "key-import" : "backup"),
+                  setPage(machineSetupBackTarget(identityWasImported)),
                 next: (runtimeIds) => {
                   const ids = Array.from(runtimeIds);
                   setReadyRuntimeIds(ids);

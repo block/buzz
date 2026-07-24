@@ -611,6 +611,7 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   });
   await page.goto("/");
 
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Use an existing key" }).click();
   const importedNsec = nsecEncode(hexToBytes(TEST_IDENTITIES.alice.privateKey));
   await page.getByTestId("nostr-import-nsec-input").fill(importedNsec);

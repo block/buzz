@@ -11,6 +11,8 @@ test("identity key help explains the first-run choice", async ({ page }) => {
     skipOnboardingSeed: true,
   });
   await page.goto("/");
+  // The help trigger lives on the advanced (no-email) identity screen.
+  await page.getByRole("button", { name: "Sign up without email" }).click();
 
   const trigger = page.getByTestId("identity-key-help-trigger");
   // No initial opacity-0 assertion: on a slow runner the 2s reveal timer can
@@ -51,6 +53,7 @@ test("identity key help explains the first-run choice", async ({ page }) => {
   await expect(trigger).toHaveCSS("opacity", "1");
 
   await page.reload();
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await expect(page.getByTestId("identity-key-help-trigger")).toHaveCSS(
     "opacity",
     "1",

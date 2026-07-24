@@ -16,6 +16,23 @@ export async function seedActiveIdentity(
   );
 }
 
+/**
+ * From the landing screen, enter the advanced (no-email) identity screen —
+ * the create-key / import-key choice behind "Sign up without email".
+ */
+export async function enterAdvancedIdentity(page: Page) {
+  await page.getByRole("button", { name: "Sign up without email" }).click();
+  await expect(
+    page.getByRole("button", { name: "Create a new identity key" }),
+  ).toBeVisible();
+}
+
+/** From the landing screen, create a fresh key via the advanced path. */
+export async function createFreshIdentityKey(page: Page) {
+  await enterAdvancedIdentity(page);
+  await page.getByRole("button", { name: "Create a new identity key" }).click();
+}
+
 /** Navigate through the backup step (fresh-key path). */
 export async function passThroughBackupStep(page: Page) {
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();

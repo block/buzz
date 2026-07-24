@@ -8,6 +8,7 @@ async function enterMachineBackup(page: import("@playwright/test").Page) {
     skipOnboardingSeed: true,
   });
   await page.goto("/");
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 }
 
@@ -103,6 +104,7 @@ test("backup step shows error banner and retry button when get_nsec fails", asyn
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(page.getByTestId("onboarding-page-backup")).toBeVisible();
@@ -127,6 +129,7 @@ test("backup step retry succeeds and shows key after initial failure", async ({
     { skipCommunitySeed: true, skipOnboardingSeed: true },
   );
   await page.goto("/");
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Create a new identity key" }).click();
 
   await expect(page.getByTestId("backup-load-error")).toBeVisible();

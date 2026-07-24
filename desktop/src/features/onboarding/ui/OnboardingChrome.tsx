@@ -1,9 +1,11 @@
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 
 /**
- * Positions in the first-launch flow: landing, identity/key, harness setup,
- * default config, community choice, community profile, meet the team. Used as
- * the default pagination length when a flow doesn't pass an explicit total.
+ * Positions in the first-launch flow: account entry (signup / login /
+ * sign-up-without-email), identity key, harness setup, default config,
+ * community choice, community profile, meet the team. The landing screen
+ * renders no chrome and holds no position. Used as the default pagination
+ * length when a flow doesn't pass an explicit total.
  */
 export const TOTAL_ONBOARDING_PAGES = 7;
 

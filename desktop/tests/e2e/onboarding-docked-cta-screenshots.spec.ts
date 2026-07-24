@@ -27,6 +27,7 @@ test("machine onboarding: landing, backup, setup docked CTAs", async ({
   await waitForAnimations(page);
   await page.screenshot({ path: `${SHOT_DIR}/01-landing.png` });
 
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Use an existing key" }).click();
   await expect(
     page.getByRole("heading", { name: "Enter your private key" }),
@@ -82,6 +83,7 @@ test("machine key import remains usable in a short viewport", async ({
     skipOnboardingSeed: true,
   });
   await page.goto("/");
+  await page.getByRole("button", { name: "Sign up without email" }).click();
   await page.getByRole("button", { name: "Use an existing key" }).click();
 
   const heading = page.getByRole("heading", { name: "Enter your private key" });
