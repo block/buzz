@@ -109,6 +109,7 @@ export function createOptimisticMessage(
       identity.pubkey,
     )) {
       tags.push(["p", pubkey]);
+      tags.push(["mention", pubkey]);
     }
   }
 
@@ -512,8 +513,11 @@ export function useSendMessageMutation(
             ...baseTags,
             // For non-replies, add mention p-tags here (replies get them via buildReplyTags)
             ...(!parentEventId
-              ? normalizeMentionPubkeys(recipientPubkeys, identity.pubkey).map(
-                  (pk) => ["p", pk],
+              ? normalizeMentionPubkeys(recipientPubkeys, identity.pubkey).flatMap(
+                  (pk) => [
+                    ["p", pk],
+                    ["mention", pk],
+                  ],
                 )
               : []),
             ...imetaTags,

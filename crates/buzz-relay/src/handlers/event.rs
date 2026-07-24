@@ -534,7 +534,171 @@ async fn dispatch_persistent_event_inner(
         });
     }
 
+    // Offline-mention safety net (#1743): if a channel message *explicitly*
+    // @mentions an agent (bot member) that has no presence key, the fan-out
+    // above delivered nothing to it — it has no live subscription. Rather
+    // than let the mention silently vanish, emit a system notice into the
+    // channel so the sender and any human observer can see the target is
+    // offline. Only `mention` tags count (not structural reply-author `p`
+    // tags from buildReplyTags). Spawned so it never adds latency to
+    // dispatch; best-effort (never blocks or fails the event).
+    //
+    // Presence is a reachability warning only — not a delivery receipt that
+    // a particular harness subscription admitted the event (see also #2386).
+    if kind_u32 == buzz_core::kind::KIND_STREAM_MESSAGE {
+        if let Some(channel_id) = stored_event.channel_id {
+            let mentioned = explicit_mention_pubkeys_from_tags(&stored_event.event.tags);
+            if !mentioned.is_empty() {
+                let tenant = tenant.clone();
+                let state = Arc::clone(state);
+                tokio::spawn(async move {
+                    notify_offline_agent_mentions(&tenant, &state, channel_id, mentioned).await;
+                });
+            }
+        }
+    }
+
     matches.len()
+}
+
+/// Collect explicit `@mention` targets from event tags.
+///
+/// Producers emit `["mention", pubkey]` in parallel with `p` for intentional
+/// authored @mentions (SDK/CLI `build_message`, Desktop ordinary composer /
+/// `buildReplyTags` mention loop, Mobile `SendMessage`). The non-member
+/// "send without inviting" path also uses bare `mention` tags.
+/// Structural reply-author `p` alone must **not** count (Brad #2296 / #1862).
+///
+/// - Dedupes first-seen hex (lowercased)
+/// - Skips malformed tags (missing/empty pubkey)
+/// - Ignores bare `p` tags entirely
+pub(crate) fn explicit_mention_pubkeys_from_tags(tags: &nostr::Tags) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for t in tags.iter() {
+        if t.kind().to_string() != "mention" {
+            continue;
+        }
+        let Some(raw) = t.content() else {
+            continue;
+        };
+        let hex = raw.trim().to_ascii_lowercase();
+        if hex.is_empty() {
+            continue;
+        }
+        if seen.insert(hex.clone()) {
+            out.push(hex);
+        }
+    }
+    out
+}
+
+/// Pure selection: mentioned bot hexes with no presence key (offline).
+/// Presence (any status value) means "not offline" for this warning — we do
+/// **not** treat offline presence statuses specially and we never claim delivery.
+pub(crate) fn select_offline_mentioned_bots(
+    mentioned_hex: &[String],
+    bot_hexes: &std::collections::HashSet<String>,
+    present: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for hex in mentioned_hex {
+        if !bot_hexes.contains(hex) {
+            continue;
+        }
+        if present.contains_key(hex) {
+            continue;
+        }
+        if seen.insert(hex.clone()) {
+            out.push(hex.clone());
+        }
+    }
+    out
+}
+
+/// Emit a system notice for any *explicitly* @mentioned agent (bot member)
+/// that is offline when the mention is dispatched (#1743).
+///
+/// Best-effort and side-effect-only: presence/DB lookups or emit failures are
+/// logged and skipped — they never fail the original message ingest (caller
+/// already identical-spawned after dispatch).
+///
+/// Only agents that are (a) bot members of this community and (b) have no
+/// presence key are reported. Human `p` / non-bot primary tags never emit an
+/// agent notice. Online agents (any presence key) are never flagged.
+async fn notify_offline_agent_mentions(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: uuid::Uuid,
+    mentioned_hex: Vec<String>,
+) {
+    use nostr::PublicKey;
+
+    let bots = match state.db.get_bot_members(tenant.community()).await {
+        Ok(bots) => bots,
+        Err(e) => {
+            warn!(channel = %channel_id, error = %e, "offline-mention: bot lookup failed");
+            return;
+        }
+    };
+    if bots.is_empty() {
+        return;
+    }
+    let mut bot_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for b in &bots {
+        let hex = hex::encode(&b.pubkey);
+        let name = b
+            .display_name
+            .clone()
+            .unwrap_or_else(|| format!("agent {}", &hex[..hex.len().min(8)]));
+        bot_names.insert(hex, name);
+    }
+
+    let mentioned_bots: Vec<(String, PublicKey)> = mentioned_hex
+        .iter()
+        .filter(|hex| bot_names.contains_key(*hex))
+        .filter_map(|hex| PublicKey::from_hex(hex).ok().map(|pk| (hex.clone(), pk)))
+        .collect();
+    if mentioned_bots.is_empty() {
+        return;
+    }
+
+    let pubkeys: Vec<PublicKey> = mentioned_bots.iter().map(|(_, pk)| *pk).collect();
+    let present = match state.pubsub.get_presence_bulk(tenant, &pubkeys).await {
+        Ok(map) => map,
+        Err(e) => {
+            // Presence failure must not affect the original message (already accepted).
+            warn!(channel = %channel_id, error = %e, "offline-mention: presence lookup failed");
+            return;
+        }
+    };
+
+    let bot_hex_set: std::collections::HashSet<String> =
+        mentioned_bots.iter().map(|(hex, _)| hex.clone()).collect();
+    let candidate_hex: Vec<String> = mentioned_bots.iter().map(|(hex, _)| hex.clone()).collect();
+    let offline = select_offline_mentioned_bots(&candidate_hex, &bot_hex_set, &present);
+    for hex in &offline {
+        let name = bot_names
+            .get(hex)
+            .cloned()
+            .unwrap_or_else(|| "agent".to_string());
+        let content = serde_json::json!({
+            "type": "agent_mention_undelivered",
+            "agent_pubkey": hex,
+            "agent_name": name,
+            "message": format!("{name} is offline and may not see this mention."),
+        });
+        if let Err(e) =
+            crate::handlers::side_effects::emit_system_message(tenant, state, channel_id, content)
+                .await
+        {
+            // Emit failure must not fail the original message (already accepted).
+            warn!(channel = %channel_id, error = %e, "offline-mention: system notice emit failed");
+        } else {
+            metrics::counter!("buzz_agent_mention_undelivered_total").increment(1);
+        }
+    }
 }
 
 async fn enqueue_event_created_audit(
@@ -2455,6 +2619,194 @@ mod tests {
                 out.is_empty(),
                 "Inv_NonInterference: a connection bound to community A \
                  must not receive a community-B event. Got: {out:?}"
+            );
+        }
+
+        #[test]
+        fn offline_mentioned_bots_selects_only_offline_bot_members() {
+            use std::collections::{HashMap, HashSet};
+
+            let alice = "aa".repeat(32);
+            let bob = "bb".repeat(32);
+            let human = "cc".repeat(32);
+
+            // alice + bob are bot members; human is not a bot.
+            let bots: HashSet<String> = [alice.clone(), bob.clone()].into_iter().collect();
+
+            // alice is online (present), bob is offline (absent).
+            let mut present: HashMap<String, String> = HashMap::new();
+            present.insert(alice.clone(), "online".to_string());
+
+            let mentioned = vec![alice.clone(), bob.clone(), human.clone()];
+            let offline =
+                crate::handlers::event::select_offline_mentioned_bots(&mentioned, &bots, &present);
+
+            // Only bob: alice is online, human is not a bot member.
+            assert_eq!(offline, vec![bob]);
+        }
+
+        #[test]
+        fn offline_mentioned_bots_empty_when_all_online_or_non_bots() {
+            use std::collections::{HashMap, HashSet};
+            let alice = "aa".repeat(32);
+            let bots: HashSet<String> = [alice.clone()].into_iter().collect();
+            let mut present: HashMap<String, String> = HashMap::new();
+            present.insert(alice.clone(), "away".to_string());
+            // alice present (any status) => not flagged; unknown pubkey not a bot.
+            let mentioned = vec![alice, "dd".repeat(32)];
+            assert!(crate::handlers::event::select_offline_mentioned_bots(
+                &mentioned, &bots, &present
+            )
+            .is_empty());
+        }
+
+        #[test]
+        fn offline_mentioned_bots_dedupes_duplicate_mentions() {
+            use std::collections::{HashMap, HashSet};
+            let bob = "bb".repeat(32);
+            let bots: HashSet<String> = [bob.clone()].into_iter().collect();
+            let present: HashMap<String, String> = HashMap::new();
+            let mentioned = vec![bob.clone(), bob.clone(), bob.clone()];
+            let offline =
+                crate::handlers::event::select_offline_mentioned_bots(&mentioned, &bots, &present);
+            assert_eq!(offline, vec![bob]);
+        }
+
+        #[test]
+        fn explicit_mention_tags_ignore_structural_p_only() {
+            // Brad matrix: buildReplyTags-style structural author `p` alone → no notice candidates.
+            let tags =
+                nostr::Tags::from_list(vec![nostr::Tag::parse(["p", &"aa".repeat(32)]).unwrap()]);
+            assert!(crate::handlers::event::explicit_mention_pubkeys_from_tags(&tags).is_empty());
+        }
+
+        #[test]
+        fn explicit_mention_tags_collect_mention_kind_only() {
+            let bot = "bb".repeat(32);
+            let human = "cc".repeat(32);
+            let tags = nostr::Tags::from_list(vec![
+                // structural reply author p — must not count
+                nostr::Tag::parse(["p", &"aa".repeat(32)]).unwrap(),
+                // human p recipient — not a mention tag
+                nostr::Tag::parse(["p", &human]).unwrap(),
+                // explicit composer mentions
+                nostr::Tag::custom(nostr::TagKind::Custom("mention".into()), [&bot]),
+                nostr::Tag::custom(nostr::TagKind::Custom("mention".into()), [&human]),
+            ]);
+            let found = crate::handlers::event::explicit_mention_pubkeys_from_tags(&tags);
+            assert_eq!(found, vec![bot, human]);
+        }
+
+        #[test]
+        fn explicit_mention_tags_dedupe_and_skip_malformed() {
+            let bot = "bb".repeat(32);
+            let tags = nostr::Tags::from_list(vec![
+                nostr::Tag::custom(nostr::TagKind::Custom("mention".into()), [&bot]),
+                // duplicate
+                nostr::Tag::custom(
+                    nostr::TagKind::Custom("mention".into()),
+                    [&bot.to_ascii_uppercase()],
+                ),
+                // empty content — custom with no values may omit content
+                nostr::Tag::custom(
+                    nostr::TagKind::Custom("mention".into()),
+                    Vec::<String>::new(),
+                ),
+                // wrong kind still ignored
+                nostr::Tag::parse(["p", &bot]).unwrap(),
+            ]);
+            let found = crate::handlers::event::explicit_mention_pubkeys_from_tags(&tags);
+            assert_eq!(found, vec![bot]);
+        }
+
+        #[test]
+        fn explicit_mention_from_sdk_style_tags_not_structural_p() {
+            // Contract: intentional mentions carry parallel p+mention; structural
+            // reply author is p-only and must not extract.
+            let author = "aa".repeat(32);
+            let offline_bot = "bb".repeat(32);
+            let structural_only = nostr::Tags::from_list(vec![
+                nostr::Tag::parse(["p", &author]).unwrap(),
+                nostr::Tag::parse(["h", "00000000-0000-0000-0000-000000000001"]).unwrap(),
+            ]);
+            assert!(
+                crate::handlers::event::explicit_mention_pubkeys_from_tags(&structural_only)
+                    .is_empty()
+            );
+
+            let intentional = nostr::Tags::from_list(vec![
+                nostr::Tag::parse(["p", &author]).unwrap(),
+                nostr::Tag::parse(["h", "00000000-0000-0000-0000-000000000001"]).unwrap(),
+                nostr::Tag::parse(["p", &offline_bot]).unwrap(),
+                nostr::Tag::custom(
+                    nostr::TagKind::Custom("mention".into()),
+                    [&offline_bot],
+                ),
+            ]);
+            assert_eq!(
+                crate::handlers::event::explicit_mention_pubkeys_from_tags(&intentional),
+                vec![offline_bot.clone()]
+            );
+
+            use std::collections::{HashMap, HashSet};
+            let bots: HashSet<String> = [offline_bot.clone()].into_iter().collect();
+            let present: HashMap<String, String> = HashMap::new();
+            let mentioned =
+                crate::handlers::event::explicit_mention_pubkeys_from_tags(&intentional);
+            assert_eq!(
+                crate::handlers::event::select_offline_mentioned_bots(
+                    &mentioned, &bots, &present
+                ),
+                vec![offline_bot]
+            );
+        }
+
+        #[test]
+        fn offline_matrix_explicit_offline_bot_only() {
+            use std::collections::{HashMap, HashSet};
+            let online_bot = "aa".repeat(32);
+            let offline_bot = "bb".repeat(32);
+            let human = "cc".repeat(32);
+            let bots: HashSet<String> = [online_bot.clone(), offline_bot.clone()]
+                .into_iter()
+                .collect();
+            let mut present = HashMap::new();
+            present.insert(online_bot.clone(), "online".to_string());
+
+            // human p only → not selected (not bot)
+            assert!(crate::handlers::event::select_offline_mentioned_bots(
+                &[human.clone()],
+                &bots,
+                &present
+            )
+            .is_empty());
+
+            // online agent → no notice
+            assert!(crate::handlers::event::select_offline_mentioned_bots(
+                &[online_bot.clone()],
+                &bots,
+                &present
+            )
+            .is_empty());
+
+            // offline agent → exactly one
+            assert_eq!(
+                crate::handlers::event::select_offline_mentioned_bots(
+                    &[offline_bot.clone()],
+                    &bots,
+                    &present
+                ),
+                vec![offline_bot.clone()]
+            );
+
+            // mix: only offline bot
+            assert_eq!(
+                crate::handlers::event::select_offline_mentioned_bots(
+                    &[online_bot, offline_bot.clone(), human],
+                    &bots,
+                    &present
+                ),
+                vec![offline_bot]
             );
         }
     }

@@ -110,11 +110,13 @@ export function buildReplyTags(
     ["h", channelId],
   ];
 
-  // Add p-tags for mentioned users so mention-filtered subscriptions
-  // (e.g. ACP agent harness) receive the reply event.
+  // Intentional @mentions: `p` for subscription fan-out + explicit `mention`
+  // intent marker (relay offline-agent notice gates on mention only; structural
+  // reply-author `p` above must never count as a mention).
   // Best-effort normalization — relay performs authoritative validation.
   for (const pubkey of normalizeMentionPubkeys(mentionPubkeys, authorPubkey)) {
     tags.push(["p", pubkey]);
+    tags.push(["mention", pubkey]);
   }
 
   if (parentEventId === rootEventId) {
