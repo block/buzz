@@ -54,6 +54,16 @@ pub enum SubscribeMode {
     Config,
 }
 
+/// Author policy for followed-thread admissions (#2270 loop guard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum FollowThreadAuthors {
+    /// Admit unmentioned followed-thread replies from humans only (default).
+    Humans,
+    /// Admit unmentioned followed-thread replies from any author, including
+    /// agents. Opting in accepts the risk of agent↔agent auto-continuation.
+    All,
+}
+
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum DedupMode {
     Drop,
@@ -338,6 +348,34 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_NO_MENTION_FILTER")]
     pub no_mention_filter: bool,
 
+    /// Disable thread-following. With this set, a mention-gated agent only
+    /// sees messages that explicitly @mention it — even untagged replies in
+    /// threads it is already participating in (the pre-#2270 behavior).
+    #[arg(long, env = "BUZZ_ACP_NO_FOLLOW_THREADS")]
+    pub no_follow_threads: bool,
+
+    /// Whose unmentioned replies a followed thread admits. `humans` (default)
+    /// admits human authors only — agent-authored replies still require an
+    /// explicit @mention, so two agents sharing a thread can never
+    /// auto-continue each other. `all` admits any author.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_FOLLOW_THREAD_AUTHORS",
+        default_value = "humans",
+        value_enum
+    )]
+    pub follow_thread_authors: FollowThreadAuthors,
+
+    /// Sliding inactivity TTL, in seconds, for followed threads. A thread the
+    /// agent participated in stops being followed after this long without
+    /// activity; a fresh @mention re-joins it.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_THREAD_FOLLOW_TTL_SECS",
+        default_value_t = 86_400
+    )]
+    pub thread_follow_ttl_secs: u64,
+
     #[arg(long, env = "BUZZ_ACP_CONFIG", default_value = "./buzz-acp.toml")]
     pub config: PathBuf,
 
@@ -480,6 +518,12 @@ pub struct ChannelFilter {
     pub kinds: Option<Vec<u32>>,
     /// Whether to include `#p` tag filter for agent pubkey.
     pub require_mention: bool,
+    /// Thread roots the agent follows in this channel. When non-empty and
+    /// `require_mention` is set, the REQ carries a second filter clause
+    /// (`#h` + `#e`) so untagged replies in these threads are delivered
+    /// alongside explicit mentions. Ignored when `require_mention` is false
+    /// (the mention-less clause already delivers everything).
+    pub thread_roots: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -509,6 +553,13 @@ pub struct Config {
     pub kinds_override: Option<Vec<u32>>,
     pub channels_override: Option<Vec<String>>,
     pub no_mention_filter: bool,
+    /// Whether the agent follows threads it has participated in (#2270).
+    /// Only consulted in Mentions mode — All mode delivers everything anyway.
+    pub follow_threads: bool,
+    /// Sliding inactivity TTL for followed thread roots, in seconds.
+    pub thread_follow_ttl_secs: u64,
+    /// Author policy for followed-thread admissions (loop guard).
+    pub follow_thread_authors: FollowThreadAuthors,
     pub config_path: PathBuf,
     pub context_message_limit: u32,
     /// Maximum turns per session before proactive rotation. 0 = disabled.
@@ -985,6 +1036,9 @@ impl Config {
             kinds_override: args.kinds,
             channels_override: args.channels,
             no_mention_filter: args.no_mention_filter,
+            follow_threads: !args.no_follow_threads,
+            thread_follow_ttl_secs: args.thread_follow_ttl_secs,
+            follow_thread_authors: args.follow_thread_authors,
             config_path: args.config,
             context_message_limit: args.context_message_limit,
             max_turns_per_session: args.max_turns_per_session,
@@ -1168,6 +1222,7 @@ pub fn resolve_channel_filters(
                     ChannelFilter {
                         kinds: Some(kinds.clone()),
                         require_mention,
+                        thread_roots: Vec::new(),
                     },
                 );
             }
@@ -1179,6 +1234,7 @@ pub fn resolve_channel_filters(
                     ChannelFilter {
                         kinds: config.kinds_override.clone(),
                         require_mention: false,
+                        thread_roots: Vec::new(),
                     },
                 );
             }
@@ -1214,6 +1270,7 @@ pub fn resolve_channel_filters(
                         ChannelFilter {
                             kinds: merged_kinds,
                             require_mention,
+                            thread_roots: Vec::new(),
                         },
                     );
                 }
@@ -1267,10 +1324,12 @@ pub fn resolve_dynamic_channel_filter(
                 ]
             })),
             require_mention: !config.no_mention_filter,
+            thread_roots: Vec::new(),
         }),
         SubscribeMode::All => Some(ChannelFilter {
             kinds: config.kinds_override.clone(),
             require_mention: false,
+            thread_roots: Vec::new(),
         }),
         SubscribeMode::Config => {
             // Same merge logic as resolve_channel_filters() Config branch:
@@ -1308,6 +1367,7 @@ pub fn resolve_dynamic_channel_filter(
             Some(ChannelFilter {
                 kinds: merged_kinds,
                 require_mention,
+                thread_roots: Vec::new(),
             })
         }
     }
@@ -1354,6 +1414,9 @@ mod tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            follow_threads: true,
+            thread_follow_ttl_secs: 86_400,
+            follow_thread_authors: FollowThreadAuthors::Humans,
             config_path: PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,

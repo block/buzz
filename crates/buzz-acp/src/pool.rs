@@ -2576,7 +2576,7 @@ fn collect_prompt_pubkeys(
 /// cheap routing heuristic for reply anchoring, not a verified security gate
 /// (the signing path in `lib.rs::check_sibling_via_profile` does full
 /// verification where it matters).
-fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
+pub(crate) fn profile_event_is_agent(ev: &serde_json::Value) -> bool {
     ev.get("tags")
         .and_then(|t| t.as_array())
         .is_some_and(|tags| {

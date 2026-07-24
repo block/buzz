@@ -10,6 +10,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+mod thread_follow;
 mod usage;
 
 pub use usage::TurnUsage;
@@ -153,6 +154,10 @@ struct OwnerCache {
     pubkey: Option<String>,
     /// author_hex → is_sibling (true = same owner, false = not)
     siblings: std::sync::Mutex<HashMap<String, bool>>,
+    /// author_hex → is_agent (NIP-OA auth tag present on kind:0).
+    /// Used by the followed-thread author policy (#2270 loop guard), not by
+    /// the security gate — same heuristic weight as prompt reply anchoring.
+    agent_flags: std::sync::Mutex<HashMap<String, bool>>,
 }
 
 impl OwnerCache {
@@ -160,6 +165,25 @@ impl OwnerCache {
         Self {
             pubkey: initial,
             siblings: std::sync::Mutex::new(HashMap::new()),
+            agent_flags: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Check the agent-flag cache. `None` = never looked up.
+    fn known_agent_flag(&self, author: &str) -> Option<bool> {
+        self.agent_flags
+            .lock()
+            .ok()
+            .and_then(|map| map.get(author).copied())
+    }
+
+    /// Cache an agent-flag lookup result (capped like the sibling cache).
+    fn cache_agent_flag(&self, author: String, is_agent: bool) {
+        if let Ok(mut map) = self.agent_flags.lock() {
+            if map.len() >= 256 {
+                map.clear();
+            }
+            map.insert(author, is_agent);
         }
     }
 
@@ -213,6 +237,64 @@ async fn is_owner_or_sibling(
     let is_sibling = check_sibling_via_profile(author, my_owner, rest_client).await;
     owner_cache.cache_sibling(author.to_string(), is_sibling);
     is_sibling
+}
+
+/// Is this author an agent (NIP-OA `auth` tag on their kind:0 profile)?
+///
+/// Used by the followed-thread author policy: an *unmentioned* event admitted
+/// only because its thread is followed must not fire a turn when its author
+/// is another agent, or two agents sharing a thread auto-continue each other
+/// indefinitely (the loop #2270 requires stay impossible). Presence/shape
+/// heuristic per [`pool::profile_event_is_agent`] — same weight as prompt
+/// reply anchoring; the security gate remains [`author_allowed`]. Unknown or
+/// unfetchable identities classify as human (fail open for visibility,
+/// matching `turn_is_human_facing`); explicit mentions are never affected.
+async fn author_is_agent(
+    author: &str,
+    owner_cache: &OwnerCache,
+    rest_client: &relay::RestClient,
+) -> bool {
+    if let Some(cached) = owner_cache.known_agent_flag(author) {
+        return cached;
+    }
+
+    let author_pk = match nostr::PublicKey::from_hex(author) {
+        Ok(pk) => pk,
+        Err(_) => return false,
+    };
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .author(author_pk)
+        .limit(1);
+
+    let is_agent =
+        match tokio::time::timeout(Duration::from_millis(2000), rest_client.query(&[filter])).await
+        {
+            Ok(Ok(resp)) => resp
+                .as_array()
+                .and_then(|events| events.first())
+                .is_some_and(pool::profile_event_is_agent),
+            // Timeout/error — treat as human (fail open) but do NOT cache, so a
+            // transient relay hiccup can't pin an agent as human for the session.
+            _ => return false,
+        };
+
+    owner_cache.cache_agent_flag(author.to_string(), is_agent);
+    is_agent
+}
+
+/// Whether a followed-thread admission should be suppressed for this author.
+///
+/// Pure decision core of the #2270 loop guard, kept separate for testability:
+/// only events admitted *via the follow bypass* (unmentioned, followed root)
+/// are ever suppressed, and only under the `humans` policy when the author is
+/// an agent. Mentioned events and normally-matched events pass untouched.
+fn suppress_follow_admission(
+    admitted_via_follow: bool,
+    policy: config::FollowThreadAuthors,
+    author_is_agent: bool,
+) -> bool {
+    admitted_via_follow && matches!(policy, config::FollowThreadAuthors::Humans) && author_is_agent
 }
 
 /// Inbound author gate decision: does this author's event fire a turn?
@@ -1526,6 +1608,12 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
+    // Thread-following (#2270): track the threads this agent participates in
+    // so untagged replies in them stay audible under mention gating. Disabled
+    // trackers are inert — every call below becomes a no-op.
+    let mut thread_follow =
+        thread_follow::ThreadFollowState::new(config.thread_follow_ttl_secs, config.follow_threads);
+
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
         mcp_servers: build_mcp_servers(&config),
@@ -1741,6 +1829,37 @@ async fn tokio_main() -> Result<()> {
             }
         }
 
+        // #2270: keep followed-thread REQ clauses in sync. take_dirty() is
+        // empty on almost every iteration; when a dispatch records a new
+        // thread (or a root expires) the affected channels get their
+        // subscription re-issued with an updated `#e` clause. The re-REQ
+        // replays from last_seen minus skew, so replies that land between
+        // dispatch and re-subscribe are recovered by replay, not lost.
+        // Runs regardless of pool readiness — this is relay subscription
+        // state; expiry-narrowing must proceed while a lazy pool sleeps.
+        thread_follow.compact_if_due();
+        for ch in thread_follow.take_dirty() {
+            if !subscribed_channel_ids.contains(&ch) {
+                continue;
+            }
+            let base = channel_filters
+                .get(&ch)
+                .cloned()
+                .or_else(|| config::resolve_dynamic_channel_filter(&config, ch, &rules));
+            if let Some(mut filter) = base {
+                if filter.require_mention {
+                    filter.thread_roots = thread_follow.roots_for_filter(ch);
+                    if let Err(e) = relay.subscribe_channel(ch, filter).await {
+                        tracing::warn!(
+                            channel_id = %ch,
+                            error = %e,
+                            "failed to refresh followed-thread subscription"
+                        );
+                    }
+                }
+            }
+        }
+
         if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
@@ -1775,7 +1894,9 @@ async fn tokio_main() -> Result<()> {
             // called on relay events or pool results, neither of which
             // arrive when the channel is silent.
             if queue.has_flushable_work() {
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -1811,7 +1932,9 @@ async fn tokio_main() -> Result<()> {
         // this, batches requeued during crash recovery sit idle until the
         // next relay event arrives — which can be minutes on quiet channels.
         if respawn_collected {
-            for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+            for (channel_id, thread_tags) in
+                dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+            {
                 typing_channels.insert(channel_id, thread_tags);
             }
         }
@@ -1993,6 +2116,7 @@ async fn tokio_main() -> Result<()> {
                                     } else {
                                         0
                                     };
+                                    thread_follow.clear_channel(ch);
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -2171,14 +2295,55 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
-                            let prompt_tag = match matched {
-                                Some(m) => m.prompt_tag,
+                            let followed_roots = thread_follow
+                                .enabled()
+                                .then(|| thread_follow.live_roots(buzz_event.channel_id));
+                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, followed_roots.as_ref()).await;
+                            let (prompt_tag, admitted_via_follow) = match matched {
+                                Some(m) => (m.prompt_tag, m.admitted_via_follow),
                                 None => {
                                     tracing::debug!(channel_id = %buzz_event.channel_id, kind = buzz_event.event.kind.as_u16(), "event matched no rule — dropping");
                                     continue;
                                 }
                             };
+                            // #2270 loop guard: an admission that exists only
+                            // because the thread is followed must not fire on
+                            // agent authors (policy `humans`, the default) —
+                            // otherwise two agents sharing a thread would
+                            // auto-continue each other indefinitely. Explicit
+                            // mentions never take this path, and the profile
+                            // lookup runs only on follow-admitted events.
+                            if admitted_via_follow {
+                                let author = buzz_event.event.pubkey.to_hex();
+                                let is_agent_author = match config.follow_thread_authors {
+                                    config::FollowThreadAuthors::Humans => {
+                                        author_is_agent(&author, &owner_cache, &ctx.rest_client)
+                                            .await
+                                    }
+                                    config::FollowThreadAuthors::All => false,
+                                };
+                                if suppress_follow_admission(
+                                    admitted_via_follow,
+                                    config.follow_thread_authors,
+                                    is_agent_author,
+                                ) {
+                                    tracing::debug!(
+                                        channel_id = %buzz_event.channel_id,
+                                        author = %author,
+                                        "followed-thread admission suppressed for agent author"
+                                    );
+                                    continue;
+                                }
+                            }
+                            // An admitted event in a followed thread is live
+                            // conversation — slide that thread's TTL forward.
+                            if thread_follow.enabled() {
+                                if let Some(root) =
+                                    queue::parse_thread_tags(&buzz_event.event).root_event_id
+                                {
+                                    thread_follow.touch(buzz_event.channel_id, &root);
+                                }
+                            }
                             // Capture author pubkey before queue.push() moves
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
@@ -2259,7 +2424,7 @@ async fn tokio_main() -> Result<()> {
                             }
                             if pool_ready {
                                 for (channel_id, thread_tags) in
-                                    dispatch_pending(&mut pool, &mut queue, &ctx)
+                                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
                                 {
                                     typing_channels.insert(channel_id, thread_tags);
                                 }
@@ -2288,7 +2453,7 @@ async fn tokio_main() -> Result<()> {
                     } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -2386,7 +2551,9 @@ async fn tokio_main() -> Result<()> {
                 {
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2409,7 +2576,9 @@ async fn tokio_main() -> Result<()> {
                     tracing::error!("all agents dead — exiting");
                     break;
                 }
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2529,7 +2698,9 @@ async fn tokio_main() -> Result<()> {
                 // tear down the in-flight task; on its completion the
                 // queue drains. We still try here in case the in-flight
                 // task has already returned.
-                for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
+                for (channel_id, thread_tags) in
+                    dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
+                {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
@@ -2556,7 +2727,7 @@ async fn tokio_main() -> Result<()> {
                             None,
                         );
                         for (channel_id, thread_tags) in
-                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                            dispatch_pending(&mut pool, &mut queue, &ctx, &mut thread_follow)
                         {
                             typing_channels.insert(channel_id, thread_tags);
                         }
@@ -2890,6 +3061,7 @@ fn dispatch_pending(
     pool: &mut AgentPool,
     queue: &mut EventQueue,
     ctx: &Arc<PromptContext>,
+    follow: &mut thread_follow::ThreadFollowState,
 ) -> Vec<(Uuid, ThreadTags)> {
     let mut dispatched_channels = Vec::new();
     loop {
@@ -2903,6 +3075,15 @@ fn dispatch_pending(
             .last()
             .map(|event| queue::parse_thread_tags(&event.event))
             .unwrap_or_default();
+        // #2270: the thread this dispatch participates in — the batch's NIP-10
+        // root, or the triggering event itself when the agent's reply will
+        // start a new thread (mirrors resolve_reply_anchor's root resolution).
+        let follow_root = batch.events.last().map(|be| {
+            typing_scope
+                .root_event_id
+                .clone()
+                .unwrap_or_else(|| be.event.id.to_hex())
+        });
         let affinity_hit = pool.has_session_for(channel_id);
         let mut agent = match pool.try_claim(Some(channel_id)) {
             Some(a) => a,
@@ -2968,6 +3149,9 @@ fn dispatch_pending(
                 steer_tx,
             },
         );
+        if let Some(root) = follow_root {
+            follow.record(channel_id, &root);
+        }
         dispatched_channels.push((channel_id, typing_scope));
     }
     tracing::debug!(
@@ -4323,6 +4507,71 @@ mod owner_cache_tests {
 }
 
 #[cfg(test)]
+mod follow_author_policy_tests {
+    use super::*;
+    use config::FollowThreadAuthors;
+
+    #[test]
+    fn human_unmentioned_reply_in_followed_root_is_admitted() {
+        assert!(!suppress_follow_admission(
+            true,
+            FollowThreadAuthors::Humans,
+            false
+        ));
+    }
+
+    #[test]
+    fn agent_unmentioned_reply_in_followed_root_is_dropped() {
+        // Covers both the same-owner sibling case (passes the author gate)
+        // and the external-agent-under-RespondTo::Anyone case — the policy
+        // classifies by agenthood, not by gate mode.
+        assert!(suppress_follow_admission(
+            true,
+            FollowThreadAuthors::Humans,
+            true
+        ));
+    }
+
+    #[test]
+    fn mentioned_admissions_are_never_suppressed() {
+        // A mention-based match has admitted_via_follow == false, so the
+        // policy cannot touch it regardless of author kind or policy value.
+        assert!(!suppress_follow_admission(
+            false,
+            FollowThreadAuthors::Humans,
+            true
+        ));
+        assert!(!suppress_follow_admission(
+            false,
+            FollowThreadAuthors::All,
+            true
+        ));
+    }
+
+    #[test]
+    fn all_policy_opts_into_agent_authors() {
+        assert!(!suppress_follow_admission(
+            true,
+            FollowThreadAuthors::All,
+            true
+        ));
+    }
+
+    #[test]
+    fn two_agents_sharing_a_followed_root_cannot_auto_continue() {
+        // Simulate the #2270 loop hazard at the decision layer: agents A and
+        // B both follow root T. B posts an unmentioned reply; A's harness
+        // sees a follow-only admission from an agent author — suppressed. If
+        // A ever replied anyway, B's harness would face the identical
+        // decision — also suppressed. Under the default policy the cycle
+        // cannot begin from either side.
+        let a_fires = !suppress_follow_admission(true, FollowThreadAuthors::Humans, true);
+        let b_fires = !suppress_follow_admission(true, FollowThreadAuthors::Humans, true);
+        assert!(!a_fires && !b_fires);
+    }
+}
+
+#[cfg(test)]
 mod author_gate_tests {
     use super::*;
 
@@ -4922,6 +5171,9 @@ mod build_mcp_servers_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            follow_threads: true,
+            thread_follow_ttl_secs: 86_400,
+            follow_thread_authors: config::FollowThreadAuthors::Humans,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
@@ -5088,6 +5340,9 @@ mod error_outcome_emission_tests {
             kinds_override: None,
             channels_override: None,
             no_mention_filter: false,
+            follow_threads: true,
+            thread_follow_ttl_secs: 86_400,
+            follow_thread_authors: config::FollowThreadAuthors::Humans,
             config_path: std::path::PathBuf::from("./buzz-acp.toml"),
             context_message_limit: 12,
             max_turns_per_session: 0,
