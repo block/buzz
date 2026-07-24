@@ -48,6 +48,7 @@ import {
 import {
   ACCENT_COLORS,
   isBuzzTheme,
+  isGlassTheme,
   NEUTRAL_ACCENT,
   useTheme,
 } from "@/shared/theme/ThemeProvider";
@@ -421,10 +422,9 @@ function ThemeSettingsCard() {
     setFollowSystem,
   } = useTheme();
 
-  // Buzz themes pin a neutral accent (GitHub black in light, white in dark),
-  // so the accent picker is hidden while a Buzz theme is active. `themeName` is
-  // the effective theme, so this also covers System mode resolving to Buzz.
-  const accentPickerHidden = isBuzzTheme(themeName);
+  // First-party Buzz and Glass themes pin a neutral accent, so their selected
+  // state stays consistent with their custom sidebar treatments.
+  const accentPickerHidden = isBuzzTheme(themeName) || isGlassTheme(themeName);
   const shouldReduceMotion = useReducedMotion();
 
   const previewVarsByTheme = useThemePreviewVars();
