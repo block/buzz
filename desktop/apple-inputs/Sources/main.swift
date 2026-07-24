@@ -2,40 +2,61 @@ import Foundation
 
 let eventKit = EventKitReader()
 let notes = NotesReader()
-let defaultFiles = FileReader(allowlistedRoots: [URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")])
+let files = FileReader(allowlistedRoots: [URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")])
 
 @MainActor
 func response(for request: AppleInputRequest) async -> AppleInputResponse {
     do {
-        switch request.operation {
-        case .permissionStatus:
-            let state = eventKit.permissionStatus()
-            return AppleInputResponse(source: "eventkit", permission: state.calendar, records: [.init(fields: ["calendar": state.calendar.rawValue, "reminders": state.reminders.rawValue])])
-        case .requestPermission:
-            let state = await eventKit.requestPermission()
-            return AppleInputResponse(source: "eventkit", permission: state.calendar, records: [.init(fields: ["calendar": state.calendar.rawValue, "reminders": state.reminders.rawValue])])
-        case .readCalendar:
-            let ids = request.arguments["calendar_ids"] as? [String] ?? []; let max = try bounded(request.arguments["maximum"] as? Int, maximum: 100)
-            let values = try eventKit.readCalendar(calendarIdentifiers: ids, start: Date().addingTimeInterval(-86_400 * 30), end: Date().addingTimeInterval(86_400 * 90), maximum: max)
-            return AppleInputResponse(source: "calendar", permission: eventKit.permissionStatus().calendar, records: values.map { $0.output() }, truncated: values.count == max)
-        case .readReminders:
-            let ids = request.arguments["list_ids"] as? [String] ?? []; let max = try bounded(request.arguments["maximum"] as? Int, maximum: 100)
-            let values = try eventKit.readReminders(listIdentifiers: ids, maximum: max)
-            return AppleInputResponse(source: "reminders", permission: eventKit.permissionStatus().reminders, records: values.map { $0.output() }, truncated: values.count == max)
-        case .readNotes:
-            let folders = request.arguments["folder_ids"] as? [String] ?? []; let max = try bounded(request.arguments["maximum"] as? Int, maximum: 100)
-            let values = try notes.read(folderIdentifiers: folders, maximum: max)
-            return AppleInputResponse(source: "notes", permission: .authorized, records: values.map { $0.output() }, truncated: values.count == max)
-        case .readFiles:
-            let paths = request.arguments["paths"] as? [String] ?? []
-            return AppleInputResponse(source: "files", permission: .authorized, records: try defaultFiles.read(paths: paths).map { $0.output() })
+        switch request.payload {
+        case .permission(let payload):
+            if request.operation == .requestPermission {
+                let state = await eventKit.requestPermission(source: payload.source)
+                return .init(source: payload.source.rawValue, permission: state, records: [],
+                             error: state == .authorized ? nil : "permission request was not granted")
+            }
+            let state: PermissionState
+            switch payload.source {
+            case .calendar, .reminders: state = eventKit.permissionStatus(source: payload.source)
+            case .files: state = .authorized
+            case .notes: state = .unavailable
+            }
+            return .init(source: payload.source.rawValue, permission: state, records: [],
+                         error: state == .unavailable ? "permission status is unavailable without prompting" : nil)
+        case .readCalendar(let payload):
+            let page = try eventKit.readCalendar(calendarIdentifiers: payload.calendarIdentifiers, start: payload.start, end: payload.end, maximum: payload.maximum)
+            return .init(source: "calendar", permission: eventKit.permissionStatus(source: .calendar),
+                         records: page.records.map { $0.output() }, truncated: page.truncated)
+        case .readReminders(let payload):
+            let page = try eventKit.readReminders(listIdentifiers: payload.listIdentifiers, maximum: payload.maximum)
+            return .init(source: "reminders", permission: eventKit.permissionStatus(source: .reminders),
+                         records: page.records.map { $0.output() }, truncated: page.truncated)
+        case .readNotes(let payload):
+            let page = try notes.read(folderIdentifiers: payload.folderIdentifiers, maximum: payload.maximum)
+            return .init(source: "notes", permission: .authorized, records: page.records.map { $0.output() }, truncated: page.truncated)
+        case .readFiles(let payload):
+            let page = try files.read(paths: payload.paths)
+            return .init(source: "files", permission: .authorized, records: page.records.map { $0.output() }, truncated: page.truncated)
         }
-    } catch { return AppleInputResponse(source: request.operation.rawValue, permission: .unavailable, records: [], error: error.localizedDescription) }
+    } catch {
+        return .init(source: request.operation.rawValue, permission: .unavailable, records: [], error: error.localizedDescription)
+    }
 }
 
-while let line = readLine() {
-    let output: String
-    do { output = try await response(for: AppleInputRequest.decode(line: line)).encodeLine() }
-    catch { output = try! AppleInputResponse(source: "protocol", permission: .unavailable, records: [], error: error.localizedDescription).encodeLine() }
-    FileHandle.standardOutput.write(output.data(using: .utf8)!)
+func protocolError(_ error: Error) -> String {
+    let response = AppleInputResponse(source: "protocol", permission: .unavailable, records: [], error: error.localizedDescription)
+    if let encoded = try? response.encodeLine() { return encoded }
+    return #"{"source":"protocol","permission":"unavailable","observedAt":"","records":[],"truncated":false,"error":"protocol failure"}"# + "\n"
+}
+
+let reader = BoundedLineReader(handle: .standardInput)
+while true {
+    do {
+        guard let line = try reader.nextLine() else { break }
+        let output: String
+        do { output = try await response(for: AppleInputRequest.decode(line: line)).encodeLine() }
+        catch { output = protocolError(error) }
+        FileHandle.standardOutput.write(Data(output.utf8))
+    } catch {
+        FileHandle.standardOutput.write(Data(protocolError(error).utf8))
+    }
 }
