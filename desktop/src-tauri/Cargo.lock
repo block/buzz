@@ -1021,6 +1021,7 @@ dependencies = [
  "buzz-media",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-voice",
  "bytes",
  "bzip2 0.6.1",
  "chrono",
@@ -1138,6 +1139,14 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "buzz-voice"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

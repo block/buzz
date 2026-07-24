@@ -1261,6 +1261,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-voice"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "buzz-workflow"
 version = "0.1.0"
 dependencies = [
