@@ -312,6 +312,35 @@ test("rewriteRelayUrl: matches relay origin case-insensitively (uppercase saved 
   }
 });
 
+test("rewriteRelayUrl: proxies bare relay media hashes", async () => {
+  const previousWindow = globalThis.window;
+
+  globalThis.window = {
+    __TAURI_INTERNALS__: {
+      invoke(command) {
+        if (command === "get_media_proxy_port") return Promise.resolve(54321);
+        if (command === "get_relay_http_url") {
+          return Promise.resolve("https://relay.example");
+        }
+        return Promise.reject(new Error(`Unexpected command: ${command}`));
+      },
+    },
+  };
+
+  try {
+    const mediaUrl = await import(`./mediaUrl.ts?bare=${Date.now()}`);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const relayMediaUrl = `https://relay.example/media/${HASH}`;
+    assert.equal(
+      mediaUrl.rewriteRelayUrl(relayMediaUrl),
+      `http://127.0.0.1:54321/media/${HASH}`,
+    );
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test("rewriteRelayUrl: still passes external Blossom URLs through unchanged", async () => {
   const previousWindow = globalThis.window;
 

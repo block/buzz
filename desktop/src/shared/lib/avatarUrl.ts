@@ -1,7 +1,7 @@
 import { rewriteRelayUrl } from "@/shared/lib/mediaUrl";
 
 const AVATAR_MEDIA_RE =
-  /^https?:\/\/[^/]+\/media\/[\da-f]{64}(?:\.thumb)?\.(?:jpg|png|gif|webp)(?:\?.*)?$/iu;
+  /^https?:\/\/[^/]+\/media\/[\da-f]{64}(?:(?:\.(?:jpg|png|gif|webp))|(?:\.thumb\.jpg))?(?:\?.*)?$/iu;
 
 const INLINE_AVATAR_RE = /^(?:blob:|data:image\/)/iu;
 

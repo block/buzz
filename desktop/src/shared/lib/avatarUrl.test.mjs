@@ -12,6 +12,10 @@ test("isRelayHostedAvatarUrl accepts image media on the active relay", () => {
     true,
   );
   assert.equal(
+    isRelayHostedAvatarUrl(`${RELAY_ORIGIN}/media/${HASH}`, RELAY_ORIGIN),
+    true,
+  );
+  assert.equal(
     isRelayHostedAvatarUrl(
       `${RELAY_ORIGIN}/media/${HASH}.thumb.jpg`,
       RELAY_ORIGIN,
@@ -34,6 +38,13 @@ test("isRelayHostedAvatarUrl rejects external media and non-image media", () => 
   );
   assert.equal(
     isRelayHostedAvatarUrl(`${RELAY_ORIGIN}/other/${HASH}.png`, RELAY_ORIGIN),
+    false,
+  );
+  assert.equal(
+    isRelayHostedAvatarUrl(
+      `${RELAY_ORIGIN}/media/${HASH}.thumb.png`,
+      RELAY_ORIGIN,
+    ),
     false,
   );
 });
