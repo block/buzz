@@ -1169,10 +1169,10 @@ pub(crate) fn codex_adapter_is_outdated_with_path(
     path: &Path,
     augmented_path: Option<&str>,
 ) -> bool {
-    match probe_codex_acp_major_version_with_path(path, augmented_path) {
-        Some(major) if major >= 1 => false,
-        _ => true,
-    }
+    !matches!(
+        probe_codex_acp_major_version_with_path(path, augmented_path),
+        Some(major) if major >= 1
+    )
 }
 
 /// Intermediate struct built before the (potentially slow) auth probe phase.
