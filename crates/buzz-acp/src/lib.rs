@@ -60,45 +60,16 @@ fn is_subcommand(name: &str) -> bool {
 }
 
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
 const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// Hermes performs substantially more Python/module initialization than the
-/// lightweight ACP adapters: live probes on this machine completed in roughly
-/// 13–21 seconds. Keep the fast fail for every other harness while giving
-/// Hermes enough cold-start headroom to return its native ACP model catalog.
-#[allow(dead_code)]
-fn model_probe_timeout_for_agent(agent_command: &str) -> Duration {
-    match config::normalize_agent_command_identity(agent_command).as_str() {
-        "hermes" | "hermes-agent" => Duration::from_secs(45),
-        _ => MODELS_TIMEOUT,
-    }
-}
-
-/// Environment overrides required when Buzz owns a Hermes ACP session.
-///
-/// Hermes normally starts every configured MCP server before entering its ACP
-/// JSON-RPC loop. Buzz passes the session's MCP servers explicitly through
-/// `session/new` (an empty list when none are configured), so unrelated global
-/// Hermes MCP startup must not block either discovery or a managed session.
-/// The marker is Hermes-specific; all other ACP runtimes are unchanged.
-#[allow(dead_code)]
-fn acp_env_for_agent(agent_command: &str) -> Vec<(String, String)> {
-    match config::normalize_agent_command_identity(agent_command).as_str() {
-        "hermes" | "hermes-agent" => vec![(
-            "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
-            "1".to_string(),
-        )],
-        _ => Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod model_probe_timeout_tests {
     use super::*;
+    use crate::acp::{acp_env_for_agent, model_probe_timeout_for_agent};
 
     #[test]
     fn hermes_gets_a_cold_start_model_probe_budget() {
@@ -3913,6 +3884,7 @@ fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Valu
 
 /// `buzz-acp auth-methods` — spawn an adapter, initialize it, print authMethods.
 async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
+    let probe_timeout = acp::model_probe_timeout_for_agent(&args.agent.agent_command);
     let mut client = match spawn_auth_client(&args.agent).await {
         Ok(c) => c,
         Err(e) => {
@@ -3921,7 +3893,7 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
         }
     };
 
-    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+    let init_result = match tokio::time::timeout(probe_timeout, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -3930,7 +3902,7 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({probe_timeout:?})");
             std::process::exit(1);
         }
     };
@@ -3961,6 +3933,7 @@ async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
 
 /// `buzz-acp authenticate` — invoke one adapter-owned auth method.
 async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
+    let probe_timeout = acp::model_probe_timeout_for_agent(&args.agent.agent_command);
     let mut client = match spawn_auth_client(&args.agent).await {
         Ok(c) => c,
         Err(e) => {
@@ -3969,7 +3942,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         }
     };
 
-    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+    let init_result = match tokio::time::timeout(probe_timeout, client.initialize()).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
             client.shutdown().await;
@@ -3978,7 +3951,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent initialize timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent initialize timed out ({probe_timeout:?})");
             std::process::exit(1);
         }
     };
@@ -4021,6 +3994,7 @@ async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
+    let probe_timeout = acp::model_probe_timeout_for_agent(&args.agent.agent_command);
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
@@ -4040,7 +4014,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
-    let protocol_result = tokio::time::timeout(MODELS_TIMEOUT, async {
+    let protocol_result = tokio::time::timeout(probe_timeout, async {
         let init = client.initialize().await?;
         let session = client.session_new_full(&cwd, vec![], None).await?;
         Ok::<_, acp::AcpError>((init, session))
@@ -4056,7 +4030,7 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
         }
         Err(_) => {
             client.shutdown().await;
-            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            eprintln!("error: agent timed out ({probe_timeout:?})");
             std::process::exit(1);
         }
     };

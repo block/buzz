@@ -367,6 +367,34 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Hermes performs substantially more Python/module initialization than the
+/// lightweight ACP adapters: live probes on this machine completed in roughly
+/// 13–21 seconds. Keep the fast fail for every other harness while giving
+/// Hermes enough cold-start headroom to return its native ACP model catalog.
+pub(crate) fn model_probe_timeout_for_agent(agent_command: &str) -> std::time::Duration {
+    match crate::config::normalize_agent_command_identity(agent_command).as_str() {
+        "hermes" | "hermes-agent" => std::time::Duration::from_secs(45),
+        _ => crate::MODELS_TIMEOUT,
+    }
+}
+
+/// Environment overrides required when Buzz owns a Hermes ACP session.
+///
+/// Hermes normally starts every configured MCP server before entering its ACP
+/// JSON-RPC loop. Buzz passes the session's MCP servers explicitly through
+/// `session/new` (an empty list when none are configured), so unrelated global
+/// Hermes MCP startup must not block either discovery or a managed session.
+/// The marker is Hermes-specific; all other ACP runtimes are unchanged.
+pub(crate) fn acp_env_for_agent(agent_command: &str) -> Vec<(String, String)> {
+    match crate::config::normalize_agent_command_identity(agent_command).as_str() {
+        "hermes" | "hermes-agent" => vec![(
+            "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
+            "1".to_string(),
+        )],
+        _ => Vec::new(),
+    }
+}
+
 /// Build the OS command that hosts an ACP runtime.
 ///
 /// Hermes's installer exposes a Bash launcher that `exec`s its Python entry
@@ -485,6 +513,16 @@ impl AcpClient {
         }
         if let Some(merged) = codex_config_value {
             cmd.env("CODEX_CONFIG", merged);
+        }
+
+        // Runtime-specific ACP host environment. Applied to every spawn path
+        // (probes and managed sessions) so runtime isolation cannot silently
+        // depend on which caller created the client. Operator precedence still
+        // wins: an explicitly exported value is never overwritten.
+        for (key, value) in acp_env_for_agent(command) {
+            if std::env::var(&key).is_err() {
+                cmd.env(&key, &value);
+            }
         }
 
         // Spawn the agent in its own process group so SIGKILL doesn't propagate
@@ -2055,6 +2093,39 @@ mod tests {
                 "/Users/test/.local/bin/hermes",
                 "acp",
             ]
+        );
+    }
+
+    #[test]
+    fn hermes_runtime_gets_the_configured_mcp_skip_marker() {
+        let env = acp_env_for_agent("/Users/test/.local/bin/hermes");
+        assert_eq!(
+            env,
+            vec![(
+                "HERMES_ACP_SKIP_CONFIGURED_MCP".to_string(),
+                "1".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn non_hermes_runtimes_get_no_extra_acp_env() {
+        assert!(acp_env_for_agent("codex-acp").is_empty());
+        assert!(acp_env_for_agent("/opt/bin/goose").is_empty());
+    }
+
+    #[test]
+    fn hermes_probe_budget_exceeds_the_default_and_others_keep_it() {
+        let hermes = model_probe_timeout_for_agent("hermes");
+        let other = model_probe_timeout_for_agent("codex-acp");
+
+        // Contract: Hermes needs a strictly larger cold-start budget than the
+        // shared default, and every other runtime keeps the fast-fail default.
+        assert!(hermes > other);
+        assert_eq!(other, crate::MODELS_TIMEOUT);
+        assert_eq!(
+            model_probe_timeout_for_agent("/Users/test/.local/bin/hermes-agent"),
+            hermes
         );
     }
 
