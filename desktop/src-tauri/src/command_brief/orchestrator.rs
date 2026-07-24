@@ -114,6 +114,19 @@ pub(crate) trait BriefPersistence: Send + Sync {
     ) -> BriefFuture<'a, Result<(), BriefPersistenceError>>;
 }
 
+/// Boundary between durable persistence and the one atomic terminal decision.
+pub(crate) trait BriefFinalizationGate: Send + Sync {
+    fn wait<'a>(&'a self) -> BriefFuture<'a, ()>;
+}
+
+struct ImmediateFinalizationGate;
+
+impl BriefFinalizationGate for ImmediateFinalizationGate {
+    fn wait<'a>(&'a self) -> BriefFuture<'a, ()> {
+        Box::pin(async {})
+    }
+}
+
 impl BriefAdviserProvider for AdviserExecutor {
     fn run_specialist<'a>(
         &'a self,
@@ -428,6 +441,7 @@ struct OrchestratorInner {
     sources: Arc<dyn BriefSourceProvider>,
     advisers: Arc<dyn BriefAdviserProvider>,
     persistence: Arc<dyn BriefPersistence>,
+    finalization_gate: Arc<dyn BriefFinalizationGate>,
     runs: Mutex<BTreeMap<String, RunRecord>>,
 }
 
@@ -453,12 +467,31 @@ impl CommandBriefOrchestrator {
         advisers: Arc<dyn BriefAdviserProvider>,
         persistence: Arc<dyn BriefPersistence>,
     ) -> Self {
+        Self::new_with_finalization_gate(
+            scheduler,
+            sources,
+            advisers,
+            persistence,
+            Arc::new(ImmediateFinalizationGate),
+        )
+    }
+
+    /// Installs an explicit post-persistence boundary used by lifecycle
+    /// integrations and deterministic terminal-race verification.
+    pub(crate) fn new_with_finalization_gate(
+        scheduler: LocalModelScheduler,
+        sources: Arc<dyn BriefSourceProvider>,
+        advisers: Arc<dyn BriefAdviserProvider>,
+        persistence: Arc<dyn BriefPersistence>,
+        finalization_gate: Arc<dyn BriefFinalizationGate>,
+    ) -> Self {
         Self {
             inner: Arc::new(OrchestratorInner {
                 scheduler,
                 sources,
                 advisers,
                 persistence,
+                finalization_gate,
                 runs: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -585,19 +618,17 @@ impl CommandBriefOrchestrator {
 
     /// Cancels collection, queued/running model work, or persistence.
     pub fn cancel(&self, run_id: &str) -> bool {
-        self.inner
-            .runs
-            .lock()
-            .ok()
-            .and_then(|runs| {
-                runs.get(run_id).and_then(|record| {
-                    (!is_terminal(record.state)).then(|| record.cancellation.clone())
-                })
-            })
-            .is_some_and(|cancellation| {
-                cancellation.cancel();
-                true
-            })
+        let Ok(runs) = self.inner.runs.lock() else {
+            return false;
+        };
+        let Some(record) = runs.get(run_id) else {
+            return false;
+        };
+        if is_terminal(record.state) {
+            return false;
+        }
+        record.cancellation.cancel();
+        true
     }
 
     async fn run(
@@ -931,6 +962,7 @@ impl CommandBriefOrchestrator {
                 contributions,
                 chief,
                 &degraded,
+                &failed_advisers,
             ) {
                 Ok(brief) => brief,
                 Err(()) => {
@@ -958,8 +990,8 @@ impl CommandBriefOrchestrator {
                 .persist(&brief, cancellation.clone())
                 .await
             {
-                Ok(()) if !cancellation.is_cancelled() => {}
-                Ok(()) | Err(BriefPersistenceError::Cancelled) => {
+                Ok(()) => {}
+                Err(BriefPersistenceError::Cancelled) => {
                     self.terminal(
                         &run_id,
                         &request.schedule_id,
@@ -982,6 +1014,7 @@ impl CommandBriefOrchestrator {
                     return;
                 }
             }
+            self.inner.finalization_gate.wait().await;
             let terminal = if degraded.is_empty()
                 && context.limitations().is_empty()
                 && failed_advisers.is_empty()
@@ -1033,11 +1066,20 @@ impl CommandBriefOrchestrator {
         error: Option<&str>,
         result: Option<CommandBrief>,
     ) {
-        let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
-            return;
-        };
         if let Ok(mut runs) = self.inner.runs.lock() {
             if let Some(record) = runs.get_mut(run_id) {
+                if is_terminal(record.state) {
+                    return;
+                }
+                let (state, error, result) =
+                    if state != BriefRunState::Cancelled && record.cancellation.is_cancelled() {
+                        (BriefRunState::Cancelled, None, None)
+                    } else {
+                        (state, error, result)
+                    };
+                let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
+                    return;
+                };
                 if record.history.len() == MAX_STATUS_HISTORY {
                     record.history.pop_front();
                 }
@@ -1132,6 +1174,7 @@ fn assemble_brief(
     contributions: Vec<AdviserContribution>,
     chief: ValidatedChief,
     degraded: &[BriefSection],
+    failed_advisers: &[AdviserId],
 ) -> Result<CommandBrief, ()> {
     let mut sections = BTreeMap::<BriefSection, Vec<CitedFinding>>::from([
         (BriefSection::Today, chief.findings),
@@ -1151,13 +1194,8 @@ fn assemble_brief(
         .iter()
         .flat_map(|contribution| contribution.dissent().iter().cloned())
         .collect::<Vec<_>>();
-    let missing_information = bounded_unique_text(
-        context.limitations().iter().cloned().chain(
-            contributions
-                .iter()
-                .flat_map(|contribution| contribution.limitations().iter().cloned()),
-        ),
-    );
+    let missing_information =
+        bounded_missing_information(failed_advisers, &contributions, context.limitations());
     let value = json!({
         "version": 1,
         "classification": "OFFICIAL",
@@ -1289,19 +1327,51 @@ fn valid_text_array(values: &[String], maximum_items: usize) -> bool {
             .all(|value| valid_bounded_text(value, MAX_TEXT_BYTES))
 }
 
-fn bounded_unique_text(values: impl IntoIterator<Item = String>) -> Vec<String> {
+fn bounded_missing_information(
+    failed_advisers: &[AdviserId],
+    contributions: &[AdviserContribution],
+    source_limitations: &[String],
+) -> Vec<String> {
     let mut seen = BTreeSet::new();
-    let mut bounded = Vec::new();
-    for value in values {
-        if !valid_bounded_text(&value, MAX_TEXT_BYTES) || !seen.insert(value.clone()) {
-            continue;
+    let mut required = Vec::new();
+    for adviser in SPECIALIST_ADVISERS {
+        if failed_advisers.contains(&adviser) {
+            let limitation = adviser_unavailable(adviser);
+            if valid_bounded_text(&limitation, MAX_TEXT_BYTES) && seen.insert(limitation.clone()) {
+                required.push(limitation);
+            }
         }
-        if bounded.len() == MAX_ARRAY_ITEMS {
-            break;
-        }
-        bounded.push(value);
     }
-    bounded
+
+    let mut specialist_limitations = contributions
+        .iter()
+        .flat_map(|contribution| contribution.limitations().iter().cloned())
+        .collect::<Vec<_>>();
+    specialist_limitations.sort();
+    let mut source_limitations = source_limitations.to_vec();
+    source_limitations.sort();
+
+    let mut optional = Vec::new();
+    for value in specialist_limitations.into_iter().chain(source_limitations) {
+        if valid_bounded_text(&value, MAX_TEXT_BYTES) && seen.insert(value.clone()) {
+            optional.push(value);
+        }
+    }
+
+    if required.len() + optional.len() <= MAX_ARRAY_ITEMS {
+        required.extend(optional);
+        return required;
+    }
+
+    let optional_capacity = MAX_ARRAY_ITEMS
+        .saturating_sub(required.len())
+        .saturating_sub(1);
+    let omitted = optional.len().saturating_sub(optional_capacity);
+    required.extend(optional.into_iter().take(optional_capacity));
+    required.push(format!(
+        "{omitted} additional trusted limitations omitted after the canonical limit."
+    ));
+    required
 }
 
 fn timestamp() -> String {

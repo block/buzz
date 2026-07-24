@@ -14,9 +14,9 @@ use crate::command_services::apple_inputs::{
 use crate::command_services::rag::VerifiedRagSnapshot;
 
 use super::orchestrator::{
-    BriefAdviserError, BriefAdviserProvider, BriefFuture, BriefPersistence, BriefPersistenceError,
-    BriefSourceProvider, CollectedSourceProvider, CommandBriefOrchestrator, CommandBriefRequest,
-    ReloadingSourceProvider, SourceBackendLoader,
+    BriefAdviserError, BriefAdviserProvider, BriefFinalizationGate, BriefFuture, BriefPersistence,
+    BriefPersistenceError, BriefSourceProvider, CollectedSourceProvider, CommandBriefOrchestrator,
+    CommandBriefRequest, ReloadingSourceProvider, SourceBackendLoader,
 };
 use super::provenance::ValidatedSource;
 use super::scheduler::LocalModelScheduler;
@@ -90,7 +90,12 @@ fn section_for(adviser: AdviserId) -> BriefSection {
     }
 }
 
-fn contribution(adviser: AdviserId, source_id: &str, dissent: &str) -> AdviserContribution {
+fn contribution_with_limitations(
+    adviser: AdviserId,
+    source_id: &str,
+    dissent: &str,
+    limitations: Vec<String>,
+) -> AdviserContribution {
     AdviserContribution::parse_for_adviser(
         json!({
             "classification": "OFFICIAL",
@@ -102,7 +107,7 @@ fn contribution(adviser: AdviserId, source_id: &str, dissent: &str) -> AdviserCo
                 "sourceIds": [source_id]
             }],
             "confidence": 0.8,
-            "limitations": [],
+            "limitations": limitations,
             "dissent": [dissent],
             "proposedActions": []
         }),
@@ -210,6 +215,7 @@ struct FakeAdviserProvider {
     failures: Mutex<BTreeMap<AdviserId, usize>>,
     chief_override: Mutex<Option<Value>>,
     chief_limitations: Mutex<Option<Vec<String>>>,
+    specialist_limitations: Mutex<BTreeMap<AdviserId, Vec<String>>>,
     tokens: Mutex<Vec<CancellationToken>>,
 }
 
@@ -219,6 +225,13 @@ impl FakeAdviserProvider {
             .lock()
             .expect("failure lock")
             .insert(adviser, 1);
+    }
+
+    fn set_specialist_limitations(&self, adviser: AdviserId, limitations: Vec<String>) {
+        self.specialist_limitations
+            .lock()
+            .expect("specialist limitations lock")
+            .insert(adviser, limitations);
     }
 }
 
@@ -270,10 +283,18 @@ impl BriefAdviserProvider for FakeAdviserProvider {
                 .first()
                 .map(|source| source.ledger_id())
                 .ok_or(BriefAdviserError::Failed)?;
-            Ok(contribution(
+            let limitations = self
+                .specialist_limitations
+                .lock()
+                .expect("specialist limitations lock")
+                .get(&adviser)
+                .cloned()
+                .unwrap_or_default();
+            Ok(contribution_with_limitations(
                 adviser,
                 source_id,
                 &format!("{run_id}:{adviser:?}:dissent"),
+                limitations,
             ))
         })
     }
@@ -593,11 +614,102 @@ async fn exact_trusted_source_and_specialist_limitations_are_valid_chief_subset(
     assert_eq!(
         brief["missingInformation"],
         json!([
-            "Trusted source gap.",
-            "Navigation adviser output was unavailable."
+            "Navigation adviser output was unavailable.",
+            "Trusted source gap."
         ])
     );
     assert_eq!(persistence.values.lock().expect("persistence").len(), 1);
+}
+
+#[tokio::test]
+async fn missing_information_prioritizes_failure_and_specialist_before_64_source_limitations() {
+    let source_limitations = (0..64)
+        .map(|index| format!("Source gap {index:02}."))
+        .collect::<Vec<_>>();
+    let sources = Arc::new(FakeSourceProvider {
+        snapshots: Mutex::new(VecDeque::from([SNAPSHOT_A])),
+        limitations: source_limitations,
+        ..FakeSourceProvider::default()
+    });
+    let advisers = Arc::new(FakeAdviserProvider::default());
+    advisers.fail_once(AdviserId::Navigation);
+    advisers.set_specialist_limitations(
+        AdviserId::Operations,
+        vec!["Operations specialist gap.".to_string()],
+    );
+    let orchestrator = orchestrator(1, sources, advisers, Arc::new(FakePersistence::default()));
+
+    let run_id = orchestrator.start(request()).expect("run starts");
+    assert_eq!(
+        wait_terminal(&orchestrator, &run_id).await,
+        BriefRunState::Degraded
+    );
+    let brief = serde_json::to_value(orchestrator.result(&run_id).expect("brief")).expect("json");
+    let missing = brief["missingInformation"]
+        .as_array()
+        .expect("missing information");
+    assert_eq!(missing.len(), 64);
+    assert_eq!(
+        missing.first(),
+        Some(&json!("Navigation adviser output was unavailable."))
+    );
+    assert_eq!(missing.get(1), Some(&json!("Operations specialist gap.")));
+    assert_eq!(
+        missing.last(),
+        Some(&json!(
+            "3 additional trusted limitations omitted after the canonical limit."
+        ))
+    );
+    assert!(missing.contains(&json!("Source gap 60.")));
+    assert!(!missing.contains(&json!("Source gap 61.")));
+    assert!(!missing.contains(&json!("Source gap 62.")));
+    assert!(!missing.contains(&json!("Source gap 63.")));
+}
+
+#[tokio::test]
+async fn missing_information_boundary_is_exact_and_omission_summary_is_not_silent() {
+    for (source_count, expected_omitted) in [(62, None), (63, Some(2usize))] {
+        let sources = Arc::new(FakeSourceProvider {
+            snapshots: Mutex::new(VecDeque::from([SNAPSHOT_A])),
+            limitations: (0..source_count)
+                .map(|index| format!("Source gap {index:02}."))
+                .collect(),
+            ..FakeSourceProvider::default()
+        });
+        let advisers = Arc::new(FakeAdviserProvider::default());
+        advisers.fail_once(AdviserId::Navigation);
+        advisers.set_specialist_limitations(
+            AdviserId::Operations,
+            vec!["Operations specialist gap.".to_string()],
+        );
+        let orchestrator = orchestrator(1, sources, advisers, Arc::new(FakePersistence::default()));
+
+        let run_id = orchestrator.start(request()).expect("run starts");
+        assert_eq!(
+            wait_terminal(&orchestrator, &run_id).await,
+            BriefRunState::Degraded
+        );
+        let brief =
+            serde_json::to_value(orchestrator.result(&run_id).expect("brief")).expect("json");
+        let missing = brief["missingInformation"]
+            .as_array()
+            .expect("missing information");
+        assert_eq!(missing.len(), 64);
+        assert_eq!(
+            missing.first(),
+            Some(&json!("Navigation adviser output was unavailable."))
+        );
+        assert_eq!(missing.get(1), Some(&json!("Operations specialist gap.")));
+        match expected_omitted {
+            None => assert_eq!(missing.last(), Some(&json!("Source gap 61."))),
+            Some(omitted) => assert_eq!(
+                missing.last(),
+                Some(&json!(format!(
+                    "{omitted} additional trusted limitations omitted after the canonical limit."
+                )))
+            ),
+        }
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1088,4 +1200,82 @@ async fn terminal_observation_is_atomic_at_capacity_and_terminal_cancel_is_false
         assert!(!orchestrator.cancel(run_id));
     }
     assert_eq!(retained, 64);
+}
+
+struct BarrierFinalizationGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl BarrierFinalizationGate {
+    fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl BriefFinalizationGate for BarrierFinalizationGate {
+    fn wait<'a>(&'a self) -> BriefFuture<'a, ()> {
+        boxed(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+        })
+    }
+}
+
+fn orchestrator_with_finalization_gate(
+    gate: Arc<dyn BriefFinalizationGate>,
+    persistence: Arc<dyn BriefPersistence>,
+) -> CommandBriefOrchestrator {
+    CommandBriefOrchestrator::new_with_finalization_gate(
+        LocalModelScheduler::new(1).expect("scheduler"),
+        Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A])),
+        Arc::new(FakeAdviserProvider::default()),
+        persistence,
+        gate,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancellation_and_completion_have_one_atomic_winner_after_persistence() {
+    let cancellation_gate = Arc::new(BarrierFinalizationGate::new());
+    let cancellation_persistence = Arc::new(FakePersistence::default());
+    let cancelled = orchestrator_with_finalization_gate(
+        cancellation_gate.clone(),
+        cancellation_persistence.clone(),
+    );
+    let cancelled_run = cancelled.start(request()).expect("run starts");
+    cancellation_gate.entered.notified().await;
+    assert_eq!(
+        cancellation_persistence
+            .values
+            .lock()
+            .expect("persistence")
+            .len(),
+        1
+    );
+    assert!(cancelled.cancel(&cancelled_run));
+    cancellation_gate.release.notify_one();
+    assert_eq!(
+        wait_terminal(&cancelled, &cancelled_run).await,
+        BriefRunState::Cancelled
+    );
+    assert!(cancelled.result(&cancelled_run).is_none());
+
+    let completion_gate = Arc::new(BarrierFinalizationGate::new());
+    let completed = orchestrator_with_finalization_gate(
+        completion_gate.clone(),
+        Arc::new(FakePersistence::default()),
+    );
+    let completed_run = completed.start(request()).expect("run starts");
+    completion_gate.entered.notified().await;
+    completion_gate.release.notify_one();
+    assert_eq!(
+        wait_terminal(&completed, &completed_run).await,
+        BriefRunState::Completed
+    );
+    assert!(completed.result(&completed_run).is_some());
+    assert!(!completed.cancel(&completed_run));
 }
