@@ -11,6 +11,7 @@ import {
 } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
+import { rankTopbarChannelResults } from "@/features/search/lib/channelResultRanking";
 import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -69,37 +70,11 @@ export function useSearchResults({
       return [];
     }
 
-    const normalizedQuery = debouncedQuery.toLowerCase();
-
-    return channels
-      .filter(
-        (channel) =>
-          (channel.archivedAt
-            ? channel.isMember
-            : channel.visibility === "open" || channel.isMember) &&
-          [
-            channel.name,
-            channel.description,
-            channelLabels?.[channel.id] ?? "",
-          ].some((value) => value.toLowerCase().includes(normalizedQuery)),
-      )
-      .sort((a, b) => {
-        const aDisplayName = channelLabels?.[a.id]?.trim() || a.name;
-        const bDisplayName = channelLabels?.[b.id]?.trim() || b.name;
-        const aNameMatches = aDisplayName
-          .toLowerCase()
-          .includes(normalizedQuery);
-        const bNameMatches = bDisplayName
-          .toLowerCase()
-          .includes(normalizedQuery);
-
-        if (aNameMatches !== bNameMatches) {
-          return aNameMatches ? -1 : 1;
-        }
-
-        return aDisplayName.localeCompare(bDisplayName);
-      })
-      .slice(0, 5);
+    return rankTopbarChannelResults({
+      channels,
+      channelLabels,
+      lowerQuery: debouncedQuery.toLowerCase(),
+    });
   }, [channelLabels, channels, debouncedQuery]);
 
   const hasSearchQuery = debouncedQuery.length >= MIN_SEARCH_QUERY_LENGTH;
