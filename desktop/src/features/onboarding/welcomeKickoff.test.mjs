@@ -9,6 +9,7 @@ import {
   classifyWelcomeKickoffResolution,
   createWelcomeKickoffCoordinator,
   mergeKickoffEvents,
+  resolveWelcomeAgentReadiness,
   resolveWelcomeAgentSet,
   selectWelcomeKickoffIntroTeammates,
   waitForWelcomeKickoffBeat,
@@ -32,6 +33,28 @@ function agent(name, personaId, pubkey) {
 const fizz = agent("Fizz", "builtin:fizz", "f".repeat(64));
 const honey = agent("Honey", "builtin:honey", "h".repeat(64));
 const bumble = agent("Bumble", "builtin:bumble", "b".repeat(64));
+
+test("welcome readiness ignores a hidden logged-in runtime", () => {
+  const runtimes = [
+    {
+      id: "claude",
+      label: "Claude",
+      availability: "available",
+      authStatus: { status: "logged_in" },
+    },
+  ];
+  const globalConfig = {
+    env_vars: {},
+    provider: null,
+    model: null,
+    preferred_runtime: null,
+  };
+
+  assert.deepEqual(
+    resolveWelcomeAgentReadiness(runtimes, globalConfig, ["claude"]),
+    { ready: false },
+  );
+});
 
 test("resolveWelcomeAgentSet orders agents by stable persona identity", () => {
   assert.deepEqual(resolveWelcomeAgentSet([bumble, fizz, honey]), {

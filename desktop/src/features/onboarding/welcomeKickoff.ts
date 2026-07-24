@@ -5,6 +5,10 @@ import {
   useAcpRuntimesQuery,
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
+import {
+  filterEnabledAcpRuntimes,
+  useDisabledAcpRuntimeIds,
+} from "@/features/agents/lib/runtimeVisibilityPreference";
 import { useImplicitGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
@@ -26,7 +30,13 @@ import { hasManagedAgentChannelMessageMarker } from "@/shared/api/tauriManagedAg
 import { sendManagedAgentChannelMessage } from "@/shared/api/tauriManagedAgentMessages";
 import { getPresence, listManagedAgents } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
-import type { Channel, ManagedAgent, RelayEvent } from "@/shared/api/types";
+import type {
+  AcpRuntimeCatalogEntry,
+  Channel,
+  GlobalAgentConfig,
+  ManagedAgent,
+  RelayEvent,
+} from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -44,6 +54,17 @@ export const WELCOME_KICKOFF_PROVIDER_MESSAGE =
 
 const WELCOME_KICKOFF_CTA =
   "What can we help you build? Bring us something you're working on, or give us a quick challenge to see how we work together.";
+
+export function resolveWelcomeAgentReadiness(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+  globalConfig: GlobalAgentConfig,
+  disabledRuntimeIds: readonly string[],
+) {
+  return resolveAgentReadiness(
+    filterEnabledAcpRuntimes(runtimes, disabledRuntimeIds),
+    globalConfig,
+  );
+}
 
 function formatAgentNames(agents: readonly ManagedAgent[]) {
   if (agents.length === 0) return "";
@@ -493,6 +514,7 @@ export function useWelcomeKickoff(
   const { activeCommunity } = useCommunities();
   const runtimesQuery = useAcpRuntimesQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
   const { globalConfig, isLoading: configLoading } =
     useImplicitGlobalAgentConfig();
   const channelId = activeChannel?.id ?? null;
@@ -546,8 +568,13 @@ export function useWelcomeKickoff(
     [activeCommunity?.relayUrl, managedAgentsQuery.data],
   );
   const readiness = React.useMemo(
-    () => resolveAgentReadiness(runtimesQuery.data ?? [], globalConfig),
-    [globalConfig, runtimesQuery.data],
+    () =>
+      resolveWelcomeAgentReadiness(
+        runtimesQuery.data ?? [],
+        globalConfig,
+        disabledRuntimeIds,
+      ),
+    [disabledRuntimeIds, globalConfig, runtimesQuery.data],
   );
   React.useEffect(() => {
     if (
