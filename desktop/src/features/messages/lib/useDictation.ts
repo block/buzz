@@ -21,8 +21,10 @@ export type DictationStatus = "idle" | "starting" | "recording";
 const OWNERSHIP_DECAY_MS = 15_000;
 
 /** Hold plain Space this long to start dictation. A quick tap still types a
- *  space as normal — only key-repeats during the hold are suppressed. */
-const SPACE_HOLD_MS = 1500;
+ *  space as normal — only key-repeats during the hold are suppressed.
+ *  800 ms: at 1.5 s people start talking well before the mic opens and the
+ *  first words are lost (the fragment that survives decodes as filler). */
+const SPACE_HOLD_MS = 800;
 
 /** Cap on waiting for a session's `dictation-flushed` marker (Enter-to-send
  *  submits on it; a superseded session's stragglers are discarded until it).
