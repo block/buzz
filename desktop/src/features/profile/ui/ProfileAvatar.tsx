@@ -48,6 +48,13 @@ export function ProfileAvatar({
   // the poster and hover animation can recover independently.
   const liveSrc = baseUrl ? rewriteRelayUrl(baseUrl) : null;
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
+
+  // Clear sticky failure when the candidate URL changes so a transient relay
+  // blip can recover without remounting (e.g. visiting Settings).
+  React.useEffect(() => {
+    setFailedSrc(null);
+  }, [liveSrc]);
+
   const liveFailed = liveSrc !== null && failedSrc === liveSrc;
 
   // When the relay is unreachable the proxied avatar URL 404s/times out; fall
@@ -55,7 +62,9 @@ export function ProfileAvatar({
   const src = liveFailed
     ? (avatarDataUrl ?? undefined)
     : (liveSrc ?? avatarDataUrl ?? undefined);
-  const shouldShowFallback = src === undefined || (!animated && liveFailed);
+  // Monogram only when there is no image candidate. A live failure that falls
+  // back to avatarDataUrl must still render that image, not initials (#2665).
+  const shouldShowFallback = src === undefined;
 
   return (
     <Avatar
@@ -80,7 +89,15 @@ export function ProfileAvatar({
           )}
           data-testid={testId ? `${testId}-image` : undefined}
           onLoadingStatusChange={(status) => {
-            if (status === "error") setFailedSrc(liveSrc);
+            if (
+              status === "error" &&
+              liveSrc !== null &&
+              src === liveSrc
+            ) {
+              setFailedSrc(liveSrc);
+            }
+            // Only clear on a successful live load — clearing after a data-URL
+            // fallback would immediately retry the broken live URL in a loop.
             if (status === "loaded" && src === liveSrc) {
               setFailedSrc(null);
             }
