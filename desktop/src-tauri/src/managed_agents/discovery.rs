@@ -18,6 +18,8 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const DEVIN_AVATAR_URL: &str =
+    "https://avatars.githubusercontent.com/u/158243242?s=200&v=4";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
@@ -188,6 +190,37 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    KnownAcpRuntime {
+        id: "devin",
+        label: "Devin CLI",
+        commands: &["devin"],
+        aliases: &["devin-cli"],
+        avatar_url: DEVIN_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("devin"),
+        cli_install_commands: &["curl -fsSL https://devin.ai/install.sh | bash"],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://devin.ai",
+        cli_install_hint: "Install the Devin CLI via the official install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".devin/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: None,
+        config_file_format: None,
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `devin auth` to complete authentication."),
+        auth_probe_args: Some(&["devin", "auth", "status"]),
+    },
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -342,7 +375,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "devin" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,

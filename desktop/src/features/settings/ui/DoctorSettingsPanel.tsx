@@ -38,6 +38,7 @@ const RUNTIME_LOGO_URLS: Record<string, string> = {
   "buzz-agent": "/app-icon@2x.png",
   claude: "/runtime-icons/claude.png",
   codex: "/runtime-icons/codex.png",
+  devin: "/runtime-icons/devin.png",
   goose: "/runtime-icons/goose.svg",
 };
 
@@ -45,6 +46,7 @@ const RUNTIME_LOGO_SCALE: Record<string, string> = {
   "buzz-agent": "scale-110",
   claude: "scale-110",
   codex: "scale-110",
+  devin: "scale-110",
   goose: "scale-125",
 };
 
