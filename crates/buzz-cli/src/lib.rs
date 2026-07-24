@@ -71,7 +71,7 @@ Configuration (flags override env vars):
   BUZZ_PRIVATE_KEY   Nostr private key (hex or nsec)  [required]
   BUZZ_AUTH_TAG      NIP-OA auth tag JSON  [optional]
 
-The 'pack' subcommand runs locally and does not require a relay connection.
+The 'pack' subcommand and 'agents import' run locally and do not require a relay connection.
 
 Exit codes: 0=ok  1=bad input  2=relay/network error  3=auth error  4=other  5=write conflict
 Errors are JSON on stderr: {\"error\": \"<category>\", \"message\": \"<detail>\"}"
@@ -258,6 +258,12 @@ impl RespondToArg {
 
 #[derive(Subcommand)]
 pub enum AgentsCmd {
+    /// Open a local snapshot in Buzz Desktop's import preview
+    Import {
+        /// Path to an .agent.json or .agent.png snapshot
+        #[arg(long)]
+        file: std::path::PathBuf,
+    },
     /// Open a prefilled create-agent form in the owner's Buzz Desktop
     DraftCreate {
         /// Current channel UUID; the new agent is added here after save
@@ -1738,6 +1744,12 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         };
     }
 
+    // Agent snapshot import only opens Buzz's review surface. It never talks
+    // to the relay and must remain usable without a Nostr private key.
+    if let Cmd::Agents(AgentsCmd::Import { ref file }) = cli.command {
+        return commands::agents::cmd_import(file);
+    }
+
     // Auth: private key is required for all relay operations.
     // The keypair IS the identity — no tokens, no other auth.
     let private_key_str = cli.private_key.ok_or_else(|| {
@@ -1872,6 +1884,7 @@ mod tests {
                 "archived",
                 "draft-create",
                 "draft-update",
+                "import",
                 "unarchive"
             ]
         );
@@ -1992,7 +2005,7 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 5),
+            ("agents", 6),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),

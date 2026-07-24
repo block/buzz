@@ -36,6 +36,7 @@ import {
 } from "@/features/notifications/hooks";
 import { PreventSleepProvider } from "@/features/agents/usePreventSleep";
 import { requestOpenCreateAgent } from "@/features/agents/openCreateAgentEvent";
+import { useAgentSnapshotDeepLinks } from "@/features/agents/useAgentSnapshotDeepLinks";
 import { useAgentsDataRefresh } from "@/features/agents/lib/useAgentsDataRefresh";
 import { useManagedAgentRuntimeReconciliation } from "@/features/agents/useManagedAgentRuntimeReconciliation";
 import { useAutoRestartPolicy } from "@/features/agents/lib/useAutoRestartPolicy";
@@ -619,6 +620,8 @@ export function AppShell() {
 
   // Dispatch `buzz://message` deep links into the router.
   useMessageDeepLinks();
+  // Route CLI/browser snapshot requests through the existing import preview.
+  useAgentSnapshotDeepLinks();
 
   const handleOpenNewDm = React.useCallback(
     () => void goNewMessage(),

@@ -73,6 +73,9 @@ buzz-persona = { path = "../buzz-persona" }
 # channel-templates.json store for `channels create --template`
 dirs = "6"
 
+# Open Buzz Desktop through its registered buzz:// deep-link handler.
+webbrowser = "1"
+
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
 
