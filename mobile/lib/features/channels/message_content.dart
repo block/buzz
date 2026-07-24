@@ -30,6 +30,10 @@ class MessageContent extends HookConsumerWidget {
   /// Keys are lowercase pubkeys, values are display names.
   final Map<String, String> mentionNames;
 
+  /// Mentioned pubkeys that resolve to agents. Agent chips use the desktop
+  /// robot treatment instead of an `@` prefix.
+  final Set<String> agentMentionPubkeys;
+
   /// Known channel names for #channel links. Keys are lowercase channel
   /// names, values are channel IDs.
   final Map<String, String> channelNames;
@@ -52,6 +56,7 @@ class MessageContent extends HookConsumerWidget {
     super.key,
     required this.content,
     this.mentionNames = const {},
+    this.agentMentionPubkeys = const {},
     this.channelNames = const {},
     this.tags = const [],
     this.onChannelTap,
@@ -151,7 +156,11 @@ class MessageContent extends HookConsumerWidget {
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
       maxLines: maxLines,
       inlineComponents: [
-        _MentionMd(mentionNames: mentionNames, onMentionTap: onMentionTap),
+        _MentionMd(
+          mentionNames: mentionNames,
+          agentMentionPubkeys: agentMentionPubkeys,
+          onMentionTap: onMentionTap,
+        ),
         CustomEmojiMd(customEmoji),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
@@ -578,6 +587,7 @@ class _MessageCodeBlock extends HookWidget {
 
 class _MentionMd extends InlineMd {
   final Map<String, String> mentionNames;
+  final Set<String> agentMentionPubkeys;
   final void Function(String pubkey)? onMentionTap;
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '@',
@@ -585,7 +595,11 @@ class _MentionMd extends InlineMd {
     genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
   );
 
-  _MentionMd({required this.mentionNames, this.onMentionTap});
+  _MentionMd({
+    required this.mentionNames,
+    required this.agentMentionPubkeys,
+    this.onMentionTap,
+  });
 
   @override
   RegExp get exp => _exp;
@@ -614,8 +628,11 @@ class _MentionMd extends InlineMd {
       }
     }
 
-    final pill = _TokenPill(
-      text: '@${displayName ?? raw.substring(1)}',
+    final isAgent =
+        pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
+    final pill = _MentionPill(
+      label: displayName ?? raw.substring(1),
+      isAgent: isAgent,
       textStyle: config.style,
     );
 
@@ -625,6 +642,66 @@ class _MentionMd extends InlineMd {
       child: pubkey != null && onMentionTap != null
           ? GestureDetector(onTap: () => onMentionTap!(pubkey!), child: pill)
           : pill,
+    );
+  }
+}
+
+class _MentionPill extends StatelessWidget {
+  final String label;
+  final bool isAgent;
+  final TextStyle? textStyle;
+
+  const _MentionPill({
+    required this.label,
+    required this.isAgent,
+    this.textStyle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final style =
+        (textStyle ?? context.textTheme.bodyMedium)?.copyWith(
+          color: context.colors.primary,
+          fontWeight: FontWeight.w500,
+          height: 1,
+        ) ??
+        TextStyle(
+          color: context.colors.primary,
+          fontWeight: FontWeight.w500,
+          height: 1,
+        );
+    final fontSize = style.fontSize ?? 16;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(
+        Grid.half,
+        Grid.quarter + 1,
+        Grid.half,
+        Grid.quarter,
+      ),
+      decoration: BoxDecoration(
+        color: context.colors.primary.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(Radii.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (isAgent) ...[
+            Icon(
+              LucideIcons.bot,
+              size: fontSize * 0.95,
+              color: context.colors.primary,
+            ),
+            const SizedBox(width: Grid.quarter),
+          ] else
+            Transform.translate(
+              offset: const Offset(0, -Grid.quarter),
+              child: Text('@', style: style),
+            ),
+          Text(label, style: style),
+        ],
+      ),
     );
   }
 }

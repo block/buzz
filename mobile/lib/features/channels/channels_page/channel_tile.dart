@@ -67,7 +67,7 @@ class _ChannelTile extends ConsumerWidget {
                     ),
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: context.textTheme.bodyMedium?.copyWith(
+                    style: context.textTheme.bodyLarge?.copyWith(
                       color: context.colors.onSurface,
                       fontWeight: isUnread ? FontWeight.w700 : FontWeight.w400,
                     ),

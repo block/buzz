@@ -1,42 +1,5 @@
 part of '../channels_page.dart';
 
-class _QuickActionsSheet extends StatelessWidget {
-  const _QuickActionsSheet();
-
-  @override
-  Widget build(BuildContext context) {
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            ListTile(
-              leading: const Icon(LucideIcons.hash),
-              title: const Text('Create channel'),
-              subtitle: const Text('Start a new stream channel'),
-              onTap: () =>
-                  Navigator.of(context).pop(_QuickAction.createChannel),
-            ),
-            ListTile(
-              leading: const Icon(LucideIcons.messagesSquare),
-              title: const Text('New direct message'),
-              subtitle: const Text('Open a DM with one or more people'),
-              onTap: () => Navigator.of(context).pop(_QuickAction.newDm),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
 class _CreateChannelSheet extends HookConsumerWidget {
   final String channelType;
 
