@@ -15,6 +15,13 @@ function meshStatus({ state, health = { status: "ok" }, modelName = null }) {
   };
 }
 
+function meshClientStatus() {
+  return {
+    ...meshStatus({ state: "running" }),
+    mode: "client",
+  };
+}
+
 test("reports connected only after successful relay and local-compute probes", () => {
   const viewModel = createCommandConsoleStatusViewModel({
     localCompute: {
@@ -104,6 +111,43 @@ test("reports explicit offline states after successful terminal probes", () => {
   assert.equal(viewModel.liveServices[0].statusLabel, "Offline");
   assert.equal(viewModel.liveServices[1].state, "offline");
   assert.equal(viewModel.liveServices[1].statusLabel, "Offline");
+  assert.equal(
+    viewModel.liveServices[1].detail,
+    "Local compute is not running.",
+  );
+  assert.doesNotMatch(viewModel.liveServices[1].detail, /installed/i);
+});
+
+test("does not claim a healthy mesh client is serving local compute", () => {
+  const viewModel = createCommandConsoleStatusViewModel({
+    localCompute: {
+      error: null,
+      status: meshClientStatus(),
+    },
+    relayConnection: "connected",
+  });
+
+  assert.equal(viewModel.liveServices[1].state, "unavailable");
+  assert.equal(viewModel.liveServices[1].statusLabel, "Unavailable");
+  assert.match(viewModel.liveServices[1].detail, /client/i);
+  assert.doesNotMatch(viewModel.liveServices[1].detail, /running on this Mac/i);
+});
+
+test("does not treat daemon reachability without serve mode as local compute", () => {
+  const viewModel = createCommandConsoleStatusViewModel({
+    localCompute: {
+      error: null,
+      status: {
+        ...meshStatus({ state: "running" }),
+        mode: null,
+      },
+    },
+    relayConnection: "connected",
+  });
+
+  assert.equal(viewModel.liveServices[1].state, "unavailable");
+  assert.equal(viewModel.liveServices[1].statusLabel, "Unavailable");
+  assert.match(viewModel.liveServices[1].detail, /did not verify/i);
 });
 
 test("marks later-phase capabilities as not configured instead of probing or simulating them", () => {

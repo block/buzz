@@ -41,6 +41,10 @@ type LocalComputeProbe = {
   readonly error: string | null;
 };
 
+type LocalComputeFreshnessOptions = {
+  readonly freshnessMs?: number;
+};
+
 type CommandConsoleStatusSources = {
   readonly relayConnection: ConnectionState;
   readonly localCompute: LocalComputeProbe;
@@ -76,6 +80,8 @@ const LATER_CAPABILITIES: readonly CommandServiceStatus[] = [
     statusLabel: "Not configured",
   },
 ];
+
+const LOCAL_COMPUTE_FRESHNESS_MS = 10_000;
 
 function relayStatus(connection: ConnectionState): CommandServiceStatus {
   const base = {
@@ -159,9 +165,29 @@ function localComputeStatus({
   if (status.state === "off") {
     return {
       ...base,
-      detail: "Local compute is installed but not running.",
+      detail: "Local compute is not running.",
       state: "offline",
       statusLabel: "Offline",
+    };
+  }
+
+  if (status.mode === "client") {
+    return {
+      ...base,
+      detail:
+        "This Mac is operating in mesh client mode, not serving local compute.",
+      state: "unavailable",
+      statusLabel: "Unavailable",
+    };
+  }
+
+  if (status.mode !== "serve") {
+    return {
+      ...base,
+      detail:
+        "The status probe did not verify this Mac as a local-compute server.",
+      state: "unavailable",
+      statusLabel: "Unavailable",
     };
   }
 
@@ -218,9 +244,42 @@ export function createCommandConsoleStatusViewModel({
   };
 }
 
+export function useFreshCommandConsoleLocalCompute(
+  localCompute: LocalComputeProbe,
+  options?: LocalComputeFreshnessOptions,
+): LocalComputeProbe {
+  const freshnessMs = options?.freshnessMs ?? LOCAL_COMPUTE_FRESHNESS_MS;
+  const [freshnessExpired, setFreshnessExpired] = React.useState(false);
+
+  React.useEffect(() => {
+    setFreshnessExpired(false);
+
+    if (localCompute.error !== null || localCompute.status === null) {
+      return;
+    }
+
+    const timeout = window.setTimeout(
+      () => setFreshnessExpired(true),
+      Math.max(0, freshnessMs),
+    );
+    return () => window.clearTimeout(timeout);
+  }, [freshnessMs, localCompute.error, localCompute.status]);
+
+  if (freshnessExpired) {
+    return {
+      error:
+        "Local-compute status is stale: no successful probe completed before the freshness deadline.",
+      status: null,
+    };
+  }
+
+  return localCompute;
+}
+
 export function useCommandConsoleStatus(): CommandConsoleStatusViewModel {
-  const relayConnection = useRelayConnection();
-  const localCompute = useMeshNodeStatus();
+  const relayConnection = useRelayConnection({ degradedAfterMs: 0 });
+  const localComputeProbe = useMeshNodeStatus();
+  const localCompute = useFreshCommandConsoleLocalCompute(localComputeProbe);
 
   return React.useMemo(
     () =>

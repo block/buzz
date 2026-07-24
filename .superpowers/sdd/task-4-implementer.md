@@ -43,3 +43,37 @@ later-capability labels; and the rendered status section.
   truncation guards.
 - Targeted Biome formatting: completed with no changes required.
 - `git diff --check`: passed.
+
+## Review corrections
+
+### RED
+
+The corrective regressions produced four expected failures:
+
+- Command Console remained `Connected` immediately after a
+  `connected -> reconnecting` transition because the generic debounce still
+  scheduled a zero-delay timer.
+- No freshness hook existed, so a prior successful mesh result could not
+  expire when later probes stopped completing.
+- A stopped response claimed the runtime was installed without evidence.
+- Healthy `client` and unverified-mode responses incorrectly claimed this Mac
+  was serving local compute.
+
+### GREEN
+
+- Command Console now explicitly requests zero relay debounce, and the shared
+  hook treats non-positive debounce values synchronously. Hook-level tests
+  cover immediate reconnecting and stalled transitions.
+- A Command Console-only 10-second freshness deadline expires unchanged mesh
+  snapshots to explicit `Unavailable`, without changing other mesh UI polling.
+- Only `mode=serve`, `state=running`, and `health.status=ok` can produce
+  `Connected`. Client and unverified modes are unavailable, and stopped copy
+  says only that local compute is not running.
+- Later capabilities remain `Not configured`.
+
+### Corrective verification
+
+- Focused Command Console status tests: 13 passed, 0 failed.
+- Full desktop Node suite: 3,482 passed, 0 failed.
+- `pnpm typecheck`: passed.
+- `pnpm check`: passed, including Biome and all desktop repository guards.

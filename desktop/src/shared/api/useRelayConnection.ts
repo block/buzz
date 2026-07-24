@@ -47,6 +47,13 @@ export function useRelayConnection(options?: {
         return;
       }
 
+      if (degradedAfterMs <= 0) {
+        // Truthfulness-sensitive status surfaces can explicitly opt out of the
+        // generic transient-state debounce.
+        setState(next);
+        return;
+      }
+
       // Transient degraded states — wait before showing the user a warning.
       pendingTimer = window.setTimeout(() => {
         pendingTimer = null;
