@@ -191,3 +191,19 @@ fn legacy_managed_agent_auth_tag_skips_self_attestation() {
 
     assert_eq!(tag, None);
 }
+
+#[test]
+fn feed_item_category_matches_frontend_union_singular() {
+    // The desktop `FeedItemCategory` union (shared/api/types.ts) and every
+    // frontend comparison (feed.ts / inbox.ts) plus the e2e bridge use the
+    // SINGULAR "mention". get_feed must emit that exact value so native
+    // mention items render the "X mentioned you" title instead of falling
+    // through to the needs-action fallback (#2106).
+    let keys = nostr::Keys::generate();
+    let ev = nostr::EventBuilder::text_note("hi")
+        .sign_with_keys(&keys)
+        .expect("sign");
+    let item = feed_item_from_event(&ev, "mention");
+    assert_eq!(item.category, "mention");
+    assert_ne!(item.category, "mentions", "must not emit the plural form");
+}

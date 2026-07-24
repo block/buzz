@@ -100,9 +100,16 @@ pub async fn get_feed(
         Vec::new()
     };
 
+    // Category must be the singular `"mention"` to match the `FeedItemCategory`
+    // union in desktop/src/shared/api/types.ts and every frontend comparison
+    // (feed.ts / inbox.ts) as well as the e2e bridge, which already emits the
+    // singular. Emitting "mentions" here made native mention items fall through
+    // to the needs-action fallback title (#2106). The `types` request filter
+    // keyword ("mentions") is a separate API surface and is intentionally
+    // left unchanged.
     let mentions: Vec<FeedItemInfo> = mention_events
         .iter()
-        .map(|ev| feed_item_from_event(ev, "mentions"))
+        .map(|ev| feed_item_from_event(ev, "mention"))
         .collect();
     let needs_action: Vec<FeedItemInfo> = approval_events
         .iter()
