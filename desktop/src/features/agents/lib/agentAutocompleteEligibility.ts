@@ -9,9 +9,12 @@ export function getSharedChannelIds(channels: readonly Channel[] | undefined) {
   );
 }
 
-export function relayAgentIsSharedWithUser(
-  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
-  sharedChannelIds: ReadonlySet<string>,
+/// Whether the relay directory says this agent would respond to the current
+/// user at all, ignoring channel overlap. Used where the user is about to
+/// CREATE the overlap (e.g. adding the agent to a channel), so requiring an
+/// existing shared channel would be circular.
+export function relayAgentIsInvocableByUser(
+  agent: Pick<RelayAgent, "respondTo" | "respondToAllowlist">,
   currentPubkey?: string | null,
 ) {
   const normalizedCurrentPubkey = currentPubkey
@@ -22,6 +25,18 @@ export function relayAgentIsSharedWithUser(
     return agent.respondToAllowlist
       .map((pubkey) => normalizePubkey(pubkey))
       .includes(normalizedCurrentPubkey);
+  }
+
+  return agent.respondTo === "anyone";
+}
+
+export function relayAgentIsSharedWithUser(
+  agent: Pick<RelayAgent, "channelIds" | "respondTo" | "respondToAllowlist">,
+  sharedChannelIds: ReadonlySet<string>,
+  currentPubkey?: string | null,
+) {
+  if (agent.respondTo === "allowlist") {
+    return relayAgentIsInvocableByUser(agent, currentPubkey);
   }
 
   return (
@@ -54,13 +69,18 @@ export function getMentionableAgentPubkeys({
   return pubkeys;
 }
 
+/// Non-agents always pass; agent identities pass when their pubkey is in the
+/// provided allow-set. Callers decide the set: the local managed list alone is
+/// NOT sufficient — relay-directory agents that would respond to this user
+/// (see `relayAgentIsInvocableByUser`) must be included, otherwise shared
+/// agents owned by other members are silently unreachable.
 export function isAgentIdentityInManagedList(
   candidate: { isAgent?: boolean; pubkey: string },
-  managedAgentPubkeys: ReadonlySet<string>,
+  allowedAgentPubkeys: ReadonlySet<string>,
 ) {
   return (
     candidate.isAgent !== true ||
-    managedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
+    allowedAgentPubkeys.has(normalizePubkey(candidate.pubkey))
   );
 }
 
