@@ -1,4 +1,5 @@
 import AVFoundation
+import BuzzPushKit
 import Flutter
 import UIKit
 import UserNotifications
@@ -7,6 +8,7 @@ import UserNotifications
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var mediaUploadChannel: FlutterMethodChannel?
   private var pushChannel: FlutterMethodChannel?
+  private let apnsRegistrationBuffer = APNsRegistrationBuffer()
   private var appGroupIdentifier: String? {
     Bundle.main.object(forInfoDictionaryKey: "BuzzAppGroupIdentifier") as? String
   }
@@ -43,6 +45,9 @@ import UserNotifications
     pushChannel?.setMethodCallHandler { [weak self] call, result in
       self?.handlePushMethodCall(call, result: result)
     }
+    apnsRegistrationBuffer.attach { [weak self] update in
+      self?.pushChannel?.invokeMethod(update.method, arguments: update.arguments)
+    }
   }
 
   override func application(
@@ -50,9 +55,7 @@ import UserNotifications
     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
   ) {
     super.application(application, didRegisterForRemoteNotificationsWithDeviceToken: deviceToken)
-    pushChannel?.invokeMethod(
-      "apnsTokenChanged",
-      arguments: ["token": deviceToken.map { String(format: "%02x", $0) }.joined()])
+    apnsRegistrationBuffer.recordToken(deviceToken)
   }
 
   override func application(
@@ -60,8 +63,7 @@ import UserNotifications
     didFailToRegisterForRemoteNotificationsWithError error: Error
   ) {
     super.application(application, didFailToRegisterForRemoteNotificationsWithError: error)
-    pushChannel?.invokeMethod(
-      "apnsRegistrationFailed", arguments: ["message": error.localizedDescription])
+    apnsRegistrationBuffer.recordError(error.localizedDescription)
   }
 
   private func handlePushMethodCall(
@@ -71,7 +73,8 @@ import UserNotifications
     switch call.method {
     case "saveCommunitySnapshot":
       guard let arguments = call.arguments as? [String: Any],
-        let communities = arguments["communities"] as? [[String: Any]]
+        let communities = arguments["communities"] as? [[String: Any]],
+        let signingKeys = arguments["signingKeys"] as? [String: String]
       else {
         result(
           FlutterError(
@@ -80,11 +83,16 @@ import UserNotifications
       }
       do {
         try savePushCommunitySnapshot(communities)
+        try BuzzPushKeychain.replace(
+          signingKeys: signingKeys,
+          accessGroup: Bundle.main.object(forInfoDictionaryKey: "BuzzKeychainAccessGroup")
+            as? String
+        )
         result(nil)
       } catch {
         result(
           FlutterError(
-            code: "save_failed", message: "Unable to save push community snapshot.",
+            code: "save_failed", message: "Unable to save push community credentials.",
             details: error.localizedDescription))
       }
     default:

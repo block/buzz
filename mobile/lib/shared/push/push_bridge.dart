@@ -1,3 +1,4 @@
+import 'package:nostr/nostr.dart' as nostr;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
@@ -7,6 +8,11 @@ import '../relay/relay_provider.dart';
 import 'push_models.dart';
 
 const _channel = MethodChannel('buzz/push');
+
+/// Latest APNs registration state, including callbacks replayed by iOS after
+/// the Flutter method channel attaches.
+final apnsDeviceToken = ValueNotifier<String?>(null);
+final apnsRegistrationError = ValueNotifier<String?>(null);
 
 Future<void> registerBuzzPushCommunitySnapshot(
   List<Community> communities,
@@ -22,8 +28,24 @@ Future<void> registerBuzzPushCommunitySnapshot(
           pubkey: community.pubkey ?? pubkeyFromNsec(community.nsec),
         ),
     ];
+    final signingKeys = <String, String>{};
+    for (final community in communities) {
+      final nsec = community.nsec;
+      if (nsec == null || nsec.isEmpty) continue;
+      try {
+        final decoded = nostr.Nip19.decode(payload: nsec);
+        if (decoded.prefix != nostr.Nip19Prefix.nsec ||
+            decoded.data.length != 64) {
+          continue;
+        }
+        signingKeys[community.id] = decoded.data;
+      } catch (_) {
+        // Native storage is fail-closed; malformed keys are never exported.
+      }
+    }
     await _channel.invokeMethod<void>('saveCommunitySnapshot', {
       'communities': [for (final snapshot in snapshots) snapshot.toJson()],
+      'signingKeys': signingKeys,
     });
   } on MissingPluginException {
     // Flutter tests and non-Runner embeddings do not install the native bridge.
@@ -76,6 +98,24 @@ Future<BuzzPushResolution?> resolveBuzzPushPayload(
 void installBuzzPushMethodHandler() {
   _channel.setMethodCallHandler((call) async {
     switch (call.method) {
+      case 'apnsTokenChanged':
+        final args = call.arguments;
+        if (args is Map) {
+          final token = args['token'];
+          if (token is String && token.isNotEmpty) {
+            apnsDeviceToken.value = token;
+            apnsRegistrationError.value = null;
+          }
+        }
+        return null;
+      case 'apnsRegistrationFailed':
+        final args = call.arguments;
+        final message = args is Map ? args['message'] : null;
+        apnsRegistrationError.value = message is String && message.isNotEmpty
+            ? message
+            : 'APNs registration failed';
+        debugPrint('APNs registration failed: ${apnsRegistrationError.value}');
+        return null;
       case 'resolveNotification':
         final args = call.arguments;
         if (args is! Map) return null;
