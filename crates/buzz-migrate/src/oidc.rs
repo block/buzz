@@ -1,33 +1,20 @@
-//! Sign in with Slack (OIDC) — the second, stronger claim channel.
+//! Sign in with Slack (OIDC).
 //!
-//! Where the email channel proves control of an inbox, this channel proves
-//! control of the Slack account itself, live: the person authenticates to
-//! Slack and the service reads back the verified user id. There is no bearer
-//! token to leak — the proof is a fresh authorization Slack performs at claim
-//! time.
-//!
-//! Flow:
-//! 1. `GET /oidc/start?pubkey=X` — the app opens this with **its own** key. We
-//!    stash `state → X` and redirect to Slack's authorize endpoint.
-//! 2. Slack authenticates the person and redirects to
-//!    `GET /oidc/callback?code&state`.
-//! 3. We exchange the code for an access token, call Slack's userInfo endpoint,
-//!    and read the verified `https://slack.com/user_id` claim. Because Slack
-//!    pins that id to whoever actually authenticated, binding `slack:<id> → X`
-//!    is safe — an attacker can only ever prove their *own* Slack id.
-//! 4. We admit the verified public key as a member, publish the attestation,
-//!    and deep-link back into the app. The app connects to that community and
-//!    publishes its self-claim there.
-//!
-//! The exchange needs Slack's `client_secret`, so it runs server-side. That is
-//! the service's only Slack credential; it never touches a Buzz private key
-//! other than the operator admin key used to sign attestations.
+//! The server uses PKCE for Slack's authorization code and verifies the
+//! returned ID token (signature, issuer, audience, expiry, nonce, workspace).
+//! Identity is then confirmed again through Slack's authenticated userInfo
+//! endpoint before the migration service mints an app handoff code.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use ring::signature::{RsaPublicKeyComponents, RSA_PKCS1_2048_8192_SHA256};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 
-/// Slack OIDC application credentials. Absent → the `/oidc/*` routes return 503.
+/// Slack OIDC application credentials. Absent means the `/oidc/*` routes are
+/// disabled.
 #[derive(Clone)]
 pub struct OidcConfig {
     /// Slack application's OAuth client id.
@@ -43,17 +30,25 @@ pub struct OidcConfig {
 const AUTHORIZE_URL: &str = "https://slack.com/openid/connect/authorize";
 const TOKEN_URL: &str = "https://slack.com/api/openid.connect.token";
 const USERINFO_URL: &str = "https://slack.com/api/openid.connect.userInfo";
+const JWKS_URL: &str = "https://slack.com/openid/connect/keys";
+const ISSUER: &str = "https://slack.com";
 
-/// Build the Slack authorize URL to redirect the person to.
-pub fn authorize_url(cfg: &OidcConfig, state: &str, nonce: &str) -> String {
+/// Build the Slack authorization URL, including an S256 PKCE challenge.
+pub fn authorize_url(cfg: &OidcConfig, state: &str, nonce: &str, code_challenge: &str) -> String {
     format!(
-        "{AUTHORIZE_URL}?response_type=code&scope=openid&client_id={}&redirect_uri={}&state={}&nonce={}&team={}",
+        "{AUTHORIZE_URL}?response_type=code&scope=openid&client_id={}&redirect_uri={}&state={}&nonce={}&team={}&code_challenge={}&code_challenge_method=S256",
         urlencode(&cfg.client_id),
         urlencode(&cfg.redirect_uri),
         urlencode(state),
         urlencode(nonce),
         urlencode(&cfg.team_id),
+        urlencode(code_challenge),
     )
+}
+
+/// RFC 7636 S256 challenge for a high-entropy verifier.
+pub fn pkce_challenge(verifier: &str) -> String {
+    URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
 }
 
 #[derive(Deserialize)]
@@ -72,7 +67,6 @@ struct TokenResp {
 struct UserInfoResp {
     #[serde(default)]
     ok: bool,
-    /// Slack puts the workspace user id under this namespaced claim.
     #[serde(rename = "https://slack.com/user_id", default)]
     user_id: Option<String>,
     #[serde(rename = "https://slack.com/team_id", default)]
@@ -81,9 +75,53 @@ struct UserInfoResp {
     error: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 struct IdTokenClaims {
+    iss: String,
+    aud: Audience,
+    exp: u64,
     nonce: String,
+    #[serde(rename = "https://slack.com/user_id")]
+    user_id: String,
+    #[serde(rename = "https://slack.com/team_id")]
+    team_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum Audience {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Audience {
+    fn contains(&self, expected: &str) -> bool {
+        match self {
+            Self::One(value) => value == expected,
+            Self::Many(values) => values.iter().any(|value| value == expected),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct IdTokenHeader {
+    alg: String,
+    kid: String,
+}
+
+#[derive(Deserialize)]
+struct JwkSet {
+    keys: Vec<Jwk>,
+}
+
+#[derive(Deserialize)]
+struct Jwk {
+    kty: String,
+    kid: String,
+    #[serde(default)]
+    alg: Option<String>,
+    n: String,
+    e: String,
 }
 
 /// Why an OIDC exchange failed.
@@ -97,37 +135,38 @@ pub enum OidcError {
     NoUserId,
     #[error("slack OIDC nonce did not match")]
     NonceMismatch,
-    #[error("slack OIDC id_token is malformed")]
-    MalformedIdToken,
+    #[error("slack OIDC id_token is invalid: {0}")]
+    InvalidIdToken(String),
+    #[error("could not verify Slack OIDC signing keys: {0}")]
+    SigningKeys(String),
     #[error("authenticated Slack workspace {actual:?} does not match configured workspace")]
     WrongTeam { actual: Option<String> },
     #[error(transparent)]
     Http(#[from] reqwest::Error),
 }
 
-/// Exchange an authorization `code` for the authenticated Slack user id.
-/// Returns the `slack:<user id>` subject.
+/// Exchange an authorization code, verify the OIDC response, and return the
+/// workspace-scoped `slack:<team>:<user>` subject.
 pub async fn exchange_code_for_subject(
     http: &reqwest::Client,
     cfg: &OidcConfig,
     code: &str,
     expected_nonce: &str,
+    code_verifier: &str,
 ) -> Result<String, OidcError> {
     if code.is_empty() {
         return Err(OidcError::Token("missing authorization code".into()));
     }
-    // 1. code → access token (confidential client: client_secret required).
-    // Build the x-www-form-urlencoded body by hand so we don't depend on
-    // reqwest's optional form feature.
     let body = [
         ("client_id", cfg.client_id.as_str()),
         ("client_secret", cfg.client_secret.as_str()),
         ("code", code),
         ("redirect_uri", cfg.redirect_uri.as_str()),
         ("grant_type", "authorization_code"),
+        ("code_verifier", code_verifier),
     ]
     .iter()
-    .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v)))
+    .map(|(key, value)| format!("{}={}", urlencode(key), urlencode(value)))
     .collect::<Vec<_>>()
     .join("&");
     let token: TokenResp = http
@@ -144,20 +183,22 @@ pub async fn exchange_code_for_subject(
             token.error.unwrap_or_else(|| "unknown".into()),
         ));
     }
+
     let access = token
         .access_token
         .ok_or_else(|| OidcError::Token("no access_token".into()))?;
-    let claims = decode_id_token_claims(
+    let claims = verify_id_token(
+        http,
+        cfg,
         token
             .id_token
             .as_deref()
-            .ok_or(OidcError::MalformedIdToken)?,
-    )?;
-    if claims.nonce != expected_nonce {
-        return Err(OidcError::NonceMismatch);
-    }
+            .ok_or_else(|| OidcError::InvalidIdToken("missing token".into()))?,
+        expected_nonce,
+        unix_now(),
+    )
+    .await?;
 
-    // 2. access token → verified user id.
     let info: UserInfoResp = http
         .get(USERINFO_URL)
         .bearer_auth(&access)
@@ -166,7 +207,7 @@ pub async fn exchange_code_for_subject(
         .error_for_status()?
         .json()
         .await
-        .map_err(|e| OidcError::UserInfo(e.to_string()))?;
+        .map_err(|error| OidcError::UserInfo(error.to_string()))?;
     if !info.ok {
         return Err(OidcError::UserInfo(
             info.error.unwrap_or_else(|| "unknown".into()),
@@ -179,36 +220,125 @@ pub async fn exchange_code_for_subject(
     }
     let user_id = info
         .user_id
-        .filter(|s| !s.is_empty())
+        .filter(|value| !value.is_empty())
         .ok_or(OidcError::NoUserId)?;
-    // Team-scope the subject: `slack:<team>:<user>`. `team_id` was just verified
-    // to equal the workspace Slack authenticated against, so this is the real
-    // workspace, not one the caller could choose.
+    if claims.team_id != cfg.team_id || claims.user_id != user_id {
+        return Err(OidcError::InvalidIdToken(
+            "ID token and userInfo identity did not agree".into(),
+        ));
+    }
     Ok(format!("slack:{}:{user_id}", cfg.team_id))
 }
 
-/// Decode only the nonce from the ID token returned directly by Slack's token
-/// endpoint. Identity still comes from the authenticated userInfo request.
-fn decode_id_token_claims(id_token: &str) -> Result<IdTokenClaims, OidcError> {
-    let payload = id_token
-        .split('.')
-        .nth(1)
-        .ok_or(OidcError::MalformedIdToken)?;
-    let decoded = URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|_| OidcError::MalformedIdToken)?;
-    serde_json::from_slice(&decoded).map_err(|_| OidcError::MalformedIdToken)
+async fn verify_id_token(
+    http: &reqwest::Client,
+    cfg: &OidcConfig,
+    id_token: &str,
+    expected_nonce: &str,
+    now: u64,
+) -> Result<IdTokenClaims, OidcError> {
+    let mut parts = id_token.split('.');
+    let (Some(header_wire), Some(claims_wire), Some(signature_wire), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Err(OidcError::InvalidIdToken("malformed compact JWT".into()));
+    };
+    let header: IdTokenHeader = decode_json_part(header_wire)?;
+    if header.alg != "RS256" || header.kid.is_empty() {
+        return Err(OidcError::InvalidIdToken(
+            "unsupported signing algorithm or missing key id".into(),
+        ));
+    }
+
+    let jwks: JwkSet = http
+        .get(JWKS_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await
+        .map_err(|error| OidcError::SigningKeys(error.to_string()))?;
+    let key = jwks
+        .keys
+        .iter()
+        .find(|key| {
+            key.kid == header.kid
+                && key.kty == "RSA"
+                && key
+                    .alg
+                    .as_deref()
+                    .is_none_or(|algorithm| algorithm == "RS256")
+        })
+        .ok_or_else(|| OidcError::SigningKeys("matching RSA key not found".into()))?;
+    let modulus = decode_base64url(&key.n)?;
+    let exponent = decode_base64url(&key.e)?;
+    let signature = decode_base64url(signature_wire)?;
+    let signed = format!("{header_wire}.{claims_wire}");
+    RsaPublicKeyComponents {
+        n: &modulus,
+        e: &exponent,
+    }
+    .verify(&RSA_PKCS1_2048_8192_SHA256, signed.as_bytes(), &signature)
+    .map_err(|_| OidcError::InvalidIdToken("signature verification failed".into()))?;
+
+    let claims: IdTokenClaims = decode_json_part(claims_wire)?;
+    validate_id_token_claims(&claims, cfg, expected_nonce, now)?;
+    Ok(claims)
 }
 
-/// Same minimal percent-encoding used by the email channel (no external dep).
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
+fn validate_id_token_claims(
+    claims: &IdTokenClaims,
+    cfg: &OidcConfig,
+    expected_nonce: &str,
+    now: u64,
+) -> Result<(), OidcError> {
+    if claims.iss != ISSUER {
+        return Err(OidcError::InvalidIdToken("issuer mismatch".into()));
+    }
+    if !claims.aud.contains(&cfg.client_id) {
+        return Err(OidcError::InvalidIdToken("audience mismatch".into()));
+    }
+    if claims.exp <= now {
+        return Err(OidcError::InvalidIdToken("token expired".into()));
+    }
+    if claims.nonce != expected_nonce {
+        return Err(OidcError::NonceMismatch);
+    }
+    if claims.team_id != cfg.team_id || claims.user_id.is_empty() {
+        return Err(OidcError::WrongTeam {
+            actual: Some(claims.team_id.clone()),
+        });
+    }
+    Ok(())
+}
+
+fn decode_json_part<T: for<'de> Deserialize<'de>>(part: &str) -> Result<T, OidcError> {
+    let decoded = decode_base64url(part)?;
+    serde_json::from_slice(&decoded)
+        .map_err(|_| OidcError::InvalidIdToken("malformed JWT JSON".into()))
+}
+
+fn decode_base64url(value: &str) -> Result<Vec<u8>, OidcError> {
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| OidcError::InvalidIdToken("malformed base64url".into()))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
+                out.push(byte as char);
             }
-            _ => out.push_str(&format!("%{b:02X}")),
+            _ => out.push_str(&format!("%{byte:02X}")),
         }
     }
     out
@@ -228,15 +358,25 @@ mod tests {
     }
 
     #[test]
-    fn authorize_url_encodes_params() {
-        let u = authorize_url(&cfg(), "st ate", "non/ce");
-        assert!(u.starts_with(AUTHORIZE_URL));
-        assert!(u.contains("client_id=123.456"));
-        assert!(u.contains("redirect_uri=https%3A%2F%2Fmig.example%2Foidc%2Fcallback"));
-        assert!(u.contains("state=st%20ate"));
-        assert!(u.contains("nonce=non%2Fce"));
-        assert!(u.contains("team=T060"));
-        assert!(u.contains("scope=openid"));
+    fn authorize_url_encodes_params_and_pkce() {
+        let url = authorize_url(&cfg(), "st ate", "non/ce", "challenge");
+        assert!(url.starts_with(AUTHORIZE_URL));
+        assert!(url.contains("client_id=123.456"));
+        assert!(url.contains("redirect_uri=https%3A%2F%2Fmig.example%2Foidc%2Fcallback"));
+        assert!(url.contains("state=st%20ate"));
+        assert!(url.contains("nonce=non%2Fce"));
+        assert!(url.contains("team=T060"));
+        assert!(url.contains("scope=openid"));
+        assert!(url.contains("code_challenge=challenge"));
+        assert!(url.contains("code_challenge_method=S256"));
+    }
+
+    #[test]
+    fn pkce_challenge_matches_rfc_7636_example() {
+        assert_eq!(
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]
@@ -245,24 +385,31 @@ mod tests {
             r#"{"ok":true,"sub":"x","https://slack.com/user_id":"U060",
                     "https://slack.com/team_id":"T060"}"#,
         )
-        .unwrap();
+        .expect("parse");
         assert_eq!(info.user_id.as_deref(), Some("U060"));
         assert_eq!(info.team_id.as_deref(), Some("T060"));
     }
 
     #[test]
     fn token_resp_surfaces_error() {
-        let t: TokenResp = serde_json::from_str(r#"{"ok":false,"error":"bad_code"}"#).unwrap();
-        assert!(!t.ok);
-        assert_eq!(t.error.as_deref(), Some("bad_code"));
+        let token: TokenResp =
+            serde_json::from_str(r#"{"ok":false,"error":"bad_code"}"#).expect("parse");
+        assert!(!token.ok);
+        assert_eq!(token.error.as_deref(), Some("bad_code"));
     }
 
     #[test]
-    fn id_token_nonce_is_decoded() {
-        let payload = URL_SAFE_NO_PAD.encode(r#"{"nonce":"expected"}"#);
-        let claims =
-            decode_id_token_claims(&format!("header.{payload}.signature")).expect("decodes");
-        assert_eq!(claims.nonce, "expected");
-        assert!(decode_id_token_claims("not-a-jwt").is_err());
+    fn id_token_claims_validate_all_security_fields() {
+        let claims = IdTokenClaims {
+            iss: ISSUER.into(),
+            aud: Audience::One(cfg().client_id.clone()),
+            exp: 2_000,
+            nonce: "nonce".into(),
+            user_id: "U060".into(),
+            team_id: "T060".into(),
+        };
+        assert!(validate_id_token_claims(&claims, &cfg(), "nonce", 1_000).is_ok());
+        assert!(validate_id_token_claims(&claims, &cfg(), "wrong", 1_000).is_err());
+        assert!(validate_id_token_claims(&claims, &cfg(), "nonce", 2_000).is_err());
     }
 }

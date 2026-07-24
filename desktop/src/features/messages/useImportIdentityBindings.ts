@@ -10,7 +10,7 @@ import { buildConfirmedImportBindings } from "./lib/confirmImportBindings";
 
 /**
  * Confirmed import identity bindings for the active community:
- * `<source>:<foreign id>` (e.g. `slack:U060`) → the bound Buzz pubkey
+ * `<source>:<foreign id>` (e.g. `slack:T0266FRGM:U060`) → the bound Buzz pubkey
  * (lowercase hex). Feeds `formatTimelineMessages` so bot-signed imported
  * history renders under the real person's profile.
  *

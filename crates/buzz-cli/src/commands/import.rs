@@ -69,7 +69,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| export_dir.join("buzz-import-state.json"));
-    let state = ImportState::load(&state_path)?;
+    let state = ImportState::load_for_workspace(&state_path, &team_id)?;
 
     // Slack user id → display name, for mrkdwn mention rewriting and
     // author attribution tags.

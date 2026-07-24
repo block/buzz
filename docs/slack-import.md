@@ -144,14 +144,16 @@ buzz://join-slack?relay=wss%3A%2F%2Fbuzz.example.com&service=https%3A%2F%2Fmigra
 
 Opening it in Buzz:
 
-1. Creates or loads the person's device key and opens
-   `<service>/oidc/start` in their browser.
-2. Slack authenticates them. The claim service rejects an account from any
-   workspace other than its configured `SLACK_TEAM_ID`.
+1. Creates or loads the person's device key, generates a device-held verifier,
+   and opens `<service>/oidc/start` with only its one-way challenge.
+2. Slack authenticates them using an additional server-side PKCE exchange. The
+   claim service verifies Slack's signed ID token (issuer, audience, expiry,
+   nonce, workspace) and confirms the same identity through Slack userInfo.
 3. Slack returns through the internal `buzz://import-claim` callback with a
    short-lived finalize code. Buzz verifies that it matches the pending join
-   and sends the service a self-signed identity claim as proof that this device
-   controls the public key being admitted.
+   and sends the service both the retained verifier and a self-signed identity
+   claim. A stolen custom-scheme callback code is unusable without that
+   verifier.
 4. The service verifies that signature, idempotently adds the key to the target
    community, and publishes the owner/admin attestation. The code becomes bound
    to that key, so the same device can safely retry a partial network failure
@@ -179,6 +181,10 @@ redirect URL:
 https://migrate.example.com/oidc/callback
 ```
 
+Enable PKCE for the Slack app. The service sends an S256 challenge on every
+authorization and supplies the matching verifier only during the server-side
+code exchange.
+
 Run `buzz-migrate` behind HTTPS with an owner/admin Buzz key:
 
 ```bash
@@ -194,6 +200,15 @@ buzz-migrate \
   --base-url https://migrate.example.com
 ```
 
+When OIDC is enabled, startup logs print the complete
+`buzz://join-slack?...` migration link. Share that link with members of the
+imported Slack workspace. It is separate from the relay's normal invite link:
+
+- **Imported Slack member:** open the logged migration link; Slack verification
+  admits the person's device key and attaches their imported history.
+- **Everyone else:** in Buzz, open **Settings → Community access → Create invite
+  link**, choose an expiry, and share the resulting HTTPS link or QR code.
+
 > **Don't paste secrets on the command line.** `export BUZZ_PRIVATE_KEY=…` and
 > `SLACK_CLIENT_SECRET=…` land in shell history and process listings. Inject
 > both from a secret manager (or a `chmod 600` env file loaded by the service
@@ -208,10 +223,11 @@ channel when set together; omit both to run the email channel only.
 
 `--export-dir` supplies `users.json` for the optional email fallback; the OIDC
 path gets the verified Slack user id directly from Slack. `--base-url` must be
-the externally reachable claim-service origin; its `/oidc/callback` is the
-default OIDC redirect URI. Use `--oidc-redirect-uri` only when the registered
-redirect differs. If the relay requires a NIP-OA delegation, also set
-`BUZZ_AUTH_TAG`.
+the externally reachable **HTTPS** claim-service origin, with no path, query,
+fragment, or credentials; its `/oidc/callback` is the default OIDC redirect
+URI. Plain HTTP is accepted only with `--dev`. Use `--oidc-redirect-uri` only
+when the registered redirect differs. If the relay requires a NIP-OA
+delegation, also set `BUZZ_AUTH_TAG`.
 
 The join link's `relay` must identify the same community as
 `BUZZ_RELAY_URL`. The service's `BUZZ_PRIVATE_KEY` must be an owner/admin key
@@ -290,6 +306,10 @@ The per-event admin exemption above covers the practical cases today.
   `"<channel>:<ts>" → Nostr event id`. Re-running the import skips
   everything already recorded — interrupted imports resume where they
   stopped. The state file is saved incrementally during the run.
+- The state file is pinned to its schema version and `SLACK_TEAM_ID`. Reusing
+  it with another workspace is rejected. A non-empty state created before
+  workspace-scoped identities is also rejected because its skipped messages
+  could carry incompatible `import_author` values.
 - Reply `e`-tags are resolved from the state map, never from the relay.
 
 ## Text conversion (mrkdwn → markdown)

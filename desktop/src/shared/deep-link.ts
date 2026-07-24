@@ -50,7 +50,7 @@ export type NostrBindDeepLinkPayload = {
 export type ImportClaimDeepLinkPayload = {
   /** Native queue id used to survive cold launches without duplicate delivery. */
   requestId?: string;
-  /** `<source>:<foreign id>`, e.g. `slack:U060976D0QN`. */
+  /** `<source>:<foreign id>`, e.g. `slack:T0266FRGM:U060976D0QN`. */
   subject: string;
   /** Email channel: single-use magic-link token to redeem at `service`. */
   token?: string;

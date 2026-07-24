@@ -5,7 +5,7 @@
 //!
 //! History imported by `buzz import slack` is bot-signed and attributed only by
 //! display name. To render each person's imported history under their real Buzz
-//! profile, a **two-party binding** must exist for `slack:<id>`:
+//! profile, a **two-party binding** must exist for `slack:<team>:<user>`:
 //!
 //! 1. an owner/admin **attestation** (kind `KIND_IMPORT_IDENTITY_BINDING`), and
 //! 2. the subject's self-signed **claim** (kind `KIND_IMPORT_IDENTITY_CLAIM`).

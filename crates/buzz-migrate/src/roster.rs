@@ -81,7 +81,7 @@ impl Roster {
         })
     }
 
-    /// The `slack:<id>` subject for an email, if the export knows it. Matching
+    /// The `slack:<team>:<user>` subject for an email, if the export knows it. Matching
     /// is case-insensitive and whitespace-trimmed.
     pub fn subject_for_email(&self, email: &str) -> Option<&str> {
         let email = email.trim().to_lowercase();

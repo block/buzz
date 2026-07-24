@@ -2,6 +2,28 @@ import { relayClient } from "@/shared/api/relayClient";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { KIND_IMPORT_IDENTITY_CLAIM } from "@/shared/constants/kinds";
 
+async function postClaimService(
+  service: string,
+  path: string,
+  body: unknown,
+): Promise<void> {
+  const base = service.replace(/\/+$/, "");
+  const response = await fetch(`${base}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const json = (await response.json().catch(() => ({}))) as {
+    error?: unknown;
+  };
+  if (!response.ok) {
+    const message =
+      typeof json.error === "string" ? json.error : `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+}
+
 /**
  * Sign this device identity's consent to an imported identity binding, WITHOUT
  * publishing it. The signed self-claim (kind {@link KIND_IMPORT_IDENTITY_CLAIM})
@@ -47,22 +69,22 @@ export async function finalizeSlackOidcAttestation(input: {
   service: string;
   code: string;
   subject: string;
+  verifier: string;
 }): Promise<void> {
   const event = await signImportIdentityClaim(input.subject);
 
-  const base = input.service.replace(/\/+$/, "");
-  const response = await fetch(`${base}/oidc/finalize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code: input.code, claim: event }),
-    signal: AbortSignal.timeout(30_000),
+  await postClaimService(input.service, "/oidc/finalize", {
+    code: input.code,
+    verifier: input.verifier,
+    claim: event,
   });
-  const json = (await response.json().catch(() => ({}))) as {
-    error?: unknown;
-  };
-  if (!response.ok) {
-    const message =
-      typeof json.error === "string" ? json.error : `HTTP ${response.status}`;
-    throw new Error(message);
-  }
+}
+
+/** Redeem an email magic-link token with this device's public key. */
+export async function completeEmailImportClaim(
+  service: string,
+  token: string,
+  pubkey: string,
+): Promise<void> {
+  await postClaimService(service, "/email/complete", { token, pubkey });
 }

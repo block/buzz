@@ -324,8 +324,8 @@ fn has_import_tag(event: &Event) -> bool {
 /// Validate the shape of a `KIND_IMPORT_IDENTITY_BINDING` event before storage.
 ///
 /// Requires a non-empty `d` tag (the `<source>:<foreign id>` key, e.g.
-/// `slack:U060976D0QN`) and exactly one `p` tag holding a 64-char hex pubkey
-/// (the bound Buzz identity). Authorization (owner/admin) is checked by the
+/// `slack:T0266FRGM:U060976D0QN`) and exactly one `p` tag holding a 64-char hex
+/// pubkey (the bound Buzz identity). Authorization (owner/admin) is checked by the
 /// caller; this only enforces that the stored event is well-formed so clients
 /// can trust its shape.
 fn validate_import_identity_binding(event: &Event) -> Result<(), IngestError> {
@@ -338,7 +338,9 @@ fn validate_import_identity_binding(event: &Event) -> Result<(), IngestError> {
         Some(d) if !d.is_empty() => {}
         _ => {
             return Err(IngestError::Rejected(
-                "invalid: identity binding requires a non-empty d tag (e.g. slack:U123)".into(),
+                "invalid: identity binding requires a non-empty d tag \
+                 (e.g. slack:T0266FRGM:U123)"
+                    .into(),
             ))
         }
     }
@@ -380,7 +382,9 @@ fn validate_import_identity_claim(event: &Event) -> Result<(), IngestError> {
     });
     if !has_nonempty_d {
         return Err(IngestError::Rejected(
-            "invalid: identity claim requires a non-empty d tag (e.g. slack:U123)".into(),
+            "invalid: identity claim requires a non-empty d tag \
+             (e.g. slack:T0266FRGM:U123)"
+                .into(),
         ));
     }
     if event

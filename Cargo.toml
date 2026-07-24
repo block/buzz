@@ -97,6 +97,7 @@ reqwest = { version = "0.13", features = ["json", "rustls"], default-features = 
 sha2      = "0.11"
 hex       = "0.4"
 hmac      = "0.13"
+ring      = "0.17"
 
 # Randomness
 rand = "0.10"

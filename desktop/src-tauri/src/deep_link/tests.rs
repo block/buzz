@@ -36,6 +36,29 @@ fn parse_join_slack_rejects_missing_relay_or_bad_service() {
             .unwrap()
     )
     .is_err());
+    // Remote services must use TLS; local development may use loopback HTTP.
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=http%3A%2F%2Fmig.example"
+        )
+        .unwrap()
+    )
+    .is_err());
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=ws%3A%2F%2Flocalhost%3A3000&service=http%3A%2F%2Flocalhost%3A8787"
+        )
+        .unwrap()
+    )
+    .is_ok());
+    // The service is an origin; appending endpoints to a path prefix is unsafe.
+    assert!(parse_join_slack_deep_link(
+        &Url::parse(
+            "buzz://join-slack?relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example%2Fprefix"
+        )
+        .unwrap()
+    )
+    .is_err());
 }
 
 #[test]
@@ -107,6 +130,8 @@ fn parse_import_claim_rejects_incomplete_and_malformed() {
     for service in [
         "https%3A%2F%2Fmig.example%3Fnext%3Devil",
         "https%3A%2F%2Fmig.example%23fragment",
+        "https%3A%2F%2Fmig.example%2Fprefix",
+        "http%3A%2F%2Fmig.example",
     ] {
         assert!(parse_import_claim_deep_link(
             &Url::parse(&format!(

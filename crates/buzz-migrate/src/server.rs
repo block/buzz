@@ -1,6 +1,7 @@
-//! The claim-service HTTP surface (email channel).
+//! The Slack migration claim-service HTTP surface.
 //!
-//! Three endpoints implement the email proof:
+//! Email magic links and Slack OIDC share the same operator identity,
+//! workspace roster, relay writer, and bounded single-use ledgers.
 //!
 //! - `POST /email/start {email}` — mint a magic-link token for the Slack user
 //!   that email belongs to and mail it there. Deliberately takes **no pubkey**
@@ -19,13 +20,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::http::{header, HeaderName, HeaderValue, StatusCode};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use nostr::{Event, JsonUtil, Keys, Tag};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tower_http::cors::CorsLayer;
 
 use crate::oidc::{self, OidcConfig};
@@ -45,10 +49,26 @@ const MAX_PENDING_OIDC_STATES: usize = 4096;
 /// that redeems it. Replays by that same key are safe because both relay writes
 /// are idempotent; a different key can never take over a partially completed
 /// migration.
-pub struct OidcFinalizeCode {
+struct OidcPendingState {
+    nonce: String,
+    device_challenge: String,
+    slack_code_verifier: String,
+    expires_at: u64,
+}
+
+struct OidcFinalizeCode {
     subject: String,
     pubkey: Option<String>,
+    device_challenge: String,
     expires_at: u64,
+}
+
+/// Process-local OIDC session ledger. Keeping both stages behind one value
+/// prevents callers from constructing mismatched state/code maps.
+#[derive(Default)]
+pub struct OidcSessions {
+    states: Mutex<HashMap<String, OidcPendingState>>,
+    codes: Mutex<HashMap<String, OidcFinalizeCode>>,
 }
 
 /// How the service delivers magic links.
@@ -80,14 +100,8 @@ pub struct Inner {
     pub http: reqwest::Client,
     /// Slack OIDC credentials; `None` disables the `/oidc/*` routes.
     pub oidc: Option<OidcConfig>,
-    /// Live OIDC `state` → (nonce, expiry). CSRF and replay protection for the
-    /// Slack round-trip. The claimant pubkey is deliberately NOT bound here — it
-    /// is proven only at `/oidc/finalize`, so an unauthenticated `/oidc/start`
-    /// can never pin an attacker's key to a victim's Slack login.
-    pub oidc_states: Mutex<HashMap<String, (String, u64)>>,
-    /// Post-callback `code` → verified subject + first proven claimant key.
-    /// Codes are retryable only by that same key until expiry.
-    pub oidc_codes: Mutex<HashMap<String, OidcFinalizeCode>>,
+    /// Process-local Slack authorization and app-handoff sessions.
+    pub oidc_sessions: OidcSessions,
     /// Dev mode: enables `/oidc/dev-complete`, which simulates a verified OIDC
     /// result so the publish path can be exercised without a real Slack app.
     pub dev: bool,
@@ -116,10 +130,13 @@ pub fn router(state: AppState) -> Router {
         .route("/oidc/callback", get(oidc_callback))
         .route("/oidc/finalize", post(oidc_finalize))
         .route("/oidc/dev-complete", get(oidc_dev_complete))
+        // Signed Nostr events are small. Bound JSON bodies before parsing so a
+        // public migration endpoint cannot be used for oversized allocations.
+        .layer(DefaultBodyLimit::max(64 * 1024))
         // Buzz Desktop runs in a WebView origin. The public migration
-        // endpoints are already protected by OIDC state, short-lived bearer
-        // codes, and signed claims; CORS is transport compatibility, not an
-        // authorization boundary.
+        // endpoints are protected by OIDC state, device-verifier-bound
+        // short-lived codes, and signed claims. CORS is transport
+        // compatibility, not an authorization boundary.
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -131,7 +148,7 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-fn random_nonce() -> [u8; 16] {
+fn random_nonce() -> [u8; 32] {
     rand::random()
 }
 
@@ -207,13 +224,10 @@ struct VerifyQuery {
 
 /// The magic-link target. Validates integrity + expiry (not single use) and
 /// renders a page that hands the token to the recipient's Buzz app.
-async fn email_verify(
-    State(state): State<AppState>,
-    Query(q): Query<VerifyQuery>,
-) -> impl IntoResponse {
+async fn email_verify(State(state): State<AppState>, Query(q): Query<VerifyQuery>) -> Response {
     let inner = state.i();
     let tok = MagicToken::from_wire(q.token.clone());
-    match token::verify(&inner.token_secret, &tok, now_secs()) {
+    let response = match token::verify(&inner.token_secret, &tok, now_secs()) {
         Ok(v) => {
             let deep_link = format!(
                 "buzz://import-claim?subject={}&token={}&service={}",
@@ -224,7 +238,8 @@ async fn email_verify(
             Html(verify_page(&v.subject, &deep_link)).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, Html(error_page(&e.to_string()))).into_response(),
-    }
+    };
+    no_store(response)
 }
 
 // ---- POST /email/complete ----------------------------------------------------
@@ -321,20 +336,31 @@ async fn publish_join_attestation_for(
 
 // ---- OIDC channel (Sign in with Slack) --------------------------------------
 
-/// Begin Sign in with Slack: store a fresh `state`/`nonce` and redirect to
-/// Slack. The claimant's Buzz pubkey is intentionally not accepted here — it is
-/// proven at `/oidc/finalize`. This closes the takeover where an attacker starts
-/// OIDC bound to their own key and has a victim complete the Slack login.
-async fn oidc_start(State(state): State<AppState>) -> Result<Redirect, ApiError> {
+/// Begin Sign in with Slack: bind the round-trip to Buzz's device challenge,
+/// store Slack state/nonce/PKCE values, and redirect to Slack. No pubkey is
+/// accepted here; key possession is proven only at `/oidc/finalize`.
+#[derive(Deserialize)]
+struct OidcStartQuery {
+    /// S256 challenge derived from a verifier generated and retained by Buzz.
+    challenge: String,
+}
+
+async fn oidc_start(
+    State(state): State<AppState>,
+    Query(query): Query<OidcStartQuery>,
+) -> Result<Response, ApiError> {
     let inner = state.i();
     let cfg = inner.oidc.as_ref().ok_or_else(oidc_unconfigured)?;
+    validate_device_challenge(&query.challenge)?;
 
     let st = hex::encode(random_nonce());
     let nonce = hex::encode(random_nonce());
+    let slack_code_verifier = hex::encode(random_nonce());
+    let slack_code_challenge = oidc::pkce_challenge(&slack_code_verifier);
     {
         let now = now_secs();
-        let mut states = lock_or_recover(&inner.oidc_states, "oidc states");
-        states.retain(|_, (_, exp)| *exp > now);
+        let mut states = lock_or_recover(&inner.oidc_sessions.states, "oidc states");
+        states.retain(|_, pending| pending.expires_at > now);
         if states.len() >= MAX_PENDING_OIDC_STATES {
             return Err(ApiError::too_many_requests(
                 "too many pending Slack sign-ins; try again shortly",
@@ -342,10 +368,20 @@ async fn oidc_start(State(state): State<AppState>) -> Result<Redirect, ApiError>
         }
         states.insert(
             st.clone(),
-            (nonce.clone(), now.saturating_add(OIDC_STATE_TTL_SECS)),
+            OidcPendingState {
+                nonce: nonce.clone(),
+                device_challenge: query.challenge,
+                slack_code_verifier,
+                expires_at: now.saturating_add(OIDC_STATE_TTL_SECS),
+            },
         );
     }
-    Ok(Redirect::to(&oidc::authorize_url(cfg, &st, &nonce)))
+    Ok(no_store(Redirect::to(&oidc::authorize_url(
+        cfg,
+        &st,
+        &nonce,
+        &slack_code_challenge,
+    ))))
 }
 
 #[derive(Deserialize)]
@@ -366,45 +402,35 @@ struct OidcCallbackQuery {
 async fn oidc_callback(
     State(state): State<AppState>,
     Query(q): Query<OidcCallbackQuery>,
-) -> Result<Redirect, ApiError> {
+) -> Result<Response, ApiError> {
     let inner = state.i();
     let cfg = inner.oidc.as_ref().ok_or_else(oidc_unconfigured)?;
 
     // Consume the state (CSRF + replay) → the nonce we sent Slack.
-    let nonce = {
+    let pending = {
         let now = now_secs();
-        let mut states = lock_or_recover(&inner.oidc_states, "oidc states");
-        states.retain(|_, (_, exp)| *exp > now);
-        states.remove(&q.state).map(|(nonce, _)| nonce)
+        let mut states = lock_or_recover(&inner.oidc_sessions.states, "oidc states");
+        states.retain(|_, pending| pending.expires_at > now);
+        states.remove(&q.state)
     }
     .ok_or_else(|| ApiError::bad("unknown or expired OIDC state"))?;
 
-    let subject = oidc::exchange_code_for_subject(&inner.http, cfg, &q.code, &nonce)
-        .await
-        .map_err(|e| ApiError::upstream(&e.to_string()))?;
+    let subject = oidc::exchange_code_for_subject(
+        &inner.http,
+        cfg,
+        &q.code,
+        &pending.nonce,
+        &pending.slack_code_verifier,
+    )
+    .await
+    .map_err(|e| ApiError::upstream(&e.to_string()))?;
 
-    // Mint a short-lived code bound to the verified subject. The first valid
-    // self-claim also binds it permanently to that claimant key.
-    let code = hex::encode(random_nonce());
-    {
-        let now = now_secs();
-        let mut codes = lock_or_recover(&inner.oidc_codes, "oidc codes");
-        codes.retain(|_, pending| pending.expires_at > now);
-        if codes.len() >= MAX_PENDING_OIDC_STATES {
-            return Err(ApiError::too_many_requests(
-                "too many pending Slack sign-ins; try again shortly",
-            ));
-        }
-        codes.insert(
-            code.clone(),
-            OidcFinalizeCode {
-                subject: subject.clone(),
-                pubkey: None,
-                expires_at: now.saturating_add(OIDC_CODE_TTL_SECS),
-            },
-        );
-    }
-    Ok(Redirect::to(&oidc_app_return_url(inner, &subject, &code)))
+    // Mint a short-lived code bound to the verified subject and to the device
+    // challenge supplied by Buzz before the browser was opened.
+    let code = insert_oidc_finalize_code(inner, subject.clone(), pending.device_challenge)?;
+    Ok(no_store(Redirect::to(&oidc_app_return_url(
+        inner, &subject, &code,
+    ))))
 }
 
 fn oidc_app_return_url(inner: &Inner, subject: &str, code: &str) -> String {
@@ -421,6 +447,8 @@ fn oidc_app_return_url(inner: &Inner, subject: &str, code: &str) -> String {
 struct OidcFinalizeReq {
     /// Short-lived code from the `/oidc/callback` redirect.
     code: String,
+    /// Verifier retained by the Buzz app that initiated `/oidc/start`.
+    verifier: String,
     /// The claimant's signed self-claim (kind `KIND_IMPORT_IDENTITY_CLAIM`). Its
     /// valid signature proves control of the pubkey to be attested; its `d` tag
     /// must equal the code's OIDC-verified subject.
@@ -432,10 +460,9 @@ struct OidcFinalizeReq {
 /// accompanying self-claim, never to an attacker-suppliable parameter.
 ///
 /// The claim event is fully verified (id hash + Schnorr signature); its `d` tag
-/// must equal the Slack-verified subject the code stands for. Because the code
-/// reaches only the app that completed the Slack login, and the attested pubkey
-/// is proven by signature, a phisher who makes a victim authenticate can neither
-/// obtain the code nor forge a self-claim for a key they do not hold.
+/// must equal the Slack-verified subject. The finalize code additionally
+/// requires the verifier retained by the Buzz transaction that initiated the
+/// browser flow, so intercepting the custom-scheme callback is insufficient.
 async fn oidc_finalize(
     State(state): State<AppState>,
     Json(req): Json<OidcFinalizeReq>,
@@ -475,6 +502,7 @@ async fn oidc_finalize(
     let subject = bind_oidc_finalize_code(
         inner,
         &req.code,
+        &req.verifier,
         claim_subject.as_deref(),
         &pubkey,
         now_secs(),
@@ -489,15 +517,17 @@ async fn oidc_finalize(
 fn bind_oidc_finalize_code(
     inner: &Inner,
     code: &str,
+    verifier: &str,
     claim_subject: Option<&str>,
     pubkey: &str,
     now: u64,
 ) -> Result<String, ApiError> {
-    let mut codes = lock_or_recover(&inner.oidc_codes, "oidc codes");
+    let mut codes = lock_or_recover(&inner.oidc_sessions.codes, "oidc codes");
     codes.retain(|_, pending| pending.expires_at > now);
     let pending = codes
         .get_mut(code)
         .ok_or_else(|| ApiError::bad("unknown or expired finalize code"))?;
+    validate_device_verifier(verifier, &pending.device_challenge)?;
     if claim_subject != Some(pending.subject.as_str()) {
         return Err(ApiError::bad(
             "self-claim does not match the verified Slack identity",
@@ -519,6 +549,8 @@ fn bind_oidc_finalize_code(
 struct OidcDevCompleteQuery {
     /// Simulated Slack user id (e.g. `U060`).
     sub: String,
+    /// S256 challenge generated by Buzz, matching the real `/oidc/start`.
+    challenge: String,
 }
 
 #[derive(Serialize)]
@@ -547,25 +579,67 @@ async fn oidc_dev_complete(
     if sub.is_empty() {
         return Err(ApiError::bad("sub must not be empty"));
     }
+    validate_device_challenge(&q.challenge)?;
     let subject = format!("slack:{}:{sub}", inner.team_id);
-    let code = hex::encode(random_nonce());
-    {
-        let now = now_secs();
-        let mut codes = lock_or_recover(&inner.oidc_codes, "oidc codes");
-        codes.insert(
-            code.clone(),
-            OidcFinalizeCode {
-                subject: subject.clone(),
-                pubkey: None,
-                expires_at: now.saturating_add(OIDC_CODE_TTL_SECS),
-            },
-        );
-    }
+    let code = insert_oidc_finalize_code(inner, subject.clone(), q.challenge)?;
     let app_return_url = oidc_app_return_url(inner, &subject, &code);
     Ok(Json(DevCompleteResp {
         subject,
         app_return_url,
     }))
+}
+
+fn insert_oidc_finalize_code(
+    inner: &Inner,
+    subject: String,
+    device_challenge: String,
+) -> Result<String, ApiError> {
+    let code = hex::encode(random_nonce());
+    let now = now_secs();
+    let mut codes = lock_or_recover(&inner.oidc_sessions.codes, "oidc codes");
+    codes.retain(|_, pending| pending.expires_at > now);
+    if codes.len() >= MAX_PENDING_OIDC_STATES {
+        return Err(ApiError::too_many_requests(
+            "too many pending Slack sign-ins; try again shortly",
+        ));
+    }
+    codes.insert(
+        code.clone(),
+        OidcFinalizeCode {
+            subject,
+            pubkey: None,
+            device_challenge,
+            expires_at: now.saturating_add(OIDC_CODE_TTL_SECS),
+        },
+    );
+    Ok(code)
+}
+
+fn validate_device_challenge(challenge: &str) -> Result<(), ApiError> {
+    let decoded = URL_SAFE_NO_PAD
+        .decode(challenge)
+        .map_err(|_| ApiError::bad("challenge must be an S256 base64url value"))?;
+    if decoded.len() != 32 {
+        return Err(ApiError::bad("challenge must be an S256 base64url value"));
+    }
+    Ok(())
+}
+
+fn validate_device_verifier(verifier: &str, expected_challenge: &str) -> Result<(), ApiError> {
+    if !(43..=128).contains(&verifier.len())
+        || !verifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        return Err(ApiError::bad("invalid device verifier"));
+    }
+    let actual = oidc::pkce_challenge(verifier);
+    if !bool::from(actual.as_bytes().ct_eq(expected_challenge.as_bytes())) {
+        return Err(ApiError::bad(
+            "device verifier does not match this Slack sign-in",
+        ));
+    }
+    Ok(())
 }
 
 fn oidc_unconfigured() -> ApiError {
@@ -598,6 +672,19 @@ fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &str) -> MutexGuard<'a, T> 
             poisoned.into_inner()
         }
     }
+}
+
+fn no_store(response: impl IntoResponse) -> Response {
+    let mut response = response.into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response.headers_mut().insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("no-referrer"),
+    );
+    response
 }
 
 fn token_err_to_api(e: &TokenError) -> ApiError {
@@ -728,8 +815,7 @@ mod tests {
             mailer: Mailer::Dev,
             http: reqwest::Client::new(),
             oidc: None,
-            oidc_states: Mutex::new(HashMap::new()),
-            oidc_codes: Mutex::new(HashMap::new()),
+            oidc_sessions: OidcSessions::default(),
             dev: false,
         }
     }
@@ -806,6 +892,21 @@ mod tests {
     }
 
     #[test]
+    fn sensitive_responses_disable_caching_and_referrers() {
+        let response = no_store(Html("secret"));
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static("no-store, max-age=0"))
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(HeaderName::from_static("referrer-policy")),
+            Some(&HeaderValue::from_static("no-referrer"))
+        );
+    }
+
+    #[test]
     fn oidc_return_carries_code_relay_and_service() {
         let inner = test_inner();
         assert_eq!(
@@ -823,13 +924,30 @@ mod tests {
             redirect_uri: "https://migrate.example/oidc/callback".into(),
             team_id: "T060".into(),
         });
-        inner.oidc_states = Mutex::new(
+        inner.oidc_sessions.states = Mutex::new(
             (0..MAX_PENDING_OIDC_STATES)
-                .map(|index| (format!("state-{index}"), ("nonce".into(), u64::MAX)))
+                .map(|index| {
+                    (
+                        format!("state-{index}"),
+                        OidcPendingState {
+                            nonce: "nonce".into(),
+                            device_challenge: oidc::pkce_challenge(&test_verifier()),
+                            slack_code_verifier: "slack-verifier".into(),
+                            expires_at: u64::MAX,
+                        },
+                    )
+                })
                 .collect(),
         );
         let state = AppState(Arc::new(inner));
-        let error = match oidc_start(State(state)).await {
+        let error = match oidc_start(
+            State(state),
+            Query(OidcStartQuery {
+                challenge: oidc::pkce_challenge(&test_verifier()),
+            }),
+        )
+        .await
+        {
             Ok(_) => panic!("capacity must reject"),
             Err(error) => error,
         };
@@ -853,15 +971,20 @@ mod tests {
 
     fn inner_with_code(code: &str, subject: &str) -> Inner {
         let inner = test_inner();
-        inner.oidc_codes.lock().unwrap().insert(
+        inner.oidc_sessions.codes.lock().unwrap().insert(
             code.to_string(),
             OidcFinalizeCode {
                 subject: subject.to_string(),
                 pubkey: None,
+                device_challenge: oidc::pkce_challenge(&test_verifier()),
                 expires_at: u64::MAX,
             },
         );
         inner
+    }
+
+    fn test_verifier() -> String {
+        "v".repeat(43)
     }
 
     #[test]
@@ -870,6 +993,7 @@ mod tests {
         let first = bind_oidc_finalize_code(
             &inner,
             "retry-code",
+            &test_verifier(),
             Some("slack:U060"),
             &"aa".repeat(32),
             100,
@@ -879,6 +1003,7 @@ mod tests {
         assert!(bind_oidc_finalize_code(
             &inner,
             "retry-code",
+            &test_verifier(),
             Some("slack:U060"),
             &"aa".repeat(32),
             101,
@@ -887,6 +1012,7 @@ mod tests {
         let error = bind_oidc_finalize_code(
             &inner,
             "retry-code",
+            &test_verifier(),
             Some("slack:U060"),
             &"bb".repeat(32),
             102,
@@ -901,6 +1027,7 @@ mod tests {
         assert!(bind_oidc_finalize_code(
             &inner,
             "subject-code",
+            &test_verifier(),
             Some("slack:U999"),
             &"aa".repeat(32),
             100,
@@ -909,6 +1036,30 @@ mod tests {
         assert!(bind_oidc_finalize_code(
             &inner,
             "subject-code",
+            &test_verifier(),
+            Some("slack:U060"),
+            &"bb".repeat(32),
+            101,
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn wrong_device_verifier_does_not_bind_finalize_code() {
+        let inner = inner_with_code("device-code", "slack:U060");
+        assert!(bind_oidc_finalize_code(
+            &inner,
+            "device-code",
+            &"x".repeat(43),
+            Some("slack:U060"),
+            &"aa".repeat(32),
+            100,
+        )
+        .is_err());
+        assert!(bind_oidc_finalize_code(
+            &inner,
+            "device-code",
+            &test_verifier(),
             Some("slack:U060"),
             &"bb".repeat(32),
             101,
@@ -928,6 +1079,7 @@ mod tests {
             State(state),
             Json(OidcFinalizeReq {
                 code: "code1".into(),
+                verifier: test_verifier(),
                 claim,
             }),
         )
@@ -948,6 +1100,7 @@ mod tests {
             State(state),
             Json(OidcFinalizeReq {
                 code: "code2".into(),
+                verifier: test_verifier(),
                 claim,
             }),
         )
@@ -965,6 +1118,7 @@ mod tests {
             State(state),
             Json(OidcFinalizeReq {
                 code: "not-the-code".into(),
+                verifier: test_verifier(),
                 claim,
             }),
         )
@@ -987,6 +1141,7 @@ mod tests {
             State(state),
             Json(OidcFinalizeReq {
                 code: "code4".into(),
+                verifier: test_verifier(),
                 claim,
             }),
         )

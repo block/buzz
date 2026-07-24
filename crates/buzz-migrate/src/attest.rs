@@ -3,8 +3,9 @@
 //!
 //! This is the one place the service uses the operator's admin key. The Slack
 //! OAuth join path first publishes an idempotent member-add event, then a
-//! `KIND_IMPORT_IDENTITY_BINDING` mapping the proven `subject` (`slack:<id>`) to
-//! the claimant's Buzz pubkey. Email recovery publishes only the binding.
+//! `KIND_IMPORT_IDENTITY_BINDING` mapping the proven subject
+//! (`slack:<team>:<user>`) to the claimant's Buzz pubkey. Email recovery
+//! publishes only the binding.
 //!
 //! The attestation is only *half* of a binding: nothing is attributed until the
 //! claimant's own `KIND_IMPORT_IDENTITY_CLAIM` (self-signed) also exists. So a
@@ -57,7 +58,7 @@ pub async fn publish_add_member(
 /// Sign and publish the attestation `subject → bound_pubkey_hex` with the
 /// operator's `admin` key. Returns the published event id on success.
 ///
-/// `subject` is the binding key (`slack:<id>`); `bound_pubkey_hex` is the
+/// `subject` is the binding key (`slack:<team>:<user>`); `bound_pubkey_hex` is the
 /// claimant's 64-char hex pubkey. `auth_tag` carries the relay's community
 /// scope when one is required (same tag the CLI injects).
 pub async fn publish_attestation(

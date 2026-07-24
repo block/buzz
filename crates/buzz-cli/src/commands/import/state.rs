@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CliError;
 
+const CURRENT_STATE_VERSION: u32 = 1;
+
 /// Per-channel state: the Buzz UUID minted for it and whether metadata
 /// (create + topic/purpose) has been published.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,8 +29,14 @@ pub struct ChannelState {
 }
 
 /// The whole state file.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ImportState {
+    /// State schema version. Missing means the file predates workspace pinning.
+    #[serde(default)]
+    version: u32,
+    /// Slack workspace this ledger belongs to.
+    #[serde(default)]
+    team_id: Option<String>,
     /// Slack channel ID → channel state.
     #[serde(default)]
     pub channels: HashMap<String, ChannelState>,
@@ -40,10 +48,26 @@ pub struct ImportState {
     pub reactions: HashSet<String>,
 }
 
+impl Default for ImportState {
+    fn default() -> Self {
+        Self {
+            version: CURRENT_STATE_VERSION,
+            team_id: None,
+            channels: HashMap::new(),
+            messages: HashMap::new(),
+            reactions: HashSet::new(),
+        }
+    }
+}
+
 impl ImportState {
-    /// Load state from `path`; a missing file yields empty state.
-    pub fn load(path: &Path) -> Result<Self, CliError> {
-        match std::fs::read_to_string(path) {
+    /// Load state from `path` and bind it to one Slack workspace.
+    ///
+    /// A missing file yields fresh state. A non-empty legacy file is rejected:
+    /// it may contain unscoped `import_author` values, so silently adopting it
+    /// could skip messages that can never match workspace-scoped bindings.
+    pub fn load_for_workspace(path: &Path, team_id: &str) -> Result<Self, CliError> {
+        let mut state: Self = match std::fs::read_to_string(path) {
             Ok(raw) => serde_json::from_str(&raw).map_err(|e| {
                 CliError::Usage(format!(
                     "state file {} is corrupt: {e} — move it aside to restart the import",
@@ -55,7 +79,35 @@ impl ImportState {
                 "cannot read state file {}: {e}",
                 path.display()
             ))),
+        }?;
+
+        if state.version == 0 && !state.is_empty() {
+            return Err(CliError::Usage(format!(
+                "state file {} predates workspace-scoped Slack imports and cannot be resumed \
+                 safely; use a fresh target community, or add version/team_id only after \
+                 verifying the existing events already use slack:<team>:<user> identities",
+                path.display()
+            )));
         }
+        if state.version > CURRENT_STATE_VERSION {
+            return Err(CliError::Usage(format!(
+                "state file {} uses newer schema version {}; this CLI supports version {}",
+                path.display(),
+                state.version,
+                CURRENT_STATE_VERSION
+            )));
+        }
+        if let Some(saved_team_id) = state.team_id.as_deref() {
+            if saved_team_id != team_id {
+                return Err(CliError::Usage(format!(
+                    "state file {} belongs to Slack workspace {saved_team_id}, not {team_id}",
+                    path.display()
+                )));
+            }
+        }
+        state.version = CURRENT_STATE_VERSION;
+        state.team_id = Some(team_id.to_string());
+        Ok(state)
     }
 
     /// Persist state to `path` (write-temp-then-rename so an interrupted
@@ -75,6 +127,10 @@ impl ImportState {
     pub fn message_key(channel_id: &str, ts: &str) -> String {
         format!("{channel_id}:{ts}")
     }
+
+    fn is_empty(&self) -> bool {
+        self.channels.is_empty() && self.messages.is_empty() && self.reactions.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -87,7 +143,8 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("mkdir");
         let path = dir.join("state.json");
 
-        let mut state = ImportState::default();
+        let mut state =
+            ImportState::load_for_workspace(&path, "T1").expect("missing state is fresh");
         state.channels.insert(
             "C1".into(),
             ChannelState {
@@ -102,7 +159,7 @@ mod tests {
         state.reactions.insert("C1:1.000:👍".into());
         state.save(&path).expect("save");
 
-        let loaded = ImportState::load(&path).expect("load");
+        let loaded = ImportState::load_for_workspace(&path, "T1").expect("load");
         assert_eq!(loaded.channels["C1"].uuid, "u-u-i-d");
         assert!(loaded.channels["C1"].metadata_done);
         assert!(loaded.channels["C1"].archived_done);
@@ -115,8 +172,41 @@ mod tests {
     #[test]
     fn missing_file_is_empty_state() {
         let path = std::path::PathBuf::from("/nonexistent/dir/state.json");
-        let state = ImportState::load(&path).expect("missing file is fine");
+        let state = ImportState::load_for_workspace(&path, "T1").expect("missing file is fine");
         assert!(state.channels.is_empty());
         assert!(state.messages.is_empty());
+    }
+
+    #[test]
+    fn rejects_state_from_a_different_workspace() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-import-state-team-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("state.json");
+        ImportState::load_for_workspace(&path, "T1")
+            .expect("fresh")
+            .save(&path)
+            .expect("save");
+
+        let error = ImportState::load_for_workspace(&path, "T2").expect_err("must reject");
+        assert!(error.to_string().contains("belongs to Slack workspace T1"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_non_empty_legacy_state() {
+        let dir =
+            std::env::temp_dir().join(format!("buzz-import-state-legacy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("state.json");
+        std::fs::write(
+            &path,
+            r#"{"channels":{},"messages":{"C1:1.0":"abc"},"reactions":[]}"#,
+        )
+        .expect("write");
+
+        let error = ImportState::load_for_workspace(&path, "T1").expect_err("must reject");
+        assert!(error.to_string().contains("predates workspace-scoped"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

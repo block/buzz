@@ -22,7 +22,11 @@ import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { ImportClaimDialog } from "@/features/messages/ui/ImportClaimDialog";
-import { publishImportIdentityClaim } from "@/features/messages/lib/publishImportIdentityClaim";
+import { publishImportIdentityClaim } from "@/features/messages/lib/importIdentityClaims";
+import {
+  buildSlackOidcStartUrl,
+  createSlackOidcVerifier,
+} from "@/features/messages/lib/slackMigrationOidc";
 import { importIdentityBindingsQueryKey } from "@/features/messages/useImportIdentityBindings";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
@@ -301,7 +305,7 @@ function CommunityApp({
   const communityOnboarding = useCommunityOnboarding();
   const queryClient = useQueryClient();
   const connectingTransactionRef = useRef<string | null>(null);
-  const slackAuthTransactionRef = useRef<string | null>(null);
+  const slackAuthVerifierRef = useRef<string | null>(null);
   const slackClaimTransactionRef = useRef<string | null>(null);
   // Tracks the ID of the profile-check request that has been launched for the
   // current connecting transaction. Prevents the effect from launching a
@@ -417,17 +421,34 @@ function CommunityApp({
     if (transaction?.stage !== "slack-auth" || !transaction.slackService)
       return;
     // Require the device key to exist before sending them to Slack, so the
-    // finalize step (which signs with it) can't strand a completed sign-in. The
-    // key is NOT sent to /oidc/start — possession is proven only at finalize.
+    // finalize step (which signs with it) can't strand a completed sign-in.
+    // /oidc/start receives only a one-way challenge; key possession and the
+    // device-held verifier are proven at finalize.
     if (!currentPubkey) return;
-    if (slackAuthTransactionRef.current === transaction.id) return;
-    slackAuthTransactionRef.current = transaction.id;
-    const base = transaction.slackService.replace(/\/+$/, "");
-    const startUrl = `${base}/oidc/start`;
+    if (!transaction.slackOidcVerifier) {
+      communityOnboarding.update(
+        { slackOidcVerifier: createSlackOidcVerifier(), error: undefined },
+        transaction.id,
+      );
+      return;
+    }
+    if (slackAuthVerifierRef.current === transaction.slackOidcVerifier) return;
+    slackAuthVerifierRef.current = transaction.slackOidcVerifier;
     try {
+      const startUrl = await buildSlackOidcStartUrl(
+        transaction.slackService,
+        transaction.slackOidcVerifier,
+      );
+      if (
+        transactionRef.current?.id !== transaction.id ||
+        transactionRef.current.stage !== "slack-auth"
+      ) {
+        slackAuthVerifierRef.current = null;
+        return;
+      }
       await openUrl(startUrl);
     } catch (error) {
-      slackAuthTransactionRef.current = null; // allow a retry
+      slackAuthVerifierRef.current = null; // allow a retry
       communityOnboarding.update({
         error: error instanceof Error ? error.message : String(error),
       });
@@ -437,7 +458,7 @@ function CommunityApp({
   // Reopen the Slack sign-in on demand (the browser tab was closed, or the
   // auto-open failed): clear the once-guard, then open again.
   const handleCommunityOnboardingSlackAuthRetry = useCallback(() => {
-    slackAuthTransactionRef.current = null;
+    slackAuthVerifierRef.current = null;
     communityOnboarding.update({ error: undefined });
     void handleCommunityOnboardingSlackAuth();
   }, [communityOnboarding, handleCommunityOnboardingSlackAuth]);

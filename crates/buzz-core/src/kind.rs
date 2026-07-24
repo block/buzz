@@ -315,7 +315,7 @@ pub const KIND_DM_VISIBILITY: u32 = 30622;
 /// Import identity binding: an owner/admin-signed **attestation** that a
 /// foreign workspace identity (e.g. a Slack user id) belongs to a given Buzz
 /// pubkey. Parameterized-replaceable, `d = <source>:<foreign id>` (e.g.
-/// `slack:U060976D0QN`), with a single `["p", <pubkey hex>]` naming the
+/// `slack:T0266FRGM:U060976D0QN`), with a single `["p", <pubkey hex>]` naming the
 /// attested identity. The relay accepts this kind ONLY from a community owner
 /// or admin (mirrors the kind:9030 relay-admin authorization).
 ///
