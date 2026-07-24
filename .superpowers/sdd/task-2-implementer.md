@@ -26,6 +26,12 @@ Implemented the typed LM Studio-native runtime policy and transport boundary.
 - Added `Provider::LmStudioNative` and a distinct
   `buzz-lmstudio-agent` entry point. It defaults to the native provider, refuses
   every other provider, and does not expose the generic `auth` subcommand.
+- Every `Provider::LmStudioNative` ACP session rejects non-empty legacy stdio
+  `mcpServers` before `McpRegistry::spawn_all`; a marker-command integration
+  test proves no process launch and no `BUZZ_PRIVATE_KEY` inheritance.
+- Non-success native HTTP bodies are bounded and drained but never included in
+  diagnostics. Only the HTTP status is surfaced, preventing reflected OFFICIAL
+  content, control characters, or forged log lines.
 - Existing Anthropic, OpenAI-compatible, and Databricks paths remain on their
   prior code paths.
 
@@ -66,7 +72,24 @@ cargo clippy -p buzz-agent --all-targets -- -D warnings
 passed
 
 cargo test -p buzz-agent -- --test-threads=1
-297 unit + 75 integration tests passed; 0 failed
+297 unit + 76 integration tests passed; 0 failed
+```
+
+## Review correction evidence
+
+The Task 2 review found that the dedicated native entry point could still pass
+caller-controlled ACP stdio MCP definitions into the legacy process launcher.
+The RED integration test received `-32000` from the legacy MCP spawn path. The
+corrected path checks the typed `Provider::LmStudioNative` mode immediately
+after decoding `session/new`, returns `-32602`, and leaves the credential marker
+absent.
+
+The diagnostic-hardening RED test also demonstrated that a native server could
+reflect a token, OFFICIAL prompt, newline, and ANSI control sequence into the
+agent error. The corrected transport returns only:
+
+```text
+LM Studio native request failed with <HTTP status>
 ```
 
 ## Deliberate Task 3 boundary

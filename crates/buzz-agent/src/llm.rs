@@ -225,12 +225,8 @@ impl LmStudioNativeClient {
         };
         let bytes = read_bounded_native_body(response, limit).await?;
         if !status.is_success() {
-            let mut diagnostic = String::from_utf8_lossy(&bytes).into_owned();
-            if let Some(token) = self.runtime.api_token().filter(|token| !token.is_empty()) {
-                diagnostic = diagnostic.replace(token, "[REDACTED]");
-            }
             return Err(AgentError::Llm(format!(
-                "LM Studio native request failed with {status}: {diagnostic}"
+                "LM Studio native request failed with {status}"
             )));
         }
         Ok(bytes)
@@ -3316,13 +3312,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_transport_redacts_token_echoed_in_error_body() {
+    async fn native_transport_suppresses_arbitrary_reflected_error_body() {
         let router = axum::Router::new().route(
             "/api/v1/models",
             axum::routing::get(|| async {
                 (
                     axum::http::StatusCode::UNAUTHORIZED,
-                    "rejected native-secret",
+                    "native-secret\nOFFICIAL navigation prompt\u{1b}[31m forged log",
                 )
             }),
         );
@@ -3343,7 +3339,13 @@ mod tests {
             .expect_err("401 must fail")
             .to_string();
         assert!(!error.contains("native-secret"), "{error}");
-        assert!(error.contains("[REDACTED]"), "{error}");
+        assert!(!error.contains("OFFICIAL navigation prompt"), "{error}");
+        assert!(!error.contains('\n'), "{error:?}");
+        assert!(!error.contains('\u{1b}'), "{error:?}");
+        assert_eq!(
+            error,
+            "llm: LM Studio native request failed with 401 Unauthorized"
+        );
     }
 
     #[test]

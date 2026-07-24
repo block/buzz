@@ -359,6 +359,15 @@ async fn session_new(app: &Arc<App>, id: Value, params: Value, wire_tx: &WireSen
         Ok(p) => p,
         Err(m) => return reject(wire_tx, id, INVALID_PARAMS, &m).await,
     };
+    if app.cfg.provider == Provider::LmStudioNative && !p.mcp_servers.is_empty() {
+        return reject(
+            wire_tx,
+            id,
+            INVALID_PARAMS,
+            "session/new: LM Studio native runtime rejects legacy stdio MCP servers",
+        )
+        .await;
+    }
     if p.cwd.is_empty() || !Path::new(&p.cwd).is_absolute() {
         return reject(
             wire_tx,
