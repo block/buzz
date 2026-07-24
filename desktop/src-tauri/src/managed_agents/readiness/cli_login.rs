@@ -61,6 +61,15 @@ pub(super) fn requirements(
                         diagnostic: stderr_excerpt,
                     }]
                 }
+                // Outdated Claude Code (etc.): surface the update hint via the
+                // same CliLogin nudge so Doctor / setup can point at repair.
+                cli_probe::ProbeOutcome::Unsupported { diagnostic } => {
+                    vec![missing_requirement(
+                        probe_args,
+                        &diagnostic,
+                        AcpAvailabilityStatus::Available,
+                    )]
+                }
             }
         }
         other => vec![missing_requirement(probe_args, setup_copy, other)],

@@ -399,6 +399,15 @@ function RuntimeRow({
             Config error: {runtime.authStatus.diagnostic}
           </p>
         ) : null}
+        {runtime.authStatus.status === "unknown" &&
+        runtime.authStatus.diagnostic ? (
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-auth-unknown-${runtime.id}`}
+          >
+            {runtime.authStatus.diagnostic}
+          </p>
+        ) : null}
 
         {installSuccess && runtime.availability !== "available" ? (
           <p className="mt-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-sm text-green-700 dark:text-green-400">

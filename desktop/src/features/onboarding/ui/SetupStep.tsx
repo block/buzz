@@ -238,6 +238,21 @@ function RuntimeStatus({
     runtime.availability === "available" &&
     runtime.authStatus.status === "unknown"
   ) {
+    // Outdated Claude Code (etc.): Install repairs the CLI via `claude update`.
+    if (runtime.canAutoInstall) {
+      return (
+        <Button
+          aria-label={`Update ${runtime.label} CLI`}
+          className="buzz-onboarding-runtime-setup h-5 rounded-full bg-[var(--buzz-welcome-chartreuse)]/30 px-2.5 font-mono !text-badge font-normal uppercase text-foreground hover:bg-[var(--buzz-welcome-chartreuse)]/40"
+          data-testid={`onboarding-runtime-install-${runtime.id}`}
+          onClick={onInstall}
+          type="button"
+          variant="ghost"
+        >
+          UPDATE CLI
+        </Button>
+      );
+    }
     return (
       <Button
         aria-label={`Check ${runtime.label} again`}
@@ -451,10 +466,14 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     runtime.availability === "available" &&
     runtime.authStatus.status === "unknown"
   ) {
+    const detail =
+      runtime.authStatus.diagnostic ??
+      runtime.loginHint ??
+      "Couldn’t verify authentication.";
     return (
       <RuntimeErrorTooltip
         className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
-        detail="Couldn’t verify authentication."
+        detail={detail}
         label="Status unavailable"
       />
     );
