@@ -174,8 +174,8 @@ test("unknown authentication offers UPDATE CLI when auto-install is available", 
 
   const card = page.getByTestId("onboarding-runtime-claude");
   await expect(
-    card.getByRole("status", { name: /Status unavailable/ }),
-  ).toBeVisible();
+    card.getByTestId("onboarding-runtime-update-hint-claude"),
+  ).toHaveText("Update required");
   const updateCli = page.getByRole("button", {
     name: "Update Claude Code CLI",
   });

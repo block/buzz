@@ -452,6 +452,15 @@ function getOnboardingAuthMethods(
   return supported;
 }
 
+function runtimeAuthUnknownDetail(runtime: AcpRuntimeCatalogEntry): string {
+  if (runtime.authStatus.status !== "unknown") return "";
+  return (
+    runtime.authStatus.diagnostic ??
+    runtime.loginHint ??
+    "Update this CLI, then try again."
+  );
+}
+
 function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   if (runtime.authStatus.status === "config_invalid") {
     return (
@@ -462,22 +471,8 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
       />
     );
   }
-  if (
-    runtime.availability === "available" &&
-    runtime.authStatus.status === "unknown"
-  ) {
-    const detail =
-      runtime.authStatus.diagnostic ??
-      runtime.loginHint ??
-      "Couldn’t verify authentication.";
-    return (
-      <RuntimeErrorTooltip
-        className="absolute inset-x-3 bottom-2 truncate text-xs leading-4 text-destructive"
-        detail={detail}
-        label="Status unavailable"
-      />
-    );
-  }
+  // Unknown auth (e.g. outdated Claude Code) is rendered inline under the CTA
+  // in RuntimeCard — keep this slot for bottom-pinned errors only.
   return null;
 }
 
@@ -558,7 +553,16 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {!isAvailable && runtimeDetailText(runtime) ? (
+        {isAvailable &&
+        runtime.authStatus.status === "unknown" &&
+        !installError ? (
+          <RuntimeErrorTooltip
+            className="max-w-[13rem] text-2xs leading-4 text-muted-foreground"
+            detail={runtimeAuthUnknownDetail(runtime)}
+            label="Update required"
+            testId={`onboarding-runtime-update-hint-${runtime.id}`}
+          />
+        ) : !isAvailable && runtimeDetailText(runtime) ? (
           <p
             aria-hidden={installError ? "true" : undefined}
             className={cn(
