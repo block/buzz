@@ -7,6 +7,8 @@ services:
     depends_on:
       relay:
         condition: service_healthy
+      pair:
+        condition: service_healthy
     environment:
       BUZZ_DOMAIN: ${BUZZ_DOMAIN:?set BUZZ_DOMAIN}
     ports:
