@@ -48,12 +48,13 @@ export function ProfileAvatar({
   // the poster and hover animation can recover independently.
   const liveSrc = baseUrl ? rewriteRelayUrl(baseUrl) : null;
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
-
-  // Clear sticky failure when the candidate URL changes so a transient relay
+  // Adjust failure state when the candidate URL changes so a transient relay
   // blip can recover without remounting (e.g. visiting Settings).
-  React.useEffect(() => {
+  const [trackedLiveSrc, setTrackedLiveSrc] = React.useState(liveSrc);
+  if (liveSrc !== trackedLiveSrc) {
+    setTrackedLiveSrc(liveSrc);
     setFailedSrc(null);
-  }, [liveSrc]);
+  }
 
   const liveFailed = liveSrc !== null && failedSrc === liveSrc;
 
@@ -89,11 +90,7 @@ export function ProfileAvatar({
           )}
           data-testid={testId ? `${testId}-image` : undefined}
           onLoadingStatusChange={(status) => {
-            if (
-              status === "error" &&
-              liveSrc !== null &&
-              src === liveSrc
-            ) {
+            if (status === "error" && liveSrc !== null && src === liveSrc) {
               setFailedSrc(liveSrc);
             }
             // Only clear on a successful live load — clearing after a data-URL
