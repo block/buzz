@@ -254,15 +254,8 @@ fn upload_filename(file_path: &str) -> Option<String> {
     }
 }
 
-fn apply_local_upload_metadata(
-    desc: &mut BlobDescriptor,
-    filename: Option<&str>,
-    upload_mime: &str,
-) {
+fn apply_local_upload_metadata(desc: &mut BlobDescriptor, filename: Option<&str>) {
     desc.filename = filename.map(ToOwned::to_owned);
-    if desc.mime_type == "application/octet-stream" && upload_mime != "application/octet-stream" {
-        desc.mime_type = upload_mime.to_string();
-    }
 }
 
 /// Returns `true` for moderation command kinds (9040–9044).
@@ -1274,7 +1267,7 @@ impl BuzzClient {
         // itself is not retried; only transient failures on the selected legacy endpoint are.
         match result {
             Ok(mut desc) => {
-                apply_local_upload_metadata(&mut desc, filename.as_deref(), &mime);
+                apply_local_upload_metadata(&mut desc, filename.as_deref());
                 return Ok(desc);
             }
             Err(CliError::Relay { status: s, body: _ })
@@ -1332,7 +1325,7 @@ impl BuzzClient {
                 }
             })
             .await?;
-        apply_local_upload_metadata(&mut desc, filename.as_deref(), &mime);
+        apply_local_upload_metadata(&mut desc, filename.as_deref());
         Ok(desc)
     }
 
@@ -1949,7 +1942,7 @@ mod retry_policy_tests {
     }
 
     #[tokio::test]
-    async fn upload_file_accepts_markdown_with_filename_and_extension_mime() {
+    async fn upload_file_accepts_markdown_with_filename_and_relay_mime() {
         type Capture = Arc<std::sync::Mutex<Option<(String, Vec<u8>)>>>;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1991,7 +1984,7 @@ mod retry_policy_tests {
         let client = test_client(&format!("http://{addr}"));
         let desc = client.upload_file(path.to_str().unwrap()).await.unwrap();
 
-        assert_eq!(desc.mime_type, "text/markdown");
+        assert_eq!(desc.mime_type, "application/octet-stream");
         assert_eq!(desc.filename.as_deref(), Some("RUNBOOK.md"));
 
         let captured = capture.lock().unwrap().clone().unwrap();
