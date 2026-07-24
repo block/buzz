@@ -94,6 +94,14 @@ mod tests {
         );
         assert!(goose.adapter_install_instructions_url.is_empty());
         assert!(goose.cli_install_hint.contains("desktop app alone"));
+        assert!(goose
+            .cli_install_commands_windows
+            .iter()
+            .any(|command| command.contains("raw.githubusercontent.com/aaif-goose/goose/main")));
+        assert!(goose
+            .cli_install_commands_windows
+            .iter()
+            .any(|command| command.contains("CONFIGURE='false'")));
 
         let claude = known_acp_runtime_exact("claude").unwrap();
         assert_eq!(
