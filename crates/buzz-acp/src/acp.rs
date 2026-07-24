@@ -367,6 +367,34 @@ fn build_client_capabilities() -> serde_json::Value {
     })
 }
 
+/// Build the OS command that hosts an ACP runtime.
+///
+/// Hermes's installer exposes a Bash launcher that `exec`s its Python entry
+/// point. On Unix/macOS that entry point stops servicing stdio when the launcher
+/// itself is made the process-group leader. Keep a non-execing shell supervisor
+/// as the group leader instead; Hermes remains a child in the same group, so
+/// `killpg` still cleans up Hermes and every tool/MCP descendant.
+fn build_agent_spawn_command(command: &str, args: &[String]) -> std::process::Command {
+    #[cfg(unix)]
+    if matches!(
+        crate::config::normalize_agent_command_identity(command).as_str(),
+        "hermes" | "hermes-agent"
+    ) {
+        let mut supervised = std::process::Command::new("/bin/sh");
+        supervised
+            .arg("-c")
+            .arg("\"$@\"; status=$?; exit \"$status\"")
+            .arg("buzz-acp-hermes-supervisor")
+            .arg(command)
+            .args(args);
+        return supervised;
+    }
+
+    let mut direct = std::process::Command::new(command);
+    direct.args(args);
+    direct
+}
+
 impl AcpClient {
     /// Kill the agent subprocess and wait for it to exit (no zombies).
     ///
@@ -413,9 +441,8 @@ impl AcpClient {
     ) -> Result<Self, AcpError> {
         use std::process::Stdio;
 
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .stdin(Stdio::piped())
+        let mut cmd = tokio::process::Command::from(build_agent_spawn_command(command, args));
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Inherit stderr so agent logs are visible in the harness terminal.
             .stderr(Stdio::inherit())
@@ -2007,6 +2034,29 @@ fn configure_no_window(cmd: &mut tokio::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_spawn_command_keeps_a_supervisor_as_process_group_leader() {
+        let args = vec!["acp".to_string()];
+        let command = build_agent_spawn_command("/Users/test/.local/bin/hermes", &args);
+        let actual_args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command.get_program(), "/bin/sh");
+        assert_eq!(
+            actual_args,
+            vec![
+                "-c",
+                "\"$@\"; status=$?; exit \"$status\"",
+                "buzz-acp-hermes-supervisor",
+                "/Users/test/.local/bin/hermes",
+                "acp",
+            ]
+        );
+    }
 
     #[test]
     fn stop_reason_parses_all_known_values() {

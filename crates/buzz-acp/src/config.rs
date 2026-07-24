@@ -619,6 +619,7 @@ fn default_agent_args(command: &str) -> Option<Vec<String>> {
         "goose" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        "hermes" | "hermes-agent" => Some(vec!["acp".to_string()]),
         _ => None,
     }
 }
@@ -1527,6 +1528,30 @@ mod tests {
         assert_eq!(
             normalize_agent_args("codex-acp", vec!["ACP".into()]),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn hermes_defaults_to_acp_arg() {
+        assert_eq!(default_agent_args("hermes"), Some(vec!["acp".to_string()]));
+        assert_eq!(
+            default_agent_args("hermes-agent"),
+            Some(vec!["acp".to_string()])
+        );
+        // Path-qualified and case variants normalize correctly.
+        assert_eq!(
+            default_agent_args("/usr/local/bin/hermes"),
+            Some(vec!["acp".to_string()])
+        );
+        assert_eq!(default_agent_args("Hermes"), Some(vec!["acp".to_string()]));
+    }
+
+    #[test]
+    fn hermes_not_treated_as_codex_for_network_env() {
+        assert_eq!(codex_network_env("hermes", "ws://localhost:3000"), None);
+        assert_eq!(
+            codex_network_env("hermes-agent", "ws://localhost:3000"),
+            None
         );
     }
 

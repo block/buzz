@@ -5,10 +5,10 @@ use super::{
     apply_agent_command_update, classify_runtime, codex_adapter_availability,
     codex_adapter_is_outdated, create_time_agent_command_override, default_agent_command,
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
-    is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
-    parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    is_login_shell_path_uninit, is_safe_nvm_tag, known_acp_runtime_exact,
+    managed_agent_avatar_url, normalize_agent_args, parse_semver_tag,
+    probe_codex_acp_major_version, record_agent_command, refresh_login_shell_path,
+    BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -93,6 +93,45 @@ fn normalizes_buzz_agent_args_to_empty() {
     assert_eq!(
         normalize_agent_args("buzz-agent", vec!["acp".into()]),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn hermes_runtime_contract_is_acp_native() {
+    let runtime = known_acp_runtime_exact("hermes").expect("Hermes runtime must be registered");
+
+    assert_eq!(
+        normalize_agent_args("hermes", Vec::new()),
+        vec!["acp".to_string()],
+        "desktop launches must enter Hermes' ACP stdio mode"
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/Users/test/.local/bin/hermes"),
+        Some(
+            "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/website/static/img/apple-touch-icon.png"
+                .to_string()
+        )
+    );
+    assert_eq!(
+        runtime.cli_install_commands,
+        &["curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"]
+    );
+    assert_eq!(
+        runtime.cli_install_commands_windows,
+        &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"iex (irm https://hermes-agent.nousresearch.com/install.ps1)\""]
+    );
+    assert!(runtime.adapter_install_commands.is_empty());
+    assert!(runtime.supports_acp_model_switching);
+    assert_eq!(runtime.model_env_var, None);
+    assert_eq!(runtime.provider_env_var, None);
+    assert!(runtime.required_normalized_fields.is_empty());
+    assert_eq!(
+        runtime.auth_probe_args,
+        Some(&["hermes", "config", "get", "model.provider"][..])
+    );
+    assert_eq!(
+        runtime.login_hint,
+        Some("Run `hermes model` to configure a provider and model.")
     );
 }
 
