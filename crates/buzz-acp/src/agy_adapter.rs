@@ -23,6 +23,7 @@ const MAX_HOOK_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROCESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_PRINT_TIMEOUT: &str = "2h";
 const HOOK_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MODEL_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct Session {
@@ -324,6 +325,90 @@ fn non_empty_env(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// Whether a lightweight `buzz-acp` helper is targeting the bundled AGY bridge.
+///
+/// Model discovery receives the resolved executable path from Desktop, so this
+/// must recognize both a bare `buzz-acp` command and an absolute sidecar path.
+pub(crate) fn is_bridge_invocation(command: &str, args: &[String]) -> bool {
+    let executable = command.rsplit(['/', '\\']).next().unwrap_or(command);
+    let executable = executable.to_ascii_lowercase();
+    let executable = executable.strip_suffix(".exe").unwrap_or(&executable);
+
+    executable == "buzz-acp"
+        && args
+            .first()
+            .is_some_and(|arg| arg.eq_ignore_ascii_case("agy-acp"))
+}
+
+/// Query AGY's native model catalog.
+///
+/// The compatibility bridge cannot advertise ACP live model switching because
+/// AGY applies `--model` when each print process starts. Its native `models`
+/// command is nevertheless authoritative for configuration-time selection.
+pub(crate) async fn discover_models() -> Result<Vec<String>> {
+    let command = non_empty_env("BUZZ_AGY_COMMAND").unwrap_or_else(|| "agy".to_string());
+    let mut command_builder = Command::new(&command);
+    command_builder
+        .arg("models")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(path) = path_with_current_executable() {
+        command_builder.env("PATH", path);
+    }
+
+    let mut child = command_builder
+        .spawn()
+        .with_context(|| format!("failed to start Antigravity CLI `{command} models`"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Antigravity model-list stdout pipe was unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow!("Antigravity model-list stderr pipe was unavailable"))?;
+    let stdout_task = tokio::spawn(read_process_output(stdout));
+    let stderr_task = tokio::spawn(read_process_output(stderr));
+
+    let status = match tokio::time::timeout(MODEL_LIST_TIMEOUT, child.wait()).await {
+        Ok(status) => status.context("failed waiting for Antigravity model list")?,
+        Err(_) => {
+            stop_child(&mut child).await;
+            let _ = finish_output_tasks(stdout_task, stderr_task).await;
+            return Err(anyhow!(
+                "Antigravity model discovery timed out after {MODEL_LIST_TIMEOUT:?}"
+            ));
+        }
+    };
+    let (stdout, stderr) = finish_output_tasks(stdout_task, stderr_task).await?;
+    if !status.success() {
+        return Err(anyhow!(process_failure_message(&AgyOutput {
+            status,
+            stdout,
+            stderr,
+        })));
+    }
+
+    let models = parse_model_list(&stdout);
+    if models.is_empty() {
+        return Err(anyhow!("Antigravity CLI returned no models"));
+    }
+    Ok(models)
+}
+
+fn parse_model_list(output: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .filter(|model| seen.insert((*model).to_string()))
+        .map(str::to_string)
+        .collect()
 }
 
 async fn persist_hook_event(hook_dir: &Path, event: &str, payload: Value) -> Result<()> {
@@ -899,7 +984,8 @@ where
 mod tests {
     use super::{
         acp_tool_kind, agy_args, capture_completed_conversation, hook_response,
-        hook_session_updates, process_failure_message, render_prompt, AgyOutput, Session,
+        hook_session_updates, is_bridge_invocation, parse_model_list, process_failure_message,
+        render_prompt, AgyOutput, Session,
     };
     use serde_json::json;
     use std::collections::HashSet;
@@ -950,6 +1036,33 @@ mod tests {
         assert_eq!(
             args.get(conversation_flag + 1).map(String::as_str),
             Some("conversation-1")
+        );
+    }
+
+    #[test]
+    fn recognizes_resolved_antigravity_bridge_invocation() {
+        assert!(is_bridge_invocation(
+            "/Applications/Buzz.app/Contents/MacOS/buzz-acp",
+            &["agy-acp".to_string()]
+        ));
+        assert!(is_bridge_invocation(
+            r"C:\Program Files\Buzz\buzz-acp.exe",
+            &["AGY-ACP".to_string()]
+        ));
+        assert!(!is_bridge_invocation(
+            "buzz-acp",
+            &["other-adapter".to_string()]
+        ));
+        assert!(!is_bridge_invocation("agy", &["agy-acp".to_string()]));
+    }
+
+    #[test]
+    fn parses_and_deduplicates_native_model_list() {
+        assert_eq!(
+            parse_model_list(
+                "gemini-3.6-flash-high\n\n claude-sonnet-4-6 \ngemini-3.6-flash-high\n"
+            ),
+            vec!["gemini-3.6-flash-high", "claude-sonnet-4-6"]
         );
     }
 

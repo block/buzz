@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn antigravity_native_catalog_normalizes_to_selectable_models() {
+    let raw = serde_json::json!({
+        "agent": { "name": "Antigravity", "version": "0.1.0" },
+        "stable": {
+            "configOptions": [{
+                "category": "model",
+                "configId": "model",
+                "displayName": "Model",
+                "options": [
+                    {
+                        "value": "gemini-3.6-flash-high",
+                        "displayName": "gemini-3.6-flash-high"
+                    },
+                    {
+                        "value": "claude-sonnet-4-6",
+                        "displayName": "claude-sonnet-4-6"
+                    }
+                ]
+            }]
+        },
+        "unstable": null
+    });
+
+    let response = normalize_agent_models(&raw, None);
+
+    assert_eq!(response.agent_name, "Antigravity");
+    assert!(response.supports_switching);
+    assert_eq!(
+        response
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["gemini-3.6-flash-high", "claude-sonnet-4-6"]
+    );
+}
+
+#[test]
 fn openai_model_normalization_keeps_agent_text_models() {
     let models = normalize_openai_compatible_models(
         OpenAiModelListResponse {

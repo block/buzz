@@ -37,6 +37,52 @@ async fn spawn_adapter_with_app_data(fake_agy: &Path, app_data: Option<&Path>) -
     command.spawn().expect("spawn AGY adapter")
 }
 
+#[tokio::test]
+async fn model_discovery_uses_native_antigravity_catalog() {
+    let directory = test_directory();
+    std::fs::create_dir_all(&directory).expect("create test directory");
+    let fake_agy = directory.join("agy");
+    write_executable(
+        &fake_agy,
+        r#"#!/bin/sh
+set -eu
+test "${1:-}" = "models"
+printf '%s\n' \
+  gemini-3.6-flash-high \
+  claude-sonnet-4-6 \
+  gemini-3.6-flash-high
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_buzz-acp"))
+        .arg("models")
+        .arg("--json")
+        .arg("--agent-command")
+        .arg(env!("CARGO_BIN_EXE_buzz-acp"))
+        .arg("--agent-args")
+        .arg("agy-acp")
+        .env("BUZZ_AGY_COMMAND", &fake_agy)
+        .output()
+        .await
+        .expect("run model discovery");
+
+    assert!(
+        output.status.success(),
+        "model discovery failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).expect("model discovery JSON");
+    let options = response["stable"]["configOptions"][0]["options"]
+        .as_array()
+        .expect("model options");
+    assert_eq!(response["agent"]["name"], "Antigravity");
+    assert_eq!(options.len(), 2);
+    assert_eq!(options[0]["value"], "gemini-3.6-flash-high");
+    assert_eq!(options[1]["value"], "claude-sonnet-4-6");
+
+    let _ = std::fs::remove_dir_all(directory);
+}
+
 async fn write_request(child: &mut Child, request: Value) {
     let stdin = child.stdin.as_mut().expect("adapter stdin");
     stdin

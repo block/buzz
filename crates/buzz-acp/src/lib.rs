@@ -3969,6 +3969,45 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
     let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
+    if agy_adapter::is_bridge_invocation(&args.agent.agent_command, &agent_args) {
+        let models = agy_adapter::discover_models().await?;
+        if args.json {
+            let options = models
+                .iter()
+                .map(|model| {
+                    serde_json::json!({
+                        "value": model,
+                        "displayName": model,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let output = serde_json::json!({
+                "agent": {
+                    "name": "Antigravity",
+                    "version": env!("CARGO_PKG_VERSION"),
+                },
+                "stable": {
+                    "configOptions": [{
+                        "category": "model",
+                        "configId": "model",
+                        "displayName": "Model",
+                        "options": options,
+                    }],
+                },
+                "unstable": serde_json::Value::Null,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else {
+            println!("Agent: Antigravity v{}", env!("CARGO_PKG_VERSION"));
+            println!();
+            println!("Models (Antigravity CLI):");
+            for model in models {
+                println!("  - {model}");
+            }
+        }
+        return Ok(());
+    }
+
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
         .to_string_lossy()
