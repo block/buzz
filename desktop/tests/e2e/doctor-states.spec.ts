@@ -196,11 +196,11 @@ test.describe("Doctor panel state screenshots", () => {
       await expect(toggle.locator("span")).toHaveClass(/shadow-none/);
     }
     await expect(
-      page.getByRole("menuitem", { name: "CLI install guide" }),
+      page.getByRole("menuitem", { name: "CLI setup guide" }),
     ).toHaveCount(0);
     await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
-      page.getByRole("menuitem", { name: "CLI install guide" }),
+      page.getByRole("menuitem", { name: "CLI setup guide" }),
     ).toBeVisible();
     await waitForAnimations(page);
     await page.screenshot({
@@ -223,7 +223,7 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(
       page
         .getByTestId("doctor-runtime-guidance-codex")
-        .getByRole("button", { name: "CLI install guide" }),
+        .getByRole("button", { name: "CLI setup guide" }),
     ).toBeVisible();
 
     await runtimeList.scrollIntoViewIfNeeded();
@@ -300,7 +300,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await page.getByTestId("doctor-runtime-menu-codex").click();
     await expect(
-      page.getByRole("menuitem", { name: "CLI install guide" }),
+      page.getByRole("menuitem", { name: "CLI setup guide" }),
     ).toBeVisible();
     await page.keyboard.press("Escape");
 
@@ -344,7 +344,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await page.getByTestId("doctor-runtime-menu-claude").click();
     await expect(
-      page.getByRole("menuitem", { name: "CLI install guide" }),
+      page.getByRole("menuitem", { name: "CLI setup guide" }),
     ).toBeVisible();
     await page.keyboard.press("Escape");
 
@@ -665,7 +665,7 @@ test.describe("Doctor panel state screenshots", () => {
     );
     await page.getByTestId("doctor-runtime-menu-claude").click();
     await expect(
-      page.getByRole("menuitem", { name: "CLI install guide" }),
+      page.getByRole("menuitem", { name: "CLI setup guide" }),
     ).toBeVisible();
     await expect(
       page.getByRole("menuitem", { name: "Sign in with ChatGPT" }),
