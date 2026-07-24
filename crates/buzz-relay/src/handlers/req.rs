@@ -969,23 +969,6 @@ fn filter_to_query_params(
         (None, None)
     };
 
-    // Push multi-value #h into an exact channel list. The caller intersects
-    // this with the authenticated viewer's accessible channels before the DB
-    // read; keeping the extraction here preserves per-filter NIP-01 semantics.
-    let h_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::H);
-    let exact_channel_ids = filter.generic_tags.get(&h_tag).and_then(|values| {
-        if values.len() > 1 {
-            Some(
-                values
-                    .iter()
-                    .filter_map(|value| value.parse::<uuid::Uuid>().ok())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            None
-        }
-    });
-
     EventQuery {
         channel_id,
         kinds,
@@ -999,7 +982,6 @@ fn filter_to_query_params(
         authors,
         ids,
         e_tags,
-        exact_channel_ids,
         ..EventQuery::for_community(community)
     }
 }
@@ -1013,12 +995,7 @@ pub(crate) fn apply_access_scope_to_query(
     channel_id: Option<uuid::Uuid>,
     accessible_channels: &[uuid::Uuid],
 ) {
-    if let Some(requested) = query.exact_channel_ids.as_mut() {
-        requested.retain(|channel| accessible_channels.contains(channel));
-        // The exact requested/access intersection is sufficient and excludes
-        // globals by contract; do not also install the broader access scope.
-        query.channel_ids = None;
-    } else if channel_id.is_none() {
+    if channel_id.is_none() {
         query.channel_ids = Some(accessible_channels.to_vec());
     }
 }
@@ -1282,44 +1259,6 @@ mod tests {
 
         assert!(query.channel_ids.is_none());
         assert_eq!(query.channel_id, Some(channel));
-    }
-
-    #[test]
-    fn multi_h_queries_intersect_requested_and_accessible_before_limit() {
-        let allowed = uuid::Uuid::new_v4();
-        let denied = uuid::Uuid::new_v4();
-        let unrelated = uuid::Uuid::new_v4();
-        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
-        let filter = Filter::new().custom_tags(h_tag, [allowed.to_string(), denied.to_string()]);
-        let mut query = filter_to_query_params(
-            &filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
-        );
-
-        apply_access_scope_to_query(&mut query, None, &[allowed, unrelated]);
-
-        assert_eq!(query.exact_channel_ids, Some(vec![allowed]));
-        assert!(query.channel_ids.is_none());
-    }
-
-    #[test]
-    fn multi_h_query_with_no_authorized_channels_matches_no_channels() {
-        let requested_a = uuid::Uuid::new_v4();
-        let requested_b = uuid::Uuid::new_v4();
-        let h_tag = SingleLetterTag::lowercase(Alphabet::H);
-        let filter =
-            Filter::new().custom_tags(h_tag, [requested_a.to_string(), requested_b.to_string()]);
-        let mut query = filter_to_query_params(
-            &filter,
-            None,
-            buzz_core::tenant::CommunityId::from_uuid(uuid::Uuid::new_v4()),
-        );
-
-        apply_access_scope_to_query(&mut query, None, &[uuid::Uuid::new_v4()]);
-
-        assert_eq!(query.exact_channel_ids, Some(vec![]));
-        assert!(query.channel_ids.is_none());
     }
 
     /// S2 invariant: the bounded-concurrency pipeline (phase 2) must yield

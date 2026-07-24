@@ -67,11 +67,10 @@ pub struct EventQuery {
     /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
     /// historical pages have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
-    /// Restrict results to events in exactly these channels. Unlike
-    /// `channel_ids`, this excludes channel-less global events. Used for
-    /// multi-value `#h` filters so unrelated accessible channels and global
-    /// events cannot consume the SQL `LIMIT` before NIP-01 post-filtering.
-    pub exact_channel_ids: Option<Vec<uuid::Uuid>>,
+    /// Restrict results to events in channels where this pubkey has an active
+    /// membership. The membership is resolved by PostgreSQL with an indexed
+    /// `EXISTS` subquery, avoiding client-supplied channel-ID arrays.
+    pub member_channel_pubkey: Option<Vec<u8>>,
     /// Override the default limit clamp (1000). Used by COUNT fallback path
     /// which needs to fetch all matching events for post-filter counting.
     /// When None, the default clamp of 1000 applies.
@@ -103,7 +102,7 @@ impl EventQuery {
             ids: None,
             e_tags: None,
             channel_ids: None,
-            exact_channel_ids: None,
+            member_channel_pubkey: None,
             max_limit: None,
         }
     }
@@ -374,7 +373,7 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel array pushdown: restrict to events in any of these channels
+    // Multi-channel IN pushdown: restrict to events in any of these channels
     // OR global events (channel_id IS NULL). Used by NIP-45 COUNT to enforce
     // channel access at the SQL level without fetching all rows.
     //
@@ -386,23 +385,41 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
             qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
         } else {
             qb.push(format!(
-                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id = ANY("
+                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id IN ("
             ));
-            qb.push_bind(ch_ids.clone());
+            let mut sep = qb.separated(", ");
+            for ch in ch_ids {
+                sep.push_bind(*ch);
+            }
             qb.push("))");
         }
     }
 
-    // Exact multi-channel pushdown for NIP-01 `#h` filters. Unlike the access
-    // scope above, an `#h` filter never matches channel-less global events.
-    if let Some(ref ch_ids) = q.exact_channel_ids {
-        if ch_ids.is_empty() {
-            qb.push(" AND FALSE");
+    // Membership-scoped overview queries resolve channel access inside
+    // PostgreSQL. The active-membership index starts with (community_id,
+    // pubkey), and the channel PK check completes the lookup without shipping
+    // every channel UUID through the client and relay.
+    if let Some(ref member_pubkey) = q.member_channel_pubkey {
+        let outer_event_prefix = if q.p_tag_hex.is_some() {
+            "e."
         } else {
-            qb.push(format!(" AND {col_prefix}channel_id = ANY("));
-            qb.push_bind(ch_ids.clone());
-            qb.push(")");
-        }
+            "events."
+        };
+        qb.push(format!(
+            " AND {outer_event_prefix}channel_id IS NOT NULL AND EXISTS (\
+             SELECT 1 FROM channel_members cm \
+             JOIN channels c \
+               ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+             WHERE cm.community_id = {outer_event_prefix}community_id \
+               AND cm.channel_id = {outer_event_prefix}channel_id \
+               AND cm.pubkey = "
+        ));
+        qb.push_bind(member_pubkey.clone());
+        qb.push(
+            " AND cm.removed_at IS NULL \
+             AND c.deleted_at IS NULL \
+             AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL))",
+        );
     }
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
@@ -613,29 +630,20 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
         qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
     }
 
-    // Multi-channel array pushdown for COUNT: restrict to accessible channels + global.
+    // Multi-channel IN pushdown for COUNT: restrict to accessible channels + global.
     // SECURITY: Some(empty vec) = no channel access → global events only.
     if let Some(ref ch_ids) = q.channel_ids {
         if ch_ids.is_empty() {
             qb.push(format!(" AND {col_prefix}channel_id IS NULL"));
         } else {
             qb.push(format!(
-                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id = ANY("
+                " AND ({col_prefix}channel_id IS NULL OR {col_prefix}channel_id IN ("
             ));
-            qb.push_bind(ch_ids.clone());
+            let mut sep = qb.separated(", ");
+            for ch in ch_ids {
+                sep.push_bind(*ch);
+            }
             qb.push("))");
-        }
-    }
-
-    // Exact multi-channel pushdown for NIP-01 `#h` filters. Unlike the access
-    // scope above, an `#h` filter never matches channel-less global events.
-    if let Some(ref ch_ids) = q.exact_channel_ids {
-        if ch_ids.is_empty() {
-            qb.push(" AND FALSE");
-        } else {
-            qb.push(format!(" AND {col_prefix}channel_id = ANY("));
-            qb.push_bind(ch_ids.clone());
-            qb.push(")");
         }
     }
 
@@ -1841,80 +1849,53 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
-    async fn exact_channel_scope_is_applied_before_limit_and_excludes_globals() {
+    async fn member_channel_scope_is_applied_before_limit_and_excludes_non_members() {
         let pool = setup_pool().await;
         let community_uuid = make_test_community(&pool).await;
         let community = CommunityId::from_uuid(community_uuid);
-        let requested_a = make_test_channel(&pool, community_uuid, None).await;
-        let requested_b = make_test_channel(&pool, community_uuid, None).await;
-        let unrequested = make_test_channel(&pool, community_uuid, None).await;
-        let base = 1_800_100_000;
+        let member_channel = make_test_channel(&pool, community_uuid, None).await;
+        let nonmember_channel = make_test_channel(&pool, community_uuid, None).await;
+        let member_pubkey = vec![42_u8; 32];
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community_uuid)
+        .bind(member_channel)
+        .bind(&member_pubkey)
+        .execute(&pool)
+        .await
+        .expect("insert active membership");
 
-        // Newer rows outside the exact #h set must not consume the SQL page.
+        let base = 1_800_100_000;
         for offset in 10..13 {
-            let event = make_event_at(39_001, "newer unrequested", base + offset);
-            insert_event(&pool, community, &event, Some(unrequested))
+            let event = make_event_at(30_620, "newer nonmember", base + offset);
+            insert_event(&pool, community, &event, Some(nonmember_channel))
                 .await
-                .expect("insert unrequested candidate");
+                .expect("insert nonmember workflow");
         }
-        let global = make_event_at(39_001, "newer global", base + 9);
+        let global = make_event_at(30_620, "newer global", base + 9);
         insert_event(&pool, community, &global, None)
             .await
-            .expect("insert global candidate");
-        let requested_newer = make_event_at(39_001, "requested a", base + 2);
-        insert_event(&pool, community, &requested_newer, Some(requested_a))
+            .expect("insert global workflow");
+        let member_workflow = make_event_at(30_620, "older member", base + 1);
+        insert_event(&pool, community, &member_workflow, Some(member_channel))
             .await
-            .expect("insert requested a candidate");
-        let requested_older = make_event_at(39_001, "requested b", base + 1);
-        insert_event(&pool, community, &requested_older, Some(requested_b))
-            .await
-            .expect("insert requested b candidate");
+            .expect("insert member workflow");
 
         let events = query_events(
             &pool,
             &EventQuery {
-                kinds: Some(vec![39_001]),
-                exact_channel_ids: Some(vec![requested_a, requested_b]),
+                kinds: Some(vec![30_620]),
+                member_channel_pubkey: Some(member_pubkey),
                 limit: Some(2),
                 ..EventQuery::for_community(community)
             },
         )
         .await
-        .expect("query exact-channel page");
+        .expect("query member workflow page");
 
-        assert_eq!(events.len(), 2, "exact-channel page must fill before EOF");
-        assert_eq!(events[0].event.id, requested_newer.id);
-        assert_eq!(events[1].event.id, requested_older.id);
-        assert!(
-            events.iter().all(|stored| stored.channel_id.is_some()),
-            "an explicit #h list must exclude channel-less global events"
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn empty_exact_channel_scope_matches_nothing() {
-        let pool = setup_pool().await;
-        let community_uuid = make_test_community(&pool).await;
-        let community = CommunityId::from_uuid(community_uuid);
-        let channel = make_test_channel(&pool, community_uuid, None).await;
-        let event = make_event_at(39_002, "must not match", 1_800_200_000);
-        insert_event(&pool, community, &event, Some(channel))
-            .await
-            .expect("insert candidate");
-
-        let events = query_events(
-            &pool,
-            &EventQuery {
-                kinds: Some(vec![39_002]),
-                exact_channel_ids: Some(vec![]),
-                ..EventQuery::for_community(community)
-            },
-        )
-        .await
-        .expect("query empty exact-channel scope");
-
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.id, member_workflow.id);
     }
 
     fn make_text_event(content: &str) -> nostr::Event {

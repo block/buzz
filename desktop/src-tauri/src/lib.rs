@@ -830,7 +830,7 @@ pub fn run() {
             preview_team_snapshot_import,
             confirm_team_snapshot_import,
             get_channel_workflows,
-            get_channels_workflows,
+            get_member_channel_workflows,
             get_workflow,
             create_workflow,
             update_workflow,
