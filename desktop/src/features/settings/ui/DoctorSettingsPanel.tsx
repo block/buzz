@@ -278,7 +278,13 @@ function RuntimeHeader({
   );
 }
 
-function RuntimeRow({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+function RuntimeRow({
+  resetEpoch,
+  runtime,
+}: {
+  resetEpoch: number;
+  runtime: AcpRuntimeCatalogEntry;
+}) {
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
@@ -290,6 +296,13 @@ function RuntimeRow({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
     success: boolean;
     error: string | null;
   } | null>(null);
+  // Clear stale install results when the parent triggers a catalog refresh
+  // (Check again) — the runtime may now be healthy and stale failure state
+  // would linger because keyed rows don't remount on refetch.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetEpoch is an intentional trigger only; its value is not consumed in the effect body
+  React.useEffect(() => {
+    setInstallResult(null);
+  }, [resetEpoch]);
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
   const installSuccess = installResult?.success ?? false;
@@ -393,7 +406,10 @@ function RuntimeRow({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
           </p>
         ) : null}
         {installError ? (
-          <p className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-install-error-${runtime.id}`}
+          >
             {installError}
           </p>
         ) : null}
@@ -512,6 +528,9 @@ export function DoctorSettingsPanel() {
     [runtimesQuery.data],
   );
   const isRefreshing = runtimesQuery.isFetching;
+  // Incremented each time the user clicks "Check again" so RuntimeRow
+  // useEffect clears stale install results from before the refresh.
+  const [resetEpoch, setResetEpoch] = React.useState(0);
 
   return (
     <section
@@ -526,6 +545,7 @@ export function DoctorSettingsPanel() {
           <Button
             disabled={isRefreshing}
             onClick={() => {
+              setResetEpoch((e) => e + 1);
               void runtimesQuery.refetch();
               void gitBashQuery.refetch();
             }}
@@ -564,7 +584,11 @@ export function DoctorSettingsPanel() {
           ) : runtimes.length > 0 ? (
             <div className="space-y-3" data-testid="doctor-runtime-list">
               {runtimes.map((runtime) => (
-                <RuntimeRow key={runtime.id} runtime={runtime} />
+                <RuntimeRow
+                  key={runtime.id}
+                  resetEpoch={resetEpoch}
+                  runtime={runtime}
+                />
               ))}
             </div>
           ) : (

@@ -42,7 +42,9 @@ export function RuntimeErrorTooltip({
         side="bottom"
         sideOffset={12}
       >
-        <span className="whitespace-pre-line leading-4">{detail}</span>
+        <span className="block max-h-48 overflow-y-auto break-words whitespace-pre-line leading-4">
+          {detail}
+        </span>
       </TooltipContent>
     </Tooltip>
   );

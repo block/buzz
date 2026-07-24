@@ -735,4 +735,133 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(loading).toBeVisible();
     await expect(loading).toContainText("Codex installing");
   });
+
+  /**
+   * 08 — concurrent installs each keep their own spinner/result state;
+   *      stale install failure is cleared when Check again fires (F1 fix).
+   *
+   * Flow:
+   *  - Claude (400ms delay) → failure
+   *  - Codex  (100ms delay) → success
+   *  Both started before either settles.
+   *  After both settle: claude shows failure, codex shows success banner.
+   *  Click Check again → both rows lose stale state (claude error gone).
+   */
+  test("08-concurrent-installs-and-stale-clear", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        {
+          ...CLAUDE_AVAILABLE_LOGGED_IN,
+          availability: "adapter_missing",
+          command: null,
+          binary_path: null,
+          can_auto_install: true,
+          auth_status: { status: "unknown" },
+        },
+        {
+          ...CODEX_NOT_INSTALLED,
+          can_auto_install: true,
+          node_required: false,
+        },
+        GOOSE_AVAILABLE,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      installAcpRuntimeByRuntime: {
+        claude: {
+          delayMs: 400,
+          result: {
+            success: false,
+            steps: [
+              {
+                step: "adapter",
+                command: "npm install -g @agentclientprotocol/claude-agent-acp",
+                success: false,
+                stdout: "",
+                stderr:
+                  "npm ERR! code EACCES\nnpm ERR! syscall mkdir\nnpm ERR! path /usr/local\n\nHint: Check prefix permissions.",
+                exit_code: 1,
+              },
+            ],
+          },
+        },
+        codex: {
+          delayMs: 100,
+          result: {
+            success: true,
+            steps: [
+              {
+                step: "adapter",
+                command: "npm install -g @zed-industries/codex-acp",
+                success: true,
+                stdout: "added 1 package",
+                stderr: "",
+                exit_code: 0,
+              },
+            ],
+          },
+        },
+      },
+      // After the catalog refresh (triggered by a successful install or Check
+      // again), all runtimes report healthy so stale errors must clear.
+      acpRuntimesCatalogAfterInstall: [
+        {
+          ...CLAUDE_AVAILABLE_LOGGED_IN,
+          availability: "available",
+        },
+        {
+          ...CODEX_NOT_INSTALLED,
+          availability: "available",
+          command: "codex-acp",
+          binary_path: "/usr/local/bin/codex-acp",
+          auth_status: { status: "logged_in" },
+        },
+        GOOSE_AVAILABLE,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    const claudeRow = page.getByTestId("doctor-runtime-claude");
+    const codexRow = page.getByTestId("doctor-runtime-codex");
+    await expect(claudeRow).toBeVisible({ timeout: 10_000 });
+    await expect(codexRow).toBeVisible();
+
+    const claudeToggle = page.getByTestId("doctor-runtime-toggle-claude");
+    const codexToggle = page.getByTestId("doctor-runtime-toggle-codex");
+
+    // Start both installs before either settles.
+    await claudeToggle.click();
+    await codexToggle.click();
+
+    // Codex settles first (shorter delay): toggle flips on, no error on codex.
+    // The catalog refresh triggered by codex's success immediately returns
+    // availability === "available", so the transient "installed. Checking..."
+    // banner is replaced by the stable isOn state — assert the toggle instead.
+    await expect(codexToggle).toBeChecked({ timeout: 3_000 });
+    await expect(
+      page.getByTestId("doctor-runtime-install-error-codex"),
+    ).toHaveCount(0);
+
+    // Claude settles (after its longer delay): failure error visible with
+    // multiline stderr. Codex toggle must still be on — unaffected by claude.
+    const claudeError = page.getByTestId("doctor-runtime-install-error-claude");
+    await expect(claudeError).toBeVisible({ timeout: 3_000 });
+    await expect(claudeError).toContainText("npm ERR!");
+    await expect(codexToggle).toBeChecked();
+
+    // Click Check again — epoch increments, RuntimeRow useEffect clears
+    // local installResult state, so the stale claude error disappears.
+    await page.getByRole("button", { name: "Check again" }).click();
+    await expect(claudeError).toHaveCount(0, { timeout: 5_000 });
+    // Codex toggle stays on (catalog still reports available after refresh).
+    await expect(codexToggle).toBeChecked({ timeout: 5_000 });
+
+    await claudeRow.scrollIntoViewIfNeeded();
+    await waitForAnimations(page);
+    await claudeRow.screenshot({
+      path: `${SHOTS}/08-concurrent-installs-and-stale-clear.png`,
+    });
+  });
 });

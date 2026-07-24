@@ -635,3 +635,116 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
   await expect.poll(() => readSavedRuntime(page)).toBe("codex");
 });
+
+/**
+ * Two installs started concurrently — claude fails with a multiline error
+ * (rich hint+stderr in the tooltip) while codex succeeds. Each card must
+ * keep its own independent spinner and its own terminal result; neither card
+ * may show the other's outcome.
+ *
+ * This is the behavioral regression test for the per-card mutation fix
+ * (Bug B) and the multiline tooltip fix (Bug A / F3 from Thufir pass 1).
+ */
+test("concurrent installs each keep their own state — one fails, one succeeds", async ({
+  page,
+}) => {
+  const multilineError =
+    "npm ERR! code EACCES\nnpm ERR! syscall mkdir\nnpm ERR! path /usr/local/lib/node_modules\n\nHint: Check your npm prefix permissions and try again.";
+  const claudeNotInstalled = runtime("claude", "adapter_missing", {
+    status: "unknown",
+  });
+  const codexNotInstalled = runtime("codex", "adapter_missing", {
+    status: "unknown",
+  });
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [claudeNotInstalled, codexNotInstalled],
+      // Claude: long delay then failure with multiline stderr + hint.
+      // Codex: short delay then success.
+      // Per-runtime config lets both be in flight simultaneously.
+      installAcpRuntimeByRuntime: {
+        claude: {
+          delayMs: 600,
+          result: {
+            success: false,
+            steps: [
+              {
+                step: "adapter",
+                command: "npm install -g @agentclientprotocol/claude-agent-acp",
+                success: false,
+                stdout: "",
+                stderr: multilineError,
+                exit_code: 1,
+              },
+            ],
+          },
+        },
+        codex: {
+          delayMs: 200,
+          result: {
+            success: true,
+            steps: [
+              {
+                step: "adapter",
+                command: "npm install -g @zed-industries/codex-acp",
+                success: true,
+                stdout: "added 1 package",
+                stderr: "",
+                exit_code: 0,
+              },
+            ],
+          },
+        },
+      },
+      acpRuntimesCatalogAfterInstall: [
+        runtime("claude", "adapter_missing", { status: "unknown" }),
+        runtime("codex", "available", { status: "logged_in" }),
+      ],
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+
+  const claudeInstall = page.getByTestId("onboarding-runtime-install-claude");
+  const codexInstall = page.getByTestId("onboarding-runtime-install-codex");
+
+  // Start both installs before either settles.
+  await claudeInstall.click();
+  await codexInstall.click();
+
+  // While in flight: both install buttons must be absent (no duplicate clicks).
+  await expect(claudeInstall).toHaveCount(0);
+  await expect(codexInstall).toHaveCount(0);
+
+  // Codex settles first (shorter delay): success indicator, no error.
+  await expect(page.getByTestId("onboarding-runtime-ready-codex")).toBeVisible({
+    timeout: 3_000,
+  });
+  await expect(page.getByTestId("onboarding-runtime-error-codex")).toHaveCount(
+    0,
+  );
+
+  // Claude still in flight: its install button must still be absent.
+  await expect(claudeInstall).toHaveCount(0);
+
+  // Claude settles: failure error visible; codex still shows ready (not reset).
+  const claudeError = page.getByTestId("onboarding-runtime-error-claude");
+  await expect(claudeError).toBeVisible({ timeout: 3_000 });
+  await expect(
+    page.getByTestId("onboarding-runtime-ready-codex"),
+  ).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-error-codex")).toHaveCount(
+    0,
+  );
+
+  // The error trigger has the full aria-label (label + detail).
+  await expect(claudeError).toHaveAttribute("aria-label", /npm ERR!/);
+  // Open the tooltip and verify multiline content is visible (F3 fix).
+  await claudeError.focus();
+  const tooltip = page.getByRole("tooltip");
+  await expect(tooltip).toBeVisible({ timeout: 2_000 });
+  await expect(tooltip).toContainText("npm ERR! code EACCES");
+  await expect(tooltip).toContainText("Hint: Check your npm prefix");
+});
