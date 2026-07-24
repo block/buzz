@@ -1537,11 +1537,10 @@ async fn ingest_event_inner(
         ));
     }
 
-    const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024; // 256 KB
-    if event.content.len() > MAX_EVENT_CONTENT_BYTES {
+    if !event_content_within_shared_limit(&event.content) {
         return Err(IngestError::Rejected(format!(
             "invalid: content exceeds maximum size of {} bytes (got {})",
-            MAX_EVENT_CONTENT_BYTES,
+            buzz_core::command_brief::MAX_EVENT_CONTENT_BYTES,
             event.content.len()
         )));
     }
@@ -2557,6 +2556,10 @@ async fn ingest_event_inner(
         accepted: true,
         message: String::new(),
     })
+}
+
+fn event_content_within_shared_limit(content: &str) -> bool {
+    content.len() <= buzz_core::command_brief::MAX_EVENT_CONTENT_BYTES
 }
 
 #[cfg(test)]
@@ -3665,6 +3668,14 @@ mod tests {
             ],
         );
         assert!(validate_command_brief_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn relay_content_bound_uses_shared_core_limit_at_exact_boundary() {
+        let exact = "x".repeat(buzz_core::command_brief::MAX_EVENT_CONTENT_BYTES);
+        let over = "x".repeat(buzz_core::command_brief::MAX_EVENT_CONTENT_BYTES + 1);
+        assert!(event_content_within_shared_limit(&exact));
+        assert!(!event_content_within_shared_limit(&over));
     }
 
     #[test]

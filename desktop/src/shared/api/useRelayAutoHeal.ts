@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { useQueryClient } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
 
 import type { ConnectionState } from "@/shared/api/relayClientShared";
 import { isRelayDependentQuery } from "@/shared/api/relayQueryInvalidation";
@@ -107,6 +108,13 @@ export function useRelayAutoHeal(): void {
   if (schedulerRef.current === null) {
     schedulerRef.current = new RelayAutoHealScheduler(
       () => {
+        // A real disconnected-to-connected transition rearms a bounded NIP-CB
+        // spool batch, including rows whose ordinary retry budget is exhausted.
+        // The backend republishes the exact signed IDs and quarantines permanent
+        // validation failures; this best-effort call must not block query healing.
+        void invoke<number>("recover_command_brief_publications").catch(
+          () => {},
+        );
         if (isRateLimited()) {
           // Connection recovered but the relay is still under back-pressure.
           // Defer the invalidate until the rate-limit window clears so queries

@@ -1149,8 +1149,8 @@ pub(crate) fn filter_can_match_author_only_kinds(filter: &Filter) -> bool {
 /// Used by the COUNT handler to force the per-event fallback path instead of
 /// the fast SQL `count_events()`, which cannot enforce the owner-only result
 /// gate. An existence count leaks private event activity even though no content
-/// is returned, violating the NIP-AM / NIP-DM requirement that knowing an id
-/// MUST NOT grant access.
+/// is returned, violating the NIP-AM / NIP-DM / NIP-CB requirement that knowing
+/// an id MUST NOT grant access.
 pub(crate) fn filter_can_match_result_gated_kinds(filter: &Filter) -> bool {
     filter.kinds.as_ref().is_none_or(|ks| {
         ks.iter()
@@ -1925,6 +1925,25 @@ mod tests {
             buzz_core::kind::KIND_AGENT_TURN_METRIC as u16,
         ));
         assert!(filter_can_match_result_gated_kinds(&f));
+    }
+
+    #[test]
+    fn command_brief_count_requires_owner_scoped_pushdown_or_result_filtering() {
+        let (owner, _agent, other) = three_pubkeys();
+        let p_tag = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_COMMAND_BRIEF as u16);
+        let owner_filter = Filter::new().kind(kind).custom_tags(p_tag, [owner.clone()]);
+        let wrong_owner_filter = Filter::new().kind(kind).custom_tags(p_tag, [other]);
+        let kindless = Filter::new();
+
+        assert!(filter_can_match_result_gated_kinds(&owner_filter));
+        assert!(result_gated_count_safe_for_pushdown(&owner_filter, &owner));
+        assert!(!result_gated_count_safe_for_pushdown(
+            &wrong_owner_filter,
+            &owner
+        ));
+        assert!(filter_can_match_result_gated_kinds(&kindless));
+        assert!(!result_gated_count_safe_for_pushdown(&kindless, &owner));
     }
 
     #[test]

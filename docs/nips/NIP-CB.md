@@ -34,8 +34,15 @@ The camel-case plaintext object contains:
 - `lifecycleState`, matching the public `status`;
 - RFC3339 `occurredAt`;
 - `frozenSnapshotId`;
-- `finalBrief` for `completed` or `degraded`, otherwise null;
-- redacted `failure.code` for `cancelled` or `failed`, otherwise null; and
+- `finalBrief` for `completed` or `degraded`, otherwise null. It MUST match the
+  authoritative strict `CommandBrief` contract: unknown fields and enum values,
+  missing adviser/section/source provenance, broken citations, and unbounded
+  values are rejected;
+- redacted `failure.code` for `cancelled` or `failed`, otherwise null. Codes use
+  the closed implementation vocabulary (`cancellation_requested`,
+  `brief_generation_failed`, snapshot/RAG/source failures,
+  `chief_of_staff_failed`, `chief_of_staff_output_rejected`, or
+  `brief_assembly_rejected`); and
 - `previousLifecycleEventId`, exactly matching the optional public tag.
 
 The signed event ID is deliberately absent from the plaintext used to derive
@@ -43,9 +50,11 @@ that ID. A client adds it only to its post-signing `PublishedCommandBrief`
 view.
 
 Payloads and every nested string, array, object, identifier, and retry queue
-are bounded by the implementation contract. Payloads MUST NOT contain raw
-prompts, hidden reasoning, credentials, API keys, bearer tokens, arbitrary
-provider error bodies, or unvalidated retrieved passages.
+are bounded by the implementation contract. The final signed event content is
+limited to 256 KiB of NIP-44 ciphertext at both client admission and relay
+ingest. Payloads MUST NOT contain raw prompts, hidden reasoning, credentials,
+API keys, bearer tokens, arbitrary provider error bodies, or unvalidated
+retrieved passages.
 
 ## Lifecycle and storage
 
@@ -55,9 +64,18 @@ is rejected locally. Neither relay nor client may replace or overwrite an
 earlier record.
 
 The client signs and commits the exact event and event ID to a protected
-SQLite WAL spool before reporting local completion. Relay unavailability
-leaves the record queued. Reconnect republishes the exact signed bytes
-idempotently by event ID with bounded retry metadata.
+SQLite WAL spool before reporting local completion. That commit is the
+cancellation linearization point: accepted cancellation before it produces one
+`cancelled` event; cancellation after it cannot replace the committed terminal.
+Every terminal path (`completed`, `degraded`, `cancelled`, and `failed`) uses
+this same durable path.
+
+Relay unavailability leaves the record queued. Startup and a
+degraded-to-connected relay transition re-arm a bounded owner batch, including
+rows that previously reached retry 8, and republish the exact signed bytes
+idempotently by event ID. Rows whose stored envelope, signature, timestamp,
+ciphertext, or event ID no longer validate are permanently quarantined and are
+not re-armed.
 
 ## Access and privacy
 
@@ -67,9 +85,10 @@ existence nor content unless the authenticated reader equals the sole `p`
 owner.
 
 Kind `44210` has a NULL full-text-search vector. Relays do not decrypt it.
-Clients decrypt only after the current unlocked identity proves that it is
-both the event author and the `p` recipient. Consumers receive a validated
-Command Brief view model, never raw arbitrary JSON.
+Clients and the archive pipeline decrypt only after the current unlocked
+identity proves that it is both the event author and the `p` recipient.
+Consumers receive a validated Command Brief view model, never raw arbitrary
+JSON or ciphertext masquerading as a brief.
 
 ## Retention and backup
 

@@ -6,7 +6,10 @@ use std::time::{Duration, Instant};
 use nostr::{Event, JsonUtil};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
-const SCHEMA_VERSION: i64 = 1;
+use buzz_core_pkg::command_brief::MAX_EVENT_CONTENT_BYTES;
+use buzz_core_pkg::kind::KIND_COMMAND_BRIEF;
+
+const SCHEMA_VERSION: i64 = 2;
 const MAX_RETRIES: i64 = 8;
 const MAX_RETRY_DELAY_SECONDS: i64 = 3_600;
 const MAX_DUE_ROWS: usize = 64;
@@ -25,12 +28,34 @@ CREATE TABLE command_brief_spool (
     next_retry_at       INTEGER NOT NULL DEFAULT 0,
     last_error_code     TEXT,
     created_at          INTEGER NOT NULL,
+    append_sequence     INTEGER NOT NULL,
     published_at        INTEGER,
     PRIMARY KEY (owner_pubkey, run_id, event_id),
-    UNIQUE (owner_pubkey, event_id)
+    UNIQUE (owner_pubkey, event_id),
+    UNIQUE (owner_pubkey, run_id, append_sequence)
+);
+CREATE TABLE command_brief_heads (
+    owner_pubkey       TEXT NOT NULL,
+    run_id             TEXT NOT NULL,
+    head_event_id      TEXT NOT NULL,
+    head_sequence      INTEGER NOT NULL,
+    PRIMARY KEY (owner_pubkey, run_id)
 );
 CREATE INDEX command_brief_spool_due
-ON command_brief_spool(owner_pubkey, publish_state, next_retry_at, created_at);
+ON command_brief_spool(owner_pubkey, publish_state, next_retry_at, append_sequence);
+";
+
+const MIGRATE_V1_TO_V2: &str = "
+ALTER TABLE command_brief_spool ADD COLUMN append_sequence INTEGER;
+CREATE UNIQUE INDEX command_brief_spool_sequence
+ON command_brief_spool(owner_pubkey, run_id, append_sequence);
+CREATE TABLE command_brief_heads (
+    owner_pubkey       TEXT NOT NULL,
+    run_id             TEXT NOT NULL,
+    head_event_id      TEXT NOT NULL,
+    head_sequence      INTEGER NOT NULL,
+    PRIMARY KEY (owner_pubkey, run_id)
+);
 ";
 
 /// Closed local relay-publication state.
@@ -72,6 +97,14 @@ pub struct DueSpoolEvent {
     pub event_id: String,
     /// Exact signed event JSON.
     pub raw_event: String,
+    /// Public lifecycle status.
+    pub status: String,
+    /// Exact predecessor event ID.
+    pub previous_event_id: Option<String>,
+    /// Exact encrypted event content.
+    pub encrypted_payload: String,
+    /// Signed event timestamp.
+    pub created_at: i64,
     /// Current publication state.
     pub publish_state: PublishState,
     /// Bounded number of failed relay attempts.
@@ -112,8 +145,69 @@ pub fn migrate_command_brief_store(conn: &Connection) -> Result<(), String> {
             .map_err(|_| "command brief store migration failed")?;
         tx.commit()
             .map_err(|_| "command brief store migration failed")?;
+    } else if version == 1 {
+        migrate_v1_to_v2(conn)?;
     }
     Ok(())
+}
+
+fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Exclusive)
+        .map_err(|_| "command brief store migration failed")?;
+    tx.execute_batch(MIGRATE_V1_TO_V2)
+        .map_err(|_| "command brief store migration failed")?;
+    let rows = {
+        let mut statement = tx
+            .prepare(
+                "SELECT rowid,owner_pubkey,run_id FROM command_brief_spool
+                 ORDER BY owner_pubkey,run_id,created_at,rowid",
+            )
+            .map_err(|_| "command brief store migration failed")?;
+        let mapped = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|_| "command brief store migration failed")?;
+        mapped
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "command brief store migration failed")?
+    };
+    let mut previous_key: Option<(String, String)> = None;
+    let mut sequence = 0_i64;
+    for (rowid, owner, run) in rows {
+        let key = (owner, run);
+        if previous_key.as_ref() != Some(&key) {
+            sequence = 1;
+            previous_key = Some(key);
+        } else {
+            sequence += 1;
+        }
+        tx.execute(
+            "UPDATE command_brief_spool SET append_sequence=?2 WHERE rowid=?1",
+            params![rowid, sequence],
+        )
+        .map_err(|_| "command brief store migration failed")?;
+    }
+    tx.execute_batch(
+        "INSERT INTO command_brief_heads(owner_pubkey,run_id,head_event_id,head_sequence)
+         SELECT spool.owner_pubkey,spool.run_id,spool.event_id,spool.append_sequence
+         FROM command_brief_spool spool
+         WHERE spool.append_sequence = (
+             SELECT MAX(candidate.append_sequence)
+             FROM command_brief_spool candidate
+             WHERE candidate.owner_pubkey=spool.owner_pubkey
+               AND candidate.run_id=spool.run_id
+         );",
+    )
+    .map_err(|_| "command brief store migration failed")?;
+    tx.pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(|_| "command brief store migration failed")?;
+    tx.commit()
+        .map_err(|_| "command brief store migration failed".to_string())
 }
 
 /// Append one exact signed event. Exact re-insertion is idempotent.
@@ -122,7 +216,10 @@ pub fn insert_spool_event(conn: &Connection, insert: SpoolInsert) -> Result<bool
     let event = Event::from_json(&insert.raw_event).map_err(|_| "command brief spool rejected")?;
     if event.id.to_hex() != insert.event_id
         || event.pubkey.to_hex() != insert.owner_pubkey
+        || event.kind.as_u16() as u32 != KIND_COMMAND_BRIEF
         || event.content != insert.encrypted_payload
+        || event.content.len() > MAX_EVENT_CONTENT_BYTES
+        || event.created_at.as_secs() as i64 != insert.created_at
         || !event.verify_id()
         || !event.verify_signature()
         || !event_envelope_matches_insert(&event, &insert)
@@ -147,24 +244,24 @@ pub fn insert_spool_event(conn: &Connection, insert: SpoolInsert) -> Result<bool
         }
         return Err("command brief spool conflict".into());
     }
-    let latest: Option<String> = tx
+    let head: Option<(String, i64)> = tx
         .query_row(
-            "SELECT event_id FROM command_brief_spool
-             WHERE owner_pubkey = ?1 AND run_id = ?2
-             ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            "SELECT head_event_id,head_sequence FROM command_brief_heads
+             WHERE owner_pubkey = ?1 AND run_id = ?2",
             params![&insert.owner_pubkey, &insert.run_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(|_| "command brief spool unavailable")?;
-    if latest.as_deref() != insert.previous_event_id.as_deref() {
+    if head.as_ref().map(|(event_id, _)| event_id.as_str()) != insert.previous_event_id.as_deref() {
         return Err("command brief spool predecessor conflict".into());
     }
+    let append_sequence = head.map_or(1, |(_, sequence)| sequence.saturating_add(1));
     tx.execute(
         "INSERT INTO command_brief_spool
          (owner_pubkey,run_id,event_id,status,previous_event_id,encrypted_payload,
-          raw_event,publish_state,retry_count,next_retry_at,created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',0,0,?8)",
+          raw_event,publish_state,retry_count,next_retry_at,created_at,append_sequence)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,'queued',0,0,?8,?9)",
         params![
             &insert.owner_pubkey,
             &insert.run_id,
@@ -173,7 +270,22 @@ pub fn insert_spool_event(conn: &Connection, insert: SpoolInsert) -> Result<bool
             &insert.previous_event_id,
             &insert.encrypted_payload,
             &insert.raw_event,
-            insert.created_at
+            insert.created_at,
+            append_sequence
+        ],
+    )
+    .map_err(|_| "command brief spool conflict")?;
+    tx.execute(
+        "INSERT INTO command_brief_heads(owner_pubkey,run_id,head_event_id,head_sequence)
+         VALUES (?1,?2,?3,?4)
+         ON CONFLICT(owner_pubkey,run_id) DO UPDATE SET
+           head_event_id=excluded.head_event_id,
+           head_sequence=excluded.head_sequence",
+        params![
+            &insert.owner_pubkey,
+            &insert.run_id,
+            &insert.event_id,
+            append_sequence
         ],
     )
     .map_err(|_| "command brief spool conflict")?;
@@ -218,11 +330,12 @@ pub fn list_due_spool_events(
     let limit = limit.min(MAX_DUE_ROWS) as i64;
     let mut statement = conn
         .prepare(
-            "SELECT owner_pubkey,run_id,event_id,raw_event,publish_state,retry_count,next_retry_at
+            "SELECT owner_pubkey,run_id,event_id,raw_event,status,previous_event_id,
+                    encrypted_payload,created_at,publish_state,retry_count,next_retry_at
              FROM command_brief_spool
              WHERE owner_pubkey = ?1 AND publish_state = 'queued'
                AND retry_count < 8 AND next_retry_at <= ?2
-             ORDER BY created_at,event_id LIMIT ?3",
+             ORDER BY append_sequence,event_id LIMIT ?3",
         )
         .map_err(|_| "command brief spool unavailable")?;
     let rows = statement
@@ -232,14 +345,87 @@ pub fn list_due_spool_events(
                 run_id: row.get(1)?,
                 event_id: row.get(2)?,
                 raw_event: row.get(3)?,
-                publish_state: parse_state(&row.get::<_, String>(4)?)?,
-                retry_count: row.get(5)?,
-                next_retry_at: row.get(6)?,
+                status: row.get(4)?,
+                previous_event_id: row.get(5)?,
+                encrypted_payload: row.get(6)?,
+                created_at: row.get(7)?,
+                publish_state: parse_state(&row.get::<_, String>(8)?)?,
+                retry_count: row.get(9)?,
+                next_retry_at: row.get(10)?,
             })
         })
         .map_err(|_| "command brief spool unavailable")?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|_| "command brief spool unavailable".into())
+}
+
+/// Rearm a bounded queued batch on one explicit relay-readiness transition.
+///
+/// Rows permanently rejected by local validation are never rearmed.
+pub fn rearm_queued_spool_events(
+    conn: &Connection,
+    owner_pubkey: &str,
+    now: i64,
+    limit: usize,
+) -> Result<usize, String> {
+    let limit = limit.min(MAX_DUE_ROWS) as i64;
+    let event_ids = {
+        let mut statement = conn
+            .prepare(
+                "SELECT event_id FROM command_brief_spool
+                 WHERE owner_pubkey=?1 AND publish_state='queued'
+                   AND (last_error_code IS NULL OR last_error_code='relay_unavailable')
+                 ORDER BY append_sequence,event_id LIMIT ?2",
+            )
+            .map_err(|_| "command brief spool unavailable")?;
+        let rows = statement
+            .query_map(params![owner_pubkey, limit], |row| row.get::<_, String>(0))
+            .map_err(|_| "command brief spool unavailable")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "command brief spool unavailable")?
+    };
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
+        .map_err(|_| "command brief spool unavailable")?;
+    for event_id in &event_ids {
+        tx.execute(
+            "UPDATE command_brief_spool
+             SET retry_count=0,next_retry_at=?3,last_error_code=NULL
+             WHERE owner_pubkey=?1 AND event_id=?2 AND publish_state='queued'",
+            params![owner_pubkey, event_id, now],
+        )
+        .map_err(|_| "command brief spool unavailable")?;
+    }
+    tx.commit().map_err(|_| "command brief spool unavailable")?;
+    Ok(event_ids.len())
+}
+
+/// Parse and revalidate every signed field before exact-ID republish.
+pub fn validate_due_spool_event(row: &DueSpoolEvent) -> Result<Event, String> {
+    let insert = SpoolInsert {
+        owner_pubkey: row.owner_pubkey.clone(),
+        run_id: row.run_id.clone(),
+        event_id: row.event_id.clone(),
+        status: row.status.clone(),
+        previous_event_id: row.previous_event_id.clone(),
+        encrypted_payload: row.encrypted_payload.clone(),
+        raw_event: row.raw_event.clone(),
+        created_at: row.created_at,
+    };
+    validate_insert(&insert)?;
+    let event = Event::from_json(&row.raw_event).map_err(|_| "command brief spool rejected")?;
+    if event.id.to_hex() != row.event_id
+        || event.pubkey.to_hex() != row.owner_pubkey
+        || event.kind.as_u16() as u32 != KIND_COMMAND_BRIEF
+        || event.content != row.encrypted_payload
+        || event.content.len() > MAX_EVENT_CONTENT_BYTES
+        || event.created_at.as_secs() as i64 != row.created_at
+        || !event.verify_id()
+        || !event.verify_signature()
+        || !event_envelope_matches_insert(&event, &insert)
+    {
+        return Err("command brief spool rejected".into());
+    }
+    Ok(event)
 }
 
 /// Return the latest append-only lifecycle head for one owner/run.
@@ -249,9 +435,8 @@ pub fn latest_event_id(
     run_id: &str,
 ) -> Result<Option<String>, String> {
     conn.query_row(
-        "SELECT event_id FROM command_brief_spool
-         WHERE owner_pubkey=?1 AND run_id=?2
-         ORDER BY created_at DESC,rowid DESC LIMIT 1",
+        "SELECT head_event_id FROM command_brief_heads
+         WHERE owner_pubkey=?1 AND run_id=?2",
         params![owner_pubkey, run_id],
         |row| row.get(0),
     )
@@ -316,6 +501,27 @@ pub fn mark_publish_failed(
     Ok(())
 }
 
+/// Permanently quarantine a locally invalid row so readiness cannot hot-loop it.
+pub fn mark_publish_permanent(
+    conn: &Connection,
+    owner_pubkey: &str,
+    event_id: &str,
+) -> Result<(), String> {
+    let changed = conn
+        .execute(
+            "UPDATE command_brief_spool
+             SET retry_count=?3,next_retry_at=?4,last_error_code='invalid_event'
+             WHERE owner_pubkey=?1 AND event_id=?2 AND publish_state='queued'",
+            params![owner_pubkey, event_id, MAX_RETRIES, i64::MAX],
+        )
+        .map_err(|_| "command brief spool unavailable")?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err("command brief spool row missing".into())
+    }
+}
+
 fn parse_state(value: &str) -> rusqlite::Result<PublishState> {
     match value {
         "queued" => Ok(PublishState::Queued),
@@ -344,7 +550,8 @@ fn validate_insert(insert: &SpoolInsert) -> Result<(), String> {
             .as_deref()
             .is_some_and(|value| !valid_hex(value))
         || insert.encrypted_payload.is_empty()
-        || insert.raw_event.len() > 2 * 1024 * 1024
+        || insert.encrypted_payload.len() > MAX_EVENT_CONTENT_BYTES
+        || insert.raw_event.len() > MAX_EVENT_CONTENT_BYTES.saturating_mul(2)
     {
         return Err("command brief spool rejected".into());
     }

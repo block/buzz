@@ -9344,6 +9344,8 @@ export function maybeInstallE2eTauriMocks() {
         }
         return;
       }
+      case "recover_command_brief_publications":
+        return 0;
       case "get_profile":
         return handleGetProfile(activeConfig);
       case "update_profile":

@@ -6,20 +6,16 @@
 use chrono::DateTime;
 use nostr::{nips::nip44, Event, EventBuilder, Keys, Kind, Tag};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
+pub use crate::command_brief_wire::CommandBriefWire;
 use crate::kind::KIND_COMMAND_BRIEF;
 
 /// Current encrypted payload schema version.
 pub const COMMAND_BRIEF_PAYLOAD_VERSION: u32 = 1;
 /// Maximum bytes in an identifier or failure code.
 pub const MAX_COMMAND_BRIEF_ID_BYTES: usize = 256;
-/// Maximum serialized plaintext size.
-pub const MAX_COMMAND_BRIEF_PAYLOAD_BYTES: usize = 1024 * 1024;
-const MAX_VALUE_DEPTH: usize = 16;
-const MAX_VALUE_ARRAY_ITEMS: usize = 320;
-const MAX_VALUE_OBJECT_FIELDS: usize = 64;
-const MAX_VALUE_STRING_BYTES: usize = 4096;
+/// Shared relay and local maximum for final NIP-CB ciphertext bytes.
+pub const MAX_EVENT_CONTENT_BYTES: usize = 256 * 1024;
 
 /// Closed terminal lifecycle vocabulary persisted by NIP-CB.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -50,12 +46,66 @@ impl CommandBriefLifecycleState {
     }
 }
 
+/// Closed, redacted terminal code vocabulary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandBriefFailureCode {
+    /// The user accepted cancellation before a durable success commit.
+    CancellationRequested,
+    /// A generic bounded generation failure.
+    BriefGenerationFailed,
+    /// The signed knowledge snapshot changed more than once.
+    SnapshotChanged,
+    /// Required local RAG was unavailable.
+    RagUnavailable,
+    /// Required local RAG was stale.
+    RagStale,
+    /// Required local RAG failed validation.
+    RagInvalid,
+    /// A source request was rejected.
+    SourceRequestRejected,
+    /// A source timestamp was rejected.
+    SourceTimeRejected,
+    /// Source identities conflicted.
+    SourceIdentityConflict,
+    /// Chief-of-Staff execution failed.
+    ChiefOfStaffFailed,
+    /// Chief-of-Staff output failed strict validation.
+    ChiefOfStaffOutputRejected,
+    /// Final deterministic assembly failed validation.
+    BriefAssemblyRejected,
+    /// Local audit persistence failed; this code is local-only and cannot claim
+    /// that its own failure record was durably written.
+    BriefPersistenceFailed,
+}
+
+impl CommandBriefFailureCode {
+    /// Return the canonical redacted wire label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::CancellationRequested => "cancellation_requested",
+            Self::BriefGenerationFailed => "brief_generation_failed",
+            Self::SnapshotChanged => "snapshot_changed",
+            Self::RagUnavailable => "rag_unavailable",
+            Self::RagStale => "rag_stale",
+            Self::RagInvalid => "rag_invalid",
+            Self::SourceRequestRejected => "source_request_rejected",
+            Self::SourceTimeRejected => "source_time_rejected",
+            Self::SourceIdentityConflict => "source_identity_conflict",
+            Self::ChiefOfStaffFailed => "chief_of_staff_failed",
+            Self::ChiefOfStaffOutputRejected => "chief_of_staff_output_rejected",
+            Self::BriefAssemblyRejected => "brief_assembly_rejected",
+            Self::BriefPersistenceFailed => "brief_persistence_failed",
+        }
+    }
+}
+
 /// Redacted terminal failure metadata.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandBriefFailure {
-    /// Stable bounded error code; never a provider body or secret.
-    pub code: String,
+    /// Stable closed error code; never a provider body or secret.
+    pub code: CommandBriefFailureCode,
 }
 
 /// Decrypted NIP-CB lifecycle payload.
@@ -77,7 +127,7 @@ pub struct CommandBriefEventPayload {
     /// Frozen signed knowledge snapshot identity.
     pub frozen_snapshot_id: String,
     /// Validated final brief for completed/degraded states.
-    pub final_brief: Option<Value>,
+    pub final_brief: Option<CommandBriefWire>,
     /// Redacted metadata for failed/cancelled states.
     pub failure: Option<CommandBriefFailure>,
     /// Exact preceding lifecycle event ID, when one exists.
@@ -118,18 +168,6 @@ impl CommandBriefEventPayload {
         } else if self.final_brief.is_some() || self.failure.is_none() {
             return Err(CommandBriefEventError::Invalid);
         }
-        if let Some(failure) = &self.failure {
-            if !valid_identifier(&failure.code) {
-                return Err(CommandBriefEventError::Invalid);
-            }
-        }
-        if let Some(brief) = &self.final_brief {
-            validate_json_value(brief, 0)?;
-        }
-        let serialized = serde_json::to_vec(self).map_err(|_| CommandBriefEventError::Invalid)?;
-        if serialized.len() > MAX_COMMAND_BRIEF_PAYLOAD_BYTES {
-            return Err(CommandBriefEventError::Invalid);
-        }
         Ok(())
     }
 }
@@ -149,6 +187,9 @@ pub fn build_command_brief_event(
         nip44::Version::V2,
     )
     .map_err(|_| CommandBriefEventError::Cryptography)?;
+    if ciphertext.len() > MAX_EVENT_CONTENT_BYTES {
+        return Err(CommandBriefEventError::Invalid);
+    }
     let mut tags = vec![
         Tag::public_key(owner),
         parse_tag(["d", payload.run_id.as_str()])?,
@@ -170,15 +211,15 @@ pub fn decrypt_command_brief_event(
     event: &Event,
 ) -> Result<CommandBriefEventPayload, CommandBriefEventError> {
     let envelope = validate_public_envelope(event)?;
+    if event.content.len() > MAX_EVENT_CONTENT_BYTES {
+        return Err(CommandBriefEventError::Invalid);
+    }
     let owner = owner_keys.public_key();
     if event.pubkey != owner || envelope.owner != owner.to_hex() {
         return Err(CommandBriefEventError::Invalid);
     }
     let plaintext = nip44::decrypt(owner_keys.secret_key(), &owner, &event.content)
         .map_err(|_| CommandBriefEventError::Cryptography)?;
-    if plaintext.len() > MAX_COMMAND_BRIEF_PAYLOAD_BYTES {
-        return Err(CommandBriefEventError::Invalid);
-    }
     let payload: CommandBriefEventPayload =
         serde_json::from_str(&plaintext).map_err(|_| CommandBriefEventError::Invalid)?;
     payload.validate()?;
@@ -259,46 +300,4 @@ fn is_event_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-}
-
-fn validate_json_value(value: &Value, depth: usize) -> Result<(), CommandBriefEventError> {
-    if depth > MAX_VALUE_DEPTH {
-        return Err(CommandBriefEventError::Invalid);
-    }
-    match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) => Ok(()),
-        Value::String(value) if value.len() <= MAX_VALUE_STRING_BYTES => Ok(()),
-        Value::String(_) => Err(CommandBriefEventError::Invalid),
-        Value::Array(values) if values.len() <= MAX_VALUE_ARRAY_ITEMS => values
-            .iter()
-            .try_for_each(|value| validate_json_value(value, depth + 1)),
-        Value::Array(_) => Err(CommandBriefEventError::Invalid),
-        Value::Object(values) if values.len() <= MAX_VALUE_OBJECT_FIELDS => {
-            for (key, value) in values {
-                let normalized: String = key
-                    .chars()
-                    .filter(|character| character.is_ascii_alphanumeric())
-                    .flat_map(char::to_lowercase)
-                    .collect();
-                if matches!(
-                    normalized.as_str(),
-                    "prompt"
-                        | "systemprompt"
-                        | "reasoning"
-                        | "credentials"
-                        | "credential"
-                        | "bearertoken"
-                        | "accesstoken"
-                        | "apikey"
-                        | "secret"
-                ) || key.len() > MAX_VALUE_STRING_BYTES
-                {
-                    return Err(CommandBriefEventError::Invalid);
-                }
-                validate_json_value(value, depth + 1)?;
-            }
-            Ok(())
-        }
-        Value::Object(_) => Err(CommandBriefEventError::Invalid),
-    }
 }

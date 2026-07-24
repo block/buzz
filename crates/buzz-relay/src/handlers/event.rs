@@ -96,6 +96,33 @@ where
     drop_count
 }
 
+/// Return whether a live-fanout recipient may receive an owner-private event.
+///
+/// The result-level gate is repeated at the final send chokepoint because a
+/// kindless live subscription can match by event id. A malformed private
+/// envelope or an unauthenticated recipient fails closed.
+fn owner_private_recipient_authorized(event: &Event, recipient_pubkey: Option<&[u8]>) -> bool {
+    let kind = event_kind_u32(event);
+    if kind != buzz_core::kind::KIND_DM_VISIBILITY
+        && kind != buzz_core::kind::KIND_AGENT_TURN_METRIC
+        && kind != buzz_core::kind::KIND_COMMAND_BRIEF
+    {
+        return true;
+    }
+
+    let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+    let recipients: Vec<_> = event
+        .tags
+        .filter(nostr::TagKind::SingleLetter(p))
+        .filter_map(|tag| tag.content())
+        .collect();
+    if recipients.len() != 1 {
+        return false;
+    }
+
+    recipient_pubkey.is_some_and(|bytes| hex::encode(bytes) == recipients[0])
+}
+
 /// Drop recipients without access before fan-out on a private channel.
 ///
 /// Open and channel-less events skip membership filtering (open channel-scoped
@@ -431,23 +458,9 @@ async fn dispatch_persistent_event_inner(
             return 0;
         }
     };
-    // For viewer-private events (kind:30622 DM visibility, kind:44200 agent turn
-    // metrics), live fan-out must reach only the owner — a kindless `ids:[…]`
-    // subscription can otherwise match it. Pull paths (HTTP /query, WS historical)
-    // are gated separately by reader_authorized_for_event.
-    let owner_only_kind = kind_u32 == buzz_core::kind::KIND_DM_VISIBILITY
-        || kind_u32 == buzz_core::kind::KIND_AGENT_TURN_METRIC
-        || kind_u32 == buzz_core::kind::KIND_COMMAND_BRIEF;
-    let private_event_owner: Option<String> = owner_only_kind
-        .then(|| {
-            let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
-            stored_event
-                .event
-                .tags
-                .filter(nostr::TagKind::SingleLetter(p))
-                .find_map(|t| t.content().map(|s| s.to_string()))
-        })
-        .flatten();
+    // For owner-private events, live fan-out must reach only the authenticated
+    // owner — a kindless `ids:[…]` subscription can otherwise match it. Pull
+    // paths are gated separately by `reader_authorized_for_event`.
     // Author-only delivery gating (NIP-ER reminders) is enforced centrally in
     // filter_fanout_by_access, applied to `matches` above before this loop. The
     // DM visibility owner gate is an additional delivery fence, so build shared
@@ -455,14 +468,10 @@ async fn dispatch_persistent_event_inner(
     let recipients: Vec<_> = matches
         .iter()
         .filter_map(|(target_conn_id, sub_id)| {
-            if let Some(ref owner_hex) = private_event_owner {
-                let is_owner = state
-                    .conn_manager
-                    .pubkey_for(*target_conn_id)
-                    .is_some_and(|pk| hex::encode(pk) == *owner_hex);
-                if !is_owner {
-                    return None;
-                }
+            let recipient_pubkey = state.conn_manager.pubkey_for(*target_conn_id);
+            if !owner_private_recipient_authorized(&stored_event.event, recipient_pubkey.as_deref())
+            {
+                return None;
             }
             Some((*target_conn_id, sub_id.as_str()))
         })
@@ -1185,6 +1194,34 @@ mod tests {
             ),
             "fan-out frame sharing must not escape a single cycle"
         );
+    }
+
+    #[test]
+    fn command_brief_live_fanout_allows_only_authenticated_owner() {
+        let owner = Keys::generate();
+        let other = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_COMMAND_BRIEF as u16),
+            "opaque-official-ciphertext",
+        )
+        .tags([
+            Tag::public_key(owner.public_key()),
+            Tag::parse(["d", "run-private"]).expect("d"),
+            Tag::parse(["status", "completed"]).expect("status"),
+        ])
+        .allow_self_tagging()
+        .sign_with_keys(&owner)
+        .expect("sign command brief");
+
+        assert!(super::owner_private_recipient_authorized(
+            &event,
+            Some(&owner.public_key().to_bytes())
+        ));
+        assert!(!super::owner_private_recipient_authorized(
+            &event,
+            Some(&other.public_key().to_bytes())
+        ));
+        assert!(!super::owner_private_recipient_authorized(&event, None));
     }
 
     #[test]

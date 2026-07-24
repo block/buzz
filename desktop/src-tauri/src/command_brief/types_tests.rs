@@ -64,7 +64,7 @@ fn contribution(adviser: &str) -> Value {
     })
 }
 
-pub(super) fn brief_value() -> Value {
+pub(crate) fn brief_value() -> Value {
     json!({
         "version": 1,
         "classification": "OFFICIAL",

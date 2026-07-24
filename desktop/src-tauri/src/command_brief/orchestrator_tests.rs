@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use buzz_core_pkg::command_brief::{CommandBriefFailureCode, CommandBriefLifecycleState};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
@@ -13,6 +14,7 @@ use crate::command_services::apple_inputs::{
 };
 use crate::command_services::rag::VerifiedRagSnapshot;
 
+use super::audit::{PersistedTerminal, TerminalAuditInput};
 use super::orchestrator::{
     BriefAdviserError, BriefAdviserProvider, BriefFinalizationGate, BriefFuture, BriefPersistence,
     BriefPersistenceError, BriefSourceProvider, CollectedSourceProvider, CommandBriefOrchestrator,
@@ -25,7 +27,7 @@ use super::sources::{
     SourceReadError,
 };
 use super::types::{
-    AdviserContribution, AdviserId, BriefRunState, BriefSection, CommandBrief, PublicationState,
+    AdviserContribution, AdviserId, BriefRunState, BriefSection, PublicationState,
     PublishedCommandBrief, SourceLedgerEntry, SPECIALIST_ADVISERS,
 };
 
@@ -142,6 +144,7 @@ struct FakeSourceProvider {
     rechecks: Mutex<VecDeque<Result<(), SourceCollectionError>>>,
     freeze_tokens: Mutex<Vec<CancellationToken>>,
     recheck_tokens: Mutex<Vec<CancellationToken>>,
+    freeze_error: Mutex<Option<SourceCollectionError>>,
     degraded: Vec<BriefSection>,
     limitations: Vec<String>,
 }
@@ -170,6 +173,9 @@ impl BriefSourceProvider for FakeSourceProvider {
                 .push(cancellation.clone());
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
+            }
+            if let Some(error) = self.freeze_error.lock().expect("freeze error").clone() {
+                return Err(error);
             }
             let snapshot = self
                 .snapshots
@@ -341,15 +347,23 @@ impl BriefAdviserProvider for FakeAdviserProvider {
 struct FakePersistence {
     values: Mutex<Vec<Value>>,
     tokens: Mutex<Vec<CancellationToken>>,
+    committed: Mutex<BTreeSet<String>>,
+    terminals: Mutex<
+        Vec<(
+            buzz_core_pkg::command_brief::CommandBriefLifecycleState,
+            Option<buzz_core_pkg::command_brief::CommandBriefFailureCode>,
+        )>,
+    >,
     wait_for_cancel: bool,
+    fail: bool,
 }
 
 impl BriefPersistence for FakePersistence {
-    fn persist<'a>(
+    fn persist_terminal<'a>(
         &'a self,
-        brief: &'a CommandBrief,
+        input: TerminalAuditInput,
         cancellation: CancellationToken,
-    ) -> BriefFuture<'a, Result<PublishedCommandBrief, BriefPersistenceError>> {
+    ) -> BriefFuture<'a, Result<PersistedTerminal, BriefPersistenceError>> {
         boxed(async move {
             self.tokens
                 .lock()
@@ -358,19 +372,51 @@ impl BriefPersistence for FakePersistence {
             if self.wait_for_cancel {
                 cancellation.cancelled().await;
             }
-            if cancellation.is_cancelled() {
-                return Err(BriefPersistenceError::Cancelled);
+            if self.fail {
+                return Err(BriefPersistenceError::Failed);
             }
-            self.values
+            let input = if cancellation.is_cancelled() {
+                input.into_cancelled()
+            } else {
+                input
+            };
+            if let Some(brief) = input.final_brief() {
+                self.values
+                    .lock()
+                    .expect("persistence values lock")
+                    .push(serde_json::to_value(brief).expect("serialize brief"));
+            }
+            self.terminals
                 .lock()
-                .expect("persistence values lock")
-                .push(serde_json::to_value(brief).expect("serialize brief"));
-            Ok(PublishedCommandBrief::new(
-                brief.clone(),
+                .expect("terminal lock")
+                .push((input.lifecycle_state(), input.failure_code()));
+            self.committed
+                .lock()
+                .expect("committed lock")
+                .insert(input.run_id().to_string());
+            let published = input.final_brief().map(|brief| {
+                PublishedCommandBrief::new(brief.clone(), "a".repeat(64), PublicationState::Queued)
+            });
+            Ok(PersistedTerminal::new(
+                input.lifecycle_state(),
                 "a".repeat(64),
                 PublicationState::Queued,
+                published,
             ))
         })
+    }
+
+    fn request_cancel(&self, run_id: &str, cancellation: &CancellationToken) -> bool {
+        if self
+            .committed
+            .lock()
+            .expect("committed lock")
+            .contains(run_id)
+        {
+            return false;
+        }
+        cancellation.cancel();
+        true
     }
 }
 
@@ -497,7 +543,7 @@ async fn failed_adviser_becomes_visible_limitation_only_degradation_without_retr
     let advisers = Arc::new(FakeAdviserProvider::default());
     advisers.fail_once(AdviserId::Navigation);
     let persistence = Arc::new(FakePersistence::default());
-    let orchestrator = orchestrator(1, sources, advisers.clone(), persistence);
+    let orchestrator = orchestrator(1, sources, advisers.clone(), persistence.clone());
 
     let run_id = orchestrator.start(request()).expect("run starts");
     assert_eq!(
@@ -540,10 +586,14 @@ async fn failed_adviser_becomes_visible_limitation_only_degradation_without_retr
             .count(),
         1
     );
+    assert_eq!(
+        persistence.terminals.lock().expect("terminals").as_slice(),
+        &[(CommandBriefLifecycleState::Degraded, None)]
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn unsupported_chief_addition_fails_before_persistence() {
+async fn unsupported_chief_addition_persists_one_redacted_failed_terminal() {
     let sources = Arc::new(FakeSourceProvider::with_snapshots([SNAPSHOT_A]));
     let advisers = Arc::new(FakeAdviserProvider::default());
     *advisers.chief_override.lock().expect("chief override lock") = Some(json!({
@@ -567,9 +617,73 @@ async fn unsupported_chief_addition_fails_before_persistence() {
     );
     assert!(orchestrator.result(&run_id).is_none());
     assert!(persistence.values.lock().expect("persistence").is_empty());
+    assert_eq!(
+        persistence.terminals.lock().expect("terminals").as_slice(),
+        &[(
+            CommandBriefLifecycleState::Failed,
+            Some(CommandBriefFailureCode::ChiefOfStaffOutputRejected)
+        )]
+    );
     let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
     assert_eq!(status["error"], "chief_of_staff_output_rejected");
     assert!(!status.to_string().contains("Unsupported new claim"));
+}
+
+#[tokio::test]
+async fn source_failure_persists_one_redacted_failed_terminal_without_a_brief() {
+    let persistence = Arc::new(FakePersistence::default());
+    let orchestrator = orchestrator(
+        1,
+        Arc::new(FakeSourceProvider {
+            freeze_error: Mutex::new(Some(SourceCollectionError::RagUnavailable)),
+            ..FakeSourceProvider::default()
+        }),
+        Arc::new(FakeAdviserProvider::default()),
+        persistence.clone(),
+    );
+
+    let run_id = orchestrator.start(request()).expect("run starts");
+    assert_eq!(
+        wait_terminal(&orchestrator, &run_id).await,
+        BriefRunState::Failed
+    );
+    assert!(orchestrator.result(&run_id).is_none());
+    assert!(persistence.values.lock().expect("briefs").is_empty());
+    assert_eq!(
+        persistence.terminals.lock().expect("terminals").as_slice(),
+        &[(
+            CommandBriefLifecycleState::Failed,
+            Some(CommandBriefFailureCode::RagUnavailable)
+        )]
+    );
+    let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
+    assert_eq!(status["error"], "rag_unavailable");
+}
+
+#[tokio::test]
+async fn audit_persistence_failure_surfaces_only_bounded_local_failure_status() {
+    let persistence = Arc::new(FakePersistence {
+        fail: true,
+        ..FakePersistence::default()
+    });
+    let orchestrator = orchestrator(
+        1,
+        Arc::new(FakeSourceProvider {
+            freeze_error: Mutex::new(Some(SourceCollectionError::RagUnavailable)),
+            ..FakeSourceProvider::default()
+        }),
+        Arc::new(FakeAdviserProvider::default()),
+        persistence.clone(),
+    );
+
+    let run_id = orchestrator.start(request()).expect("run starts");
+    assert_eq!(
+        wait_terminal(&orchestrator, &run_id).await,
+        BriefRunState::Failed
+    );
+    assert!(persistence.terminals.lock().expect("terminals").is_empty());
+    let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
+    assert_eq!(status["error"], "brief_persistence_failed");
 }
 
 #[tokio::test]
@@ -813,6 +927,13 @@ async fn cancellation_reaches_persistence_and_status_history_is_bounded_metadata
     let history_json = serde_json::to_string(&history).expect("serialize history");
     assert!(!history_json.contains("reasoning"));
     assert!(!history_json.contains("Verified source text"));
+    assert_eq!(
+        persistence.terminals.lock().expect("terminals").as_slice(),
+        &[(
+            CommandBriefLifecycleState::Cancelled,
+            Some(CommandBriefFailureCode::CancellationRequested)
+        )]
+    );
 }
 
 #[derive(Clone)]
@@ -1178,6 +1299,13 @@ async fn active_source_cancellation_stops_later_reads_and_never_reaches_persiste
     assert_eq!(memory_calls.load(Ordering::SeqCst), 0);
     assert_eq!(apple_calls.load(Ordering::SeqCst), 0);
     assert!(persistence.values.lock().expect("persistence").is_empty());
+    assert_eq!(
+        persistence.terminals.lock().expect("terminals").as_slice(),
+        &[(
+            CommandBriefLifecycleState::Cancelled,
+            Some(CommandBriefFailureCode::CancellationRequested)
+        )]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1250,7 +1378,7 @@ fn orchestrator_with_finalization_gate(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cancellation_and_completion_have_one_atomic_winner_after_persistence() {
+async fn cancellation_after_persistence_commit_is_rejected_and_result_is_installed() {
     let cancellation_gate = Arc::new(BarrierFinalizationGate::new());
     let cancellation_persistence = Arc::new(FakePersistence::default());
     let cancelled = orchestrator_with_finalization_gate(
@@ -1267,13 +1395,13 @@ async fn cancellation_and_completion_have_one_atomic_winner_after_persistence() 
             .len(),
         1
     );
-    assert!(cancelled.cancel(&cancelled_run));
+    assert!(!cancelled.cancel(&cancelled_run));
     cancellation_gate.release.notify_one();
     assert_eq!(
         wait_terminal(&cancelled, &cancelled_run).await,
-        BriefRunState::Cancelled
+        BriefRunState::Completed
     );
-    assert!(cancelled.result(&cancelled_run).is_none());
+    assert!(cancelled.result(&cancelled_run).is_some());
 
     let completion_gate = Arc::new(BarrierFinalizationGate::new());
     let completed = orchestrator_with_finalization_gate(

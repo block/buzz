@@ -675,7 +675,12 @@ fn make_command_brief_event(owner_keys: &Keys) -> Event {
             lifecycle_state: CommandBriefLifecycleState::Completed,
             occurred_at: "2026-07-25T06:00:00Z".into(),
             frozen_snapshot_id: "snapshot-1".into(),
-            final_brief: Some(serde_json::json!({"classification":"OFFICIAL"})),
+            final_brief: Some(
+                buzz_core_pkg::command_brief::CommandBriefWire::try_from(
+                    super::super::command_brief::types_tests::brief_value(),
+                )
+                .expect("strict brief"),
+            ),
             failure: None,
             previous_lifecycle_event_id: None,
         },

@@ -3198,6 +3198,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn search_hit_rejects_command_brief_for_kindless_ids_third_party() {
+        let owner = Keys::generate();
+        let third_party = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_COMMAND_BRIEF as u16),
+            "opaque-official-ciphertext",
+        )
+        .tags([
+            Tag::public_key(owner.public_key()),
+            Tag::parse(["d", "run-private"]).expect("d"),
+            Tag::parse(["status", "completed"]).expect("status"),
+        ])
+        .allow_self_tagging()
+        .sign_with_keys(&owner)
+        .expect("sign command brief");
+        let stored = buzz_core::StoredEvent::new(event.clone(), None);
+        let filter = nostr::Filter::new().id(event.id);
+
+        assert!(search_hit_accepted(
+            &filter,
+            &stored,
+            &[],
+            &owner.public_key().to_hex()
+        ));
+        assert!(!search_hit_accepted(
+            &filter,
+            &stored,
+            &[],
+            &third_party.public_key().to_hex()
+        ));
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // truncate_reason regression tests
     //

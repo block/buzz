@@ -186,6 +186,20 @@ pub async fn apply_workspace(
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
+    // Startup recovery runs only after the frontend has installed the selected
+    // workspace relay and identity. It is bounded and non-blocking so an
+    // unavailable relay cannot hold the workspace initialization gate.
+    let command_brief_recovery_app = restore_app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = crate::command_brief::recovery::recover_command_brief_publications(
+            command_brief_recovery_app,
+        )
+        .await
+        {
+            eprintln!("buzz-desktop: command-brief startup recovery: {error}");
+        }
+    });
+
     let state = restore_app.state::<AppState>();
     let restore_pending = state
         .managed_agent_restore_pending

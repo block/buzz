@@ -13,6 +13,7 @@ pub mod agent_turn_metric;
 pub mod channel;
 /// NIP-CB: encrypted owner-only Daily Command Brief lifecycle events.
 pub mod command_brief;
+mod command_brief_wire;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;

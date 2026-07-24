@@ -902,6 +902,7 @@ pub fn run() {
             command_services::memory::sync_memory_service,
             command_services::policy::status::get_command_knowledge_status,
             command_services::rag::get_rag_service_readiness,
+            command_brief::recovery::recover_command_brief_publications,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -5,6 +5,7 @@ pub mod lmstudio;
 pub mod orchestrator;
 pub mod personas;
 pub mod provenance;
+pub mod recovery;
 pub mod scheduler;
 pub mod sources;
 pub mod store;
@@ -34,4 +35,4 @@ mod sources_tests;
 mod store_tests;
 
 #[cfg(test)]
-mod types_tests;
+pub(crate) mod types_tests;

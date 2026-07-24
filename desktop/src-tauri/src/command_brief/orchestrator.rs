@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use buzz_core_pkg::command_brief::{CommandBriefFailureCode, CommandBriefLifecycleState};
 use chrono::{DateTime, SecondsFormat, Utc};
 use futures_util::future::join_all;
 use serde::Deserialize;
@@ -12,6 +13,7 @@ use serde_json::{json, Value};
 use tauri::Manager;
 use tokio_util::sync::CancellationToken;
 
+use super::audit::{PersistedTerminal, TerminalAuditInput};
 use super::lmstudio::{
     AdviserExecutionError, AdviserExecutionErrorCode, AdviserExecutor, ChiefOfStaffRequest,
     SpecialistAdviserRequest,
@@ -107,11 +109,17 @@ pub(crate) trait BriefAdviserProvider: Send + Sync {
 
 /// Task 6 persistence seam. Completion is impossible until this future settles.
 pub(crate) trait BriefPersistence: Send + Sync {
-    fn persist<'a>(
+    fn persist_terminal<'a>(
         &'a self,
-        brief: &'a CommandBrief,
+        input: TerminalAuditInput,
         cancellation: CancellationToken,
-    ) -> BriefFuture<'a, Result<PublishedCommandBrief, BriefPersistenceError>>;
+    ) -> BriefFuture<'a, Result<PersistedTerminal, BriefPersistenceError>>;
+
+    fn request_cancel(&self, run_id: &str, cancellation: &CancellationToken) -> bool {
+        let _ = run_id;
+        cancellation.cancel();
+        true
+    }
 }
 
 /// Boundary between durable persistence and the one atomic terminal decision.
@@ -627,8 +635,9 @@ impl CommandBriefOrchestrator {
         if is_terminal(record.state) {
             return false;
         }
-        record.cancellation.cancel();
-        true
+        self.inner
+            .persistence
+            .request_cancel(run_id, &record.cancellation)
     }
 
     async fn run(
@@ -640,14 +649,15 @@ impl CommandBriefOrchestrator {
         let mut restarted = false;
         loop {
             if cancellation.is_cancelled() {
-                self.terminal(
+                self.persist_closed_and_install(
                     &run_id,
                     &request.schedule_id,
-                    BriefRunState::Cancelled,
+                    "unavailable",
+                    CommandBriefFailureCode::CancellationRequested,
                     &[],
-                    None,
-                    None,
-                );
+                    cancellation.clone(),
+                )
+                .await;
                 return;
             }
             self.transition(
@@ -674,26 +684,28 @@ impl CommandBriefOrchestrator {
                     continue;
                 }
                 Err(SourceCollectionError::Cancelled) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Cancelled,
+                        "unavailable",
+                        CommandBriefFailureCode::CancellationRequested,
                         &[],
-                        None,
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
                 Err(error) => {
                     let code = source_error_code(&error);
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        "unavailable",
+                        code,
                         &[],
-                        Some(code),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -729,14 +741,15 @@ impl CommandBriefOrchestrator {
                     .iter()
                     .any(|result| matches!(result, Err(SchedulerError::Cancelled)))
             {
-                self.terminal(
+                self.persist_closed_and_install(
                     &run_id,
                     &request.schedule_id,
-                    BriefRunState::Cancelled,
+                    context.snapshot_id(),
+                    CommandBriefFailureCode::CancellationRequested,
                     context.degraded_sections(),
-                    None,
-                    None,
-                );
+                    cancellation.clone(),
+                )
+                .await;
                 return;
             }
             let ledger_ids = context
@@ -755,14 +768,15 @@ impl CommandBriefOrchestrator {
                         let placeholder =
                             limitation_only_contribution(adviser, &limitation, &ledger_ids);
                         let Ok(placeholder) = placeholder else {
-                            self.terminal(
+                            self.persist_closed_and_install(
                                 &run_id,
                                 &request.schedule_id,
-                                BriefRunState::Failed,
+                                context.snapshot_id(),
+                                CommandBriefFailureCode::BriefAssemblyRejected,
                                 context.degraded_sections(),
-                                Some("brief_assembly_rejected"),
-                                None,
-                            );
+                                cancellation.clone(),
+                            )
+                            .await;
                             return;
                         };
                         contributions.push(placeholder);
@@ -782,36 +796,39 @@ impl CommandBriefOrchestrator {
                     continue;
                 }
                 Err(SourceCollectionError::SnapshotChanged) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::SnapshotChanged,
                         context.degraded_sections(),
-                        Some("snapshot_changed"),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
                 Err(SourceCollectionError::Cancelled) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Cancelled,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::CancellationRequested,
                         context.degraded_sections(),
-                        None,
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
                 Err(error) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        source_error_code(&error),
                         context.degraded_sections(),
-                        Some(source_error_code(&error)),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             }
@@ -830,14 +847,15 @@ impl CommandBriefOrchestrator {
             let chief_key = match SchedulerJobKey::new(&run_id, AdviserId::ChiefOfStaff) {
                 Ok(key) => key,
                 Err(_) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::ChiefOfStaffOutputRejected,
                         &degraded,
-                        Some("chief_of_staff_output_rejected"),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -867,25 +885,27 @@ impl CommandBriefOrchestrator {
                 Ok(value) => value,
                 Err(SchedulerError::Cancelled)
                 | Err(SchedulerError::Task(BriefAdviserError::Cancelled)) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Cancelled,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::CancellationRequested,
                         &degraded,
-                        None,
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
                 Err(_) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::ChiefOfStaffFailed,
                         &degraded,
-                        Some("chief_of_staff_failed"),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -897,14 +917,15 @@ impl CommandBriefOrchestrator {
             ) {
                 Ok(chief) => chief,
                 Err(()) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::ChiefOfStaffOutputRejected,
                         &degraded,
-                        Some("chief_of_staff_output_rejected"),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -921,36 +942,39 @@ impl CommandBriefOrchestrator {
                     continue;
                 }
                 Err(SourceCollectionError::SnapshotChanged) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::SnapshotChanged,
                         &degraded,
-                        Some("snapshot_changed"),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
                 Err(SourceCollectionError::Cancelled) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Cancelled,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::CancellationRequested,
                         &degraded,
-                        None,
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
                 Err(error) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        source_error_code(&error),
                         &degraded,
-                        Some(source_error_code(&error)),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             }
@@ -966,14 +990,15 @@ impl CommandBriefOrchestrator {
             ) {
                 Ok(brief) => brief,
                 Err(()) => {
-                    self.terminal(
+                    self.persist_closed_and_install(
                         &run_id,
                         &request.schedule_id,
-                        BriefRunState::Failed,
+                        context.snapshot_id(),
+                        CommandBriefFailureCode::BriefAssemblyRejected,
                         &degraded,
-                        Some("brief_assembly_rejected"),
-                        None,
-                    );
+                        cancellation.clone(),
+                    )
+                    .await;
                     return;
                 }
             };
@@ -984,55 +1009,105 @@ impl CommandBriefOrchestrator {
                 &degraded,
                 None,
             );
-            let published = match self
-                .inner
-                .persistence
-                .persist(&brief, cancellation.clone())
-                .await
-            {
-                Ok(published) => published,
-                Err(BriefPersistenceError::Cancelled) => {
-                    self.terminal(
-                        &run_id,
-                        &request.schedule_id,
-                        BriefRunState::Cancelled,
-                        &degraded,
-                        None,
-                        None,
-                    );
-                    return;
-                }
-                Err(BriefPersistenceError::Failed) => {
-                    self.terminal(
-                        &run_id,
-                        &request.schedule_id,
-                        BriefRunState::Failed,
-                        &degraded,
-                        Some("brief_persistence_failed"),
-                        None,
-                    );
-                    return;
-                }
-            };
-            self.inner.finalization_gate.wait().await;
-            let terminal = if degraded.is_empty()
-                && context.limitations().is_empty()
-                && failed_advisers.is_empty()
-            {
-                BriefRunState::Completed
-            } else {
-                BriefRunState::Degraded
-            };
-            self.terminal(
+            self.persist_and_install(
                 &run_id,
                 &request.schedule_id,
-                terminal,
                 &degraded,
+                TerminalAuditInput::completed(brief),
                 None,
-                Some(published),
-            );
+                cancellation.clone(),
+            )
+            .await;
             return;
         }
+    }
+
+    async fn persist_closed_and_install(
+        &self,
+        run_id: &str,
+        schedule_id: &str,
+        snapshot_id: &str,
+        failure_code: CommandBriefFailureCode,
+        degraded: &[BriefSection],
+        cancellation: CancellationToken,
+    ) {
+        let lifecycle_state = if failure_code == CommandBriefFailureCode::CancellationRequested {
+            CommandBriefLifecycleState::Cancelled
+        } else {
+            CommandBriefLifecycleState::Failed
+        };
+        let input = match TerminalAuditInput::closed(
+            run_id.to_string(),
+            schedule_id.to_string(),
+            timestamp(),
+            snapshot_id.to_string(),
+            lifecycle_state,
+            failure_code,
+        ) {
+            Ok(input) => input,
+            Err(_) => {
+                self.terminal_local_failure(run_id, schedule_id, degraded);
+                return;
+            }
+        };
+        let display_error =
+            (lifecycle_state == CommandBriefLifecycleState::Failed).then_some(failure_code);
+        self.persist_and_install(
+            run_id,
+            schedule_id,
+            degraded,
+            input,
+            display_error,
+            cancellation,
+        )
+        .await;
+    }
+
+    async fn persist_and_install(
+        &self,
+        run_id: &str,
+        schedule_id: &str,
+        degraded: &[BriefSection],
+        input: TerminalAuditInput,
+        display_error: Option<CommandBriefFailureCode>,
+        cancellation: CancellationToken,
+    ) {
+        let persisted = self
+            .inner
+            .persistence
+            .persist_terminal(input, cancellation)
+            .await;
+        let Ok(persisted) = persisted else {
+            self.terminal_local_failure(run_id, schedule_id, degraded);
+            return;
+        };
+        self.inner.finalization_gate.wait().await;
+        let state = match persisted.lifecycle_state() {
+            CommandBriefLifecycleState::Completed => BriefRunState::Completed,
+            CommandBriefLifecycleState::Degraded => BriefRunState::Degraded,
+            CommandBriefLifecycleState::Cancelled => BriefRunState::Cancelled,
+            CommandBriefLifecycleState::Failed => BriefRunState::Failed,
+        };
+        let result = persisted.published_brief().cloned();
+        self.terminal(
+            run_id,
+            schedule_id,
+            state,
+            degraded,
+            display_error.map(CommandBriefFailureCode::as_str),
+            result,
+        );
+    }
+
+    fn terminal_local_failure(&self, run_id: &str, schedule_id: &str, degraded: &[BriefSection]) {
+        self.terminal(
+            run_id,
+            schedule_id,
+            BriefRunState::Failed,
+            degraded,
+            Some(CommandBriefFailureCode::BriefPersistenceFailed.as_str()),
+            None,
+        );
     }
 
     fn transition(
@@ -1071,12 +1146,6 @@ impl CommandBriefOrchestrator {
                 if is_terminal(record.state) {
                     return;
                 }
-                let (state, error, result) =
-                    if state != BriefRunState::Cancelled && record.cancellation.is_cancelled() {
-                        (BriefRunState::Cancelled, None, None)
-                    } else {
-                        (state, error, result)
-                    };
                 let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
                     return;
                 };
@@ -1281,16 +1350,18 @@ fn adviser_label(adviser: AdviserId) -> &'static str {
     }
 }
 
-fn source_error_code(error: &SourceCollectionError) -> &'static str {
+fn source_error_code(error: &SourceCollectionError) -> CommandBriefFailureCode {
     match error {
-        SourceCollectionError::Cancelled => "cancelled",
-        SourceCollectionError::SnapshotChanged => "snapshot_changed",
-        SourceCollectionError::RagUnavailable => "rag_unavailable",
-        SourceCollectionError::RagStale => "rag_stale",
-        SourceCollectionError::RagInvalid => "rag_invalid",
-        SourceCollectionError::InvalidRequest => "source_request_rejected",
-        SourceCollectionError::InvalidTime => "source_time_rejected",
-        SourceCollectionError::ConflictingSourceIdentity => "source_identity_conflict",
+        SourceCollectionError::Cancelled => CommandBriefFailureCode::CancellationRequested,
+        SourceCollectionError::SnapshotChanged => CommandBriefFailureCode::SnapshotChanged,
+        SourceCollectionError::RagUnavailable => CommandBriefFailureCode::RagUnavailable,
+        SourceCollectionError::RagStale => CommandBriefFailureCode::RagStale,
+        SourceCollectionError::RagInvalid => CommandBriefFailureCode::RagInvalid,
+        SourceCollectionError::InvalidRequest => CommandBriefFailureCode::SourceRequestRejected,
+        SourceCollectionError::InvalidTime => CommandBriefFailureCode::SourceTimeRejected,
+        SourceCollectionError::ConflictingSourceIdentity => {
+            CommandBriefFailureCode::SourceIdentityConflict
+        }
     }
 }
 
