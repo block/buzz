@@ -119,6 +119,7 @@ Phase 2 excludes:
 - Modify: `desktop/src-tauri/src/managed_agents/runtime.rs`
 - Modify: `desktop/src-tauri/src/commands/agent_models.rs`
 - Modify: `desktop/src-tauri/src/managed_agents/env_vars.rs`
+- Modify: `desktop/src-tauri/src/managed_agents/config_bridge/reader.rs`
 - Modify: `desktop/src-tauri/src/managed_agents/agent_env.rs` only if packaging requires it
 - Modify: `desktop/src-tauri/tauri.conf.json`
 - Modify: `Justfile`
@@ -130,15 +131,16 @@ Phase 2 excludes:
 **Steps:**
 
 1. Write failing Rust catalog/readiness tests for the distinct runtime identity, command, provider lock, model discovery capability, absence of a stdio MCP command, required native model/base configuration, and optional Keychain-backed LM Studio token.
-2. Add `buzz-lmstudio-agent` to the Tauri external binaries, every platform-specific Just build/copy/setup loop, and the Rust runtime catalog. Keep capability facts in `KnownAcpRuntime`; do not add renderer-level runtime-ID checks.
-3. Make the runtime provider-locked to `lmstudio-native`, model-switchable through ACP, and explicit that MCP integrations are native policy configuration rather than a desktop stdio MCP command.
-4. Add read-only `/api/v1/models` discovery through the native egress policy and return downloaded/loaded state without claiming an unloaded model is ready.
-5. Extend readiness to distinguish application installed, API unreachable, authentication required, no loaded model, configured model unavailable, and ready.
-6. Report a wildcard-bound or unauthenticated server as a security warning; do not silently change the user's LM Studio global settings.
-7. Project the catalog metadata through `agentConfigCore` and render the existing canonical configuration controls.
-8. Update the nested `AGENTS.md` because runtime configuration behavior changes.
-9. Run focused Tauri Rust tests, focused TypeScript tests, `just desktop-check`, and formatting.
-10. Commit only Task 4 changes.
+2. Add `buzz-lmstudio-agent` to the Tauri external binaries, every platform-specific Just build/copy/setup loop, `default_agent_args`, and the Rust runtime catalog. Keep capability facts in `KnownAcpRuntime`; do not add renderer-level runtime-ID checks.
+3. Make the runtime provider-locked to `lmstudio-native`, model-switchable through ACP, and explicit that MCP integrations are native policy configuration rather than a desktop stdio MCP command. Extend locked-provider metadata so the config bridge renders the catalog's real locked provider rather than its current Anthropic-only label.
+4. Reserve classification, provider, base URL, and integration-policy environment keys from user/persona configuration and force-write the security values after user environment layering. Tests must prove persona/global/default environment values cannot override them; `KnownAcpRuntime::default_env` alone is not a security boundary or readiness input.
+5. Add read-only `/api/v1/models` discovery through the native egress policy and return downloaded/loaded state without claiming an unloaded model is ready.
+6. Extend readiness to distinguish application installed, API unreachable, authentication required, no loaded model, configured model unavailable, and ready.
+7. Report a wildcard-bound or unauthenticated server as a security warning; do not silently change the user's LM Studio global settings.
+8. Project the catalog metadata through `agentConfigCore` and render the existing canonical configuration controls.
+9. Update the nested `AGENTS.md` because runtime configuration behavior changes.
+10. Run focused Tauri Rust tests, focused TypeScript tests, `just desktop-check`, and formatting.
+11. Commit only Task 4 changes.
 
 ### Task 5: Add structured adviser validation and bounded single-model scheduling
 
