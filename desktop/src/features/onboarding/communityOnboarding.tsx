@@ -1,6 +1,6 @@
 import {
+  canonicalCommunityRelayUrl,
   deriveCommunityName,
-  normalizeRelayUrl,
 } from "@/features/communities/communityStorage";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
 import type { Profile } from "@/shared/api/types";
@@ -82,18 +82,6 @@ export type StartCommunityOnboardingInput = {
   policyReceipt?: string;
 };
 
-function canonicalRelayUrl(rawRelayUrl: string) {
-  const trimmed = rawRelayUrl.trim();
-  const withScheme = /^(ws|wss):\/\//i.test(trimmed)
-    ? trimmed
-    : normalizeRelayUrl(trimmed);
-  const parsed = new URL(withScheme);
-  parsed.protocol = parsed.protocol.toLowerCase();
-  parsed.hostname = parsed.hostname.toLowerCase();
-  parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
-  return parsed.toString().replace(/\/$/, "");
-}
-
 function isTransaction(
   value: unknown,
 ): value is CommunityOnboardingTransaction {
@@ -151,9 +139,12 @@ export function startCommunityOnboarding(
   storage: Storage = localStorage,
   now = new Date(),
 ): CommunityOnboardingTransaction {
-  const relayUrl = canonicalRelayUrl(input.relayUrl);
+  const relayUrl = canonicalCommunityRelayUrl(input.relayUrl);
   const existing = loadCommunityOnboardingTransaction(storage);
   if (existing?.relayUrl === relayUrl) {
+    const reopenConnect =
+      input.source === "deep-link-connect" &&
+      existing.source === "deep-link-connect";
     const updated = {
       ...existing,
       firstCommunityPage:
@@ -163,6 +154,12 @@ export function startCommunityOnboarding(
       token: input.token?.trim() || existing.token,
       reposDir: input.reposDir ?? existing.reposDir,
       policyReceipt: input.policyReceipt ?? existing.policyReceipt,
+      stage: reopenConnect ? "connecting" : existing.stage,
+      communityId: reopenConnect ? undefined : existing.communityId,
+      previousCommunityId: reopenConnect
+        ? undefined
+        : existing.previousCommunityId,
+      addedCommunity: reopenConnect ? undefined : existing.addedCommunity,
       updatedAt: now.toISOString(),
       error: undefined,
       // A freshly opened link deserves fresh feedback — re-present the gate
@@ -339,7 +336,7 @@ export function CommunityOnboardingProvider({
     (input: StartCommunityOnboardingInput) => {
       if (
         transaction &&
-        canonicalRelayUrl(input.relayUrl) !== transaction.relayUrl
+        canonicalCommunityRelayUrl(input.relayUrl) !== transaction.relayUrl
       ) {
         return false;
       }

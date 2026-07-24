@@ -76,6 +76,73 @@ test("join deep link is acknowledged without claiming before setup", async ({
     .toContain('"stage":"claiming"');
 });
 
+test("connect deep link switches to an existing community without onboarding", async ({
+  page,
+}) => {
+  const activeCommunityId = "builderlab-community";
+  const otherCommunityId = "other-community";
+  const builderlabRelay = "wss://buzz.block.builderlab.xyz";
+  await page.addInitScript(
+    ({ activeId, communities }) => {
+      window.localStorage.setItem(
+        "buzz-communities",
+        JSON.stringify(communities),
+      );
+      window.localStorage.setItem("buzz-active-community-id", activeId);
+    },
+    {
+      activeId: otherCommunityId,
+      communities: [
+        {
+          id: activeCommunityId,
+          name: "Builderlab",
+          relayUrl: "WSS://Buzz.Block.Builderlab.xyz/",
+          addedAt: "2026-07-23T00:00:00.000Z",
+        },
+        {
+          id: otherCommunityId,
+          name: "Other",
+          relayUrl: "wss://other.example",
+          addedAt: "2026-07-23T00:00:00.000Z",
+        },
+      ],
+    },
+  );
+  await installMockBridge(
+    page,
+    {
+      pendingCommunityDeepLinks: [
+        {
+          id: "dl-connect-builderlab",
+          kind: "connect",
+          relayUrl: builderlabRelay,
+          code: null,
+        },
+      ],
+    },
+    { skipCommunitySeed: true },
+  );
+  await page.goto("/");
+
+  await expect(page.getByTestId("community-onboarding-flow")).toHaveCount(0);
+  await expect(page.getByTestId("sidebar-profile-avatar-button")).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        window.localStorage.getItem("buzz-active-community-id"),
+      ),
+    )
+    .toBe(activeCommunityId);
+  await expect
+    .poll(() =>
+      page.evaluate(
+        (key) => window.localStorage.getItem(key),
+        TRANSACTION_STORAGE_KEY,
+      ),
+    )
+    .toBeNull();
+});
+
 test("connect deep link shows a static acknowledgment during setup", async ({
   page,
 }) => {
