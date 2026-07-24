@@ -75,6 +75,59 @@ CREATE TABLE IF NOT EXISTS archive_migrations (
     name       TEXT PRIMARY KEY,
     applied_at INTEGER NOT NULL
 );
+
+-- Parsed index of kind 44200 (NIP-AM agent turn metric) archive rows.
+--
+-- Rebuildable from `archived_events.raw_json` — never the source of truth.
+-- Every archived kind-44200 row gets exactly one row here, keyed by
+-- (identity, relay, id), with `parse_status` 'valid' or 'invalid'. Token
+-- counters are stored as fixed-width 20-digit zero-padded decimal TEXT
+-- (order-preserving lexicographically) because SQLite INTEGER is signed
+-- i64 and NIP-AM counters are full-range u64. `turn_seq` uses the same
+-- encoding so it survives sequence values above i64::MAX.
+CREATE TABLE IF NOT EXISTS agent_metric_index (
+    identity_pubkey              TEXT NOT NULL,
+    relay_url                    TEXT NOT NULL,
+    id                           TEXT NOT NULL,
+    agent_pubkey                 TEXT NOT NULL,
+    event_created_at             INTEGER NOT NULL,
+    archived_at                  INTEGER NOT NULL,
+    reported_at                  INTEGER,
+    session_id                   TEXT,
+    turn_seq                     TEXT,
+    model                        TEXT,
+    delta_reliable               INTEGER,
+    turn_input_tokens            TEXT,
+    turn_output_tokens           TEXT,
+    turn_total_tokens            TEXT,
+    turn_cost_usd                REAL,
+    cumulative_input_tokens      TEXT,
+    cumulative_output_tokens     TEXT,
+    cumulative_total_tokens      TEXT,
+    cumulative_cost_usd          REAL,
+    parse_status                 TEXT NOT NULL CHECK (parse_status IN ('valid','invalid')),
+    PRIMARY KEY (identity_pubkey, relay_url, id)
+);
+
+-- Backfill/anti-join source: scoped partial index so the per-read backfill
+-- scan over archived_events only touches kind-44200 rows.
+CREATE INDEX IF NOT EXISTS idx_archived_events_agent_metric
+    ON archived_events (identity_pubkey, relay_url, id)
+    WHERE kind = 44200;
+
+-- Predecessor/baseline lookup: exact-sequence probes (A11) and duplicate
+-- cardinality checks key on this prefix.
+CREATE INDEX IF NOT EXISTS idx_agent_metric_session
+    ON agent_metric_index (identity_pubkey, relay_url, agent_pubkey, session_id, turn_seq, id);
+
+-- Window scan by reported time.
+CREATE INDEX IF NOT EXISTS idx_agent_metric_reported
+    ON agent_metric_index (identity_pubkey, relay_url, reported_at);
+
+-- Coarse-time scan for invalid-row coverage (invalid rows lack a trustworthy
+-- reported_at, so their window membership is judged by event_created_at).
+CREATE INDEX IF NOT EXISTS idx_agent_metric_created
+    ON agent_metric_index (identity_pubkey, relay_url, event_created_at, parse_status);
 ";
 
 // ── Open / init ─────────────────────────────────────────────────────────────
@@ -442,6 +495,8 @@ pub fn get_subscription_kinds(
 /// Upsert an event row (idempotent on the PK).
 ///
 /// Does nothing if the event is already archived (same identity/relay/id).
+/// Returns `true` iff this call inserted a new row (`false` if the row
+/// already existed and the `ON CONFLICT DO NOTHING` no-op'd).
 // Args mirror the archived_events columns; a params struct would just rename them.
 #[allow(clippy::too_many_arguments)]
 pub fn upsert_archived_event(
@@ -454,25 +509,26 @@ pub fn upsert_archived_event(
     created_at: i64,
     raw_json: &str,
     archived_at: i64,
-) -> Result<(), String> {
-    conn.execute(
-        "INSERT INTO archived_events
-             (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-         ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
-        params![
-            identity_pubkey,
-            relay_url,
-            event_id,
-            kind,
-            pubkey,
-            created_at,
-            raw_json,
-            archived_at
-        ],
-    )
-    .map_err(|e| format!("failed to upsert archived event: {e}"))?;
-    Ok(())
+) -> Result<bool, String> {
+    let affected = conn
+        .execute(
+            "INSERT INTO archived_events
+                 (identity_pubkey, relay_url, id, kind, pubkey, created_at, raw_json, archived_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
+            params![
+                identity_pubkey,
+                relay_url,
+                event_id,
+                kind,
+                pubkey,
+                created_at,
+                raw_json,
+                archived_at
+            ],
+        )
+        .map_err(|e| format!("failed to upsert archived event: {e}"))?;
+    Ok(affected > 0)
 }
 
 /// Upsert a scope membership row for an event.
@@ -771,17 +827,28 @@ pub fn read_archived_observer_events_for_channel(
         .map_err(|e| format!("read read_archived_observer_events_for_channel row: {e}"))
 }
 
-/// GC: delete orphaned event rows whose last scope row was just removed.
+/// GC: delete orphaned event rows whose last scope row was just removed, and
+/// atomically cascade-delete any `agent_metric_index` rows whose canonical
+/// `archived_events` row no longer exists.
 ///
-/// Called after any batch deletion of scope rows. Uses a LEFT JOIN so only
-/// events with zero remaining scope rows are deleted.
+/// Both deletes run inside ONE SQLite transaction (not two autocommit
+/// statements) so the derived index can never observe a canonical row as
+/// gone while the index row it produced still exists — an index row must
+/// never outlive the event it was parsed from (A6).
+///
+/// Called after any batch deletion of scope rows. Uses a LEFT JOIN-equivalent
+/// anti-join so only events with zero remaining scope rows are deleted.
 #[allow(dead_code)] // Used by P4 purge commands; not yet wired to a Tauri command.
 pub fn gc_orphaned_events(
     conn: &Connection,
     identity_pubkey: &str,
     relay_url: &str,
 ) -> Result<usize, String> {
-    let affected = conn
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("failed to begin gc_orphaned_events transaction: {e}"))?;
+
+    let affected = tx
         .execute(
             "DELETE FROM archived_events
              WHERE identity_pubkey = ?1
@@ -794,6 +861,11 @@ pub fn gc_orphaned_events(
             params![identity_pubkey, relay_url],
         )
         .map_err(|e| format!("failed to gc orphaned events: {e}"))?;
+
+    super::metric_store::delete_orphaned_metric_index_rows(&tx, identity_pubkey, relay_url)?;
+
+    tx.commit()
+        .map_err(|e| format!("failed to commit gc_orphaned_events transaction: {e}"))?;
     Ok(affected)
 }
 

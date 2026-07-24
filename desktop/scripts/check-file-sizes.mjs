@@ -75,7 +75,13 @@ const overrides = new Map([
   // is test-only content; the override covers the test growth accumulated
   // across the local-archive + agent-metric-archive PR series. store_tests.rs
   // (~731 lines) is under 1000 so needs no override.
-  ["src-tauri/src/archive/mod_tests.rs", 1208],
+  // agent-usage-archive (Rev 3): persistedAgentMetrics decrypt-success
+  // assertion + re-ingest no-double-count test, plus three
+  // get_agent_usage_series integration tests (fresh ingest, agentPubkey
+  // filter + hasArchivedEvidence, pre-existing-row backfill) exercising the
+  // command's SQLite core end to end. Test-only content; ratcheted
+  // 1208 -> 1424.
+  ["src-tauri/src/archive/mod_tests.rs", 1424],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports
@@ -362,7 +368,10 @@ const overrides = new Map([
   ["src/features/profile/ui/UserProfilePanelSections.tsx", 1140],
   // +14 for openEditAgent event subscription (config-nudge card "Open Edit Agent" action).
   // +11 for editAgentFocus state + initialFocus prop threading (deep-link granularity).
-  ["src/features/profile/ui/UserProfilePanel.tsx", 1025],
+  // +1 for A13 fail-closed canViewUsage wiring + AgentUsageFocusedView mount.
+  // +14 for query-derived usageIngressTrailing summary threaded into the
+  // Info-tab ingress row (replaces the hardcoded "View" label, plan:328).
+  ["src/features/profile/ui/UserProfilePanel.tsx", 1040],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
@@ -546,6 +555,13 @@ const overrides = new Map([
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
   // hideProviderIds computation for Databricks v1 gate. Queued to split.
   ["src/features/agents/ui/AgentDefinitionDialog.tsx", 1035],
+  // agent-usage-archive (Rev 3): Phase 2's single invoke_handler registration
+  // line for get_agent_usage_series (826d79221) pre-existed under the prior
+  // 1000-line ceiling; rebasing this branch onto a later main (which grew
+  // lib.rs by 2 lines upstream, unrelated to this feature) tipped the file
+  // to 1001. Not generic debt growth from this PR — one line, pre-existing.
+  // Queued to split with the rest of this list.
+  ["src-tauri/src/lib.rs", 1001],
 ]);
 
 await runFileSizeCheck({

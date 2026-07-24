@@ -67,6 +67,9 @@ import {
   ProfileSummaryView,
 } from "@/features/profile/ui/UserProfilePanelSections";
 import { AgentConfigurationFocusedView } from "@/features/profile/ui/UserProfilePanelAgentDetails";
+import { AgentUsageFocusedView } from "@/features/agent-usage/ui/AgentUsageFocusedView";
+import { useAgentUsageSeries } from "@/features/agent-usage/hooks";
+import { deriveUsageIngressTrailing } from "@/features/agent-usage/lib/agentUsage";
 import { UserProfileAgentSettingsMenuSlot } from "@/features/profile/ui/UserProfileAgentActions";
 import { useProfileAgentDeletion } from "@/features/profile/ui/UserProfilePanelDeletion";
 import { useProfileFieldBuckets } from "@/features/profile/ui/UserProfilePanelFields";
@@ -338,6 +341,18 @@ export function UserProfilePanel({
     viewerIsOwner &&
     Boolean(effectivePubkey) &&
     canOpenAgentActivity(effectivePubkey);
+  const canViewUsage = viewerIsOwner && isBot && Boolean(effectivePubkey);
+  // Info-tab ingress row's trailing text (plan:328) needs its own 7-day
+  // query — independent of the focused view's own 7d/30d selector, and
+  // gated off entirely when the row won't render.
+  const usageIngressQuery = useAgentUsageSeries({
+    agentPubkey: effectivePubkey ?? undefined,
+    days: 7,
+    enabled: canViewUsage,
+  });
+  const usageIngressTrailing = usageIngressQuery.data
+    ? deriveUsageIngressTrailing(usageIngressQuery.data)
+    : undefined;
   const canOpenAgentLogs =
     isOwner === true && managedAgent?.backend.type === "local";
   const canInstantiateAgent =
@@ -787,6 +802,8 @@ export function UserProfilePanel({
           canInstantiateAgent={canInstantiateAgent}
           canOpenAgentLogs={canOpenAgentLogs}
           canViewActivity={canViewActivity}
+          canViewUsage={canViewUsage}
+          usageIngressTrailing={usageIngressTrailing}
           callerChannelId={callerChannelId}
           channelCount={profileChannels.length}
           channelIdToName={channelIdToName}
@@ -822,6 +839,7 @@ export function UserProfilePanel({
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}
           onOpenInstructions={() => setView("instructions")}
+          onOpenUsage={() => setView("usage")}
           onTabChange={setTab}
           onOpenDm={onOpenDm}
           presenceStatus={presenceStatus}
@@ -837,6 +855,13 @@ export function UserProfilePanel({
         <MemoryFocusedView
           agentPubkey={effectivePubkey}
           viewerIsOwner={viewerIsOwner}
+        />
+      ) : null}
+      {view === "usage" && effectivePubkey ? (
+        <AgentUsageFocusedView
+          agentPubkey={effectivePubkey}
+          canViewUsage={canViewUsage}
+          onIneligible={() => setView("summary", { replace: true })}
         />
       ) : null}
       {view === "info" ? (

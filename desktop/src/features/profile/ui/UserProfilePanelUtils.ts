@@ -25,7 +25,8 @@ export type ProfilePanelView =
   | "diagnostics"
   | "memories"
   | "channels"
-  | "logs";
+  | "logs"
+  | "usage";
 
 export type ProfilePanelTab = "info" | "runtime" | "channels" | "memories";
 
@@ -38,6 +39,7 @@ export const PROFILE_PANEL_VIEW_TITLES: Record<ProfilePanelView, string> = {
   memories: "Memories",
   channels: "Channels",
   logs: "Harness Log",
+  usage: "Usage",
 };
 
 const PROFILE_PANEL_VIEWS = new Set<ProfilePanelView>(

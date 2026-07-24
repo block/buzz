@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { onAgentMetricsChanged } from "@/shared/api/tauriArchive";
 import { ArchiveSyncManager } from "./archiveSyncManager.ts";
 
 // ── Fakes ────────────────────────────────────────────────────────────────────
@@ -41,6 +42,7 @@ function makeFakeArchive() {
   let subs = [];
   const archiveCalls = [];
   const listeners = new Set();
+  let nextPersistedAgentMetrics = 0;
 
   return {
     async listSaveSubscriptions() {
@@ -81,7 +83,13 @@ function makeFakeArchive() {
     },
     async archiveEvents(candidates) {
       archiveCalls.push(candidates);
-      return { persisted: candidates.length, dropped: 0 };
+      const persistedAgentMetrics = nextPersistedAgentMetrics;
+      nextPersistedAgentMetrics = 0;
+      return {
+        persisted: candidates.length,
+        persistedAgentMetrics,
+        dropped: 0,
+      };
     },
     onSubscriptionChange(listener) {
       listeners.add(listener);
@@ -90,6 +98,10 @@ function makeFakeArchive() {
     archiveCalls,
     setSubs(s) {
       subs = s;
+    },
+    /** Next archiveEvents() call reports this many newly persisted agent metrics. */
+    setNextPersistedAgentMetrics(n) {
+      nextPersistedAgentMetrics = n;
     },
   };
 }
@@ -801,6 +813,177 @@ test("manager_handles_out_of_order_list_resolution", async () => {
     0,
     "K must not be active after delete-then-list-resolve",
   );
+});
+
+test("manager_notifies_agent_metrics_changed_when_persisted_agent_metrics_positive", async () => {
+  const relay = makeFakeRelayClient();
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "owner_p",
+      scopeValue: "agent-pk",
+      kinds: [44200],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive, { flushBatchSize: 1 });
+  await mgr.start();
+  await tick();
+
+  let fired = 0;
+  const off = onAgentMetricsChanged(() => {
+    fired++;
+  });
+
+  archive.setNextPersistedAgentMetrics(1);
+  const filter = JSON.parse([...relay.subs.keys()][0]);
+  relay.push(filter, {
+    id: "metric-1",
+    kind: 44200,
+    pubkey: "agent-pk",
+    created_at: 1,
+    content: "encrypted",
+    tags: [],
+  });
+  await tick();
+
+  assert.equal(fired, 1, "notifier fires once when persistedAgentMetrics > 0");
+  off();
+  mgr.destroy();
+});
+
+test("manager_does_not_notify_agent_metrics_changed_when_persisted_agent_metrics_zero", async () => {
+  const relay = makeFakeRelayClient();
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "channel_h",
+      scopeValue: "chan-1",
+      kinds: [9],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive, { flushBatchSize: 1 });
+  await mgr.start();
+  await tick();
+
+  let fired = 0;
+  const off = onAgentMetricsChanged(() => {
+    fired++;
+  });
+
+  // Non-metric event; archiveEvents defaults to persistedAgentMetrics: 0.
+  const filter = JSON.parse([...relay.subs.keys()][0]);
+  relay.push(filter, {
+    id: "ev1",
+    kind: 9,
+    pubkey: "pk",
+    created_at: 1,
+    content: "hi",
+    tags: [],
+  });
+  await tick();
+
+  assert.equal(fired, 0, "notifier must not fire for persistedAgentMetrics: 0");
+  off();
+  mgr.destroy();
+});
+
+test("manager_does_not_notify_agent_metrics_changed_on_archive_events_rejection", async () => {
+  const relay = makeFakeRelayClient();
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "owner_p",
+      scopeValue: "agent-pk",
+      kinds: [44200],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  const mgr = makeManager(relay, archive, {
+    flushBatchSize: 1,
+    archiveEvents: async () => {
+      throw new Error("simulated archive_events failure");
+    },
+  });
+  await mgr.start();
+  await tick();
+
+  let fired = 0;
+  const off = onAgentMetricsChanged(() => {
+    fired++;
+  });
+
+  const filter = JSON.parse([...relay.subs.keys()][0]);
+  relay.push(filter, {
+    id: "metric-1",
+    kind: 44200,
+    pubkey: "agent-pk",
+    created_at: 1,
+    content: "encrypted",
+    tags: [],
+  });
+  await tick();
+
+  assert.equal(fired, 0, "a rejected archiveEvents call must never notify");
+  off();
+  mgr.destroy();
+});
+
+test("manager_notifies_agent_metrics_changed_on_destroy_flush", async () => {
+  const relay = makeFakeRelayClient();
+  const archive = makeFakeArchive();
+  archive.setSubs([
+    {
+      scopeType: "owner_p",
+      scopeValue: "agent-pk",
+      kinds: [44200],
+      identityPubkey: "pk",
+      relayUrl: "wss://r",
+      createdAt: 0,
+    },
+  ]);
+  // Large batch size / idle so the event stays buffered until destroy() flushes it.
+  const mgr = makeManager(relay, archive, {
+    flushBatchSize: 100,
+    flushIdleMs: 10000,
+  });
+  await mgr.start();
+  await tick();
+
+  let fired = 0;
+  const off = onAgentMetricsChanged(() => {
+    fired++;
+  });
+
+  archive.setNextPersistedAgentMetrics(1);
+  const filter = JSON.parse([...relay.subs.keys()][0]);
+  relay.push(filter, {
+    id: "metric-1",
+    kind: 44200,
+    pubkey: "agent-pk",
+    created_at: 1,
+    content: "encrypted",
+    tags: [],
+  });
+  assert.equal(archive.archiveCalls.length, 0, "buffered, not yet flushed");
+
+  mgr.destroy();
+  await tick();
+
+  assert.equal(archive.archiveCalls.length, 1, "destroy() flushes the buffer");
+  assert.equal(
+    fired,
+    1,
+    "destroy flush notifies when persistedAgentMetrics > 0",
+  );
+  off();
 });
 
 test("manager_flushes_buffer_on_destroy", async () => {

@@ -4,7 +4,9 @@ import type { RelayEvent } from "@/shared/api/types";
 import {
   archiveEvents as defaultArchiveEvents,
   listSaveSubscriptions as defaultListSaveSubscriptions,
+  notifyAgentMetricsChanged,
   onSubscriptionChange as defaultOnSubscriptionChange,
+  type ArchiveBatchResult,
   type SaveSubscription,
   type ScopeType,
 } from "@/shared/api/tauriArchive";
@@ -30,7 +32,7 @@ export interface ArchiveSyncDeps {
       rawEventJson: string;
       matchedScope: { scopeType: ScopeType; scopeValue: string };
     }>,
-  ) => Promise<unknown>;
+  ) => Promise<ArchiveBatchResult>;
   onSubscriptionChange: (listener: () => void) => () => void;
   flushBatchSize?: number;
   flushIdleMs?: number;
@@ -135,9 +137,7 @@ export class ArchiveSyncManager {
     // Flush any buffered events before tearing down.
     if (this.buffer.length > 0) {
       const toFlush = this.buffer.splice(0);
-      void this.deps.archiveEvents(toFlush).catch((err: unknown) => {
-        console.warn("[archiveSyncManager] flush on destroy failed:", err);
-      });
+      this.sendBatch(toFlush, "flush on destroy failed");
     }
     for (const [, unsub] of this.active) {
       void unsub();
@@ -292,9 +292,33 @@ export class ArchiveSyncManager {
     }
     if (this.buffer.length === 0) return;
     const batch = this.buffer.splice(0);
-    void this.deps.archiveEvents(batch).catch((err: unknown) => {
-      console.warn("[archiveSyncManager] archive_events failed:", err);
-    });
+    this.sendBatch(batch, "archive_events failed");
+  }
+
+  /**
+   * Fire-and-forget `archiveEvents(batch)`, shared by the idle/size-triggered
+   * flush and the destroy-time flush. Notifies `onAgentMetricsChanged`
+   * subscribers only when the backend confirms `persistedAgentMetrics > 0` —
+   * the backend is authoritative, so a rejected call, a duplicate-only batch,
+   * or a batch with no kind-44200 events never notifies.
+   */
+  private sendBatch(
+    batch: Array<{
+      rawEventJson: string;
+      matchedScope: { scopeType: ScopeType; scopeValue: string };
+    }>,
+    errLabel: string,
+  ): void {
+    void this.deps
+      .archiveEvents(batch)
+      .then((result) => {
+        if (result.persistedAgentMetrics > 0) {
+          notifyAgentMetricsChanged();
+        }
+      })
+      .catch((err: unknown) => {
+        console.warn(`[archiveSyncManager] ${errLabel}:`, err);
+      });
   }
 }
 

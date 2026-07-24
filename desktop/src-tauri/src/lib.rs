@@ -894,6 +894,7 @@ pub fn run() {
             archive::read_archived_observer_events_for_channel,
             archive::index_observer_channel_id,
             archive::read_unindexed_observer_rows,
+            archive::get_agent_usage_series,
             is_auto_update_supported,
             set_window_vibrancy,
         ])

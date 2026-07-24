@@ -131,6 +131,77 @@ type MockSearchProfileSeed = {
   isAgent?: boolean;
 };
 
+// ── Agent usage (NIP-AM) mock wire shapes ────────────────────────────────────
+// Mirrors `desktop/src/shared/api/tauriArchive.ts`'s camelCase types
+// field-for-field, kept independent of that module so the bridge has no
+// runtime dependency on the feature slice it's mocking for.
+
+type RawUsageField = { value: string | null; incomplete: boolean };
+type RawCostField = { value: number | null; incomplete: boolean };
+
+type RawReportedUsage = {
+  inputTokens: RawUsageField;
+  outputTokens: RawUsageField;
+  totalTokens: RawUsageField;
+  estimatedCostUsd: RawCostField;
+};
+
+type RawAgentUsageSeriesBucket = {
+  start: number;
+  end: number;
+  usage: RawReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+type RawAgentUsageModel = {
+  model: string | null;
+  usage: RawReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+type RawAgentUsage = {
+  agentPubkey: string;
+  usage: RawReportedUsage;
+  buckets: RawAgentUsageSeriesBucket[];
+  models: RawAgentUsageModel[];
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+type RawAgentUsageSeries = {
+  collectionEnabled: boolean;
+  buckets: RawAgentUsageSeriesBucket[];
+  agents: RawAgentUsage[];
+  coverage: {
+    firstArchivedAt: number | null;
+    lastArchivedAt: number | null;
+    firstReportedAt: number | null;
+    lastReportedAt: number | null;
+    reportCount: number;
+    invalidReportCount: number;
+    hasUnknownUsage: boolean;
+  };
+  hasArchivedEvidence: boolean | null;
+};
+
+const DEFAULT_MOCK_AGENT_USAGE_SERIES: RawAgentUsageSeries = {
+  collectionEnabled: true,
+  buckets: [],
+  agents: [],
+  coverage: {
+    firstArchivedAt: null,
+    lastArchivedAt: null,
+    firstReportedAt: null,
+    lastReportedAt: null,
+    reportCount: 0,
+    invalidReportCount: 0,
+    hasUnknownUsage: false,
+  },
+  hasArchivedEvidence: null,
+};
+
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
@@ -332,6 +403,23 @@ type E2eConfig = {
      */
     observerArchiveDefaultEnabledError?: string;
     agentMetricArchiveDefaultEnabled?: boolean;
+    /**
+     * Response for `get_agent_usage_series` (NIP-AM local agent usage,
+     * `desktop/src/features/agent-usage`). Mirrors
+     * `desktop/src/shared/api/tauriArchive.ts`'s `AgentUsageSeries` wire
+     * shape field-for-field so specs can seed exact fixtures without a real
+     * SQLite archive. Omitted → an empty, collection-enabled series (no
+     * agents, no coverage, `hasArchivedEvidence: null`), which renders the
+     * "no locally archived usage" empty state.
+     */
+    agentUsageSeries?: RawAgentUsageSeries;
+    /** Sequenced `get_agent_usage_series` failures, call-count indexed
+     *  (mirrors `addChannelMembersErrors`): a string rejects that call;
+     *  `null` succeeds. When exhausted, the last entry repeats. Drives the
+     *  retry error state without deleting mock config mid-test. */
+    agentUsageErrors?: (string | null)[];
+    /** Delay (ms) before `get_agent_usage_series` resolves; drives the loading-skeleton state. */
+    agentUsageDelayMs?: number;
     saveSubscriptions?: Array<{
       scope_type: string;
       scope_value: string;
@@ -7075,6 +7163,7 @@ let installCallCount = 0;
 /** Per-runtime call counters for `installAcpRuntimeByRuntime` sequences. */
 const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
+let agentUsageSeriesCallCount = 0;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
   provider: string | null;
@@ -11009,6 +11098,35 @@ export function maybeInstallE2eTauriMocks() {
           throw new Error(error);
         }
         return activeConfig?.mock?.observerArchiveDefaultEnabled ?? false;
+      }
+      case "get_agent_usage_series": {
+        // `AgentUsageSeriesRequest` is validated Rust-side; the mock trusts
+        // the seeded fixture as-is and ignores `bucketBoundaries`/`agentPubkey`
+        // filtering — specs seed the exact series they want per window/agent.
+        const configuredErrors = activeConfig?.mock?.agentUsageErrors;
+        if (configuredErrors && configuredErrors.length > 0) {
+          const index = Math.min(
+            agentUsageSeriesCallCount,
+            configuredErrors.length - 1,
+          );
+          agentUsageSeriesCallCount += 1;
+          const error = configuredErrors[index];
+          if (error) {
+            throw new Error(error);
+          }
+        } else {
+          agentUsageSeriesCallCount += 1;
+        }
+        const usageDelayMs = activeConfig?.mock?.agentUsageDelayMs ?? 0;
+        if (usageDelayMs > 0) {
+          await new Promise((resolve) =>
+            window.setTimeout(resolve, usageDelayMs),
+          );
+        }
+        return (
+          activeConfig?.mock?.agentUsageSeries ??
+          DEFAULT_MOCK_AGENT_USAGE_SERIES
+        );
       }
       case "agent_metric_archive_default_enabled":
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;

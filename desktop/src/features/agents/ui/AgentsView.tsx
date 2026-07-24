@@ -4,6 +4,7 @@ import {
   consumePendingSnapshotImport,
   subscribeSnapshotImport,
 } from "@/features/agents/openSnapshotImportFromUrlEvent";
+import { AgentUsageSection } from "@/features/agent-usage/ui/AgentUsageSection";
 import { AddAgentToChannelDialog } from "./AddAgentToChannelDialog";
 import { AddTeamToChannelDialog } from "./AddTeamToChannelDialog";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
@@ -200,6 +201,12 @@ export function AgentsView() {
               onDeletePersona={personas.openDelete}
               onImportSnapshotFile={(fileBytes, fileName) => {
                 void personas.handleImportSnapshotFile(fileBytes, fileName);
+              }}
+            />
+
+            <AgentUsageSection
+              onOpenAgentProfile={(pubkey, options) => {
+                openProfilePanel?.(pubkey, options);
               }}
             />
 

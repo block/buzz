@@ -1,4 +1,84 @@
+import { KIND_AGENT_TURN_METRIC } from "@/shared/constants/kinds";
+
 import { invokeTauri } from "./tauri";
+
+// ── Agent usage wire types (NIP-AM, `get_agent_usage_series`) ────────────────
+//
+// Mirrors `desktop-src-tauri/src/archive/agent_usage.rs` field-for-field.
+// Token counters cross the Tauri boundary as decimal strings (JS cannot
+// exactly represent the full `u64` range); parse with `BigInt(...)` in the
+// feature slice, never `Number(...)`.
+
+export type UsageField = { value: string | null; incomplete: boolean };
+export type CostField = { value: number | null; incomplete: boolean };
+
+export type ReportedUsage = {
+  inputTokens: UsageField;
+  outputTokens: UsageField;
+  totalTokens: UsageField;
+  estimatedCostUsd: CostField;
+};
+
+export type AgentUsageSeriesBucket = {
+  start: number;
+  end: number;
+  usage: ReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsageModel = {
+  model: string | null;
+  usage: ReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsage = {
+  agentPubkey: string;
+  usage: ReportedUsage;
+  buckets: AgentUsageSeriesBucket[];
+  models: AgentUsageModel[];
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsageCoverage = {
+  firstArchivedAt: number | null;
+  lastArchivedAt: number | null;
+  firstReportedAt: number | null;
+  lastReportedAt: number | null;
+  reportCount: number;
+  invalidReportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type AgentUsageSeries = {
+  collectionEnabled: boolean;
+  buckets: AgentUsageSeriesBucket[];
+  agents: AgentUsage[];
+  coverage: AgentUsageCoverage;
+  /**
+   * A13: `null` when the request had no `agentPubkey` filter; otherwise
+   * `true` iff at least one surviving `agent_metric_index` row (either
+   * `parseStatus`) exists for that author, independent of the requested
+   * bucket window. Drives profile focused-view eligibility for historical
+   * agents whose only evidence falls outside the current 7d/30d window.
+   */
+  hasArchivedEvidence: boolean | null;
+};
+
+export type AgentUsageSeriesRequest = {
+  /**
+   * Exact local-midnight Unix-second boundaries, inclusive start/exclusive
+   * end per adjacent pair. Exactly 8 entries (7 buckets) or 31 entries (30
+   * buckets) — build with the feature slice's DST-safe boundary helper,
+   * never `N * 86_400`.
+   */
+  bucketBoundaries: number[];
+  /** Normalized 64-hex author filter for the profile drill-in, or omit for the overview. */
+  agentPubkey?: string;
+};
 
 // ── Wire-shape types (raw Tauri responses) ───────────────────────────────────
 
@@ -32,8 +112,32 @@ export type SaveSubscription = {
 
 export type ArchiveBatchResult = {
   persisted: number;
+  /**
+   * Newly-indexed `agent_metric_index` rows (valid or invalid) written by
+   * this call. A re-ingested duplicate event does not increment this even
+   * when `persisted` counts it, because the index row for that id was
+   * already written by whichever earlier batch first saw it. Missing on
+   * the wire (older/mocked responses) decodes as `0` — see
+   * `decodeArchiveBatchResult`.
+   */
+  persistedAgentMetrics: number;
   dropped: number;
 };
+
+/**
+ * Rust sends camelCase (`#[serde(rename_all = "camelCase")]` on
+ * `ArchiveBatchResult`), but decode defensively rather than trust every
+ * caller (including mocks/tests) to supply every field.
+ */
+function decodeArchiveBatchResult(
+  raw: Partial<ArchiveBatchResult>,
+): ArchiveBatchResult {
+  return {
+    persisted: raw.persisted ?? 0,
+    persistedAgentMetrics: raw.persistedAgentMetrics ?? 0,
+    dropped: raw.dropped ?? 0,
+  };
+}
 
 // ── Subscription-change notifier ─────────────────────────────────────────────
 
@@ -51,6 +155,28 @@ export function onSubscriptionChange(listener: () => void): () => void {
 
 function notifySubscriptionChange(): void {
   for (const listener of subscriptionChangeListeners) {
+    listener();
+  }
+}
+
+// ── Agent-metrics-change notifier ────────────────────────────────────────────
+
+/**
+ * Module-level notifier for newly persisted agent turn metrics (kind 44200).
+ * `useAgentUsageSeries` subscribes to this to invalidate its query without
+ * polling. Fired only when the backend confirms `persistedAgentMetrics > 0`
+ * for a successful `archiveEvents` call, or when a kind-44200 subscription
+ * mutation succeeds (`collectionEnabled` is part of the usage query result).
+ */
+const agentMetricsChangeListeners = new Set<() => void>();
+
+export function onAgentMetricsChanged(listener: () => void): () => void {
+  agentMetricsChangeListeners.add(listener);
+  return () => agentMetricsChangeListeners.delete(listener);
+}
+
+export function notifyAgentMetricsChanged(): void {
+  for (const listener of agentMetricsChangeListeners) {
     listener();
   }
 }
@@ -124,6 +250,12 @@ export async function agentMetricArchiveDefaultEnabled(): Promise<boolean> {
 export async function mergeSaveSubscriptionKinds(kind: number): Promise<void> {
   await invokeTauri("merge_save_subscription_kinds", { kind });
   notifySubscriptionChange();
+  // `collectionEnabled` is part of the usage query result — toggling kind
+  // 44200 on must invalidate mounted usage queries. Other kinds don't affect
+  // usage state.
+  if (kind === KIND_AGENT_TURN_METRIC) {
+    notifyAgentMetricsChanged();
+  }
 }
 
 /**
@@ -142,6 +274,9 @@ export async function mergeSaveSubscriptionKinds(kind: number): Promise<void> {
 export async function removeSaveSubscriptionKind(kind: number): Promise<void> {
   await invokeTauri("remove_save_subscription_kind", { kind });
   notifySubscriptionChange();
+  if (kind === KIND_AGENT_TURN_METRIC) {
+    notifyAgentMetricsChanged();
+  }
 }
 
 /**
@@ -209,7 +344,7 @@ export async function archiveEvents(
     matchedScope: { scopeType: ScopeType; scopeValue: string };
   }>,
 ): Promise<ArchiveBatchResult> {
-  return invokeTauri<ArchiveBatchResult>("archive_events", {
+  const raw = await invokeTauri<Partial<ArchiveBatchResult>>("archive_events", {
     candidates: candidates.map((c) => ({
       raw_event_json: c.rawEventJson,
       matched_scope: {
@@ -218,6 +353,7 @@ export async function archiveEvents(
       },
     })),
   });
+  return decodeArchiveBatchResult(raw);
 }
 
 /**
@@ -304,6 +440,18 @@ export async function readUnindexedObserverRows(): Promise<
     rawJson: r.raw_json,
     createdAt: r.created_at,
   }));
+}
+
+/**
+ * Read the locally archived NIP-AM usage series for the active identity +
+ * relay (Rev 3 frozen contract). Rust owns identity/relay scoping, request
+ * validation, backfill-before-read, and the accounting ladder — this is a
+ * thin typed wrapper with no client-side logic.
+ */
+export async function getAgentUsageSeries(
+  request: AgentUsageSeriesRequest,
+): Promise<AgentUsageSeries> {
+  return invokeTauri<AgentUsageSeries>("get_agent_usage_series", { request });
 }
 
 /**

@@ -127,6 +127,61 @@ export type MockAgentMemoryListing = {
   fetchedAt: number;
 };
 
+// ── Agent usage (NIP-AM) mock wire shapes ────────────────────────────────────
+// Mirrors `desktop/src/shared/api/tauriArchive.ts`'s camelCase types
+// field-for-field, kept local (no cross-file type import) to match this
+// file's existing Mock* type convention.
+
+export type MockUsageField = { value: string | null; incomplete: boolean };
+export type MockCostField = { value: number | null; incomplete: boolean };
+
+export type MockReportedUsage = {
+  inputTokens: MockUsageField;
+  outputTokens: MockUsageField;
+  totalTokens: MockUsageField;
+  estimatedCostUsd: MockCostField;
+};
+
+export type MockAgentUsageSeriesBucket = {
+  start: number;
+  end: number;
+  usage: MockReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type MockAgentUsageModel = {
+  model: string | null;
+  usage: MockReportedUsage;
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type MockAgentUsage = {
+  agentPubkey: string;
+  usage: MockReportedUsage;
+  buckets: MockAgentUsageSeriesBucket[];
+  models: MockAgentUsageModel[];
+  reportCount: number;
+  hasUnknownUsage: boolean;
+};
+
+export type MockAgentUsageSeries = {
+  collectionEnabled: boolean;
+  buckets: MockAgentUsageSeriesBucket[];
+  agents: MockAgentUsage[];
+  coverage: {
+    firstArchivedAt: number | null;
+    lastArchivedAt: number | null;
+    firstReportedAt: number | null;
+    lastReportedAt: number | null;
+    reportCount: number;
+    invalidReportCount: number;
+    hasUnknownUsage: boolean;
+  };
+  hasArchivedEvidence: boolean | null;
+};
+
 type MockBridgeOptions = {
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
@@ -286,6 +341,20 @@ type MockBridgeOptions = {
    * drives the fail-closed path when the policy check itself fails.
    */
   observerArchiveDefaultEnabledError?: string;
+  /**
+   * Response for the mocked `get_agent_usage_series` command (NIP-AM local
+   * agent usage). Mirrors `desktop/src/shared/api/tauriArchive.ts`'s
+   * `AgentUsageSeries` wire shape field-for-field; see e2eBridge mock config
+   * for the same shape and default (empty, collection-enabled series).
+   */
+  agentUsageSeries?: MockAgentUsageSeries;
+  /** Sequenced `get_agent_usage_series` failures, call-count indexed
+   *  (mirrors `addChannelMembersErrors`): a string rejects that call; `null`
+   *  succeeds. When exhausted, the last entry repeats. Drives the retry
+   *  error state without deleting mock config mid-test. */
+  agentUsageErrors?: (string | null)[];
+  /** Delay (ms) before `get_agent_usage_series` resolves; drives the loading-skeleton state. */
+  agentUsageDelayMs?: number;
   // NIP-IA gate inputs — drive the archive-button gate matrix in
   // tests/e2e/identity-archive.spec.ts.
   /**

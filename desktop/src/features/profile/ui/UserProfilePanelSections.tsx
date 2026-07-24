@@ -69,6 +69,8 @@ export type ProfileSummaryViewProps = {
   canEditAgent: boolean;
   canOpenAgentLogs: boolean;
   canViewActivity: boolean;
+  canViewUsage: boolean;
+  usageIngressTrailing: string | undefined;
   channelCount: number;
   channelIdToName: Record<string, string>;
   channels: ProfileChannelLink[];
@@ -103,6 +105,7 @@ export type ProfileSummaryViewProps = {
   onOpenChannel: (channelId: string) => void;
   onOpenDiagnostics: () => void;
   onOpenInstructions: () => void;
+  onOpenUsage: () => void;
   onTabChange: (tab: ProfilePanelTab, options?: { replace?: boolean }) => void;
   onOpenDm?: (pubkeys: string[]) => Promise<void> | void;
   presenceStatus: "online" | "away" | "offline" | undefined;
@@ -182,6 +185,8 @@ export function ProfileSummaryView({
   canEditAgent,
   canOpenAgentLogs,
   canViewActivity,
+  canViewUsage,
+  usageIngressTrailing,
   channelCount,
   channelIdToName,
   channels,
@@ -216,6 +221,7 @@ export function ProfileSummaryView({
   onOpenChannel,
   onOpenDiagnostics,
   onOpenInstructions,
+  onOpenUsage,
   onTabChange,
   onOpenDm,
   presenceStatus,
@@ -253,11 +259,13 @@ export function ProfileSummaryView({
     diagnosticsFields.some((field) => field.label !== "Status") ||
     canOpenAgentLogs;
   const showActivityIngress = canViewActivity;
+  const showUsageIngress = canViewUsage;
   const showInfoTab =
     agentInfoFields.length > 0 ||
     instances.length > 1 ||
     isArchived ||
     showActivityIngress ||
+    showUsageIngress ||
     !showRuntimeTab;
 
   const diagnosticsErrorField = diagnosticsFields.find(
@@ -408,8 +416,11 @@ export function ProfileSummaryView({
               isArchived={isArchived}
               onOpenActivity={onOpenActivity}
               onOpenInstance={onOpenInstance}
+              onOpenUsage={onOpenUsage}
               pubkey={pubkey}
               showActivityIngress={showActivityIngress}
+              showUsageIngress={showUsageIngress}
+              usageIngressTrailing={usageIngressTrailing}
             />
           ) : null}
           {activeTab === "runtime" ? (

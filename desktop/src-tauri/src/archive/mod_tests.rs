@@ -740,6 +740,10 @@ fn test_turn_metric_decrypt_success_stores_plaintext() {
 
     assert_eq!(result.persisted, 1, "event must be persisted");
     assert_eq!(result.dropped, 0, "no drops on successful decrypt");
+    assert_eq!(
+        result.persisted_agent_metrics, 1,
+        "one newly-indexed agent_metric_index row on first ingest"
+    );
 
     // The stored raw_json must be plaintext JSON, not NIP-44 ciphertext.
     let raw_json: String = conn
@@ -795,6 +799,226 @@ fn test_turn_metric_decrypt_fail_drops_fail_closed() {
     assert_eq!(
         event_count, 0,
         "no rows must be written to archived_events on decrypt failure"
+    );
+}
+
+/// Re-ingesting a batch containing an already-archived kind-44200 event must
+/// no-op the metric index insert: `persisted` still counts the (idempotent)
+/// event/scope upsert, but `persisted_agent_metrics` must be 0 for the
+/// duplicate — the row was already indexed by the first ingest (A5: this is
+/// exactly the signal the frontend uses to skip a redundant query
+/// invalidation).
+#[test]
+fn test_reingest_of_same_metric_event_does_not_double_count_persisted_agent_metrics() {
+    let conn = in_memory();
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let owner_pk = owner_keys.public_key().to_hex();
+    let relay_url = "wss://relay.example";
+    add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[44200]");
+
+    let ev = make_turn_metric_event(&owner_keys, &agent_keys);
+    let cand1 = candidate(&ev, ScopeType::OwnerP, &owner_pk);
+
+    let first = run_batch_sync_with_keys(
+        vec![cand1],
+        &owner_pk,
+        relay_url,
+        &conn,
+        vec![ev.clone()],
+        &owner_keys,
+    );
+    assert_eq!(first.persisted, 1);
+    assert_eq!(first.persisted_agent_metrics, 1);
+
+    // Same event re-ingested in a second batch (e.g. relay redelivery).
+    let cand2 = candidate(&ev, ScopeType::OwnerP, &owner_pk);
+    let second = run_batch_sync_with_keys(
+        vec![cand2],
+        &owner_pk,
+        relay_url,
+        &conn,
+        vec![ev.clone()],
+        &owner_keys,
+    );
+    assert_eq!(
+        second.persisted, 1,
+        "re-ingest of a duplicate is still an accepted (idempotent) write"
+    );
+    assert_eq!(
+        second.persisted_agent_metrics, 0,
+        "re-ingest must NOT double-count the metric index row"
+    );
+
+    let index_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_metric_index", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(index_count, 1, "exactly one index row must exist total");
+}
+
+// ── get_agent_usage_series integration ──────────────────────────────────────
+//
+// Exercises `agent_usage_series` (the sync core `get_agent_usage_series`
+// delegates to) end to end: ingest a real encrypted turn-metric event
+// through the full archive pipeline, then read it back through the command
+// core, proving backfill/indexing, collection-enabled detection, and the
+// pure accounting ladder are wired together correctly — not just each in
+// isolation.
+
+/// A freshly ingested single turn-metric event surfaces in the series with
+/// its direct (delta-reliable, no-baseline) token counts, and
+/// `collectionEnabled` reflects the active owner_p/44200 subscription.
+#[test]
+fn test_agent_usage_series_surfaces_freshly_ingested_event() {
+    let conn = in_memory();
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let owner_pk = owner_keys.public_key().to_hex();
+    let agent_pk = agent_keys.public_key().to_hex();
+    let relay_url = "wss://relay.example";
+    add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[44200]");
+
+    let ev = make_turn_metric_event(&owner_keys, &agent_keys);
+    let cand = candidate(&ev, ScopeType::OwnerP, &owner_pk);
+    let batch = run_batch_sync_with_keys(
+        vec![cand],
+        &owner_pk,
+        relay_url,
+        &conn,
+        vec![ev.clone()],
+        &owner_keys,
+    );
+    assert_eq!(batch.persisted_agent_metrics, 1, "event must be indexed");
+
+    // `make_turn_metric_event`'s payload timestamp is 2026-07-01T00:00:00Z.
+    const EVENT_DAY_START: i64 = 1_782_864_000;
+    let boundaries: Vec<i64> = (0..=7).map(|i| EVENT_DAY_START + i * 86_400).collect();
+    let request = agent_usage::AgentUsageSeriesRequest {
+        bucket_boundaries: boundaries,
+        agent_pubkey: None,
+    };
+
+    let series = agent_usage_series(&conn, &owner_pk, relay_url, &request).unwrap();
+
+    assert!(
+        series.collection_enabled,
+        "owner_p subscription includes kind 44200"
+    );
+    assert_eq!(series.coverage.report_count, 1);
+    assert_eq!(series.coverage.invalid_report_count, 0);
+    assert_eq!(series.agents.len(), 1, "exactly one agent reported usage");
+    let agent = &series.agents[0];
+    assert_eq!(agent.agent_pubkey, agent_pk);
+    // No baseline row exists, so the ladder falls back to the direct
+    // (delta-reliable) turn values from the payload: 100/50/150.
+    assert_eq!(agent.usage.input_tokens.value.as_deref(), Some("100"));
+    assert_eq!(agent.usage.output_tokens.value.as_deref(), Some("50"));
+    assert_eq!(agent.usage.total_tokens.value.as_deref(), Some("150"));
+    assert!(!agent.usage.input_tokens.incomplete);
+    assert_eq!(
+        series.has_archived_evidence, None,
+        "no agentPubkey filter was supplied"
+    );
+}
+
+/// Filtering by `agentPubkey` scopes both the returned series and
+/// `hasArchivedEvidence` (A13) to that one author; an unrelated agent's
+/// events must not leak into either.
+#[test]
+fn test_agent_usage_series_filters_by_agent_pubkey_and_sets_has_archived_evidence() {
+    let conn = in_memory();
+    let owner_keys = Keys::generate();
+    let target_agent = Keys::generate();
+    let other_agent = Keys::generate();
+    let owner_pk = owner_keys.public_key().to_hex();
+    let target_pk = target_agent.public_key().to_hex();
+    let relay_url = "wss://relay.example";
+    add_sub(&conn, &owner_pk, relay_url, "owner_p", &owner_pk, "[44200]");
+
+    let target_ev = make_turn_metric_event(&owner_keys, &target_agent);
+    let other_ev = make_turn_metric_event(&owner_keys, &other_agent);
+    let cands = vec![
+        candidate(&target_ev, ScopeType::OwnerP, &owner_pk),
+        candidate(&other_ev, ScopeType::OwnerP, &owner_pk),
+    ];
+    let batch = run_batch_sync_with_keys(
+        cands,
+        &owner_pk,
+        relay_url,
+        &conn,
+        vec![target_ev.clone(), other_ev.clone()],
+        &owner_keys,
+    );
+    assert_eq!(batch.persisted_agent_metrics, 2);
+
+    const EVENT_DAY_START: i64 = 1_782_864_000;
+    let boundaries: Vec<i64> = (0..=7).map(|i| EVENT_DAY_START + i * 86_400).collect();
+    let request = agent_usage::AgentUsageSeriesRequest {
+        bucket_boundaries: boundaries,
+        agent_pubkey: Some(target_pk.clone()),
+    };
+
+    let series = agent_usage_series(&conn, &owner_pk, relay_url, &request).unwrap();
+
+    assert_eq!(
+        series.agents.len(),
+        1,
+        "only the filtered agent's usage must be returned"
+    );
+    assert_eq!(series.agents[0].agent_pubkey, target_pk);
+    assert_eq!(
+        series.has_archived_evidence,
+        Some(true),
+        "A13: evidence exists for the filtered author"
+    );
+}
+
+/// An unindexed pre-existing kind-44200 row (simulating an event archived
+/// by a prior build before `agent_metric_index` existed) is picked up by
+/// the command's backfill step before the window is read.
+#[test]
+fn test_agent_usage_series_backfills_unindexed_row_before_reading() {
+    let conn = in_memory();
+    let owner_keys = Keys::generate();
+    let agent_keys = Keys::generate();
+    let owner_pk = owner_keys.public_key().to_hex();
+    let relay_url = "wss://relay.example";
+
+    // Insert directly into `archived_events`, bypassing `commit_archive`, so
+    // no `agent_metric_index` row is created — the exact state a fresh
+    // backfill must repair.
+    let ev = make_turn_metric_event(&owner_keys, &agent_keys);
+    let plaintext = r#"{"harness":"test-harness","model":"test-model","sessionId":"sess-1","turnId":"turn-1","turnSeq":1,"timestamp":"2026-07-01T00:00:00Z","turn":{"inputTokens":100,"outputTokens":50,"totalTokens":150,"costUsd":0.001},"deltaReliable":true}"#;
+    store::upsert_archived_event(
+        &conn,
+        &owner_pk,
+        relay_url,
+        &ev.id.to_hex(),
+        44200,
+        &agent_keys.public_key().to_hex(),
+        ev.created_at.as_secs() as i64,
+        plaintext,
+        0,
+    )
+    .unwrap();
+
+    let index_count_before: i64 = conn
+        .query_row("SELECT COUNT(*) FROM agent_metric_index", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(index_count_before, 0, "no index row before backfill");
+
+    const EVENT_DAY_START: i64 = 1_782_864_000;
+    let boundaries: Vec<i64> = (0..=7).map(|i| EVENT_DAY_START + i * 86_400).collect();
+    let request = agent_usage::AgentUsageSeriesRequest {
+        bucket_boundaries: boundaries,
+        agent_pubkey: None,
+    };
+
+    let series = agent_usage_series(&conn, &owner_pk, relay_url, &request).unwrap();
+
+    assert_eq!(
+        series.coverage.report_count, 1,
+        "backfill must index the pre-existing row before the window read"
     );
 }
 
