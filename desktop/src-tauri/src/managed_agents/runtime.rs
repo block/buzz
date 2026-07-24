@@ -1736,14 +1736,7 @@ pub fn spawn_agent_child(
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
-    // Isolate Buzz-managed Codex sessions from the user's personal ~/.codex
-    // (sidebar / ChatGPT Remote). Auth + config are seeded from ~/.codex when
-    // the nest copy is missing; session/history stay under the nest (#2660).
-    if runtime_meta.is_some_and(|r| r.id == "codex") {
-        if let Some(codex_home) = super::prepare_isolated_codex_home() {
-            command.env("CODEX_HOME", codex_home);
-        }
-    }
+    super::codex_home::apply_isolated_codex_home_env(&mut command, runtime_meta.map(|r| r.id));
 
     // ── Readiness check: set setup-payload if agent is not ready ─────────────
     //

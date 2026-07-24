@@ -401,59 +401,6 @@ pub fn ensure_cli_symlink(_exe_parent: &Path, _is_dev: bool) -> Result<(), Strin
     Ok(())
 }
 
-/// Buzz-owned Codex state directory (`$NEST/.codex`).
-///
-/// Codex defaults to `~/.codex` for sessions and history. Managed agents must
-/// not write there — that mixes Buzz sessions into the user's personal Codex
-/// sidebar / ChatGPT Remote list (#2660).
-pub fn buzz_codex_home() -> Option<PathBuf> {
-    nest_dir().map(|root| root.join(".codex"))
-}
-
-/// Ensure a Buzz-owned `CODEX_HOME` exists and is seeded with auth/config from
-/// the user's personal `~/.codex` when missing.
-///
-/// Copies (does not symlink) `auth.json` and `config.toml` so Buzz can own
-/// session/history files while still inheriting an existing login. Returns the
-/// directory path suitable for the `CODEX_HOME` env var.
-pub fn prepare_isolated_codex_home() -> Option<PathBuf> {
-    let home = buzz_codex_home()?;
-    fs::create_dir_all(&home).ok()?;
-    seed_codex_home_file(&home, "auth.json");
-    seed_codex_home_file(&home, "config.toml");
-    Some(home)
-}
-
-fn seed_codex_home_file(codex_home: &Path, name: &str) {
-    let dest = codex_home.join(name);
-    if dest.exists() {
-        return;
-    }
-    let Some(user_codex) = dirs::home_dir().map(|h| h.join(".codex")) else {
-        return;
-    };
-    let src = user_codex.join(name);
-    if src.is_file() {
-        let _ = fs::copy(&src, &dest);
-    }
-}
-
-/// Test helper: seed logic against explicit nest/user Codex paths.
-#[cfg(test)]
-pub(crate) fn seed_codex_home_from(user_codex: &Path, nest_codex: &Path) {
-    let _ = fs::create_dir_all(nest_codex);
-    for name in ["auth.json", "config.toml"] {
-        let dest = nest_codex.join(name);
-        if dest.exists() {
-            continue;
-        }
-        let src = user_codex.join(name);
-        if src.is_file() {
-            let _ = fs::copy(&src, &dest);
-        }
-    }
-}
-
 /// Read a version number from a file. Returns 0 if the file doesn't exist or can't be parsed.
 fn read_version_file(path: &Path) -> u32 {
     fs::read_to_string(path)

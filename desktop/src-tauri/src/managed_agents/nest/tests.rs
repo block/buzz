@@ -943,32 +943,3 @@ fn test_path_is_dev_nest_root_returns_false() {
         "root path must not be identified as dev nest"
     );
 }
-
-#[test]
-fn seed_codex_home_copies_auth_and_config_once() {
-    let tmp = tempfile::tempdir().unwrap();
-    let user = tmp.path().join("user-codex");
-    let nest = tmp.path().join("nest-codex");
-    fs::create_dir_all(&user).unwrap();
-    fs::write(user.join("auth.json"), r#"{"tokens":1}"#).unwrap();
-    fs::write(user.join("config.toml"), "model = \"o3\"\n").unwrap();
-
-    seed_codex_home_from(&user, &nest);
-    assert_eq!(
-        fs::read_to_string(nest.join("auth.json")).unwrap(),
-        r#"{"tokens":1}"#
-    );
-    assert_eq!(
-        fs::read_to_string(nest.join("config.toml")).unwrap(),
-        "model = \"o3\"\n"
-    );
-
-    // Second seed must not overwrite nest-local edits.
-    fs::write(nest.join("auth.json"), r#"{"tokens":"buzz"}"#).unwrap();
-    fs::write(user.join("auth.json"), r#"{"tokens":"user"}"#).unwrap();
-    seed_codex_home_from(&user, &nest);
-    assert_eq!(
-        fs::read_to_string(nest.join("auth.json")).unwrap(),
-        r#"{"tokens":"buzz"}"#
-    );
-}
