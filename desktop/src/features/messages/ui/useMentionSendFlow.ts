@@ -666,6 +666,15 @@ export function useMentionSendFlow({
           return;
         }
 
+        const mentionedGroups = mentions.extractMentionGroups(trimmed);
+        if (mentionedGroups.length > 0 && !mentions.hasResolvedMembers) {
+          const message =
+            "Checking channel members. Try sending the group mention again in a moment.";
+          setNonMemberPromptError(message);
+          toast.error(message);
+          return;
+        }
+
         let effectiveChannelId = capturedChannelId;
         if (!effectiveChannelId && onPrepareSendChannel) {
           effectiveChannelId = await onPrepareSendChannel();
@@ -705,7 +714,7 @@ export function useMentionSendFlow({
         );
         const groupExpansion = expandGroupMentions({
           channelMemberPubkeys: mentions.memberPubkeys,
-          groups: mentions.extractMentionGroups(trimmed),
+          groups: mentionedGroups,
           individualMentionPubkeys,
         });
         const pubkeys = groupExpansion.mentionPubkeys;
@@ -783,6 +792,7 @@ export function useMentionSendFlow({
       getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
       mentions.extractMentionGroups,
+      mentions.hasResolvedMembers,
       mentions.memberPubkeys,
       mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,

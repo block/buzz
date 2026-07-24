@@ -663,8 +663,10 @@ pub enum ChannelsCmd {
     #[command(name = "add-group")]
     AddGroup {
         /// Channel UUID
+        #[arg(long)]
         channel: String,
         /// User-group UUID or handle
+        #[arg(long)]
         group: String,
     },
     /// Remove a member from a channel
@@ -1920,12 +1922,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_channel_add_group_positionally() {
+    fn parses_channel_add_group_flags() {
         let cli = Cli::try_parse_from([
             "buzz",
             "channels",
             "add-group",
+            "--channel",
             "11111111-1111-1111-1111-111111111111",
+            "--group",
             "ios-team",
         ])
         .expect("channel add-group parses");
@@ -1934,6 +1938,18 @@ mod tests {
         };
         assert_eq!(channel, "11111111-1111-1111-1111-111111111111");
         assert_eq!(group, "ios-team");
+    }
+
+    #[test]
+    fn rejects_positional_channel_add_group_arguments() {
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "channels",
+            "add-group",
+            "11111111-1111-1111-1111-111111111111",
+            "ios-team",
+        ])
+        .is_err());
     }
 
     #[test]

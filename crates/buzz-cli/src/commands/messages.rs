@@ -215,19 +215,32 @@ async fn resolve_content_mentions(
     client: &BuzzClient,
     channel_id: &str,
     content: &str,
-) -> MentionExpansion {
+) -> Result<MentionExpansion, CliError> {
     if !content.contains('@') {
-        return MentionExpansion::default();
+        return Ok(MentionExpansion::default());
     }
 
+    let groups = crate::commands::groups::fetch_active_groups(client)
+        .await
+        .unwrap_or_default();
     let members_filter = serde_json::json!({
         "kinds": [39002],
         "#d": [channel_id],
         "limit": 1,
     });
-    let member_pubkeys = fetch_member_pubkeys(client, &members_filter)
-        .await
-        .unwrap_or_default();
+    let member_pubkeys = match fetch_member_pubkeys(client, &members_filter).await {
+        Some(pubkeys) => pubkeys,
+        None => {
+            let group_handles: Vec<&str> =
+                groups.iter().map(|group| group.handle.as_str()).collect();
+            if !extract_at_mentions_with_known(content, &group_handles).is_empty() {
+                return Err(CliError::Other(
+                    "could not resolve channel membership for group mention".into(),
+                ));
+            }
+            Vec::new()
+        }
+    };
 
     let profile_events = if member_pubkeys.is_empty() {
         Vec::new()
@@ -242,10 +255,12 @@ async fn resolve_content_mentions(
             .unwrap_or_default()
     };
 
-    let groups = crate::commands::groups::fetch_active_groups(client)
-        .await
-        .unwrap_or_default();
-    resolve_mentions_from_data(content, &member_pubkeys, &profile_events, &groups)
+    Ok(resolve_mentions_from_data(
+        content,
+        &member_pubkeys,
+        &profile_events,
+        &groups,
+    ))
 }
 
 /// Fetch raw events for `filter` via the relay's `/query` endpoint.
@@ -578,7 +593,7 @@ pub async fn cmd_send_message(
 
     // Resolve @name mentions in the author-written body only — not the media markdown we
     // append above, which is derived from upload metadata and can't carry `@names`.
-    let mut mention_expansion = resolve_content_mentions(client, &p.channel_id, &p.content).await;
+    let mut mention_expansion = resolve_content_mentions(client, &p.channel_id, &p.content).await?;
 
     // NIP-27: also extract nostr:npub1… inline references (skipping code regions)
     let stripped = strip_code_regions(&p.content);

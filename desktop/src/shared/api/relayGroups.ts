@@ -142,21 +142,6 @@ async function publishGroupCommand(
 ): Promise<void> {
   try {
     const event = await signRelayEvent({ kind, content: "", tags });
-    const signedPubkeys = new Set(
-      event.tags
-        .filter((tag) => tag[0] === "p" && tag[1])
-        .map((tag) => normalizePubkey(tag[1])),
-    );
-    const missingPubkey = tags
-      .filter((tag) => tag[0] === "p" && tag[1])
-      .map((tag) => normalizePubkey(tag[1]))
-      .find((pubkey) => !signedPubkeys.has(pubkey));
-    if (missingPubkey) {
-      throw new UserGroupError(
-        "The desktop signer could not preserve one selected member. Remove your own account from the group and try again.",
-        "rejected",
-      );
-    }
     await relayClient.publishEvent(
       event,
       "Timed out while updating the user group.",

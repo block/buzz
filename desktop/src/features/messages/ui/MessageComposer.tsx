@@ -223,6 +223,7 @@ function MessageComposerImpl({
   } | null>(null);
   const mentions = useMentions(channelId, undefined, profiles, {
     channelType,
+    includeGroups: editTarget === null,
   });
   const channelLinks = useChannelLinks();
   const customEmoji = useCustomEmoji();

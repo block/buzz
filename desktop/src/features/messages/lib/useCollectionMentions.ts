@@ -2,8 +2,7 @@ import * as React from "react";
 
 import { useGroupsQuery } from "@/features/groups/groupHooks";
 import type { UserGroup } from "@/shared/api/relayGroups";
-import type { AgentPersona, AgentTeam, ChannelType } from "@/shared/api/types";
-import { trimMapToSize } from "@/shared/lib/trimMapToSize";
+import type { AgentPersona, AgentTeam } from "@/shared/api/types";
 import { hasMention } from "./hasMention";
 import {
   buildGroupMentionCandidates,
@@ -13,19 +12,18 @@ import {
 
 type UseCollectionMentionsOptions = {
   baseCandidates: MentionCandidate[];
-  channelType?: ChannelType | null;
+  includeGroups: boolean;
   personas: AgentPersona[];
   teams: AgentTeam[];
 };
 
 export function useCollectionMentions({
   baseCandidates,
-  channelType,
+  includeGroups,
   personas,
   teams,
 }: UseCollectionMentionsOptions) {
   const groupsQuery = useGroupsQuery();
-  const selectedGroupsRef = React.useRef<Map<string, UserGroup>>(new Map());
   const [selectedGroupHandles, setSelectedGroupHandles] = React.useState<
     string[]
   >([]);
@@ -34,11 +32,11 @@ export function useCollectionMentions({
     () => [
       ...baseCandidates,
       ...buildTeamMentionCandidates(teams, personas, baseCandidates),
-      ...(channelType === "forum"
-        ? []
-        : buildGroupMentionCandidates(groupsQuery.data ?? [])),
+      ...(includeGroups
+        ? buildGroupMentionCandidates(groupsQuery.data ?? [])
+        : []),
     ],
-    [baseCandidates, channelType, groupsQuery.data, personas, teams],
+    [baseCandidates, groupsQuery.data, includeGroups, personas, teams],
   );
 
   const searchableNames = React.useMemo(() => {
@@ -69,8 +67,6 @@ export function useCollectionMentions({
       );
       if (!group) return false;
 
-      selectedGroupsRef.current.set(handle, group);
-      trimMapToSize(selectedGroupsRef.current, 200);
       setSelectedGroupHandles((current) =>
         current.some(
           (candidate) => candidate.toLowerCase() === handle.toLowerCase(),
@@ -84,17 +80,16 @@ export function useCollectionMentions({
   );
 
   const extractGroups = React.useCallback(
-    (text: string): UserGroup[] => {
+    (text: string, selectedPeople: Iterable<string>): UserGroup[] => {
       const groups: UserGroup[] = [];
-      const seen = new Set<string>();
-      for (const [handle, group] of selectedGroupsRef.current) {
-        if (hasMention(text, handle)) {
-          groups.push(group);
-          seen.add(group.id);
-        }
-      }
+      const selectedPersonHandles = new Set(
+        [...selectedPeople].map((handle) => handle.trim().toLowerCase()),
+      );
       for (const group of groupsQuery.data ?? []) {
-        if (!seen.has(group.id) && hasMention(text, group.handle)) {
+        if (
+          !selectedPersonHandles.has(group.handle.toLowerCase()) &&
+          hasMention(text, group.handle)
+        ) {
           groups.push(group);
         }
       }
@@ -104,7 +99,6 @@ export function useCollectionMentions({
   );
 
   const clear = React.useCallback(() => {
-    selectedGroupsRef.current.clear();
     setSelectedGroupHandles([]);
   }, []);
 

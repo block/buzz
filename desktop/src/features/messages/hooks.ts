@@ -466,41 +466,10 @@ export function useSendMessageMutation(
         mentionPubkeys,
       );
 
-      if (groupTags.length > 0) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
-        const replyReferenceTags = parentEventId
-          ? buildReplyTags(
-              effectiveChannel.id,
-              identity.pubkey,
-              parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
-            ).filter((tag) => tag[0] === "e")
-          : [];
-        return relayClient.sendMessage(
-          effectiveChannel.id,
-          content,
-          recipientPubkeys,
-          [
-            ...replyReferenceTags,
-            ...imetaTags,
-            ...emojiTags,
-            ...mentionTags,
-            ...groupTags,
-          ],
-        );
-      }
-
       // Messages carrying media OR custom-emoji tags MUST go through REST so
       // the relay's tag validation runs. The WebSocket path emits no extra
       // tags, so emoji-only messages would otherwise lose their emoji tag.
       if (parentEventId || imetaTags.length > 0 || emojiTags.length > 0) {
-        const cachedMessages =
-          queryClient.getQueryData<RelayEvent[]>(
-            channelMessagesKey(effectiveChannel.id),
-          ) ?? [];
         const result = await sendChannelMessage(
           effectiveChannel.id,
           content,
@@ -510,6 +479,7 @@ export function useSendMessageMutation(
           undefined,
           emojiTags,
           mentionTags,
+          groupTags,
         );
 
         // Build tags matching relay-emitted shape: h, author p, mention ps, reply es, imeta, emoji.
@@ -520,7 +490,7 @@ export function useSendMessageMutation(
               effectiveChannel.id,
               identity.pubkey,
               parentEventId,
-              resolveReplyRootId(parentEventId, cachedMessages),
+              result.rootEventId ?? parentEventId,
               recipientPubkeys,
             )
           : [];
@@ -547,6 +517,7 @@ export function useSendMessageMutation(
             ...imetaTags,
             ...emojiTags,
             ...mentionTags,
+            ...groupTags,
           ],
           content: content.trim(),
           sig: "",
@@ -557,7 +528,7 @@ export function useSendMessageMutation(
         effectiveChannel.id,
         content,
         recipientPubkeys,
-        mentionTags,
+        [...mentionTags, ...groupTags],
       );
     },
     onMutate: async ({

@@ -55,6 +55,7 @@ export type PersonaMentionTarget = {
 };
 type UseMentionsOptions = {
   channelType?: ChannelType | null;
+  includeGroups?: boolean;
 };
 function formatSearchUserDisplayName(user: UserSearchResult) {
   return user.displayName?.trim() || user.nip05Handle?.trim() || null;
@@ -432,7 +433,7 @@ export function useMentions(
 
   const collectionMentions = useCollectionMentions({
     baseCandidates: mentionCandidates,
-    channelType: options?.channelType,
+    includeGroups: options?.includeGroups ?? true,
     personas: personasQuery.data ?? [],
     teams: teamsQuery.data ?? [],
   });
@@ -824,6 +825,14 @@ export function useMentions(
     },
     [collectionMentions.selectedGroupHandles, mentionCandidates],
   );
+  const extractMentionGroups = React.useCallback(
+    (text: string) =>
+      collectionMentions.extractGroups(text, [
+        ...mentionMapRef.current.keys(),
+        ...personaMentionMapRef.current.keys(),
+      ]),
+    [collectionMentions.extractGroups],
+  );
 
   const extractMentionPersonas = React.useCallback(
     (text: string): PersonaMentionTarget[] => {
@@ -968,7 +977,7 @@ export function useMentions(
     clearMentions,
     extractMentionPersonas,
     extractMentionPubkeys,
-    extractMentionGroups: collectionMentions.extractGroups,
+    extractMentionGroups,
     getDraftMentionRefs,
     getMentionDisplayName,
     handleMentionKeyDown,

@@ -120,6 +120,9 @@ pub async fn sign_event(
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut builder = EventBuilder::new(Kind::Custom(kind), content).tags(nostr_tags);
+        if matches!(kind, 47000 | 47003 | 47004) {
+            builder = builder.allow_self_tagging();
+        }
         if let Some(created_at) = created_at {
             builder = builder.custom_created_at(Timestamp::from(created_at));
         }

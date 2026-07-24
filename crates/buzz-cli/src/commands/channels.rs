@@ -1001,17 +1001,101 @@ pub async fn cmd_add_group_to_channel(
     channel_id: &str,
     group_reference: &str,
 ) -> Result<(), CliError> {
+    validate_uuid(channel_id)?;
     let group = crate::commands::groups::resolve_group(client, group_reference).await?;
+    let filter = serde_json::json!({
+        "kinds": [39002],
+        "#d": [channel_id],
+        "limit": 1,
+    });
+    let raw = client.query(&filter).await?;
+    let events: Vec<serde_json::Value> = serde_json::from_str(&raw)
+        .map_err(|error| CliError::Other(format!("failed to parse channel members: {error}")))?;
+    let member_snapshot = events.first().ok_or_else(|| {
+        CliError::NotFound(format!("channel membership for '{channel_id}' not found"))
+    })?;
+    let existing_members: HashSet<String> = extract_p_tags(member_snapshot)
+        .into_iter()
+        .filter_map(|member| {
+            member
+                .get("pubkey")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_ascii_lowercase)
+        })
+        .collect();
+
     let mut responses = Vec::with_capacity(group.members.len());
+    let mut failure_count = 0;
     for pubkey in &group.members {
-        let response = add_channel_member(client, channel_id, pubkey, None).await?;
-        responses.push(
-            serde_json::from_str::<serde_json::Value>(&response)
-                .unwrap_or(serde_json::Value::String(response)),
-        );
+        if existing_members.contains(&pubkey.to_ascii_lowercase()) {
+            responses.push(serde_json::json!({
+                "pubkey": pubkey,
+                "accepted": true,
+                "skipped": true,
+                "message": "already a channel member",
+            }));
+            continue;
+        }
+
+        match add_channel_member(client, channel_id, pubkey, None).await {
+            Ok(response) => match serde_json::from_str::<serde_json::Value>(&response) {
+                Ok(serde_json::Value::Object(mut result)) => {
+                    let accepted = result
+                        .get("accepted")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    result.insert(
+                        "pubkey".to_string(),
+                        serde_json::Value::String(pubkey.clone()),
+                    );
+                    if !accepted {
+                        failure_count += 1;
+                        let message = result
+                            .get("message")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("relay rejected member add")
+                            .to_string();
+                        result.insert("error".to_string(), serde_json::Value::String(message));
+                    }
+                    responses.push(serde_json::Value::Object(result));
+                }
+                Ok(result) => {
+                    failure_count += 1;
+                    responses.push(serde_json::json!({
+                        "pubkey": pubkey,
+                        "accepted": false,
+                        "error": "relay returned an invalid member-add response",
+                        "response": result,
+                    }));
+                }
+                Err(error) => {
+                    failure_count += 1;
+                    responses.push(serde_json::json!({
+                        "pubkey": pubkey,
+                        "accepted": false,
+                        "error": format!("failed to parse member-add response: {error}"),
+                        "response": response,
+                    }));
+                }
+            },
+            Err(error) => {
+                failure_count += 1;
+                responses.push(serde_json::json!({
+                    "pubkey": pubkey,
+                    "accepted": false,
+                    "error": error.to_string(),
+                }));
+            }
+        }
     }
     println!("{}", serde_json::to_string(&responses).unwrap_or_default());
-    Ok(())
+    if failure_count == 0 {
+        Ok(())
+    } else {
+        Err(CliError::Other(format!(
+            "failed to add {failure_count} group member(s) to the channel"
+        )))
+    }
 }
 
 pub async fn cmd_remove_channel_member(

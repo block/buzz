@@ -188,7 +188,7 @@ buzz groups remove-members "$GROUP_ID" --member "$MEMBER_PK" | jq .
 
 # Bulk channel addition resolves the current 39100 snapshot.
 buzz groups add-members cli-team --member "$MEMBER_PK" | jq .
-buzz channels add-group "$CHANNEL_ID" cli-team | jq .
+buzz channels add-group --channel "$CHANNEL_ID" --group cli-team | jq .
 
 # The message carries a group marker and p-tags only for group members
 # who are currently in the channel.
