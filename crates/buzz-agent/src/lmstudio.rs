@@ -21,10 +21,15 @@ const MAX_RESPONSE_ID_SUFFIX_BYTES: usize = 256;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LmStudioReasoning {
+    /// Disable LM Studio native reasoning output.
     Off,
+    /// Request LM Studio's native low reasoning level.
     Low,
+    /// Request LM Studio's native medium reasoning level.
     Medium,
+    /// Request LM Studio's native high reasoning level.
     High,
+    /// Enable LM Studio native reasoning with model-selected intensity.
     On,
 }
 
@@ -78,7 +83,12 @@ pub struct LmStudioChatRequest {
 }
 
 impl LmStudioChatRequest {
-    /// Creates a new stateful native chat request.
+    /// Creates a new stateful native chat request with bounded token resources.
+    ///
+    /// Model, input, and system-prompt size policy remains at the future
+    /// configuration and ACP transport boundaries; Task 1 has no HTTP transport
+    /// and validates only the native wire contract's explicit numeric resource
+    /// boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         model: impl Into<String>,
@@ -88,8 +98,19 @@ impl LmStudioChatRequest {
         reasoning: LmStudioReasoning,
         max_output_tokens: u32,
         context_length: u64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, AgentError> {
+        if !(1..=MAX_OUTPUT_TOKENS).contains(&max_output_tokens) {
+            return Err(AgentError::InvalidParams(format!(
+                "LM Studio max output tokens must be between 1 and {MAX_OUTPUT_TOKENS}"
+            )));
+        }
+        let widened_output_tokens = u64::from(max_output_tokens);
+        if context_length <= widened_output_tokens || context_length > MAX_CONTEXT_TOKENS {
+            return Err(AgentError::InvalidParams(format!(
+                "LM Studio context length must be greater than max output tokens and at most {MAX_CONTEXT_TOKENS}"
+            )));
+        }
+        Ok(Self {
             model: model.into(),
             input: input.into(),
             system_prompt: system_prompt.into(),
@@ -100,7 +121,7 @@ impl LmStudioChatRequest {
             context_length,
             store: true,
             previous_response_id: None,
-        }
+        })
     }
 
     /// Continues a stateful native chat from a prior valid response ID.
@@ -365,7 +386,8 @@ mod tests {
             LmStudioReasoning::On,
             MAX_OUTPUT_TOKENS,
             MAX_CONTEXT_TOKENS,
-        );
+        )
+        .unwrap();
 
         let value = serde_json::to_value(request).unwrap();
 
@@ -405,6 +427,7 @@ mod tests {
             2_048,
             32_768,
         )
+        .unwrap()
         .continue_from("resp_0123456789abcdef")
         .unwrap();
 
@@ -416,6 +439,46 @@ mod tests {
         );
         assert_eq!(value.get("reasoning"), Some(&json!("off")));
         assert!(value.get("integrations").is_none());
+    }
+
+    #[test]
+    fn request_limits_accept_only_bounded_context_with_output_headroom() {
+        for (output_tokens, context_tokens) in [(1, 2), (MAX_OUTPUT_TOKENS, MAX_CONTEXT_TOKENS)] {
+            LmStudioChatRequest::new(
+                "qwen/qwen3.6-27b",
+                "Prepare the brief.",
+                "System",
+                Vec::new(),
+                LmStudioReasoning::On,
+                output_tokens,
+                context_tokens,
+            )
+            .unwrap();
+        }
+
+        for (output_tokens, context_tokens) in [
+            (0, 2),
+            (MAX_OUTPUT_TOKENS + 1, MAX_CONTEXT_TOKENS),
+            (1, 0),
+            (1, MAX_CONTEXT_TOKENS + 1),
+            (1, 1),
+            (2, 1),
+        ] {
+            let error = LmStudioChatRequest::new(
+                "qwen/qwen3.6-27b",
+                "Prepare the brief.",
+                "System",
+                Vec::new(),
+                LmStudioReasoning::On,
+                output_tokens,
+                context_tokens,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, AgentError::InvalidParams(_)),
+                "unexpected error for output={output_tokens}, context={context_tokens}: {error}"
+            );
+        }
     }
 
     #[test]

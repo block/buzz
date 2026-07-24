@@ -95,3 +95,27 @@ the complete sequential package run passed.
 - The whole body is capped at 16 MiB and output count at 1,024. Task 2 must
   enforce the same body cap while reading HTTP so an oversized response is not
   fully buffered before this parser sees it.
+
+## Review correction
+
+Task 1 review found that the exported output/context maxima were serialized but
+not enforced by the public constructor. A separate correction commit made
+`LmStudioChatRequest::new` fallible and added a request-boundary invariant:
+
+```text
+1 <= max_output_tokens <= MAX_OUTPUT_TOKENS
+max_output_tokens < context_length <= MAX_CONTEXT_TOKENS
+```
+
+The comparison widens `u32` output tokens with `u64::from` before comparing it
+to the context length. The RED boundary test failed because the constructor
+returned `Self`; after validation was added, all ten focused LM Studio tests
+passed. Per-variant public documentation was also added for every native
+reasoning value.
+
+Model, input, and system-prompt size policy remains deliberately deferred. Task
+1 has no HTTP transport or ACP-session request assembly: model configuration is
+owned by the validated runtime work in Task 2, while prompt/system request
+assembly and its transport-size budget are owned by Task 3. The Task 1
+constructor documents this boundary and does not claim those strings are
+independently bounded.
