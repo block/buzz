@@ -292,17 +292,6 @@ function PairingDialog({
               </div>
             ) : null}
           </div>
-
-          <div className="flex justify-end border-t border-border/60 bg-background/95 px-6 py-4">
-            <Button
-              data-testid="mobile-pairing-done"
-              onClick={() => handleOpenChange(false)}
-              size="sm"
-              variant="outline"
-            >
-              {step === "done" ? "Done" : "Close"}
-            </Button>
-          </div>
         </div>
       </DialogContent>
     </Dialog>

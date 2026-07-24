@@ -26,6 +26,10 @@ test("mobile pairing uses the local Wallet-style QR renderer", async ({
   await expect(dialog).toBeVisible();
   await expect(qrCode).toBeVisible();
   await expect(copyButton).toHaveText("Copy pairing code");
+  await expect(dialog.getByTestId("mobile-pairing-done")).toHaveCount(0);
+  await expect(
+    dialog.getByRole("button", { name: "Close", exact: true }),
+  ).toHaveCount(1);
   await expect(
     dialog.getByText("Waiting for mobile device to scan..."),
   ).toHaveCount(0);
