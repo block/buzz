@@ -147,6 +147,26 @@ fn normalize_url(raw: &str) -> String {
         Ok(u) => u,
         Err(_) => return raw.to_lowercase(),
     };
+    // Normalize the host so that loopback variants (localhost, 127.0.0.1,
+    // [::1]) all compare equal — mirrors buzz_core::tenant::normalize_host
+    // and buzz_core::relay::normalize_relay_url.
+    if let Some(host) = parsed.host_str() {
+        let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let authority = format!("{host}{port}");
+        let normalized = buzz_core::tenant::normalize_host(&authority);
+        // Split back into host + port for Url::set_host.
+        if let Some(idx) = normalized.rfind(':') {
+            let (h, p) = normalized.split_at(idx);
+            if let Ok(port_num) = p[1..].parse::<u16>() {
+                let _ = parsed.set_host(Some(h));
+                let _ = parsed.set_port(Some(port_num));
+            } else {
+                let _ = parsed.set_host(Some(&normalized));
+            }
+        } else {
+            let _ = parsed.set_host(Some(&normalized));
+        }
+    }
     let path = parsed.path().trim_end_matches('/').to_string();
     parsed.set_path(&path);
     parsed.to_string()
@@ -286,32 +306,42 @@ mod tests {
     }
 
     #[test]
-    fn loopback_aliases_are_distinct_hosts() {
-        // Under multi-tenant, the `u`-tag host is the row-zero community
-        // binding. An event signed for `localhost` MUST NOT pass against an
-        // expected URL on `127.0.0.1` (or `::1`) — collapsing the three would
-        // be a host-check side door. Production reconstructs `expected_url`
-        // from the community-bound host; tests do the same.
+    fn loopback_aliases_collapse_to_same_host() {
+        // normalize_host (buzz-core) collapses all loopback variants to
+        // 127.0.0.1, so NIP-98 URL comparison must also collapse them.
+        // An event signed for `localhost` MUST pass against an expected URL
+        // on `127.0.0.1` (and vice versa) — otherwise the auth layer and
+        // the community binding layer disagree, causing spurious 401s.
         let keys = Keys::generate();
         let localhost_url = "http://localhost:3000/api/tokens";
         let loopback_url = "http://127.0.0.1:3000/api/tokens";
+        let ipv6_url = "http://[::1]:3000/api/tokens";
+
+        // localhost ↔ 127.0.0.1
         let json = make_nip98_event(&keys, localhost_url, TEST_METHOD, None, None);
-        let result = verify_nip98_event(&json, loopback_url, TEST_METHOD, None);
         assert!(
-            matches!(result, Err(AuthError::Nip98Invalid(_))),
-            "localhost u-tag must NOT match a 127.0.0.1 expected_url; got {result:?}"
+            verify_nip98_event(&json, loopback_url, TEST_METHOD, None).is_ok(),
+            "localhost u-tag must match 127.0.0.1 expected_url"
         );
-
-        // Symmetric: signed-for-127.0.0.1 against expected localhost — same answer.
         let json2 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
-        let result2 = verify_nip98_event(&json2, localhost_url, TEST_METHOD, None);
         assert!(
-            matches!(result2, Err(AuthError::Nip98Invalid(_))),
-            "127.0.0.1 u-tag must NOT match a localhost expected_url; got {result2:?}"
+            verify_nip98_event(&json2, localhost_url, TEST_METHOD, None).is_ok(),
+            "127.0.0.1 u-tag must match localhost expected_url"
         );
 
-        // And identity still holds — same host on both sides verifies.
-        let json3 = make_nip98_event(&keys, loopback_url, TEST_METHOD, None, None);
-        assert!(verify_nip98_event(&json3, loopback_url, TEST_METHOD, None).is_ok());
+        // [::1] ↔ 127.0.0.1
+        let json3 = make_nip98_event(&keys, ipv6_url, TEST_METHOD, None, None);
+        assert!(
+            verify_nip98_event(&json3, loopback_url, TEST_METHOD, None).is_ok(),
+            "[::1] u-tag must match 127.0.0.1 expected_url"
+        );
+
+        // Non-loopback hosts are still distinct.
+        let other_url = "http://relay.example:3000/api/tokens";
+        let json4 = make_nip98_event(&keys, localhost_url, TEST_METHOD, None, None);
+        assert!(
+            verify_nip98_event(&json4, other_url, TEST_METHOD, None).is_err(),
+            "localhost u-tag must NOT match relay.example expected_url"
+        );
     }
 }

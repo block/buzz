@@ -134,7 +134,43 @@ pub fn normalize_host(host: &str) -> String {
     if let Some(stripped) = host.strip_suffix('.') {
         host = stripped.to_string();
     }
+    // Collapse loopback variants to a single canonical form, matching
+    // `normalize_relay_url` in `buzz-core::relay`. Without this, a relay
+    // URL stored as `ws://localhost:3000` (frontend/CLI) and one normalized
+    // to `ws://127.0.0.1:3000` (agent spawn) would bind to different
+    // communities, splitting the tenant.
+    host = normalize_loopback_host(&host);
     host
+}
+
+/// Collapse all loopback address spellings to `127.0.0.1`.
+///
+/// Handles `localhost`, `127.0.0.1`, `[::1]`, with or without a non-default
+/// port suffix. This mirrors the loopback collapsing in
+/// [`crate::relay::normalize_relay_url`] so that `bind_community` and
+/// `normalize_relay_url` agree on a single canonical loopback identity.
+fn normalize_loopback_host(host: &str) -> String {
+    // Split into host part and optional port.
+    // IPv6 literals are bracketed: [::1]:3000
+    if let Some(rest) = host.strip_prefix('[') {
+        if let Some(end) = rest.find(']') {
+            let ipv6 = &rest[..end];
+            let port_part = &rest[end + 1..];
+            if ipv6 == "::1" {
+                return format!("127.0.0.1{port_part}");
+            }
+            return host.to_string();
+        }
+    }
+    // Plain host or host:port
+    let (host_part, port_part) = match host.rfind(':') {
+        Some(idx) => (&host[..idx], &host[idx..]),
+        None => (host, ""),
+    };
+    if host_part == "localhost" || host_part == "127.0.0.1" || host_part == "0.0.0.0" {
+        return format!("127.0.0.1{port_part}");
+    }
+    host.to_string()
 }
 
 /// Extract the authority (host plus an explicit non-default port, if present)
@@ -219,10 +255,33 @@ mod tests {
     }
 
     #[test]
+    fn normalize_host_collapses_loopback_variants() {
+        // All loopback spellings are the SAME tenant — mirrors
+        // normalize_relay_url's loopback collapsing so that agents
+        // (ws://127.0.0.1:3000) and frontends (ws://localhost:3000)
+        // bind to the same community.
+        let canonical = "127.0.0.1:3000";
+        for variant in [
+            "localhost:3000",
+            "127.0.0.1:3000",
+            "Localhost:3000",
+            "LOCALHOST:3000",
+            "[::1]:3000",
+            "  localhost:3000  ",
+        ] {
+            assert_eq!(normalize_host(variant), canonical, "variant {variant:?}");
+        }
+        // Without a port, loopback still collapses.
+        assert_eq!(normalize_host("localhost"), "127.0.0.1");
+        assert_eq!(normalize_host("127.0.0.1"), "127.0.0.1");
+        assert_eq!(normalize_host("[::1]"), "127.0.0.1");
+    }
+
+    #[test]
     fn normalize_host_leaves_ipv6_literal_intact() {
-        // IPv6 literals contain colons but no trailing default-port suffix.
-        assert_eq!(normalize_host("[::1]"), "[::1]");
-        assert_eq!(normalize_host("[::1]:443"), "[::1]");
+        // Non-loopback IPv6 literals are left intact.
+        assert_eq!(normalize_host("[::2]"), "[::2]");
+        assert_eq!(normalize_host("[::2]:443"), "[::2]");
     }
 
     #[test]
@@ -235,9 +294,11 @@ mod tests {
     #[test]
     fn relay_url_authority_keeps_explicit_nondefault_port() {
         // The default dev seed: startup, bind_deployment_community, and
-        // buzz-admin must all derive `localhost:3000` (NOT bare `localhost`),
-        // or the admin lookup misses the community startup seeded.
-        assert_eq!(relay_url_authority("ws://localhost:3000"), "localhost:3000");
+        // buzz-admin must all derive the same canonical authority (with
+        // loopback collapsed to 127.0.0.1) or the admin lookup misses the
+        // community startup seeded.
+        assert_eq!(relay_url_authority("ws://localhost:3000"), "127.0.0.1:3000");
+        assert_eq!(relay_url_authority("ws://127.0.0.1:3000"), "127.0.0.1:3000");
         assert_eq!(
             relay_url_authority("wss://relay.example:8443"),
             "relay.example:8443"
@@ -263,7 +324,11 @@ mod tests {
     fn relay_url_authority_preserves_ipv6_brackets() {
         // `host_str()` strips IPv6 brackets and the port; `relay_url_authority`
         // must keep both so the authority matches `communities.host`.
-        assert_eq!(relay_url_authority("ws://[::1]:3000"), "[::1]:3000");
+        // Loopback IPv6 (`[::1]`) collapses to `127.0.0.1` matching
+        // `normalize_relay_url`.
+        assert_eq!(relay_url_authority("ws://[::1]:3000"), "127.0.0.1:3000");
+        // Non-loopback IPv6 keeps brackets.
+        assert_eq!(relay_url_authority("ws://[::2]:3000"), "[::2]:3000");
     }
 
     #[test]
