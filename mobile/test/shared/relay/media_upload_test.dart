@@ -1147,6 +1147,34 @@ void main() {
         ),
       );
     });
+
+    test('rejects empty generic file attachments before upload', () async {
+      var uploadRequested = false;
+      final service = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        httpClient: http_testing.MockClient((request) async {
+          uploadRequested = true;
+          return http.Response('', HttpStatus.ok);
+        }),
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () async => null,
+        pickAttachmentFile: () async =>
+            XFile.fromData(Uint8List(0), name: 'empty.txt'),
+      );
+
+      await expectLater(
+        service.pickAndUploadFile(),
+        throwsA(
+          isA<Exception>().having(
+            (error) => error.toString(),
+            'message',
+            contains('File is empty'),
+          ),
+        ),
+      );
+      expect(uploadRequested, isFalse);
+    });
   });
 
   group('pickAndUploadVideo', () {

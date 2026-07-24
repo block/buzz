@@ -175,9 +175,14 @@ List<BlobDescriptor> _withoutAttachment(
 
 class _AttachmentStrip extends StatelessWidget {
   final List<BlobDescriptor> attachments;
+  final int uploadingCount;
   final void Function(String url) onRemove;
 
-  const _AttachmentStrip({required this.attachments, required this.onRemove});
+  const _AttachmentStrip({
+    required this.attachments,
+    required this.uploadingCount,
+    required this.onRemove,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -188,9 +193,52 @@ class _AttachmentStrip extends StatelessWidget {
       height: thumbHeight,
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
-        itemCount: attachments.length,
+        itemCount: attachments.length + (uploadingCount > 0 ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(width: Grid.half),
         itemBuilder: (context, index) {
+          if (index == attachments.length) {
+            final label = uploadingCount == 1
+                ? 'Uploading attachment…'
+                : 'Uploading $uploadingCount attachments…';
+            return Semantics(
+              liveRegion: true,
+              label: label,
+              child: Container(
+                key: const ValueKey('compose-upload-progress'),
+                width: 128,
+                decoration: BoxDecoration(
+                  color: context.colors.surface,
+                  borderRadius: BorderRadius.circular(Radii.md),
+                  border: Border.all(color: context.colors.outlineVariant),
+                ),
+                padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    SizedBox.square(
+                      dimension: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: context.colors.primary,
+                      ),
+                    ),
+                    const SizedBox(width: Grid.half),
+                    Flexible(
+                      child: Text(
+                        label,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: context.colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
           final attachment = attachments[index];
           final isVideo = attachment.type.startsWith('video/');
           final isImage = attachment.type.startsWith('image/');

@@ -706,9 +706,10 @@ class ComposeBar extends HookConsumerWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (hasAttachments) ...[
+              if (hasAttachments || hasPendingUploads) ...[
                 _AttachmentStrip(
                   attachments: attachments.value,
+                  uploadingCount: uploadingCount.value,
                   onRemove: removeAttachment,
                 ),
                 const SizedBox(height: Grid.xxs),

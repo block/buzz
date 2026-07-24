@@ -323,6 +323,48 @@ void main() {
       expect(find.byTooltip('Remove attachment'), findsNothing);
     });
 
+    testWidgets('keeps upload progress visible after the picker closes', (
+      tester,
+    ) async {
+      final pickedImage = Completer<XFile?>();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () => pickedImage.future,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsOneWidget,
+      );
+      expect(find.text('Uploading attachment…'), findsOneWidget);
+
+      pickedImage.complete(null);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsNothing,
+      );
+    });
+
     testWidgets('pasted image follows the attachment preview and send path', (
       tester,
     ) async {

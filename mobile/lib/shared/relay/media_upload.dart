@@ -52,7 +52,6 @@ const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
-typedef PickCameraImage = Future<XFile?> Function();
 typedef PickAttachmentFile = Future<XFile?> Function();
 typedef SanitizeImageBytes =
     Future<Uint8List> Function(Uint8List bytes, String mimeType);
@@ -161,7 +160,6 @@ class MediaUploadService {
   final String? _nsec;
   final PickGalleryImage _pickGalleryImage;
   final PickGalleryVideo _pickGalleryVideo;
-  final PickCameraImage? _pickCameraImage;
   final PickAttachmentFile? _pickAttachmentFile;
   final SanitizeImageBytes _sanitizeImageBytes;
   final TranscodeImageToJpeg _transcodeImageToJpeg;
@@ -176,7 +174,6 @@ class MediaUploadService {
     required String? nsec,
     required PickGalleryImage pickGalleryImage,
     required PickGalleryVideo pickGalleryVideo,
-    PickCameraImage? pickCameraImage,
     PickAttachmentFile? pickAttachmentFile,
     SanitizeImageBytes? sanitizeImageBytes,
     TranscodeImageToJpeg? transcodeImageToJpeg,
@@ -188,7 +185,6 @@ class MediaUploadService {
        _nsec = nsec,
        _pickGalleryImage = pickGalleryImage,
        _pickGalleryVideo = pickGalleryVideo,
-       _pickCameraImage = pickCameraImage,
        _pickAttachmentFile = pickAttachmentFile,
        _sanitizeImageBytes = sanitizeImageBytes ?? _sanitizePickedImageBytes,
        _transcodeImageToJpeg =
@@ -217,16 +213,6 @@ class MediaUploadService {
       preparedImage.bytes,
       mimeType: preparedImage.mimeType,
     );
-  }
-
-  Future<BlobDescriptor?> captureAndUploadImage() async {
-    final pickCameraImage = _pickCameraImage;
-    if (pickCameraImage == null) {
-      throw Exception("Camera attachments aren't available on this device.");
-    }
-    final pickedImage = await pickCameraImage();
-    if (pickedImage == null) return null;
-    return uploadImage(pickedImage);
   }
 
   Future<bool> clipboardHasImage() async {
@@ -288,6 +274,9 @@ class MediaUploadService {
     if (pickedFile == null) return null;
 
     final length = await pickedFile.length();
+    if (length == 0) {
+      throw Exception('File is empty.');
+    }
     if (length > _maxFileSizeBytes) {
       throw Exception(
         'File is too large (${(length / 1024 / 1024).toStringAsFixed(0)}MB). Maximum is 100MB.',
@@ -763,10 +752,6 @@ final mediaUploadServiceProvider = Provider<MediaUploadService>((ref) {
       requestFullMetadata: false,
     ),
     pickGalleryVideo: () => picker.pickVideo(source: ImageSource.gallery),
-    pickCameraImage: () => picker.pickImage(
-      source: ImageSource.camera,
-      requestFullMetadata: false,
-    ),
     pickAttachmentFile: file_selector.openFile,
   );
   ref.onDispose(service.dispose);
