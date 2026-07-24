@@ -185,6 +185,18 @@ type E2eConfig = {
      *  Call N returns results[N]; when exhausted the last entry repeats.
      *  Takes precedence over `installAcpRuntimeResult`. */
     installAcpRuntimeResults?: RawInstallRuntimeResult[];
+    /** Per-runtime install configuration keyed by runtimeId.
+     *  When a runtimeId matches, its entry overrides the global
+     *  installAcpRuntime* fields for that specific runtime. */
+    installAcpRuntimeByRuntime?: Record<
+      string,
+      {
+        delayMs?: number;
+        result?: RawInstallRuntimeResult;
+        /** Call-order sequence — same semantics as installAcpRuntimeResults. */
+        results?: RawInstallRuntimeResult[];
+      }
+    >;
     managedAgentPrereqs?: {
       acp?: MockCommandAvailability;
       mcp?: MockCommandAvailability;
@@ -7060,6 +7072,8 @@ async function handleConnectAcpRuntime(
 // Per-page install call counter. Reset each test run because this module is
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
+/** Per-runtime call counters for `installAcpRuntimeByRuntime` sequences. */
+const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
@@ -7080,6 +7094,31 @@ async function handleInstallAcpRuntime(
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
+  const runtimeId = args.runtimeId ?? "";
+  const perRuntime = config?.mock?.installAcpRuntimeByRuntime?.[runtimeId];
+
+  if (perRuntime) {
+    const delayMs = perRuntime.delayMs ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    const seq = perRuntime.results;
+    if (seq && seq.length > 0) {
+      const idx = Math.min(
+        installCallCountByRuntime[runtimeId] ?? 0,
+        seq.length - 1,
+      );
+      installCallCountByRuntime[runtimeId] = idx + 1;
+      const result = seq[idx];
+      if (result.success) mockInstallCompleted = true;
+      return result;
+    }
+    if (perRuntime.result) {
+      if (perRuntime.result.success) mockInstallCompleted = true;
+      return perRuntime.result;
+    }
+  }
+
   const delayMs = config?.mock?.installAcpRuntimeDelayMs ?? 0;
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
