@@ -468,4 +468,63 @@ Commands:
             );
         }
     }
+
+    /// Manual/live validation: run against whatever `claude` is on PATH.
+    /// Ignored in CI — opt in with `--ignored`.
+    #[test]
+    #[ignore = "live PATH probe; run manually after downgrading Claude Code"]
+    fn live_claude_auth_probe_against_path_binary() {
+        use crate::managed_agents::discover_acp_runtimes;
+
+        let claude = std::process::Command::new("claude")
+            .arg("--version")
+            .output()
+            .expect("claude on PATH");
+        println!(
+            "claude --version: {}",
+            String::from_utf8_lossy(&claude.stdout).trim()
+        );
+
+        let help = std::process::Command::new("claude")
+            .arg("--help")
+            .output()
+            .expect("claude --help");
+        let help_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&help.stdout),
+            String::from_utf8_lossy(&help.stderr)
+        );
+        let needs_upgrade = super::claude_help_missing_auth_command(&help_text);
+        println!("claude_help_missing_auth_command={needs_upgrade}");
+
+        let runtimes = discover_acp_runtimes();
+        let entry = runtimes
+            .iter()
+            .find(|r| r.id == "claude")
+            .expect("claude runtime in catalog");
+        println!("availability={:?}", entry.availability);
+        println!("auth_status={:?}", entry.auth_status);
+        println!("login_hint={:?}", entry.login_hint);
+        println!("can_auto_install={}", entry.can_auto_install);
+
+        if needs_upgrade {
+            match &entry.auth_status {
+                crate::managed_agents::AuthStatus::Unknown {
+                    diagnostic: Some(diagnostic),
+                } if entry.availability
+                    == crate::managed_agents::AcpAvailabilityStatus::Available =>
+                {
+                    assert!(
+                        diagnostic.contains("claude update"),
+                        "expected update diagnostic, got {diagnostic}"
+                    );
+                    assert_eq!(entry.login_hint.as_deref(), Some(diagnostic.as_str()));
+                }
+                other => panic!(
+                    "expected Available + Unknown(diagnostic) for outdated Claude, got availability={:?} auth={other:?}",
+                    entry.availability
+                ),
+            }
+        }
+    }
 }
