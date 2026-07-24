@@ -14,13 +14,22 @@ import { formatModelDiscoveryErrorStatus } from "./personaModelDiscoveryStatus.t
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function makeRuntime(id, availability = "available") {
+function makeRuntime(
+  id,
+  availability = "available",
+  providerEnvVar = id === "buzz-agent"
+    ? "BUZZ_AGENT_PROVIDER"
+    : id === "goose"
+      ? "GOOSE_PROVIDER"
+      : null,
+) {
   return {
     id,
     label: id,
     command: id,
     defaultArgs: [],
     mcpCommand: null,
+    providerEnvVar,
     availability,
   };
 }
@@ -80,7 +89,7 @@ test("hidden Buzz Agent suppresses shared compute for new selections", () => {
   const hidden = getPersonaHiddenProviderIds({
     bakedEnvKeys: [],
     selectableRuntimes: [makeRuntime("goose")],
-    currentRuntimeId: "goose",
+    currentRuntime: makeRuntime("goose"),
     preserveCurrentRuntime: false,
   });
   const ids = getPersonaProviderOptions("", "goose", "", hidden).map(
@@ -93,13 +102,39 @@ test("an existing hidden Buzz Agent keeps its shared compute provider", () => {
   const hidden = getPersonaHiddenProviderIds({
     bakedEnvKeys: [],
     selectableRuntimes: [makeRuntime("goose")],
-    currentRuntimeId: "buzz-agent",
+    currentRuntime: makeRuntime("buzz-agent"),
     preserveCurrentRuntime: true,
   });
   const ids = getPersonaProviderOptions("", "buzz-agent", "", hidden).map(
     (option) => option.id,
   );
   assert.ok(ids.includes("relay-mesh"));
+});
+
+test("shared compute visibility follows runtime catalog metadata instead of runtime ids", () => {
+  const hidden = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [
+      makeRuntime("future-shared-compute", "available", "BUZZ_AGENT_PROVIDER"),
+    ],
+    preserveCurrentRuntime: false,
+  });
+  const ids = getPersonaProviderOptions(
+    "",
+    "future-shared-compute",
+    "",
+    hidden,
+  ).map((option) => option.id);
+  assert.ok(ids.includes("relay-mesh"));
+
+  const renamedCapability = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [
+      makeRuntime("buzz-agent", "available", "GOOSE_PROVIDER"),
+    ],
+    preserveCurrentRuntime: false,
+  });
+  assert.ok(renamedCapability.has("relay-mesh"));
 });
 
 // ── getDefaultPersonaRuntime — buzz-agent first ───────────────────────────────

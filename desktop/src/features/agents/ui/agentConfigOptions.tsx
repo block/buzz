@@ -21,24 +21,45 @@ export const BLOCK_BUILD_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set([
   "databricks",
 ]);
 
+type RuntimeProviderCapability = Pick<
+  AcpRuntimeCatalogEntry,
+  "id" | "providerEnvVar"
+>;
+
+export function runtimeSupportsRelayMesh(
+  runtime: RuntimeProviderCapability | null | undefined,
+): boolean {
+  return runtime?.providerEnvVar === "BUZZ_AGENT_PROVIDER";
+}
+
+export function getRelayMeshRuntime<T extends RuntimeProviderCapability>(
+  selectableRuntimes: readonly T[],
+  currentRuntime?: T | null,
+): T | null {
+  if (runtimeSupportsRelayMesh(currentRuntime)) {
+    return currentRuntime ?? null;
+  }
+  return selectableRuntimes.find(runtimeSupportsRelayMesh) ?? null;
+}
+
 export function getPersonaHiddenProviderIds({
   bakedEnvKeys,
   selectableRuntimes,
-  currentRuntimeId,
+  currentRuntime,
   preserveCurrentRuntime,
 }: {
   bakedEnvKeys: readonly string[];
-  selectableRuntimes: readonly Pick<AcpRuntimeCatalogEntry, "id">[];
-  currentRuntimeId: string;
+  selectableRuntimes: readonly RuntimeProviderCapability[];
+  currentRuntime?: RuntimeProviderCapability | null;
   preserveCurrentRuntime: boolean;
 }): ReadonlySet<string> {
   const hidden = bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")
     ? new Set(BLOCK_BUILD_HIDDEN_PROVIDER_IDS)
     : new Set<string>();
-  const buzzAgentSelectable =
-    selectableRuntimes.some((runtime) => runtime.id === "buzz-agent") ||
-    (preserveCurrentRuntime && currentRuntimeId.trim() === "buzz-agent");
-  if (!buzzAgentSelectable) hidden.add("relay-mesh");
+  const relayMeshSelectable =
+    selectableRuntimes.some(runtimeSupportsRelayMesh) ||
+    (preserveCurrentRuntime && runtimeSupportsRelayMesh(currentRuntime));
+  if (!relayMeshSelectable) hidden.add("relay-mesh");
   return hidden;
 }
 

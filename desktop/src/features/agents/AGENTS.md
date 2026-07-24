@@ -102,8 +102,10 @@ with a TypeScript lookup table or an id comparison in a component.
    visible-runtime set only for members that need an implicit fallback, so a
    fully pinned team remains deployable even when every installed runtime is
    hidden. Definitions already pinned to a hidden runtime remain runnable.
-   Provider pickers use `getPersonaHiddenProviderIds` as the shared
-   relay-mesh visibility policy.
+   Welcome Team reconciliation skips runtime updates for existing agents on a
+   hidden runtime. Provider pickers use `getPersonaHiddenProviderIds` as the
+   shared relay-mesh visibility policy, deriving support from each runtime's
+   catalog-provided `providerEnvVar` rather than its ID.
 10. **The defaults modal is progressively disclosed.** An unset global config
    starts on the Buzz Agent-first deployment fallback and carries that visible
    harness into the next saved edit. The `progressive-defaults` disclosure

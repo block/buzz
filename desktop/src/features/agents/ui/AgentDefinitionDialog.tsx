@@ -36,6 +36,7 @@ import {
   getPersonaHiddenProviderIds,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getRelayMeshRuntime,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
@@ -516,7 +517,7 @@ export function AgentDefinitionDialog({
   const hideProviderIds = getPersonaHiddenProviderIds({
     bakedEnvKeys: bakedEnvKeys ?? [],
     selectableRuntimes,
-    currentRuntimeId: runtime,
+    currentRuntime: selectedRuntime,
     preserveCurrentRuntime: !isCreateMode,
   });
   const providerOptions = getPersonaProviderOptions(
@@ -681,11 +682,16 @@ export function AgentDefinitionDialog({
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    if (nextProvider === "relay-mesh" && runtime !== "buzz-agent") {
-      handleRuntimeDropdownChange("buzz-agent");
+    const relayMeshRuntime =
+      nextProvider === "relay-mesh"
+        ? getRelayMeshRuntime(selectableRuntimes, selectedRuntime)
+        : null;
+    const nextRuntime = relayMeshRuntime?.id ?? runtime;
+    if (nextRuntime !== runtime) {
+      handleRuntimeDropdownChange(nextRuntime);
     }
     const nextSelection = selectionOnProviderDropdownChange(selection, {
-      runtime: nextProvider === "relay-mesh" ? "buzz-agent" : runtime,
+      runtime: nextRuntime,
       nextValue,
       clearModelWhenApiKeyMissing: true,
     });

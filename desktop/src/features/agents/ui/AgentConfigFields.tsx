@@ -590,10 +590,10 @@ export function AgentConfigFields({
       getPersonaHiddenProviderIds({
         bakedEnvKeys,
         selectableRuntimes: selectedRuntime ? [selectedRuntime] : [],
-        currentRuntimeId: selectedRuntimeId,
+        currentRuntime: selectedRuntime,
         preserveCurrentRuntime: false,
       }),
-    [bakedEnvKeys, selectedRuntime, selectedRuntimeId],
+    [bakedEnvKeys, selectedRuntime],
   );
   const providerOptions = getPersonaProviderOptions(
     providerValue,
