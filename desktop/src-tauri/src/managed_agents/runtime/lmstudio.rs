@@ -8,6 +8,7 @@ const LMSTUDIO_CATALOG_OWNED_ENV_KEYS: &[&str] = &[
     "LM_STUDIO_MODEL",
     "LM_STUDIO_BASE_URL",
     "LM_STUDIO_MCP_INTEGRATIONS",
+    "LM_STUDIO_COMMAND_EVIDENCE_POLICY",
     "LM_STUDIO_FALLBACK_PROVIDER",
     "LM_STUDIO_API_TOKEN",
 ];
@@ -72,5 +73,8 @@ pub(crate) fn apply_runtime_security_env(
             crate::command_services::policy::CommandKnowledgeWorkflow::Adviser,
         );
         env.insert(key.to_string(), integrations);
+    }
+    if let Some(policy) = crate::command_services::policy::catalog_evidence_policy_json() {
+        env.insert("LM_STUDIO_COMMAND_EVIDENCE_POLICY".to_string(), policy);
     }
 }

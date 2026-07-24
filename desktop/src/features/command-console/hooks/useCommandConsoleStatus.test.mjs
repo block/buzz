@@ -32,9 +32,11 @@ function knowledgeStatus(overrides = {}) {
       status: "ready",
       serverIdentity: "memory",
       nodeId: "node:command",
+      homeNodeId: "node:home-command",
       revisionCount: 42,
       conflictCount: 2,
       replicationCursor: 41,
+      homeReplicationCursor: 73,
       lastSuccessfulSync: "2026-07-24T04:20:00Z",
       freshness: "fresh",
       validation: "verified",
@@ -238,7 +240,9 @@ test("reports live verified Memory, RAG, and Apple status without content or sec
   assert.match(memory?.detail ?? "", /2 unresolved conflicts/i);
   assert.deepEqual(memory?.facts, [
     { label: "Node", value: "node:command" },
+    { label: "Home node", value: "node:home-command" },
     { label: "Replication cursor", value: "41" },
+    { label: "Home replication cursor", value: "73" },
     {
       label: "Last successful sync",
       value: "2026-07-24T04:20:00Z",

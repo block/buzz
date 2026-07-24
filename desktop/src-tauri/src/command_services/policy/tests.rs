@@ -1,11 +1,15 @@
 use super::*;
-use serde_json::{json, Value};
+use hmac::{Hmac, KeyInit, Mac};
+use serde_json::{json, Map, Value};
+use sha2::Sha256;
 use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::thread;
 
 const NOW: &str = "2026-07-24T04:30:00Z";
+const ATTESTATION_SECRET: &str = "fixture-attestation-secret-123456789";
+const GOLDEN_NONCE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn admitted_service(kind: KnowledgeServiceKind) -> VerifiedService {
     let (server_identity, endpoint, active_identity, advertised_tools) = match kind {
@@ -17,7 +21,7 @@ fn admitted_service(kind: KnowledgeServiceKind) -> VerifiedService {
         ),
         KnowledgeServiceKind::Rag => (
             "rag",
-            "http://127.0.0.1:8005/mcp",
+            "http://127.0.0.1:8005/mcp/",
             "f8bb8f8d2f046a82137f1ebc01f41fb370f3a330992bce8a7a4b6160c3ef3f07",
             RAG_CATALOG_TOOLS,
         ),
@@ -86,28 +90,59 @@ fn authenticated_fake_memory_mcp() -> (String, thread::JoinHandle<()>) {
         listener.local_addr().unwrap().port()
     );
     let server = thread::spawn(move || {
-        for index in 0..5 {
+        for index in 0..6 {
             let (mut stream, _) = listener.accept().expect("accept fake MCP request");
             let (headers, body) = read_http_request(&mut stream);
+            if index == 0 {
+                assert!(headers.starts_with("POST /attestation HTTP/1.1\r\n"));
+                assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+                assert_eq!(body.as_object().map(Map::len), Some(1));
+                let nonce = body["nonce"].as_str().expect("attestation nonce");
+                assert_eq!(nonce.len(), 64);
+                assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                let transcript =
+                    format!("buzz-command-attestation-v1\0memory\0node:command\0{nonce}");
+                let mut hmac =
+                    Hmac::<Sha256>::new_from_slice(ATTESTATION_SECRET.as_bytes()).unwrap();
+                hmac.update(transcript.as_bytes());
+                write_http_response(
+                    &mut stream,
+                    "200 OK",
+                    Some(json!({
+                        "service": "memory",
+                        "identity": "node:command",
+                        "nonce": nonce,
+                        "mac": format!("sha256:{}", hex::encode(hmac.finalize().into_bytes())),
+                    })),
+                );
+                continue;
+            }
             assert_eq!(
                 body.get("method").and_then(Value::as_str),
                 Some(match index {
-                    0..=2 => "initialize",
-                    3 => "notifications/initialized",
+                    1..=3 => "initialize",
+                    4 => "notifications/initialized",
                     _ => "tools/list",
                 }),
             );
             match index {
-                0 => {
+                1 => {
                     assert!(!headers.to_ascii_lowercase().contains("authorization:"));
                     write_http_response(&mut stream, "401 Unauthorized", None);
                 }
-                1 => {
-                    assert!(headers
-                        .contains("authorization: Bearer buzz-invalid-token-0000000000000000"));
+                2 => {
+                    let authorization = headers
+                        .lines()
+                        .find(|line| {
+                            line.to_ascii_lowercase()
+                                .starts_with("authorization: bearer ")
+                        })
+                        .expect("fresh invalid bearer");
+                    assert!(!authorization.contains("fixture-token-123456789"));
+                    assert!(!authorization.contains("buzz-invalid-token-0000000000000000"));
                     write_http_response(&mut stream, "403 Forbidden", None);
                 }
-                2 => {
+                3 => {
                     assert!(headers.contains("authorization: Bearer fixture-token-123456789"));
                     write_http_response(
                         &mut stream,
@@ -123,7 +158,7 @@ fn authenticated_fake_memory_mcp() -> (String, thread::JoinHandle<()>) {
                         })),
                     );
                 }
-                3 => write_http_response(&mut stream, "202 Accepted", None),
+                4 => write_http_response(&mut stream, "202 Accepted", None),
                 _ => write_http_response(
                     &mut stream,
                     "200 OK",
@@ -160,6 +195,7 @@ fn admits_only_authenticated_literal_loopback_with_exact_identity() {
         "http://[::1]:8005/mcp",
         "http://192.168.1.107:8005/mcp",
         "https://127.0.0.1:8005/mcp",
+        "http://127.0.0.1:8005/mcp",
         "http://127.0.0.1:8005/other",
         "http://127.0.0.1:8005/mcp?token=secret",
         "http://user:secret@127.0.0.1:8005/mcp",
@@ -195,8 +231,15 @@ fn admits_only_authenticated_literal_loopback_with_exact_identity() {
     );
 
     let (endpoint, server) = authenticated_fake_memory_mcp();
-    let attestation =
-        probe_authenticated_mcp(&endpoint, "fixture-token-123456789", None).expect("authenticated");
+    let attestation = probe_authenticated_mcp(
+        &endpoint,
+        "fixture-token-123456789",
+        ATTESTATION_SECRET,
+        "memory",
+        "node:command",
+        None,
+    )
+    .expect("authenticated");
     server.join().expect("join fake MCP");
     assert_eq!(attestation.server_identity, "memory");
     assert_eq!(
@@ -206,6 +249,49 @@ fn admits_only_authenticated_literal_loopback_with_exact_identity() {
             .map(|tool| (*tool).to_string())
             .collect::<Vec<_>>(),
     );
+}
+
+#[test]
+fn attestation_matches_cross_language_memory_and_rag_goldens_and_exact_bounds() {
+    let rag_identity = format!(
+        "snapshot:{};signer-sha256:{}",
+        "f".repeat(64),
+        "e".repeat(64)
+    );
+    for (service, identity, encoded_mac) in [
+        (
+            "memory",
+            "node:command",
+            "sha256:05c34688762800b49e7a17893d60e8e1291b64e754b2ae9de6c00fd5c59504b1",
+        ),
+        (
+            "rag",
+            rag_identity.as_str(),
+            "sha256:339dee3bfc8eab760c1c30fa0b48f0d8d7804e3bcc850443f334b8108af92922",
+        ),
+    ] {
+        let mac = decode_attestation_mac(encoded_mac).expect("prefixed MAC");
+        assert_eq!(
+            verify_attestation_mac(ATTESTATION_SECRET, service, identity, GOLDEN_NONCE, &mac),
+            Ok(())
+        );
+    }
+    for invalid in [
+        "05c34688762800b49e7a17893d60e8e1291b64e754b2ae9de6c00fd5c59504b1",
+        "sha256:05C34688762800b49e7a17893d60e8e1291b64e754b2ae9de6c00fd5c59504b1",
+        "sha256:short",
+    ] {
+        assert_eq!(
+            decode_attestation_mac(invalid),
+            Err(AdmissionError::InvalidAttestation)
+        );
+    }
+    assert!(valid_attestation_secret(&"a".repeat(32)));
+    assert!(valid_attestation_secret(&"a".repeat(1024)));
+    assert!(!valid_attestation_secret(&"a".repeat(31)));
+    assert!(!valid_attestation_secret(&"a".repeat(1025)));
+    assert!(!valid_attestation_secret(&format!("{}\0", "a".repeat(32))));
+    assert!(!valid_attestation_secret(&format!("{}\n", "a".repeat(32))));
 }
 
 #[test]
@@ -268,6 +354,36 @@ fn catalog_policy_exposes_read_only_rag_and_workflow_scoped_memory_writes() {
     let debug = format!("{:?}", adviser[0]);
     assert!(debug.contains("[REDACTED]"));
     assert!(!debug.contains("fixture-token"));
+}
+
+#[test]
+fn catalog_evidence_policy_binds_each_integration_to_its_active_identity() {
+    let policy = build_command_evidence_policy(&[
+        admitted_service(KnowledgeServiceKind::Memory),
+        admitted_service(KnowledgeServiceKind::Rag),
+    ])
+    .expect("catalog evidence policy");
+    assert_eq!(
+        serde_json::to_value(policy).expect("serialize policy"),
+        json!({
+            "version": 1,
+            "maximum_evidence_age_seconds": 86400,
+            "services": [
+                {
+                    "server_label": "memory",
+                    "kind": "memory",
+                    "active_identity": "node:command"
+                },
+                {
+                    "server_label": "rag",
+                    "kind": "rag",
+                    "active_identity": "f8bb8f8d2f046a82137f1ebc01f41fb370f3a330992bce8a7a4b6160c3ef3f07"
+                }
+            ],
+            "allowed_apple_ids": [],
+            "allowed_file_paths": []
+        })
+    );
 }
 
 #[test]

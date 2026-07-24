@@ -23,16 +23,23 @@ type ClassifiedInput<T> = Omit<T, "kind" | "version" | "classification"> & {
 };
 
 export type KnowledgeServiceStatus = "ready" | "not_configured" | "unavailable";
-export type KnowledgeFreshness = "fresh" | "stale" | "unknown";
+export type KnowledgeFreshness =
+  | "never_synced"
+  | "fresh"
+  | "stale"
+  | "corrupt"
+  | "unknown";
 export type KnowledgeValidation = "verified" | "failed" | "unknown";
 
 export type MemoryKnowledgeStatus = {
   readonly status: KnowledgeServiceStatus;
   readonly serverIdentity: string | null;
   readonly nodeId: string | null;
+  readonly homeNodeId: string | null;
   readonly revisionCount: number;
   readonly conflictCount: number;
   readonly replicationCursor: number | null;
+  readonly homeReplicationCursor: number | null;
   readonly lastSuccessfulSync: string | null;
   readonly freshness: KnowledgeFreshness;
   readonly validation: KnowledgeValidation;
@@ -94,7 +101,13 @@ function isKnowledgeServiceStatus(
 }
 
 function isKnowledgeFreshness(value: unknown): value is KnowledgeFreshness {
-  return value === "fresh" || value === "stale" || value === "unknown";
+  return (
+    value === "never_synced" ||
+    value === "fresh" ||
+    value === "stale" ||
+    value === "corrupt" ||
+    value === "unknown"
+  );
 }
 
 function isKnowledgeValidation(value: unknown): value is KnowledgeValidation {
@@ -126,9 +139,11 @@ function parseMemoryKnowledgeStatus(
       "status",
       "serverIdentity",
       "nodeId",
+      "homeNodeId",
       "revisionCount",
       "conflictCount",
       "replicationCursor",
+      "homeReplicationCursor",
       "lastSuccessfulSync",
       "freshness",
       "validation",
@@ -138,9 +153,14 @@ function parseMemoryKnowledgeStatus(
     !isKnowledgeServiceStatus(value.status) ||
     !nullableText(value.serverIdentity) ||
     !nullableText(value.nodeId) ||
+    !nullableText(value.homeNodeId) ||
     !isCount(value.revisionCount) ||
     !isCount(value.conflictCount) ||
     !(value.replicationCursor === null || isCount(value.replicationCursor)) ||
+    !(
+      value.homeReplicationCursor === null ||
+      isCount(value.homeReplicationCursor)
+    ) ||
     !nullableTimestamp(value.lastSuccessfulSync) ||
     !isKnowledgeFreshness(value.freshness) ||
     !isKnowledgeValidation(value.validation) ||
@@ -153,7 +173,7 @@ function parseMemoryKnowledgeStatus(
     (value.status === "ready"
       ? value.serverIdentity !== "memory" ||
         value.nodeId === null ||
-        value.freshness !== "fresh" ||
+        value.freshness === "unknown" ||
         value.validation !== "verified" ||
         value.error !== null
       : value.serverIdentity !== null || value.validation === "verified")
@@ -163,9 +183,11 @@ function parseMemoryKnowledgeStatus(
     status: value.status,
     serverIdentity: value.serverIdentity,
     nodeId: value.nodeId,
+    homeNodeId: value.homeNodeId,
     revisionCount: value.revisionCount,
     conflictCount: value.conflictCount,
     replicationCursor: value.replicationCursor,
+    homeReplicationCursor: value.homeReplicationCursor,
     lastSuccessfulSync: value.lastSuccessfulSync,
     freshness: value.freshness,
     validation: value.validation,

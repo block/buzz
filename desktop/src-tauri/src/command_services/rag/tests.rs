@@ -9,7 +9,12 @@ struct FakeMcpProbe {
 
 #[cfg(test)]
 impl McpProbe for FakeMcpProbe {
-    fn attest(&self, _endpoint: &str, bearer_token: &str) -> Result<McpAttestation, RagError> {
+    fn attest(
+        &self,
+        _config: &RagConfig,
+        bearer_token: &str,
+        _attestation_secret: &str,
+    ) -> Result<McpAttestation, RagError> {
         if bearer_token != self.expected_token {
             return Err(RagError::AuthenticationFailed);
         }
@@ -30,9 +35,28 @@ use std::os::unix::fs::PermissionsExt;
 const SNAPSHOT_TIME: &str = "2026-07-24T03:30:00Z";
 const ACTIVATED_AT: &str = "2026-07-24T04:00:00Z";
 
+#[test]
+fn rag_canonicalization_matches_upstream_rfc8785_golden_bytes() {
+    assert_eq!(
+        canonical_json_bytes(&json!({"a": 1, "z": [3, {"é": true}]})).expect("canonical object"),
+        r#"{"a":1,"z":[3,{"é":true}]}"#.as_bytes(),
+    );
+    assert_eq!(
+        canonical_json_bytes(&json!({"n": 0.000001})).expect("canonical decimal"),
+        br#"{"n":0.000001}"#,
+    );
+    let rfc_sample: Value = serde_json::from_str(
+        r#"{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],"string":"€$\u000f\nA'B\"\\\\\"/"}"#,
+    )
+    .expect("parse RFC sample");
+    assert_eq!(
+        canonical_json_bytes(&rfc_sample).expect("canonical RFC sample"),
+        b"{\"numbers\":[333333333.3333333,1e+30,4.5,0.002,1e-27],\"string\":\"\xE2\x82\xAC$\\u000f\\nA'B\\\"\\\\\\\\\\\"/\"}",
+    );
+}
+
 fn hex(value: &Value) -> String {
-    let bytes =
-        crate::command_services::policy::canonical_json_bytes(value).expect("canonical fixture");
+    let bytes = canonical_json_bytes(value).expect("canonical fixture");
     crate::command_services::policy::sha256_hex(&bytes)
 }
 
@@ -124,12 +148,13 @@ fn fixture() -> (RagConfig, Value, Value, Value, FakeMcpProbe) {
     });
     let config = RagConfig {
         schema_version: 1,
-        endpoint: "http://127.0.0.1:8005/mcp".to_string(),
+        endpoint: "http://127.0.0.1:8005/mcp/".to_string(),
         state_root: "/var/lib/command-rag".into(),
         expected_server_identity: "rag".to_string(),
         expected_active_snapshot_id: snapshot_id.clone(),
         trusted_signer_fingerprint: signer,
         credential_key: "rag.local.read".to_string(),
+        attestation_credential_key: "rag.local.attestation".to_string(),
         tool_allowlist: RAG_CATALOG_TOOLS
             .iter()
             .map(|tool| (*tool).to_string())
@@ -154,6 +179,7 @@ fn recomputes_manifest_and_activation_hashes_before_ready() {
     let result = verify_rag_service(
         &config,
         "rag-read-token-123456",
+        "rag-attestation-secret-123456",
         &manifest,
         &activation,
         &probe,
@@ -228,6 +254,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
         verify_rag_service(
             &config,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &tampered_manifest,
             &activation,
             &probe,
@@ -242,6 +269,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
         verify_rag_service(
             &config,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &manifest,
             &tampered_activation,
             &probe,
@@ -256,6 +284,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
         verify_rag_service(
             &stale,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &manifest,
             &activation,
             &probe,
@@ -275,6 +304,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
         verify_rag_service(
             &config,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &manifest,
             &activation,
             &wrong_server,
@@ -291,6 +321,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
         verify_rag_service(
             &config,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &manifest,
             &activation,
             &missing_tool,
@@ -303,6 +334,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
         verify_rag_service(
             &config,
             "",
+            "rag-attestation-secret-123456",
             &manifest,
             &activation,
             &probe,
@@ -315,6 +347,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
         verify_rag_service(
             &config,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &manifest,
             &activation,
             &probe,
@@ -329,6 +362,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
         verify_rag_service(
             &invalid_credential_key,
             "rag-read-token-123456",
+            "rag-attestation-secret-123456",
             &manifest,
             &activation,
             &probe,

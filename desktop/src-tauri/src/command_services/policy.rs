@@ -1,39 +1,25 @@
-use crate::command_services::ssh::ProtectedFile;
-use crate::secret_store::SecretStore;
-use chrono::Utc;
+use hmac::{Hmac, KeyInit, Mac};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use serde::Deserialize;
-use serde::Serialize;
 use serde_json::{Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use sha2::Sha256;
+use std::collections::BTreeSet;
 use std::io::Read;
-use std::sync::{LazyLock, Mutex};
-use std::time::{Duration, Instant};
-use tauri::Manager;
+use std::time::Duration;
 use url::Url;
 
 const MAXIMUM_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
 const MAXIMUM_JSON_DEPTH: usize = 64;
 const MAXIMUM_JSON_NODES: usize = 10_000;
 const MAXIMUM_MCP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
+const MAXIMUM_ATTESTATION_RESPONSE_BYTES: usize = 4 * 1024;
 const MCP_TIMEOUT: Duration = Duration::from_secs(3);
-const ADMISSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
-pub(crate) const MEMORY_READ_ONLY_TOOLS: &[&str] = &[
-    "get_entity",
-    "get_wiki_page",
-    "list_entities",
-    "memory_graph",
-    "recall_for_entity",
-    "search_events",
-    "search_wiki",
-    "timeline",
-];
+pub(crate) const MEMORY_READ_ONLY_TOOLS: &[&str] = &["command_memory_context"];
 pub(crate) const MEMORY_WORKFLOW_WRITE_TOOLS: &[&str] =
     &["link_entities", "record_event", "upsert_entity"];
 pub(crate) const MEMORY_CATALOG_TOOLS: &[&str] = &[
+    "command_memory_context",
     "get_entity",
     "get_wiki_page",
     "link_entities",
@@ -126,7 +112,7 @@ impl ServiceAdmissionPolicy {
     }
 
     pub(crate) fn verify(&self, candidate: &VerifiedService) -> Result<(), AdmissionError> {
-        validate_literal_loopback_mcp_endpoint(&candidate.endpoint)?;
+        validate_service_endpoint(self.kind, &candidate.endpoint)?;
         if !valid_bearer_token(&candidate.bearer_token) {
             return Err(AdmissionError::AuthenticationUnavailable);
         }
@@ -193,11 +179,34 @@ fn valid_bearer_token(value: &str) -> bool {
 }
 
 pub(crate) fn validate_literal_loopback_mcp_endpoint(endpoint: &str) -> Result<(), AdmissionError> {
+    validate_literal_loopback_mcp_path(endpoint, "/mcp")
+}
+
+pub(crate) fn validate_rag_literal_loopback_mcp_endpoint(
+    endpoint: &str,
+) -> Result<(), AdmissionError> {
+    validate_literal_loopback_mcp_path(endpoint, "/mcp/")
+}
+
+fn validate_service_endpoint(
+    kind: KnowledgeServiceKind,
+    endpoint: &str,
+) -> Result<(), AdmissionError> {
+    match kind {
+        KnowledgeServiceKind::Memory => validate_literal_loopback_mcp_endpoint(endpoint),
+        KnowledgeServiceKind::Rag => validate_rag_literal_loopback_mcp_endpoint(endpoint),
+    }
+}
+
+fn validate_literal_loopback_mcp_path(
+    endpoint: &str,
+    expected_path: &str,
+) -> Result<(), AdmissionError> {
     let url = Url::parse(endpoint).map_err(|_| AdmissionError::EndpointNotLiteralLoopback)?;
     if url.scheme() != "http"
         || url.host_str() != Some("127.0.0.1")
         || url.port().is_none_or(|port| port == 0)
-        || url.path() != "/mcp"
+        || url.path() != expected_path
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
@@ -341,11 +350,7 @@ fn mcp_result(response: &Value) -> Result<&Map<String, Value>, AdmissionError> {
         .ok_or(AdmissionError::InvalidResponse)
 }
 
-fn verify_mcp_authentication_gate(
-    client: &Client,
-    endpoint: &str,
-    bearer_token: &str,
-) -> Result<(), AdmissionError> {
+fn verify_mcp_authentication_gate(client: &Client, endpoint: &str) -> Result<(), AdmissionError> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "buzz-auth-negative-probe",
@@ -356,11 +361,11 @@ fn verify_mcp_authentication_gate(
             "clientInfo": {"name": "buzz-command-auth-probe", "version": "1"},
         },
     });
-    let invalid_token = if bearer_token == "buzz-invalid-token-0000000000000000" {
-        "buzz-invalid-token-1111111111111111"
-    } else {
-        "buzz-invalid-token-0000000000000000"
-    };
+    let invalid_token = format!(
+        "buzz-invalid-{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
     for authorization in [None, Some(format!("Bearer {invalid_token}"))] {
         let mut builder = client
             .post(endpoint)
@@ -380,12 +385,137 @@ fn verify_mcp_authentication_gate(
     Ok(())
 }
 
+fn verify_service_attestation(
+    client: &Client,
+    endpoint: &str,
+    attestation_secret: &str,
+    expected_service: &str,
+    expected_identity: &str,
+) -> Result<(), AdmissionError> {
+    if !valid_attestation_secret(attestation_secret)
+        || !matches!(expected_service, "memory" | "rag")
+        || expected_identity.is_empty()
+        || expected_identity.len() > 256
+    {
+        return Err(AdmissionError::AuthenticationUnavailable);
+    }
+    let mut attestation_url =
+        Url::parse(endpoint).map_err(|_| AdmissionError::EndpointNotLiteralLoopback)?;
+    attestation_url.set_path("/attestation");
+    attestation_url.set_query(None);
+    attestation_url.set_fragment(None);
+    let nonce = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let response = client
+        .post(attestation_url)
+        .header(ACCEPT, "application/json")
+        .header(CONTENT_TYPE, "application/json")
+        .json(&serde_json::json!({"nonce": nonce}))
+        .send()
+        .map_err(|_| AdmissionError::ServiceUnavailable)?;
+    if response.status().is_redirection() || !response.status().is_success() {
+        return Err(AdmissionError::AuthenticationUnavailable);
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAXIMUM_ATTESTATION_RESPONSE_BYTES as u64)
+        || response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            != Some("application/json")
+    {
+        return Err(AdmissionError::InvalidAttestation);
+    }
+    let mut bytes = Vec::new();
+    response
+        .take((MAXIMUM_ATTESTATION_RESPONSE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AdmissionError::InvalidAttestation)?;
+    if bytes.len() > MAXIMUM_ATTESTATION_RESPONSE_BYTES {
+        return Err(AdmissionError::ResponseTooLarge);
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| AdmissionError::InvalidAttestation)?;
+    let object = value
+        .as_object()
+        .filter(|object| {
+            object.len() == 4
+                && ["service", "identity", "nonce", "mac"]
+                    .iter()
+                    .all(|key| object.contains_key(*key))
+        })
+        .ok_or(AdmissionError::InvalidAttestation)?;
+    if object.get("service").and_then(Value::as_str) != Some(expected_service)
+        || object.get("identity").and_then(Value::as_str) != Some(expected_identity)
+        || object.get("nonce").and_then(Value::as_str) != Some(nonce.as_str())
+    {
+        return Err(AdmissionError::InvalidAttestation);
+    }
+    let mac = object
+        .get("mac")
+        .and_then(Value::as_str)
+        .ok_or(AdmissionError::InvalidAttestation)
+        .and_then(decode_attestation_mac)?;
+    verify_attestation_mac(
+        attestation_secret,
+        expected_service,
+        expected_identity,
+        &nonce,
+        &mac,
+    )
+}
+
+fn valid_attestation_secret(value: &str) -> bool {
+    (32..=1024).contains(&value.len()) && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn decode_attestation_mac(value: &str) -> Result<Vec<u8>, AdmissionError> {
+    value
+        .strip_prefix("sha256:")
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+        .and_then(|digest| hex::decode(digest).ok())
+        .ok_or(AdmissionError::InvalidAttestation)
+}
+
+fn verify_attestation_mac(
+    attestation_secret: &str,
+    service: &str,
+    identity: &str,
+    nonce: &str,
+    supplied_mac: &[u8],
+) -> Result<(), AdmissionError> {
+    let transcript = format!("buzz-command-attestation-v1\0{service}\0{identity}\0{nonce}");
+    let mut verifier = Hmac::<Sha256>::new_from_slice(attestation_secret.as_bytes())
+        .map_err(|_| AdmissionError::AuthenticationUnavailable)?;
+    verifier.update(transcript.as_bytes());
+    verifier
+        .verify_slice(supplied_mac)
+        .map_err(|_| AdmissionError::InvalidAttestation)
+}
+
 pub(crate) fn probe_authenticated_mcp(
     endpoint: &str,
     bearer_token: &str,
+    attestation_secret: &str,
+    expected_service: &str,
+    expected_identity: &str,
     status_tool: Option<&str>,
 ) -> Result<AuthenticatedMcpAttestation, AdmissionError> {
-    validate_literal_loopback_mcp_endpoint(endpoint)?;
+    match expected_service {
+        "memory" => validate_literal_loopback_mcp_endpoint(endpoint)?,
+        "rag" => validate_rag_literal_loopback_mcp_endpoint(endpoint)?,
+        _ => return Err(AdmissionError::EndpointNotLiteralLoopback),
+    }
     if !valid_bearer_token(bearer_token) {
         return Err(AdmissionError::AuthenticationUnavailable);
     }
@@ -395,7 +525,14 @@ pub(crate) fn probe_authenticated_mcp(
         .timeout(MCP_TIMEOUT)
         .build()
         .map_err(|_| AdmissionError::ServiceUnavailable)?;
-    verify_mcp_authentication_gate(&client, endpoint, bearer_token)?;
+    verify_service_attestation(
+        &client,
+        endpoint,
+        attestation_secret,
+        expected_service,
+        expected_identity,
+    )?;
+    verify_mcp_authentication_gate(&client, endpoint)?;
     let mut session = McpSession {
         client,
         endpoint,
@@ -490,302 +627,14 @@ pub(crate) fn probe_authenticated_mcp(
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CommandKnowledgeWorkflow {
-    Adviser,
-    CommandMemory,
-}
-
-#[derive(Clone, Eq, PartialEq, Serialize)]
-pub(crate) struct NativeMcpIntegration {
-    #[serde(rename = "type")]
-    integration_type: &'static str,
-    pub(crate) server_label: String,
-    pub(crate) server_url: String,
-    pub(crate) allowed_tools: Vec<String>,
-    headers: BTreeMap<String, String>,
-}
-
-impl std::fmt::Debug for NativeMcpIntegration {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NativeMcpIntegration")
-            .field("integration_type", &self.integration_type)
-            .field("server_label", &self.server_label)
-            .field("server_url", &self.server_url)
-            .field("allowed_tools", &self.allowed_tools)
-            .field("headers", &"[REDACTED]")
-            .finish()
-    }
-}
-
-pub(crate) fn build_catalog_integrations(
-    services: &[VerifiedService],
-    workflow: CommandKnowledgeWorkflow,
-) -> Result<Vec<NativeMcpIntegration>, AdmissionError> {
-    if services.len() > 2 {
-        return Err(AdmissionError::UnexpectedToolCatalog);
-    }
-    let mut ordered = services.to_vec();
-    ordered.sort_by_key(|service| service.kind);
-    let mut seen = BTreeSet::new();
-    let mut result = Vec::with_capacity(ordered.len());
-    for service in ordered {
-        if !seen.insert(service.kind) {
-            return Err(AdmissionError::UnexpectedToolCatalog);
-        }
-        validate_literal_loopback_mcp_endpoint(&service.endpoint)?;
-        if !valid_bearer_token(&service.bearer_token) {
-            return Err(AdmissionError::AuthenticationUnavailable);
-        }
-        let expected_identity = match service.kind {
-            KnowledgeServiceKind::Memory => "memory",
-            KnowledgeServiceKind::Rag => "rag",
-        };
-        if service.server_identity != expected_identity || service.active_identity.is_empty() {
-            return Err(AdmissionError::ServerIdentityMismatch);
-        }
-        let observed = tool_set(&service.advertised_tools)?;
-        if observed.iter().any(|tool| {
-            !catalog_tools(service.kind)
-                .iter()
-                .any(|candidate| candidate == &tool.as_str())
-        }) {
-            return Err(AdmissionError::UnexpectedToolCatalog);
-        }
-        let allowed: Vec<String> = match service.kind {
-            KnowledgeServiceKind::Rag => RAG_CATALOG_TOOLS
-                .iter()
-                .map(|tool| (*tool).to_string())
-                .collect(),
-            KnowledgeServiceKind::Memory => MEMORY_READ_ONLY_TOOLS
-                .iter()
-                .chain(
-                    (workflow == CommandKnowledgeWorkflow::CommandMemory)
-                        .then_some(MEMORY_WORKFLOW_WRITE_TOOLS)
-                        .into_iter()
-                        .flatten(),
-                )
-                .filter(|tool| observed.contains(**tool))
-                .map(|tool| (*tool).to_string())
-                .collect(),
-        };
-        if allowed.is_empty() || allowed.iter().any(|tool| !observed.contains(tool)) {
-            return Err(AdmissionError::MissingRequiredTool);
-        }
-        result.push(NativeMcpIntegration {
-            integration_type: "ephemeral_mcp",
-            server_label: expected_identity.to_string(),
-            server_url: service.endpoint,
-            allowed_tools: allowed,
-            headers: BTreeMap::from([(
-                "Authorization".to_string(),
-                format!("Bearer {}", service.bearer_token),
-            )]),
-        });
-    }
-    Ok(result)
-}
-
-struct CachedAdmissions {
-    expires_at: Instant,
-    services: Vec<VerifiedService>,
-}
-
-static ADMISSION_CACHE: LazyLock<Mutex<Option<CachedAdmissions>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-pub(crate) fn cache_verified_service(service: VerifiedService) {
-    let Ok(mut cache) = ADMISSION_CACHE.lock() else {
-        return;
-    };
-    let now = Instant::now();
-    let mut services = cache
-        .take()
-        .filter(|cached| cached.expires_at > now)
-        .map(|cached| cached.services)
-        .unwrap_or_default();
-    services.retain(|candidate| candidate.kind != service.kind);
-    services.push(service);
-    *cache = Some(CachedAdmissions {
-        expires_at: now + ADMISSION_CACHE_TTL,
-        services,
-    });
-}
-
-pub(crate) fn clear_cached_service(kind: KnowledgeServiceKind) {
-    let Ok(mut cache) = ADMISSION_CACHE.lock() else {
-        return;
-    };
-    if let Some(cached) = cache.as_mut() {
-        cached.services.retain(|service| service.kind != kind);
-        if cached.services.is_empty() {
-            *cache = None;
-        }
-    }
-}
-
-pub(crate) fn catalog_integrations_json(workflow: CommandKnowledgeWorkflow) -> String {
-    let services = ADMISSION_CACHE
-        .lock()
-        .ok()
-        .and_then(|mut cache| {
-            let now = Instant::now();
-            if cache
-                .as_ref()
-                .is_some_and(|cached| cached.expires_at <= now)
-            {
-                *cache = None;
-            }
-            cache.as_ref().map(|cached| cached.services.clone())
-        })
-        .unwrap_or_default();
-    build_catalog_integrations(&services, workflow)
-        .and_then(|integrations| {
-            serde_json::to_string(&integrations).map_err(|_| AdmissionError::InvalidAttestation)
-        })
-        .unwrap_or_else(|_| "[]".to_string())
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MemoryCredentialKeys {
-    local_read: String,
-    local_replicate: String,
-    remote_read: String,
-    remote_replicate: String,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct MemoryAdmissionConfig {
-    schema_version: u32,
-    local_port: u16,
-    home_host_alias: String,
-    home_user: String,
-    pinned_host_fingerprint: String,
-    known_hosts_path: std::path::PathBuf,
-    identity_file: std::path::PathBuf,
-    remote_loopback_port: u16,
-    local_node_id: String,
-    home_node_id: String,
-    sync_interval_minutes: u32,
-    tool_allowlist: Vec<String>,
-    credential_keys: MemoryCredentialKeys,
-}
-
-fn valid_memory_credential_key(value: &str) -> bool {
-    value.starts_with("memory.")
-        && value.len() <= 128
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn validate_memory_admission_config(config: &MemoryAdmissionConfig) -> Result<(), AdmissionError> {
-    let tools = tool_set(&config.tool_allowlist)?;
-    let credential_keys = [
-        config.credential_keys.local_read.as_str(),
-        config.credential_keys.local_replicate.as_str(),
-        config.credential_keys.remote_read.as_str(),
-        config.credential_keys.remote_replicate.as_str(),
-    ];
-    if config.schema_version != 1
-        || config.local_port == 0
-        || config.remote_loopback_port == 0
-        || config.local_node_id == config.home_node_id
-        || config.local_node_id.len() > 128
-        || !config.local_node_id.starts_with("node:")
-        || config.home_node_id.len() > 128
-        || !config.home_node_id.starts_with("node:")
-        || !(5..=1440).contains(&config.sync_interval_minutes)
-        || tools.iter().any(|tool| {
-            !MEMORY_CATALOG_TOOLS
-                .iter()
-                .any(|candidate| candidate == &tool.as_str())
-        })
-        || !MEMORY_READ_ONLY_TOOLS
-            .iter()
-            .any(|required| tools.contains(*required))
-        || credential_keys
-            .iter()
-            .any(|key| !valid_memory_credential_key(key))
-        || credential_keys
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .len()
-            != credential_keys.len()
-        || config.home_host_alias.is_empty()
-        || config.home_user.is_empty()
-        || config.pinned_host_fingerprint.is_empty()
-        || !config.known_hosts_path.is_absolute()
-        || !config.identity_file.is_absolute()
-    {
-        return Err(AdmissionError::InvalidAttestation);
-    }
-    Ok(())
-}
-
-pub(crate) fn admit_memory_for_catalog(
-    app: &tauri::AppHandle,
-    readiness_node_id: &str,
-    observed_at: &str,
-) -> Result<VerifiedService, AdmissionError> {
-    let path = app
-        .path()
-        .app_config_dir()
-        .map_err(|_| AdmissionError::InvalidAttestation)?
-        .join("command-memory.json");
-    let bytes = ProtectedFile::open(&path, MAXIMUM_CONFIG_BYTES)
-        .and_then(|file| file.read_all())
-        .map_err(|_| AdmissionError::InvalidAttestation)?;
-    let config: MemoryAdmissionConfig =
-        serde_json::from_slice(&bytes).map_err(|_| AdmissionError::InvalidAttestation)?;
-    validate_memory_admission_config(&config)?;
-    if config.local_node_id != readiness_node_id {
-        return Err(AdmissionError::ActiveIdentityMismatch);
-    }
-    let store = SecretStore::shared(crate::app_state::keyring_service());
-    let bearer_token = store
-        .load(&config.credential_keys.local_read)
-        .map_err(|_| AdmissionError::AuthenticationUnavailable)?
-        .ok_or(AdmissionError::AuthenticationUnavailable)?;
-    let endpoint = format!("http://127.0.0.1:{}/mcp", config.local_port);
-    let attestation = probe_authenticated_mcp(&endpoint, &bearer_token, None)?;
-    let advertised = tool_set(&attestation.tools)?;
-    // Memory may expose replication/admin tools for native operators. Admit
-    // only the protected-config subset and never copy the broader server
-    // catalogue into the model-facing integration.
-    if config
-        .tool_allowlist
-        .iter()
-        .any(|tool| !advertised.contains(tool))
-    {
-        return Err(AdmissionError::UnexpectedToolCatalog);
-    }
-    let service = VerifiedService {
-        kind: KnowledgeServiceKind::Memory,
-        server_identity: attestation.server_identity,
-        endpoint,
-        bearer_token,
-        active_identity: config.local_node_id.clone(),
-        advertised_tools: config.tool_allowlist.clone(),
-        verified_at: observed_at.to_string(),
-    };
-    let expected: Vec<&str> = config.tool_allowlist.iter().map(String::as_str).collect();
-    ServiceAdmissionPolicy::for_service(
-        KnowledgeServiceKind::Memory,
-        "memory",
-        &config.local_node_id,
-        &expected,
-    )
-    .verify(&service)?;
-    Ok(service)
-}
+#[path = "policy/catalog.rs"]
+mod catalog;
+pub(crate) use catalog::*;
 
 mod context;
-pub(crate) use context::{canonical_json_bytes, sha256_hex};
+#[cfg(test)]
+pub(crate) use context::canonical_json_bytes;
+pub(crate) use context::sha256_hex;
 #[allow(
     unused_imports,
     reason = "Phase 4 consumes these sealed context-validation APIs"

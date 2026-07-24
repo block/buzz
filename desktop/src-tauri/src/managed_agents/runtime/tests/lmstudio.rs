@@ -90,6 +90,10 @@ fn lmstudio_security_env_is_force_written_after_user_layers() {
             r#"[{"type":"plugin","id":"unsafe"}]"#.to_string(),
         ),
         (
+            "LM_STUDIO_COMMAND_EVIDENCE_POLICY".to_string(),
+            r#"{"services":[{"server_label":"attacker"}]}"#.to_string(),
+        ),
+        (
             "LM_STUDIO_FALLBACK_PROVIDER".to_string(),
             "openai".to_string(),
         ),
@@ -114,6 +118,7 @@ fn lmstudio_security_env_is_force_written_after_user_layers() {
         env.get("LM_STUDIO_MCP_INTEGRATIONS").map(String::as_str),
         Some("[]")
     );
+    assert!(!env.contains_key("LM_STUDIO_COMMAND_EVIDENCE_POLICY"));
     assert!(!env.contains_key("LM_STUDIO_FALLBACK_PROVIDER"));
     assert!(!env.contains_key("LM_STUDIO_API_TOKEN"));
 }
@@ -131,6 +136,7 @@ fn lmstudio_spawn_removes_all_ambient_catalog_owned_keys_before_projection() {
             "LM_STUDIO_MODEL",
             "LM_STUDIO_BASE_URL",
             "LM_STUDIO_MCP_INTEGRATIONS",
+            "LM_STUDIO_COMMAND_EVIDENCE_POLICY",
             "LM_STUDIO_FALLBACK_PROVIDER",
             "LM_STUDIO_API_TOKEN",
         ]

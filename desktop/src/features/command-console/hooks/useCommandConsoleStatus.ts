@@ -344,19 +344,33 @@ function memoryStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
     };
   }
   const conflicts = memory.conflictCount;
-  const degraded = conflicts > 0;
+  const freshnessDetail =
+    memory.freshness === "never_synced"
+      ? "Memory has not completed a successful home sync."
+      : memory.freshness === "stale"
+        ? "The last successful Memory sync is stale."
+        : memory.freshness === "corrupt"
+          ? "The protected Memory sync state is corrupt."
+          : null;
+  const degraded = conflicts > 0 || freshnessDetail !== null;
   return {
     ...base,
     detail: degraded
-      ? `${conflicts} unresolved conflicts are excluded from unattended adviser context.`
+      ? (freshnessDetail ??
+        `${conflicts} unresolved conflicts are excluded from unattended adviser context.`)
       : "Authenticated local Memory is ready for approved adviser reads.",
     state: degraded ? "degraded" : "connected",
     statusLabel: degraded ? "Degraded" : "Connected",
     facts: [
       { label: "Node", value: memory.nodeId ?? "Unknown" },
+      { label: "Home node", value: memory.homeNodeId ?? "Unknown" },
       {
         label: "Replication cursor",
         value: memory.replicationCursor?.toString() ?? "Unknown",
+      },
+      {
+        label: "Home replication cursor",
+        value: memory.homeReplicationCursor?.toString() ?? "Unknown",
       },
       {
         label: "Last successful sync",
@@ -374,9 +388,12 @@ function memoryStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
             : "None",
       },
     ],
-    diagnostics: degraded
-      ? ["Resolve Memory conflicts before unattended brief generation."]
-      : [],
+    diagnostics: [
+      ...(freshnessDetail ? [freshnessDetail] : []),
+      ...(conflicts > 0
+        ? ["Resolve Memory conflicts before unattended brief generation."]
+        : []),
+    ],
   };
 }
 

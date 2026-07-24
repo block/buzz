@@ -819,12 +819,13 @@ impl Config {
             ),
         };
         let lmstudio_runtime = if provider == Provider::LmStudioNative {
-            Some(LmStudioRuntimeConfig::parse_with_token(
+            Some(LmStudioRuntimeConfig::parse_with_token_and_evidence(
                 env("BUZZ_AGENT_CLASSIFICATION").as_deref(),
                 &base_url,
                 env("LM_STUDIO_FALLBACK_PROVIDER").as_deref(),
                 env("LM_STUDIO_MCP_INTEGRATIONS").as_deref(),
                 env("LM_STUDIO_API_TOKEN").as_deref(),
+                env("LM_STUDIO_COMMAND_EVIDENCE_POLICY").as_deref(),
             )?)
         } else {
             None

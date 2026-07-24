@@ -1,4 +1,6 @@
 use super::*;
+use chrono::Utc;
+use serde::Serialize;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -6,9 +8,11 @@ struct MemoryKnowledgeStatus {
     status: String,
     server_identity: Option<String>,
     node_id: Option<String>,
+    home_node_id: Option<String>,
     revision_count: u64,
     conflict_count: u64,
     replication_cursor: Option<u64>,
+    home_replication_cursor: Option<u64>,
     last_successful_sync: Option<String>,
     freshness: &'static str,
     validation: &'static str,
@@ -74,6 +78,7 @@ fn value_texts(value: &Value, key: &str) -> Vec<String> {
 }
 
 async fn memory_knowledge_status(app: tauri::AppHandle) -> (MemoryKnowledgeStatus, Vec<String>) {
+    let mut sync = crate::command_services::memory::get_memory_sync_status(&app);
     let readiness =
         crate::command_services::memory::get_memory_service_readiness(app.clone()).await;
     let value = serde_json::to_value(readiness).unwrap_or(Value::Null);
@@ -87,11 +92,21 @@ async fn memory_knowledge_status(app: tauri::AppHandle) -> (MemoryKnowledgeStatu
     } else {
         "failed"
     };
-    let mut freshness = if status == "ready" {
-        "fresh"
-    } else {
-        "unknown"
-    };
+    if node_id.is_some()
+        && sync.local_node_id.is_some()
+        && node_id.as_deref() != sync.local_node_id.as_deref()
+    {
+        sync = crate::command_services::memory::sync_state::MemorySyncStatus {
+            freshness: crate::command_services::memory::sync_state::MemorySyncFreshness::Corrupt,
+            local_node_id: None,
+            home_node_id: None,
+            local_replication_cursor: None,
+            home_replication_cursor: None,
+            conflict_count: None,
+            last_successful_sync: None,
+        };
+    }
+    let freshness = sync.freshness.as_str();
     let mut server_identity = None;
     let mut tool_allowlist = Vec::new();
     if status == "ready" {
@@ -122,7 +137,6 @@ async fn memory_knowledge_status(app: tauri::AppHandle) -> (MemoryKnowledgeStatu
                 } else {
                     clear_cached_service(KnowledgeServiceKind::Memory);
                     status = "unavailable".to_string();
-                    freshness = "unknown";
                     validation = "failed";
                     error = Some("admission_failed".to_string());
                 }
@@ -130,7 +144,6 @@ async fn memory_knowledge_status(app: tauri::AppHandle) -> (MemoryKnowledgeStatu
             _ => {
                 clear_cached_service(KnowledgeServiceKind::Memory);
                 status = "unavailable".to_string();
-                freshness = "unknown";
                 validation = "failed";
                 error = Some("admission_failed".to_string());
             }
@@ -138,10 +151,8 @@ async fn memory_knowledge_status(app: tauri::AppHandle) -> (MemoryKnowledgeStatu
     } else {
         clear_cached_service(KnowledgeServiceKind::Memory);
     }
-    let conflict_count = value
-        .get("conflictCount")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
+    let live_conflict_count = value.get("conflictCount").and_then(Value::as_u64);
+    let conflict_count = live_conflict_count.or(sync.conflict_count).unwrap_or(0);
     let mut degraded = Vec::new();
     if status != "ready" {
         degraded.push("memory-readiness".to_string());
@@ -149,18 +160,32 @@ async fn memory_knowledge_status(app: tauri::AppHandle) -> (MemoryKnowledgeStatu
     if conflict_count > 0 {
         degraded.push("memory-conflicts".to_string());
     }
+    match sync.freshness {
+        crate::command_services::memory::sync_state::MemorySyncFreshness::NeverSynced => {
+            degraded.push("memory-never-synced".to_string());
+        }
+        crate::command_services::memory::sync_state::MemorySyncFreshness::Stale => {
+            degraded.push("memory-sync-stale".to_string());
+        }
+        crate::command_services::memory::sync_state::MemorySyncFreshness::Corrupt => {
+            degraded.push("memory-sync-state".to_string());
+        }
+        crate::command_services::memory::sync_state::MemorySyncFreshness::Fresh => {}
+    }
     (
         MemoryKnowledgeStatus {
             status,
             server_identity,
             node_id,
+            home_node_id: sync.home_node_id,
             revision_count: value
                 .get("revisionCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
             conflict_count,
-            replication_cursor: None,
-            last_successful_sync: None,
+            replication_cursor: sync.local_replication_cursor,
+            home_replication_cursor: sync.home_replication_cursor,
+            last_successful_sync: sync.last_successful_sync,
             freshness,
             validation,
             tool_allowlist,

@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tauri::Manager;
 
 const CONFIG_FILE_NAME: &str = "command-memory.json";
+const SYNC_STATE_FILE_NAME: &str = "command-memory-sync-state.json";
 const SSH_BINARY: &str = "/usr/bin/ssh";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(3);
 const TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
@@ -26,6 +27,7 @@ const REPLICATION_TIMEOUT: Duration = Duration::from_secs(90);
 const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
 const MAXIMUM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const EXACT_MEMORY_TOOLS: &[&str] = &[
+    "command_memory_context",
     "get_entity",
     "get_wiki_page",
     "link_entities",
@@ -44,6 +46,8 @@ static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
 #[path = "memory_replication.rs"]
 mod replication;
 use replication::replicate_direction;
+#[path = "memory_sync_state.rs"]
+pub(crate) mod sync_state;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryError {
@@ -104,6 +108,7 @@ impl From<SshError> for MemoryError {
 #[serde(deny_unknown_fields)]
 struct CredentialKeys {
     local_read: String,
+    local_attestation: String,
     local_replicate: String,
     remote_read: String,
     remote_replicate: String,
@@ -129,6 +134,8 @@ struct MemoryConfig {
 
 struct MemorySecrets {
     local_read: String,
+    #[allow(dead_code)]
+    local_attestation: String,
     local_replicate: String,
     remote_read: String,
     remote_replicate: String,
@@ -287,6 +294,7 @@ fn validate_config(config: &MemoryConfig) -> Result<(), MemoryError> {
         .collect::<HashSet<_>>();
     let credential_keys = [
         config.credential_keys.local_read.as_str(),
+        config.credential_keys.local_attestation.as_str(),
         config.credential_keys.local_replicate.as_str(),
         config.credential_keys.remote_read.as_str(),
         config.credential_keys.remote_replicate.as_str(),
@@ -351,6 +359,7 @@ fn load_trusted_config(
     validate_config(&config)?;
     let secrets = MemorySecrets {
         local_read: load_secret(credentials, &config.credential_keys.local_read)?,
+        local_attestation: load_secret(credentials, &config.credential_keys.local_attestation)?,
         local_replicate: load_secret(credentials, &config.credential_keys.local_replicate)?,
         remote_read: load_secret(credentials, &config.credential_keys.remote_read)?,
         remote_replicate: load_secret(credentials, &config.credential_keys.remote_replicate)?,
@@ -666,6 +675,28 @@ fn trusted_config_path<R: tauri::Runtime>(
         .map_err(|_| MemoryError::InvalidConfig)
 }
 
+fn sync_state_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, MemoryError> {
+    app.path()
+        .app_config_dir()
+        .map(|directory| directory.join(SYNC_STATE_FILE_NAME))
+        .map_err(|_| MemoryError::InvalidConfig)
+}
+
+pub(crate) fn get_memory_sync_status(app: &tauri::AppHandle) -> sync_state::MemorySyncStatus {
+    match sync_state_path(app) {
+        Ok(path) => sync_state::load_status(&path, Utc::now()),
+        Err(_) => sync_state::MemorySyncStatus {
+            freshness: sync_state::MemorySyncFreshness::Corrupt,
+            local_node_id: None,
+            home_node_id: None,
+            local_replication_cursor: None,
+            home_replication_cursor: None,
+            conflict_count: None,
+            last_successful_sync: None,
+        },
+    }
+}
+
 pub(crate) fn start_memory_sync_scheduler(
     app: tauri::AppHandle,
 ) -> Option<Arc<MemorySyncScheduler>> {
@@ -681,7 +712,9 @@ pub(crate) fn start_memory_sync_scheduler(
             let path = trusted_config_path(&scheduler_app)?;
             let store = SecretStore::shared(crate::app_state::keyring_service());
             let trusted = load_trusted_config(&path, store)?;
-            sync_memory_blocking(&trusted).map(|_| ())
+            let result = sync_memory_blocking(&trusted)?;
+            let state_path = sync_state_path(&scheduler_app)?;
+            sync_state::persist_successful_response(&state_path, &trusted.config, &result)
         },
     )))
 }
@@ -712,7 +745,10 @@ pub(crate) async fn sync_memory_service(app: tauri::AppHandle) -> MemorySyncResp
         let path = trusted_config_path(&app)?;
         let store = SecretStore::shared(crate::app_state::keyring_service());
         let trusted = load_trusted_config(&path, store)?;
-        sync_memory_blocking(&trusted)
+        let result = sync_memory_blocking(&trusted)?;
+        let state_path = sync_state_path(&app)?;
+        sync_state::persist_successful_response(&state_path, &trusted.config, &result)?;
+        Ok(result)
     });
     match task.await {
         Ok(Ok(result)) => result,

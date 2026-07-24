@@ -1,4 +1,5 @@
 use super::{MemoryError, MAXIMUM_OBJECTS_PER_PAGE, PAGE_SIZE};
+use buzz_core_pkg::agent_memory_canonical;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -103,126 +104,17 @@ pub(super) fn object_is_tombstone(value: &ImmutableObject) -> bool {
     value.kind == "tombstone"
 }
 
-fn write_python_canonical(value: &Value, output: &mut Vec<u8>) -> Result<(), MemoryError> {
-    match value {
-        Value::Null => output.extend_from_slice(b"null"),
-        Value::Bool(true) => output.extend_from_slice(b"true"),
-        Value::Bool(false) => output.extend_from_slice(b"false"),
-        Value::Number(number) => {
-            let encoded = if number.as_i64().is_some() || number.as_u64().is_some() {
-                number.to_string()
-            } else {
-                python_float(number)?
-            };
-            output.extend_from_slice(encoded.as_bytes());
-        }
-        Value::String(text) => output.extend_from_slice(
-            serde_json::to_string(text)
-                .map_err(|_| MemoryError::InvalidResponse)?
-                .as_bytes(),
-        ),
-        Value::Array(values) => {
-            output.push(b'[');
-            for (index, value) in values.iter().enumerate() {
-                if index > 0 {
-                    output.push(b',');
-                }
-                write_python_canonical(value, output)?;
-            }
-            output.push(b']');
-        }
-        Value::Object(values) => {
-            let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(right.0));
-            output.push(b'{');
-            for (index, (key, value)) in entries.into_iter().enumerate() {
-                if index > 0 {
-                    output.push(b',');
-                }
-                output.extend_from_slice(
-                    serde_json::to_string(key)
-                        .map_err(|_| MemoryError::InvalidResponse)?
-                        .as_bytes(),
-                );
-                output.push(b':');
-                write_python_canonical(value, output)?;
-            }
-            output.push(b'}');
-        }
-    }
-    if output.len() > MAXIMUM_CANONICAL_BYTES {
-        return Err(MemoryError::ResponseTooLarge);
-    }
-    Ok(())
-}
-
-fn python_float(number: &serde_json::Number) -> Result<String, MemoryError> {
-    let rendered = number.to_string();
-    let (sign, magnitude) = rendered
-        .strip_prefix('-')
-        .map_or(("", rendered.as_str()), |value| ("-", value));
-    let (coefficient, explicit_exponent) = magnitude
-        .split_once(['e', 'E'])
-        .map_or((magnitude, 0_i32), |(coefficient, exponent)| {
-            (coefficient, exponent.parse::<i32>().unwrap_or(i32::MIN))
-        });
-    if explicit_exponent == i32::MIN {
-        return Err(MemoryError::InvalidResponse);
-    }
-    let decimal_position = coefficient.find('.').unwrap_or(coefficient.len()) as i32;
-    let digits = coefficient
-        .bytes()
-        .filter(|byte| *byte != b'.')
-        .collect::<Vec<_>>();
-    let Some(first_nonzero) = digits.iter().position(|byte| *byte != b'0') else {
-        return Ok(format!("{sign}0.0"));
-    };
-    let last_nonzero = digits
-        .iter()
-        .rposition(|byte| *byte != b'0')
-        .ok_or(MemoryError::InvalidResponse)?;
-    let significant = std::str::from_utf8(&digits[first_nonzero..=last_nonzero])
-        .map_err(|_| MemoryError::InvalidResponse)?;
-    let adjusted_exponent = explicit_exponent + decimal_position - first_nonzero as i32 - 1;
-
-    if !(-4..16).contains(&adjusted_exponent) {
-        let mut coefficient = significant[..1].to_string();
-        if significant.len() > 1 {
-            coefficient.push('.');
-            coefficient.push_str(&significant[1..]);
-        }
-        let exponent_sign = if adjusted_exponent < 0 { '-' } else { '+' };
-        return Ok(format!(
-            "{sign}{coefficient}e{exponent_sign}{:02}",
-            adjusted_exponent.unsigned_abs()
-        ));
-    }
-
-    let decimal_position = adjusted_exponent + 1;
-    if decimal_position <= 0 {
-        return Ok(format!(
-            "{sign}0.{}{significant}",
-            "0".repeat((-decimal_position) as usize)
-        ));
-    }
-    let decimal_position = decimal_position as usize;
-    if decimal_position >= significant.len() {
-        return Ok(format!(
-            "{sign}{significant}{}.0",
-            "0".repeat(decimal_position - significant.len())
-        ));
-    }
-    Ok(format!(
-        "{sign}{}.{}",
-        &significant[..decimal_position],
-        &significant[decimal_position..]
-    ))
-}
-
 pub(super) fn python_canonical_json_bytes(value: &Value) -> Result<Vec<u8>, MemoryError> {
-    let mut output = Vec::new();
-    write_python_canonical(value, &mut output)?;
-    Ok(output)
+    agent_memory_canonical::canonical_json_bytes(value, MAXIMUM_CANONICAL_BYTES).map_err(|error| {
+        match error {
+            agent_memory_canonical::CanonicalJsonError::BoundsExceeded => {
+                MemoryError::ResponseTooLarge
+            }
+            agent_memory_canonical::CanonicalJsonError::InvalidValue => {
+                MemoryError::InvalidResponse
+            }
+        }
+    })
 }
 
 fn sha256_value(value: &Value) -> Result<String, MemoryError> {

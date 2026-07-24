@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use reqwest::Url;
 use serde::Deserialize;
 
+use crate::command_evidence::CommandEvidenceGate;
 use crate::lmstudio::{EphemeralMcpIntegration, LmStudioChatResponse, LmStudioOutput};
 use crate::types::ExecutedToolProvider;
 
@@ -132,7 +133,7 @@ impl std::fmt::Debug for NativeMcpIntegration {
 struct LoopbackMcpEndpoint(Url);
 
 impl LoopbackMcpEndpoint {
-    fn parse(raw: &str) -> Result<Self, String> {
+    fn parse(raw: &str, server_label: &str) -> Result<Self, String> {
         if raw.len() > MAX_MCP_URL_BYTES {
             return Err(format!(
                 "config: MCP server URL exceeds {MAX_MCP_URL_BYTES} bytes"
@@ -140,6 +141,11 @@ impl LoopbackMcpEndpoint {
         }
         validate_literal_loopback_authority(raw)?;
         let url = Url::parse(raw).map_err(|e| format!("config: invalid MCP server URL: {e}"))?;
+        let expected_path = if server_label == "rag" {
+            "/mcp/"
+        } else {
+            "/mcp"
+        };
         if url.scheme() != "http"
             || !url.username().is_empty()
             || url.password().is_some()
@@ -147,11 +153,11 @@ impl LoopbackMcpEndpoint {
             || url.query().is_some()
             || url.port().is_none()
             || url.host_str() != Some("127.0.0.1")
-            || url.path() != "/mcp"
+            || url.path() != expected_path
         {
-            return Err(
-                "config: MCP server URL must be literal http://127.0.0.1:<port>/mcp".into(),
-            );
+            return Err(format!(
+                "config: MCP server URL for {server_label:?} must use exact path {expected_path}"
+            ));
         }
         Ok(Self(url))
     }
@@ -207,6 +213,7 @@ pub struct LmStudioRuntimeConfig {
     classification: Classification,
     endpoint: LmStudioEndpoint,
     integrations: Vec<NativeMcpIntegration>,
+    evidence_gate: CommandEvidenceGate,
     api_token: Option<String>,
 }
 
@@ -217,6 +224,7 @@ impl std::fmt::Debug for LmStudioRuntimeConfig {
             .field("classification", &self.classification)
             .field("endpoint", &self.endpoint)
             .field("integrations", &self.integrations)
+            .field("evidence_gate", &self.evidence_gate)
             .field("api_token", &self.api_token.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
@@ -230,11 +238,12 @@ impl LmStudioRuntimeConfig {
         fallback_provider: Option<&str>,
         integrations_json: Option<&str>,
     ) -> Result<Self, String> {
-        Self::parse_with_token(
+        Self::parse_with_token_and_evidence(
             classification,
             endpoint,
             fallback_provider,
             integrations_json,
+            None,
             None,
         )
     }
@@ -250,6 +259,25 @@ impl LmStudioRuntimeConfig {
         integrations_json: Option<&str>,
         api_token: Option<&str>,
     ) -> Result<Self, String> {
+        Self::parse_with_token_and_evidence(
+            classification,
+            endpoint,
+            fallback_provider,
+            integrations_json,
+            api_token,
+            None,
+        )
+    }
+
+    /// Parses the runtime policy with catalog-owned MCP evidence bindings.
+    pub fn parse_with_token_and_evidence(
+        classification: Option<&str>,
+        endpoint: &str,
+        fallback_provider: Option<&str>,
+        integrations_json: Option<&str>,
+        api_token: Option<&str>,
+        evidence_policy_json: Option<&str>,
+    ) -> Result<Self, String> {
         let classification = Classification::parse(classification)?;
         if fallback_provider.is_some_and(|fallback| !fallback.is_empty()) {
             return Err(
@@ -258,6 +286,12 @@ impl LmStudioRuntimeConfig {
         }
         let endpoint = LmStudioEndpoint::parse(endpoint, classification)?;
         let integrations = parse_integrations(integrations_json, classification)?;
+        let labels = integrations
+            .iter()
+            .map(|integration| integration.server_label.clone())
+            .collect::<BTreeSet<_>>();
+        let evidence_gate = CommandEvidenceGate::parse(evidence_policy_json, &labels)
+            .map_err(|error| format!("config: command evidence policy {}", error.code()))?;
         let api_token = match api_token {
             None | Some("") => None,
             Some(token)
@@ -276,6 +310,7 @@ impl LmStudioRuntimeConfig {
             classification,
             endpoint,
             integrations,
+            evidence_gate,
             api_token,
         })
     }
@@ -333,6 +368,9 @@ impl LmStudioRuntimeConfig {
                     call.name, server_label
                 ));
             }
+            self.evidence_gate
+                .validate_tool_call(call)
+                .map_err(|error| format!("command evidence rejected: {}", error.code()))?;
         }
         Ok(())
     }
@@ -483,9 +521,11 @@ fn parse_integrations(
                 )
             })?
             .clone();
+        let endpoint =
+            LoopbackMcpEndpoint::parse(&integration.server_url, &integration.server_label)?;
         integrations.push(NativeMcpIntegration {
             server_label: integration.server_label,
-            endpoint: LoopbackMcpEndpoint::parse(&integration.server_url)?,
+            endpoint,
             allowed_tools: integration.allowed_tools,
             authorization,
         });
@@ -510,6 +550,33 @@ fn validate_identifier(label: &str, value: &str, max_bytes: usize) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn evidence_policy(labels: &[&str]) -> String {
+        let services = labels
+            .iter()
+            .map(|label| match *label {
+                "memory" => serde_json::json!({
+                    "server_label": "memory",
+                    "kind": "memory",
+                    "active_identity": "node:command"
+                }),
+                "rag" => serde_json::json!({
+                    "server_label": "rag",
+                    "kind": "rag",
+                    "active_identity": "f".repeat(64)
+                }),
+                _ => panic!("unsupported fixture label"),
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "version": 1,
+            "maximum_evidence_age_seconds": 3600,
+            "services": services,
+            "allowed_apple_ids": [],
+            "allowed_file_paths": []
+        })
+        .to_string()
+    }
 
     #[test]
     fn classification_is_exact_and_defaults_to_official() {
@@ -644,13 +711,21 @@ mod tests {
           {
             "type":"ephemeral_mcp",
             "server_label":"rag",
-            "server_url":"http://127.0.0.1:9200/mcp",
+            "server_url":"http://127.0.0.1:9200/mcp/",
             "allowed_tools":["search"],
             "headers":{"Authorization":"Bearer fixture-token-654321"}
           }
         ]"#;
-        let cfg = LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(valid))
-            .expect("valid official config");
+        let policy = evidence_policy(&["memory", "rag"]);
+        let cfg = LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            None,
+            "http://127.0.0.1:1234",
+            None,
+            Some(valid),
+            None,
+            Some(&policy),
+        )
+        .expect("valid official config");
         assert_eq!(cfg.classification(), Classification::Official);
         assert_eq!(cfg.integrations().len(), 2);
         assert_eq!(cfg.integrations()[0].server_label(), "memory");
@@ -663,9 +738,37 @@ mod tests {
     #[test]
     fn mcp_endpoint_requires_authenticated_literal_ipv4_loopback() {
         let valid = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"],"headers":{"Authorization":"Bearer fixture-token-123456"}}]"#;
-        assert!(
-            LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(valid)).is_ok()
-        );
+        let policy = evidence_policy(&["memory"]);
+        assert!(LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            None,
+            "http://127.0.0.1:1234",
+            None,
+            Some(valid),
+            None,
+            Some(&policy),
+        )
+        .is_ok());
+        let rag_policy = evidence_policy(&["rag"]);
+        let valid_rag = r#"[{"type":"ephemeral_mcp","server_label":"rag","server_url":"http://127.0.0.1:9200/mcp/","allowed_tools":["search"],"headers":{"Authorization":"Bearer fixture-token-123456"}}]"#;
+        assert!(LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            None,
+            "http://127.0.0.1:1234",
+            None,
+            Some(valid_rag),
+            None,
+            Some(&rag_policy),
+        )
+        .is_ok());
+        let wrong_rag_path = r#"[{"type":"ephemeral_mcp","server_label":"rag","server_url":"http://127.0.0.1:9200/mcp","allowed_tools":["search"],"headers":{"Authorization":"Bearer fixture-token-123456"}}]"#;
+        assert!(LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            None,
+            "http://127.0.0.1:1234",
+            None,
+            Some(wrong_rag_path),
+            None,
+            Some(&rag_policy),
+        )
+        .is_err());
         for url in [
             "http://[::1]:9100/mcp",
             "http://127.0.0.1:0/mcp",
@@ -679,8 +782,15 @@ mod tests {
                 r#"[{{"type":"ephemeral_mcp","server_label":"memory","server_url":"{url}","allowed_tools":["search"],"headers":{{"Authorization":"Bearer fixture-token-123456"}}}}]"#
             );
             assert!(
-                LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(&raw))
-                    .is_err(),
+                LmStudioRuntimeConfig::parse_with_token_and_evidence(
+                    None,
+                    "http://127.0.0.1:1234",
+                    None,
+                    Some(&raw),
+                    None,
+                    Some(&policy),
+                )
+                .is_err(),
                 "{url} must be rejected"
             );
         }
@@ -695,8 +805,15 @@ mod tests {
                 r#"[{{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"],"headers":{headers}}}]"#
             );
             assert!(
-                LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(&raw))
-                    .is_err(),
+                LmStudioRuntimeConfig::parse_with_token_and_evidence(
+                    None,
+                    "http://127.0.0.1:1234",
+                    None,
+                    Some(&raw),
+                    None,
+                    Some(&policy),
+                )
+                .is_err(),
                 "{headers} must be rejected"
             );
         }

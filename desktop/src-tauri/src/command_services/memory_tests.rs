@@ -52,12 +52,14 @@ mod tests {
             "home_node_id": "node:home-command",
             "sync_interval_minutes": 30,
             "tool_allowlist": [
+                "command_memory_context",
                 "recall_for_entity",
                 "search_events",
                 "record_event"
             ],
             "credential_keys": {
                 "local_read": "memory.local.read",
+                "local_attestation": "memory.local.attestation",
                 "local_replicate": "memory.local.replicate",
                 "remote_read": "memory.remote.read",
                 "remote_replicate": "memory.remote.replicate"
@@ -69,6 +71,7 @@ mod tests {
         FakeCredentials {
             values: [
                 ("memory.local.read", "local-read-token"),
+                ("memory.local.attestation", "local-attestation-secret"),
                 ("memory.local.replicate", "local-replicate-token"),
                 ("memory.remote.read", "remote-read-token"),
                 ("memory.remote.replicate", "remote-replicate-token"),
@@ -272,7 +275,12 @@ mod tests {
         assert_eq!(readiness.endpoint, Some(format!("http://127.0.0.1:{port}")));
         assert_eq!(
             readiness.tool_allowlist,
-            vec!["recall_for_entity", "search_events", "record_event"]
+            vec![
+                "command_memory_context",
+                "recall_for_entity",
+                "search_events",
+                "record_event"
+            ]
         );
     }
 

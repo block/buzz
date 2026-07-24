@@ -3484,8 +3484,27 @@ mod tests {
         );
         let base = spawn_native_router(router).await;
         let mcp = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"],"headers":{"Authorization":"Bearer fixture-token-123456"}}]"#;
-        let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, Some(mcp))
-            .expect("runtime policy");
+        let evidence_policy = serde_json::json!({
+            "version": 1,
+            "maximum_evidence_age_seconds": 3600,
+            "services": [{
+                "server_label": "memory",
+                "kind": "memory",
+                "active_identity": "node:command"
+            }],
+            "allowed_apple_ids": [],
+            "allowed_file_paths": []
+        })
+        .to_string();
+        let runtime = crate::egress::LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            None,
+            &base,
+            None,
+            Some(mcp),
+            None,
+            Some(&evidence_policy),
+        )
+        .expect("runtime policy");
         let client =
             LmStudioNativeClient::new(runtime, Duration::from_secs(5)).expect("native client");
         let request = native_request_with(client.runtime.wire_integrations());

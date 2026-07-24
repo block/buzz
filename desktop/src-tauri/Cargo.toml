@@ -68,6 +68,7 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 infer = "0.19"
 hex = "0.4"
+hmac = "0.13"
 ed25519-dalek = "=3.0.0-rc.0"
 tokio = { version = "1", features = ["fs", "sync", "rt", "macros", "time", "net", "io-util"] }
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
@@ -78,6 +79,7 @@ opus = "0.3"
 neteq = { version = "0.8", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_jcs = "0.2"
 serde_yaml = "0.9"
 toml = "0.8"
 nostr = { version = "0.44", features = ["nip44"] }

@@ -37,6 +37,7 @@ reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process"] }
 arc-swap = "1"
 getrandom = "0.4"
+chrono = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # OAuth 2.0 PKCE for Databricks (and future browser-auth providers).
@@ -47,6 +48,7 @@ hex = { workspace = true }
 sha2 = { workspace = true }
 urlencoding = "2"
 webbrowser = "1"
+buzz-core = { path = "../buzz-core" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["signal", "process"] }

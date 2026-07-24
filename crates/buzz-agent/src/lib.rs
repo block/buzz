@@ -3,6 +3,9 @@ mod agent;
 pub mod auth;
 mod builtin;
 pub mod catalog;
+mod command_evidence;
+#[cfg(test)]
+mod command_evidence_tests;
 pub mod config;
 pub mod egress;
 mod handoff;

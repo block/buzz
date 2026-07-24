@@ -1,6 +1,6 @@
 use crate::command_services::policy::{
-    cache_verified_service, canonical_json_bytes, clear_cached_service, probe_authenticated_mcp,
-    validate_literal_loopback_mcp_endpoint, AdmissionError, KnowledgeServiceKind,
+    cache_verified_service, clear_cached_service, probe_authenticated_mcp,
+    validate_rag_literal_loopback_mcp_endpoint, AdmissionError, KnowledgeServiceKind,
     ServiceAdmissionPolicy, VerifiedService, RAG_CATALOG_TOOLS,
 };
 use crate::command_services::ssh::ProtectedFile;
@@ -28,6 +28,7 @@ pub(crate) struct RagConfig {
     expected_active_snapshot_id: String,
     trusted_signer_fingerprint: String,
     credential_key: String,
+    attestation_credential_key: String,
     tool_allowlist: Vec<String>,
     maximum_snapshot_age_hours: u32,
 }
@@ -122,16 +123,36 @@ struct McpAttestation {
 }
 
 trait McpProbe {
-    fn attest(&self, endpoint: &str, bearer_token: &str) -> Result<McpAttestation, RagError>;
+    fn attest(
+        &self,
+        config: &RagConfig,
+        bearer_token: &str,
+        attestation_secret: &str,
+    ) -> Result<McpAttestation, RagError>;
 }
 
 struct HttpMcpProbe;
 
 impl McpProbe for HttpMcpProbe {
-    fn attest(&self, endpoint: &str, bearer_token: &str) -> Result<McpAttestation, RagError> {
-        let attestation =
-            probe_authenticated_mcp(endpoint, bearer_token, Some("get_snapshot_status"))
-                .map_err(map_admission_error)?;
+    fn attest(
+        &self,
+        config: &RagConfig,
+        bearer_token: &str,
+        attestation_secret: &str,
+    ) -> Result<McpAttestation, RagError> {
+        let identity = format!(
+            "snapshot:{};signer-sha256:{}",
+            config.expected_active_snapshot_id, config.trusted_signer_fingerprint
+        );
+        let attestation = probe_authenticated_mcp(
+            &config.endpoint,
+            bearer_token,
+            attestation_secret,
+            "rag",
+            &identity,
+            Some("get_snapshot_status"),
+        )
+        .map_err(map_admission_error)?;
         Ok(McpAttestation {
             server_identity: attestation.server_identity,
             tools: attestation.tools,
@@ -179,10 +200,12 @@ fn valid_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, RagError> {
+    serde_jcs::to_vec(value).map_err(|_| RagError::InvalidResponse)
+}
+
 fn digest(value: &Value) -> Result<String, RagError> {
-    canonical_json_bytes(value)
-        .map(|bytes| crate::command_services::policy::sha256_hex(&bytes))
-        .map_err(|_| RagError::InvalidResponse)
+    canonical_json_bytes(value).map(|bytes| crate::command_services::policy::sha256_hex(&bytes))
 }
 
 fn validate_config(config: &RagConfig) -> Result<(), RagError> {
@@ -191,7 +214,7 @@ fn validate_config(config: &RagConfig) -> Result<(), RagError> {
         .iter()
         .collect::<std::collections::BTreeSet<_>>();
     if config.schema_version != 1
-        || validate_literal_loopback_mcp_endpoint(&config.endpoint).is_err()
+        || validate_rag_literal_loopback_mcp_endpoint(&config.endpoint).is_err()
         || config.expected_server_identity != "rag"
         || !valid_digest(&config.expected_active_snapshot_id)
         || !valid_digest(&config.trusted_signer_fingerprint)
@@ -203,6 +226,14 @@ fn validate_config(config: &RagConfig) -> Result<(), RagError> {
             .credential_key
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || !config.attestation_credential_key.starts_with("rag.")
+        || config.attestation_credential_key.len() <= "rag.".len()
+        || config.attestation_credential_key.len() > 128
+        || !config
+            .attestation_credential_key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        || config.attestation_credential_key == config.credential_key
         || !(1..=24 * 30).contains(&config.maximum_snapshot_age_hours)
         || config.tool_allowlist.len() != RAG_CATALOG_TOOLS.len()
         || unique_tools.len() != config.tool_allowlist.len()
@@ -219,6 +250,7 @@ fn validate_config(config: &RagConfig) -> Result<(), RagError> {
 fn verify_rag_service(
     config: &RagConfig,
     bearer_token: &str,
+    attestation_secret: &str,
     manifest: &Value,
     activation: &Value,
     probe: &dyn McpProbe,
@@ -352,7 +384,7 @@ fn verify_rag_service(
     }
     let activation_id = digest(activation)?;
 
-    let attestation = probe.attest(&config.endpoint, bearer_token)?;
+    let attestation = probe.attest(config, bearer_token, attestation_secret)?;
     if attestation.server_identity != config.expected_server_identity {
         return Err(RagError::ServerIdentityMismatch);
     }
@@ -486,7 +518,12 @@ fn fail_soft_readiness(error: RagError) -> RagServiceReadiness {
 struct FixedMcpProbe(McpAttestation);
 
 impl McpProbe for FixedMcpProbe {
-    fn attest(&self, _endpoint: &str, _bearer_token: &str) -> Result<McpAttestation, RagError> {
+    fn attest(
+        &self,
+        _config: &RagConfig,
+        _bearer_token: &str,
+        _attestation_secret: &str,
+    ) -> Result<McpAttestation, RagError> {
         Ok(self.0.clone())
     }
 }
@@ -562,7 +599,11 @@ fn query_rag_readiness(
         .load(&config.credential_key)
         .map_err(|_| RagError::AuthenticationFailed)?
         .ok_or(RagError::AuthenticationFailed)?;
-    let attestation = HttpMcpProbe.attest(&config.endpoint, &bearer_token)?;
+    let attestation_secret = credentials
+        .load(&config.attestation_credential_key)
+        .map_err(|_| RagError::AuthenticationFailed)?
+        .ok_or(RagError::AuthenticationFailed)?;
+    let attestation = HttpMcpProbe.attest(&config, &bearer_token, &attestation_secret)?;
     let readiness = exact_object(
         &attestation.snapshot_status,
         &[
@@ -603,6 +644,7 @@ fn query_rag_readiness(
     let result = verify_rag_service(
         &config,
         &bearer_token,
+        &attestation_secret,
         &manifest,
         &activation,
         &FixedMcpProbe(attestation),
