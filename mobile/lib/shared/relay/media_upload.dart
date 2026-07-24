@@ -482,8 +482,25 @@ class MediaUploadService {
 
 String _safeAttachmentFilename(String filename) {
   final segments = filename.split(RegExp(r'[/\\]'));
-  final basename = segments.isEmpty ? '' : segments.last.trim();
-  return basename.isEmpty ? 'file' : basename;
+  final basename = segments.isEmpty ? '' : segments.last;
+  final sanitized = StringBuffer();
+  var byteLength = 0;
+
+  for (final rune in basename.runes) {
+    if ((rune >= 0 && rune <= 0x1f) || (rune >= 0x7f && rune <= 0x9f)) {
+      continue;
+    }
+
+    final character = String.fromCharCode(rune);
+    final characterByteLength = utf8.encode(character).length;
+    if (byteLength + characterByteLength > 255) break;
+
+    sanitized.write(character);
+    byteLength += characterByteLength;
+  }
+
+  final safeBasename = sanitized.toString().trim();
+  return safeBasename.isEmpty ? 'file' : safeBasename;
 }
 
 String _sha256Hex(Uint8List bytes) {
