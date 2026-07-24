@@ -28,6 +28,8 @@ import {
 import { useComposerFocusOwnership } from "@/features/messages/lib/useComposerFocusOwnership";
 import { isMentionCodeContext } from "@/features/messages/lib/mentionCodeContext";
 import { useMentions } from "@/features/messages/lib/useMentions";
+import { useSlashCommandAutocomplete } from "@/features/messages/lib/useSlashCommandAutocomplete";
+import type { SlashCommandSuggestion } from "@/features/messages/lib/slashCommandAutocomplete";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { setKeepMentionedAgentsPinned } from "@/features/messages/lib/autoPinMentionedAgentsPreference";
 import { useIdentityQuery } from "@/shared/api/hooks";
@@ -148,6 +150,11 @@ function MessageComposerImpl({
     recentMentionPubkeys,
   });
   const channelLinks = useChannelLinks();
+  const slashCommands = useSlashCommandAutocomplete({
+    channelId,
+    ownerPubkey,
+    mentions,
+  });
   const customEmoji = useCustomEmoji();
   const emojiAutocomplete = useEmojiAutocomplete(customEmoji);
   const notifyTyping = useTypingBroadcast(
@@ -253,7 +260,8 @@ function MessageComposerImpl({
   isAutocompleteOpenRef.current =
     mentions.isMentionOpen ||
     channelLinks.isChannelOpen ||
-    emojiAutocomplete.isEmojiAutocompleteOpen;
+    emojiAutocomplete.isEmojiAutocompleteOpen ||
+    slashCommands.isOpen;
   const submitMessageRef = React.useRef<() => void>(() => {});
   const composerScrollRef = React.useRef<HTMLDivElement>(null);
   const formRef = React.useRef<HTMLFormElement>(null);
@@ -308,6 +316,7 @@ function MessageComposerImpl({
       mentions.updateMentionQuery(text, cursor);
       channelLinks.updateChannelQuery(text, cursor);
       emojiAutocomplete.updateEmojiQuery(text, cursor);
+      slashCommands.updateQuery(text, cursor);
       if (text.trim().length > 0) {
         notifyTyping();
       }
@@ -504,6 +513,19 @@ function MessageComposerImpl({
       applyAutocompleteEdit,
       emojiAutocomplete.insertEmoji,
       richText.getPlainTextAndCursor,
+    ],
+  );
+  const applySlashCommandInsert = React.useCallback(
+    (suggestion: SlashCommandSuggestion) => {
+      const { cursor } = richText.getPlainTextAndCursor();
+      const edit = slashCommands.insertCommand(suggestion, cursor);
+      if (!edit) return;
+      applyAutocompleteEdit(edit);
+    },
+    [
+      applyAutocompleteEdit,
+      richText.getPlainTextAndCursor,
+      slashCommands.insertCommand,
     ],
   );
   // ── Emoji insertion ─────────────────────────────────────────────────
@@ -726,6 +748,12 @@ function MessageComposerImpl({
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       if (handleAlwaysAddressShortcut(event)) return;
+      const commandResult = slashCommands.handleKeyDown(event);
+      if (commandResult.handled) {
+        if (commandResult.suggestion)
+          applySlashCommandInsert(commandResult.suggestion);
+        return;
+      }
       // Let autocomplete handle keys first
       const emojiResult = emojiAutocomplete.handleEmojiKeyDown(event);
       if (emojiResult.handled) {
@@ -784,6 +812,8 @@ function MessageComposerImpl({
     },
     [
       handleAlwaysAddressShortcut,
+      slashCommands.handleKeyDown,
+      applySlashCommandInsert,
       emojiAutocomplete.handleEmojiKeyDown,
       applyEmojiInsert,
       channelLinks.handleChannelKeyDown,
@@ -881,6 +911,8 @@ function MessageComposerImpl({
                 audienceScope && editTarget == null,
               )}
               channelLinks={channelLinks}
+              slashCommands={slashCommands}
+              onSlashCommandSelect={applySlashCommandInsert}
               composerOwnsFocus={composerOwnsFocus}
               emojiAutocomplete={emojiAutocomplete}
               keepMentionedAgentsPinned={keepMentionedAgentsPinned}
