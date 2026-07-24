@@ -39,6 +39,7 @@ const RUNTIME_LOGO_URLS: Record<string, string> = {
   claude: "/runtime-icons/claude.png",
   codex: "/runtime-icons/codex.png",
   goose: "/runtime-icons/goose.svg",
+  hermes: "/runtime-icons/hermes.png",
 };
 
 const RUNTIME_LOGO_SCALE: Record<string, string> = {
@@ -46,11 +47,13 @@ const RUNTIME_LOGO_SCALE: Record<string, string> = {
   claude: "scale-110",
   codex: "scale-110",
   goose: "scale-125",
+  hermes: "scale-110",
 };
 
 const RUNTIME_SORT_PRIORITY: Record<string, number> = {
   "buzz-agent": 0,
-  goose: 1,
+  hermes: 1,
+  goose: 2,
 };
 
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
