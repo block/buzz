@@ -61,15 +61,15 @@ members, bots) fall back to bot-mode signing with the author-name prefix.
 
 Requirements and behavior:
 
-- The relay only accepts an event whose `pubkey` matches the NIP-98 HTTP
-  signer, so the importer submits each user's events through a client
-  authenticated as that user's key.
-- Mapped users must be relay members before they can post. The importer
-  sends a NIP-43 relay-admin add-member (kind `9030`, requires the CLI
-  identity to be a community **owner or admin**) and a channel add-member
-  (kind `9000`) for every mapped user active in each imported channel.
-  Failures are surfaced as warnings (e.g. on open relays where membership
-  enforcement is off, or when the CLI identity lacks admin).
+- Every event is signed locally with the mapped user's key and submitted
+  over the single CLI connection. The relay accepts the author/submitter
+  mismatch because the events carry `import` provenance tags and the CLI
+  identity is a community owner/admin (see the exemption below) — the
+  event's own Schnorr signature proves authorship. Mapped keys never need
+  to be live relay members to import.
+- The importer still best-effort registers mapped users as relay members
+  (kind `9030`) and channel members (kind `9000`) so their history is
+  readable to them the moment they log in with their key.
 - A kind `0` profile (display name, avatar URL from `users.json`) is
   published for each mapped user unless `--skip-profiles` is set.
 
@@ -98,6 +98,45 @@ event IDs of messages signed by *other* users' claims) — the state-file
 design below anticipates it, but multi-party coordination is out of scope
 for v1. Fallback hierarchy for unclaimed users stays the same: bot-signed
 with attribution tags.
+
+## Relay requirements
+
+**The CLI identity must be a community owner or admin.** The relay
+normally rejects events whose `created_at` is more than 15 minutes in the
+past, and events whose author differs from the authenticated submitter.
+Both checks carry an authorized-import exemption: an event with an
+`import` provenance tag, submitted by an authenticated community
+owner/admin, may be backdated and may be third-party-signed (its Schnorr
+signature proves authorship). No relay restart or configuration change is
+needed — the operator's own auth *is* the authorization, scoped per event.
+
+Under the hood the exemption also disarms the DB commit-time floor guard
+(migration 0021) for exactly those inserts, and on read-replica
+deployments it closes the replica fence until a fresh handshake provably
+covers the backfilled rows — degraded read capacity during the import,
+never missing rows. Single-instance deployments are unaffected.
+
+Two optional knobs for the import window:
+
+```bash
+# Only if you cannot grant the importer admin: raise the past-drift window
+# relay-wide instead (requires restart; the DB floor guard follows at +60s).
+BUZZ_MAX_PAST_DRIFT_SECS=315360000
+
+# Speed: bot mode signs thousands of events with one key and the default
+# quota is 60 messages/minute. The importer backs off and retries on 429,
+# so an import finishes at default limits — just slowly.
+BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN=100000
+BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN=100000
+```
+
+### Future: self-expiring import window
+
+A possible refinement — proposed, not implemented — is an admin-published
+relay command ("open import window: max age N, expires in H hours"),
+making the import authorization itself a signed, audit-logged,
+self-expiring event, with optional scoping to specific author pubkeys.
+The per-event admin exemption above covers the practical cases today.
 
 ## Ordering, threads, idempotency
 

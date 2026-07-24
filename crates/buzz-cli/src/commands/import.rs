@@ -84,10 +84,13 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         .map(|(id, u)| (id.clone(), u.best_name().to_string()))
         .collect();
 
-    // Mapping mode: one signing client per mapped user. The relay requires
-    // event.pubkey to match the NIP-98 HTTP signer, so each user's events
-    // must be submitted by a client holding that user's key.
-    let mut user_clients: HashMap<String, BuzzClient> = HashMap::new();
+    // Mapping mode: sign each mapped user's history with their own key
+    // locally; every event is submitted over the single CLI connection. The
+    // relay accepts third-party-signed events carrying `import` provenance
+    // tags when the submitter is a community owner/admin (the Schnorr
+    // signature proves authorship), so no per-user connection or relay
+    // membership is needed at import time.
+    let mut user_keys: HashMap<String, Keys> = HashMap::new();
     if let Some(ref mapping_path) = p.mapping {
         let raw = std::fs::read_to_string(mapping_path)
             .map_err(|e| CliError::Usage(format!("cannot read --mapping {mapping_path}: {e}")))?;
@@ -99,10 +102,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
                     "invalid private key for {slack_id} in mapping: {e}"
                 ))
             })?;
-            user_clients.insert(
-                slack_id,
-                BuzzClient::new(client.relay_url().to_string(), keys, None, None)?,
-            );
+            user_keys.insert(slack_id, keys);
         }
     }
 
@@ -128,16 +128,15 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
     }
 
     if p.dry_run {
-        return dry_run_report(&export, &selected, &st, &user_clients);
+        return dry_run_report(&export, &selected, &st, &user_keys);
     }
 
     let mut summary = Summary::default();
 
-    // Relay membership for mapped users (best-effort: requires the CLI
-    // identity to be a community owner/admin; open relays may not enforce
-    // membership at all).
-    for (slack_id, user_client) in &user_clients {
-        let pk = user_client.keys().public_key().to_hex();
+    // Relay membership for mapped users (best-effort: lets them read once
+    // they log in with their key; posting during import does not need it).
+    for (slack_id, keys) in &user_keys {
+        let pk = keys.public_key().to_hex();
         if st.relay_members.contains(&pk) {
             continue;
         }
@@ -147,14 +146,16 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
                 st.save(&state_path)?;
             }
             Err(e) => summary.warn(format!(
-                "relay add-member failed for {slack_id} ({pk}): {e} — posts by this user may be rejected"
+                "relay add-member failed for {slack_id} ({pk}): {e}"
             )),
         }
     }
 
-    // Profiles for mapped users.
+    // Profiles for mapped users — signed by the user's key, submitted over
+    // the CLI connection (import tags make the third-party signature
+    // acceptable to the relay).
     if !p.skip_profiles {
-        for (slack_id, user_client) in &user_clients {
+        for (slack_id, keys) in &user_keys {
             if st.profiles.contains(slack_id) {
                 continue;
             }
@@ -162,10 +163,11 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
                 summary.warn(format!("mapping entry {slack_id} not found in users.json"));
                 continue;
             };
+            let name = user.best_name().to_string();
             let builder = buzz_sdk::build_profile(
-                Some(user.best_name()),
+                Some(&name),
                 Some(if user.name.is_empty() {
-                    user.best_name()
+                    &name
                 } else {
                     &user.name
                 }),
@@ -173,8 +175,9 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
                 None,
                 None,
             )
-            .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
-            match submit(user_client, builder).await {
+            .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?
+            .tags(provenance_tags(slack_id, &name, "")?);
+            match submit_as(client, keys, builder).await {
                 Ok(_) => {
                     st.profiles.insert(slack_id.clone());
                     st.save(&state_path)?;
@@ -191,7 +194,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
             &export,
             channel,
             &names,
-            &user_clients,
+            &user_keys,
             &mut st,
             &state_path,
             &mut summary,
@@ -222,7 +225,7 @@ fn dry_run_report(
     export: &SlackExport,
     selected: &[&SlackChannel],
     st: &ImportState,
-    user_clients: &HashMap<String, BuzzClient>,
+    user_keys: &HashMap<String, Keys>,
 ) -> Result<(), CliError> {
     let mut channels_to_create = 0u64;
     let mut messages = 0u64;
@@ -246,7 +249,7 @@ fn dry_run_report(
                 .map(|r| r.users.len() as u64)
                 .sum::<u64>();
             if let Some(author) = author_id(&msg) {
-                if !user_clients.contains_key(&author) {
+                if !user_keys.contains_key(&author) {
                     unmapped_authors.insert(author);
                 }
             }
@@ -260,7 +263,7 @@ fn dry_run_report(
         "channels_to_create": channels_to_create,
         "messages_to_import": messages,
         "reactions_to_import": reactions,
-        "mapped_users": user_clients.len(),
+        "mapped_users": user_keys.len(),
         "unmapped_authors": unmapped,
     });
     println!(
@@ -277,7 +280,7 @@ async fn import_channel(
     export: &SlackExport,
     channel: &SlackChannel,
     names: &HashMap<String, String>,
-    user_clients: &HashMap<String, BuzzClient>,
+    user_keys: &HashMap<String, Keys>,
     st: &mut ImportState,
     state_path: &std::path::Path,
     summary: &mut Summary,
@@ -334,10 +337,10 @@ async fn import_channel(
         let Some(author) = author_id(msg) else {
             continue;
         };
-        let Some(user_client) = user_clients.get(&author) else {
+        let Some(keys) = user_keys.get(&author) else {
             continue;
         };
-        let pk = user_client.keys().public_key().to_hex();
+        let pk = keys.public_key().to_hex();
         let member_key = format!("{}:{pk}", channel.id);
         if st.channel_members.contains(&member_key) {
             continue;
@@ -367,15 +370,7 @@ async fn import_channel(
             // (state-deduped) pass below.
             if !skip_reactions {
                 import_reactions(
-                    client,
-                    channel,
-                    msg,
-                    &key,
-                    names,
-                    user_clients,
-                    st,
-                    state_path,
-                    summary,
+                    client, channel, msg, &key, names, user_keys, st, state_path, summary,
                 )
                 .await?;
             }
@@ -384,9 +379,8 @@ async fn import_channel(
 
         let author = author_id(msg);
         let author_name = author_display(msg, names);
-        let user_client = author.as_ref().and_then(|a| user_clients.get(a));
-        let bot_signed = user_client.is_none();
-        let signer = user_client.unwrap_or(client);
+        let signing_keys = author.as_ref().and_then(|a| user_keys.get(a));
+        let bot_signed = signing_keys.is_none();
 
         let mut content = mrkdwn::convert(&msg.text, names);
         for file in &msg.files {
@@ -451,7 +445,11 @@ async fn import_channel(
                 &msg.ts,
             )?);
 
-        match submit(signer, builder).await {
+        let submitted = match signing_keys {
+            Some(keys) => submit_as(client, keys, builder).await,
+            None => submit(client, builder).await,
+        };
+        match submitted {
             Ok(event_id) => {
                 consecutive_failures = 0;
                 st.messages.insert(key.clone(), event_id);
@@ -482,15 +480,7 @@ async fn import_channel(
             continue;
         }
         import_reactions(
-            client,
-            channel,
-            msg,
-            &key,
-            names,
-            user_clients,
-            st,
-            state_path,
-            summary,
+            client, channel, msg, &key, names, user_keys, st, state_path, summary,
         )
         .await?;
     }
@@ -514,7 +504,7 @@ async fn import_reactions(
     msg: &SlackMessage,
     message_key: &str,
     names: &HashMap<String, String>,
-    user_clients: &HashMap<String, BuzzClient>,
+    user_keys: &HashMap<String, Keys>,
     st: &mut ImportState,
     state_path: &std::path::Path,
     summary: &mut Summary,
@@ -534,8 +524,8 @@ async fn import_reactions(
         let emoji = emoji_for_shortcode(&reaction.name);
         let mut bot_reacted = false;
         for user in &reaction.users {
-            let signer = match user_clients.get(user) {
-                Some(c) => c,
+            let signing_keys = match user_keys.get(user) {
+                Some(keys) => Some(keys),
                 None => {
                     // All unmapped reactors collapse into one bot-signed
                     // reaction per emoji — one key can't react twice.
@@ -543,10 +533,12 @@ async fn import_reactions(
                         continue;
                     }
                     bot_reacted = true;
-                    client
+                    None
                 }
             };
-            let signer_pk = signer.keys().public_key().to_hex();
+            let signer_pk = signing_keys
+                .map(|k| k.public_key().to_hex())
+                .unwrap_or_else(|| client.keys().public_key().to_hex());
             let dedupe = format!("{message_key}:{emoji}:{signer_pk}");
             if st.reactions.contains(&dedupe) {
                 continue;
@@ -565,7 +557,11 @@ async fn import_reactions(
             let builder = builder
                 .custom_created_at(Timestamp::from(created_at))
                 .tags(provenance_tags(user, reactor_name, &msg.ts)?);
-            match submit(signer, builder).await {
+            let submitted = match signing_keys {
+                Some(keys) => submit_as(client, keys, builder).await,
+                None => submit(client, builder).await,
+            };
+            match submitted {
                 Ok(_) => {
                     st.reactions.insert(dedupe);
                     st.save(state_path)?;
@@ -586,10 +582,48 @@ async fn import_reactions(
 /// A 2xx response with `accepted: false` whose message marks a duplicate is
 /// success (idempotent re-run after state loss); any other rejection is an
 /// error.
+///
+/// Bulk imports run head-first into the relay's per-pubkey minute quotas,
+/// and the relay's `retry in 0s` hint makes the client's built-in retry
+/// spin uselessly — so 429s are absorbed here with a real backoff. The
+/// signed event is resubmitted verbatim; a re-send that lands twice is a
+/// relay-side duplicate, which the acceptance check below treats as
+/// success.
 async fn submit(client: &BuzzClient, builder: EventBuilder) -> Result<String, CliError> {
     let event = client.sign_event(builder)?;
+    submit_signed(client, event).await
+}
+
+/// Sign with a mapped user's key and submit over the CLI connection.
+///
+/// The relay accepts the author/submitter mismatch because imported events
+/// carry `import` provenance tags and the CLI identity is a community
+/// owner/admin — the event's own Schnorr signature proves authorship.
+async fn submit_as(
+    client: &BuzzClient,
+    keys: &Keys,
+    builder: EventBuilder,
+) -> Result<String, CliError> {
+    let event = builder
+        .sign_with_keys(keys)
+        .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
+    submit_signed(client, event).await
+}
+
+async fn submit_signed(client: &BuzzClient, event: nostr::Event) -> Result<String, CliError> {
     let event_id = event.id.to_hex();
-    let resp = client.submit_event(event).await?;
+    let mut backoff_secs = 1u64;
+    let resp = loop {
+        match client.submit_event(event.clone()).await {
+            Ok(resp) => break resp,
+            Err(CliError::Relay { status: 429, .. }) if backoff_secs <= 64 => {
+                eprintln!("  rate-limited — retrying in {backoff_secs}s");
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                backoff_secs *= 2;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let parsed: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
     let accepted = parsed
         .get("accepted")

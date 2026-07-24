@@ -146,6 +146,9 @@ async fn main() -> anyhow::Result<()> {
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
         read_database_url: config.read_database_url.clone(),
+        // The DB commit-time floor guard must stay above the ingest past-
+        // drift envelope, with slack for validation/lock waits at commit.
+        created_at_floor_secs: config.max_past_drift_secs + 60,
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {

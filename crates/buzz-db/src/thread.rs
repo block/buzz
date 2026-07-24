@@ -959,6 +959,7 @@ mod tests {
                 depth: 0,
                 broadcast: true,
             }),
+            false,
         )
         .await
         .expect("insert community A metadata");
@@ -978,6 +979,7 @@ mod tests {
                 depth: 3,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert community B metadata");
@@ -1016,7 +1018,7 @@ mod tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None, false)
             .await
             .expect("insert root event");
 
@@ -1039,6 +1041,7 @@ mod tests {
                 depth: 1,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert reply event and metadata");
@@ -1081,7 +1084,7 @@ mod tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None, false)
             .await
             .expect("insert root event");
 
@@ -1113,6 +1116,7 @@ mod tests {
                     depth: 1,
                     broadcast: false,
                 }),
+                false,
             )
             .await
             .expect("insert tied reply");
@@ -1196,7 +1200,7 @@ mod tests {
         // Root (no metadata row on first insert — a depth-0 message).
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None, false)
             .await
             .expect("insert root event");
 
@@ -1219,6 +1223,7 @@ mod tests {
                 depth: 1,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert depth-1 child");
@@ -1243,6 +1248,7 @@ mod tests {
                 depth: 2,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert depth-2 grandchild");
@@ -1305,7 +1311,7 @@ mod tests {
         let child = make_stream_event(&author, "child");
         let grandchild = make_stream_event(&author, "grandchild");
         for ev in [&root, &child, &grandchild] {
-            insert_event_with_thread_metadata(&pool, community, ev, Some(channel.id), None)
+            insert_event_with_thread_metadata(&pool, community, ev, Some(channel.id), None, false)
                 .await
                 .expect("insert event");
         }
@@ -1363,7 +1369,7 @@ mod tests {
 
         let root = make_stream_event(&author, "root");
         let root_created_at = event_created_at(&root);
-        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &root, Some(channel.id), None, false)
             .await
             .expect("insert root event");
 
@@ -1387,6 +1393,7 @@ mod tests {
                 depth: 1,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert good reply");
@@ -1409,6 +1416,7 @@ mod tests {
                 depth: 1,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert bad reply");
@@ -1459,6 +1467,7 @@ mod tests {
                 depth: 0,
                 broadcast: true,
             }),
+            false,
         )
         .await
         .expect("insert top-level event");
@@ -1489,6 +1498,7 @@ mod tests {
                 depth: 1,
                 broadcast,
             }),
+            false,
         )
         .await
         .expect("insert reply event");
@@ -1521,7 +1531,7 @@ mod tests {
 
         // No thread metadata at all — the legacy-ingest shape. Top-level.
         let bare = make_stream_event(&author, "bare");
-        insert_event_with_thread_metadata(&pool, community, &bare, Some(channel.id), None)
+        insert_event_with_thread_metadata(&pool, community, &bare, Some(channel.id), None, false)
             .await
             .expect("insert bare event");
 
