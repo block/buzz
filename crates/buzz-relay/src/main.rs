@@ -31,6 +31,16 @@ fn buzz_auto_migrate_enabled(value: Option<&str>) -> bool {
     })
 }
 
+/// Returns true when some other process is listening on the IPv6 loopback at
+/// `port`. Used to warn when the relay binds IPv4-only (the `0.0.0.0:3000`
+/// default): on macOS `localhost` resolves to `::1` first, so local clients
+/// silently reach the squatter instead of the relay — dev servers often answer
+/// GETs with 200 and writes with 404, which looks like a relay bug.
+fn ipv6_loopback_squatter(port: u16) -> bool {
+    let probe = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+    std::net::TcpStream::connect_timeout(&probe, std::time::Duration::from_millis(250)).is_ok()
+}
+
 /// Controls how many per-community gauge series the usage poller emits.
 ///
 /// Datadog cost is proportional to the number of unique time-series.  With ~25
@@ -1158,6 +1168,18 @@ async fn serve(
         .map_err(|e| anyhow::anyhow!("Failed to bind {}: {e}", config.bind_addr))?;
     info!(addr = %config.bind_addr, "buzz-relay TCP listening");
 
+    // Warn-only probe: an IPv4-only bind leaves [::1]:<port> free for another
+    // process, and `localhost` resolves IPv6-first on macOS, silently routing
+    // local clients away from the relay.
+    if config.bind_addr.is_ipv4() && ipv6_loopback_squatter(config.bind_addr.port()) {
+        warn!(
+            port = config.bind_addr.port(),
+            "another process is listening on the IPv6 loopback for this port; \
+             clients resolving `localhost` to ::1 will reach it instead of \
+             buzz-relay — set BUZZ_BIND_ADDR=[::]:<port> or free the port"
+        );
+    }
+
     #[cfg(unix)]
     if let Some(ref uds_path) = config.uds_path {
         use std::os::unix::fs::FileTypeExt as _;
@@ -1824,6 +1846,20 @@ mod tests {
         debugging::DebugValue,
         registry::{GenerationalAtomicStorage, Registry},
     };
+
+    #[test]
+    fn ipv6_loopback_squatter_detects_listener() {
+        // Skip silently when the environment has no IPv6 loopback.
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+            return;
+        };
+        let Ok(addr) = listener.local_addr() else {
+            return;
+        };
+        assert!(super::ipv6_loopback_squatter(addr.port()));
+        drop(listener);
+        assert!(!super::ipv6_loopback_squatter(addr.port()));
+    }
 
     #[tokio::test(start_paused = true)]
     async fn periodic_loop_exits_immediately_on_cancellation() {
