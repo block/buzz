@@ -2431,12 +2431,18 @@ async fn ingest_event_inner(
         });
     }
 
+    // `side_effect_note` carries a client-visible no-op note (e.g. a NIP-09
+    // deletion that matched nothing) into the OK message below, alongside
+    // `accepted:true` -- the event itself was validly stored either way.
+    let mut side_effect_note: Option<String> = None;
     if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
-        if let Err(e) =
-            crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
-                .await
+        match crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
+            .await
         {
-            warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+            Ok(note) => side_effect_note = note,
+            Err(e) => {
+                warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+            }
         }
     }
 
@@ -2499,7 +2505,7 @@ async fn ingest_event_inner(
     Ok(IngestResult {
         event_id: event_id_hex,
         accepted: true,
-        message: String::new(),
+        message: side_effect_note.unwrap_or_default(),
     })
 }
 

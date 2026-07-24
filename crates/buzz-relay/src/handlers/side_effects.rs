@@ -15,6 +15,7 @@ use buzz_core::kind::{
 };
 use buzz_core::StoredEvent;
 use buzz_db::channel::{MemberRecord, MemberRole};
+use buzz_db::DbError;
 
 use super::event::dispatch_persistent_event;
 use crate::protocol::RelayMessage;
@@ -139,15 +140,28 @@ pub async fn evict_all_channel_subscriptions(
 }
 
 /// Dispatch side effects for a stored event.
+///
+/// Returns `Ok(Some(note))` when the side effect completed but has a
+/// client-visible outcome worth surfacing (e.g. a NIP-09 deletion that
+/// matched no target) -- the caller folds `note` into the `OK` message
+/// alongside `accepted:true`, mirroring the existing "duplicate:" / "info:"
+/// message conventions. All other kinds are unaffected and always yield
+/// `Ok(None)`.
 pub async fn handle_side_effects(
     tenant: &TenantContext,
     kind: u32,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
+    // kind:5 (NIP-09 deletion) is the only side effect that can produce a
+    // client-visible no-op note; route it separately so every other kind
+    // keeps its original Result<()> shape below.
+    if kind == 5 {
+        return handle_standard_deletion_event(tenant, event, state).await;
+    }
+
     match kind {
         0 => handle_kind0_profile(tenant, event, state).await,
-        5 => handle_standard_deletion_event(tenant, event, state).await,
         9000 => handle_put_user(tenant, event, state).await,
         9001 => handle_remove_user(tenant, event, state).await,
         9002 => handle_edit_metadata(tenant, event, state).await,
@@ -168,7 +182,8 @@ pub async fn handle_side_effects(
         KIND_AGENT_PROFILE => handle_agent_profile(tenant, event, state).await,
         // kind:7 (reaction) handled inline in ingest_event() before storage.
         _ => Ok(()),
-    }
+    }?;
+    Ok(None)
 }
 
 /// Validate a standard NIP-09 deletion event before it is stored.
@@ -1980,7 +1995,7 @@ async fn handle_a_tag_deletion(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     let a_value = event
         .tags
         .iter()
@@ -1997,7 +2012,11 @@ async fn handle_a_tag_deletion(
         .map_err(|_| anyhow::anyhow!("invalid kind in a-tag"))?;
     let pubkey_hex = parts[1];
     let d_tag = parts[2];
-    let actor_bytes = effective_message_author(event, &state.relay_keypair.public_key());
+    // NOTE: intentionally NOT reading `effective_message_author` (the
+    // deletion signer) here. `validate_standard_deletion_event` already
+    // authorized this request against the a-tag's pubkey (including the
+    // `is_agent_owner` allowance), so execution below must scope by that same
+    // pubkey (`pubkey_hex`), not by who signed the deletion.
 
     match kind_num {
         // kind:30350 revocation is exclusively a higher-generation inactive replacement.
@@ -2005,50 +2024,87 @@ async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
+            // Execute against the owner the a-tag names, NOT `actor_bytes` (the
+            // deletion signer). `validate_standard_deletion_event` already
+            // authorized this request against the a-tag pubkey -- including
+            // the `is_agent_owner` allowance that lets a human owner delete
+            // their agent's workflows. Scoping execution by `actor_bytes`
+            // instead meant a human owner's deletion of an agent-owned
+            // workflow passed validation, then silently deleted nothing here.
+            let owner_bytes = match hex::decode(pubkey_hex) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid pubkey hex in a-tag {pubkey_hex}: {e}"
+                    ));
+                }
+            };
+
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
-                let channel_id = state
-                    .db
-                    .delete_workflow_for_owner(tenant.community(), wf_id, &actor_bytes)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"))?;
-                if let Some(channel_id) = channel_id {
-                    state
-                        .workflow_engine
-                        .invalidate_channel_workflows(tenant.community(), channel_id);
-                }
-                tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
-            } else {
-                // Name-based lookup
                 match state
                     .db
-                    .find_workflow_by_owner_and_name(tenant.community(), &actor_bytes, d_tag)
+                    .delete_workflow_for_owner(tenant.community(), wf_id, &owner_bytes)
                     .await
                 {
-                    Ok(Some(wf)) => {
-                        let channel_id = state
-                            .db
-                            .delete_workflow_for_owner(tenant.community(), wf.id, &actor_bytes)
-                            .await
-                            .map_err(|e| {
-                                anyhow::anyhow!("failed to delete workflow {}: {e}", wf.id)
-                            })?;
+                    Ok(channel_id) => {
                         if let Some(channel_id) = channel_id {
                             state
                                 .workflow_engine
                                 .invalidate_channel_workflows(tenant.community(), channel_id);
                         }
-                        tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
+                        tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                        return Ok(None);
                     }
-                    Ok(None) => {
+                    Err(DbError::NotFound(_)) => {
                         tracing::warn!(
-                            "NIP-09 a-tag deletion: no workflow '{d_tag}' found for owner"
+                            workflow_id = %wf_id,
+                            "NIP-09 a-tag deletion: no workflow found for owner"
                         );
+                        return Ok(Some(
+                            "info: no matching workflow found for deletion".to_string(),
+                        ));
                     }
                     Err(e) => {
-                        tracing::warn!("NIP-09 a-tag deletion: DB lookup failed: {e}");
+                        return Err(anyhow::anyhow!("failed to delete workflow {wf_id}: {e}"));
                     }
                 }
+            }
+
+            // Name-based lookup: remove every workflow this owner has under
+            // `d_tag`. There is no unique constraint on (owner, name), so a
+            // single-row delete (the old `find_by_owner_and_name` + delete-one
+            // path) could leave duplicates behind; delete all matches instead.
+            let deleted = match state
+                .db
+                .delete_workflows_for_owner_by_name(tenant.community(), &owner_bytes, d_tag)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "NIP-09 a-tag deletion: DB lookup failed for name '{d_tag}': {e}"
+                    ));
+                }
+            };
+
+            if deleted.is_empty() {
+                tracing::warn!("NIP-09 a-tag deletion: no workflow '{d_tag}' found for owner");
+                return Ok(Some(
+                    "info: no matching workflow found for deletion".to_string(),
+                ));
+            }
+
+            let mut invalidated_channels = std::collections::HashSet::new();
+            for (workflow_id, channel_id) in &deleted {
+                if let Some(channel_id) = channel_id {
+                    if invalidated_channels.insert(*channel_id) {
+                        state
+                            .workflow_engine
+                            .invalidate_channel_workflows(tenant.community(), *channel_id);
+                    }
+                }
+                tracing::info!(workflow_id = %workflow_id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
             }
         }
         // Generic NIP-33 (parameterized-replaceable) soft-delete by coordinate.
@@ -2102,14 +2158,14 @@ async fn handle_a_tag_deletion(
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 async fn handle_standard_deletion_event(
     tenant: &TenantContext,
     event: &Event,
     state: &Arc<AppState>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<String>> {
     let target_ids = extract_target_event_ids(event);
     if !has_e_tag(event) {
         // NIP-09 a-tag deletion path for addressable events. Keyed on the
@@ -2230,7 +2286,7 @@ async fn handle_standard_deletion_event(
         }
     }
 
-    Ok(())
+    Ok(None)
 }
 
 /// Extract channel UUID from `h` tag (NIP-29 group ID).
@@ -3343,5 +3399,142 @@ mod tests {
         }];
 
         assert!(actor_is_channel_owner_or_admin(&members, &actor));
+    }
+}
+
+/// Issue #1593 regression: a-tag workflow deletion must execute against the
+/// a-tag's owner, not the deletion signer.
+///
+/// Postgres-gated, following the same pattern as
+/// `workflow_sink::integration_tests` (real `AppState` built against a lazy
+/// `PgPool`, no live relay server needed). Run with:
+///   `cargo test -p buzz-relay --lib side_effects -- --ignored`
+#[cfg(test)]
+mod workflow_deletion_owner_scope_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind};
+
+    /// Real-PG state mirroring `workflow_sink::integration_tests::test_state`.
+    /// Also returns the raw pool so tests can seed a `communities` row
+    /// directly (there is no `Db` wrapper for that -- it's not a relay-facing
+    /// operation).
+    async fn test_state() -> (Arc<AppState>, sqlx::PgPool) {
+        let mut config = crate::config::Config::from_env().expect("default config loads");
+        config.require_relay_membership = false;
+        config.redis_url = "redis://127.0.0.1:1".to_string();
+        let pool = sqlx::PgPool::connect_lazy(&config.database_url).expect("lazy pg pool");
+        let db = buzz_db::Db::from_pool(pool.clone());
+        let redis_pool = deadpool_redis::Config::from_url(&config.redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let pubsub = Arc::new(
+            buzz_pubsub::PubSubManager::new(&config.redis_url, redis_pool.clone())
+                .await
+                .expect("pubsub manager"),
+        );
+        let audit = buzz_audit::AuditService::new(pool.clone());
+        let auth = buzz_auth::AuthService::new(config.auth.clone());
+        let search = buzz_search::SearchService::new(pool.clone());
+        let workflow_engine = Arc::new(buzz_workflow::WorkflowEngine::new(
+            db.clone(),
+            buzz_workflow::WorkflowConfig::default(),
+        ));
+        let media_storage = buzz_media::MediaStorage::new(&config.media).expect("media storage");
+        let (state, _audit_shutdown) = AppState::new(
+            config,
+            db,
+            redis_pool,
+            audit,
+            pubsub,
+            auth,
+            search,
+            workflow_engine,
+            nostr::Keys::generate(),
+            media_storage,
+        );
+        (Arc::new(state), pool)
+    }
+
+    /// Human owner `H` deletes agent `A`'s workflow via
+    /// `a:"30620:<A>:<workflow-uuid>"`, signed by `H`. `validate_standard_deletion_event`
+    /// authorizes this via `is_agent_owner(A, H)` (mirrors `validate_edit_ownership`'s
+    /// allowance). Before the fix, execution scoped the DELETE by the *signer*
+    /// (`H`), never `A` -- the workflow, owned by `A`, was never matched, so the
+    /// delete silently no-op'd while the relay still replied `accepted:true`.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn a_tag_deletion_by_human_owner_deletes_agent_owned_workflow() {
+        let (state, pool) = test_state().await;
+
+        let agent = Keys::generate();
+        let agent_bytes = agent.public_key().to_bytes().to_vec();
+        let agent_hex = agent.public_key().to_hex();
+        let human_owner = Keys::generate();
+        let owner_bytes = human_owner.public_key().to_bytes().to_vec();
+
+        let community_uuid = Uuid::new_v4();
+        let host = format!("wf-owner-scope-{}.example", community_uuid.simple());
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(community_uuid)
+            .bind(&host)
+            .execute(&pool)
+            .await
+            .expect("insert community");
+        let community = buzz_core::CommunityId::from_uuid(community_uuid);
+        let tenant = TenantContext::resolved(community, host);
+
+        state
+            .db
+            .ensure_user(community, &agent_bytes)
+            .await
+            .expect("ensure agent user row");
+        state
+            .db
+            .ensure_user(community, &owner_bytes)
+            .await
+            .expect("ensure owner user row");
+        state
+            .db
+            .set_agent_owner(community, &agent_bytes, &owner_bytes)
+            .await
+            .expect("set agent owner");
+
+        let workflow_id = state
+            .db
+            .create_workflow(
+                community,
+                None,
+                &agent_bytes,
+                "agent-owned-workflow",
+                r#"{"trigger":{"on":"schedule"},"steps":[]}"#,
+                &[0u8; 32],
+            )
+            .await
+            .expect("create agent-owned workflow");
+
+        // a-tag names the *agent* as owner; the deletion event is signed by
+        // the human owner, exactly like validate_standard_deletion_event's
+        // is_agent_owner allowance expects.
+        let a_coord = format!(
+            "{}:{}:{}",
+            buzz_core::kind::KIND_WORKFLOW_DEF,
+            agent_hex,
+            workflow_id
+        );
+        let deletion_event = EventBuilder::new(Kind::EventDeletion, "")
+            .tags([Tag::parse(["a", &a_coord]).expect("a tag")])
+            .sign_with_keys(&human_owner)
+            .expect("sign deletion event");
+
+        handle_a_tag_deletion(&tenant, &deletion_event, &state)
+            .await
+            .expect("a-tag deletion side effect must succeed");
+
+        let after = state.db.get_workflow(community, workflow_id).await;
+        assert!(
+            matches!(after, Err(buzz_db::DbError::NotFound(_))),
+            "agent-owned workflow must actually be deleted when the human \
+             owner signs the deletion, got: {after:?}"
+        );
     }
 }

@@ -1193,6 +1193,38 @@ pub async fn find_by_owner_and_name(
     }
 }
 
+/// Delete every workflow matching `(community_id, owner_pubkey, name)`.
+///
+/// `find_by_owner_and_name`'s `LIMIT 1` (no `ORDER BY`) is fine for a "look up
+/// one to act on" reader, but there is no unique constraint on
+/// `(owner_pubkey, name)` -- a name can collide across N rows for the same
+/// owner. NIP-09 name-based deletion must remove every match, or a delete
+/// leaves orphaned duplicates behind that a future create can collide with
+/// again. Returns the deleted rows' `(id, channel_id)` so the caller can
+/// invalidate each affected channel's workflow-trigger cache.
+pub async fn delete_workflows_for_owner_by_name(
+    pool: &PgPool,
+    community_id: CommunityId,
+    owner_pubkey: &[u8],
+    name: &str,
+) -> Result<Vec<(Uuid, Option<Uuid>)>> {
+    let rows = sqlx::query(
+        "DELETE FROM workflows WHERE community_id = $1 AND owner_pubkey = $2 AND name = $3 \
+         RETURNING id, channel_id",
+    )
+    .bind(community_id.as_uuid())
+    .bind(owner_pubkey)
+    .bind(name)
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| -> Result<(Uuid, Option<Uuid>)> {
+            Ok((row.try_get("id")?, row.try_get("channel_id")?))
+        })
+        .collect()
+}
+
 // -- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
@@ -2271,5 +2303,106 @@ mod tests {
             ApprovalStatus::Pending,
             "B's approval must remain pending after A is granted"
         );
+    }
+
+    // -- delete_workflows_for_owner_by_name -----------------------------------
+
+    /// Insert a workflow for a specific owner/name pair, in its own channel
+    /// (workflows.channel_id has a composite FK to (community_id, channel_id)).
+    async fn make_workflow_for_owner(
+        pool: &PgPool,
+        community: CommunityId,
+        owner: &[u8],
+        name: &str,
+    ) -> Uuid {
+        ensure_user(pool, community, owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(pool, community, owner).await;
+        create_workflow(
+            pool,
+            community,
+            Some(channel_id),
+            owner,
+            name,
+            r#"{"trigger":{"on":"schedule"},"steps":[]}"#,
+            &[0u8; 32],
+        )
+        .await
+        .expect("create workflow")
+    }
+
+    /// Bug #1593 regression (buzz-db half): `find_by_owner_and_name`'s bare
+    /// `LIMIT 1` only ever picks one row to *read*. There is no unique
+    /// constraint on `(owner_pubkey, name)`, so N same-named rows for the same
+    /// owner can coexist. `delete_workflows_for_owner_by_name` must remove all
+    /// of them, or a NIP-09 name-based deletion leaves N-1 orphans behind.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_workflows_for_owner_by_name_removes_all_same_named_rows() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner = vec![0xd1; 32];
+        let name = "duplicate-name";
+
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            ids.push(make_workflow_for_owner(&pool, community, &owner, name).await);
+        }
+
+        let deleted = delete_workflows_for_owner_by_name(&pool, community, &owner, name)
+            .await
+            .expect("delete all same-named rows");
+
+        assert_eq!(deleted.len(), 3, "all 3 same-named rows must be deleted");
+        let deleted_ids: std::collections::HashSet<Uuid> =
+            deleted.iter().map(|(id, _)| *id).collect();
+        for id in &ids {
+            assert!(
+                deleted_ids.contains(id),
+                "deleted set must include workflow {id}"
+            );
+            assert!(
+                matches!(
+                    get_workflow(&pool, community, *id).await,
+                    Err(DbError::NotFound(_))
+                ),
+                "workflow {id} must no longer exist"
+            );
+        }
+    }
+
+    /// Bug #1593 regression: deleting owner A's workflows by name must never
+    /// touch owner B's identically-named workflow in the same community.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn delete_workflows_for_owner_by_name_leaves_other_owners_untouched() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let owner_a = vec![0xd2; 32];
+        let owner_b = vec![0xd3; 32];
+        let name = "shared-name";
+
+        let id_a = make_workflow_for_owner(&pool, community, &owner_a, name).await;
+        let id_b = make_workflow_for_owner(&pool, community, &owner_b, name).await;
+
+        let deleted = delete_workflows_for_owner_by_name(&pool, community, &owner_a, name)
+            .await
+            .expect("delete A's rows");
+
+        assert_eq!(deleted.len(), 1, "only owner A's row must be deleted");
+        assert_eq!(deleted[0].0, id_a);
+        assert!(
+            matches!(
+                get_workflow(&pool, community, id_a).await,
+                Err(DbError::NotFound(_))
+            ),
+            "A's workflow must be deleted"
+        );
+        let surviving_b = get_workflow(&pool, community, id_b)
+            .await
+            .expect("B's identically-named workflow must survive");
+        assert_eq!(surviving_b.owner_pubkey, owner_b);
+        assert_eq!(surviving_b.name, name);
     }
 }
