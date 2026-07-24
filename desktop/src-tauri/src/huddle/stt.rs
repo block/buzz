@@ -740,6 +740,12 @@ fn process_16k_samples(
                     .is_some_and(|best| decode_collapsed(&text, best));
                 if collapsed {
                     eprintln!("buzz-desktop: STT partial collapsed ({text:?}) — suppressed");
+                } else if lone_filler(&text) {
+                    // Not shown and not recorded as best/punct partial: a
+                    // filler-only phrase must reach flush_to_stt with
+                    // best_partial=None so its final is dropped there instead
+                    // of resurrected by the collapse guard.
+                    eprintln!("buzz-desktop: STT partial is a lone filler ({text:?}) — suppressed");
                 } else if !text.is_empty() {
                     let mut text = text;
                     // Second collapse shape — see stitch_prefix_collapse.
@@ -786,6 +792,20 @@ fn norm_words(s: &str) -> String {
         })
         .collect();
     mapped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A decode that is nothing but one filler word. Parakeet hallucinates these
+/// ("Yeah.", "Mm.") on breaths/hums/clicks that outlast the VAD onset
+/// debounce (see ONSET_DEBOUNCE_FRAMES), and the composer ends up with a
+/// "Yeah." for every random noise. A phrase whose decodes never grew past a
+/// lone filler never contained speech — suppress it end to end.
+/// ponytail: word-list heuristic; a deliberately dictated bare "Yeah." is
+/// also dropped — as part of any sentence it survives.
+fn lone_filler(text: &str) -> bool {
+    matches!(
+        norm_words(text).as_str(),
+        "yeah" | "uh" | "um" | "mm" | "hmm" | "mhm" | "huh" | "uh huh" | "mm hmm"
+    )
 }
 
 /// Punctuation from the 110M model is unstable: re-decodes of the same phrase
@@ -936,6 +956,24 @@ mod stitch_prefix_collapse_tests {
 }
 
 #[cfg(test)]
+mod lone_filler_tests {
+    use super::lone_filler;
+
+    #[test]
+    fn trace_strings() {
+        // The noise phrases from the 2026-07-24 ramble trace.
+        assert!(lone_filler("Yeah."));
+        assert!(lone_filler("Mm."));
+        assert!(lone_filler("Uh-huh."));
+        // Real speech that merely starts with or resembles filler survives.
+        assert!(!lone_filler("Yeah, so"));
+        assert!(!lone_filler("The problem."));
+        assert!(!lone_filler("Testing."));
+        assert!(!lone_filler(""));
+    }
+}
+
+#[cfg(test)]
 mod decode_collapsed_tests {
     use super::decode_collapsed;
 
@@ -963,6 +1001,15 @@ fn flush_to_stt(
     best_partial: Option<String>,
 ) {
     let mut text = prefer_punctuated(decode_speech(speech_buf, recognizer), punct_hint.as_deref());
+    // Noise gate — see lone_filler. best_partial=None means no real partial
+    // was ever shown for this phrase (filler partials are never recorded), so
+    // a lone-filler final is a hallucinated noise, not speech the user watched
+    // appear. The empty final still flows through live_tx so the frontend
+    // clears any state for the phrase.
+    if live_tx.is_some() && best_partial.is_none() && lone_filler(&text) {
+        eprintln!("buzz-desktop: STT final is a lone filler ({text:?}) — dropped");
+        text = String::new();
+    }
     // Collapse guard — see decode_collapsed. A collapsed final would replace
     // the sentence on screen with nothing (or junk); keep the best partial
     // the user was looking at instead.
