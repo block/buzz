@@ -61,19 +61,30 @@ pub async fn cmd_get_users(
         .collect();
     let output = match format {
         crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> = profiles
-                .iter()
-                .map(|p| serde_json::json!({
-                    "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
-                    "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
-                }))
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact_profiles(&profiles)).unwrap_or_default()
         }
+        crate::OutputFormat::Table => crate::output::render_rows(&compact_profiles(&profiles)),
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
     };
     println!("{output}");
     Ok(())
+}
+
+/// Reduced user fields shared by `--format compact` and `--format table`.
+fn compact_profiles(profiles: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    profiles
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
+                "display_name": p
+                    .get("display_name")
+                    .or_else(|| p.get("name"))
+                    .cloned()
+                    .unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 /// Search for users by display name via NIP-50 full-text search on kind:0 profiles.
@@ -132,15 +143,9 @@ async fn search_by_name(
         .collect();
     let output = match format {
         crate::OutputFormat::Compact => {
-            let compact: Vec<serde_json::Value> = profiles
-                .iter()
-                .map(|p| serde_json::json!({
-                    "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
-                    "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
-                }))
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact_profiles(&profiles)).unwrap_or_default()
         }
+        crate::OutputFormat::Table => crate::output::render_rows(&compact_profiles(&profiles)),
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
     };
     println!("{output}");

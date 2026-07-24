@@ -44,24 +44,27 @@ pub async fn cmd_get_feed(
     let normalized = normalize_events(&events);
     let output = match format {
         crate::OutputFormat::Compact => {
-            let evts: Vec<serde_json::Value> =
-                serde_json::from_str(&normalized).unwrap_or_default();
-            let compact: Vec<serde_json::Value> = evts
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "id": e.get("id").cloned().unwrap_or_default(),
-                        "content": e.get("content").cloned().unwrap_or_default(),
-                        "created_at": e.get("created_at").cloned().unwrap_or_default(),
-                    })
-                })
-                .collect();
-            serde_json::to_string(&compact).unwrap_or_default()
+            serde_json::to_string(&compact_feed(&normalized)).unwrap_or_default()
         }
+        crate::OutputFormat::Table => crate::output::render_rows(&compact_feed(&normalized)),
         crate::OutputFormat::Json => normalized,
     };
     println!("{output}");
     Ok(())
+}
+
+/// Reduced feed fields shared by `--format compact` and `--format table`.
+fn compact_feed(normalized: &str) -> Vec<serde_json::Value> {
+    let evts: Vec<serde_json::Value> = serde_json::from_str(normalized).unwrap_or_default();
+    evts.iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.get("id").cloned().unwrap_or_default(),
+                "content": e.get("content").cloned().unwrap_or_default(),
+                "created_at": e.get("created_at").cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 pub async fn dispatch(

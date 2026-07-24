@@ -2,6 +2,7 @@ pub mod agent_management;
 mod client;
 mod commands;
 mod error;
+mod output;
 mod validate;
 
 use clap::{Parser, Subcommand};
@@ -89,7 +90,9 @@ struct Cli {
     #[arg(long, env = "BUZZ_AUTH_TAG")]
     auth_tag: Option<String>,
 
-    /// Output format: 'json' (default, full fields) or 'compact' (reduced fields).
+    /// Output format: 'json' (default, full fields), 'compact' (reduced
+    /// fields), or 'table' (human-friendly terminal table of the reduced
+    /// fields).
     #[arg(long, value_enum, default_value = "json")]
     format: OutputFormat,
 
@@ -169,6 +172,9 @@ pub enum OutputFormat {
     /// Reduced fields for agent scanning
     #[value(name = "compact")]
     Compact,
+    /// Human-friendly terminal table of the reduced (compact) fields
+    #[value(name = "table")]
+    Table,
 }
 
 #[derive(Subcommand)]
