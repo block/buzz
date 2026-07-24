@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **grok** (`grok agent stdio`), **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
 
 ## Prerequisites
 
@@ -88,6 +88,27 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Grok Build
+
+Grok Build speaks ACP natively over stdio — no separate `*-acp` adapter.
+
+```bash
+# Install: https://x.ai/cli (binary often lands in ~/.grok/bin)
+grok login   # or export XAI_API_KEY=...
+
+export BUZZ_ACP_AGENT_COMMAND="grok"
+export BUZZ_ACP_AGENT_ARGS="agent --always-approve stdio"
+
+> **Maintainer note:** Grok installs may also put a bare `agent` shim on PATH.
+> Buzz registers **`grok` + args**, never a second runtime keyed as nested `agent`.
+> Cursor uses `cursor-agent` for the same reason (shared shim name).
+
+buzz-acp
+```
+
+`--always-approve` is recommended for managed agents so tool permission prompts
+do not block headless turns.
 
 ## Configuration
 
@@ -169,7 +190,24 @@ buzz-acp --respond-to anyone
 buzz-acp --respond-to nobody --heartbeat-interval 300
 ```
 
-### Configuration Examples
+### Running with Grok Build
+
+Grok Build speaks ACP natively over stdio — no separate `*-acp` adapter.
+
+```bash
+# Install: https://x.ai/cli (binary often lands in ~/.grok/bin)
+grok login   # or export XAI_API_KEY=...
+
+export BUZZ_ACP_AGENT_COMMAND="grok"
+export BUZZ_ACP_AGENT_ARGS="agent --always-approve stdio"
+
+buzz-acp
+```
+
+`--always-approve` is recommended for managed agents so tool permission prompts
+do not block headless turns.
+
+## Configuration Examples
 
 **Single agent, no heartbeat (default):**
 ```bash

@@ -13,10 +13,11 @@ mod runtime_metadata;
 
 pub(crate) use runtime_metadata::KnownAcpRuntime;
 
-const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
-const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
-const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
-const BUZZ_AGENT_AVATAR_URL: &str =
+pub(crate) const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
+pub(crate) const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
+pub(crate) const GROK_AVATAR_URL: &str = "https://x.ai/favicon.ico";
+pub(crate) const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+pub(crate) const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
 fn common_binary_paths() -> &'static [PathBuf] {
@@ -38,6 +39,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
             paths.extend([
                 home.join(".local/share/mise/shims"),
                 home.join(".local/bin"),
+                home.join(".grok/bin"),
                 home.join(".volta/bin"),
                 home.join(".asdf/shims"),
             ]);
@@ -156,6 +158,50 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+
+    // Grok Build speaks ACP natively over stdio (`grok agent stdio`) —
+    // no separate *-acp npm adapter (same class as Goose / Cursor).
+    // Auth: `grok login` or XAI_API_KEY. For managed/headless agents we default
+    // `--always-approve` so tool calls do not block on a TTY prompt.
+    //
+    // PATH collision note for maintainers: the install may also drop an
+    // `agent` shim under ~/.local/bin. Registry discovery intentionally uses
+    // ONLY the `grok` binary (+ `agent` / `stdio` ARGS). Bare `agent` must
+    // never appear in `commands` here — Cursor's entry owns that name and
+    // disambiguates via path heuristics (see cursor-acp PR / is_cursor_agent_binary).
+    KnownAcpRuntime {
+        id: "grok",
+        label: "Grok Build",
+        commands: &["grok"],
+        aliases: &["grok-build", "grokbuild"],
+        avatar_url: GROK_AVATAR_URL,
+        mcp_command: Some("buzz-dev-mcp"),
+        mcp_hooks: false,
+        underlying_cli: Some("grok"),
+        cli_install_commands: &["curl -fsSL https://x.ai/cli/install.sh | bash"],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://docs.x.ai/developers/guides/grok-cli",
+        cli_install_hint: "Install Grok Build via the official xAI install script.",
+        adapter_install_hint: "",
+        skill_dir: Some(".grok/skills"),
+        supports_acp_model_switching: false,
+        model_env_var: Some("XAI_MODEL"),
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.grok/config.toml"),
+        config_file_format: Some("toml"),
+        supports_acp_native_config: false,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        // No stable `grok auth status` probe today — login is interactive /
+        // env-key based (same posture as Goose for auth_probe_args).
+        login_hint: Some("Run `grok login` to authenticate (or set XAI_API_KEY)."),
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -342,7 +388,15 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
+        // goose speaks ACP as a subcommand (`goose acp`).
         "goose" => Some(vec!["acp".to_string()]),
+        // Grok Build ACP server over stdio. `--always-approve` keeps managed
+        // agents from blocking on interactive tool-permission prompts.
+        "grok" | "grok-build" | "grokbuild" => Some(vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
