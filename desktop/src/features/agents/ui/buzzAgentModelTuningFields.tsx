@@ -17,6 +17,8 @@ import {
   BUZZ_AGENT_MAX_CONTEXT_TOKENS,
   BUZZ_AGENT_MAX_OUTPUT_TOKENS,
   BUZZ_AGENT_MAX_ROUNDS,
+  BUZZ_AGENT_SERVICE_TIER,
+  BUZZ_AGENT_SERVICE_TIER_VALUES,
   BUZZ_AGENT_THINKING_EFFORT,
   BUZZ_AGENT_THINKING_EFFORT_VALUES,
   getProviderEffortConfig,
@@ -221,6 +223,7 @@ export function BuzzAgentModelTuningFields({
     effortConfig;
 
   const currentEffort = envVars[BUZZ_AGENT_THINKING_EFFORT] ?? "";
+  const isOpenAi = provider?.trim().toLowerCase() === "openai";
   useEffortAutoClear({
     currentEffort,
     effortValid,
@@ -257,6 +260,38 @@ export function BuzzAgentModelTuningFields({
             blank to inherit from the global or persona default.
           </p>
         </div>
+
+        {isOpenAi && (
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium" htmlFor="ba-service-tier">
+              Service tier
+            </label>
+            <select
+              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
+              data-testid="ba-service-tier-select"
+              id="ba-service-tier"
+              onChange={(event) =>
+                onEnvVarChange(BUZZ_AGENT_SERVICE_TIER, event.target.value)
+              }
+              value={envVars[BUZZ_AGENT_SERVICE_TIER] ?? ""}
+            >
+              <option value="">
+                {inheritedEnvVars[BUZZ_AGENT_SERVICE_TIER]
+                  ? `Inherit (${inheritedEnvVars[BUZZ_AGENT_SERVICE_TIER]})`
+                  : "Inherit (agent default)"}
+              </option>
+              {BUZZ_AGENT_SERVICE_TIER_VALUES.map((tier) => (
+                <option key={tier} value={tier}>
+                  {tier}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground" id="help-ba-service-tier">
+              Controls OpenAI request processing priority. Leave blank to use
+              the project default.
+            </p>
+          </div>
+        )}
 
         {/* Max Rounds */}
         <div className="space-y-1.5">

@@ -683,6 +683,27 @@ pub enum OpenAiApi {
     Auto,
 }
 
+/// OpenAI request processing tier. `None` leaves the provider default intact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiServiceTier {
+    Auto,
+    Default,
+    Flex,
+    Priority,
+}
+
+impl OpenAiServiceTier {
+    /// Return the wire-format value expected by OpenAI APIs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Default => "default",
+            Self::Flex => "flex",
+            Self::Priority => "priority",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub provider: Provider,
@@ -730,6 +751,8 @@ pub struct Config {
     /// Thinking/reasoning effort level. `None` = use provider default (no
     /// thinking config sent). Set via `BUZZ_AGENT_THINKING_EFFORT`.
     pub thinking_effort: Option<ThinkingEffort>,
+    /// OpenAI processing tier. Set via `BUZZ_AGENT_SERVICE_TIER`.
+    pub service_tier: Option<OpenAiServiceTier>,
 }
 
 impl Config {
@@ -824,6 +847,7 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
+            service_tier: parse_service_tier(env("BUZZ_AGENT_SERVICE_TIER").as_deref())?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -864,6 +888,7 @@ impl Config {
             hook_servers: HookServers::None,
             hints_enabled: false,
             thinking_effort: None,
+            service_tier: None,
         }
     }
 
@@ -948,6 +973,22 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+/// Parse the optional OpenAI service tier. Empty values preserve provider defaults.
+pub fn parse_service_tier(raw: Option<&str>) -> Result<Option<OpenAiServiceTier>, String> {
+    match raw.map(str::trim).filter(|value| !value.is_empty()) {
+        None => Ok(None),
+        Some(value) => match value.to_ascii_lowercase().as_str() {
+            "auto" => Ok(Some(OpenAiServiceTier::Auto)),
+            "default" => Ok(Some(OpenAiServiceTier::Default)),
+            "flex" => Ok(Some(OpenAiServiceTier::Flex)),
+            "priority" => Ok(Some(OpenAiServiceTier::Priority)),
+            other => Err(format!(
+                "config: BUZZ_AGENT_SERVICE_TIER={other} not supported (use auto|default|flex|priority)"
+            )),
+        },
     }
 }
 
@@ -1345,6 +1386,25 @@ mod tests {
             err.contains("none|minimal|low|medium|high|xhigh|max"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn parse_service_tier_accepts_openai_values_case_insensitively() {
+        assert_eq!(
+            parse_service_tier(Some(" FLEX ")).unwrap(),
+            Some(OpenAiServiceTier::Flex)
+        );
+        assert_eq!(
+            parse_service_tier(Some("priority")).unwrap(),
+            Some(OpenAiServiceTier::Priority)
+        );
+        assert_eq!(parse_service_tier(Some(" ")).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_service_tier_rejects_unknown_value() {
+        let err = parse_service_tier(Some("economy")).unwrap_err();
+        assert!(err.contains("BUZZ_AGENT_SERVICE_TIER=economy"), "{err}");
     }
 
     #[test]
