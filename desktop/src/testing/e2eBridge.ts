@@ -149,6 +149,13 @@ type E2eConfig = {
       name?: string;
       expiresAt: string;
     } | null;
+    /** Optional policy returned by the native join-policy discovery command. */
+    joinPolicy?: {
+      terms_markdown?: string;
+      privacy_markdown?: string;
+      age_attestation_required: boolean;
+      version: string;
+    } | null;
     /** Delay Builderlab login completion so cancellation/retry UI can be tested. */
     builderlabLoginDelayMs?: number;
     /** Bound Builderlab Nostr identity. Null/omitted = not linked yet. */
@@ -9511,6 +9518,8 @@ export function maybeInstallE2eTauriMocks() {
         // seeded empty/default path as valid so Add Community can continue to
         // relay-policy discovery.
         return;
+      case "fetch_join_policy":
+        return activeConfig?.mock?.joinPolicy ?? null;
       case "apply_workspace": {
         const applyDelayMs = activeConfig?.mock?.applyCommunityDelayMs ?? 0;
         if (applyDelayMs > 0) {
