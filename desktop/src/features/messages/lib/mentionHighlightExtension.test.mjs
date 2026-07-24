@@ -1,10 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { getSchema } from "@tiptap/core";
+import StarterKit from "@tiptap/starter-kit";
+
 import {
   buildHighlightPatterns,
+  findAgentMentionRanges,
   findHighlightMatches,
+  snapCaretOutOfAgentMention,
 } from "./mentionHighlightExtension.ts";
+
+// Schema mirrors the composer for document-absolute position tests.
+const schema = getSchema([
+  StarterKit.configure({
+    hardBreak: { keepMarks: true },
+    heading: false,
+    trailingNode: false,
+    link: false,
+  }),
+]);
+const para = (...c) => schema.nodes.paragraph.create(null, c);
+const t = (s) => schema.text(s);
+function doc(...content) {
+  return schema.nodes.doc.create(null, content);
+}
 
 // ── buildHighlightPatterns ────────────────────────────────────────────
 
@@ -163,4 +183,62 @@ test("#general should NOT match inside #generally (trailing word boundary)", () 
   const patterns = buildHighlightPatterns([], ["general"]);
   const matches = findHighlightMatches("#generally", patterns);
   assert.equal(matches.length, 0);
+});
+
+// ── Agent-mention caret snap (#2707) ──────────────────────────────────
+// Persistent auto-tag keeps `@Agent ` at the head of the composer. Mentions
+// are decorations (not atoms) and the `@` is width:0, so a click that looks
+// like the start of the chip often lands *inside* the name. Typing there
+// mutates the display name and drops the decoration.
+
+test("findAgentMentionRanges locates agent mentions in document coords", () => {
+  // PM: doc=0, para opens at 0, text starts at 1: "@Ada " is positions 1..5
+  const d = doc(para(t("@Ada hello")));
+  const ranges = findAgentMentionRanges(d, ["Ada"]);
+  assert.equal(ranges.length, 1);
+  assert.equal(ranges[0].from, 1);
+  assert.equal(ranges[0].to, 5); // "@Ada"
+});
+
+test("snapCaretOutOfAgentMention leaves edge positions alone", () => {
+  const d = doc(para(t("@Ada ")));
+  // Positions: 1=before @, 5=after a, 6=after trailing space
+  assert.equal(snapCaretOutOfAgentMention(d, 1, ["Ada"]), 1);
+  assert.equal(snapCaretOutOfAgentMention(d, 5, ["Ada"]), 5);
+  assert.equal(snapCaretOutOfAgentMention(d, 6, ["Ada"]), 6);
+});
+
+test("snapCaretOutOfAgentMention snaps interior caret past trailing space", () => {
+  // "@Ada " — interior positions 2..4 (after @, mid-name) must jump to 6
+  // (after the trailing space hydration always inserts).
+  const d = doc(para(t("@Ada ")));
+  for (const pos of [2, 3, 4]) {
+    assert.equal(
+      snapCaretOutOfAgentMention(d, pos, ["Ada"]),
+      6,
+      `interior pos ${pos} should snap after trailing space`,
+    );
+  }
+});
+
+test("snapCaretOutOfAgentMention snaps to name end when no trailing space", () => {
+  const d = doc(para(t("@Ada")));
+  assert.equal(snapCaretOutOfAgentMention(d, 3, ["Ada"]), 5);
+});
+
+test("snapCaretOutOfAgentMention ignores non-agent mention names", () => {
+  // Human-only name list: no snap (agents are the ones with hidden @ + auto-tag).
+  const d = doc(para(t("@Alice hello")));
+  assert.equal(snapCaretOutOfAgentMention(d, 3, []), 3);
+});
+
+test("snapCaretOutOfAgentMention handles multiple agent chips", () => {
+  // "@Ada @Bob " — caret inside Bob should land after Bob's trailing space.
+  const d = doc(para(t("@Ada @Bob more")));
+  const ranges = findAgentMentionRanges(d, ["Ada", "Bob"]);
+  assert.equal(ranges.length, 2);
+  const bob = ranges[1];
+  const interior = bob.from + 2;
+  const snapped = snapCaretOutOfAgentMention(d, interior, ["Ada", "Bob"]);
+  assert.equal(snapped, bob.to + 1); // consume trailing space after @Bob
 });
