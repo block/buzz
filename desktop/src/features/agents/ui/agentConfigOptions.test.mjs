@@ -141,9 +141,10 @@ test("runtimeSupportsLlmProviderSelection is true for buzz-agent and goose", () 
   assert.equal(runtimeSupportsLlmProviderSelection("goose"), true);
 });
 
-test("runtimeSupportsLlmProviderSelection is false for codex and claude", () => {
+test("runtimeSupportsLlmProviderSelection is false for codex, claude, and kimi", () => {
   assert.equal(runtimeSupportsLlmProviderSelection("codex"), false);
   assert.equal(runtimeSupportsLlmProviderSelection("claude"), false);
+  assert.equal(runtimeSupportsLlmProviderSelection("kimi"), false);
 });
 
 test("resetConfigForHarnessChange clears harness-specific values", () => {
