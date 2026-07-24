@@ -151,44 +151,19 @@ mod tests {
     use axum::body::to_bytes;
     use buzz_relay_mesh::endpoint::MeshEndpoint;
     use buzz_relay_mesh::{
-        InboundHandler, MeshDatagram, MeshError, MeshStream, MeshStreamFrame, Profile, RuntimeId,
+        InboundHandler, MeshDatagram, MeshError, MeshStream, MeshStreamFrame, RuntimeId,
         StreamHello,
     };
-    use std::sync::Mutex;
     use uuid::Uuid;
 
     use super::*;
-    use crate::tunnel::directory::{SessionDirectory, SessionLease};
-
-    /// Serialize mesh echo tests against shared Redis lease keys / local UDP
-    /// binds so parallel `cargo test -p buzz-relay --lib` does not flake (#2458).
-    static MESH_DEMO_IO_LOCK: Mutex<()> = Mutex::new(());
+    use crate::tunnel::directory::SessionDirectory;
 
     fn pool() -> deadpool_redis::Pool {
         let url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into());
         deadpool_redis::Config::from_url(url)
             .create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .expect("create redis pool")
-    }
-
-    async fn clear_keys(directory: &SessionDirectory, community_id: CommunityId, session_id: Uuid) {
-        let base = format!("buzz:{}:tunnel:{}", community_id, session_id);
-        let _ = directory
-            .release(&SessionLease {
-                community_id,
-                session_id,
-                owner_runtime_id: RuntimeId([1; 32]),
-                generation: 1,
-                profile: Profile::ReliableStream,
-            })
-            .await;
-        let mut conn = pool().get().await.expect("redis conn");
-        let _: () = redis::cmd("DEL")
-            .arg(format!("{base}:lease"))
-            .arg(format!("{base}:generation"))
-            .query_async(&mut *conn)
-            .await
-            .expect("clear keys");
     }
 
     async fn redis_directory_if_available() -> Option<SessionDirectory> {
@@ -198,9 +173,12 @@ mod tests {
             .query_async::<String>(&mut *conn)
             .await
             .ok()?;
+        // Keep test leases well above QUIC setup + task-spawn latency under
+        // full-suite parallelism so the owner lease cannot expire mid-forward
+        // (#2458). Production default is 30s; tests do not exercise expiry.
         Some(SessionDirectory::with_lease_ttl(
             pool,
-            Duration::from_secs(5),
+            Duration::from_secs(60),
         ))
     }
 
@@ -258,15 +236,9 @@ mod tests {
     /// First post for a session acquires the fenced lease and reports `owned`.
     #[tokio::test]
     async fn demo_join_owned_arm_reports_generation() {
-        let _guard = MESH_DEMO_IO_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(directory) = redis_directory_if_available().await else {
             return;
         };
-        let community_id = Uuid::new_v4();
-        let session_id = Uuid::new_v4();
-        clear_keys(&directory, CommunityId::from_uuid(community_id), session_id).await;
         let router = ReliableStreamRouter::new(
             directory.clone(),
             std::sync::Arc::new(NoopTransport),
@@ -276,8 +248,8 @@ mod tests {
             &router,
             &directory,
             DemoEchoRequest {
-                community_id,
-                session_id,
+                community_id: Uuid::new_v4(),
+                session_id: Uuid::new_v4(),
                 payload: "unused".into(),
             },
         )
@@ -286,7 +258,6 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["outcome"], "owned");
         assert!(body["generation"].as_u64().is_some());
-        clear_keys(&directory, CommunityId::from_uuid(community_id), session_id).await;
     }
 
     /// Second runtime forwards to the owner and round-trips the payload
@@ -294,15 +265,11 @@ mod tests {
     /// end to end over a real mesh stream pair.
     #[tokio::test]
     async fn demo_join_forwarded_arm_round_trips_echo() {
-        let _guard = MESH_DEMO_IO_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(directory) = redis_directory_if_available().await else {
             return;
         };
         let community_id = Uuid::new_v4();
         let session_id = Uuid::new_v4();
-        clear_keys(&directory, CommunityId::from_uuid(community_id), session_id).await;
 
         let bind = || "127.0.0.1:0".parse().unwrap();
         let local_endpoint = MeshEndpoint::bind(bind()).await.unwrap();
@@ -377,6 +344,5 @@ mod tests {
         assert_eq!(body["outcome"], "forwarded");
         assert_eq!(body["echoed_payload"], "mesh echo evidence");
         owner_task.abort();
-        clear_keys(&directory, CommunityId::from_uuid(community_id), session_id).await;
     }
 }
