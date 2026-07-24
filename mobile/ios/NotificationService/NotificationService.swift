@@ -77,7 +77,9 @@ final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
   }
 
   func resolve(completion: @escaping (BuzzPushResolution?) -> Void) {
-    let communities = loadCommunities().filter {
+    let loadedCommunities = loadCommunities()
+    removeStaleWatermarks(activeCommunityIDs: Set(loadedCommunities.map(\.id)))
+    let communities = loadedCommunities.filter {
       $0.pubkey?.isEmpty == false && loadPrivateKey(communityID: $0.id) != nil
     }
     guard !communities.isEmpty else { completion(nil); return }
@@ -96,10 +98,13 @@ final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     group.notify(queue: .global(qos: .userInitiated)) { [weak self] in
       guard let self else { return }
       let newest = candidates.max {
-        $0.1.createdAt == $1.1.createdAt ? $0.1.id < $1.1.id : $0.1.createdAt < $1.1.createdAt
+        $0.1.createdAt == $1.1.createdAt ? $0.1.id > $1.1.id : $0.1.createdAt < $1.1.createdAt
       }
       for candidate in candidates {
-        self.defaults?.set(candidate.1.createdAt, forKey: self.watermarkKey(candidate.2.id))
+        self.defaults?.set(
+          PushWatermark.persistedTimestamp(eventTimestamp: candidate.1.createdAt),
+          forKey: PushWatermark.key(communityID: candidate.2.id)
+        )
       }
       completion(newest?.0)
     }
@@ -113,8 +118,11 @@ final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       completion(nil); return
     }
     var filter: [String: Any] = ["kinds": [9, 40002, 45001, 45003], "#p": [pubkey], "limit": 10]
-    let watermark = defaults?.integer(forKey: watermarkKey(community.id)) ?? 0
-    if watermark > 0 { filter["since"] = watermark + 1 }
+    let watermarkKey = PushWatermark.key(communityID: community.id)
+    let storedWatermark = defaults?.integer(forKey: watermarkKey) ?? 0
+    let watermark = PushWatermark.queryTimestamp(storedWatermark: storedWatermark)
+    if watermark != storedWatermark { defaults?.set(watermark, forKey: watermarkKey) }
+    if let since = PushWatermark.querySince(watermark: watermark) { filter["since"] = since }
     guard let body = try? JSONSerialization.data(withJSONObject: [filter]) else { completion(nil); return }
     let url = URL(string: "/query", relativeTo: community.relayURL)!
     var request = URLRequest(url: url)
@@ -128,7 +136,12 @@ final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
       guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode),
         let data, let events = try? JSONDecoder().decode([VerifiedNostrEvent].self, from: data)
       else { completion(nil); return }
-      completion(Self.decodeResolution(events: events.filter { $0.hasValidIDAndSignature() }, community: community))
+      completion(Self.decodeResolution(
+        events: events.filter {
+          $0.hasValidIDAndSignature() && PushWatermark.isAcceptable(eventTimestamp: $0.createdAt)
+        },
+        community: community
+      ))
     }.resume()
   }
 
@@ -164,7 +177,15 @@ final class BuzzPushNotificationResolver: BuzzPushNotificationResolving {
     pubkey.count > 8 ? String(pubkey.prefix(8)) + "…" : pubkey
   }
 
-  private func watermarkKey(_ id: String) -> String { "buzz.push.watermark.\(id)" }
+  private func removeStaleWatermarks(activeCommunityIDs: Set<String>) {
+    guard let defaults else { return }
+    for key in PushWatermark.staleKeys(
+      in: Array(defaults.dictionaryRepresentation().keys),
+      activeCommunityIDs: activeCommunityIDs
+    ) {
+      defaults.removeObject(forKey: key)
+    }
+  }
 
   private func loadPrivateKey(communityID: String) -> String? {
     var query: [String: Any] = [

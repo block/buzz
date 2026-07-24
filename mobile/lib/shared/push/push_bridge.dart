@@ -14,6 +14,17 @@ const _channel = MethodChannel('buzz/push');
 final apnsDeviceToken = ValueNotifier<String?>(null);
 final apnsRegistrationError = ValueNotifier<String?>(null);
 
+/// Latest failure to export the community snapshot used by the iOS
+/// notification service extension. Snapshot export is push enrichment and must
+/// never gate authentication or community persistence.
+final pushCommunitySnapshotError = ValueNotifier<String?>(null);
+
+void reportPushCommunitySnapshotError(Object error, StackTrace stackTrace) {
+  pushCommunitySnapshotError.value = error.toString();
+  debugPrint('Push community snapshot export failed: $error');
+  debugPrintStack(stackTrace: stackTrace);
+}
+
 Future<void> registerBuzzPushCommunitySnapshot(
   List<Community> communities,
 ) async {

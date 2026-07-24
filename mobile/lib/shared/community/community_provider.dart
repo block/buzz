@@ -21,9 +21,47 @@ final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
   return registerBuzzPushCommunitySnapshot;
 });
 
+final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {
+  return _CommunitySnapshotSync(ref.read(communitySnapshotWriterProvider));
+});
+
+class _CommunitySnapshotSync {
+  _CommunitySnapshotSync(this._writer);
+
+  final CommunitySnapshotWriter _writer;
+  String? _lastSuccessfulSnapshot;
+
+  Future<void> write(List<Community> communities) async {
+    final fingerprint = communities
+        .map(
+          (community) => [
+            community.id,
+            community.name,
+            community.relayUrl,
+            community.pubkey,
+            community.nsec,
+          ].join('\u0000'),
+        )
+        .join('\u0001');
+    if (fingerprint == _lastSuccessfulSnapshot) return;
+
+    await _writer(communities);
+    _lastSuccessfulSnapshot = fingerprint;
+  }
+}
+
+Future<void> syncCommunitySnapshot(Ref ref, List<Community> communities) async {
+  try {
+    await ref.read(_communitySnapshotSyncProvider).write(communities);
+    pushCommunitySnapshotError.value = null;
+  } catch (error, stackTrace) {
+    reportPushCommunitySnapshotError(error, stackTrace);
+  }
+}
+
 Future<void> syncStoredCommunitySnapshot(Ref ref) async {
   final communities = await ref.read(communityStorageProvider).loadAll();
-  await ref.read(communitySnapshotWriterProvider)(communities);
+  await syncCommunitySnapshot(ref, communities);
 }
 
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
@@ -31,7 +69,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   Future<List<Community>> build() async {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
-    await ref.read(communitySnapshotWriterProvider)(communities);
+    await syncCommunitySnapshot(ref, communities);
     return communities;
   }
 
@@ -56,14 +94,14 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
-      await registerBuzzPushCommunitySnapshot(updatedList);
+      await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
     }
 
     await storage.save(community);
     final updatedList = [...current, community];
     state = AsyncData(updatedList);
-    await registerBuzzPushCommunitySnapshot(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
     return community.id;
   }
 
@@ -74,7 +112,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final current = state.value ?? [];
     final updatedList = current.where((w) => w.id != id).toList();
     state = AsyncData(updatedList);
-    await registerBuzzPushCommunitySnapshot(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
 
     // If we removed the active community, switch to another or sign out.
     final activeId = await storage.loadActiveId();
@@ -115,7 +153,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current];
     updatedList[index] = updated;
     state = AsyncData(updatedList);
-    await registerBuzzPushCommunitySnapshot(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
   }
 }
 

@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:nostr/nostr.dart' as nostr;
@@ -5,6 +6,7 @@ import 'package:buzz/shared/auth/auth_provider.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:buzz/shared/push/push_bridge.dart';
 
 import '../community/community_storage_test.dart';
 
@@ -121,6 +123,68 @@ void main() {
       );
     },
   );
+
+  test(
+    'snapshot export failure does not gate startup authentication',
+    () async {
+      final storage = CommunityStorage(secure: FakeSecureStorage());
+      final community = Community.create(
+        name: 'Existing',
+        relayUrl: 'https://existing.example',
+        nsec: nostr.Keys.generate().nsec,
+      );
+      await storage.save(community);
+      await storage.saveActiveId(community.id);
+      final container = ProviderContainer(
+        overrides: [
+          communityStorageProvider.overrideWithValue(storage),
+          communitySnapshotWriterProvider.overrideWithValue((_) async {
+            throw PlatformException(
+              code: 'save_failed',
+              message: 'Keychain unavailable',
+            );
+          }),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      final auth = await container.read(authProvider.future);
+
+      expect(auth.status, AuthStatus.authenticated);
+      expect(auth.community?.id, community.id);
+      expect(pushCommunitySnapshotError.value, contains('save_failed'));
+    },
+  );
+
+  test('snapshot export failure does not gate direct authentication', () async {
+    final storage = CommunityStorage(secure: FakeSecureStorage());
+    final community = Community.create(
+      name: 'Added',
+      relayUrl: 'https://added.example',
+      nsec: nostr.Keys.generate().nsec,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        communityStorageProvider.overrideWithValue(storage),
+        communitySnapshotWriterProvider.overrideWithValue((_) async {
+          throw PlatformException(
+            code: 'save_failed',
+            message: 'Keychain unavailable',
+          );
+        }),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container
+        .read(authProvider.notifier)
+        .authenticateWithCommunity(community);
+
+    final auth = await container.read(authProvider.future);
+    expect(auth.status, AuthStatus.authenticated);
+    expect(auth.community?.id, community.id);
+    expect((await storage.loadAll()).single.id, community.id);
+  });
 
   test('falls through to the next valid saved community', () async {
     final storage = CommunityStorage(secure: FakeSecureStorage());

@@ -59,6 +59,22 @@ void main() {
       expect(fakeSecure['buzz_workspaces'], isNull);
     });
 
+    test('skips an unchanged snapshot after provider invalidation', () async {
+      final community = Community.create(
+        name: 'Stored',
+        relayUrl: 'https://stored.example.com',
+        nsec: nostr.Keys.generate().nsec,
+      );
+      await communityStorage.save(community);
+      container = createContainer();
+
+      await container.read(communityListProvider.future);
+      container.invalidate(communityListProvider);
+      await container.read(communityListProvider.future);
+
+      expect(snapshots, hasLength(1));
+    });
+
     test('addCommunity adds to list', () async {
       container = createContainer();
       await container.read(communityListProvider.future);
