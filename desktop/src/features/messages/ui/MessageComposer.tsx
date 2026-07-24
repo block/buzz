@@ -10,12 +10,9 @@ import { resolveSentDraftKey } from "@/features/messages/ui/draftSubmitKey";
 import { useEmojiAutocomplete } from "@/features/messages/lib/useEmojiAutocomplete";
 import type { EmojiSuggestion } from "@/features/messages/lib/useEmojiAutocomplete";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
-import { buildCustomEmojiTags } from "@/shared/lib/customEmojiTags";
 import {
-  buildOutgoingMessage,
   findSpoileredImetaMediaUrls,
   type ImetaMedia,
-  mergeOutgoingTags,
   restoreImetaMediaDisplayLabels,
   stripImetaMediaLines,
 } from "@/features/messages/lib/imetaMediaMarkdown";
@@ -26,7 +23,7 @@ import {
   useMediaUpload,
 } from "@/features/messages/lib/useMediaUpload";
 import { useMentions } from "@/features/messages/lib/useMentions";
-import { diffAddedMentionPubkeys } from "@/features/messages/lib/threading";
+import { prepareComposerEditPayload } from "@/features/messages/lib/prepareComposerEditPayload";
 import { getPersistentAgentAudienceScope } from "@/features/messages/lib/persistentAgentAudience";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
@@ -609,36 +606,17 @@ function MessageComposerImpl({
       // effective deletion).
       if (!trimmed && !hasMedia) return;
 
-      // Build the edit's body + imeta tag set. Coerce `mediaTags ?? []`
-      // because edit semantics use `[]` as the explicit "wipe all
-      // attachments" signal — the receiver overlay drops imeta when the
-      // edit carries an empty (but defined) set.
-      const { content: finalContent, mediaTags } = buildOutgoingMessage(
-        trimmed,
-        currentPendingImeta,
-        spoileredAttachmentUrls,
-      );
-
-      // NIP-30: attach `["emoji", shortcode, url]` tags for custom emoji in the
-      // edited body, exactly like the send path. Without this an edited message
-      // ships with no emoji tags, so the receiver can't resolve a `:shortcode:`
-      // and renders the literal text. `?? []` preserves edit semantics (a
-      // defined-but-empty media set means "wipe attachments").
-      const outgoingTags =
-        mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
-        ) ?? [];
-
-      // Notify only mentions this edit *newly adds* (see
-      // diffAddedMentionPubkeys): a typo-fix edit that leaves the mention set
-      // unchanged emits no `p` tags and re-wakes nobody. Computed before the
-      // composer state is cleared below.
-      const addedMentionPubkeys = diffAddedMentionPubkeys(
-        extractMentionPubkeysRef.current(editTargetRef.current.body),
-        extractMentionPubkeysRef.current(finalContent),
-        ownerPubkeyRef.current ?? "",
-      );
+      const { finalContent, outgoingTags, addedMentionPubkeys } =
+        prepareComposerEditPayload({
+          trimmed,
+          previousBody: editTargetRef.current.body,
+          pendingImeta: currentPendingImeta,
+          spoileredAttachmentUrls,
+          customEmoji,
+          ownerPubkey: ownerPubkeyRef.current ?? "",
+          extractMentionPubkeys: extractMentionPubkeysRef.current,
+          getMentionDisplayName: mentions.getMentionDisplayName,
+        });
 
       const savedContent = trimmed;
       const savedImeta = [...currentPendingImeta];
@@ -719,6 +697,7 @@ function MessageComposerImpl({
     mentionSendFlow.isPreparingMentionSend,
     mentionSendFlow.sendMessageWithMentionFlow,
     mentions.clearMentions,
+    mentions.getMentionDisplayName,
     richText.clearContent,
     richText.setContent,
     setComposerContent,
