@@ -9,7 +9,8 @@
 //! the relay is the source of truth. Candidates are grouped and re-queried via
 //! a batched authed `/query`; only events the relay returns are inserted.
 //! Owner-private content is decrypted only after the current identity proves
-//! access through the relay query and local cryptography; failures are dropped.
+//! access through the relay query and local cryptography. Kind 44210 stores
+//! only strict decrypted payload JSON; failures are dropped.
 //!
 //! **Ephemeral scope** (`owner_p`, kind 24200 observer frames): the relay
 //! never stores these, so `/query` cannot verify them. The relay's REQ-time

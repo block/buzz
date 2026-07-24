@@ -1611,7 +1611,7 @@ mod tests {
                 Tag::parse(["d", "run-malformed"]).expect("d"),
                 Tag::parse(["status", "completed"]).expect("status"),
             ];
-            for tags in [
+            for (index, tags) in [
                 common.to_vec(),
                 vec![
                     Tag::public_key(owner.public_key()),
@@ -1624,13 +1624,23 @@ mod tests {
                     common[0].clone(),
                     common[1].clone(),
                 ],
-            ] {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let state = test_state().await;
                 let event =
                     EventBuilder::new(Kind::Custom(KIND_COMMAND_BRIEF as u16), "ciphertext")
                         .tags(tags)
+                        .allow_self_tagging()
                         .sign_with_keys(&owner)
                         .expect("sign malformed command brief");
+                let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
+                assert_eq!(
+                    event.tags.filter(nostr::TagKind::SingleLetter(p)).count(),
+                    [0, 2, 1][index],
+                    "fixture p-tag cardinality"
+                );
                 let filter = Filter::new().id(event.id);
                 let (_owner, mut owner_rx) = register_global_sub(
                     &state,

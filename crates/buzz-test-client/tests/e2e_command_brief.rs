@@ -95,6 +95,17 @@ async fn query(pubkey: Option<&str>, filters: serde_json::Value) -> reqwest::Res
     request.send().await.expect("query")
 }
 
+async fn count(pubkey: Option<&str>, filters: serde_json::Value) -> reqwest::Response {
+    let mut request = reqwest::Client::new()
+        .post(format!("{}/count", relay_http_url()))
+        .header("Content-Type", "application/json")
+        .json(&filters);
+    if let Some(pubkey) = pubkey {
+        request = request.header("X-Pubkey", pubkey);
+    }
+    request.send().await.expect("count")
+}
+
 async fn community_id() -> uuid::Uuid {
     let url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
@@ -178,6 +189,9 @@ async fn real_req_count_id_live_and_http_search_routes_are_owner_private() {
     let mut wrong_ws = BuzzTestClient::connect(&relay_url(), &wrong)
         .await
         .expect("wrong connect");
+    let mut unauth_live = BuzzTestClient::connect_unauthenticated(&relay_url())
+        .await
+        .expect("unauthenticated live connect");
     let live_owner = format!("live-owner-{}", uuid::Uuid::new_v4());
     let live_wrong = format!("live-wrong-{}", uuid::Uuid::new_v4());
     owner_ws
@@ -188,6 +202,11 @@ async fn real_req_count_id_live_and_http_search_routes_are_owner_private() {
         .subscribe(&live_wrong, vec![Filter::new().id(event.id)])
         .await
         .expect("wrong live REQ");
+    let live_unauth = format!("live-unauth-{}", uuid::Uuid::new_v4());
+    unauth_live
+        .subscribe(&live_unauth, vec![Filter::new().id(event.id)])
+        .await
+        .expect("unauthenticated live REQ");
     let _ = owner_ws
         .collect_until_eose(&live_owner, Duration::from_secs(5))
         .await
@@ -196,6 +215,21 @@ async fn real_req_count_id_live_and_http_search_routes_are_owner_private() {
         .collect_until_eose(&live_wrong, Duration::from_secs(5))
         .await
         .expect("wrong EOSE");
+    loop {
+        match unauth_live
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("unauthenticated live denial")
+        {
+            RelayMessage::Auth { .. } => {}
+            RelayMessage::Notice { message } if message.contains("auth-required:") => break,
+            RelayMessage::Event { .. } => {
+                panic!("unauthenticated NIP-CB live REQ leaked an event")
+            }
+            RelayMessage::Count { .. } => panic!("unauthenticated live REQ leaked a count"),
+            other => panic!("expected auth-required live denial, got {other:?}"),
+        }
+    }
 
     assert_eq!(submit(&event, &owner).await["accepted"], true);
     match owner_ws
@@ -212,6 +246,21 @@ async fn real_req_count_id_live_and_http_search_routes_are_owner_private() {
         wrong_ws.recv_event(Duration::from_millis(500)).await,
         Err(TestClientError::Timeout)
     ));
+    loop {
+        match unauth_live.recv_event(Duration::from_millis(500)).await {
+            Err(TestClientError::Timeout) => break,
+            Ok(RelayMessage::Auth { .. } | RelayMessage::Closed { .. }) => {}
+            Ok(RelayMessage::Notice { message }) if message.contains("auth-required:") => {}
+            Ok(RelayMessage::Event { .. }) => {
+                panic!("unauthenticated live route leaked an event after publish")
+            }
+            Ok(RelayMessage::Count { .. }) => {
+                panic!("unauthenticated live route leaked existence after publish")
+            }
+            Ok(other) => panic!("unexpected unauthenticated live frame: {other:?}"),
+            Err(error) => panic!("unauthenticated live receive failed: {error}"),
+        }
+    }
 
     let req_id = format!("owner-req-{}", uuid::Uuid::new_v4());
     owner_ws
@@ -287,9 +336,60 @@ async fn real_req_count_id_live_and_http_search_routes_are_owner_private() {
             RelayMessage::Auth { .. } => {}
             RelayMessage::Notice { message } if message.contains("auth-required:") => break,
             RelayMessage::Event { .. } => panic!("unauthenticated NIP-CB read leaked an event"),
+            RelayMessage::Count { .. } => panic!("unauthenticated REQ leaked a count"),
             other => panic!("expected auth-required denial, got {other:?}"),
         }
     }
+    let unauth_count_id = format!("unauth-count-{}", uuid::Uuid::new_v4());
+    unauthenticated
+        .send_raw(&serde_json::json!([
+            "COUNT",
+            unauth_count_id,
+            owner_filter(&owner)
+        ]))
+        .await
+        .expect("unauthenticated COUNT");
+    loop {
+        match unauthenticated
+            .recv_event(Duration::from_secs(5))
+            .await
+            .expect("unauthenticated COUNT denial")
+        {
+            RelayMessage::Auth { .. } => {}
+            RelayMessage::Closed {
+                subscription_id,
+                message,
+            } if message.contains("auth-required:") => {
+                if subscription_id == unauth_count_id {
+                    break;
+                }
+            }
+            RelayMessage::Notice { message } if message.contains("auth-required:") => break,
+            RelayMessage::Event { .. } => panic!("unauthenticated COUNT leaked an event"),
+            RelayMessage::Count { .. } => panic!("unauthenticated COUNT leaked existence"),
+            other => panic!("expected auth-required COUNT denial, got {other:?}"),
+        }
+    }
+
+    let count_filter = serde_json::json!([{
+        "kinds": [KIND_COMMAND_BRIEF],
+        "#p": [owner.public_key().to_hex()]
+    }]);
+    let owner_count = count(Some(&owner.public_key().to_hex()), count_filter.clone()).await;
+    assert!(owner_count.status().is_success());
+    assert!(owner_count
+        .json::<serde_json::Value>()
+        .await
+        .expect("owner HTTP count")["count"]
+        .as_u64()
+        .is_some_and(|value| value >= 1));
+    assert!(
+        !count(Some(&wrong.public_key().to_hex()), count_filter.clone())
+            .await
+            .status()
+            .is_success()
+    );
+    assert!(!count(None, count_filter).await.status().is_success());
 
     let search = serde_json::json!([{
         "ids": [event.id.to_hex()],
@@ -332,11 +432,19 @@ async fn malformed_stored_command_briefs_fail_closed_at_real_result_routes() {
         ],
     ];
     let mut ids = Vec::new();
-    for tags in variants {
+    for (index, tags) in variants.into_iter().enumerate() {
         let event = EventBuilder::new(Kind::Custom(KIND_COMMAND_BRIEF), fake_nip44_v2())
             .tags(tags)
+            .allow_self_tagging()
             .sign_with_keys(&owner)
             .expect("sign fixture");
+        let p_count = event
+            .tags
+            .filter(nostr::TagKind::SingleLetter(SingleLetterTag::lowercase(
+                Alphabet::P,
+            )))
+            .count();
+        assert_eq!(p_count, [0, 2, 1][index], "fixture p-tag cardinality");
         seed_bypassing_ingest(&event).await;
         ids.push(event.id);
     }
@@ -373,6 +481,21 @@ async fn malformed_stored_command_briefs_fail_closed_at_real_result_routes() {
         RelayMessage::Count { count, .. } => assert_eq!(count, 0),
         other => panic!("expected COUNT, got {other:?}"),
     }
+    let http_count = count(
+        Some(&owner.public_key().to_hex()),
+        serde_json::json!([{
+            "ids": ids.iter().map(|id| id.to_hex()).collect::<Vec<_>>()
+        }]),
+    )
+    .await;
+    assert!(http_count.status().is_success());
+    assert_eq!(
+        http_count
+            .json::<serde_json::Value>()
+            .await
+            .expect("HTTP count")["count"],
+        0
+    );
     let filters = serde_json::json!([{
         "ids": ids.iter().map(|id| id.to_hex()).collect::<Vec<_>>(),
         "limit": 10
