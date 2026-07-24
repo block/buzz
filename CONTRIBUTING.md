@@ -326,7 +326,7 @@ dependency diagram.
 automatically. No special access is required.
 
 **Block team members:** See the internal
-[sprout-releases CONTRIBUTING.md](https://github.com/squareup/sprout-releases/blob/main/CONTRIBUTING.md)
+[buzz-releases CONTRIBUTING.md](https://github.com/squareup/buzz-releases/blob/main/CONTRIBUTING.md)
 for team access setup, onboarding, and the full repo inventory. See
 [RELEASING.md](RELEASING.md) for the release process.
 
