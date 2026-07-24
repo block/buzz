@@ -9414,6 +9414,10 @@ export function maybeInstallE2eTauriMocks() {
         }
         return "nsec1mock000000000000000000000000000000000000000000000000000000";
       }
+      case "save_identity_backup":
+        // The browser harness cannot open a native save dialog. Returning true
+        // lets onboarding specs assert the command and success feedback.
+        return true;
       case "persist_current_identity": {
         // Persist the ephemeral key: clears only the lost flag. The locked flag
         // is cleared only by import_identity; production rejects

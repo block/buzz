@@ -27,6 +27,10 @@ export async function getNsec(): Promise<string> {
   return invokeTauri<string>("get_nsec");
 }
 
+export async function saveIdentityBackup(): Promise<boolean> {
+  return invokeTauri<boolean>("save_identity_backup");
+}
+
 export async function importIdentity(nsec: string): Promise<Identity> {
   return fromRawIdentity(
     await invokeTauri<RawIdentity>("import_identity", { nsec }),

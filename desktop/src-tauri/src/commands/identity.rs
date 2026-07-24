@@ -1,8 +1,11 @@
 use nostr::{
     nips::nip44, Event, EventBuilder, JsonUtil, Keys, Kind, PublicKey, Tag, Timestamp, ToBech32,
 };
+use std::io::Write;
 use tauri::Manager;
 use tauri::State;
+use tauri_plugin_dialog::DialogExt;
+use zeroize::Zeroizing;
 
 use crate::{
     app_state::AppState,
@@ -186,6 +189,66 @@ pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
     keys.secret_key()
         .to_bech32()
         .map_err(|error| format!("encode nsec: {error}"))
+}
+
+fn write_identity_backup(path: &std::path::Path, nsec: &str) -> Result<(), String> {
+    use atomic_write_file::AtomicWriteFile;
+
+    let mut file = AtomicWriteFile::open(path)
+        .map_err(|error| format!("open identity backup for atomic write: {error}"))?;
+
+    // Apply owner-only permissions before any secret bytes reach disk.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("set identity backup permissions: {error}"))?;
+    }
+
+    file.write_all(nsec.as_bytes())
+        .map_err(|error| format!("write identity backup: {error}"))?;
+    file.write_all(b"\n")
+        .map_err(|error| format!("write identity backup: {error}"))?;
+    file.commit()
+        .map_err(|error| format!("commit identity backup: {error}"))
+}
+
+/// Save the current identity key through the native file picker.
+///
+/// The frontend never supplies the key: it is read from trusted app state only
+/// after the user chooses a destination. The plaintext string is zeroized when
+/// this command returns, and Unix backups are written owner-only (`0o600`).
+#[tauri::command]
+pub async fn save_identity_backup(app: tauri::AppHandle) -> Result<bool, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Text file", &["txt"])
+        .set_file_name("buzz-identity-key.txt")
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+
+    let selected = rx
+        .await
+        .map_err(|_| "identity backup dialog closed unexpectedly".to_string())?;
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    let destination = selected
+        .as_path()
+        .ok_or_else(|| "Save dialog returned an invalid path".to_string())?;
+
+    let state = app.state::<AppState>();
+    let keys = state.signing_keys()?;
+    let nsec = Zeroizing::new(
+        keys.secret_key()
+            .to_bech32()
+            .map_err(|error| format!("encode nsec: {error}"))?,
+    );
+    write_identity_backup(destination, &nsec)?;
+
+    Ok(true)
 }
 
 #[tauri::command]
@@ -581,5 +644,36 @@ mod nostr_identity_binding_tests {
         .unwrap_err();
 
         assert_eq!(error, "expires_at is expired");
+    }
+}
+
+#[cfg(test)]
+mod identity_backup_tests {
+    use super::write_identity_backup;
+
+    #[test]
+    fn identity_backup_is_plain_text_with_a_trailing_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("buzz-identity-key.txt");
+
+        write_identity_backup(&path, "nsec1example").unwrap();
+
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "nsec1example\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn identity_backup_replaces_permissive_files_with_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("buzz-identity-key.txt");
+        std::fs::write(&path, "old contents").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_identity_backup(&path, "nsec1example").unwrap();
+
+        let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

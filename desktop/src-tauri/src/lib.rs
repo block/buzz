@@ -663,6 +663,7 @@ pub fn run() {
             title_bar_double_click,
             get_identity,
             get_nsec,
+            save_identity_backup,
             import_identity,
             persist_current_identity,
             get_profile,
