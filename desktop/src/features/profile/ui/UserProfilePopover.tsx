@@ -5,6 +5,7 @@ import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useHuddle } from "@/features/huddle";
+import { formatHuddleActionError } from "@/features/huddle/lib/huddleError";
 import {
   channelsQueryKey,
   useChannelsQuery,
@@ -374,9 +375,7 @@ export function UserProfilePopover({
         setOpen(false);
       }
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Failed to start huddle.",
-      );
+      toast.error(formatHuddleActionError(error, "start"));
     } finally {
       if (isMountedRef.current) {
         setPendingAction(null);

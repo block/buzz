@@ -728,8 +728,10 @@ void main() {
           ),
         );
 
-        // Mention should be rendered as @Alice in a highlighted container.
-        expect(find.text('@Alice'), findsOneWidget);
+        // The desktop-style mention chip renders the prefix and label
+        // separately so they can be aligned independently.
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
       });
 
       testWidgets('highlights an entire multi-word display name', (
@@ -744,7 +746,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@Kenny Lopez'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Kenny Lopez'), findsOneWidget);
         expect(find.text('@Kenny'), findsNothing);
         expect(_allRichText(tester), isNot(contains('Lopez Lopez')));
       });
@@ -759,7 +762,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@unknown'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('unknown'), findsOneWidget);
       });
 
       testWidgets('does not treat email addresses as mentions', (tester) async {
@@ -788,7 +792,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@Alice'));
+        await tester.tap(find.text('Alice'));
         expect(tappedPubkey, 'pk1');
       });
 
@@ -806,7 +810,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@Kenny Lopez'));
+        await tester.tap(find.text('Kenny Lopez'));
         expect(tappedPubkey, 'pk1');
       });
 
@@ -822,7 +826,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.text('@unknown'), warnIfMissed: false);
+        await tester.tap(find.text('unknown'), warnIfMissed: false);
         expect(tapped, isFalse);
       });
     });
@@ -896,7 +900,8 @@ void main() {
         );
 
         expect(_hasBoldSpan(tester, 'Important'), isTrue);
-        expect(find.text('@Alice'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
       });
 
       testWidgets('preserves markdown around mentions', (tester) async {
@@ -909,7 +914,8 @@ void main() {
           ),
         );
 
-        expect(find.text('@Alice'), findsOneWidget);
+        expect(find.text('@'), findsOneWidget);
+        expect(find.text('Alice'), findsOneWidget);
         expect(_allRichText(tester), isNot(contains('**')));
       });
 

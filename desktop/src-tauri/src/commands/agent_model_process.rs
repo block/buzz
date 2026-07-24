@@ -49,6 +49,7 @@ pub(super) async fn run_agent_models_command(
             cmd.env(k, v);
         }
         crate::managed_agents::configure_runtime_cli(&mut cmd, known_acp_runtime(&agent_command));
+        crate::util::configure_no_window(&mut cmd);
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()

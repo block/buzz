@@ -259,35 +259,32 @@ class _CommunityIndicator extends ConsumerWidget {
     return GestureDetector(
       onTap: onTap,
       behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.only(left: _kCommunityAvatarInset),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _CommunityAvatar(name: name),
-            const SizedBox(width: Grid.xxs),
-            if (name != null)
-              Flexible(
-                child: Text(
-                  name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.textTheme.labelLarge?.copyWith(
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              )
-            else
-              Text(
-                'Community',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _CommunityAvatar(name: name),
+          const SizedBox(width: Grid.xxs),
+          if (name != null)
+            Flexible(
+              child: Text(
+                name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: context.textTheme.labelLarge?.copyWith(
                   fontWeight: FontWeight.w600,
                 ),
               ),
-          ],
-        ),
+            )
+          else
+            Text(
+              'Community',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: context.textTheme.labelLarge?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+        ],
       ),
     );
   }

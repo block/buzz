@@ -23,6 +23,7 @@ class _MessageList extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final displayEntries = groupMembershipTimelineEntries(entries);
     final itemScrollController = useMemoized(ItemScrollController.new);
     final itemPositionsListener = useMemoized(ItemPositionsListener.create);
     final isLoadingOlder = useState(false);
@@ -35,12 +36,12 @@ class _MessageList extends HookConsumerWidget {
 
     int? reversedIndexOf(String? messageId) {
       if (messageId == null) return null;
-      final chronologicalIndex = entries.indexWhere(
-        (entry) => entry.message.id == messageId,
+      final chronologicalIndex = displayEntries.indexWhere(
+        (group) => group.any((entry) => entry.message.id == messageId),
       );
       return chronologicalIndex < 0
           ? null
-          : entries.length - 1 - chronologicalIndex;
+          : displayEntries.length - 1 - chronologicalIndex;
     }
 
     Future<void> scrollToLatest() async {
@@ -68,7 +69,7 @@ class _MessageList extends HookConsumerWidget {
             .map((position) => position.index)
             .reduce((a, b) => a > b ? a : b);
         if (!hasUserScrolled.value ||
-            oldestVisible < entries.length - 3 ||
+            oldestVisible < displayEntries.length - 3 ||
             isLoadingOlder.value) {
           return;
         }
@@ -201,10 +202,10 @@ class _MessageList extends HookConsumerWidget {
               top: frostedAppBarHeight(context),
               bottom: Grid.xxs,
             ),
-            itemCount: entries.length + (isLoadingOlder.value ? 1 : 0),
+            itemCount: displayEntries.length + (isLoadingOlder.value ? 1 : 0),
             itemBuilder: (context, index) {
               // Loading indicator at the top (last index in reversed list).
-              if (index >= entries.length) {
+              if (index >= displayEntries.length) {
                 return const Padding(
                   padding: EdgeInsets.symmetric(vertical: Grid.xs),
                   child: Center(
@@ -218,12 +219,15 @@ class _MessageList extends HookConsumerWidget {
               }
 
               // Reversed list: index 0 = newest (bottom of screen).
-              final chronIdx = entries.length - 1 - index;
-              final entry = entries[chronIdx];
+              final chronIdx = displayEntries.length - 1 - index;
+              final entryGroup = displayEntries[chronIdx];
+              final entry = entryGroup.first;
               final message = entry.message;
 
               // Day boundary check — applies to all messages including system.
-              final prevEntry = chronIdx > 0 ? entries[chronIdx - 1] : null;
+              final prevEntry = chronIdx > 0
+                  ? displayEntries[chronIdx - 1].last
+                  : null;
               final prevMessage = prevEntry?.message;
               final showDayDivider =
                   prevMessage == null ||
@@ -246,6 +250,9 @@ class _MessageList extends HookConsumerWidget {
                   if (message.isSystem)
                     _SystemMessageRow(
                       message: message,
+                      groupedMessages: entryGroup.length > 1
+                          ? entryGroup.map((entry) => entry.message).toList()
+                          : null,
                       channelId: channelId,
                       currentPubkey: currentPubkey,
                       allMessages: null,

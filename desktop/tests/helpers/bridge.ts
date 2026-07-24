@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { ChannelTemplate } from "../../src/shared/api/types";
 import { FEATURE_OVERRIDES_STORAGE_KEY, PREVIEW_FEATURE_IDS } from "./features";
 
 export const TEST_IDENTITIES = {
@@ -214,11 +215,14 @@ type MockBridgeOptions = {
   relayAgents?: MockRelayAgentSeed[];
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
+  channelTemplates?: ChannelTemplate[];
   addChannelMembersDelayMs?: number;
   /** Sequenced add-member failures. A string fails that call; null succeeds. */
   addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
   channelsReadError?: string;
+  /** Reject successive mock `get_channels` calls, then resume. */
+  channelsReadErrors?: (string | null)[];
   /** Reject successive mock `create_channel` calls, then resume. */
   createChannelErrors?: string[];
   /** Reject successive mock `ensure_starter_channels` calls, then resume. */
@@ -261,6 +265,8 @@ type MockBridgeOptions = {
   openerError?: string;
   /** Delay binding signatures so specs can exercise request supersession. */
   nostrBindSignDelayMs?: number;
+  /** Reject successive mock WebSocket connect attempts, then resume. */
+  websocketConnectErrors?: string[];
   stallWebsocketSends?: boolean;
   userSearchDelayMs?: number;
   /**
@@ -393,6 +399,15 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
   };
+  /** File-layer config returned by runtime id. */
+  runtimeFileConfigs?: Record<
+    string,
+    {
+      provider: string | null;
+      model: string | null;
+      satisfiedEnvKeys: string[];
+    } | null
+  >;
   bakedBuildEnv?: Array<{
     key: string;
     masked: boolean;
@@ -459,6 +474,7 @@ type BridgeOptions = {
   mock?: MockBridgeOptions;
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   skipOnboardingSeed?: boolean;
   skipCommunitySeed?: boolean;
   /**
@@ -710,7 +726,14 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   }
 
   await page.addInitScript(
-    ({ identity: bridgeIdentity, mock, mode, relayHttpUrl, relayWsUrl }) => {
+    ({
+      identity: bridgeIdentity,
+      mock,
+      mode,
+      relayHttpUrl,
+      relayWsUrl,
+      autoConnectDefaultRelay,
+    }) => {
       const notificationLog: Array<{
         body: string | null;
         title: string;
@@ -767,6 +790,8 @@ export async function installBridge(page: Page, options: BridgeOptions) {
         mode,
         relayHttpUrl: relayHttpUrl ?? currentConfig.relayHttpUrl,
         relayWsUrl: relayWsUrl ?? currentConfig.relayWsUrl,
+        autoConnectDefaultRelay:
+          autoConnectDefaultRelay ?? currentConfig.autoConnectDefaultRelay,
       };
       testWindow.__BUZZ_E2E_APP_BADGE_COUNT__ = 0;
       testWindow.__BUZZ_E2E_APP_BADGE_STATE__ = "none";
@@ -789,6 +814,7 @@ export async function installBridge(page: Page, options: BridgeOptions) {
       mode: options.mode,
       relayHttpUrl: options.relayHttpUrl,
       relayWsUrl: options.relayWsUrl,
+      autoConnectDefaultRelay: options.autoConnectDefaultRelay,
     },
   );
 }
@@ -798,6 +824,7 @@ export async function installMockBridge(
   mock?: MockBridgeOptions,
   options?: {
     relayWsUrl?: string;
+    autoConnectDefaultRelay?: boolean;
     skipOnboardingSeed?: boolean;
     skipCommunitySeed?: boolean;
     seedPreviewFeatures?: boolean;
@@ -807,6 +834,7 @@ export async function installMockBridge(
     mode: "mock",
     mock,
     relayWsUrl: options?.relayWsUrl,
+    autoConnectDefaultRelay: options?.autoConnectDefaultRelay,
     skipOnboardingSeed: options?.skipOnboardingSeed,
     skipCommunitySeed: options?.skipCommunitySeed,
     seedPreviewFeatures: options?.seedPreviewFeatures,

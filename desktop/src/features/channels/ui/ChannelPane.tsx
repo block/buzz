@@ -515,16 +515,16 @@ export const ChannelPane = React.memo(function ChannelPane({
   const isOverlay = useIsThreadPanelOverlay();
   const useSplitAuxiliaryPane = !isSinglePanelView && !isOverlay;
   const threadViewMode = useThreadViewMode();
-  // Focus mode is a wide-viewport-only alternative to the split thread pane:
-  // narrow viewports keep their existing single-panel / floating-overlay
-  // behavior untouched. It applies to the thread panel only — channel
-  // management, agent session and profile panels always use the split pane.
+  // Focus mode only replaces the wide split thread pane; narrow threads and
+  // other auxiliary panels keep their existing presentation.
   const useFocusThreadDrawer =
     threadViewMode === "focus" &&
     useSplitAuxiliaryPane &&
     (Boolean(threadHeadMessage) || shouldShowThreadSkeleton);
-  const { channelIsCovered, markExitComplete } =
-    useFocusDrawerPresence(useFocusThreadDrawer);
+  const { channelIsCovered, markExitComplete } = useFocusDrawerPresence(
+    useFocusThreadDrawer,
+    onCloseThread,
+  );
   const { changeThreadViewMode, layoutScrollTargetId, resolveScrollTarget } =
     useThreadViewModeSwitch({
       externalScrollTargetId: threadScrollTargetId,

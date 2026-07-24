@@ -1,6 +1,10 @@
 import { expect, test } from "@playwright/test";
 
-import { KIND_TYPING_INDICATOR } from "../../src/shared/constants/kinds";
+import {
+  KIND_HUDDLE_ENDED,
+  KIND_HUDDLE_STARTED,
+  KIND_TYPING_INDICATOR,
+} from "../../src/shared/constants/kinds";
 import {
   TEST_IDENTITIES,
   installMockBridge,
@@ -144,7 +148,9 @@ async function closeChannelManagement(page: import("@playwright/test").Page) {
 async function openChannelEditDialog(page: import("@playwright/test").Page) {
   await page.getByTestId("channel-management-edit").click();
   await expect(
-    page.getByRole("dialog", { name: "Edit channel" }),
+    page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    }),
   ).toBeVisible();
 }
 
@@ -1292,6 +1298,44 @@ test("create stream with name and description", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
 });
 
+test("create channel template selector matches the lifecycle controls", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    channelTemplates: [
+      {
+        id: "project-kickoff",
+        name: "Project kickoff",
+        description: "Coordinate a new project from planning through launch.",
+        channelType: "stream",
+        visibility: "private",
+        canvasTemplate: null,
+        agents: { personas: [], teams: [] },
+        isBuiltin: false,
+        createdAt: "2026-07-23T00:00:00Z",
+        updatedAt: "2026-07-23T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  const templateControl = page.getByTestId("create-channel-template");
+  await expect(templateControl).toHaveRole("button");
+  await expect(templateControl).toHaveText("No template");
+  await templateControl.click();
+  await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
+
+  await expect(templateControl).toHaveText("Project kickoff");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Coordinate a new project from planning through launch.",
+  );
+  await expect(page.getByTestId("create-channel-permissions")).toContainText(
+    "Private",
+  );
+});
+
 test("create ephemeral stream shows sidebar and header affordances", async ({
   page,
 }) => {
@@ -1303,10 +1347,37 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await page
     .getByTestId("create-channel-description")
     .fill("Auto-cleaned test stream");
-  await page.getByRole("button", { name: "Channel duration: Ongoing" }).click();
-  await page
-    .getByLabel("Ephemeral - auto-archives after 7 days of inactivity")
-    .click();
+  await page.getByTestId("create-channel-channel-type").click();
+  await page.getByLabel("Temporary channel").click();
+  const channelTypeContainer = page.getByTestId(
+    "create-channel-channel-type-container",
+  );
+  await expect(
+    channelTypeContainer.getByTestId("create-channel-permissions-container"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("create-channel-permissions-container"),
+  ).toBeVisible();
+  await expect(page.getByTestId("create-channel-permissions")).toContainText(
+    "Public",
+  );
+  await page.getByTestId("create-channel-permissions").click();
+  await page.getByTestId("create-channel-permissions-option-private").click();
+  await expect(page.getByTestId("create-channel-permissions")).toContainText(
+    "Private",
+  );
+  await expect(
+    page.getByTestId("create-channel-permissions-option-private"),
+  ).toHaveCount(0);
+  await page.getByTestId("create-channel-permissions").click();
+  await expect(
+    page.getByTestId("create-channel-permissions-option-open"),
+  ).toBeVisible();
+  await page.getByTestId("create-channel-permissions-option-open").click();
+  await expect(page.getByTestId("create-channel-ttl")).toContainText("7 days");
+  await page.getByTestId("create-channel-ttl").click();
+  await page.getByTestId("create-channel-ttl-option-1209600").click();
+  await expect(page.getByTestId("create-channel-ttl")).toContainText("14 days");
   await page.getByTestId("create-channel-submit").click();
 
   await expect(page.getByTestId("stream-list")).toContainText(channelName);
@@ -1317,7 +1388,7 @@ test("create ephemeral stream shows sidebar and header affordances", async ({
   await expect(page.getByTestId("chat-ephemeral-badge")).toBeVisible();
   await expect(page.getByTestId("chat-ephemeral-badge")).toHaveAttribute(
     "aria-label",
-    /Ephemeral channel\. Cleans up in 7 days\./,
+    /Ephemeral channel\. Cleans up in 14 days\./,
   );
 
   await page
@@ -1345,12 +1416,8 @@ test("ephemeral countdown refreshes when switching channels after a clock jump",
     await page
       .getByTestId("create-channel-description")
       .fill("Auto-cleaned test stream");
-    await page
-      .getByRole("button", { name: "Channel duration: Ongoing" })
-      .click();
-    await page
-      .getByLabel("Ephemeral - auto-archives after 7 days of inactivity")
-      .click();
+    await page.getByTestId("create-channel-channel-type").click();
+    await page.getByLabel("Temporary channel").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toContainText(channelName);
   }
@@ -2202,24 +2269,28 @@ test("sidebar persists after channel switch", async ({ page }) => {
   await expect(page.getByTestId("app-sidebar")).toBeVisible();
 });
 
-test("manage channel updates details and context", async ({ page }) => {
+test("manage channel updates details", async ({ page }) => {
   const stamp = Date.now();
   const newName = `release-hub-${stamp}`;
   const newDescription = `Release coordination ${stamp}`;
-  const newTopic = `Launch plan ${stamp}`;
-  const newPurpose = `Track blockers and owners ${stamp}`;
 
   await page.goto("/");
   await openChannelManagement(page, "general");
   await openChannelEditDialog(page);
-  const editDialog = page.getByRole("dialog", { name: "Edit channel" });
+  const editDialog = page.getByRole("dialog", {
+    name: /Edit (?:public|private) channel/,
+  });
 
   await editDialog.getByTestId("channel-management-name").fill(newName);
   await editDialog
     .getByTestId("channel-management-description")
     .fill(newDescription);
-  await editDialog.getByTestId("channel-management-topic").fill(newTopic);
-  await editDialog.getByTestId("channel-management-purpose").fill(newPurpose);
+  await expect(editDialog.getByTestId("channel-management-topic")).toHaveCount(
+    0,
+  );
+  await expect(
+    editDialog.getByTestId("channel-management-purpose"),
+  ).toHaveCount(0);
   await editDialog.getByTestId("channel-management-save-changes").click();
   await expect(editDialog).toHaveCount(0);
 
@@ -2231,12 +2302,6 @@ test("manage channel updates details and context", async ({ page }) => {
   await expect(
     page.getByTestId("channel-management-description"),
   ).toContainText(newDescription);
-  await expect(page.getByTestId("channel-management-topic")).toContainText(
-    newTopic,
-  );
-  await expect(page.getByTestId("channel-management-purpose")).toContainText(
-    newPurpose,
-  );
 
   await closeChannelManagement(page);
 
@@ -2249,7 +2314,7 @@ test("manage channel updates details and context", async ({ page }) => {
   await expect(page.getByTestId("channel-management-sheet")).toBeVisible();
   await openChannelEditDialog(page);
   const reopenedEditDialog = page.getByRole("dialog", {
-    name: "Edit channel",
+    name: /Edit (?:public|private) channel/,
   });
 
   await expect(
@@ -2260,10 +2325,10 @@ test("manage channel updates details and context", async ({ page }) => {
   ).toHaveValue(newDescription);
   await expect(
     reopenedEditDialog.getByTestId("channel-management-topic"),
-  ).toHaveValue(newTopic);
+  ).toHaveCount(0);
   await expect(
     reopenedEditDialog.getByTestId("channel-management-purpose"),
-  ).toHaveValue(newPurpose);
+  ).toHaveCount(0);
 });
 
 test("manage channel updates visibility and ephemeral lifecycle independently", async ({
@@ -2277,8 +2342,18 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
 
   await expect(saveChangesButton).toBeDisabled();
 
-  await page.getByTestId("channel-management-private-toggle").click();
-  await page.getByTestId("channel-management-ephemeral-toggle").click();
+  await page.getByTestId("channel-management-permissions").click();
+  await page
+    .getByTestId("channel-management-permissions-option-private")
+    .click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit private channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-permissions"),
+  ).toHaveAccessibleName("Visibility: Private");
+  await page.getByTestId("channel-management-channel-type").click();
+  await page.getByLabel("Temporary channel").click();
   await expect(page.getByTestId("channel-management-ttl")).toBeVisible();
   await expect(saveChangesButton).toBeEnabled();
 
@@ -2296,9 +2371,11 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
         }),
       }),
     );
-  await expect(page.getByRole("dialog", { name: "Edit channel" })).toHaveCount(
-    0,
-  );
+  await expect(
+    page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    }),
+  ).toHaveCount(0);
 
   const channelAfterEnable = await invokeMockCommand<{
     ttl_seconds: number | null;
@@ -2317,15 +2394,25 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
   saveChangesButton = page.getByTestId("channel-management-save-changes");
 
   await expect(
-    page.getByTestId("channel-management-private-toggle"),
-  ).toHaveAttribute("data-state", "checked");
+    page.getByTestId("channel-management-permissions"),
+  ).toHaveAccessibleName("Visibility: Private");
   await expect(
-    page.getByTestId("channel-management-ephemeral-toggle"),
-  ).toHaveAttribute("data-state", "checked");
-  await expect(page.getByTestId("channel-management-ttl")).toHaveValue("7d");
+    page.getByTestId("channel-management-channel-type"),
+  ).toContainText("Temporary");
+  await expect(page.getByTestId("channel-management-ttl")).toContainText(
+    "7 days",
+  );
 
-  await page.getByTestId("channel-management-private-toggle").click();
-  await page.getByTestId("channel-management-ephemeral-toggle").click();
+  await page.getByTestId("channel-management-permissions").click();
+  await page.getByTestId("channel-management-permissions-option-open").click();
+  await expect(
+    page.getByRole("dialog", { name: "Edit public channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByTestId("channel-management-permissions"),
+  ).toHaveAccessibleName("Visibility: Public");
+  await page.getByTestId("channel-management-channel-type").click();
+  await page.getByLabel("Ongoing channel").click();
   await expect(saveChangesButton).toBeEnabled();
 
   const commandCountBeforeDisable = (await readCommandPayloadLog(page)).length;
@@ -2342,9 +2429,11 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
         }),
       }),
     );
-  await expect(page.getByRole("dialog", { name: "Edit channel" })).toHaveCount(
-    0,
-  );
+  await expect(
+    page.getByRole("dialog", {
+      name: /Edit (?:public|private) channel/,
+    }),
+  ).toHaveCount(0);
 
   const channelAfterDisable = await invokeMockCommand<{
     ttl_seconds: number | null;
@@ -2362,11 +2451,11 @@ test("manage channel updates visibility and ephemeral lifecycle independently", 
   await openChannelEditDialog(page);
 
   await expect(
-    page.getByTestId("channel-management-private-toggle"),
-  ).toHaveAttribute("data-state", "unchecked");
+    page.getByTestId("channel-management-permissions"),
+  ).toHaveAccessibleName("Visibility: Public");
   await expect(
-    page.getByTestId("channel-management-ephemeral-toggle"),
-  ).toHaveAttribute("data-state", "unchecked");
+    page.getByTestId("channel-management-channel-type"),
+  ).toContainText("Ongoing");
   await expect(page.getByTestId("channel-management-ttl")).toHaveCount(0);
 });
 
@@ -2792,6 +2881,58 @@ test("channel header omits the add agent action", async ({ page }) => {
   await expect(page.getByTestId("channel-members-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-start-huddle-trigger")).toBeVisible();
   await expect(page.getByTestId("channel-management-trigger")).toBeVisible();
+});
+
+test("huddle rollback end event clears the active header action", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByTestId("channel-random").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("random");
+  await waitForMockLiveSubscription(page, "random", KIND_HUDDLE_STARTED);
+
+  const ephemeralChannelId = "10000000-0000-4000-8000-000000000001";
+  const createdAt = Math.floor(Date.now() / 1000);
+
+  await page.evaluate(
+    ({ createdAt, ephemeralChannelId, kind }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({
+          ephemeral_channel_id: ephemeralChannelId,
+        }),
+        createdAt,
+        id: "1".repeat(64),
+        kind,
+      });
+    },
+    { createdAt, ephemeralChannelId, kind: KIND_HUDDLE_STARTED },
+  );
+
+  await expect(
+    page.getByRole("button", {
+      name: "Join active huddle (1 participant)",
+    }),
+  ).toBeVisible();
+
+  await page.evaluate(
+    ({ createdAt, ephemeralChannelId, kind }) => {
+      window.__BUZZ_E2E_EMIT_MOCK_MESSAGE__?.({
+        channelName: "random",
+        content: JSON.stringify({
+          ephemeral_channel_id: ephemeralChannelId,
+        }),
+        createdAt,
+        id: "2".repeat(64),
+        kind,
+      });
+    },
+    { createdAt, ephemeralChannelId, kind: KIND_HUDDLE_ENDED },
+  );
+
+  await expect(
+    page.getByTestId("channel-start-huddle-trigger"),
+  ).toHaveAttribute("aria-label", "Start huddle");
 });
 
 test("channel header actions show tooltips", async ({ page }) => {
