@@ -114,6 +114,41 @@ echo "==> Symlinking system GStreamer plugin directory"
 rm -rf "$LIBDIR/gstreamer-1.0"
 ln -s "/usr/lib/$MULTIARCH/gstreamer-1.0" "$LIBDIR/gstreamer-1.0"
 
+# Keep AppImage GStreamer plugin discovery from writing into the host's
+# ~/.cache/gstreamer-1.0 registry with ephemeral /tmp/.mount_Buzz_* paths
+# (#2560). Operators can override GST_REGISTRY_1_0 if needed.
+echo "==> Isolating AppImage GStreamer registry from the host desktop"
+HOOK_DIR="$WORKDIR/squashfs-root/apprun-hooks"
+mkdir -p "$HOOK_DIR"
+cat > "$HOOK_DIR/97-buzz-gstreamer-registry.sh" <<'EOF'
+# Prefer a Buzz-private registry file so host GStreamer tools never try to load
+# plugins from a vanished AppImage mount.
+if [ -z "${GST_REGISTRY_1_0:-}" ]; then
+  _buzz_gst_cache="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/buzz/gstreamer-1.0"
+  mkdir -p "$_buzz_gst_cache" 2>/dev/null || true
+  export GST_REGISTRY_1_0="$_buzz_gst_cache/registry.bin"
+  unset _buzz_gst_cache
+fi
+EOF
+if [[ -f "$WORKDIR/squashfs-root/AppRun" ]] \
+  && ! grep -q 'GST_REGISTRY_1_0' "$WORKDIR/squashfs-root/AppRun"; then
+  if ! grep -q 'apprun-hooks' "$WORKDIR/squashfs-root/AppRun"; then
+    tmp_apprun="$(mktemp)"
+    {
+      if head -n1 "$WORKDIR/squashfs-root/AppRun" | grep -q '^#!'; then
+        head -n1 "$WORKDIR/squashfs-root/AppRun"
+        echo 'if [ -z "${GST_REGISTRY_1_0:-}" ]; then _buzz_gst_cache="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/buzz/gstreamer-1.0"; mkdir -p "$_buzz_gst_cache" 2>/dev/null || true; export GST_REGISTRY_1_0="$_buzz_gst_cache/registry.bin"; unset _buzz_gst_cache; fi'
+        tail -n +2 "$WORKDIR/squashfs-root/AppRun"
+      else
+        echo 'if [ -z "${GST_REGISTRY_1_0:-}" ]; then _buzz_gst_cache="${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}/buzz/gstreamer-1.0"; mkdir -p "$_buzz_gst_cache" 2>/dev/null || true; export GST_REGISTRY_1_0="$_buzz_gst_cache/registry.bin"; unset _buzz_gst_cache; fi'
+        cat "$WORKDIR/squashfs-root/AppRun"
+      fi
+    } > "$tmp_apprun"
+    mv "$tmp_apprun" "$WORKDIR/squashfs-root/AppRun"
+    chmod +x "$WORKDIR/squashfs-root/AppRun"
+  fi
+fi
+
 echo "==> Repacking AppImage"
 # Pass a pinned type2 runtime when provided (CI sets APPIMAGETOOL_RUNTIME_FILE);
 # without it appimagetool downloads the runtime from its mutable `continuous`
