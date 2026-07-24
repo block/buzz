@@ -171,7 +171,7 @@ services:
     environment:
       MEMORY_HOST: 0.0.0.0
       MEMORY_PORT: "8006"
-      MEMORY_VAULT_ROOT: /data/memory
+      MEMORY_VAULT_ROOT: /data/current
       MEMORY_INDEX_ROOT: /data/index
       MEMORY_NODE_ID: ${BUZZ_MEMORY_NODE_ID:-node:macbook-command}
       MEMORY_REPLICATION_MAX_ITEMS: "200"
@@ -179,7 +179,7 @@ services:
     ports:
       - "127.0.0.1:${BUZZ_MEMORY_PORT:-18006}:8006"
     volumes:
-      - memory-vault:/data/memory
+      - memory-vault:/data
       - memory-index:/data/index
     secrets:
       - memory-replication-tokens

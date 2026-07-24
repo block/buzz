@@ -24,7 +24,7 @@ grep -Fq '127.0.0.1:${BUZZ_MEMORY_PORT:-18006}:8006' <<<"${memory_block}" ||
 if grep -Eq '(^|[[:space:]-])("?)(0\.0\.0\.0|::):.*8006' <<<"${memory_block}"; then
   fail "Memory must not publish on a wildcard host address"
 fi
-grep -Fq 'MEMORY_VAULT_ROOT: /data/memory' <<<"${memory_block}" ||
+grep -Fq 'MEMORY_VAULT_ROOT: /data/current' <<<"${memory_block}" ||
   fail "Memory uses a persistent canonical vault"
 grep -Fq 'MEMORY_INDEX_ROOT: /data/index' <<<"${memory_block}" ||
   fail "Memory keeps the rebuildable index separate"
@@ -33,7 +33,7 @@ grep -Fq 'MEMORY_NODE_ID: ${BUZZ_MEMORY_NODE_ID:-node:macbook-command}' \
   fail "Memory has a stable local node identity"
 grep -Fq '/replication/readiness' <<<"${memory_block}" ||
   fail "Memory has an authenticated replication readiness probe"
-grep -Fq 'memory-vault:/data/memory' <<<"${memory_block}" ||
+grep -Fq 'memory-vault:/data' <<<"${memory_block}" ||
   fail "Memory mounts the canonical vault volume"
 grep -Fq 'memory-index:/data/index' <<<"${memory_block}" ||
   fail "Memory mounts the rebuildable index volume"

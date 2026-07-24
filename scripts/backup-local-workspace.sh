@@ -33,9 +33,30 @@ mkdir -m 700 "${backup_dir}"
 mkdir -m 700 "${backup_dir}/minio"
 credentials_file="$(mktemp)"
 memory_tmp="$(mktemp -d)"
-trap 'rm -f "${credentials_file}"; rm -rf "${memory_tmp}"' EXIT
+memory_was_running=false
+restart_memory_if_needed() {
+  if [[ "${memory_was_running}" == "true" ]]; then
+    (
+      cd "$(local_workspace_repo_root)"
+      local_workspace_run_bounded \
+        "Memory writer restart readiness" \
+        "${memory_timeout_seconds}" \
+        docker compose --profile command-memory up -d --wait \
+          --wait-timeout "${memory_timeout_seconds}" memory
+    ) >/dev/null
+    memory_was_running=false
+  fi
+}
+cleanup_backup() {
+  local status=$?
+  restart_memory_if_needed || true
+  rm -f "${credentials_file}"
+  rm -rf "${memory_tmp}"
+  return "${status}"
+}
+trap cleanup_backup EXIT
 
-(
+{
   cd "$(local_workspace_repo_root)"
   local_workspace_run_bounded \
     "PostgreSQL backup" \
@@ -61,6 +82,19 @@ trap 'rm -f "${credentials_file}"; rm -rf "${memory_tmp}"' EXIT
         mc mirror --overwrite source/buzz-media /backup >/dev/null
       '
 
+  if docker compose --profile command-memory ps --status running --services |
+    grep -Fxq memory; then
+    memory_was_running=true
+    local_workspace_run_bounded \
+      "Memory writer quiesce" \
+      "${memory_timeout_seconds}" \
+      docker compose --profile command-memory stop memory
+    if docker compose --profile command-memory ps --status running --services |
+      grep -Fxq memory; then
+      local_workspace_die "Memory writer did not stop before backup"
+    fi
+  fi
+
   local_workspace_run_bounded \
     "Memory vault backup" \
     "${memory_timeout_seconds}" \
@@ -70,8 +104,9 @@ trap 'rm -f "${credentials_file}"; rm -rf "${memory_tmp}"' EXIT
       --volume "buzz-memory-vault:/source:ro" \
       --volume "${memory_tmp}:/backup" \
       minio-init -eu -c \
-      'tar -C /source -czf /backup/memory-vault.tar.gz .'
-)
+      'test -d /source/current
+       tar -C /source/current -czf /backup/memory-vault.tar.gz .'
+}
 [[ -s "${memory_tmp}/memory-vault.tar.gz" ]] ||
   local_workspace_die "Memory vault backup did not produce an archive"
 local_workspace_run_bounded \
@@ -83,6 +118,7 @@ local_workspace_run_bounded \
     -out "${backup_dir}/memory-vault.tar.gz.enc"
 rm -f "${credentials_file}"
 rm -rf "${memory_tmp}"
+restart_memory_if_needed
 trap - EXIT
 
 local_workspace_write_inventory \

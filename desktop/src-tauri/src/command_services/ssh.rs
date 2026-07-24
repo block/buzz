@@ -2,15 +2,20 @@ use base64::Engine;
 use rustix::fs::{fstat, openat, FileType, Mode, OFlags, Stat};
 use rustix::process::geteuid;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek};
-use std::net::{IpAddr, TcpListener};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 const MAXIMUM_PIN_FILE_BYTES: u64 = 64 * 1024;
+const MAXIMUM_ACTIVE_PROXY_CONNECTIONS: usize = 8;
 
 #[derive(Clone, Debug)]
 pub(super) struct SshTunnelConfig {
@@ -70,6 +75,7 @@ pub(super) struct ProtectedFile {
     file: File,
     stat: Stat,
     maximum: u64,
+    ancestors: Vec<(File, Stat)>,
 }
 
 impl ProtectedFile {
@@ -78,6 +84,14 @@ impl ProtectedFile {
             return Err(SshError::UnprotectedFile);
         }
         let mut directory = File::open("/").map_err(|_| SshError::UnprotectedFile)?;
+        let mut ancestors = Vec::new();
+        validate_directory(&directory)?;
+        ancestors.push((
+            directory
+                .try_clone()
+                .map_err(|_| SshError::UnprotectedFile)?,
+            fstat(&directory).map_err(|_| SshError::UnprotectedFile)?,
+        ));
         let mut components = path.components().peekable();
         if !matches!(components.next(), Some(Component::RootDir)) {
             return Err(SshError::UnprotectedFile);
@@ -99,6 +113,13 @@ impl ProtectedFile {
             )
             .map_err(|_| SshError::UnprotectedFile)?;
             directory = File::from(owned);
+            validate_directory(&directory)?;
+            ancestors.push((
+                directory
+                    .try_clone()
+                    .map_err(|_| SshError::UnprotectedFile)?,
+                fstat(&directory).map_err(|_| SshError::UnprotectedFile)?,
+            ));
         }
         let name = final_name.ok_or(SshError::UnprotectedFile)?;
         // Intentionally omit CLOEXEC: SSH and the replication CLI consume this
@@ -124,6 +145,7 @@ impl ProtectedFile {
             file,
             stat,
             maximum,
+            ancestors,
         })
     }
 
@@ -139,14 +161,44 @@ impl ProtectedFile {
         file.seek(std::io::SeekFrom::Start(0))
             .map_err(|_| SshError::UnprotectedFile)?;
         let mut bytes = Vec::new();
-        file.take(self.maximum + 1)
+        (&mut file)
+            .take(self.maximum + 1)
             .read_to_end(&mut bytes)
+            .map_err(|_| SshError::UnprotectedFile)?;
+        file.seek(std::io::SeekFrom::Start(0))
             .map_err(|_| SshError::UnprotectedFile)?;
         let after = fstat(&self.file).map_err(|_| SshError::UnprotectedFile)?;
         if !same_inode(&self.stat, &after)
             || bytes.is_empty()
             || bytes.len() as u64 > self.maximum
             || bytes.len() as i64 != self.stat.st_size
+        {
+            return Err(SshError::UnprotectedFile);
+        }
+        Ok(bytes)
+    }
+
+    pub(super) fn read_prefix(&self, maximum: usize) -> Result<Vec<u8>, SshError> {
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|_| SshError::UnprotectedFile)?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| SshError::UnprotectedFile)?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(maximum as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|_| SshError::UnprotectedFile)?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| SshError::UnprotectedFile)?;
+        if self.ancestors.iter().any(|(file, stat)| {
+            fstat(file)
+                .ok()
+                .is_none_or(|value| !same_directory(stat, &value))
+        }) || fstat(&self.file)
+            .ok()
+            .is_none_or(|value| !same_inode(&self.stat, &value))
         {
             return Err(SshError::UnprotectedFile);
         }
@@ -165,11 +217,40 @@ impl ProtectedFile {
         self.stat.st_mode.into()
     }
 
+    pub(super) fn try_clone_file(&self) -> Result<File, SshError> {
+        let mut file = self
+            .file
+            .try_clone()
+            .map_err(|_| SshError::UnprotectedFile)?;
+        file.seek(std::io::SeekFrom::Start(0))
+            .map_err(|_| SshError::UnprotectedFile)?;
+        Ok(file)
+    }
+
     pub(super) fn matches_path(&self, path: &Path) -> bool {
+        if self.ancestors.iter().any(|(file, stat)| {
+            fstat(file)
+                .map(|observed| !same_directory(stat, &observed))
+                .unwrap_or(true)
+        }) {
+            return false;
+        }
         Self::open(path, self.maximum)
             .ok()
             .is_some_and(|candidate| same_inode(&self.stat, &candidate.stat))
     }
+}
+
+fn validate_directory(directory: &File) -> Result<(), SshError> {
+    let stat = fstat(directory).map_err(|_| SshError::UnprotectedFile)?;
+    let uid = geteuid().as_raw();
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+        || (stat.st_uid != uid && stat.st_uid != 0)
+        || stat.st_mode & 0o022 != 0
+    {
+        return Err(SshError::UnprotectedFile);
+    }
+    Ok(())
 }
 
 fn same_inode(expected: &Stat, observed: &Stat) -> bool {
@@ -178,6 +259,13 @@ fn same_inode(expected: &Stat, observed: &Stat) -> bool {
         && expected.st_uid == observed.st_uid
         && expected.st_mode == observed.st_mode
         && expected.st_size == observed.st_size
+}
+
+fn same_directory(expected: &Stat, observed: &Stat) -> bool {
+    expected.st_dev == observed.st_dev
+        && expected.st_ino == observed.st_ino
+        && expected.st_uid == observed.st_uid
+        && expected.st_mode == observed.st_mode
 }
 
 pub(super) fn sha256_fingerprint(key_blob: &[u8]) -> String {
@@ -272,11 +360,12 @@ pub(super) fn reserve_loopback_port() -> io::Result<u16> {
     ReservedLoopbackPort::new().map(|reservation| reservation.port())
 }
 
-#[derive(Debug)]
 pub(super) struct SshTunnel {
-    child: Option<Child>,
-    _known_hosts: ProtectedFile,
-    _identity: ProtectedFile,
+    cancel: Arc<AtomicBool>,
+    failed: Arc<AtomicBool>,
+    streams: Arc<Mutex<HashMap<u64, TcpStream>>>,
+    supervisor: Option<JoinHandle<()>>,
+    _material: Arc<VerifiedHostMaterial>,
     pub evidence: PinnedHostEvidence,
     pub local_forward_port: u16,
 }
@@ -295,24 +384,46 @@ fn terminate(child: &mut Child) -> Result<(), SshError> {
 
 impl Drop for SshTunnel {
     fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
-            let _ = terminate(child);
-        }
+        let _ = self.close_inner();
     }
 }
 
 impl SshTunnel {
-    pub(super) fn ensure_running(&mut self) -> Result<(), SshError> {
-        match self.child.as_mut().ok_or(SshError::Teardown)?.try_wait() {
-            Ok(None) => Ok(()),
-            Ok(Some(_)) => Err(SshError::EarlyExit),
-            Err(_) => Err(SshError::Teardown),
+    pub(super) fn ensure_running(&self) -> Result<(), SshError> {
+        if self.failed.load(Ordering::SeqCst) || self.cancel.load(Ordering::SeqCst) {
+            Err(SshError::EarlyExit)
+        } else {
+            Ok(())
         }
     }
 
     pub(super) fn close(mut self) -> Result<(), SshError> {
-        let mut child = self.child.take().ok_or(SshError::Teardown)?;
-        terminate(&mut child)
+        self.close_inner()
+    }
+
+    #[cfg(test)]
+    fn active_connection_count(&self) -> usize {
+        self.streams.lock().map(|value| value.len()).unwrap_or(0)
+    }
+
+    fn close_inner(&mut self) -> Result<(), SshError> {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Ok(streams) = self.streams.lock() {
+            for stream in streams.values() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
+        let _ = TcpStream::connect(("127.0.0.1", self.local_forward_port));
+        let joined = self
+            .supervisor
+            .take()
+            .map(|thread| thread.join().is_ok())
+            .unwrap_or(true);
+        if joined && !self.failed.load(Ordering::SeqCst) {
+            Ok(())
+        } else {
+            Err(SshError::Teardown)
+        }
     }
 }
 
@@ -320,31 +431,22 @@ impl SshTunnel {
 pub(super) fn start_tunnel_with_binary(
     ssh_binary: &Path,
     config: &SshTunnelConfig,
-    startup_timeout: Duration,
 ) -> Result<SshTunnel, SshError> {
     let reservation =
         ReservedLoopbackPort::at(config.local_forward_port).map_err(|_| SshError::Spawn)?;
     let mut config = config.clone();
-    start_tunnel_with_reservation(ssh_binary, &mut config, reservation, startup_timeout)
+    start_tunnel_with_reservation(ssh_binary, &mut config, reservation)
 }
 
 pub(super) fn start_tunnel_with_reservation(
     ssh_binary: &Path,
     config: &mut SshTunnelConfig,
     reservation: ReservedLoopbackPort,
-    startup_timeout: Duration,
 ) -> Result<SshTunnel, SshError> {
-    if startup_timeout.is_zero() || startup_timeout > Duration::from_secs(30) {
-        return Err(SshError::InvalidConfiguration);
-    }
     if reservation.port() == 0 || config.local_forward_port != reservation.port() {
         return Err(SshError::InvalidConfiguration);
     }
-    let material = validate_host_material(config)?;
-    let forward = format!(
-        "127.0.0.1:{}:127.0.0.1:{}",
-        config.local_forward_port, config.remote_loopback_port
-    );
+    let material = Arc::new(validate_host_material(config)?);
     let host_key_algorithms = format!("HostKeyAlgorithms={}", material.evidence.key_type);
     let known_hosts = format!(
         "UserKnownHostsFile={}",
@@ -356,78 +458,189 @@ pub(super) fn start_tunnel_with_reservation(
     );
     let host_alias = format!("HostKeyAlias={}", config.home_host_alias);
     let target = format!("{}@{}", config.home_user, config.home_host_alias);
+    let direct = format!("127.0.0.1:{}", config.remote_loopback_port);
+    let args = [
+        "-F",
+        "/dev/null",
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        known_hosts.as_str(),
+        "-o",
+        host_alias.as_str(),
+        "-o",
+        host_key_algorithms.as_str(),
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        identity.as_str(),
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        "GSSAPIAuthentication=no",
+        "-o",
+        "PermitLocalCommand=no",
+        "-o",
+        "ProxyCommand=none",
+        "-o",
+        "ProxyJump=none",
+        "-o",
+        "RequestTTY=no",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ConnectTimeout=5",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=1",
+        "-W",
+        direct.as_str(),
+        target.as_str(),
+    ]
+    .map(str::to_string)
+    .to_vec();
+    let listener = reservation.listener;
+    listener
+        .set_nonblocking(true)
+        .map_err(|_| SshError::Spawn)?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let failed = Arc::new(AtomicBool::new(false));
+    let streams = Arc::new(Mutex::new(HashMap::new()));
+    let thread_cancel = Arc::clone(&cancel);
+    let thread_failed = Arc::clone(&failed);
+    let thread_streams = Arc::clone(&streams);
+    let binary = ssh_binary.to_path_buf();
+    let supervisor = std::thread::spawn(move || {
+        let mut workers: Vec<JoinHandle<()>> = Vec::new();
+        let mut next_connection_id = 0_u64;
+        while !thread_cancel.load(Ordering::SeqCst) {
+            let mut index = 0;
+            while index < workers.len() {
+                if workers[index].is_finished() {
+                    let worker = workers.swap_remove(index);
+                    if worker.join().is_err() {
+                        thread_failed.store(true, Ordering::SeqCst);
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let connection_id = next_connection_id;
+                    next_connection_id = next_connection_id.wrapping_add(1);
+                    let admitted = match thread_streams.lock() {
+                        Ok(mut active) if active.len() < MAXIMUM_ACTIVE_PROXY_CONNECTIONS => {
+                            match stream.try_clone() {
+                                Ok(clone) => {
+                                    active.insert(connection_id, clone);
+                                    true
+                                }
+                                Err(_) => false,
+                            }
+                        }
+                        _ => false,
+                    };
+                    if !admitted {
+                        let _ = stream.shutdown(Shutdown::Both);
+                        continue;
+                    }
+                    let worker_cancel = Arc::clone(&thread_cancel);
+                    let worker_failed = Arc::clone(&thread_failed);
+                    let worker_streams = Arc::clone(&thread_streams);
+                    let worker_binary = binary.clone();
+                    let worker_args = args.clone();
+                    workers.push(std::thread::spawn(move || {
+                        if proxy_connection(stream, &worker_binary, &worker_args, &worker_cancel)
+                            .is_err()
+                        {
+                            worker_failed.store(true, Ordering::SeqCst);
+                        }
+                        if let Ok(mut active) = worker_streams.lock() {
+                            active.remove(&connection_id);
+                        }
+                    }));
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(_) => {
+                    thread_failed.store(true, Ordering::SeqCst);
+                    break;
+                }
+            }
+        }
+        for worker in workers {
+            if worker.join().is_err() {
+                thread_failed.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+    Ok(SshTunnel {
+        cancel,
+        failed,
+        streams,
+        supervisor: Some(supervisor),
+        _material: Arc::clone(&material),
+        evidence: material.evidence.clone(),
+        local_forward_port: config.local_forward_port,
+    })
+}
+
+fn proxy_connection(
+    stream: TcpStream,
+    ssh_binary: &Path,
+    args: &[String],
+    cancel: &AtomicBool,
+) -> Result<(), SshError> {
     let mut child = Command::new(ssh_binary)
         .env_clear()
-        .args([
-            "-F",
-            "/dev/null",
-            "-N",
-            "-T",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "GlobalKnownHostsFile=/dev/null",
-            "-o",
-            known_hosts.as_str(),
-            "-o",
-            host_alias.as_str(),
-            "-o",
-            host_key_algorithms.as_str(),
-            "-o",
-            "ForwardAgent=no",
-            "-o",
-            "IdentityAgent=none",
-            "-o",
-            "IdentitiesOnly=yes",
-            "-o",
-            identity.as_str(),
-            "-o",
-            "PasswordAuthentication=no",
-            "-o",
-            "KbdInteractiveAuthentication=no",
-            "-o",
-            "GSSAPIAuthentication=no",
-            "-o",
-            "PermitLocalCommand=no",
-            "-o",
-            "ProxyCommand=none",
-            "-o",
-            "ProxyJump=none",
-            "-o",
-            "RequestTTY=no",
-            "-o",
-            "ExitOnForwardFailure=yes",
-            "-o",
-            "ConnectTimeout=5",
-            "-o",
-            "ServerAliveInterval=15",
-            "-o",
-            "ServerAliveCountMax=1",
-            "-L",
-            forward.as_str(),
-            target.as_str(),
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| SshError::Spawn)?;
-    drop(reservation);
-    // ExitOnForwardFailure makes an already-lost handoff fail closed. Actual
-    // readiness is established later by an authenticated node-ID probe.
-    std::thread::sleep(startup_timeout.min(Duration::from_millis(25)));
-    match child.try_wait() {
-        Ok(None) => Ok(SshTunnel {
-            child: Some(child),
-            _known_hosts: material.known_hosts,
-            _identity: material.identity,
-            evidence: material.evidence,
-            local_forward_port: config.local_forward_port,
-        }),
-        Ok(Some(_)) => Err(SshError::EarlyExit),
-        Err(_) => terminate(&mut child).and(Err(SshError::Teardown)),
+    let mut stdin = child.stdin.take().ok_or(SshError::Spawn)?;
+    let mut stdout = child.stdout.take().ok_or(SshError::Spawn)?;
+    let mut inbound = stream.try_clone().map_err(|_| SshError::Spawn)?;
+    let mut outbound = stream.try_clone().map_err(|_| SshError::Spawn)?;
+    let input = std::thread::spawn(move || io::copy(&mut inbound, &mut stdin));
+    let output = std::thread::spawn(move || io::copy(&mut stdout, &mut outbound));
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let _ = stream.shutdown(Shutdown::Both);
+                let _ = input.join();
+                let _ = output.join();
+                return if status.success() {
+                    Ok(())
+                } else {
+                    Err(SshError::EarlyExit)
+                };
+            }
+            Ok(None) if cancel.load(Ordering::SeqCst) => {
+                let result = terminate(&mut child);
+                let _ = stream.shutdown(Shutdown::Both);
+                let _ = input.join();
+                let _ = output.join();
+                return result;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => return terminate(&mut child).and(Err(SshError::Teardown)),
+        }
     }
 }
 
@@ -450,13 +663,9 @@ mod tests {
     }
 
     fn tempdir() -> tempfile::TempDir {
-        let base = if Path::new("/private/tmp").is_dir() {
-            Path::new("/private/tmp")
-        } else {
-            Path::new("/tmp")
-        };
+        let base = std::env::current_dir().expect("current directory");
         tempfile::Builder::new()
-            .tempdir_in(base)
+            .tempdir_in(&base)
             .expect("temporary directory")
     }
 
@@ -537,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn spawns_direct_ssh_with_fixed_hardened_arguments_and_cleared_environment() {
+    fn owned_listener_blocks_squatter_token_capture_and_uses_hardened_direct_ssh() {
         std::env::set_var("BUZZ_MEMORY_INHERITED_SENTINEL", "secret");
         let directory = tempdir();
         let arguments_log = directory.path().join("ssh-arguments");
@@ -552,21 +761,7 @@ if env | grep -q '^BUZZ_MEMORY_INHERITED_SENTINEL='; then
 else
   printf 'cleared\n' > '{}'
 fi
-forward=''
-previous=''
-for argument in "$@"; do
-  if [ "$previous" = '-L' ]; then forward="$argument"; break; fi
-  previous="$argument"
-done
-port=$(printf '%s' "$forward" | cut -d: -f2)
-exec /usr/bin/python3 -c 'import socket,sys,time
-s=socket.socket()
-s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-s.bind(("127.0.0.1",int(sys.argv[1])))
-s.listen()
-while True:
- c,_=s.accept()
- c.close()' "$port"
+exec /bin/cat
 "#,
             arguments_log.display(),
             environment_log.display(),
@@ -581,8 +776,25 @@ while True:
         let local_port = reserve_loopback_port().expect("reserve loopback port");
         let config = tunnel_config(directory.path(), local_port);
 
-        let tunnel = start_tunnel_with_binary(&fake_ssh, &config, Duration::from_secs(2))
-            .expect("start fake tunnel");
+        let tunnel = start_tunnel_with_binary(&fake_ssh, &config).expect("start fake tunnel");
+        assert!(
+            TcpListener::bind(("127.0.0.1", local_port)).is_err(),
+            "a squatter can never replace Buzz's bearer-facing listener"
+        );
+        let mut client =
+            TcpStream::connect(("127.0.0.1", local_port)).expect("connect owned proxy");
+        use std::io::Write;
+        client
+            .write_all(b"Authorization: Bearer never-to-squatter\n")
+            .expect("write bearer through owned proxy");
+        client
+            .shutdown(Shutdown::Write)
+            .expect("finish proxy request");
+        let mut response = String::new();
+        client
+            .read_to_string(&mut response)
+            .expect("read proxy response");
+        assert_eq!(response, "Authorization: Bearer never-to-squatter\n");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while (!arguments_log.exists() || !environment_log.exists())
@@ -596,7 +808,8 @@ while True:
         assert!(arguments.contains("IdentityAgent=none"));
         assert!(arguments.contains("ExitOnForwardFailure=yes"));
         assert!(arguments.contains("memory-sync@memory-home"));
-        assert!(arguments.contains(&format!("127.0.0.1:{local_port}:127.0.0.1:8006")));
+        assert!(arguments.contains("-W\n127.0.0.1:8006"));
+        assert!(!arguments.contains("-L"));
         assert!(!arguments.contains("-R"));
         assert!(!arguments.contains("-D"));
         assert_eq!(
@@ -621,11 +834,16 @@ while True:
             directory.path(),
             reserve_loopback_port().expect("reserve loopback port"),
         );
-        let tunnel = start_tunnel_with_binary(&fake_ssh, &config, Duration::from_millis(100))
+        let tunnel = start_tunnel_with_binary(&fake_ssh, &config)
             .expect("spawn handoff succeeds without claiming HTTP readiness");
+        let _client =
+            TcpStream::connect(("127.0.0.1", tunnel.local_forward_port)).expect("start hung child");
+        std::thread::sleep(Duration::from_millis(50));
+        let started = std::time::Instant::now();
         tunnel
             .close()
             .expect("hung SSH is explicitly killed and reaped");
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -636,26 +854,7 @@ while True:
 
         let directory = tempdir();
         let fake_ssh = directory.path().join("fake-ssh");
-        fs::write(
-            &fake_ssh,
-            r#"#!/bin/sh
-set -eu
-forward=''
-previous=''
-for argument in "$@"; do
-  if [ "$previous" = '-L' ]; then forward="$argument"; break; fi
-  previous="$argument"
-done
-port=$(printf '%s' "$forward" | cut -d: -f2)
-exec /usr/bin/python3 -c 'import socket,sys,time
-s=socket.socket()
-s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
-s.bind(("127.0.0.1",int(sys.argv[1])))
-s.listen()
-time.sleep(30)' "$port"
-"#,
-        )
-        .expect("write fake ssh");
+        fs::write(&fake_ssh, "#!/bin/sh\nexec /bin/cat\n").expect("write fake ssh");
         let mut permissions = fs::metadata(&fake_ssh)
             .expect("fixture metadata")
             .permissions();
@@ -663,16 +862,41 @@ time.sleep(30)' "$port"
         fs::set_permissions(&fake_ssh, permissions).expect("make executable");
         let mut config = tunnel_config(directory.path(), port);
 
-        let tunnel = start_tunnel_with_reservation(
-            &fake_ssh,
-            &mut config,
-            reservation,
-            Duration::from_secs(1),
-        )
-        .expect("spawn owns reservation handoff");
+        let tunnel = start_tunnel_with_reservation(&fake_ssh, &mut config, reservation)
+            .expect("spawn owns reservation handoff");
 
         assert_eq!(tunnel.local_forward_port, port);
+        assert!(
+            TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "Buzz must retain exclusive ownership for the tunnel lifetime"
+        );
         tunnel.close().expect("explicitly reap ssh");
+    }
+
+    #[test]
+    fn local_connection_flood_is_bounded_and_cannot_spawn_unlimited_ssh_children() {
+        let directory = tempdir();
+        let fake_ssh = directory.path().join("hung-flood-ssh");
+        fs::write(&fake_ssh, "#!/bin/sh\nexec /bin/sleep 30\n").expect("write fake ssh");
+        let mut permissions = fs::metadata(&fake_ssh)
+            .expect("fixture metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_ssh, permissions).expect("make executable");
+        let reservation = ReservedLoopbackPort::new().expect("reserve owned listener");
+        let port = reservation.port();
+        let mut config = tunnel_config(directory.path(), port);
+        let tunnel = start_tunnel_with_reservation(&fake_ssh, &mut config, reservation)
+            .expect("start bounded proxy");
+
+        let clients = (0..32)
+            .filter_map(|_| TcpStream::connect(("127.0.0.1", port)).ok())
+            .collect::<Vec<_>>();
+        std::thread::sleep(Duration::from_millis(150));
+
+        assert!(clients.len() > MAXIMUM_ACTIVE_PROXY_CONNECTIONS);
+        assert!(tunnel.active_connection_count() <= MAXIMUM_ACTIVE_PROXY_CONNECTIONS);
+        tunnel.close().expect("cancel bounded proxy children");
     }
 
     #[test]
@@ -696,6 +920,19 @@ time.sleep(30)' "$port"
         assert_eq!(
             protected.read_all().expect("read pinned descriptor"),
             b"original\n"
+        );
+
+        let writable = directory.path().join("writable");
+        fs::create_dir(&writable).expect("create writable ancestor");
+        let writable_file = protected_file(&writable, "identity", b"secret\n");
+        let mut permissions = fs::metadata(&writable)
+            .expect("ancestor metadata")
+            .permissions();
+        permissions.set_mode(0o777);
+        fs::set_permissions(&writable, permissions).expect("make ancestor writable");
+        assert_eq!(
+            ProtectedFile::open(&writable_file, 1024).expect_err("writable ancestor must fail"),
+            SshError::UnprotectedFile
         );
     }
 }

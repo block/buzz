@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
@@ -24,6 +25,7 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(3);
 const TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const REPLICATION_TIMEOUT: Duration = Duration::from_secs(90);
 const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
+const MAXIMUM_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const MAXIMUM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MAXIMUM_STDERR_BYTES: usize = 64 * 1024;
 const PAGE_SIZE: &str = "50";
@@ -42,6 +44,7 @@ const EXACT_MEMORY_TOOLS: &[&str] = &[
     "upsert_entity",
 ];
 static SYNC_GATE: LazyLock<Arc<SyncGate>> = LazyLock::new(|| Arc::new(SyncGate::default()));
+static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryError {
@@ -61,6 +64,7 @@ pub(crate) enum MemoryError {
     Teardown,
     Busy,
     Task,
+    Cancelled,
 }
 
 impl MemoryError {
@@ -82,6 +86,7 @@ impl MemoryError {
             Self::Teardown => "teardown_failed",
             Self::Busy => "sync_already_running",
             Self::Task => "task_failed",
+            Self::Cancelled => "cancelled",
         }
     }
 }
@@ -164,7 +169,7 @@ struct ProtectedExecutable {
 
 impl ProtectedExecutable {
     fn open(path: &Path) -> Result<Self, MemoryError> {
-        let file = ProtectedFile::open(path, MAXIMUM_CONFIG_BYTES)
+        let file = ProtectedFile::open(path, MAXIMUM_EXECUTABLE_BYTES)
             .map_err(|_| MemoryError::InvalidConfig)?;
         if file.mode() & 0o111 == 0 || file.mode() & 0o022 != 0 {
             return Err(MemoryError::InvalidConfig);
@@ -175,16 +180,39 @@ impl ProtectedExecutable {
         })
     }
 
-    fn command_path(&self) -> Result<&Path, MemoryError> {
-        if !self.file.matches_path(&self.original_path) {
-            return Err(MemoryError::InvalidConfig);
+    fn command(&self) -> Result<(Command, bool), MemoryError> {
+        let prefix = self
+            .file
+            .read_prefix(64)
+            .map_err(|_| MemoryError::InvalidConfig)?;
+        if prefix.starts_with(b"#!/bin/sh\n") {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-s", "--"]).stdin(Stdio::from(
+                self.file
+                    .try_clone_file()
+                    .map_err(|_| MemoryError::InvalidConfig)?,
+            ));
+            Ok((command, true))
+        } else {
+            Ok((Command::new(&self.original_path), false))
         }
-        Ok(&self.original_path)
+    }
+
+    fn revalidate_binary(&self) -> Result<(), MemoryError> {
+        if self.file.matches_path(&self.original_path) {
+            Ok(())
+        } else {
+            Err(MemoryError::InvalidConfig)
+        }
     }
 
     #[cfg(test)]
     fn spawn_for_test(&self) -> Result<String, MemoryError> {
-        let output = Command::new(self.command_path()?)
+        let (mut command, stdin_bound) = self.command()?;
+        if !stdin_bound {
+            self.revalidate_binary()?;
+        }
+        let output = command
             .env_clear()
             .output()
             .map_err(|_| MemoryError::Spawn)?;
@@ -219,6 +247,7 @@ struct SchedulerControl {
 pub(crate) struct MemorySyncScheduler {
     control: Arc<SchedulerControl>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    done: Mutex<Receiver<()>>,
 }
 
 impl MemorySyncScheduler {
@@ -228,26 +257,34 @@ impl MemorySyncScheduler {
     {
         let control = Arc::new(SchedulerControl::default());
         let thread_control = Arc::clone(&control);
+        let (done_sender, done_receiver) = mpsc::sync_channel(1);
         let thread = std::thread::spawn(move || loop {
             let stopped = match thread_control.stopped.lock() {
                 Ok(stopped) => stopped,
-                Err(_) => return,
+                Err(_) => break,
             };
             let waited = thread_control.wake.wait_timeout(stopped, interval);
             let Ok((stopped, _)) = waited else {
-                return;
+                break;
             };
             if *stopped {
-                return;
+                break;
             }
             drop(stopped);
             if let Ok(_guard) = gate.try_enter() {
                 let _ = task();
             }
         });
+        // The sender is moved into a small reaper so stop can enforce a
+        // bounded wait without detaching a live sync silently.
+        let thread = std::thread::spawn(move || {
+            let _ = thread.join();
+            let _ = done_sender.send(());
+        });
         Self {
             control,
             thread: Mutex::new(Some(thread)),
+            done: Mutex::new(done_receiver),
         }
     }
 
@@ -267,6 +304,11 @@ impl MemorySyncScheduler {
         }
         let thread = self.thread.lock().map_err(|_| MemoryError::Task)?.take();
         if let Some(thread) = thread {
+            self.done
+                .lock()
+                .map_err(|_| MemoryError::Task)?
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|_| MemoryError::Timeout)?;
             thread.join().map_err(|_| MemoryError::Task)?;
         }
         Ok(())
@@ -557,6 +599,9 @@ fn wait_for_remote_readiness(
     let deadline = Instant::now() + timeout;
     let endpoint = format!("http://127.0.0.1:{}", tunnel.local_forward_port);
     loop {
+        if SYNC_CANCELLED.load(Ordering::SeqCst) {
+            return Err(MemoryError::Cancelled);
+        }
         tunnel.ensure_running()?;
         match query_node_readiness(
             &endpoint,
@@ -670,7 +715,8 @@ fn run_replication_cli(
     let executable = ProtectedExecutable::open(binary)?;
     let local_url = format!("http://127.0.0.1:{}", trusted.config.local_port);
     let remote_url = format!("http://127.0.0.1:{tunnel_port}");
-    let mut child = Command::new(executable.command_path()?)
+    let (mut command, stdin_bound) = executable.command()?;
+    command
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")
@@ -696,11 +742,13 @@ fn run_replication_cli(
             "--timeout",
             CLI_REQUEST_TIMEOUT_SECONDS,
         ])
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|_| MemoryError::Spawn)?;
+        .stderr(Stdio::piped());
+    if !stdin_bound {
+        command.stdin(Stdio::null());
+        executable.revalidate_binary()?;
+    }
+    let mut child = command.spawn().map_err(|_| MemoryError::Spawn)?;
     let stdout = child.stdout.take().ok_or(MemoryError::Spawn)?;
     let stderr = child.stderr.take().ok_or(MemoryError::Spawn)?;
     let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
@@ -715,6 +763,9 @@ fn run_replication_cli(
     let mut stdout_bytes = None;
     let mut stderr_bytes = None;
     let status = loop {
+        if SYNC_CANCELLED.load(Ordering::SeqCst) {
+            break terminate(&mut child).and(Err(MemoryError::Cancelled));
+        }
         if receive_pipe(&stdout_receiver, &mut stdout_bytes).is_err()
             || receive_pipe(&stderr_receiver, &mut stderr_bytes).is_err()
         {
@@ -833,6 +884,9 @@ fn finish_after_tunnel_close<T>(
 }
 
 fn sync_memory_blocking(trusted: &TrustedMemoryConfig) -> Result<MemorySyncResponse, MemoryError> {
+    if SYNC_CANCELLED.load(Ordering::SeqCst) {
+        return Err(MemoryError::Cancelled);
+    }
     let _local = query_readiness(trusted, READINESS_TIMEOUT)?;
     let reservation = ReservedLoopbackPort::new().map_err(|_| MemoryError::SshUnavailable)?;
     let tunnel_port = reservation.port();
@@ -848,12 +902,8 @@ fn sync_memory_blocking(trusted: &TrustedMemoryConfig) -> Result<MemorySyncRespo
         remote_loopback_port: trusted.config.remote_loopback_port,
         local_forward_port: tunnel_port,
     };
-    let mut tunnel = start_tunnel_with_reservation(
-        Path::new(SSH_BINARY),
-        &mut tunnel_config,
-        reservation,
-        TUNNEL_STARTUP_TIMEOUT,
-    )?;
+    let mut tunnel =
+        start_tunnel_with_reservation(Path::new(SSH_BINARY), &mut tunnel_config, reservation)?;
     let pin = tunnel.evidence.clone();
     let operation = run_after_remote_preflight(
         || wait_for_remote_readiness(&mut tunnel, trusted, TUNNEL_STARTUP_TIMEOUT),
@@ -914,6 +964,10 @@ pub(crate) fn start_memory_sync_scheduler(
             sync_memory_blocking(&trusted).map(|_| ())
         },
     )))
+}
+
+pub(crate) fn cancel_active_memory_sync() {
+    SYNC_CANCELLED.store(true, Ordering::SeqCst);
 }
 
 #[tauri::command]

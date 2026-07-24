@@ -12,6 +12,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    static TEST_SYNC_STATE: Mutex<()> = Mutex::new(());
+
     #[derive(Default)]
     struct FakeCredentials {
         values: HashMap<String, String>,
@@ -31,13 +33,9 @@ mod tests {
     }
 
     fn tempdir() -> tempfile::TempDir {
-        let base = if Path::new("/private/tmp").is_dir() {
-            Path::new("/private/tmp")
-        } else {
-            Path::new("/tmp")
-        };
+        let base = std::env::current_dir().expect("current directory");
         tempfile::Builder::new()
-            .tempdir_in(base)
+            .tempdir_in(&base)
             .expect("temporary directory")
     }
 
@@ -257,6 +255,7 @@ mod tests {
 
     #[test]
     fn replication_cli_is_direct_bounded_redacted_and_exactly_parsed() {
+        let _state = TEST_SYNC_STATE.lock().expect("lock sync test state");
         std::env::set_var("BUZZ_MEMORY_INHERITED_SENTINEL", "must-clear");
         let directory = tempdir();
         let log_path = directory.path().join("replicate-log");
@@ -311,6 +310,7 @@ fi
 
     #[test]
     fn replication_timeout_kills_and_reaps_the_cli() {
+        let _state = TEST_SYNC_STATE.lock().expect("lock sync test state");
         let directory = tempdir();
         let fake_cli = directory.path().join("hung-replicate");
         protected_file(&fake_cli, b"#!/bin/sh\nexec /bin/sleep 30\n", true);
@@ -331,6 +331,33 @@ fi
         .expect_err("hung CLI must time out");
 
         assert_eq!(error, MemoryError::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn shutdown_cancellation_kills_and_reaps_an_active_cli_without_waiting_for_deadline() {
+        let _state = TEST_SYNC_STATE.lock().expect("lock sync test state");
+        SYNC_CANCELLED.store(false, Ordering::SeqCst);
+        let directory = tempdir();
+        let fake_cli = directory.path().join("hung-replicate-cancel");
+        protected_file(&fake_cli, b"#!/bin/sh\nexec /bin/sleep 30\n", true);
+        let trusted = TrustedMemoryConfig {
+            config: serde_json::from_value(config_json(directory.path(), 8006))
+                .expect("decode fixture config"),
+            secrets: MemorySecrets::fixture("a", "b", "c", "d"),
+        };
+        let canceller = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(75));
+            cancel_active_memory_sync();
+        });
+        let started = Instant::now();
+        let error =
+            run_replication_cli(&fake_cli, "pull", &trusted, 49154, Duration::from_secs(30))
+                .expect_err("shutdown cancellation must interrupt CLI");
+        canceller.join().expect("join canceller");
+        SYNC_CANCELLED.store(false, Ordering::SeqCst);
+
+        assert_eq!(error, MemoryError::Cancelled);
         assert!(started.elapsed() < Duration::from_secs(2));
     }
 
@@ -431,7 +458,7 @@ fi
     }
 
     #[test]
-    fn verified_cli_revalidation_rejects_path_replacement() {
+    fn verified_cli_descriptor_defeats_after_validation_path_replacement() {
         let directory = tempdir();
         let cli_path = directory.path().join("memory-mcp-replicate");
         protected_file(&cli_path, b"#!/bin/sh\nprintf '%s\\n' verified\n", true);
@@ -440,10 +467,10 @@ fi
         fs::rename(&cli_path, directory.path().join("original")).expect("move verified inode away");
         protected_file(&cli_path, b"#!/bin/sh\nprintf '%s\\n' swapped\n", true);
 
-        let error = executable
+        let output = executable
             .spawn_for_test()
-            .expect_err("replaced executable path must fail closed");
+            .expect("verified descriptor must execute original inode");
 
-        assert_eq!(error, MemoryError::InvalidConfig);
+        assert_eq!(output, "verified\n");
     }
 }

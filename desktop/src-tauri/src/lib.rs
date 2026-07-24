@@ -917,12 +917,14 @@ pub fn run() {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);
             }
+            command_services::memory::cancel_active_memory_sync();
             if let Some(scheduler) = &memory_sync_scheduler {
                 let _ = scheduler.stop_and_join();
             }
             shut_down_app(app_handle, &run_shutdown_done);
         }
         RunEvent::Exit => {
+            command_services::memory::cancel_active_memory_sync();
             if let Some(scheduler) = &memory_sync_scheduler {
                 let _ = scheduler.stop_and_join();
             }

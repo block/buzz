@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 backup_script="$repo_root/scripts/backup-local-workspace.sh"
 restore_script="$repo_root/scripts/restore-local-workspace.sh"
+memory_restore_helper="$repo_root/scripts/lib/restore-memory-vault.sh"
 
 fail() {
   printf 'not ok - %s\n' "$*" >&2
@@ -90,6 +91,18 @@ cat >"$test_tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'docker %s\n' "$*" >>"$MOCK_LOG"
+if [[ "$*" == *"compose --profile command-memory ps --status running --services"* ]]; then
+  [[ ! -e "$MOCK_MEMORY_RUNNING_FILE" ]] || printf 'memory\n'
+  exit 0
+fi
+if [[ "$*" == *"compose --profile command-memory stop memory"* ]]; then
+  rm -f "$MOCK_MEMORY_RUNNING_FILE"
+  exit 0
+fi
+if [[ "$*" == *"compose --profile command-memory up -d --wait"* ]]; then
+  : >"$MOCK_MEMORY_RUNNING_FILE"
+  exit 0
+fi
 if [[ "${MOCK_DOCKER_HANG_ON:-}" != "" && "$*" == *"$MOCK_DOCKER_HANG_ON"* ]]; then
   trap '' TERM
   (
@@ -118,7 +131,9 @@ case "$*" in
   *"pg_dump --format=custom"*)
     printf 'mock-custom-format-dump'
     ;;
-  *"tar -C /source -czf /backup/memory-vault.tar.gz"*)
+  *"tar -C /source/current -czf /backup/memory-vault.tar.gz"*)
+    [[ ! -e "$MOCK_MEMORY_RUNNING_FILE" ]] ||
+      { printf 'Memory writer still active during snapshot\n' >&2; exit 44; }
     for argument in "$@"; do
       case "$argument" in
         *:/backup)
@@ -162,6 +177,8 @@ export MOCK_LOG="$test_tmp/commands.log"
 export MOCK_ACTIVE_WORKTREE="$repo_root"
 export MOCK_MAIN_WORKTREE="$test_tmp/main-checkout"
 export MOCK_SIBLING_WORKTREE="$test_tmp/sibling-worktree"
+export MOCK_MEMORY_RUNNING_FILE="$test_tmp/memory-running"
+: >"$MOCK_MEMORY_RUNNING_FILE"
 export BUZZ_MEMORY_BACKUP_KEY_FILE="$test_tmp/memory-backup.key"
 printf 'test-only-memory-backup-passphrase-32-bytes\n' \
   >"$BUZZ_MEMORY_BACKUP_KEY_FILE"
@@ -208,6 +225,10 @@ assert_contains "$MOCK_LOG" "pg_dump --format=custom" \
 assert_contains "$MOCK_LOG" "mc mirror" "backup mirrors MinIO objects"
 assert_contains "$MOCK_LOG" "buzz-memory-vault:/source:ro" \
   "backup captures the canonical Memory volume"
+assert_contains "$MOCK_LOG" "stop memory" \
+  "backup quiesces the Memory writer before snapshot"
+assert_contains "$MOCK_LOG" "up -d --wait" \
+  "backup proves readiness after restarting a previously running Memory writer"
 
 : >"$MOCK_LOG"
 assert_fails "restore requires explicit confirmation" "$restore_script" "$backup_dir"
@@ -312,6 +333,51 @@ assert_contains "$MOCK_LOG" \
 assert_contains "$MOCK_LOG" "mc mirror" "restore mirrors MinIO objects"
 assert_contains "$MOCK_LOG" "buzz-memory-vault:/target" \
   "restore replaces the canonical Memory vault"
+assert_contains "$memory_restore_helper" 'mv "${stage}" "${current}"' \
+  "restore swaps a validated staging directory into place"
+assert_contains "$memory_restore_helper" 'mv "${old}" "${current}"' \
+  "restore rolls back the prior vault after a failed swap"
+if grep -Fq 'rm -rf /target/*' "$restore_script"; then
+  fail "restore must never delete the live Memory vault first"
+fi
+
+memory_payload="$test_tmp/memory-payload"
+memory_archive="$test_tmp/memory-restore.tar.gz"
+mkdir "$memory_payload"
+printf 'new-memory' >"$memory_payload/revisions.jsonl"
+tar -C "$memory_payload" -czf "$memory_archive" .
+for failure_point in after_extract after_old_rename; do
+  failure_target="$test_tmp/memory-target-${failure_point}"
+  mkdir -p "$failure_target/current"
+  printf 'old-memory' >"$failure_target/current/revisions.jsonl"
+  assert_fails \
+    "Memory restore rolls back injected ${failure_point} failure" \
+    env BUZZ_TEST_MEMORY_RESTORE_FAILURE="$failure_point" \
+    /bin/sh "$memory_restore_helper" "$memory_archive" "$failure_target"
+  [[ "$(cat "$failure_target/current/revisions.jsonl")" == "old-memory" ]] ||
+    fail "old Memory vault must survive ${failure_point} failure"
+done
+invalid_archive="$test_tmp/invalid-memory-restore.tar.gz"
+printf 'not-a-tar' >"$invalid_archive"
+invalid_target="$test_tmp/memory-target-invalid"
+mkdir -p "$invalid_target/current"
+printf 'old-memory' >"$invalid_target/current/revisions.jsonl"
+assert_fails "Memory restore preserves old vault on extraction I/O failure" \
+  /bin/sh "$memory_restore_helper" "$invalid_archive" "$invalid_target"
+[[ "$(cat "$invalid_target/current/revisions.jsonl")" == "old-memory" ]] ||
+  fail "old Memory vault must survive extraction failure"
+symlink_payload="$test_tmp/memory-symlink-payload"
+symlink_archive="$test_tmp/memory-symlink.tar.gz"
+mkdir "$symlink_payload"
+ln -s ../../escaped "$symlink_payload/escape"
+tar -C "$symlink_payload" -czf "$symlink_archive" .
+symlink_target="$test_tmp/memory-target-symlink"
+mkdir -p "$symlink_target/current"
+printf 'old-memory' >"$symlink_target/current/revisions.jsonl"
+assert_fails "Memory restore rejects archive symlinks before extraction" \
+  /bin/sh "$memory_restore_helper" "$symlink_archive" "$symlink_target"
+[[ "$(cat "$symlink_target/current/revisions.jsonl")" == "old-memory" ]] ||
+  fail "old Memory vault must survive malicious archive rejection"
 assert_contains "$MOCK_LOG" "migrate" "restore runs migrations"
 assert_contains "$MOCK_LOG" "ready" "restore verifies readiness"
 

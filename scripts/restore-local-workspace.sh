@@ -259,10 +259,9 @@ local_workspace_run_bounded \
     --entrypoint /bin/sh \
     --volume "buzz-memory-vault:/target" \
     --volume "${runtime_tmp}:/backup:ro" \
-    minio-init -eu -c '
-      find /target -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-      tar -xzf /backup/memory-vault.tar.gz -C /target
-    '
+    --volume "${script_dir}/lib/restore-memory-vault.sh:/restore-memory-vault.sh:ro" \
+    minio-init -eu -c \
+    '/bin/sh /restore-memory-vault.sh /backup/memory-vault.tar.gz /target'
 
 # Migrations need the normal local credential, but every known writer remains
 # stopped until migrations and readiness both succeed.
