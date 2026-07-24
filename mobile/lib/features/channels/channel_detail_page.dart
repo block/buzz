@@ -32,6 +32,7 @@ import 'manage_channel_sheet.dart';
 import 'members_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
+import 'mentions/mention_candidates_provider.dart';
 import 'read_state/deferred_read_state_update.dart';
 import 'read_state/read_state_provider.dart';
 import 'read_state/read_state_time.dart';
@@ -183,6 +184,7 @@ class ChannelDetailPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       appBar: FrostedAppBar(
+        iconColor: context.colors.primary,
         title: resolvedChannel.isDm
             ? _DmAppBarTitle(
                 channel: resolvedChannel,
@@ -190,46 +192,31 @@ class ChannelDetailPage extends HookConsumerWidget {
               )
             : Row(
                 children: [
-                  Icon(
-                    channelIcon(resolvedChannel),
-                    size: 18,
-                    color: context.colors.onSurfaceVariant,
+                  SizedBox.square(
+                    dimension: 22,
+                    child: Center(
+                      child: Icon(channelIcon(resolvedChannel), size: 18),
+                    ),
                   ),
                   const SizedBox(width: Grid.half),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                    child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Flexible(
-                              child: Text(
-                                resolveDmChannelDisplayLabel(
-                                  resolvedChannel,
-                                  currentPubkey: currentPubkey,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                            if (resolvedChannel.isEphemeral) ...[
-                              const SizedBox(width: Grid.quarter),
-                              _HeaderEphemeralBadge(channel: resolvedChannel),
-                            ],
-                          ],
-                        ),
-                        if (resolvedChannel.isStream)
-                          Text(
-                            resolvedChannel.description.isNotEmpty
-                                ? resolvedChannel.description
-                                : '${resolvedChannel.memberCount} member${resolvedChannel.memberCount == 1 ? '' : 's'}',
-                            style: context.textTheme.bodySmall?.copyWith(
-                              color: context.colors.onSurfaceVariant,
+                        Flexible(
+                          child: Text(
+                            resolveDmChannelDisplayLabel(
+                              resolvedChannel,
+                              currentPubkey: currentPubkey,
                             ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
+                        ),
+                        if (resolvedChannel.isEphemeral) ...[
+                          const SizedBox(width: Grid.quarter),
+                          _HeaderEphemeralBadge(channel: resolvedChannel),
+                        ],
                       ],
                     ),
                   ),
@@ -243,6 +230,7 @@ class ChannelDetailPage extends HookConsumerWidget {
           ),
           if (!resolvedChannel.isDm)
             IconButton(
+              color: context.colors.primary,
               onPressed: () async {
                 final shouldClose = await showModalBottomSheet<bool>(
                   context: context,
@@ -259,7 +247,7 @@ class ChannelDetailPage extends HookConsumerWidget {
                 }
               },
               tooltip: 'Manage channel',
-              icon: const Icon(LucideIcons.ellipsis),
+              icon: const Icon(LucideIcons.ellipsisVertical, size: 22),
             ),
         ],
       ),
