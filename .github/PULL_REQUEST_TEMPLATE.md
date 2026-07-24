@@ -9,9 +9,9 @@
 
 ## Related issue
 
-<!-- Link the issue this PR addresses, or N/A for small fixes (typos, docs, obvious bugs). -->
+<!-- Link the issue this PR addresses, if one exists. Opening an issue first is strongly recommended for features. -->
 
-Related issue: <!-- Fixes #1234, or N/A for small fixes -->
+Related issue: <!-- Fixes #1234, or N/A -->
 
 ## Checklist
 

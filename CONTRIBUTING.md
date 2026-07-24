@@ -4,8 +4,7 @@ Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
-If you have questions that aren't answered here, [open a question issue](https://github.com/block/buzz/issues/new?template=question.yml)
-or reach out in the community channels.
+If you have questions that aren't answered here, [open a question issue](https://github.com/block/buzz/issues/new?template=question.yml).
 
 ---
 
