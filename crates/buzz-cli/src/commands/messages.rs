@@ -187,8 +187,12 @@ async fn resolve_content_mentions(
     }
 
     // 4. Two-pass extraction: known multi-word names first, single-word fallback.
+    //    Strip code blocks/spans first so an `@name` inside a code sample does
+    //    not fire a notification — matching both the NIP-27 URI path below and
+    //    Desktop's `hasMention.ts`.
+    let scan = strip_code_regions(content);
     let known_refs: Vec<&str> = display_names.iter().map(|s| s.as_str()).collect();
-    let names = extract_at_mentions_with_known(content, &known_refs);
+    let names = extract_at_mentions_with_known(&scan, &known_refs);
 
     // 5. Look up matched names → pubkeys via the map we already built.
     names
@@ -878,7 +882,8 @@ pub async fn dispatch(
 mod tests {
     use super::{find_root_from_tags, match_profiles_by_name, parse_member_pubkeys};
     use buzz_sdk::mentions::{
-        extract_at_mentions_with_known, extract_at_names, match_names_to_profiles, MentionProfile,
+        extract_at_mentions_with_known, extract_at_names, match_names_to_profiles,
+        strip_code_regions, MentionProfile,
     };
     use serde_json::json;
 
@@ -1054,6 +1059,44 @@ mod tests {
             .cloned()
             .collect();
         assert_eq!(resolved, vec![PK_VALID_A, PK_VALID_B]);
+    }
+
+    #[test]
+    fn cli_pipeline_resolves_emphasis_wrapped_mentions() {
+        // #2526: **@Name** from an agent must resolve to a p-tag exactly like
+        // @Name. Runs the full resolve_content_mentions chain: known-name
+        // extraction → display-name → pubkey, proving a p-tag is emitted.
+        let mut name_to_pubkeys: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        name_to_pubkeys.insert("atlas".into(), vec![PK_VALID_A.into()]);
+        name_to_pubkeys.insert("will pfleger".into(), vec![PK_VALID_B.into()]);
+        let known = ["Atlas", "Will Pfleger"];
+
+        for (content, expected) in [
+            ("**@Atlas** your fix is aimed", vec![PK_VALID_A]),
+            ("cc **@Will Pfleger**", vec![PK_VALID_B]),
+            ("_@Atlas_ and (@Will Pfleger)", vec![PK_VALID_A, PK_VALID_B]),
+        ] {
+            let names = extract_at_mentions_with_known(content, &known);
+            let pubkeys: Vec<String> = names
+                .iter()
+                .flat_map(|n| name_to_pubkeys.get(n).into_iter().flatten())
+                .cloned()
+                .collect();
+            assert_eq!(pubkeys, expected, "content: {content}");
+        }
+    }
+
+    #[test]
+    fn cli_pipeline_ignores_mentions_inside_code() {
+        // #2526: an @name inside a code span/block must NOT fire a notification.
+        // Mirrors resolve_content_mentions: strip_code_regions then extract.
+        let known = ["Atlas"];
+        let scan = strip_code_regions("run `buzz send --to @Atlas` like so");
+        assert!(extract_at_mentions_with_known(&scan, &known).is_empty());
+
+        let fenced = strip_code_regions("before\n```\n@Atlas\n```\nafter");
+        assert!(extract_at_mentions_with_known(&fenced, &known).is_empty());
     }
 
     #[test]
