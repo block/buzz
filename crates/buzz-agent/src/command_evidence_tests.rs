@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{TimeZone, Utc};
 use serde_json::{json, Value};
@@ -38,7 +38,26 @@ fn gate() -> CommandEvidenceGate {
             })
             .to_string(),
         ),
-        &BTreeSet::from(["apple".to_string(), "memory".to_string(), "rag".to_string()]),
+        &BTreeMap::from([
+            (
+                "apple".to_string(),
+                BTreeSet::from(["read_calendar".to_string(), "read_files".to_string()]),
+            ),
+            (
+                "memory".to_string(),
+                BTreeSet::from([
+                    "command_memory_context".to_string(),
+                    "recall_for_entity".to_string(),
+                ]),
+            ),
+            (
+                "rag".to_string(),
+                BTreeSet::from([
+                    "get_snapshot_status".to_string(),
+                    "search_knowledge_base".to_string(),
+                ]),
+            ),
+        ]),
     )
     .expect("trusted evidence policy")
 }
@@ -320,6 +339,24 @@ fn command_evidence_gate_rejects_injection_missing_citations_and_mixed_snapshots
         gate.validate_tool_call_at(&call("rag", "search_knowledge_base", mixed), now),
         Err(EvidenceRejection::MixedSnapshot)
     );
+}
+
+#[test]
+fn command_evidence_gate_binds_records_to_catalog_owned_tool_names() {
+    let now = Utc
+        .with_ymd_and_hms(2026, 7, 25, 0, 15, 0)
+        .single()
+        .expect("time");
+    let gate = gate();
+
+    assert_eq!(
+        gate.validated_tool_call_at(&call("rag", "get_document", rag_evidence()), now),
+        Err(EvidenceRejection::UntrustedService),
+        "a valid result from an unapproved tool on an approved server is not evidence"
+    );
+    assert!(gate
+        .validated_tool_call_at(&call("rag", "search_knowledge_base", rag_evidence()), now)
+        .is_ok());
 }
 
 #[test]

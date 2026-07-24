@@ -79,6 +79,7 @@ struct RawEvidencePolicy {
 struct ServiceRule {
     kind: EvidenceKind,
     active_identity: String,
+    allowed_tools: BTreeSet<String>,
 }
 
 /// One source record extracted only after the catalog-owned evidence gate has
@@ -135,12 +136,12 @@ pub struct CommandEvidenceGate {
 }
 
 impl CommandEvidenceGate {
-    /// Parses the catalog-owned evidence policy for the exact configured MCP labels.
+    /// Parses the catalog-owned evidence policy for exact MCP server/tool bindings.
     pub fn parse(
         raw: Option<&str>,
-        expected_server_labels: &BTreeSet<String>,
+        expected_tool_bindings: &BTreeMap<String, BTreeSet<String>>,
     ) -> Result<Self, EvidenceRejection> {
-        if expected_server_labels.is_empty() && raw.is_none_or(str::is_empty) {
+        if expected_tool_bindings.is_empty() && raw.is_none_or(str::is_empty) {
             return Ok(Self {
                 services: BTreeMap::new(),
                 maximum_evidence_age_seconds: 1,
@@ -164,6 +165,10 @@ impl CommandEvidenceGate {
         }
         let mut services = BTreeMap::new();
         for rule in policy.services {
+            let allowed_tools = expected_tool_bindings
+                .get(&rule.server_label)
+                .filter(|tools| !tools.is_empty())
+                .ok_or(EvidenceRejection::InvalidPolicy)?;
             if !valid_identifier(&rule.server_label)
                 || !valid_active_identity(rule.kind, &rule.active_identity)
                 || services
@@ -172,6 +177,7 @@ impl CommandEvidenceGate {
                         ServiceRule {
                             kind: rule.kind,
                             active_identity: rule.active_identity,
+                            allowed_tools: allowed_tools.clone(),
                         },
                     )
                     .is_some()
@@ -179,7 +185,9 @@ impl CommandEvidenceGate {
                 return Err(EvidenceRejection::InvalidPolicy);
             }
         }
-        if services.keys().cloned().collect::<BTreeSet<_>>() != *expected_server_labels {
+        if services.keys().cloned().collect::<BTreeSet<_>>()
+            != expected_tool_bindings.keys().cloned().collect()
+        {
             return Err(EvidenceRejection::InvalidPolicy);
         }
         Ok(Self {
@@ -222,6 +230,9 @@ impl CommandEvidenceGate {
             .services
             .get(label)
             .ok_or(EvidenceRejection::UntrustedService)?;
+        if !rule.allowed_tools.contains(&call.name) {
+            return Err(EvidenceRejection::UntrustedService);
+        }
         let value = decode_tool_output(&call.output)?;
         match rule.kind {
             EvidenceKind::Memory => memory::validate(

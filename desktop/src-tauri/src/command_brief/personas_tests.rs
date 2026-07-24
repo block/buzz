@@ -92,6 +92,15 @@ fn fixed_prompts_are_structured_advisory_and_cannot_be_renderer_overridden() {
         assert!(prompt.contains(required), "missing {required:?}");
     }
     assert!(prompt.contains("does not generate executable navigation orders"));
+    assert_eq!(prompt.matches(ADVISORY_LIMITATION).count(), 1);
+    assert_eq!(
+        prompt
+            .matches(
+                "Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.",
+            )
+            .count(),
+        1
+    );
 
     assert_no_renderer_control_surface(navigation);
 }

@@ -286,11 +286,20 @@ impl LmStudioRuntimeConfig {
         }
         let endpoint = LmStudioEndpoint::parse(endpoint, classification)?;
         let integrations = parse_integrations(integrations_json, classification)?;
-        let labels = integrations
+        let tool_bindings = integrations
             .iter()
-            .map(|integration| integration.server_label.clone())
-            .collect::<BTreeSet<_>>();
-        let evidence_gate = CommandEvidenceGate::parse(evidence_policy_json, &labels)
+            .map(|integration| {
+                (
+                    integration.server_label.clone(),
+                    integration
+                        .allowed_tools
+                        .iter()
+                        .cloned()
+                        .collect::<BTreeSet<_>>(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let evidence_gate = CommandEvidenceGate::parse(evidence_policy_json, &tool_bindings)
             .map_err(|error| format!("config: command evidence policy {}", error.code()))?;
         let api_token = match api_token {
             None | Some("") => None,
