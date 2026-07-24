@@ -20,6 +20,8 @@ pub mod event;
 pub mod filter;
 /// Git permission types — ref patterns, protection rules, policy evaluation.
 pub mod git_perms;
+/// Huddle transcript segments — typed reader for `KIND_HUDDLE_TRANSCRIPT`.
+pub mod huddle;
 /// Buzz kind number registry — custom event type constants.
 pub mod kind;
 /// Network utilities — SSRF-safe IP classification.

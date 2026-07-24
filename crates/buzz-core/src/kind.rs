@@ -458,6 +458,13 @@ pub const KIND_HUDDLE_PARTICIPANT_JOINED: u32 = 48101;
 pub const KIND_HUDDLE_PARTICIPANT_LEFT: u32 = 48102;
 /// A huddle ended.
 pub const KIND_HUDDLE_ENDED: u32 = 48103;
+/// A huddle transcript segment — attributed, plain-text speech from one speaker
+/// over one time range, emitted as a signed channel event so agents can read
+/// and search what was said in a huddle (issue #2513). Content is the plain
+/// transcript text (FTS-indexed like a message); `p` tags the speaker pubkey,
+/// `h` the channel, `e` the `KIND_HUDDLE_STARTED` event, and `start`/`end` the
+/// millisecond offsets from huddle start. See `buzz_core::huddle`.
+pub const KIND_HUDDLE_TRANSCRIPT: u32 = 48104;
 /// Huddle channel guidelines/rules document.
 pub const KIND_HUDDLE_GUIDELINES: u32 = 48106;
 
@@ -603,6 +610,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT,
     KIND_HUDDLE_ENDED,
+    KIND_HUDDLE_TRANSCRIPT,
     KIND_HUDDLE_GUIDELINES,
     KIND_MEDIA_UPLOAD,
     KIND_GIT_REPO_ANNOUNCEMENT,
