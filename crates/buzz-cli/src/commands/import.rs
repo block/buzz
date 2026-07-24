@@ -7,7 +7,7 @@ mod export;
 mod mrkdwn;
 mod state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use nostr::{EventBuilder, EventId, Keys, Kind, Tag, Timestamp};
@@ -74,7 +74,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| export_dir.join("buzz-import-state.json"));
-    let mut st = ImportState::load(&state_path)?;
+    let state = ImportState::load(&state_path)?;
 
     // Slack user id → display name, for mrkdwn mention rewriting and
     // author attribution.
@@ -90,23 +90,71 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
     // tags when the submitter is a community owner/admin (the Schnorr
     // signature proves authorship), so no per-user connection or relay
     // membership is needed at import time.
-    let mut user_keys: HashMap<String, Keys> = HashMap::new();
-    if let Some(ref mapping_path) = p.mapping {
-        let raw = std::fs::read_to_string(mapping_path)
-            .map_err(|e| CliError::Usage(format!("cannot read --mapping {mapping_path}: {e}")))?;
-        let entries: HashMap<String, MappingEntry> = serde_json::from_str(&raw)
-            .map_err(|e| CliError::Usage(format!("cannot parse --mapping {mapping_path}: {e}")))?;
-        for (slack_id, entry) in entries {
+    let user_keys = load_mapping(p.mapping.as_deref())?;
+
+    let selected = select_channels(&export, p.channels.as_deref())?;
+
+    if p.dry_run {
+        return dry_run_report(&export, &selected, &state, &user_keys);
+    }
+
+    let mut importer = Importer {
+        client,
+        export: &export,
+        names: &names,
+        user_keys: &user_keys,
+        state,
+        state_path,
+        summary: Summary::default(),
+        skip_reactions: p.skip_reactions,
+        skip_profiles: p.skip_profiles,
+    };
+
+    // Relay membership for mapped users (best-effort: lets them read once
+    // they log in with their key; posting during import does not need it).
+    importer.add_relay_members().await?;
+
+    // Profiles for mapped users — signed by the user's key, submitted over
+    // the CLI connection (import tags make the third-party signature
+    // acceptable to the relay).
+    importer.publish_profiles().await?;
+
+    for channel in &selected {
+        importer.import_channel(channel).await?;
+    }
+
+    importer.finish()
+}
+
+/// Parse a `--mapping` file into Slack-user-ID → signing keys.
+fn load_mapping(path: Option<&str>) -> Result<HashMap<String, Keys>, CliError> {
+    let Some(path) = path else {
+        return Ok(HashMap::new());
+    };
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| CliError::Usage(format!("cannot read --mapping {path}: {e}")))?;
+    let entries: HashMap<String, MappingEntry> = serde_json::from_str(&raw)
+        .map_err(|e| CliError::Usage(format!("cannot parse --mapping {path}: {e}")))?;
+    entries
+        .into_iter()
+        .map(|(slack_id, entry)| {
             let keys = Keys::parse(&entry.private_key).map_err(|e| {
                 CliError::Key(format!(
                     "invalid private key for {slack_id} in mapping: {e}"
                 ))
             })?;
-            user_keys.insert(slack_id, keys);
-        }
-    }
+            Ok((slack_id, keys))
+        })
+        .collect()
+}
 
-    let channel_filter: Option<Vec<String>> = p.channels.as_ref().map(|list| {
+/// Resolve the `--channels` filter against the export's channel list,
+/// erroring if the filter selects nothing.
+fn select_channels<'e>(
+    export: &'e SlackExport,
+    filter: Option<&str>,
+) -> Result<Vec<&'e SlackChannel>, CliError> {
+    let filter: Option<Vec<String>> = filter.map(|list| {
         list.split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -116,7 +164,7 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         .channels
         .iter()
         .filter(|c| {
-            channel_filter
+            filter
                 .as_ref()
                 .is_none_or(|f| f.iter().any(|name| name == &c.name))
         })
@@ -126,41 +174,71 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
             "no channels selected — check --channels against channels.json".into(),
         ));
     }
+    Ok(selected)
+}
 
-    if p.dry_run {
-        return dry_run_report(&export, &selected, &st, &user_keys);
+/// A single `buzz import slack` run: the borrowed export/index inputs plus
+/// the mutable state ledger and summary threaded through every write. Bundled
+/// here so the per-channel/per-reaction helpers stay methods rather than
+/// ten-argument free functions.
+struct Importer<'a> {
+    client: &'a BuzzClient,
+    export: &'a SlackExport,
+    /// Slack user id → display name.
+    names: &'a HashMap<String, String>,
+    /// Slack user id → signing key (mapping mode); empty in bot mode.
+    user_keys: &'a HashMap<String, Keys>,
+    state: ImportState,
+    state_path: PathBuf,
+    summary: Summary,
+    skip_reactions: bool,
+    skip_profiles: bool,
+}
+
+impl Importer<'_> {
+    /// Persist the running state ledger.
+    fn save(&self) -> Result<(), CliError> {
+        self.state.save(&self.state_path)
     }
 
-    let mut summary = Summary::default();
-
-    // Relay membership for mapped users (best-effort: lets them read once
-    // they log in with their key; posting during import does not need it).
-    for (slack_id, keys) in &user_keys {
-        let pk = keys.public_key().to_hex();
-        if st.relay_members.contains(&pk) {
-            continue;
-        }
-        match add_relay_member(client, &pk).await {
-            Ok(()) => {
-                st.relay_members.insert(pk);
-                st.save(&state_path)?;
+    /// Add every mapped user as a relay member (best-effort — a failure
+    /// warns and moves on).
+    async fn add_relay_members(&mut self) -> Result<(), CliError> {
+        let client = self.client;
+        let user_keys = self.user_keys;
+        for (slack_id, keys) in user_keys {
+            let pk = keys.public_key().to_hex();
+            if self.state.relay_members.contains(&pk) {
+                continue;
             }
-            Err(e) => summary.warn(format!(
-                "relay add-member failed for {slack_id} ({pk}): {e}"
-            )),
+            match add_relay_member(client, &pk).await {
+                Ok(()) => {
+                    self.state.relay_members.insert(pk);
+                    self.save()?;
+                }
+                Err(e) => self.summary.warn(format!(
+                    "relay add-member failed for {slack_id} ({pk}): {e}"
+                )),
+            }
         }
+        Ok(())
     }
 
-    // Profiles for mapped users — signed by the user's key, submitted over
-    // the CLI connection (import tags make the third-party signature
-    // acceptable to the relay).
-    if !p.skip_profiles {
-        for (slack_id, keys) in &user_keys {
-            if st.profiles.contains(slack_id) {
+    /// Publish a kind 0 profile for each mapped user, signed by their key.
+    async fn publish_profiles(&mut self) -> Result<(), CliError> {
+        if self.skip_profiles {
+            return Ok(());
+        }
+        let client = self.client;
+        let export = self.export;
+        let user_keys = self.user_keys;
+        for (slack_id, keys) in user_keys {
+            if self.state.profiles.contains(slack_id) {
                 continue;
             }
             let Some(user) = export.users.get(slack_id) else {
-                summary.warn(format!("mapping entry {slack_id} not found in users.json"));
+                self.summary
+                    .warn(format!("mapping entry {slack_id} not found in users.json"));
                 continue;
             };
             let name = user.best_name().to_string();
@@ -179,46 +257,314 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
             .tags(provenance_tags(slack_id, &name, "")?);
             match submit_as(client, keys, builder).await {
                 Ok(_) => {
-                    st.profiles.insert(slack_id.clone());
-                    st.save(&state_path)?;
-                    summary.profiles_published += 1;
+                    self.state.profiles.insert(slack_id.clone());
+                    self.save()?;
+                    self.summary.profiles_published += 1;
                 }
-                Err(e) => summary.warn(format!("profile publish failed for {slack_id}: {e}")),
+                Err(e) => self
+                    .summary
+                    .warn(format!("profile publish failed for {slack_id}: {e}")),
             }
         }
+        Ok(())
     }
 
-    for channel in selected {
-        import_channel(
-            client,
-            &export,
-            channel,
-            &names,
-            &user_keys,
-            &mut st,
-            &state_path,
-            &mut summary,
-            p.skip_reactions,
-        )
-        .await?;
+    async fn import_channel(&mut self, channel: &SlackChannel) -> Result<(), CliError> {
+        let client = self.client;
+        let export = self.export;
+        let names = self.names;
+        let user_keys = self.user_keys;
+
+        let messages = export.channel_messages(&channel.name)?;
+        eprintln!("importing #{} ({} messages)", channel.name, messages.len());
+
+        // Channel create + metadata (once).
+        let channel_uuid = match self.state.channels.get(&channel.id) {
+            Some(cs) => Uuid::parse_str(&cs.uuid)
+                .map_err(|e| CliError::Other(format!("state file holds invalid UUID: {e}")))?,
+            None => {
+                let uuid = Uuid::new_v4();
+                let about = if channel.purpose.value.is_empty() {
+                    None
+                } else {
+                    Some(channel.purpose.value.as_str())
+                };
+                let builder = buzz_sdk::build_create_channel(
+                    uuid,
+                    &channel.name,
+                    Some(buzz_sdk::Visibility::Open),
+                    Some(buzz_sdk::ChannelKind::Stream),
+                    about,
+                    None,
+                )
+                .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
+                submit(client, builder).await.map_err(|e| {
+                    CliError::Other(format!("channel create failed for #{}: {e}", channel.name))
+                })?;
+                if !channel.topic.value.is_empty() {
+                    let topic = buzz_sdk::build_set_topic(uuid, &channel.topic.value)
+                        .map_err(|e| CliError::Other(format!("build_set_topic failed: {e}")))?;
+                    if let Err(e) = submit(client, topic).await {
+                        self.summary
+                            .warn(format!("topic set failed for #{}: {e}", channel.name));
+                    }
+                }
+                self.state.channels.insert(
+                    channel.id.clone(),
+                    ChannelState {
+                        uuid: uuid.to_string(),
+                        metadata_done: true,
+                    },
+                );
+                self.save()?;
+                self.summary.channels_created += 1;
+                uuid
+            }
+        };
+
+        // Channel membership for mapped users who speak in this channel.
+        for msg in &messages {
+            let Some(author) = author_id(msg) else {
+                continue;
+            };
+            let Some(keys) = user_keys.get(&author) else {
+                continue;
+            };
+            let pk = keys.public_key().to_hex();
+            let member_key = format!("{}:{pk}", channel.id);
+            if self.state.channel_members.contains(&member_key) {
+                continue;
+            }
+            let builder = buzz_sdk::build_add_member(channel_uuid, &pk, None)
+                .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
+            match submit(client, builder).await {
+                Ok(_) => {
+                    self.state.channel_members.insert(member_key);
+                    self.save()?;
+                }
+                Err(e) => self.summary.warn(format!(
+                    "channel add-member failed for {author} in #{}: {e}",
+                    channel.name
+                )),
+            }
+        }
+
+        // Messages, oldest first; thread roots always precede replies.
+        let mut consecutive_failures = 0usize;
+        let mut imported_in_channel = 0u64;
+        for msg in &messages {
+            let key = ImportState::message_key(&channel.id, &msg.ts);
+            if self.state.messages.contains_key(&key) {
+                // Already imported — but a prior run may have stopped between
+                // the message and its reactions, so reactions still get their
+                // (state-deduped) pass below.
+                if !self.skip_reactions {
+                    self.import_reactions(channel, msg, &key).await?;
+                }
+                continue;
+            }
+
+            let author = author_id(msg);
+            let author_name = author_display(msg, names);
+            let signing_keys = author.as_ref().and_then(|a| user_keys.get(a));
+            let bot_signed = signing_keys.is_none();
+
+            let mut content = mrkdwn::convert(&msg.text, names);
+            for file in &msg.files {
+                match file.link() {
+                    Some(link) => content.push_str(&format!("\n📎 [{}]({link})", file.label())),
+                    None => content.push_str(&format!("\n📎 {}", file.label())),
+                }
+            }
+            let content = content.trim().to_string();
+            let content = if bot_signed {
+                format!("**{author_name}**: {content}")
+            } else {
+                content
+            };
+
+            // Slack threads are flat: thread_ts is the root, every reply is a
+            // direct reply to it. Roots resolved through the state ledger.
+            let thread_ref = match thread_root_key(channel, msg) {
+                Some(root_key) => match self.state.messages.get(&root_key) {
+                    Some(root_hex) => {
+                        let root = EventId::from_hex(root_hex).map_err(|e| {
+                            CliError::Other(format!("state file holds invalid event id: {e}"))
+                        })?;
+                        Some(buzz_sdk::ThreadRef {
+                            root_event_id: root,
+                            parent_event_id: root,
+                        })
+                    }
+                    None => {
+                        self.summary.warn(format!(
+                            "thread root {root_key} not imported — posting {key} as top-level"
+                        ));
+                        None
+                    }
+                },
+                None => None,
+            };
+
+            let created_at = ts_seconds(&msg.ts)?;
+            let builder = match buzz_sdk::build_message(
+                channel_uuid,
+                &content,
+                thread_ref.as_ref(),
+                &[],
+                false,
+                &[],
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.summary.warn(format!("skipping {key}: {e}"));
+                    self.summary.skipped += 1;
+                    continue;
+                }
+            };
+            let builder =
+                builder
+                    .custom_created_at(Timestamp::from(created_at))
+                    .tags(provenance_tags(
+                        author.as_deref().unwrap_or("unknown"),
+                        &author_name,
+                        &msg.ts,
+                    )?);
+
+            match submit_maybe_as(client, signing_keys, builder).await {
+                Ok(event_id) => {
+                    consecutive_failures = 0;
+                    self.state.messages.insert(key.clone(), event_id);
+                    self.save()?;
+                    self.summary.messages_imported += 1;
+                    imported_in_channel += 1;
+                    if imported_in_channel.is_multiple_of(50) {
+                        eprintln!("  #{}: {imported_in_channel} imported", channel.name);
+                    }
+                }
+                Err(e @ CliError::Auth(_)) => return Err(e),
+                Err(e) => {
+                    consecutive_failures += 1;
+                    self.summary.warn(format!("message {key} failed: {e}"));
+                    self.summary.skipped += 1;
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                        self.save()?;
+                        return Err(CliError::Other(format!(
+                            "{MAX_CONSECUTIVE_FAILURES} consecutive submit failures — aborting; \
+                             re-run to resume from the state file"
+                        )));
+                    }
+                    continue;
+                }
+            }
+
+            if self.skip_reactions {
+                continue;
+            }
+            self.import_reactions(channel, msg, &key).await?;
+        }
+
+        // Mirror Slack's archived flag once the channel's history is in.
+        if channel.is_archived {
+            let builder = buzz_sdk::build_archive(channel_uuid)
+                .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
+            if let Err(e) = submit(client, builder).await {
+                self.summary
+                    .warn(format!("archive failed for #{}: {e}", channel.name));
+            }
+        }
+        self.save()?;
+        Ok(())
     }
 
-    st.save(&state_path)?;
-    let output = serde_json::json!({
-        "channels_created": summary.channels_created,
-        "messages_imported": summary.messages_imported,
-        "reactions_imported": summary.reactions_imported,
-        "profiles_published": summary.profiles_published,
-        "skipped": summary.skipped,
-        "warnings": summary.warnings,
-        "state_file": state_path.display().to_string(),
-    });
-    println!(
-        "{}",
-        serde_json::to_string(&output)
-            .map_err(|e| CliError::Other(format!("summary serialization failed: {e}")))?
-    );
-    Ok(())
+    async fn import_reactions(
+        &mut self,
+        channel: &SlackChannel,
+        msg: &SlackMessage,
+        message_key: &str,
+    ) -> Result<(), CliError> {
+        if msg.reactions.is_empty() {
+            return Ok(());
+        }
+        let client = self.client;
+        let names = self.names;
+        let user_keys = self.user_keys;
+
+        let Some(target_hex) = self.state.messages.get(message_key).cloned() else {
+            return Ok(());
+        };
+        let target = EventId::from_hex(&target_hex)
+            .map_err(|e| CliError::Other(format!("state file holds invalid event id: {e}")))?;
+        // Slack exports don't record reaction times; anchor just after the message.
+        let created_at = ts_seconds(&msg.ts)?.saturating_add(1);
+
+        for reaction in &msg.reactions {
+            let emoji = emoji_for_shortcode(&reaction.name);
+            let mut bot_reacted = false;
+            for user in &reaction.users {
+                let signing_keys = match user_keys.get(user) {
+                    Some(keys) => Some(keys),
+                    None => {
+                        // All unmapped reactors collapse into one bot-signed
+                        // reaction per emoji — one key can't react twice.
+                        if bot_reacted {
+                            continue;
+                        }
+                        bot_reacted = true;
+                        None
+                    }
+                };
+                let signer_pk = signing_keys
+                    .map(|k| k.public_key().to_hex())
+                    .unwrap_or_else(|| client.keys().public_key().to_hex());
+                let dedupe = format!("{message_key}:{emoji}:{signer_pk}");
+                if self.state.reactions.contains(&dedupe) {
+                    continue;
+                }
+                let builder = match buzz_sdk::build_reaction(target, &emoji) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.summary.warn(format!(
+                            "reaction :{}: on {message_key}: {e}",
+                            reaction.name
+                        ));
+                        continue;
+                    }
+                };
+                let reactor_name = names.get(user).map(String::as_str).unwrap_or(user.as_str());
+                let builder = builder
+                    .custom_created_at(Timestamp::from(created_at))
+                    .tags(provenance_tags(user, reactor_name, &msg.ts)?);
+                match submit_maybe_as(client, signing_keys, builder).await {
+                    Ok(_) => {
+                        self.state.reactions.insert(dedupe);
+                        self.save()?;
+                        self.summary.reactions_imported += 1;
+                    }
+                    Err(e) => self.summary.warn(format!(
+                        "reaction :{}: on {message_key} in #{} failed: {e}",
+                        reaction.name, channel.name
+                    )),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Flush the final state and print the run summary as JSON.
+    fn finish(&self) -> Result<(), CliError> {
+        self.save()?;
+        let output = serde_json::json!({
+            "channels_created": self.summary.channels_created,
+            "messages_imported": self.summary.messages_imported,
+            "reactions_imported": self.summary.reactions_imported,
+            "profiles_published": self.summary.profiles_published,
+            "skipped": self.summary.skipped,
+            "warnings": self.summary.warnings,
+            "state_file": self.state_path.display().to_string(),
+        });
+        print_json(&output)
+    }
 }
 
 fn dry_run_report(
@@ -230,7 +576,7 @@ fn dry_run_report(
     let mut channels_to_create = 0u64;
     let mut messages = 0u64;
     let mut reactions = 0u64;
-    let mut unmapped_authors: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut unmapped_authors: HashSet<String> = HashSet::new();
     for channel in selected {
         if !st.channels.contains_key(&channel.id) {
             channels_to_create += 1;
@@ -266,314 +612,14 @@ fn dry_run_report(
         "mapped_users": user_keys.len(),
         "unmapped_authors": unmapped,
     });
-    println!(
-        "{}",
-        serde_json::to_string(&output)
-            .map_err(|e| CliError::Other(format!("summary serialization failed: {e}")))?
-    );
-    Ok(())
+    print_json(&output)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn import_channel(
-    client: &BuzzClient,
-    export: &SlackExport,
-    channel: &SlackChannel,
-    names: &HashMap<String, String>,
-    user_keys: &HashMap<String, Keys>,
-    st: &mut ImportState,
-    state_path: &std::path::Path,
-    summary: &mut Summary,
-    skip_reactions: bool,
-) -> Result<(), CliError> {
-    let messages = export.channel_messages(&channel.name)?;
-    eprintln!("importing #{} ({} messages)", channel.name, messages.len());
-
-    // Channel create + metadata (once).
-    let channel_uuid = match st.channels.get(&channel.id) {
-        Some(cs) => Uuid::parse_str(&cs.uuid)
-            .map_err(|e| CliError::Other(format!("state file holds invalid UUID: {e}")))?,
-        None => {
-            let uuid = Uuid::new_v4();
-            let about = if channel.purpose.value.is_empty() {
-                None
-            } else {
-                Some(channel.purpose.value.as_str())
-            };
-            let builder = buzz_sdk::build_create_channel(
-                uuid,
-                &channel.name,
-                Some(buzz_sdk::Visibility::Open),
-                Some(buzz_sdk::ChannelKind::Stream),
-                about,
-                None,
-            )
-            .map_err(|e| CliError::Other(format!("build_create_channel failed: {e}")))?;
-            submit(client, builder).await.map_err(|e| {
-                CliError::Other(format!("channel create failed for #{}: {e}", channel.name))
-            })?;
-            if !channel.topic.value.is_empty() {
-                let topic = buzz_sdk::build_set_topic(uuid, &channel.topic.value)
-                    .map_err(|e| CliError::Other(format!("build_set_topic failed: {e}")))?;
-                if let Err(e) = submit(client, topic).await {
-                    summary.warn(format!("topic set failed for #{}: {e}", channel.name));
-                }
-            }
-            st.channels.insert(
-                channel.id.clone(),
-                ChannelState {
-                    uuid: uuid.to_string(),
-                    metadata_done: true,
-                },
-            );
-            st.save(state_path)?;
-            summary.channels_created += 1;
-            uuid
-        }
-    };
-
-    // Channel membership for mapped users who speak in this channel.
-    for msg in &messages {
-        let Some(author) = author_id(msg) else {
-            continue;
-        };
-        let Some(keys) = user_keys.get(&author) else {
-            continue;
-        };
-        let pk = keys.public_key().to_hex();
-        let member_key = format!("{}:{pk}", channel.id);
-        if st.channel_members.contains(&member_key) {
-            continue;
-        }
-        let builder = buzz_sdk::build_add_member(channel_uuid, &pk, None)
-            .map_err(|e| CliError::Other(format!("build_add_member failed: {e}")))?;
-        match submit(client, builder).await {
-            Ok(_) => {
-                st.channel_members.insert(member_key);
-                st.save(state_path)?;
-            }
-            Err(e) => summary.warn(format!(
-                "channel add-member failed for {author} in #{}: {e}",
-                channel.name
-            )),
-        }
-    }
-
-    // Messages, oldest first; thread roots always precede replies.
-    let mut consecutive_failures = 0usize;
-    let mut imported_in_channel = 0u64;
-    for msg in &messages {
-        let key = ImportState::message_key(&channel.id, &msg.ts);
-        if st.messages.contains_key(&key) {
-            // Already imported — but a prior run may have stopped between
-            // the message and its reactions, so reactions still get their
-            // (state-deduped) pass below.
-            if !skip_reactions {
-                import_reactions(
-                    client, channel, msg, &key, names, user_keys, st, state_path, summary,
-                )
-                .await?;
-            }
-            continue;
-        }
-
-        let author = author_id(msg);
-        let author_name = author_display(msg, names);
-        let signing_keys = author.as_ref().and_then(|a| user_keys.get(a));
-        let bot_signed = signing_keys.is_none();
-
-        let mut content = mrkdwn::convert(&msg.text, names);
-        for file in &msg.files {
-            match file.link() {
-                Some(link) => {
-                    content.push_str(&format!("\n📎 [{}]({link})", file.label()));
-                }
-                None => content.push_str(&format!("\n📎 {}", file.label())),
-            }
-        }
-        let content = content.trim().to_string();
-        let content = if bot_signed {
-            format!("**{author_name}**: {content}")
-        } else {
-            content
-        };
-
-        // Slack threads are flat: thread_ts is the root, every reply is a
-        // direct reply to it. Roots resolved through the state ledger.
-        let thread_ref = match thread_root_key(channel, msg) {
-            Some(root_key) => match st.messages.get(&root_key) {
-                Some(root_hex) => {
-                    let root = EventId::from_hex(root_hex).map_err(|e| {
-                        CliError::Other(format!("state file holds invalid event id: {e}"))
-                    })?;
-                    Some(buzz_sdk::ThreadRef {
-                        root_event_id: root,
-                        parent_event_id: root,
-                    })
-                }
-                None => {
-                    summary.warn(format!(
-                        "thread root {root_key} not imported — posting {key} as top-level"
-                    ));
-                    None
-                }
-            },
-            None => None,
-        };
-
-        let created_at = ts_seconds(&msg.ts)?;
-        let builder = match buzz_sdk::build_message(
-            channel_uuid,
-            &content,
-            thread_ref.as_ref(),
-            &[],
-            false,
-            &[],
-        ) {
-            Ok(b) => b,
-            Err(e) => {
-                summary.warn(format!("skipping {key}: {e}"));
-                summary.skipped += 1;
-                continue;
-            }
-        };
-        let builder = builder
-            .custom_created_at(Timestamp::from(created_at))
-            .tags(provenance_tags(
-                author.as_deref().unwrap_or("unknown"),
-                &author_name,
-                &msg.ts,
-            )?);
-
-        let submitted = match signing_keys {
-            Some(keys) => submit_as(client, keys, builder).await,
-            None => submit(client, builder).await,
-        };
-        match submitted {
-            Ok(event_id) => {
-                consecutive_failures = 0;
-                st.messages.insert(key.clone(), event_id);
-                st.save(state_path)?;
-                summary.messages_imported += 1;
-                imported_in_channel += 1;
-                if imported_in_channel.is_multiple_of(50) {
-                    eprintln!("  #{}: {imported_in_channel} imported", channel.name);
-                }
-            }
-            Err(e @ CliError::Auth(_)) => return Err(e),
-            Err(e) => {
-                consecutive_failures += 1;
-                summary.warn(format!("message {key} failed: {e}"));
-                summary.skipped += 1;
-                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    st.save(state_path)?;
-                    return Err(CliError::Other(format!(
-                        "{MAX_CONSECUTIVE_FAILURES} consecutive submit failures — aborting; \
-                         re-run to resume from the state file"
-                    )));
-                }
-                continue;
-            }
-        }
-
-        if skip_reactions {
-            continue;
-        }
-        import_reactions(
-            client, channel, msg, &key, names, user_keys, st, state_path, summary,
-        )
-        .await?;
-    }
-
-    // Mirror Slack's archived flag once the channel's history is in.
-    if channel.is_archived {
-        let builder = buzz_sdk::build_archive(channel_uuid)
-            .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
-        if let Err(e) = submit(client, builder).await {
-            summary.warn(format!("archive failed for #{}: {e}", channel.name));
-        }
-    }
-    st.save(state_path)?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn import_reactions(
-    client: &BuzzClient,
-    channel: &SlackChannel,
-    msg: &SlackMessage,
-    message_key: &str,
-    names: &HashMap<String, String>,
-    user_keys: &HashMap<String, Keys>,
-    st: &mut ImportState,
-    state_path: &std::path::Path,
-    summary: &mut Summary,
-) -> Result<(), CliError> {
-    if msg.reactions.is_empty() {
-        return Ok(());
-    }
-    let Some(target_hex) = st.messages.get(message_key).cloned() else {
-        return Ok(());
-    };
-    let target = EventId::from_hex(&target_hex)
-        .map_err(|e| CliError::Other(format!("state file holds invalid event id: {e}")))?;
-    // Slack exports don't record reaction times; anchor just after the message.
-    let created_at = ts_seconds(&msg.ts)?.saturating_add(1);
-
-    for reaction in &msg.reactions {
-        let emoji = emoji_for_shortcode(&reaction.name);
-        let mut bot_reacted = false;
-        for user in &reaction.users {
-            let signing_keys = match user_keys.get(user) {
-                Some(keys) => Some(keys),
-                None => {
-                    // All unmapped reactors collapse into one bot-signed
-                    // reaction per emoji — one key can't react twice.
-                    if bot_reacted {
-                        continue;
-                    }
-                    bot_reacted = true;
-                    None
-                }
-            };
-            let signer_pk = signing_keys
-                .map(|k| k.public_key().to_hex())
-                .unwrap_or_else(|| client.keys().public_key().to_hex());
-            let dedupe = format!("{message_key}:{emoji}:{signer_pk}");
-            if st.reactions.contains(&dedupe) {
-                continue;
-            }
-            let builder = match buzz_sdk::build_reaction(target, &emoji) {
-                Ok(b) => b,
-                Err(e) => {
-                    summary.warn(format!(
-                        "reaction :{}: on {message_key}: {e}",
-                        reaction.name
-                    ));
-                    continue;
-                }
-            };
-            let reactor_name = names.get(user).map(String::as_str).unwrap_or(user.as_str());
-            let builder = builder
-                .custom_created_at(Timestamp::from(created_at))
-                .tags(provenance_tags(user, reactor_name, &msg.ts)?);
-            let submitted = match signing_keys {
-                Some(keys) => submit_as(client, keys, builder).await,
-                None => submit(client, builder).await,
-            };
-            match submitted {
-                Ok(_) => {
-                    st.reactions.insert(dedupe);
-                    st.save(state_path)?;
-                    summary.reactions_imported += 1;
-                }
-                Err(e) => summary.warn(format!(
-                    "reaction :{}: on {message_key} in #{} failed: {e}",
-                    reaction.name, channel.name
-                )),
-            }
-        }
-    }
+/// Serialize `value` to compact JSON on stdout.
+fn print_json(value: &serde_json::Value) -> Result<(), CliError> {
+    let rendered = serde_json::to_string(value)
+        .map_err(|e| CliError::Other(format!("summary serialization failed: {e}")))?;
+    println!("{rendered}");
     Ok(())
 }
 
@@ -608,6 +654,19 @@ async fn submit_as(
         .sign_with_keys(keys)
         .map_err(|e| CliError::Other(format!("signing failed: {e}")))?;
     submit_signed(client, event).await
+}
+
+/// Submit `builder` signed by a mapped user's key when present (mapping
+/// mode), else by the CLI identity (bot mode).
+async fn submit_maybe_as(
+    client: &BuzzClient,
+    signing_keys: Option<&Keys>,
+    builder: EventBuilder,
+) -> Result<String, CliError> {
+    match signing_keys {
+        Some(keys) => submit_as(client, keys, builder).await,
+        None => submit(client, builder).await,
+    }
 }
 
 async fn submit_signed(client: &BuzzClient, event: nostr::Event) -> Result<String, CliError> {
