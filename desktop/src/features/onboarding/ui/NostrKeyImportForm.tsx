@@ -16,6 +16,8 @@ type NostrKeyImportFormProps = {
   backLabel?: string;
   disabled?: boolean;
   errorMessage?: string | null;
+  /** Prefill when remounting after navigating away (e.g. back from harness setup). */
+  initialNsec?: string;
   onBack: () => void;
   onImport: (nsec: string) => Promise<void>;
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
@@ -33,11 +35,12 @@ export function NostrKeyImportForm({
   backLabel = "Back",
   disabled = false,
   errorMessage: externalErrorMessage = null,
+  initialNsec = "",
   onBack,
   onImport,
   variant = "default",
 }: NostrKeyImportFormProps) {
-  const [nsecInput, setNsecInput] = React.useState("");
+  const [nsecInput, setNsecInput] = React.useState(initialNsec);
   const [isImporting, setIsImporting] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
   const [isDragging, setIsDragging] = React.useState(false);

@@ -47,6 +47,7 @@ export function MachineOnboardingFlow({
   const [error, setError] = React.useState<string | null>(null);
   const [isPending, setIsPending] = React.useState(false);
   const [identityWasImported, setIdentityWasImported] = React.useState(false);
+  const [importedNsec, setImportedNsec] = React.useState("");
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
@@ -103,6 +104,7 @@ export function MachineOnboardingFlow({
       continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);
+      setImportedNsec(nsec);
       setSelectedPubkey(identity.pubkey);
       setPage("setup");
     },
@@ -193,6 +195,7 @@ export function MachineOnboardingFlow({
               <div className="buzz-onboarding-key-import-position w-full">
                 <NostrKeyImportForm
                   backLabel={identityLost ? "Start new identity" : "Back"}
+                  initialNsec={importedNsec}
                   onBack={
                     identityLost
                       ? () => void replaceLostIdentity()
