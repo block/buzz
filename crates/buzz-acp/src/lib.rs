@@ -232,6 +232,48 @@ async fn is_owner_or_sibling(
 /// siblings may fire a turn — the explicit allowlist and `anyone` mode do
 /// NOT apply inside DMs. `Nobody` still drops everything. Callers must
 /// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
+/// Return the workflow principal asserted by a trusted relay-generated event.
+///
+/// Authority requires all of: kind:9, the configured endpoint's NIP-11 `self`
+/// as cryptographic author, exactly one `buzz:workflow=true` marker, and exactly
+/// one valid `workflow-owner` pubkey. `p` tags are deliberately ignored here:
+/// they route mentions and cannot grant authority.
+fn trusted_workflow_owner(event: &nostr::Event, relay_self: Option<&str>) -> Option<String> {
+    let relay_self = relay_self?;
+    if event.kind.as_u16() as u32 != buzz_core::kind::KIND_STREAM_MESSAGE
+        || !event.pubkey.to_hex().eq_ignore_ascii_case(relay_self)
+        || event.verify().is_err()
+    {
+        return None;
+    }
+
+    let workflow_markers: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("buzz:workflow"))
+        .collect();
+    if workflow_markers.len() != 1 || workflow_markers[0].as_slice() != ["buzz:workflow", "true"] {
+        return None;
+    }
+
+    let owner_tags: Vec<_> = event
+        .tags
+        .iter()
+        .filter(|tag| tag.as_slice().first().map(String::as_str) == Some("workflow-owner"))
+        .collect();
+    if owner_tags.len() != 1 || owner_tags[0].as_slice().len() != 2 {
+        return None;
+    }
+    let owner = owner_tags[0].as_slice()[1].to_ascii_lowercase();
+    if owner.len() != 64
+        || !owner.chars().all(|c| c.is_ascii_hexdigit())
+        || nostr::PublicKey::from_hex(&owner).is_err()
+    {
+        return None;
+    }
+    Some(owner)
+}
+
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
@@ -1345,6 +1387,8 @@ async fn tokio_main() -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
+    let relay_self = relay.relay_self().map(str::to_owned);
+
     // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
     // Best-effort: a failure here is non-fatal (we just lose the startup window
@@ -2145,6 +2189,9 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
+                                let workflow_owner =
+                                    trusted_workflow_owner(&buzz_event.event, relay_self.as_deref());
+                                let principal = workflow_owner.as_deref().unwrap_or(&author);
                                 // DM hardening: resolve channel type (fail-closed
                                 // to DM) so allowlist/anyone modes cannot be
                                 // exercised by non-owner authors inside DMs.
@@ -2153,7 +2200,7 @@ async fn tokio_main() -> Result<()> {
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
-                                    &author,
+                                    principal,
                                     is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
@@ -2162,7 +2209,9 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %author,
+                                        principal = %principal,
+                                        workflow_delegated = workflow_owner.is_some(),
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -4137,6 +4186,104 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             env
         },
     }]
+}
+
+#[cfg(test)]
+mod workflow_authority_tests {
+    use super::*;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    fn workflow_event(signer: &Keys, owner: Option<&str>, marker: bool) -> nostr::Event {
+        let mut tags = Vec::new();
+        if marker {
+            tags.push(Tag::parse(["buzz:workflow", "true"]).unwrap());
+        }
+        if let Some(owner) = owner {
+            tags.push(Tag::parse(["workflow-owner", owner]).unwrap());
+        }
+        EventBuilder::new(Kind::Custom(9), "run")
+            .tags(tags)
+            .sign_with_keys(signer)
+            .unwrap()
+    }
+
+    #[test]
+    fn requires_relay_signature_marker_and_dedicated_owner() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = workflow_event(&relay, Some(&owner), true);
+        assert_eq!(
+            trusted_workflow_owner(&event, Some(&relay.public_key().to_hex())),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn rejects_forged_missing_and_ambiguous_provenance() {
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let relay_hex = relay.public_key().to_hex();
+        assert!(trusted_workflow_owner(
+            &workflow_event(&attacker, Some(&owner), true),
+            Some(&relay_hex)
+        )
+        .is_none());
+        assert!(trusted_workflow_owner(
+            &workflow_event(&relay, Some(&owner), false),
+            Some(&relay_hex)
+        )
+        .is_none());
+        assert!(
+            trusted_workflow_owner(&workflow_event(&relay, None, true), Some(&relay_hex)).is_none()
+        );
+
+        let duplicate = EventBuilder::new(Kind::Custom(9), "run")
+            .tags([
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["workflow-owner", &owner]).unwrap(),
+                Tag::parse(["workflow-owner", &owner]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(trusted_workflow_owner(&duplicate, Some(&relay_hex)).is_none());
+
+        let malformed_marker = EventBuilder::new(Kind::Custom(9), "run")
+            .tags([
+                Tag::parse(["buzz:workflow", "false"]).unwrap(),
+                Tag::parse(["workflow-owner", &owner]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(trusted_workflow_owner(&malformed_marker, Some(&relay_hex)).is_none());
+
+        let malformed_owner = EventBuilder::new(Kind::Custom(9), "run")
+            .tags([
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["workflow-owner", &owner, "extra"]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(trusted_workflow_owner(&malformed_owner, Some(&relay_hex)).is_none());
+
+        let mut tampered = workflow_event(&relay, Some(&owner), true);
+        tampered.content = "tampered after signing".to_string();
+        assert!(trusted_workflow_owner(&tampered, Some(&relay_hex)).is_none());
+    }
+
+    #[test]
+    fn p_tags_never_supply_workflow_authority() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let event = EventBuilder::new(Kind::Custom(9), "run")
+            .tags([
+                Tag::parse(["buzz:workflow", "true"]).unwrap(),
+                Tag::parse(["p", &owner]).unwrap(),
+            ])
+            .sign_with_keys(&relay)
+            .unwrap();
+        assert!(trusted_workflow_owner(&event, Some(&relay.public_key().to_hex())).is_none());
+    }
 }
 
 #[cfg(test)]

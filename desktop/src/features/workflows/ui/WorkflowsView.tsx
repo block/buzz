@@ -10,7 +10,7 @@ import { WorkflowDialog } from "@/features/workflows/ui/WorkflowDialog";
 import type { Channel, Workflow } from "@/shared/api/types";
 import {
   deleteWorkflow,
-  getChannelsWorkflows,
+  getMemberChannelWorkflows,
   triggerWorkflow,
 } from "@/shared/api/tauriWorkflows";
 import { Button } from "@/shared/ui/button";
@@ -83,12 +83,13 @@ export function WorkflowsView({
   const allWorkflowsQuery = useQuery({
     queryKey: allWorkflowsQueryKey(channelIdKey),
     queryFn: async () => {
-      // Single batched relay query for all member channels, then group by the
-      // channel_id each workflow carries — replaces the per-channel fanout.
+      // The relay resolves active memberships server-side and returns bounded,
+      // keyset-paginated workflow pages. Desktop only retains channel names for
+      // presentation and never sends its full membership list.
       const channelNameById = new Map(
         memberChannels.map((channel) => [channel.id, channel.name]),
       );
-      const workflows = await getChannelsWorkflows(channelIds);
+      const workflows = await getMemberChannelWorkflows();
       const results: WorkflowWithChannel[] = [];
       for (const workflow of workflows) {
         results.push({

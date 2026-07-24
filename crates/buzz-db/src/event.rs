@@ -67,6 +67,10 @@ pub struct EventQuery {
     /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
     /// historical pages have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
+    /// Restrict results to events in channels where this pubkey has an active
+    /// membership. The membership is resolved by PostgreSQL with an indexed
+    /// `EXISTS` subquery, avoiding client-supplied channel-ID arrays.
+    pub member_channel_pubkey: Option<Vec<u8>>,
     /// Override the default limit clamp (1000). Used by COUNT fallback path
     /// which needs to fetch all matching events for post-filter counting.
     /// When None, the default clamp of 1000 applies.
@@ -98,6 +102,7 @@ impl EventQuery {
             ids: None,
             e_tags: None,
             channel_ids: None,
+            member_channel_pubkey: None,
             max_limit: None,
         }
     }
@@ -388,6 +393,33 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
             }
             qb.push("))");
         }
+    }
+
+    // Membership-scoped overview queries resolve channel access inside
+    // PostgreSQL. The active-membership index starts with (community_id,
+    // pubkey), and the channel PK check completes the lookup without shipping
+    // every channel UUID through the client and relay.
+    if let Some(ref member_pubkey) = q.member_channel_pubkey {
+        let outer_event_prefix = if q.p_tag_hex.is_some() {
+            "e."
+        } else {
+            "events."
+        };
+        qb.push(format!(
+            " AND {outer_event_prefix}channel_id IS NOT NULL AND EXISTS (\
+             SELECT 1 FROM channel_members cm \
+             JOIN channels c \
+               ON c.community_id = cm.community_id AND c.id = cm.channel_id \
+             WHERE cm.community_id = {outer_event_prefix}community_id \
+               AND cm.channel_id = {outer_event_prefix}channel_id \
+               AND cm.pubkey = "
+        ));
+        qb.push_bind(member_pubkey.clone());
+        qb.push(
+            " AND cm.removed_at IS NULL \
+             AND c.deleted_at IS NULL \
+             AND (c.channel_type != 'dm' OR cm.hidden_at IS NULL))",
+        );
     }
 
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
@@ -1813,6 +1845,57 @@ mod tests {
             events[1].event.id, older_accessible.id,
             "older accessible row must not be hidden behind newer inaccessible rows"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn member_channel_scope_is_applied_before_limit_and_excludes_non_members() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let member_channel = make_test_channel(&pool, community_uuid, None).await;
+        let nonmember_channel = make_test_channel(&pool, community_uuid, None).await;
+        let member_pubkey = vec![42_u8; 32];
+        sqlx::query(
+            "INSERT INTO channel_members (community_id, channel_id, pubkey) VALUES ($1, $2, $3)",
+        )
+        .bind(community_uuid)
+        .bind(member_channel)
+        .bind(&member_pubkey)
+        .execute(&pool)
+        .await
+        .expect("insert active membership");
+
+        let base = 1_800_100_000;
+        for offset in 10..13 {
+            let event = make_event_at(30_620, "newer nonmember", base + offset);
+            insert_event(&pool, community, &event, Some(nonmember_channel))
+                .await
+                .expect("insert nonmember workflow");
+        }
+        let global = make_event_at(30_620, "newer global", base + 9);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global workflow");
+        let member_workflow = make_event_at(30_620, "older member", base + 1);
+        insert_event(&pool, community, &member_workflow, Some(member_channel))
+            .await
+            .expect("insert member workflow");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![30_620]),
+                member_channel_pubkey: Some(member_pubkey),
+                limit: Some(2),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query member workflow page");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event.id, member_workflow.id);
     }
 
     fn make_text_event(content: &str) -> nostr::Event {

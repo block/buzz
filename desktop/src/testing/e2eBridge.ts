@@ -2951,11 +2951,8 @@ function handleGetChannelWorkflows(args: { channelId: string }) {
   return mockWorkflows.filter((w) => w.channel_id === args.channelId);
 }
 
-function handleGetChannelsWorkflows(args: { channelIds: string[] }) {
-  const ids = new Set(args.channelIds);
-  return mockWorkflows.filter(
-    (w) => w.channel_id != null && ids.has(w.channel_id),
-  );
+function handleGetMemberChannelWorkflows() {
+  return [...mockWorkflows];
 }
 
 function handleGetWorkflow(args: { workflowId: string }) {
@@ -10855,10 +10852,8 @@ export function maybeInstallE2eTauriMocks() {
         return handleGetChannelWorkflows(
           payload as Parameters<typeof handleGetChannelWorkflows>[0],
         );
-      case "get_channels_workflows":
-        return handleGetChannelsWorkflows(
-          payload as Parameters<typeof handleGetChannelsWorkflows>[0],
-        );
+      case "get_member_channel_workflows":
+        return handleGetMemberChannelWorkflows();
       case "get_workflow":
         return handleGetWorkflow(
           payload as Parameters<typeof handleGetWorkflow>[0],

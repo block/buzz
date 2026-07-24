@@ -997,6 +997,85 @@ async fn query_events_authed(
         ));
     }
 
+    // `member_channels` is an authenticated HTTP-bridge extension for global
+    // overviews of channel-scoped resources. Keep it deliberately narrow: the
+    // only current contract is workflow definitions, and mixed filters are
+    // rejected rather than falling back to the generic membership-array path.
+    let member_workflow_overview = raw_filters
+        .iter()
+        .zip(filters.iter())
+        .filter(|(raw, _)| extension_flag(raw, "member_channels"))
+        .collect::<Vec<_>>();
+    if !member_workflow_overview.is_empty() {
+        if member_workflow_overview.len() != filters.len() {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "member_channels filters cannot be mixed with ordinary filters",
+            ));
+        }
+
+        let mut overview_events = Vec::new();
+        for (raw, filter) in member_workflow_overview {
+            let workflow_only = filter.kinds.as_ref().is_some_and(|kinds| {
+                kinds.len() == 1 && kinds.iter().all(|kind| kind.as_u16() == 30_620)
+            });
+            if !workflow_only || extract_channel_from_filter(filter).is_some() {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "member_channels requires kinds:[30620] without #h",
+                ));
+            }
+
+            let mut query = crate::handlers::req::build_event_query_from_filter(
+                filter,
+                &pubkey_bytes,
+                state,
+                tenant.community(),
+            )
+            .await;
+            query.member_channel_pubkey = Some(pubkey_bytes.clone());
+
+            match extract_before_id(raw) {
+                BeforeId::Malformed => {
+                    return Err(api_error(
+                        StatusCode::BAD_REQUEST,
+                        "before_id must be a 64-char hex event id",
+                    ));
+                }
+                BeforeId::Valid(before_id) => {
+                    if query.until.is_none() {
+                        return Err(api_error(
+                            StatusCode::BAD_REQUEST,
+                            "before_id requires until to be set",
+                        ));
+                    }
+                    query.before_id = Some(before_id);
+                }
+                BeforeId::Absent => {}
+            }
+
+            let stored_events = state
+                .db
+                .query_events(&query)
+                .await
+                .map_err(|e| internal_error(&format!("member workflow query error: {e}")))?;
+            for stored in stored_events {
+                if buzz_core::filter::filters_match(std::slice::from_ref(filter), &stored)
+                    && buzz_core::filter::reader_authorized_for_event(
+                        &stored.event,
+                        &authed_pubkey_hex,
+                    )
+                {
+                    overview_events.push(
+                        serde_json::to_value(&stored.event)
+                            .map_err(|e| internal_error(&format!("event serialize: {e}")))?,
+                    );
+                }
+            }
+        }
+        return Ok(Json(Value::Array(overview_events)));
+    }
+
     // Get channels this user can access — same enforcement as WS REQ handler.
     let accessible_channels = state
         .get_accessible_channel_ids_cached(tenant.community(), &pubkey_bytes)

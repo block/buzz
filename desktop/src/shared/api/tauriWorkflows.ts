@@ -170,18 +170,12 @@ export async function getChannelWorkflows(
 }
 
 /**
- * Fetch workflows across many channels in a single relay round-trip.
- *
- * Replaces the per-channel `Promise.all(getChannelWorkflows)` fanout on the
- * Workflows overview: the backend `#h` filter matches any listed channel, and
- * each returned workflow carries its own `channelId` so callers can group.
+ * Fetch workflows from every channel where the authenticated user is a member.
+ * Channel membership is resolved and paginated by the relay; Desktop does not
+ * send its full channel list.
  */
-export async function getChannelsWorkflows(
-  channelIds: string[],
-): Promise<Workflow[]> {
-  const raw = await invokeTauri<RawWorkflow[]>("get_channels_workflows", {
-    channelIds,
-  });
+export async function getMemberChannelWorkflows(): Promise<Workflow[]> {
+  const raw = await invokeTauri<RawWorkflow[]>("get_member_channel_workflows");
   return raw.map(fromRawWorkflow);
 }
 
