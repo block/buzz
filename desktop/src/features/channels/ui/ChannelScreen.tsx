@@ -56,6 +56,7 @@ import {
 } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
 import { useImportIdentityBindings } from "@/features/messages/useImportIdentityBindings";
+import { useMessageProfilePubkeys } from "@/features/channels/useMessageProfilePubkeys";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -305,32 +306,18 @@ export function ChannelScreen({
       mergeChannelKnownAgentPubkeys(channelMembers, managedAgents, relayAgents),
     [channelMembers, managedAgents, relayAgents],
   );
-  // Owner-signed import identity bindings; also fetch the bound people's
-  // profiles so imported history can render under their avatar even when they
-  // never natively authored an event in this channel.
-  const importIdentityBindings = useImportIdentityBindings().data;
-  const boundImportPubkeys = React.useMemo(
-    () => (importIdentityBindings ? [...importIdentityBindings.values()] : []),
-    [importIdentityBindings],
-  );
-  const messageProfilePubkeys = React.useMemo(
-    () => [
-      ...new Set([
-        ...messageEventProfilePubkeys,
-        ...activeDmParticipantPubkeys,
-        ...knownAgentPubkeys,
-        ...typingEntries.map((entry) => entry.pubkey),
-        ...boundImportPubkeys,
-      ]),
-    ],
-    [
-      activeDmParticipantPubkeys,
-      knownAgentPubkeys,
-      messageEventProfilePubkeys,
-      typingEntries,
-      boundImportPubkeys,
-    ],
-  );
+  // Owner-signed import identity bindings + the bound people's pubkeys, so
+  // imported history renders under their avatar even where they never natively
+  // authored an event in this channel.
+  const { bindings: importIdentityBindings, boundPubkeys: boundImportPubkeys } =
+    useImportIdentityBindings();
+  const messageProfilePubkeys = useMessageProfilePubkeys({
+    messageEventProfilePubkeys,
+    activeDmParticipantPubkeys,
+    knownAgentPubkeys,
+    typingEntries,
+    boundImportPubkeys,
+  });
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
     enabled: messageProfilePubkeys.length > 0,
   });

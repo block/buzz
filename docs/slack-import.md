@@ -7,9 +7,11 @@ reactions) onto a relay you own, so agents and people can search it as one
 record from day one.
 
 ```bash
-buzz import slack --export-dir ./my-workspace-export            # bot mode
-buzz import slack --export-dir ./export --mapping keys.json     # mapping mode
-buzz import slack --export-dir ./export --dry-run               # plan only
+buzz import slack --export-dir ./my-workspace-export            # import history
+buzz import slack --export-dir ./export --dry-run              # plan only
+buzz import slack --export-dir ./export \
+  --identity-map U060=npub1abc,U081=npub1def                    # attribute people
+buzz import bind --slack-id U060 --pubkey npub1abc              # attribute one, later
 ```
 
 ## What gets imported
@@ -19,102 +21,72 @@ buzz import slack --export-dir ./export --dry-run               # plan only
 | Channels (`channels.json`) | kind `9007` create + `9002` topic/purpose | UUID generated per channel, recorded in the state file |
 | Messages (per-day JSON) | kind `9` stream message, `h`-tagged | `created_at` backdated to the original Slack `ts` |
 | Threads (`thread_ts`) | NIP-10 `e` reply tags | Slack threads are flat; every reply is a direct reply to the root |
-| Reactions | kind `7` | Common shortcodes mapped to Unicode, otherwise `:shortcode:` |
-| Users (`users.json`) | kind `0` profiles | Mapping mode only — signed by each user's key |
+| Reactions | kind `7` | One bot-signed reaction per distinct emoji (per-reactor identity isn't reproduced) |
 | Files | Links appended to message content | Blobs are **not** downloaded/re-hosted (see Limitations) |
 | Custom emoji | — | Use `scripts/grab-emoji.sh` (separate tool, needs a Slack API token) |
 
 Every imported event carries provenance tags:
 
-- `["import", "slack"]` — marks the event as imported
+- `["import", "slack"]` — marks the event as imported (the `<source>`)
 - `["import_author", "<slack user id>", "<display name>"]` — original author
 - `["import_ts", "<slack ts>"]` — original microsecond-precision timestamp
   (Nostr `created_at` is seconds, so this preserves sub-second ordering data)
 
-## Identity modes
+## Attribution model — zero key custody, no impersonation
 
-### Bot mode (default)
+Every imported event is signed by the **CLI identity** (bot mode). No
+private key is ever generated for, or distributed to, anyone. Message
+bodies keep a `**Name**: ` prefix (for search and non-Buzz clients) and the
+`import_author` tag records the original person.
 
-Everything is signed by the CLI identity (`BUZZ_PRIVATE_KEY`). Message
-content is prefixed with the original author's display name
-(`**Alice**: …`) so history stays readable; machine-readable attribution
-lives in the `import_author` tag.
+Real people are attributed by **owner/admin-signed identity bindings**
+(kind `30623`, `KIND_IMPORT_IDENTITY_BINDING`) mapping `slack:<user id>` to
+that person's **public key** (npub or hex):
 
-- Zero key custody — no keys are generated or distributed.
-- History is attributed to the importer identity, not to individual people.
-
-### Mapping mode (`--mapping keys.json`)
-
-A JSON file maps Slack user IDs to Nostr private keys:
-
-```json
-{
-  "U01ABCDEF": { "private_key": "nsec1..." },
-  "U02GHIJKL": { "private_key": "<64-char hex>" }
-}
+```bash
+# after people have onboarded and shared their npub (public — not a secret):
+buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1def
+# or one at a time, any time later:
+buzz import bind --slack-id U060 --pubkey npub1abc
 ```
 
-Messages and reactions from mapped users are signed with *their* keys, so
-imported history is natively attributable — six months from now, "my
-messages" really are that pubkey's messages. Unmapped users (departed
-members, bots) fall back to bot-mode signing with the author-name prefix.
+The Buzz client reads these bindings and renders imported history under the
+bound person's profile (name + avatar); unbound history still shows the
+`import_author` name.
 
-Requirements and behavior:
+Why this is safe:
 
-- Every event is signed locally with the mapped user's key and submitted
-  over the single CLI connection. The relay accepts the author/submitter
-  mismatch because the events carry `import` provenance tags and the CLI
-  identity is a community owner/admin (see the exemption below) — the
-  event's own Schnorr signature proves authorship. Mapped keys never need
-  to be live relay members to import.
-- The importer still best-effort registers mapped users as relay members
-  (kind `9030`) and channel members (kind `9000`) so their history is
-  readable to them the moment they log in with their key.
-- A kind `0` profile (display name, avatar URL from `users.json`) is
-  published for each mapped user unless `--skip-profiles` is set.
+- **Zero custody.** Only public keys (npubs) are handled. Nothing secret is
+  generated or distributed, so there is no `keys.json` to leak.
+- **No account takeover.** The relay stores a binding **only when signed by
+  a community owner or admin**. A member cannot publish
+  `slack:U060 → their own pubkey` to seize someone else's history — the
+  exact migration risk this design closes.
+- **No third-party signatures.** Every stored event is signed by its
+  submitter; there is no path for one key to post as another.
+- Display names remain freely editable (Slack-like); the binding ties a
+  Slack id to a **pubkey**, independent of display name. Verified handles
+  are a separate layer (NIP-05).
 
-**Key custody warning:** whoever produces `keys.json` holds every mapped
-user's private key until it is handed over. Generate keys on one machine,
-deliver each `nsec` to its person over a secure channel — Buzz's NIP-AB
-pairing (`buzz-pair-relay`) is designed for exactly this one-time key
-transfer — and destroy the mapping file after import. Prefer generating the
-mapping *with* each user present when the team is small.
-
-### Claim mode (future work)
-
-The zero-custody end state, not yet implemented:
-
-1. Each person onboards in Buzz normally (key generated on-device, never
-   leaves it).
-2. The importer (as a Slack app) DMs each member a one-time claim token —
-   receiving the token proves control of the Slack account; signing the
-   claim proves control of the Buzz key. Neither email infrastructure nor
-   key distribution is required.
-3. Each person runs `buzz import slack --claim <SLACK_ID>` against the
-   shared export, signing only their own messages locally.
-
-This needs a shared cross-run message-ID ledger (replies must reference
-event IDs of messages signed by *other* users' claims) — the state-file
-design below anticipates it, but multi-party coordination is out of scope
-for v1. Fallback hierarchy for unclaimed users stays the same: bot-signed
-with attribution tags.
+How each person's own key comes to exist (no distribution): they onboard in
+Buzz via an invite link — the key is generated on their device and never
+leaves it — then share their **npub** (public) with the operator, who
+publishes the binding.
 
 ## Relay requirements
 
-**The CLI identity must be a community owner or admin.** The relay
-normally rejects events whose `created_at` is more than 15 minutes in the
-past, and events whose author differs from the authenticated submitter.
-Both checks carry an authorized-import exemption: an event with an
-`import` provenance tag, submitted by an authenticated community
-owner/admin, may be backdated and may be third-party-signed (its Schnorr
-signature proves authorship). No relay restart or configuration change is
-needed — the operator's own auth *is* the authorization, scoped per event.
+**The CLI identity must be a community owner or admin.** Two relay checks
+matter for imports:
 
-Under the hood the exemption also disarms the DB commit-time floor guard
-(migration 0021) for exactly those inserts, and on read-replica
-deployments it closes the replica fence until a fresh handshake provably
-covers the backfilled rows — degraded read capacity during the import,
-never missing rows. Single-instance deployments are unaffected.
+- Backdating: the relay rejects `created_at` more than 15 minutes in the
+  past, *except* for `import`-tagged events submitted by an owner/admin —
+  no restart or config change; the operator's auth is the authorization,
+  scoped per event. (Under the hood this also disarms the DB commit-time
+  floor guard for those inserts, and on read-replica deployments closes the
+  replica fence until a fresh handshake covers the backfilled rows —
+  degraded read capacity during the import, never missing rows.
+  Single-instance deployments are unaffected.)
+- Identity bindings (kind `30623`): accepted **only** from an owner/admin.
 
 Two optional knobs for the import window:
 
@@ -171,8 +143,9 @@ who was ever @-mentioned in Slack. Imported mentions render as plain
   are appended as links. A future `--download-files` could fetch blobs with
   a Slack token and re-upload via Blossom, rewriting links.
 - **DMs and private channels are not imported.** Standard Slack exports
-  only contain public channels; DM import also raises consent questions
-  that belong with the claim-mode design.
+  only contain public channels.
+- **Per-reactor identity in reactions is not preserved.** Bot mode signs
+  one reaction per distinct emoji (a key can react to a target only once).
 - **Reaction timestamps are synthetic** (message `ts + 1s`) — Slack exports
   don't record when a reaction was added.
 - **Sub-second ordering may flatten.** Two messages inside the same second
@@ -186,14 +159,17 @@ who was ever @-mentioned in Slack. Imported mentions render as plain
 ```
 buzz import slack
   --export-dir <PATH>      unzipped Slack export directory (required)
-  --mapping <PATH>         Slack user id → private key JSON (mapping mode)
   --state <PATH>           state file (default: <export-dir>/buzz-import-state.json)
   --channels <a,b,c>       import only these channel names
   --dry-run                parse and report what would be imported; no writes
   --skip-reactions         do not import reactions
-  --skip-profiles          do not publish kind 0 profiles for mapped users
+  --identity-map <MAP>     SLACKID=npub-or-hex,… owner-signed bindings (public keys only)
+
+buzz import bind
+  --slack-id <ID>          Slack user id (e.g. U060976D0QN)
+  --pubkey <NPUB|HEX>      the person's PUBLIC key (never an nsec)
 ```
 
 Output follows CLI conventions: progress on stderr, a final JSON summary on
 stdout (`channels_created`, `messages_imported`, `reactions_imported`,
-`skipped`, `warnings`).
+`bindings_published`, `skipped`, `warnings`).
