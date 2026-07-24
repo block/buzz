@@ -25,6 +25,14 @@ const CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.buzz.app.dev";
 const LEGACY_CANONICAL_DEV_IDENTIFIER: &str = "xyz.block.sprout.app.dev";
 const LEGACY_RELEASE_IDENTIFIER: &str = "xyz.block.sprout.app";
 
+/// Marker recording that the legacy-app-data probe has already run.
+///
+/// Lives *inside* the current app-data dir (not its parent, unlike the reset
+/// sentinel) so a boot reset — which wipes `app_data_dir` and the legacy dir
+/// together — also clears it. That ordering is load-bearing: after a reset the
+/// probe must be free to re-run, find the legacy dir gone, and re-mark.
+const LEGACY_APP_DATA_PROBE_SENTINEL: &str = ".legacy-app-data-probed";
+
 /// JSON files symlinked from worktree data directories to the canonical
 /// dev data directory. Only data files — never `agent-pids/` or `logs/`.
 /// `identity.key` is deliberately excluded because worktree instances
@@ -192,6 +200,10 @@ fn run_boot_migrations_inner(app: &tauri::AppHandle, reset_completed: bool) {
 /// the current Buzz identifier directory. The Tauri identifier controls the app
 /// data path, so without this copy a product rename would look like a fresh
 /// install and users would lose their persisted identity and agent settings.
+///
+/// Runs at most once per install: the legacy dir belongs to another app's
+/// container, so probing it repeatedly re-triggers the macOS "access data from
+/// other apps" prompt. See [`migrate_legacy_app_data_dir_at`].
 pub fn migrate_legacy_app_data_dir(app: &tauri::AppHandle) {
     let current_dir = match app.path().app_data_dir() {
         Ok(dir) => dir,
@@ -203,10 +215,41 @@ pub fn migrate_legacy_app_data_dir(app: &tauri::AppHandle) {
     let Some(legacy_dir) = legacy_app_data_dir(&current_dir) else {
         return;
     };
+    migrate_legacy_app_data_dir_at(&legacy_dir, &current_dir);
+}
+
+/// Copy legacy app data from `legacy_dir` into `current_dir`, at most once ever.
+///
+/// The one-shot guard exists for macOS TCC, not for speed. `legacy_dir` sits in
+/// another app's container (`xyz.block.sprout.app`), and on macOS *any* access —
+/// including the `exists()` stat itself — trips the "would like to access data
+/// from other apps" consent prompt. Because the pre-sentinel code probed on every
+/// launch and bailed immediately when the dir was absent, users who never ran
+/// Sprout got a prompt on every single launch that could never lead to a copy.
+///
+/// Writing the marker *before* the probe is deliberate: if the marker cannot be
+/// written we skip the probe entirely rather than risk prompting forever. A
+/// missed migration is recoverable; an unkillable system prompt is not.
+fn migrate_legacy_app_data_dir_at(legacy_dir: &Path, current_dir: &Path) {
+    let sentinel = current_dir.join(LEGACY_APP_DATA_PROBE_SENTINEL);
+    if sentinel.exists() {
+        return;
+    }
+    if let Err(error) =
+        std::fs::create_dir_all(current_dir).and_then(|()| std::fs::write(&sentinel, b""))
+    {
+        eprintln!(
+            "buzz-desktop: app-data-migration: cannot write probe marker {}: {error} — \
+             skipping legacy probe to avoid repeating the macOS consent prompt",
+            sentinel.display()
+        );
+        return;
+    }
+
     if !legacy_dir.exists() {
         return;
     }
-    match copy_dir_all(&legacy_dir, &current_dir) {
+    match copy_dir_all(legacy_dir, current_dir) {
         Ok(()) => eprintln!(
             "buzz-desktop: app-data-migration: copied legacy data from {} to {}",
             legacy_dir.display(),
