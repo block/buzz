@@ -164,6 +164,85 @@ fn release_command_search_prefers_bundled_sidecars() {
     );
 }
 
+/// Resolve a command against an explicit, ordered dir list using the same
+/// first-executable-wins rule as `resolve_workspace_command`. Keeps the
+/// assertion on real files instead of only on directory ordering.
+#[cfg(unix)]
+fn first_executable_in(dirs: &[PathBuf], file_name: &str) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(file_name))
+        .find(|candidate| super::is_executable_file(candidate))
+}
+
+/// Release profile must pick the packaged sidecar even when a workspace
+/// artifact with the same name also exists. The ordering tests alone cannot
+/// catch a regression here, because they never place real files on disk.
+#[cfg(unix)]
+#[test]
+fn release_resolution_picks_bundled_sidecar_over_workspace_artifact() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("buzz-sidecar-{}", uuid::Uuid::new_v4()));
+    let bundled = root.join("Buzz.app/Contents/MacOS");
+    let workspace = root.join("workspace");
+    let workspace_release = workspace.join("target/release");
+    std::fs::create_dir_all(&bundled).expect("create bundled dir");
+    std::fs::create_dir_all(&workspace_release).expect("create workspace target dir");
+
+    // Both locations hold an executable named buzz-acp.
+    for dir in [&bundled, &workspace_release] {
+        let bin = dir.join("buzz-acp");
+        std::fs::write(&bin, "").expect("write sidecar");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod sidecar");
+    }
+
+    let dirs = super::command_search_dirs_for_profile(&workspace, None, Some(&bundled), false);
+    assert_eq!(
+        first_executable_in(&dirs, "buzz-acp"),
+        Some(bundled.join("buzz-acp")),
+        "release profile must resolve the packaged sidecar, not the workspace artifact"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Documents the fallback contract explicitly: when the packaged sidecar is
+/// present but NOT executable, release resolution falls through to the
+/// workspace artifact rather than failing. Locking this down makes the
+/// behavior intentional and visible instead of incidental.
+#[cfg(unix)]
+#[test]
+fn release_resolution_falls_back_when_bundled_sidecar_is_not_executable() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("buzz-sidecar-{}", uuid::Uuid::new_v4()));
+    let bundled = root.join("Buzz.app/Contents/MacOS");
+    let workspace = root.join("workspace");
+    let workspace_release = workspace.join("target/release");
+    std::fs::create_dir_all(&bundled).expect("create bundled dir");
+    std::fs::create_dir_all(&workspace_release).expect("create workspace target dir");
+
+    let broken = bundled.join("buzz-acp");
+    std::fs::write(&broken, "").expect("write bundled sidecar");
+    std::fs::set_permissions(&broken, std::fs::Permissions::from_mode(0o644))
+        .expect("chmod bundled sidecar non-executable");
+
+    let usable = workspace_release.join("buzz-acp");
+    std::fs::write(&usable, "").expect("write workspace sidecar");
+    std::fs::set_permissions(&usable, std::fs::Permissions::from_mode(0o755))
+        .expect("chmod workspace sidecar");
+
+    let dirs = super::command_search_dirs_for_profile(&workspace, None, Some(&bundled), false);
+    assert_eq!(
+        first_executable_in(&dirs, "buzz-acp"),
+        Some(usable),
+        "a non-executable packaged sidecar must fall through to the workspace artifact"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn debug_command_search_prefers_fresh_workspace_artifacts() {
     let dirs = super::command_search_dirs_for_profile(
