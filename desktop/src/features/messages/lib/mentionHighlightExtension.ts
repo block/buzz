@@ -1,6 +1,12 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
-import { Decoration, DecorationSet } from "@tiptap/pm/view";
+import {
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type EditorState,
+  type Transaction,
+} from "@tiptap/pm/state";
+import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
 
@@ -10,6 +16,10 @@ export const mentionHighlightKey = new PluginKey("mentionHighlight");
  *
  * Accepts `names` (display names) and `channelNames` storage options.
  * On every doc update the plugin scans text nodes and decorates matches.
+ *
+ * Agent mentions are treated as atomic for caret placement: the cursor
+ * cannot rest inside `@AgentName` (which would break the chip when typing).
+ * Arrow keys and backspace/delete also hop/delete the whole token.
  */
 export const MentionHighlightExtension = Extension.create({
   name: "mentionHighlight",
@@ -80,9 +90,29 @@ export const MentionHighlightExtension = Extension.create({
             return oldDecorations.map(tr.mapping, tr.doc);
           },
         },
+        appendTransaction(_transactions, _oldState, newState) {
+          return snapSelectionOutOfAgentMentions(
+            newState,
+            extension.storage.agentNames,
+          );
+        },
         props: {
           decorations(state) {
             return this.getState(state) ?? DecorationSet.empty;
+          },
+          handleClick(view, pos) {
+            return snapViewSelectionToAgentMentionEdge(
+              view,
+              pos,
+              extension.storage.agentNames,
+            );
+          },
+          handleKeyDown(view, event) {
+            return handleAgentMentionKeyDown(
+              view,
+              event,
+              extension.storage.agentNames,
+            );
           },
         },
       }),
@@ -327,4 +357,127 @@ function addMatchesForPatterns(
       match = pattern.exec(text);
     }
   }
+}
+
+type MentionRange = { from: number; to: number };
+
+/**
+ * Locate `@AgentName` ranges in a ProseMirror doc for agent display names.
+ * Exported for unit tests.
+ */
+export function findAgentMentionRanges(
+  doc: EditorState["doc"],
+  agentNames: readonly string[],
+): MentionRange[] {
+  if (agentNames.length === 0) return [];
+
+  const patterns = buildHighlightPatterns([...agentNames], []);
+  const ranges: MentionRange[] = [];
+
+  doc.descendants((node, pos) => {
+    if (!node.isText || !node.text) return;
+    for (const match of findHighlightMatches(node.text, patterns)) {
+      ranges.push({ from: pos + match.from, to: pos + match.to });
+    }
+  });
+
+  return ranges;
+}
+
+/**
+ * Snap a caret position out of an agent-mention interior.
+ * Prefers the nearer edge; ties go to the end (after the chip).
+ * Exported for unit tests.
+ */
+export function snapPosOutOfAgentMention(
+  pos: number,
+  ranges: readonly MentionRange[],
+): number {
+  for (const range of ranges) {
+    if (pos > range.from && pos < range.to) {
+      const toStart = pos - range.from;
+      const toEnd = range.to - pos;
+      return toStart < toEnd ? range.from : range.to;
+    }
+  }
+  return pos;
+}
+
+function snapSelectionOutOfAgentMentions(
+  state: EditorState,
+  agentNames: readonly string[],
+): Transaction | null {
+  const { from, to, empty } = state.selection;
+  if (!empty || from !== to) return null;
+
+  const ranges = findAgentMentionRanges(state.doc, agentNames);
+  const snapped = snapPosOutOfAgentMention(from, ranges);
+  if (snapped === from) return null;
+
+  return state.tr.setSelection(TextSelection.create(state.doc, snapped));
+}
+
+function snapViewSelectionToAgentMentionEdge(
+  view: EditorView,
+  pos: number,
+  agentNames: readonly string[],
+): boolean {
+  const ranges = findAgentMentionRanges(view.state.doc, agentNames);
+  const snapped = snapPosOutOfAgentMention(pos, ranges);
+  if (snapped === pos) return false;
+
+  view.dispatch(
+    view.state.tr.setSelection(TextSelection.create(view.state.doc, snapped)),
+  );
+  return true;
+}
+
+function handleAgentMentionKeyDown(
+  view: EditorView,
+  event: KeyboardEvent,
+  agentNames: readonly string[],
+): boolean {
+  if (event.altKey || event.metaKey || event.ctrlKey) return false;
+
+  const ranges = findAgentMentionRanges(view.state.doc, agentNames);
+  if (ranges.length === 0) return false;
+
+  const { from, empty } = view.state.selection;
+  if (!empty) return false;
+
+  if (event.key === "ArrowLeft" && !event.shiftKey) {
+    const range = ranges.find((candidate) => candidate.to === from);
+    if (!range) return false;
+    view.dispatch(
+      view.state.tr.setSelection(
+        TextSelection.create(view.state.doc, range.from),
+      ),
+    );
+    return true;
+  }
+
+  if (event.key === "ArrowRight" && !event.shiftKey) {
+    const range = ranges.find((candidate) => candidate.from === from);
+    if (!range) return false;
+    view.dispatch(
+      view.state.tr.setSelection(TextSelection.create(view.state.doc, range.to)),
+    );
+    return true;
+  }
+
+  if (event.key === "Backspace") {
+    const range = ranges.find((candidate) => candidate.to === from);
+    if (!range) return false;
+    view.dispatch(view.state.tr.delete(range.from, range.to));
+    return true;
+  }
+
+  if (event.key === "Delete") {
+    const range = ranges.find((candidate) => candidate.from === from);
+    if (!range) return false;
+    view.dispatch(view.state.tr.delete(range.from, range.to));
+    return true;
+  }
+
+  return false;
 }
