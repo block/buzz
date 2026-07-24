@@ -1716,6 +1716,8 @@ pub fn spawn_agent_child(
     if let Some(ref path) = augmented_path {
         command.env("PATH", path);
     }
+    let runtime_meta = known_acp_runtime(&effective_command);
+    super::codex_home::apply_isolated_codex_home(&mut command, runtime_meta);
     command.env("RUST_LOG", child_rust_log_filter());
     command.env("BUZZ_PRIVATE_KEY", &record.private_key_nsec);
     command.env("BUZZ_RELAY_URL", &effective_relay_url);
@@ -1732,7 +1734,6 @@ pub fn spawn_agent_child(
     }
     // Enable MCP hook tools (_Stop, _PostCompact) for agents that need them.
     // Uses "*" because build_mcp_servers() hard-codes the server name to "buzz-mcp".
-    let runtime_meta = known_acp_runtime(&effective_command);
     if runtime_meta.is_some_and(|r| r.mcp_hooks) {
         command.env("MCP_HOOK_SERVERS", "*");
     }
