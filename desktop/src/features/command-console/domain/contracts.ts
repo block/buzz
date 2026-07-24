@@ -29,7 +29,11 @@ export type QuotedLocation = {
   readonly location: string;
 };
 
-/** A quoted source chunk pinned to a collection snapshot. */
+/**
+ * Legacy/shared source reference. This remains PUBLIC-capable for Phase 1
+ * artefacts such as cloud-routing contracts; Phase 4 must use
+ * `OfficialSourceReference` instead.
+ */
 export type SourceReference = ContractBase & {
   readonly kind: "source-reference";
   readonly ledgerId: string;
@@ -47,6 +51,17 @@ export type SourceReference = ContractBase & {
   readonly timestamp: string;
   readonly snapshotId: string;
   readonly quotedLocation: QuotedLocation;
+};
+
+/**
+ * Phase 4 source provenance. It is deliberately a separate type so Daily
+ * Command Brief callers cannot silently reuse the PUBLIC-capable legacy path.
+ */
+export type OfficialSourceReference = Omit<
+  SourceReference,
+  "classification"
+> & {
+  readonly classification: "OFFICIAL";
 };
 
 export type ApprovalState = "pending" | "approved" | "rejected";
@@ -267,6 +282,37 @@ export function parseSourceReference(value: unknown): SourceReference | null {
     snapshotId: value.snapshotId,
     quotedLocation,
   });
+}
+
+/**
+ * Creates a Phase 4 source reference with a non-overridable OFFICIAL
+ * classification. Do not use this for legacy/shared PUBLIC artefacts.
+ */
+export function createOfficialSourceReference(
+  input: Omit<OfficialSourceReference, "kind" | "version" | "classification">,
+): OfficialSourceReference {
+  return required(
+    parseOfficialSourceReference({
+      kind: "source-reference",
+      version: COMMAND_CONTRACT_VERSION,
+      classification: "OFFICIAL",
+      ...input,
+    }),
+    "official-source-reference",
+  );
+}
+
+/**
+ * Safely parses a persisted Phase 4 source reference, rejecting missing or
+ * PUBLIC classification even though the legacy parser accepts PUBLIC.
+ */
+export function parseOfficialSourceReference(
+  value: unknown,
+): OfficialSourceReference | null {
+  const parsed = parseSourceReference(value);
+  return parsed?.classification === "OFFICIAL"
+    ? (parsed as OfficialSourceReference)
+    : null;
 }
 
 function actionBase(value: UnknownRecord): value is UnknownRecord & {

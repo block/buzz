@@ -1,4 +1,5 @@
 import { hasExactKeys, isRecord, isRfc3339 } from "./validation";
+import type { OfficialSourceReference } from "./contracts";
 
 export const MAX_TEXT_BYTES = 4096;
 export const MAX_ARRAY_ITEMS = 64;
@@ -66,20 +67,20 @@ export type CitedFinding = {
   readonly sourceIds: readonly string[];
 };
 
-export type SourceLedgerEntry = {
-  readonly classification: "OFFICIAL";
-  readonly ledgerId: string;
-  readonly sourceId: string;
-  readonly sourceKind: (typeof SOURCE_KINDS)[number];
-  readonly collection: string;
-  readonly documentId: string;
-  readonly chunkId: string;
-  readonly timestamp: string;
-  readonly snapshotId: string;
-  readonly quotedLocation: {
-    readonly quote: string;
-    readonly location: string;
-  };
+/** Phase 4 ledger provenance is derived only from the official source path. */
+export type SourceLedgerEntry = Pick<
+  OfficialSourceReference,
+  | "classification"
+  | "ledgerId"
+  | "sourceId"
+  | "sourceKind"
+  | "collection"
+  | "documentId"
+  | "chunkId"
+  | "timestamp"
+  | "snapshotId"
+  | "quotedLocation"
+> & {
   readonly retrievedAt: string;
   readonly observedAt: string;
 };

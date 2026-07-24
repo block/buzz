@@ -5,6 +5,7 @@ import {
   createAdviserContribution,
   createCommandBrief,
   createKnowledgeSnapshotManifest,
+  createOfficialSourceReference,
   createMemoryRevision,
   createModelRoute,
   createProposedWorkspaceAction,
@@ -13,6 +14,7 @@ import {
   parseAdviserContribution,
   parseCommandBrief,
   parseKnowledgeSnapshotManifest,
+  parseOfficialSourceReference,
   parseMemoryRevision,
   parseModelRoute,
   parseProposedWorkspaceAction,
@@ -297,6 +299,33 @@ test("every creation helper defaults to OFFICIAL and leaf PUBLIC is preserved", 
     action("task", { classification: "PUBLIC" }).classification,
     "PUBLIC",
   );
+});
+
+test("Phase 4 official source references cannot reuse the legacy PUBLIC path", () => {
+  assert.equal(source({ classification: "PUBLIC" }).classification, "PUBLIC");
+
+  const official = createOfficialSourceReference({
+    ledgerId: "ledger-official-1",
+    sourceKind: "rag",
+    sourceId: "source-official-1",
+    collection: "engineering-orders",
+    documentId: "document-1",
+    chunkId: "chunk-7",
+    timestamp: NOW,
+    snapshotId: "snapshot-1",
+    quotedLocation: {
+      quote: "The official source passage.",
+      location: "section 4, lines 12-18",
+    },
+  });
+  assert.equal(official.classification, "OFFICIAL");
+  assert.deepEqual(parseOfficialSourceReference(official), official);
+
+  const persistedPublic = { ...official, classification: "PUBLIC" };
+  const persistedMissing = { ...official };
+  delete persistedMissing.classification;
+  assert.equal(parseOfficialSourceReference(persistedPublic), null);
+  assert.equal(parseOfficialSourceReference(persistedMissing), null);
 });
 
 test("PUBLIC composites preserve PUBLIC and inherit nested OFFICIAL", () => {
