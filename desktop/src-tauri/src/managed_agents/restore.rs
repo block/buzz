@@ -323,7 +323,7 @@ pub async fn restore_managed_agents_on_launch(
                                             spawn_agent_child(
                                                 app,
                                                 record,
-                                                &key.relay_url,
+                                                &relay_url,
                                                 true,
                                                 owner_hex_ref,
                                             )
