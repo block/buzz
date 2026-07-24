@@ -482,6 +482,24 @@ pub struct ChannelFilter {
     pub require_mention: bool,
 }
 
+impl ChannelFilter {
+    /// Drop the relay-side `#p` mention filter when the channel is a DM.
+    ///
+    /// A 1:1 DM is addressed to the agent by definition, so the relay must
+    /// deliver every message in it — not just `p`-tagged ones — otherwise the
+    /// agent never sees plain (un-@mentioned) DM messages (issue #2747). This
+    /// only widens *delivery*; per-event triggering is still gated by the
+    /// inbound author gate and `match_event`, which restrict DM turns to the
+    /// owner. Group channels keep their mention filter unchanged.
+    #[must_use]
+    pub fn with_dm_exemption(mut self, is_dm: bool) -> Self {
+        if is_dm {
+            self.require_mention = false;
+        }
+        self
+    }
+}
+
 #[derive(Debug)]
 pub struct Config {
     pub keys: Keys,
@@ -1329,6 +1347,33 @@ mod tests {
     use super::*;
     use crate::filter::{ChannelScope, SubscriptionRule};
     use clap::{Parser, ValueEnum};
+
+    #[test]
+    fn test_with_dm_exemption_clears_mention_for_dm() {
+        let filter = ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+        }
+        .with_dm_exemption(true);
+        assert!(
+            !filter.require_mention,
+            "DM must drop the relay-side #p mention filter"
+        );
+        assert_eq!(filter.kinds, Some(vec![9]), "kinds must be preserved");
+    }
+
+    #[test]
+    fn test_with_dm_exemption_preserves_mention_for_non_dm() {
+        let filter = ChannelFilter {
+            kinds: Some(vec![9]),
+            require_mention: true,
+        }
+        .with_dm_exemption(false);
+        assert!(
+            filter.require_mention,
+            "group channels keep the mention filter unchanged"
+        );
+    }
 
     /// Build a minimal Config for testing without CLI parsing.
     fn test_config(mode: SubscribeMode) -> Config {

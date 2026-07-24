@@ -1479,7 +1479,16 @@ async fn tokio_main() -> Result<()> {
     }
     let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
-        if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
+        // DM mention exemption (#2747): drop the relay-side `#p` filter for
+        // channels known to be DMs at startup so plain DM messages are
+        // delivered. Unknown types keep the mention filter (fail narrow at the
+        // subscription layer — per-event gating re-resolves the type later).
+        let is_dm = channel_info_map
+            .get(channel_id)
+            .map(|ci| ci.channel_type == "dm")
+            .unwrap_or(false);
+        let filter = filter.clone().with_dm_exemption(is_dm);
+        if let Err(e) = relay.subscribe_channel(*channel_id, filter).await {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
             subscribed_channel_ids.insert(*channel_id);
@@ -1969,6 +1978,14 @@ async fn tokio_main() -> Result<()> {
                                         tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
                                     } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
+                                        // DM mention exemption (#2747): a DM the
+                                        // agent is added to post-startup (e.g. an
+                                        // agent-initiated DM) must deliver plain
+                                        // messages too. Resolve type via the shared
+                                        // resolver (fail-closed to DM on unknown,
+                                        // matching the inbound author gate).
+                                        let is_dm = is_dm_channel(ch, &ctx.channel_info).await;
+                                        let filter = filter.with_dm_exemption(is_dm);
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
                                         } else {
@@ -2143,13 +2160,13 @@ async fn tokio_main() -> Result<()> {
                             // launched by the same human). Allowlist adds the
                             // explicit pubkey list on top, for external people;
                             // it never revokes same-owner team bots.
+                            let author = buzz_event.event.pubkey.to_hex();
+                            // DM hardening: resolve channel type (fail-closed
+                            // to DM) so allowlist/anyone modes cannot be
+                            // exercised by non-owner authors inside DMs.
+                            let is_dm =
+                                is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                             {
-                                let author = buzz_event.event.pubkey.to_hex();
-                                // DM hardening: resolve channel type (fail-closed
-                                // to DM) so allowlist/anyone modes cannot be
-                                // exercised by non-owner authors inside DMs.
-                                let is_dm =
-                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
@@ -2162,7 +2179,7 @@ async fn tokio_main() -> Result<()> {
                                 if !allowed {
                                     tracing::debug!(
                                         channel_id = %buzz_event.channel_id,
-                                        author = %buzz_event.event.pubkey.to_hex(),
+                                        author = %author,
                                         mode = %config.respond_to,
                                         is_dm,
                                         "inbound author gate — dropping event"
@@ -2171,7 +2188,14 @@ async fn tokio_main() -> Result<()> {
                                 }
                             }
 
-                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex).await;
+                            // DM mention exemption (#2747): a 1:1 DM is addressed
+                            // to the agent by definition, so an owner message in a
+                            // DM fires a turn without an explicit @mention. Scoped
+                            // to the owner (not siblings) so sibling agents still
+                            // need a mention — preserving the anti-loop invariant
+                            // (#2270). Group channels are never exempt.
+                            let mention_exempt = is_dm && owner_cache.get() == Some(author.as_str());
+                            let matched = filter::match_event(&buzz_event.event, buzz_event.channel_id, &rules, &pubkey_hex, mention_exempt).await;
                             let prompt_tag = match matched {
                                 Some(m) => m.prompt_tag,
                                 None => {
@@ -2179,9 +2203,8 @@ async fn tokio_main() -> Result<()> {
                                     continue;
                                 }
                             };
-                            // Capture author pubkey before queue.push() moves
-                            // buzz_event.event (needed for mode gate below).
-                            let author_hex = buzz_event.event.pubkey.to_hex();
+                            // `author` (captured above, before queue.push() moves
+                            // buzz_event.event) is reused by the mode gate below.
                             let event_id_hex = buzz_event.event.id.to_hex();
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
@@ -2223,7 +2246,7 @@ async fn tokio_main() -> Result<()> {
                                 // event that reaches here.
                                 let signal = mode_gate_signal(
                                     config.multiple_event_handling,
-                                    &author_hex,
+                                    &author,
                                     owner_cache.get(),
                                 );
                                 if let Some(signal) = signal {

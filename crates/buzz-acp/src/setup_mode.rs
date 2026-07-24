@@ -440,12 +440,15 @@ pub(crate) async fn run_setup_listener(config: Config, payload: SetupPayload) ->
         )
         .await;
 
-        // Apply channel/kind filter rules.
+        // Apply channel/kind filter rules. Setup mode keeps its own explicit
+        // @mention requirement (above) regardless of channel type, so it opts
+        // out of the DM mention exemption (#2747) with mention_exempt = false.
         let filter_matched = filter::match_event(
             &buzz_event.event,
             buzz_event.channel_id,
             &rules,
             &pubkey_hex,
+            false,
         )
         .await
         .is_some();
