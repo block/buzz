@@ -4,6 +4,10 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
+fn log_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    EnvFilter::new(rust_log.unwrap_or("buzz_relay=info"))
+}
 use uuid::Uuid;
 
 use buzz_audit::AuditService;
@@ -107,9 +111,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing_subscriber::registry()
-        .with(fmt::layer().json().flatten_event(true))
-        .with(EnvFilter::from_default_env().add_directive("buzz_relay=info".parse()?))
-        .with(otel_layer)
+        .with(
+            fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_filter(log_env_filter(std::env::var("RUST_LOG").ok().as_deref())),
+        )
+        .with(otel_layer.map(|layer| {
+            layer.with_filter(telemetry::otel_env_filter(
+                std::env::var("BUZZ_OTEL_FILTER").ok().as_deref(),
+            ))
+        }))
         .init();
 
     // Log any exporter-build failure now that the subscriber is installed.
@@ -1058,6 +1070,52 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod env_filter_tests {
+    use super::log_env_filter;
+    use buzz_relay::telemetry::otel_env_filter;
+    use tracing_subscriber::prelude::*;
+
+    #[test]
+    fn unset_enables_datastore_only_for_otel_filter() {
+        let logs = tracing_subscriber::registry().with(log_env_filter(None));
+        tracing::subscriber::with_default(logs, || {
+            assert!(!tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+            assert!(tracing::enabled!(target: "buzz_relay", tracing::Level::INFO));
+        });
+
+        let otel = tracing_subscriber::registry().with(otel_env_filter(None));
+        tracing::subscriber::with_default(otel, || {
+            assert!(tracing::enabled!(target: "buzz_datastore", tracing::Level::INFO));
+        });
+    }
+
+    #[test]
+    fn explicit_datastore_off_is_preserved_alone() {
+        assert_eq!(
+            otel_env_filter(Some("buzz_datastore=off")).to_string(),
+            "buzz_datastore=off"
+        );
+    }
+
+    #[test]
+    fn explicit_datastore_debug_is_preserved_alone() {
+        assert_eq!(
+            otel_env_filter(Some("buzz_datastore=debug")).to_string(),
+            "buzz_datastore=debug"
+        );
+    }
+
+    #[test]
+    fn log_and_otel_filters_are_configured_independently() {
+        assert_eq!(log_env_filter(Some("warn")).to_string(), "warn");
+        assert_eq!(
+            otel_env_filter(Some("buzz_relay=debug")).to_string(),
+            "buzz_relay=debug"
+        );
+    }
 }
 
 async fn run_community_revalidator(
