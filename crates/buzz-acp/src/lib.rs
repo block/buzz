@@ -3001,6 +3001,142 @@ fn spawn_failure_notice(
     }
 }
 
+/// Stable, machine-readable discriminant for a failed turn, derived from the
+/// same data that already drives `outcome_label` and `is_transport_error`.
+///
+/// Unlike `outcome_label` (which mirrors the `PromptOutcome` variant), this
+/// groups failures into a handful of actionable buckets so consumers (the
+/// desktop UI, external tooling) never have to parse prose. Naming note:
+/// `AcpError::Protocol` means a broken frame on the wire, so it lands in
+/// `"transport"` (matching the `is_transport_error` respawn grouping), while
+/// `"protocol"` is reserved for `AcpError::Json` — the agent spoke, but not
+/// valid JSON-RPC. The `agent_panic` emit site labels itself `"panic"`
+/// directly (there is no `PromptOutcome` for a panicked task). New classes
+/// should only be added for a genuinely new failure shape — do not multiply
+/// classes for wording differences.
+fn classify_turn_failure(outcome: &PromptOutcome) -> &'static str {
+    match outcome {
+        PromptOutcome::Ok(_) => "error",
+        PromptOutcome::Timeout(_) => "timeout",
+        PromptOutcome::AgentExited => "exited",
+        PromptOutcome::Cancelled | PromptOutcome::CancelDrainTimeout(_) => "cancelled",
+        PromptOutcome::Error(e) => match e {
+            acp::AcpError::Io(_)
+            | acp::AcpError::WriteTimeout(_)
+            | acp::AcpError::Timeout(_)
+            | acp::AcpError::Protocol(_) => "transport",
+            acp::AcpError::Json(_) => "protocol",
+            acp::AcpError::AgentExited => "exited",
+            acp::AcpError::IdleTimeout(_) | acp::AcpError::HardTimeout { .. } => "timeout",
+            acp::AcpError::CancelDrainTimeout(_) => "cancelled",
+            acp::AcpError::AgentError { .. } => "agent_error",
+        },
+    }
+}
+
+#[cfg(test)]
+mod classify_turn_failure_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn timeout_outcome_classifies_as_timeout() {
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Timeout(TimeoutKind::Idle)),
+            "timeout"
+        );
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false
+            })),
+            "timeout"
+        );
+    }
+
+    #[test]
+    fn agent_exited_outcome_classifies_as_exited() {
+        assert_eq!(classify_turn_failure(&PromptOutcome::AgentExited), "exited");
+    }
+
+    #[test]
+    fn cancelled_outcomes_classify_as_cancelled() {
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Cancelled),
+            "cancelled"
+        );
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::CancelDrainTimeout(Duration::from_secs(5))),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn transport_class_errors_classify_as_transport() {
+        for e in [
+            acp::AcpError::Io(std::io::Error::other("boom")),
+            acp::AcpError::WriteTimeout(Duration::from_secs(1)),
+            acp::AcpError::Timeout(Duration::from_secs(1)),
+            acp::AcpError::Protocol("bad frame".to_string()),
+        ] {
+            assert_eq!(classify_turn_failure(&PromptOutcome::Error(e)), "transport");
+        }
+    }
+
+    #[test]
+    fn json_error_classifies_as_protocol() {
+        let json_err = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Error(acp::AcpError::Json(json_err))),
+            "protocol"
+        );
+    }
+
+    #[test]
+    fn acp_agent_exited_error_classifies_as_exited() {
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Error(acp::AcpError::AgentExited)),
+            "exited"
+        );
+    }
+
+    #[test]
+    fn acp_idle_and_hard_timeout_errors_classify_as_timeout() {
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Error(acp::AcpError::IdleTimeout(
+                Duration::from_secs(30)
+            ))),
+            "timeout"
+        );
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Error(acp::AcpError::HardTimeout {
+                silence: Duration::from_secs(30)
+            })),
+            "timeout"
+        );
+    }
+
+    #[test]
+    fn acp_cancel_drain_timeout_error_classifies_as_cancelled() {
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Error(acp::AcpError::CancelDrainTimeout(
+                Duration::from_secs(5)
+            ))),
+            "cancelled"
+        );
+    }
+
+    #[test]
+    fn agent_error_classifies_as_agent_error() {
+        assert_eq!(
+            classify_turn_failure(&PromptOutcome::Error(acp::AcpError::AgentError {
+                code: -32000,
+                message: "boom".to_string(),
+            })),
+            "agent_error"
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_prompt_result(
     pool: &mut AgentPool,
@@ -3144,6 +3280,7 @@ fn handle_prompt_result(
         PromptOutcome::Cancelled => "cancelled",
         PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
     };
+    let error_class = classify_turn_failure(&result.outcome);
     let agent_index = result.agent.index;
     // Capture the spawn-time configured model and our PID before the agent is
     // moved into match arms below. `desired_model` reflects the config/persona
@@ -3169,6 +3306,7 @@ fn handle_prompt_result(
             let mut payload = serde_json::json!({
                 "outcome": outcome_label,
                 "error": error_msg,
+                "error_class": error_class,
             });
             if let Some(code) = error_code {
                 payload["code"] = serde_json::json!(code);
@@ -3409,6 +3547,7 @@ fn recover_panicked_agent(
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
+                "error_class": "panic",
             }),
         );
     }
@@ -5286,6 +5425,7 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+        assert_eq!(panic.payload["error_class"].as_str(), Some("panic"));
     }
 
     #[tokio::test]
@@ -5386,6 +5526,94 @@ mod error_outcome_emission_tests {
         check_label(
             PromptOutcome::CancelDrainTimeout(std::time::Duration::from_secs(5)),
             "cancel_drain_timeout",
+        )
+        .await;
+    }
+
+    /// The additive `error_class` field mirrors `classify_turn_failure` for
+    /// each outcome shape, independent of the (unstable, prose) `outcome`/
+    /// `error` fields.
+    #[tokio::test]
+    async fn turn_error_payload_includes_error_class() {
+        let check_class = |outcome: PromptOutcome, expected_class: &'static str| async move {
+            let agent = dummy_agent(0).await;
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: None,
+                },
+            );
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            let config = test_config();
+            let mut heartbeat_in_flight = false;
+            let removed_channels = HashSet::new();
+            let mut crash_history = vec![SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            }];
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+            let observer = ObserverHandle::in_process();
+            let result = PromptResult {
+                agent,
+                source: PromptSource::Channel(Uuid::new_v4()),
+                turn_id: "test-turn-id".to_string(),
+                outcome,
+                batch: None,
+            };
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                Some(observer.clone()),
+                None,
+            );
+            let events = observer.snapshot();
+            let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
+            assert_eq!(
+                turn_error.payload["error_class"].as_str().unwrap(),
+                expected_class
+            );
+        };
+        check_class(PromptOutcome::AgentExited, "exited").await;
+        check_class(PromptOutcome::Timeout(TimeoutKind::Idle), "timeout").await;
+        check_class(
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false,
+            }),
+            "timeout",
+        )
+        .await;
+        check_class(
+            PromptOutcome::CancelDrainTimeout(std::time::Duration::from_secs(5)),
+            "cancelled",
+        )
+        .await;
+        check_class(
+            PromptOutcome::Error(AcpError::Protocol("bad frame".into())),
+            "transport",
+        )
+        .await;
+        check_class(
+            PromptOutcome::Error(AcpError::AgentError {
+                code: -32000,
+                message: "boom".into(),
+            }),
+            "agent_error",
         )
         .await;
     }
