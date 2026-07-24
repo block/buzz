@@ -164,7 +164,9 @@ export function cloneBoundedJson(root: unknown): JsonCloneResult {
     if (primitive(root)) return { ok: true, value: root };
     if (!Array.isArray(root) && !isRecord(root)) return { ok: false };
 
-    const rootOutput: unknown[] | UnknownRecord = Array.isArray(root) ? [] : {};
+    const rootOutput: unknown[] | UnknownRecord = Array.isArray(root)
+      ? []
+      : Object.create(null);
     const seen = new WeakSet<object>([root]);
     const containers: object[] = [rootOutput];
     const stack: Array<{
@@ -193,7 +195,9 @@ export function cloneBoundedJson(root: unknown): JsonCloneResult {
         if (!Array.isArray(item) && !isRecord(item)) return { ok: false };
         if (seen.has(item)) return { ok: false };
         seen.add(item);
-        const output: unknown[] | UnknownRecord = Array.isArray(item) ? [] : {};
+        const output: unknown[] | UnknownRecord = Array.isArray(item)
+          ? []
+          : Object.create(null);
         (frame.output as UnknownRecord)[key] = output;
         containers.push(output);
         stack.push({ input: item, output, depth: childDepth });

@@ -205,7 +205,7 @@ test("every approved contract preserves all required fields through JSON", () =>
   for (const [artefact, parse] of fixtures()) {
     const persisted = JSON.parse(JSON.stringify(artefact));
     assert.deepEqual(parse(persisted), artefact, artefact.kind);
-    assert.deepEqual(JSON.parse(JSON.stringify(artefact)), artefact);
+    assert.equal(JSON.stringify(persisted), JSON.stringify(artefact));
     assert.equal(Object.isFrozen(artefact), true, artefact.kind);
   }
 
@@ -456,4 +456,22 @@ test("bounded JSON validation rejects excessive depth and cycles without throwin
 
   const overBoundary = [boundary];
   assert.equal(parseMemoryRevision({ ...base, content: overBoundary }), null);
+});
+
+test("__proto__ keys remain inert own JSON data at every nesting level", () => {
+  const base = memoryRevision();
+  const content = JSON.parse(
+    '{"__proto__":{"polluted":true},"ok":true,"nested":{"__proto__":"inert","value":1}}',
+  );
+
+  const parsed = parseMemoryRevision({ ...base, content });
+  assert.ok(parsed);
+  assert.equal(Object.hasOwn(parsed.content, "__proto__"), true);
+  assert.equal(Object.hasOwn(parsed.content.nested, "__proto__"), true);
+  assert.equal(Object.getPrototypeOf(parsed.content), null);
+  assert.equal(Object.getPrototypeOf(parsed.content.nested), null);
+  assert.equal(parsed.content.__proto__.polluted, true);
+  assert.equal(parsed.content.nested.__proto__, "inert");
+  assert.equal(JSON.stringify(parsed.content), JSON.stringify(content));
+  assert.equal({}.polluted, undefined);
 });
