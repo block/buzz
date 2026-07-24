@@ -563,10 +563,11 @@ async fn dispatch_persistent_event_inner(
 
 /// Collect explicit `@mention` targets from event tags.
 ///
-/// Desktop emits `["mention", pubkey]` via `mergeOutgoingTagsWithReferenceMentions`
-/// / `MENTION_REFERENCE_TAG` for composer @mentions. Structural reply-author
-/// routing only adds `p` tags (`buildReplyTags`) and must **not** count as an
-/// explicit mention (Brad review on #2296 / same finding on #1862).
+/// Producers emit `["mention", pubkey]` in parallel with `p` for intentional
+/// authored @mentions (SDK/CLI `build_message`, Desktop ordinary composer /
+/// `buildReplyTags` mention loop, Mobile `SendMessage`). The non-member
+/// "send without inviting" path also uses bare `mention` tags.
+/// Structural reply-author `p` alone must **not** count (Brad #2296 / #1862).
 ///
 /// - Dedupes first-seen hex (lowercased)
 /// - Skips malformed tags (missing/empty pubkey)
@@ -2716,6 +2717,48 @@ mod tests {
             ]);
             let found = crate::handlers::event::explicit_mention_pubkeys_from_tags(&tags);
             assert_eq!(found, vec![bot]);
+        }
+
+        #[test]
+        fn explicit_mention_from_sdk_style_tags_not_structural_p() {
+            // Contract: intentional mentions carry parallel p+mention; structural
+            // reply author is p-only and must not extract.
+            let author = "aa".repeat(32);
+            let offline_bot = "bb".repeat(32);
+            let structural_only = nostr::Tags::from_list(vec![
+                nostr::Tag::parse(["p", &author]).unwrap(),
+                nostr::Tag::parse(["h", "00000000-0000-0000-0000-000000000001"]).unwrap(),
+            ]);
+            assert!(
+                crate::handlers::event::explicit_mention_pubkeys_from_tags(&structural_only)
+                    .is_empty()
+            );
+
+            let intentional = nostr::Tags::from_list(vec![
+                nostr::Tag::parse(["p", &author]).unwrap(),
+                nostr::Tag::parse(["h", "00000000-0000-0000-0000-000000000001"]).unwrap(),
+                nostr::Tag::parse(["p", &offline_bot]).unwrap(),
+                nostr::Tag::custom(
+                    nostr::TagKind::Custom("mention".into()),
+                    [&offline_bot],
+                ),
+            ]);
+            assert_eq!(
+                crate::handlers::event::explicit_mention_pubkeys_from_tags(&intentional),
+                vec![offline_bot.clone()]
+            );
+
+            use std::collections::{HashMap, HashSet};
+            let bots: HashSet<String> = [offline_bot.clone()].into_iter().collect();
+            let present: HashMap<String, String> = HashMap::new();
+            let mentioned =
+                crate::handlers::event::explicit_mention_pubkeys_from_tags(&intentional);
+            assert_eq!(
+                crate::handlers::event::select_offline_mentioned_bots(
+                    &mentioned, &bots, &present
+                ),
+                vec![offline_bot]
+            );
         }
 
         #[test]

@@ -51,10 +51,16 @@ class SendMessage {
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 
+    // Intentional @mentions emit `p` (fan-out) + `mention` (explicit intent).
+    // Structural reply routing uses only `e` tags here; relay offline notices
+    // gate on `mention` so we never treat reply-author `p` as a mention.
     final tags = <List<String>>[
       ['h', channelId],
       if (parentEventId != null) ..._buildReplyTags(parentEventId, rootEventId),
-      for (final pk in normalizedMentions) ['p', pk],
+      for (final pk in normalizedMentions) ...[
+        ['p', pk],
+        ['mention', pk],
+      ],
       ...mediaTags,
     ];
 

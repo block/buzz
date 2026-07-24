@@ -302,6 +302,7 @@ export class RelayClient {
     const tags: string[][] = [["h", channelId]];
     for (const pubkey of mentionPubkeys) {
       tags.push(["p", pubkey]);
+      tags.push(["mention", pubkey]);
     }
     for (const tag of extraTags) {
       tags.push(tag);
