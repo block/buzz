@@ -734,7 +734,7 @@ function VirtualizedTimelineRows({
                   // row spacing and Virtua's size cache are unaffected. Both the
                   // spacer and the pill are pointer-events-none, and the later
                   // (absolutely positioned) row siblings paint above the spacer.
-                  className="relative -mb-16 flex flex-col before:absolute before:inset-x-0 before:top-4 before:h-px before:bg-border/35 before:content-['']"
+                  className="relative -mb-16 flex flex-col before:absolute before:inset-x-0 before:top-[calc(0.875rem-0.5px)] before:h-px before:bg-border/35 before:content-['']"
                   data-day-label={dayLabel}
                   data-testid="message-timeline-day-group"
                   key={virtualizedItemKey(item)}
