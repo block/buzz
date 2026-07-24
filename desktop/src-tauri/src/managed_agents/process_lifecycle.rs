@@ -1,6 +1,7 @@
 //! Windows process-tree lifecycle primitives for managed agents.
 //!
-//! The Unix teardown uses `process_group(0)` + group signals (in `runtime.rs`).
+//! The Unix teardown uses `setsid()` (own session + process group) + group
+//! signals (in `runtime.rs`).
 //! Windows has no process groups, so the harness's 24 agent workers + MCP
 //! servers are reaped two ways here:
 //!   - [`JobHandle`] / [`create_job_for_child`] — the in-process stop path. A
@@ -17,7 +18,7 @@ use windows_sys::Win32::Foundation::HANDLE;
 /// Win32 Job Object that owns the harness process and (via Windows' default
 /// child-inheritance) every process it spawns. Dropping the handle with
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` set kills the whole tree — the Windows
-/// mirror of the Unix `process_group(0)` + group-signal teardown. This is what
+/// mirror of the Unix `setsid()` + group-signal teardown. This is what
 /// guarantees the 24 agent workers + MCP servers die when we stop or when the
 /// app exits, instead of being orphaned by a bare `Child::kill()`.
 pub struct JobHandle(HANDLE);

@@ -857,6 +857,71 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     let _ = intermediate.wait();
 }
 
+/// Validates the TTY-detach fix: a child spawned with the same `pre_exec`
+/// `setsid()` the harness uses becomes its own SESSION leader (sid == pid) in
+/// a session distinct from the test process. This is what frees the agent tree
+/// from the launching terminal's controlling TTY so background-group job
+/// control (SIGTTIN/SIGTTOU stops) can no longer freeze agent turns.
+///
+/// Note: this exercises the setsid pattern on a stand-in child, not
+/// `spawn_agent_child` itself (which needs an `AppHandle`). It will NOT catch
+/// a regression that re-adds `process_group(0)` to the harness `Command` —
+/// that would make `setsid()` fail EPERM at spawn time and silently reattach
+/// the tree to the launching terminal's session. Keep the spawn free of
+/// `process_group` calls.
+#[cfg(unix)]
+#[test]
+fn spawned_harness_is_session_leader_in_new_session() {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    let parent_sid = unsafe { libc::getsid(0) };
+
+    let mut child = {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30").stdin(std::process::Stdio::null());
+        // Mirror the production spawn: detach into a new session with no
+        // controlling terminal.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    let _ = libc::setpgid(0, 0);
+                }
+                Ok(())
+            });
+        }
+        cmd.spawn().expect("spawn detached sleep")
+    };
+
+    let child_pid = child.id() as i32;
+
+    // The child is a session leader: its session id equals its own pid.
+    let child_sid = unsafe { libc::getsid(child_pid) };
+    assert_eq!(
+        child_sid, child_pid,
+        "child should be its own session leader (sid == pid) after setsid()"
+    );
+
+    // And it is a DIFFERENT session than the test process — no shared
+    // controlling terminal.
+    assert_ne!(
+        child_sid, parent_sid,
+        "child session must differ from the test process session"
+    );
+
+    // setsid also makes the child a process-group leader (pid == pgid), so the
+    // production group-kill path (`kill(-pid, ...)`) still reaches the tree.
+    let child_pgid = unsafe { libc::getpgid(child_pid) };
+    assert_eq!(
+        child_pgid, child_pid,
+        "child should be its own process-group leader (pgid == pid) after setsid()"
+    );
+
+    // Cleanup: kill the child's process group.
+    unsafe { libc::kill(-child_pid, libc::SIGKILL) };
+    let _ = child.wait();
+}
+
 // ── pair receipt validation tests ───────────────────────────────────────
 
 fn receipt_fixture(

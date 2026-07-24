@@ -2011,12 +2011,41 @@ pub fn spawn_agent_child(
         .env("BUZZ_MANAGED_AGENT", current_instance_id(app))
         .env("BUZZ_MANAGED_AGENT_START_NONCE", &start_nonce);
 
-    // Spawn the harness in its own process group so we can kill the entire
-    // tree (harness + MCP servers + agent subprocesses) on shutdown.
+    // Spawn the harness in its OWN SESSION (setsid) so the entire agent tree
+    // (harness + adapter + engine + MCP servers) has no controlling terminal.
+    //
+    // WHY setsid and not process_group(0): when the desktop app is launched
+    // from a terminal (`just dev`), the harness subtree inherits that
+    // terminal's controlling TTY. As background process groups, macOS job
+    // control intermittently STOPS the actively-working agent's group
+    // (SIGTTIN/SIGTTOU-class stops, seen as `T` state in ps), freezing agent
+    // turns indefinitely. setsid() makes the child a new session leader with
+    // NO controlling terminal, so /dev/tty access can never stop the tree.
+    // Packaged .app launches have no controlling TTY and were unaffected.
+    //
+    // setsid() also makes the child both session AND process-group leader
+    // (pid == pgid), so the group-kill paths in `sigterm_then_sigkill`
+    // (which signal `-pid`) still reach the whole tree — the same invariant
+    // process_group(0) provided. Note we do NOT set process_group(0) here:
+    // std may apply setpgid() before pre_exec runs, which would make the child
+    // a group leader and cause setsid() to fail with EPERM.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        command.process_group(0);
+        // SAFETY: setsid/setpgid are async-signal-safe and touch only the
+        // child's own session/group. This file already relies on raw libc
+        // process control (see `sigterm_then_sigkill`'s `libc::kill`).
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    // EPERM: already a group leader. Fall back to a best-effort
+                    // new process group so group-kill still works; do not fail
+                    // the spawn over it.
+                    let _ = libc::setpgid(0, 0);
+                }
+                Ok(())
+            });
+        }
     }
     // Windows: suppress the harness console window. Without this a bare
     // terminal pops for buzz-acp.exe and lingers (the app itself sets
