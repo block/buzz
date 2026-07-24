@@ -149,6 +149,23 @@ pub fn normalize_custom_emoji_shortcode(shortcode: &str) -> Result<String, SdkEr
     Ok(trimmed.to_ascii_lowercase())
 }
 
+/// True when a kind:7 reaction `content` matches a user-supplied emoji argument.
+///
+/// Unicode reactions compare literally (after trim). Custom-emoji reactions
+/// store `:shortcode:` per NIP-25/30; callers often pass the bare shortcode
+/// (or a differently-cased / colon-wrapped form).
+pub fn reaction_content_matches(content: &str, emoji: &str) -> bool {
+    let content = content.trim();
+    let emoji = emoji.trim();
+    if content == emoji {
+        return true;
+    }
+    match normalize_custom_emoji_shortcode(emoji) {
+        Ok(shortcode) => content == format!(":{shortcode}:"),
+        Err(_) => false,
+    }
+}
+
 fn check_custom_emoji_url(url: &str) -> Result<(), SdkError> {
     if url.is_empty() {
         return Err(SdkError::InvalidInput(
@@ -2298,6 +2315,17 @@ mod tests {
         let ev = sign(build_remove_reaction(eid).unwrap());
         assert_eq!(ev.kind.as_u16(), 5);
         assert!(has_tag(&ev, "e", &eid.to_hex()));
+    }
+
+    #[test]
+    fn reaction_content_matches_unicode_and_custom_shortcodes() {
+        assert!(reaction_content_matches("👍", "👍"));
+        assert!(reaction_content_matches(" 👍 ", "👍"));
+        assert!(reaction_content_matches(":party:", "party"));
+        assert!(reaction_content_matches(":party:", ":Party:"));
+        assert!(reaction_content_matches(":party_parrot:", "Party_Parrot"));
+        assert!(!reaction_content_matches(":party:", "other"));
+        assert!(!reaction_content_matches("👍", "party"));
     }
 
     #[test]
