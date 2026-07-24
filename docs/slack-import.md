@@ -146,9 +146,10 @@ Opening it in Buzz:
 
 1. Creates or loads the person's device key, generates a device-held verifier,
    and opens `<service>/oidc/start` with only its one-way challenge.
-2. Slack authenticates them using an additional server-side PKCE exchange. The
-   claim service verifies Slack's signed ID token (issuer, audience, expiry,
-   nonce, workspace) and confirms the same identity through Slack userInfo.
+2. Slack authenticates them through its Sign in with Slack OpenID Connect
+   flow. The claim service verifies Slack's signed ID token (issuer, audience,
+   expiry, nonce, workspace) and confirms the same identity through Slack
+   userInfo.
 3. Slack returns through the internal `buzz://import-claim` callback with a
    short-lived finalize code. Buzz verifies that it matches the pending join
    and sends the service both the retained verifier and a self-signed identity
@@ -181,9 +182,9 @@ redirect URL:
 https://migrate.example.com/oidc/callback
 ```
 
-Enable PKCE for the Slack app. The service sends an S256 challenge on every
-authorization and supplies the matching verifier only during the server-side
-code exchange.
+The Slack exchange uses the documented Sign in with Slack OpenID Connect
+endpoints. The device-held verifier described above protects the separate
+claim-service-to-Buzz handoff; it is not sent to Slack.
 
 Run `buzz-migrate` behind HTTPS with an owner/admin Buzz key:
 
@@ -241,7 +242,17 @@ service is running; it does not expire by itself. Never run `--dev` in
 production. Rate-limit `/oidc/start`, `/oidc/callback`, and `/oidc/finalize` at
 the reverse proxy. Pending OIDC state and finalize codes are process-local, so
 run one claim-service instance (or use sticky routing); restarting it
-invalidates sign-ins currently in progress.
+invalidates sign-ins currently in progress. Outbound Slack token, userInfo, and
+signing-key requests use a 5-second connection timeout and a 30-second total
+request timeout.
+
+Before distributing the migration link in production, run one end-to-end smoke
+test against the actual Slack application and workspace: open
+`buzz://join-slack`, complete Slack authorization, verify that Buzz joins the
+expected community, and confirm that imported history resolves to that Buzz
+profile. The `--dev` flow exercises the app handoff and relay writes, but it
+does not validate Slack application configuration or Slack's live OIDC
+responses.
 
 The email magic-link channel is an identity-attribution fallback for someone
 who is already a community member; it deliberately does **not** grant

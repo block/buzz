@@ -115,9 +115,10 @@ test("join-slack callback: automatically connects before self-claim", async ({
   expect(claim?.tags).toContainEqual(["d", "slack:T060:U060"]);
   expect(claim?.tags).toContainEqual(["import", "slack"]);
 
-  // Finalize received the single-use code and the signed self-claim as proof of
-  // possession — the pubkey being attested is the one that signed. The POST is
-  // awaited inside the finalize helper, so poll until the route captured it.
+  // Finalize received the short-lived, device-bound code and the signed
+  // self-claim as proof of possession — the pubkey being attested is the one
+  // that signed. The POST is awaited inside the finalize helper, so poll until
+  // the route captured it.
   await expect(() => {
     expect(finalize.code).toBe("oidc-code-1");
     expect(finalize.verifier).toBe("v".repeat(43));

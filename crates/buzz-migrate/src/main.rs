@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use buzz_migrate::oidc::OidcConfig;
 use buzz_migrate::roster::Roster;
@@ -14,6 +15,11 @@ use buzz_migrate::server::{router, AppState, Inner, Mailer, OidcSessions};
 use buzz_migrate::token::ConsumedNonces;
 use clap::Parser;
 use nostr::Keys;
+
+const SLACK_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+// Slack's OIDC endpoints are part of an interactive flow. Bound the complete
+// request so an upstream failure returns control promptly and can be retried.
+const SLACK_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Operator claim-service for Slack→Buzz identity migration.
 #[derive(Parser, Debug)]
@@ -193,7 +199,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             Mailer::Disabled
         },
-        http: reqwest::Client::new(),
+        http: build_slack_http_client(SLACK_CONNECT_TIMEOUT, SLACK_REQUEST_TIMEOUT)
+            .map_err(|e| format!("could not build Slack HTTP client: {e}"))?,
         oidc,
         oidc_sessions: OidcSessions::default(),
         dev: args.dev,
@@ -224,6 +231,18 @@ fn slack_join_url(relay_url: &str, service_origin: &str) -> String {
         .append_pair("service", service_origin)
         .finish();
     format!("buzz://join-slack?{query}")
+}
+
+fn build_slack_http_client(
+    connect_timeout: Duration,
+    request_timeout: Duration,
+) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .connect_timeout(connect_timeout)
+        .timeout(request_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .user_agent(concat!("buzz-migrate/", env!("CARGO_PKG_VERSION")))
+        .build()
 }
 
 fn normalize_service_origin(value: &str, allow_insecure: bool) -> Result<String, String> {
@@ -313,5 +332,12 @@ mod tests {
         assert!(
             validate_oidc_redirect_uri("https://user@migrate.example/callback", false).is_err()
         );
+    }
+
+    #[test]
+    fn slack_http_client_builds_with_bounded_timeouts() {
+        assert!(build_slack_http_client(SLACK_CONNECT_TIMEOUT, SLACK_REQUEST_TIMEOUT).is_ok());
+        assert_eq!(SLACK_CONNECT_TIMEOUT, Duration::from_secs(5));
+        assert_eq!(SLACK_REQUEST_TIMEOUT, Duration::from_secs(30));
     }
 }
