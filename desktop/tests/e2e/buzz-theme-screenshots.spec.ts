@@ -534,6 +534,7 @@ test("settings content uses the same inset surface as the main app", async ({
     .getByTestId("settings-back-to-app")
     .boundingBox();
   await expect(contentSurface).toBeVisible({ timeout: 10_000 });
+  await expect(contentSurface).toHaveCSS("border-radius", "8px");
   await expect(page.getByTestId("settings-content-scroll")).toHaveCSS(
     "padding-top",
     "24px",
@@ -552,12 +553,12 @@ test("settings content uses the same inset surface as the main app", async ({
   expect(Math.abs(backToAppBox.y - searchBox.y)).toBeLessThanOrEqual(0.5);
 
   // Match the normal app shell: a fixed 40px top chrome strip, then a 1px
-  // top/left inset and 8px right/bottom inset around the rounded content card.
+  // top/left inset and 4px right/bottom inset around the rounded content card.
   expect(surfaceBox.y - viewBox.y).toBe(41);
   expect(surfaceBox.x - viewBox.x).toBe(1);
-  expect(viewBox.x + viewBox.width - (surfaceBox.x + surfaceBox.width)).toBe(8);
+  expect(viewBox.x + viewBox.width - (surfaceBox.x + surfaceBox.width)).toBe(4);
   expect(viewBox.y + viewBox.height - (surfaceBox.y + surfaceBox.height)).toBe(
-    8,
+    4,
   );
 
   await waitForAnimations(page);

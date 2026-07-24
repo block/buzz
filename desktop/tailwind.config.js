@@ -30,6 +30,10 @@ export default {
           "-1px 0 0 0 hsl(var(--border) / 0.8), -16px 0 32px -12px rgb(0 0 0 / 0.18)",
       },
       borderRadius: {
+        // Keep the floating content surface visually aligned with the native
+        // macOS window while preserving the 0.25rem (4px) inset. An 8px
+        // optical radius avoids the sharper appearance of a literal 6px arc.
+        "content-surface": "8px",
         lg: "var(--radius)",
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
