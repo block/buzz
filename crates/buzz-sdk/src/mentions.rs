@@ -56,33 +56,31 @@ pub struct MentionProfile<'a> {
 
 /// Shared leading-delimiter definition for `@mention` starts.
 ///
-/// `prev` is the character immediately before the `@`; `prev2` is the one
-/// before that (consulted only for the two-character spoiler delimiter
-/// `||`). A mention may start at start-of-string, after ASCII whitespace,
-/// after an opening parenthesis, after markdown emphasis markers (`*`, `_`),
-/// or after a spoiler delimiter (`||`). Anything else — most importantly a
-/// word character, which excludes email addresses like `user@host` — is not
-/// a mention start.
+/// `prev` is the character immediately before the `@`. A mention may start
+/// at start-of-string, after ASCII whitespace, after an opening parenthesis,
+/// after markdown emphasis markers (`*`, `_`), or after a pipe (`|` — table
+/// cells and spoiler `||`). Anything else — most importantly a word
+/// character, which excludes email addresses like `user@host` — is not a
+/// mention start.
 ///
 /// This mirrors the leading group of the Desktop parser's regex in
-/// `desktop/src/features/messages/lib/hasMention.ts`. The two surfaces must
-/// agree on what counts as a mention; see issue #2526 for what happens when
-/// they drift.
-fn is_mention_lead(prev: Option<char>, prev2: Option<char>) -> bool {
+/// `desktop/src/features/messages/lib/hasMention.ts`, except that a single
+/// `|` is accepted here (a strict superset — the TS regex requires `||`) so
+/// mentions flush against markdown table pipes still tag. The two surfaces
+/// must otherwise agree on what counts as a mention; see issue #2526 for
+/// what happens when they drift.
+fn is_mention_lead(prev: Option<char>) -> bool {
     match prev {
         None => true,
         Some(c) if c.is_ascii_whitespace() => true,
-        Some('(' | '*' | '_') => true,
-        Some('|') => prev2 == Some('|'),
+        Some('(' | '*' | '_' | '|') => true,
         _ => false,
     }
 }
 
 /// [`is_mention_lead`] for an `@` at byte offset `at` of `content`.
 fn is_mention_lead_at(content: &str, at: usize) -> bool {
-    let mut before = content[..at].chars().rev();
-    let prev = before.next();
-    is_mention_lead(prev, before.next())
+    is_mention_lead(content[..at].chars().next_back())
 }
 
 /// Extract single-word `@mention` names from message content.
@@ -109,10 +107,7 @@ pub fn extract_at_names(content: &str) -> Vec<String> {
     let mut i = 0;
     while i < len {
         if chars[i] == '@' {
-            let preceded = is_mention_lead(
-                i.checked_sub(1).map(|j| chars[j]),
-                i.checked_sub(2).map(|j| chars[j]),
-            );
+            let preceded = is_mention_lead(i.checked_sub(1).map(|j| chars[j]));
             if preceded && i + 1 < len {
                 let start = i + 1;
                 let mut end = start;
@@ -194,18 +189,19 @@ pub fn extract_at_mentions_with_known(content: &str, known_names: &[&str]) -> Ve
 /// True when `s` starts at a word boundary for a matched known name.
 ///
 /// Accepts end-of-string, ASCII whitespace, closing punctuation, trailing
-/// markdown emphasis markers (`*`, `_`), and the spoiler delimiter (`||`) —
-/// the counterpart of [`is_mention_lead`], mirroring the trailing lookahead
-/// of the Desktop parser in `desktop/src/features/messages/lib/hasMention.ts`.
+/// markdown emphasis markers (`*`, `_`), and pipes (`|` — table cells and
+/// spoiler `||`; single `|` is a superset of the Desktop parser's `||`-only
+/// lookahead, matching [`is_mention_lead`]). The counterpart of
+/// [`is_mention_lead`], mirroring the trailing lookahead of the Desktop
+/// parser in `desktop/src/features/messages/lib/hasMention.ts`.
 fn is_word_boundary(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => true,
-        Some(c) if c.is_ascii_whitespace() => true,
-        Some(',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}' | '*' | '_') => true,
-        Some('|') => chars.next() == Some('|'),
-        _ => false,
-    }
+    s.chars().next().is_none_or(|c| {
+        c.is_ascii_whitespace()
+            || matches!(
+                c,
+                ',' | ';' | '.' | '!' | '?' | ':' | ')' | ']' | '}' | '*' | '_' | '|'
+            )
+    })
 }
 
 /// Match extracted `@names` against channel-member profiles.
@@ -487,9 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn extract_at_names_single_pipe_is_not_a_lead() {
-        assert!(extract_at_names("a|@alice").is_empty());
-        // Table cells are fine — the pipe is followed by whitespace.
+    fn extract_at_names_accepts_pipe_lead() {
+        // Markdown table cells, with and without padding spaces.
+        assert_eq!(extract_at_names("|@alice|status|"), vec!["alice"]);
         assert_eq!(extract_at_names("| @alice |"), vec!["alice"]);
     }
 
@@ -612,11 +608,13 @@ mod tests {
     }
 
     #[test]
-    fn single_pipe_is_not_a_boundary_for_known_name() {
-        // A lone `|` is neither a lead nor a boundary (the spoiler delimiter
-        // is two pipes) — the known match fails and fallback emits "will".
+    fn known_name_matches_flush_against_table_pipes() {
+        // A single `|` is both a lead and a boundary, so mentions flush
+        // against markdown table pipes resolve (review feedback on #2547).
+        let result = extract_at_mentions_with_known("|@Atlas|status|", &["Atlas"]);
+        assert_eq!(result, vec!["atlas"]);
         let result = extract_at_mentions_with_known("@Will Pfleger|x", &["Will Pfleger"]);
-        assert_eq!(result, vec!["will"]);
+        assert_eq!(result, vec!["will pfleger"]);
     }
 
     #[test]
