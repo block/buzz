@@ -752,7 +752,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                   channelId={activeChannel?.id ?? null}
                   channelName={activeChannel?.name ?? "channel"}
                   channelType={activeChannel?.channelType ?? null}
-                  containerClassName="px-5"
+                  containerClassName="px-5 pb-1"
                   disabled={isComposerDisabled}
                   editTarget={mainEditTarget}
                   autoSubmitDraftKey={autoSendDraftKey}
@@ -788,10 +788,10 @@ export const ChannelPane = React.memo(function ChannelPane({
                   showTopBorder={false}
                 />
                 <div
-                  className="min-h-8 overflow-visible bg-background px-5 pb-1.5 pt-0"
+                  className="-mt-1 min-h-5 overflow-visible bg-background px-5 pb-0 pt-0"
                   data-testid="channel-composer-activity-row"
                 >
-                  <div className="flex h-full w-full items-center gap-2 overflow-visible">
+                  <div className="flex h-full w-full items-center gap-2 overflow-visible pl-2">
                     {hasComposerBotActivity ? (
                       <div className="flex min-w-0 flex-1 overflow-visible">
                         <BotActivityComposerAction
