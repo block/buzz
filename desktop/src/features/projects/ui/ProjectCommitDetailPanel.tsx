@@ -12,6 +12,7 @@ import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectDiffFilesPanel } from "./ProjectPullRequestFilesChangedPanel";
+import { ProjectRichContent } from "./ProjectRichContent";
 
 function commitDateLabel(timestamp: number) {
   return new Date(timestamp * 1_000).toLocaleString(undefined, {
@@ -98,6 +99,9 @@ export function ProjectCommitDetailPanel({
             </div>
           </div>
         </div>
+        {diff?.commitBody ? (
+          <ProjectRichContent content={diff.commitBody} />
+        ) : null}
       </header>
 
       <ProjectDiffFilesPanel

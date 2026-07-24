@@ -1,4 +1,9 @@
-import { allowedActorsForRoot, getAllTags, getTag } from "./projectIssues.mjs";
+import {
+  allowedActorsForRoot,
+  getAllTags,
+  getImetaTags,
+  getTag,
+} from "./projectIssues.mjs";
 
 // Updates and status changes rewrite the PR's tip commit, clone URLs, and
 // lifecycle state, so they are only honored when signed by the PR author or
@@ -135,6 +140,7 @@ function eventToPullRequestUpdate(event) {
   return {
     id: event.id,
     content: event.content,
+    tags: getImetaTags(event),
     author: event.pubkey,
     createdAt: event.created_at,
     commit: getTag(event, "c") ?? null,
@@ -190,6 +196,7 @@ function eventToPullRequestComment(event) {
   return {
     id: event.id,
     content: event.content,
+    tags: getImetaTags(event),
     author: event.pubkey,
     createdAt: event.created_at,
     commit: getTag(event, "c") ?? null,
@@ -352,6 +359,7 @@ export function eventToProjectPullRequest(
     id: pullRequest.id,
     title,
     content: pullRequest.content,
+    tags: getImetaTags(pullRequest),
     author: pullRequest.pubkey,
     createdAt: pullRequest.created_at,
     repoAddress: getTag(pullRequest, "a") ?? null,

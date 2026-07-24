@@ -25,7 +25,6 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
 import {
   ProjectFeedRow,
   ProjectFeedRowCluster,
@@ -38,6 +37,7 @@ import {
   ProfileAuthorName,
   ProfileIdentityButton,
 } from "./ProjectProfileIdentity";
+import { ProjectRichContent } from "./ProjectRichContent";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 import { PullRequestReviewCard } from "./PullRequestReviewCard";
 
@@ -540,10 +540,9 @@ function PullRequestDetail({
     <div className="divide-y divide-border/50">
       {pullRequest.content ? (
         <header className="p-4">
-          <Markdown
-            className="text-sm"
+          <ProjectRichContent
             content={pullRequest.content}
-            interactive={false}
+            tags={pullRequest.tags}
           />
         </header>
       ) : null}
@@ -567,9 +566,11 @@ function PullRequestDetail({
                 ) : null}
               </div>
               {update.content ? (
-                <p className="text-sm text-muted-foreground">
-                  {update.content}
-                </p>
+                <ProjectRichContent
+                  className="text-sm text-muted-foreground"
+                  content={update.content}
+                  tags={update.tags}
+                />
               ) : null}
             </article>
           ))}
@@ -656,11 +657,7 @@ function PullRequestDetail({
                       role={compactDate(item.createdAt)}
                     />
                   </div>
-                  <Markdown
-                    className="text-sm"
-                    content={item.content}
-                    interactive={false}
-                  />
+                  <ProjectRichContent content={item.content} tags={item.tags} />
                 </article>
               );
             })}

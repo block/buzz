@@ -88,6 +88,44 @@ test("accepts updates signed by the PR author", () => {
   assert.equal(pullRequest.updateCount, 1);
 });
 
+test("preserves root, update, and comment tags for rich content rendering", () => {
+  const root = pullRequestEvent({
+    tags: [
+      ["a", REPO_ADDRESS],
+      ["subject", "Add feature"],
+      ["c", "1111111111111111111111111111111111111111"],
+      ["imeta", "url https://relay.example/media/root.png", "m image/png"],
+    ],
+  });
+  const update = updateEvent({
+    pubkey: AUTHOR,
+    createdAt: 200,
+    commit: "2222222222222222222222222222222222222222",
+  });
+  update.tags.push([
+    "imeta",
+    "url https://relay.example/media/update.mp4",
+    "m video/mp4",
+  ]);
+  const comment = {
+    id: "comment-rich-content",
+    kind: 1,
+    pubkey: ATTACKER,
+    created_at: 250,
+    content: "[Demo](https://relay.example/media/comment.png)",
+    tags: [
+      ["e", root.id, "", "root"],
+      ["imeta", "url https://relay.example/media/comment.png", "m image/png"],
+    ],
+  };
+
+  const pullRequest = eventToProjectPullRequest(root, [update], [comment]);
+
+  assert.deepEqual(pullRequest.tags, [root.tags[3]]);
+  assert.deepEqual(pullRequest.updates[0].tags, [update.tags[3]]);
+  assert.deepEqual(pullRequest.comments[0].tags, [comment.tags[1]]);
+});
+
 test("accepts updates signed by the repo owner", () => {
   const update = updateEvent({
     pubkey: OWNER,

@@ -9573,6 +9573,13 @@ export function maybeInstallE2eTauriMocks() {
         return {
           additions: 27,
           deletions: 4,
+          commit_body: [
+            "See the [project guide](https://example.com/project-guide).",
+            "",
+            "![Architecture](/buzz.svg)",
+            "",
+            "![Demo](https://example.com/project-demo.mp4)",
+          ].join("\n"),
           files: [
             {
               path: "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",

@@ -7,7 +7,7 @@ import type {
 } from "@/features/projects/projectPullRequests.mjs";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
-import { Markdown } from "@/shared/ui/markdown";
+import { ProjectRichContent } from "./ProjectRichContent";
 
 function commentAuthor(
   pubkey: string,
@@ -71,10 +71,9 @@ export function ProjectPullRequestInlineCommentThread({
                   {commentDate(comment.createdAt)}
                 </span>
               </div>
-              <Markdown
-                className="text-sm"
+              <ProjectRichContent
                 content={comment.content}
-                interactive={false}
+                tags={comment.tags}
               />
             </article>
           ))}
