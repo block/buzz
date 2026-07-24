@@ -3098,6 +3098,16 @@ fn handle_prompt_result(
                 } else {
                     hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
                 }
+            } else if matches!(
+                &result.outcome,
+                PromptOutcome::Error(error) if error.requires_authentication()
+            ) {
+                // Credentials cannot recover through queue backoff. Surface the
+                // problem once, discard this attempt, and let the user retry
+                // after signing in instead of waiting through ten identical
+                // failures before the generic dead-letter notice appears.
+                let content = "⚠️ I couldn't process the last request because this agent isn't authenticated. Sign in or update its credentials in Agent settings, then re-send the request.".to_string();
+                spawn_failure_notice(rest_client, &batch, content);
             } else if let Some(dead) = queue.requeue(batch) {
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
@@ -5039,14 +5049,10 @@ mod build_mcp_servers_tests {
 
 #[cfg(test)]
 mod error_outcome_emission_tests {
-    //! Pins the policy that error-class outcomes surface to the activity feed
-    //! and never to the channel:
+    //! Pins error-class outcome reporting:
     //!
-    //! - Channel silence is enforced *structurally* — `handle_prompt_result`
-    //!   takes no relay handle, so it has no way to post a channel message. A
-    //!   future re-introduction of channel notices would have to add the relay
-    //!   parameter back, which these tests' construction would then refuse to
-    //!   compile against.
+    //! - Terminal failures that require user action may post one channel
+    //!   notice instead of spending the retry budget in silence.
     //! - Feed coverage is the regression-prone half and is asserted at runtime:
     //!   each error outcome must emit exactly one `turn_error` observer event.
     //!   If any branch drops its `emit_turn_error` call, the matching test goes
@@ -6047,6 +6053,80 @@ mod error_outcome_emission_tests {
     async fn application_error_emits_exactly_one_feed_event() {
         let app = AcpError::IdleTimeout(std::time::Duration::from_secs(1));
         assert_eq!(turn_errors_emitted_for(PromptOutcome::Error(app)).await, 1);
+    }
+
+    #[tokio::test]
+    async fn authentication_error_is_not_requeued() {
+        let channel_id = Uuid::new_v4();
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "auth-error-turn".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+
+        let event = EventBuilder::new(Kind::Custom(9), "are you there?")
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "auth-error-turn".to_string(),
+            outcome: PromptOutcome::Error(AcpError::AgentError {
+                code: -32000,
+                message: "Authentication required".into(),
+            }),
+            batch: Some(batch),
+        };
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &test_config(),
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(ObserverHandle::in_process()),
+            None,
+        );
+
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            0,
+            "authentication failures must surface once, not retry silently"
+        );
     }
 }
 
