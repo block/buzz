@@ -1528,10 +1528,9 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if !event_timestamp_authorized(kind_u32, event_ts, now) {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -2560,6 +2559,16 @@ async fn ingest_event_inner(
 
 fn event_content_within_shared_limit(content: &str) -> bool {
     content.len() <= buzz_core::command_brief::MAX_EVENT_CONTENT_BYTES
+}
+
+/// Permit NIP-CB's exact signed offline spool history while retaining the
+/// global future-skew limit. Every other kind keeps the normal ±15 minute
+/// admission window.
+fn event_timestamp_authorized(kind: u32, event_ts: i64, now: i64) -> bool {
+    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900;
+    event_ts <= now.saturating_add(MAX_TIMESTAMP_DRIFT_SECS)
+        && (kind == buzz_core::kind::KIND_COMMAND_BRIEF
+            || event_ts >= now.saturating_sub(MAX_TIMESTAMP_DRIFT_SECS))
 }
 
 #[cfg(test)]
@@ -3668,6 +3677,27 @@ mod tests {
             ],
         );
         assert!(validate_command_brief_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn only_historical_command_briefs_bypass_past_timestamp_drift() {
+        let now = 2_000_000_i64;
+        let historical = now - 3_600;
+        assert!(event_timestamp_authorized(
+            buzz_core::kind::KIND_COMMAND_BRIEF,
+            historical,
+            now
+        ));
+        assert!(!event_timestamp_authorized(
+            nostr::Kind::TextNote.as_u16() as u32,
+            historical,
+            now
+        ));
+        assert!(!event_timestamp_authorized(
+            buzz_core::kind::KIND_COMMAND_BRIEF,
+            now + 3_600,
+            now
+        ));
     }
 
     #[test]

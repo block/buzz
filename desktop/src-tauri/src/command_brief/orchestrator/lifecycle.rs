@@ -31,17 +31,8 @@ impl CommandBriefOrchestrator {
                 return;
             }
         };
-        let display_error =
-            (lifecycle_state == CommandBriefLifecycleState::Failed).then_some(failure_code);
-        self.persist_and_install(
-            run_id,
-            schedule_id,
-            degraded,
-            input,
-            display_error,
-            cancellation,
-        )
-        .await;
+        self.persist_and_install(run_id, schedule_id, degraded, input, cancellation)
+            .await;
     }
 
     pub(super) async fn persist_and_install(
@@ -50,7 +41,6 @@ impl CommandBriefOrchestrator {
         schedule_id: &str,
         degraded: &[BriefSection],
         input: TerminalAuditInput,
-        display_error: Option<CommandBriefFailureCode>,
         cancellation: CancellationToken,
     ) {
         let persisted = self
@@ -75,7 +65,9 @@ impl CommandBriefOrchestrator {
             schedule_id,
             state,
             degraded,
-            display_error.map(CommandBriefFailureCode::as_str),
+            persisted
+                .failure_code()
+                .map(CommandBriefFailureCode::as_str),
             result,
         );
     }

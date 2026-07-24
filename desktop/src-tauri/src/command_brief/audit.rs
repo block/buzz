@@ -25,8 +25,18 @@ use super::store::{
 };
 use super::types::{CommandBrief, PublicationState, PublishedCommandBrief};
 
+/// Closed publication failure classification for immutable signed events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AuditPublishError {
+    /// No relay decision was received, so exact-ID retry remains safe.
+    Transient,
+    /// The relay rejected the immutable event; retry cannot repair it.
+    Permanent,
+}
+
 /// Boxed relay-publication future.
-pub type AuditPublishFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ()>> + Send + 'a>>;
+pub type AuditPublishFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), AuditPublishError>> + Send + 'a>>;
 /// Boxed deterministic pre-commit gate future.
 pub type AuditCommitFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
 
@@ -68,10 +78,13 @@ impl BriefAuditPublisher for RelayBriefAuditPublisher {
     fn publish<'a>(&'a self, event: Event) -> AuditPublishFuture<'a> {
         Box::pin(async move {
             let state = self.app.state::<crate::app_state::AppState>();
-            crate::relay::submit_signed_event(&event, &state)
+            crate::relay::submit_signed_event_classified(&event, &state)
                 .await
                 .map(|_| ())
-                .map_err(|_| ())
+                .map_err(|error| match error {
+                    crate::relay::SignedEventSubmitError::Transient => AuditPublishError::Transient,
+                    crate::relay::SignedEventSubmitError::Permanent => AuditPublishError::Permanent,
+                })
         })
     }
 }
@@ -179,6 +192,7 @@ impl TerminalAuditInput {
 #[derive(Clone)]
 pub struct PersistedTerminal {
     lifecycle_state: CommandBriefLifecycleState,
+    failure_code: Option<CommandBriefFailureCode>,
     event_id: String,
     publication_state: PublicationState,
     published_brief: Option<PublishedCommandBrief>,
@@ -187,12 +201,14 @@ pub struct PersistedTerminal {
 impl PersistedTerminal {
     pub(crate) fn new(
         lifecycle_state: CommandBriefLifecycleState,
+        failure_code: Option<CommandBriefFailureCode>,
         event_id: String,
         publication_state: PublicationState,
         published_brief: Option<PublishedCommandBrief>,
     ) -> Self {
         Self {
             lifecycle_state,
+            failure_code,
             event_id,
             publication_state,
             published_brief,
@@ -201,6 +217,11 @@ impl PersistedTerminal {
     /// Return the closed durable lifecycle state.
     pub const fn lifecycle_state(&self) -> CommandBriefLifecycleState {
         self.lifecycle_state
+    }
+
+    /// Return the closed durable failure code, if the terminal has one.
+    pub const fn failure_code(&self) -> Option<CommandBriefFailureCode> {
+        self.failure_code
     }
 
     /// Return the exact signed lifecycle event ID.
@@ -284,7 +305,7 @@ impl EncryptedBriefAudit {
         cancellation: CancellationToken,
     ) -> Result<PersistedTerminal, BriefAuditError> {
         self.commit_gate.wait().await;
-        let (event, event_id, owner, lifecycle_state, final_brief) = {
+        let (event, event_id, owner, lifecycle_state, failure_code, final_brief) = {
             let mut committed = self
                 .committed_runs
                 .lock()
@@ -348,32 +369,41 @@ impl EncryptedBriefAudit {
                 event_id,
                 owner,
                 input.lifecycle_state,
+                input.failure_code,
                 input.final_brief,
             )
         };
 
-        let publication_state = if self.publisher.publish(event).await.is_ok() {
-            let marked = open_command_brief_store(&self.path)
-                .and_then(|conn| mark_published(&conn, &owner, &event_id, Utc::now().timestamp()));
-            if marked.is_ok() {
-                PublicationState::Published
-            } else {
-                // The signed terminal commit is authoritative. A publication
-                // bookkeeping failure must not turn that durable terminal into
-                // a false local persistence failure; the queued row is safe to
-                // retry idempotently by exact event ID.
+        let publication_state = match self.publisher.publish(event).await {
+            Ok(()) => {
+                let marked = open_command_brief_store(&self.path).and_then(|conn| {
+                    mark_published(&conn, &owner, &event_id, Utc::now().timestamp())
+                });
+                if marked.is_ok() {
+                    PublicationState::Published
+                } else {
+                    PublicationState::Queued
+                }
+            }
+            Err(error) => {
+                if let Ok(conn) = open_command_brief_store(&self.path) {
+                    let _ = match error {
+                        AuditPublishError::Transient => {
+                            mark_publish_failed(&conn, &owner, &event_id, Utc::now().timestamp())
+                        }
+                        AuditPublishError::Permanent => {
+                            mark_publish_permanent(&conn, &owner, &event_id)
+                        }
+                    };
+                }
                 PublicationState::Queued
             }
-        } else {
-            if let Ok(conn) = open_command_brief_store(&self.path) {
-                let _ = mark_publish_failed(&conn, &owner, &event_id, Utc::now().timestamp());
-            }
-            PublicationState::Queued
         };
         let published_brief = final_brief
             .map(|brief| PublishedCommandBrief::new(brief, event_id.clone(), publication_state));
         Ok(PersistedTerminal::new(
             lifecycle_state,
+            failure_code,
             event_id,
             publication_state,
             published_brief,
@@ -414,15 +444,22 @@ impl EncryptedBriefAudit {
                     continue;
                 }
             };
-            let accepted = self.publisher.publish(event).await.is_ok();
+            let outcome = self.publisher.publish(event).await;
             let conn = open_command_brief_store(&self.path).map_err(|_| BriefAuditError::Failed)?;
-            if accepted {
-                mark_published(&conn, &owner, &row.event_id, Utc::now().timestamp())
-                    .map_err(|_| BriefAuditError::Failed)?;
-                published += 1;
-            } else {
-                mark_publish_failed(&conn, &owner, &row.event_id, now)
-                    .map_err(|_| BriefAuditError::Failed)?;
+            match outcome {
+                Ok(()) => {
+                    mark_published(&conn, &owner, &row.event_id, Utc::now().timestamp())
+                        .map_err(|_| BriefAuditError::Failed)?;
+                    published += 1;
+                }
+                Err(AuditPublishError::Transient) => {
+                    mark_publish_failed(&conn, &owner, &row.event_id, now)
+                        .map_err(|_| BriefAuditError::Failed)?;
+                }
+                Err(AuditPublishError::Permanent) => {
+                    mark_publish_permanent(&conn, &owner, &row.event_id)
+                        .map_err(|_| BriefAuditError::Failed)?;
+                }
             }
         }
         Ok(published)

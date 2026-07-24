@@ -258,6 +258,19 @@ mod tests {
                 },
             },
             Case {
+                json: r#"["COUNT","sub-count",{"count":7}]"#,
+                check: |msg| match msg {
+                    RelayMessage::Count {
+                        subscription_id,
+                        count,
+                    } => {
+                        assert_eq!(subscription_id, "sub-count");
+                        assert_eq!(count, 7);
+                    }
+                    _ => panic!("expected Count"),
+                },
+            },
+            Case {
                 json: r#"["NOTICE","hello from relay"]"#,
                 check: |msg| match msg {
                     RelayMessage::Notice { message } => assert_eq!(message, "hello from relay"),

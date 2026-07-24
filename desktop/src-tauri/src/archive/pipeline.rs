@@ -316,6 +316,8 @@ pub(super) fn commit_archive(
             // the archive without needing the owner key.  Fail-closed: if
             // decrypt fails for any reason, drop the event — never store
             // ciphertext or partial output.
+            // Kind-44210 (NIP-CB) likewise stores only its strict decrypted
+            // payload JSON, never ciphertext or a partial projection.
             let stored_json =
                 if p.event.kind.as_u16() as u64 == super::KIND_AGENT_TURN_METRIC as u64 {
                     match buzz_core_pkg::agent_turn_metric::decrypt_agent_turn_metric(

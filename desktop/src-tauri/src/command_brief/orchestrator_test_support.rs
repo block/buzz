@@ -21,6 +21,12 @@ pub(super) struct FakePersistence {
     >,
     pub(super) wait_for_cancel: bool,
     pub(super) fail: bool,
+    pub(super) durable_terminal: Mutex<
+        Option<(
+            buzz_core_pkg::command_brief::CommandBriefLifecycleState,
+            Option<buzz_core_pkg::command_brief::CommandBriefFailureCode>,
+        )>,
+    >,
 }
 
 impl FakePersistence {
@@ -34,6 +40,16 @@ impl FakePersistence {
     pub(super) fn failing() -> Self {
         Self {
             fail: true,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn returning_terminal(
+        state: buzz_core_pkg::command_brief::CommandBriefLifecycleState,
+        code: Option<buzz_core_pkg::command_brief::CommandBriefFailureCode>,
+    ) -> Self {
+        Self {
+            durable_terminal: Mutex::new(Some((state, code))),
             ..Self::default()
         }
     }
@@ -89,8 +105,14 @@ impl BriefPersistence for FakePersistence {
             let published = input.final_brief().map(|brief| {
                 PublishedCommandBrief::new(brief.clone(), "a".repeat(64), PublicationState::Queued)
             });
+            let (state, code) = self
+                .durable_terminal
+                .lock()
+                .expect("durable terminal")
+                .unwrap_or((input.lifecycle_state(), input.failure_code()));
             Ok(PersistedTerminal::new(
-                input.lifecycle_state(),
+                state,
+                code,
                 "a".repeat(64),
                 PublicationState::Queued,
                 published,

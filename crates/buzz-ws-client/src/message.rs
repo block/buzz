@@ -20,6 +20,13 @@ pub enum RelayMessage {
         /// The subscription ID that has reached end-of-stored-events.
         subscription_id: String,
     },
+    /// NIP-45 count response.
+    Count {
+        /// Subscription ID supplied by the client.
+        subscription_id: String,
+        /// Number of authorized matching events.
+        count: u64,
+    },
     /// The relay closed a subscription, usually with an error.
     Closed {
         /// The subscription ID that was closed.
@@ -103,6 +110,22 @@ pub fn parse_relay_message(text: &str) -> Result<RelayMessage, WsClientError> {
                 .to_string();
             Ok(RelayMessage::Eose {
                 subscription_id: sub_id,
+            })
+        }
+        "COUNT" => {
+            let subscription_id = arr
+                .get(1)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?
+                .to_string();
+            let count = arr
+                .get(2)
+                .and_then(|value| value.get("count"))
+                .and_then(Value::as_u64)
+                .ok_or_else(|| WsClientError::UnexpectedMessage(text.to_string()))?;
+            Ok(RelayMessage::Count {
+                subscription_id,
+                count,
             })
         }
         "CLOSED" => {

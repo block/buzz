@@ -119,6 +119,9 @@ fn owner_private_recipient_authorized(event: &Event, recipient_pubkey: Option<&[
     if recipients.len() != 1 {
         return false;
     }
+    if kind == buzz_core::kind::KIND_COMMAND_BRIEF && recipients[0] != event.pubkey.to_hex() {
+        return false;
+    }
 
     recipient_pubkey.is_some_and(|bytes| hex::encode(bytes) == recipients[0])
 }
@@ -172,6 +175,25 @@ pub async fn filter_fanout_by_access(
                     .conn_manager
                     .pubkey_for_conn(*conn_id)
                     .is_some_and(|pk| pk == author)
+            })
+            .collect()
+    } else {
+        matches
+    };
+    let private_kind = event_kind_u32(&stored_event.event);
+    let matches = if matches!(
+        private_kind,
+        buzz_core::kind::KIND_DM_VISIBILITY
+            | buzz_core::kind::KIND_AGENT_TURN_METRIC
+            | buzz_core::kind::KIND_COMMAND_BRIEF
+    ) {
+        matches
+            .into_iter()
+            .filter(|(conn_id, _)| {
+                owner_private_recipient_authorized(
+                    &stored_event.event,
+                    state.conn_manager.pubkey_for_conn(*conn_id).as_deref(),
+                )
             })
             .collect()
     } else {
@@ -1222,6 +1244,22 @@ mod tests {
             Some(&other.public_key().to_bytes())
         ));
         assert!(!super::owner_private_recipient_authorized(&event, None));
+
+        let malformed = EventBuilder::new(
+            Kind::Custom(buzz_core::kind::KIND_COMMAND_BRIEF as u16),
+            "opaque-official-ciphertext",
+        )
+        .tags([
+            Tag::public_key(other.public_key()),
+            Tag::parse(["d", "run-private"]).expect("d"),
+            Tag::parse(["status", "completed"]).expect("status"),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign malformed command brief");
+        assert!(!super::owner_private_recipient_authorized(
+            &malformed,
+            Some(&other.public_key().to_bytes())
+        ));
     }
 
     #[test]
@@ -1447,9 +1485,11 @@ mod tests {
         use std::sync::Arc;
 
         use axum::extract::ws::Message;
-        use buzz_core::kind::{KIND_MEMBER_ADDED_NOTIFICATION, KIND_PRESENCE_UPDATE};
+        use buzz_core::kind::{
+            KIND_COMMAND_BRIEF, KIND_MEMBER_ADDED_NOTIFICATION, KIND_PRESENCE_UPDATE,
+        };
         use buzz_pubsub::{ChannelEvent, EventTopic};
-        use nostr::{EventBuilder, Filter, Keys, Kind};
+        use nostr::{EventBuilder, Filter, Keys, Kind, Tag};
         use tokio::sync::{mpsc, Mutex};
         use tokio_util::sync::CancellationToken;
         use uuid::Uuid;
@@ -1561,6 +1601,66 @@ mod tests {
             let delivered = event_from_ws_message(rx.try_recv().expect("presence delivered"));
             assert_eq!(delivered.id, event_id);
             assert!(rx.try_recv().is_err(), "presence is delivered once");
+        }
+
+        #[tokio::test]
+        async fn command_brief_pubsub_send_gate_rejects_malformed_owner_envelope() {
+            let owner = Keys::generate();
+            let wrong = Keys::generate();
+            let common = [
+                Tag::parse(["d", "run-malformed"]).expect("d"),
+                Tag::parse(["status", "completed"]).expect("status"),
+            ];
+            for tags in [
+                common.to_vec(),
+                vec![
+                    Tag::public_key(owner.public_key()),
+                    Tag::public_key(owner.public_key()),
+                    common[0].clone(),
+                    common[1].clone(),
+                ],
+                vec![
+                    Tag::public_key(wrong.public_key()),
+                    common[0].clone(),
+                    common[1].clone(),
+                ],
+            ] {
+                let state = test_state().await;
+                let event =
+                    EventBuilder::new(Kind::Custom(KIND_COMMAND_BRIEF as u16), "ciphertext")
+                        .tags(tags)
+                        .sign_with_keys(&owner)
+                        .expect("sign malformed command brief");
+                let filter = Filter::new().id(event.id);
+                let (_owner, mut owner_rx) = register_global_sub(
+                    &state,
+                    "owner",
+                    filter.clone(),
+                    Some(owner.public_key().to_bytes().to_vec()),
+                );
+                let (_wrong, mut wrong_rx) = register_global_sub(
+                    &state,
+                    "wrong",
+                    filter.clone(),
+                    Some(wrong.public_key().to_bytes().to_vec()),
+                );
+                let (_unknown, mut unknown_rx) =
+                    register_global_sub(&state, "unknown", filter, None);
+
+                fan_out_pubsub_event(
+                    &state,
+                    ChannelEvent {
+                        community_id: buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+                        topic: EventTopic::Global,
+                        event,
+                    },
+                )
+                .await;
+
+                assert!(owner_rx.try_recv().is_err());
+                assert!(wrong_rx.try_recv().is_err());
+                assert!(unknown_rx.try_recv().is_err());
+            }
         }
 
         #[tokio::test]

@@ -57,3 +57,27 @@ async fn audit_persistence_failure_surfaces_only_bounded_local_failure_status() 
     let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
     assert_eq!(status["error"], "brief_persistence_failed");
 }
+
+#[tokio::test]
+async fn ui_uses_committed_terminal_state_and_code_not_failed_input() {
+    let persistence = Arc::new(FakePersistence::returning_terminal(
+        CommandBriefLifecycleState::Cancelled,
+        Some(CommandBriefFailureCode::CancellationRequested),
+    ));
+    let orchestrator = orchestrator(
+        1,
+        Arc::new(FakeSourceProvider::with_freeze_error(
+            SourceCollectionError::RagUnavailable,
+        )),
+        Arc::new(FakeAdviserProvider::default()),
+        persistence,
+    );
+
+    let run_id = orchestrator.start(request()).expect("run starts");
+    assert_eq!(
+        wait_terminal(&orchestrator, &run_id).await,
+        BriefRunState::Cancelled
+    );
+    let status = serde_json::to_value(orchestrator.status(&run_id).expect("status")).expect("json");
+    assert_eq!(status["error"], "cancellation_requested");
+}

@@ -1016,7 +1016,6 @@ impl CommandBriefOrchestrator {
                 &request.schedule_id,
                 &degraded,
                 TerminalAuditInput::completed(brief),
-                None,
                 cancellation.clone(),
             )
             .await;

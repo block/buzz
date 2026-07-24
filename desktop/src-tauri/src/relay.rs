@@ -532,7 +532,10 @@ pub struct AgentProfileInfo {
 // ── Signed-event submission ─────────────────────────────────────────────────
 
 mod submit;
-pub use submit::{submit_event, submit_event_at_with_keys, SubmitEventResponse};
+pub use submit::{
+    submit_event, submit_event_at_with_keys, submit_signed_event_classified,
+    SignedEventSubmitError, SubmitEventResponse,
+};
 
 /// POST an already-signed event to `/events` with NIP-98 auth.
 ///

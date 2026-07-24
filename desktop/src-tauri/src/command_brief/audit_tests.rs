@@ -5,8 +5,8 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 
 use super::audit::{
-    AuditCommitFuture, AuditPublishFuture, BriefAuditCommitGate, BriefAuditPublisher,
-    EncryptedBriefAudit, TerminalAuditInput,
+    AuditCommitFuture, AuditPublishError, AuditPublishFuture, BriefAuditCommitGate,
+    BriefAuditPublisher, EncryptedBriefAudit, TerminalAuditInput,
 };
 use super::store::{mark_publish_failed, open_command_brief_store};
 use super::types::{CommandBrief, PublicationState};
@@ -15,15 +15,22 @@ use buzz_core_pkg::command_brief::{CommandBriefFailureCode, CommandBriefLifecycl
 #[derive(Default)]
 struct FakePublisher {
     events: Mutex<Vec<Event>>,
-    fail: Mutex<bool>,
+    failure: Mutex<Option<AuditPublishError>>,
 }
 
 impl BriefAuditPublisher for FakePublisher {
     fn publish<'a>(&'a self, event: Event) -> AuditPublishFuture<'a> {
         Box::pin(async move {
-            self.events.lock().map_err(|_| ())?.push(event);
-            if *self.fail.lock().map_err(|_| ())? {
-                Err(())
+            self.events
+                .lock()
+                .map_err(|_| AuditPublishError::Transient)?
+                .push(event);
+            if let Some(error) = *self
+                .failure
+                .lock()
+                .map_err(|_| AuditPublishError::Transient)?
+            {
+                Err(error)
             } else {
                 Ok(())
             }
@@ -89,6 +96,10 @@ async fn real_spool_commit_is_cancellation_linearization_and_writes_one_terminal
         persisted.lifecycle_state(),
         CommandBriefLifecycleState::Cancelled
     );
+    assert_eq!(
+        persisted.failure_code(),
+        Some(CommandBriefFailureCode::CancellationRequested)
+    );
     assert!(persisted.published_brief().is_none());
     assert_eq!(publisher.events.lock().expect("events").len(), 1);
 
@@ -109,6 +120,10 @@ async fn real_spool_commit_is_cancellation_linearization_and_writes_one_terminal
     assert_eq!(
         payload.lifecycle_state,
         CommandBriefLifecycleState::Cancelled
+    );
+    assert_eq!(
+        payload.failure.as_ref().map(|failure| failure.code),
+        persisted.failure_code()
     );
     assert!(payload.final_brief.is_none());
 }
@@ -280,7 +295,7 @@ async fn offline_publish_remains_queued_and_republishes_same_event_id() {
     let dir = tempdir().expect("tempdir");
     let owner = Keys::generate();
     let publisher = Arc::new(FakePublisher::default());
-    *publisher.fail.lock().expect("fail") = true;
+    *publisher.failure.lock().expect("failure") = Some(AuditPublishError::Transient);
     let audit = EncryptedBriefAudit::new(
         dir.path().join("brief.db"),
         owner.clone(),
@@ -292,7 +307,7 @@ async fn offline_publish_remains_queued_and_republishes_same_event_id() {
         .expect("local completion");
     assert_eq!(published.publication_state(), PublicationState::Queued);
     let first_id = published.lifecycle_audit_event_id().to_string();
-    *publisher.fail.lock().expect("fail") = false;
+    *publisher.failure.lock().expect("failure") = None;
     audit.republish_due(i64::MAX).await.expect("republish");
     let ids: Vec<String> = publisher
         .events
@@ -317,7 +332,7 @@ async fn restart_readiness_recovers_exact_event_after_eight_prior_failures() {
     let path = dir.path().join("brief.db");
     let owner = Keys::generate();
     let offline = Arc::new(FakePublisher::default());
-    *offline.fail.lock().expect("fail") = true;
+    *offline.failure.lock().expect("failure") = Some(AuditPublishError::Transient);
     let first = EncryptedBriefAudit::new(path.clone(), owner.clone(), offline.clone());
     let published = first
         .persist_terminal(&brief(), CancellationToken::new())
@@ -364,7 +379,7 @@ async fn readiness_quarantines_invalid_spool_bytes_without_retry_hot_loop() {
     let path = dir.path().join("brief.db");
     let owner = Keys::generate();
     let publisher = Arc::new(FakePublisher::default());
-    *publisher.fail.lock().expect("fail") = true;
+    *publisher.failure.lock().expect("failure") = Some(AuditPublishError::Transient);
     let audit = EncryptedBriefAudit::new(path.clone(), owner.clone(), publisher.clone());
     let published = audit
         .persist_terminal(&brief(), CancellationToken::new())
@@ -379,7 +394,7 @@ async fn readiness_quarantines_invalid_spool_bytes_without_retry_hot_loop() {
         )
         .expect("tamper row");
     }
-    *publisher.fail.lock().expect("fail") = false;
+    *publisher.failure.lock().expect("failure") = None;
 
     assert_eq!(
         audit.recover_on_relay_ready(10_000).await.expect("recover"),
@@ -409,6 +424,47 @@ async fn readiness_quarantines_invalid_spool_bytes_without_retry_hot_loop() {
         1,
         "only the initial best-effort publish saw the event"
     );
+}
+
+#[tokio::test]
+async fn permanent_relay_rejection_is_quarantined_and_never_rearmed() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("brief.db");
+    let owner = Keys::generate();
+    let publisher = Arc::new(FakePublisher::default());
+    *publisher.failure.lock().expect("failure") = Some(AuditPublishError::Permanent);
+    let audit = EncryptedBriefAudit::new(path.clone(), owner, publisher.clone());
+
+    let published = audit
+        .persist_terminal(&brief(), CancellationToken::new())
+        .await
+        .expect("durable local terminal");
+    assert_eq!(published.publication_state(), PublicationState::Queued);
+    assert_eq!(
+        audit
+            .recover_on_relay_ready(10_000)
+            .await
+            .expect("first readiness"),
+        0
+    );
+    assert_eq!(
+        audit
+            .recover_on_relay_ready(20_000)
+            .await
+            .expect("second readiness"),
+        0
+    );
+    assert_eq!(publisher.events.lock().expect("events").len(), 1);
+    let (retry_count, next_retry_at, error): (i64, i64, String) = open_command_brief_store(&path)
+        .expect("store")
+        .query_row(
+            "SELECT retry_count,next_retry_at,last_error_code FROM command_brief_spool",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("quarantine");
+    assert_eq!((retry_count, next_retry_at), (8, i64::MAX));
+    assert_eq!(error, "invalid_event");
 }
 
 #[tokio::test]
