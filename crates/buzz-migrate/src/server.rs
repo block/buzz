@@ -1,7 +1,7 @@
 //! The Slack migration claim-service HTTP surface.
 //!
 //! Email magic links and Slack OIDC share the same operator identity,
-//! workspace roster, relay writer, and bounded single-use ledgers.
+//! workspace roster, relay writer, and bounded session ledgers.
 //!
 //! - `POST /email/start {email}` — mint a magic-link token for the Slack user
 //!   that email belongs to and mail it there. Deliberately takes **no pubkey**
@@ -52,7 +52,6 @@ const MAX_PENDING_OIDC_STATES: usize = 4096;
 struct OidcPendingState {
     nonce: String,
     device_challenge: String,
-    slack_code_verifier: String,
     expires_at: u64,
 }
 
@@ -82,7 +81,7 @@ pub enum Mailer {
     Dev,
 }
 
-/// Immutable service configuration + shared mutable single-use ledger.
+/// Immutable service configuration + shared mutable session ledgers.
 pub struct Inner {
     pub roster: Roster,
     pub token_secret: Vec<u8>,
@@ -337,8 +336,8 @@ async fn publish_join_attestation_for(
 // ---- OIDC channel (Sign in with Slack) --------------------------------------
 
 /// Begin Sign in with Slack: bind the round-trip to Buzz's device challenge,
-/// store Slack state/nonce/PKCE values, and redirect to Slack. No pubkey is
-/// accepted here; key possession is proven only at `/oidc/finalize`.
+/// store Slack state/nonce values, and redirect to Slack. No pubkey is accepted
+/// here; key possession is proven only at `/oidc/finalize`.
 #[derive(Deserialize)]
 struct OidcStartQuery {
     /// S256 challenge derived from a verifier generated and retained by Buzz.
@@ -355,8 +354,6 @@ async fn oidc_start(
 
     let st = hex::encode(random_nonce());
     let nonce = hex::encode(random_nonce());
-    let slack_code_verifier = hex::encode(random_nonce());
-    let slack_code_challenge = oidc::pkce_challenge(&slack_code_verifier);
     {
         let now = now_secs();
         let mut states = lock_or_recover(&inner.oidc_sessions.states, "oidc states");
@@ -371,16 +368,12 @@ async fn oidc_start(
             OidcPendingState {
                 nonce: nonce.clone(),
                 device_challenge: query.challenge,
-                slack_code_verifier,
                 expires_at: now.saturating_add(OIDC_STATE_TTL_SECS),
             },
         );
     }
     Ok(no_store(Redirect::to(&oidc::authorize_url(
-        cfg,
-        &st,
-        &nonce,
-        &slack_code_challenge,
+        cfg, &st, &nonce,
     ))))
 }
 
@@ -415,15 +408,9 @@ async fn oidc_callback(
     }
     .ok_or_else(|| ApiError::bad("unknown or expired OIDC state"))?;
 
-    let subject = oidc::exchange_code_for_subject(
-        &inner.http,
-        cfg,
-        &q.code,
-        &pending.nonce,
-        &pending.slack_code_verifier,
-    )
-    .await
-    .map_err(|e| ApiError::upstream(&e.to_string()))?;
+    let subject = oidc::exchange_code_for_subject(&inner.http, cfg, &q.code, &pending.nonce)
+        .await
+        .map_err(|e| ApiError::upstream(&e.to_string()))?;
 
     // Mint a short-lived code bound to the verified subject and to the device
     // challenge supplied by Buzz before the browser was opened.
@@ -932,7 +919,6 @@ mod tests {
                         OidcPendingState {
                             nonce: "nonce".into(),
                             device_challenge: oidc::pkce_challenge(&test_verifier()),
-                            slack_code_verifier: "slack-verifier".into(),
                             expires_at: u64::MAX,
                         },
                     )

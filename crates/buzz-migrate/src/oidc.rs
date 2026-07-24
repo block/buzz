@@ -1,9 +1,10 @@
 //! Sign in with Slack (OIDC).
 //!
-//! The server uses PKCE for Slack's authorization code and verifies the
-//! returned ID token (signature, issuer, audience, expiry, nonce, workspace).
-//! Identity is then confirmed again through Slack's authenticated userInfo
-//! endpoint before the migration service mints an app handoff code.
+//! The server verifies the returned ID token (signature, issuer, audience,
+//! expiry, nonce, workspace). Identity is then confirmed again through Slack's
+//! authenticated userInfo endpoint before the migration service mints an app
+//! handoff code. The separate app handoff is bound to a device-held verifier
+//! in [`crate::server`].
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -33,16 +34,19 @@ const USERINFO_URL: &str = "https://slack.com/api/openid.connect.userInfo";
 const JWKS_URL: &str = "https://slack.com/openid/connect/keys";
 const ISSUER: &str = "https://slack.com";
 
-/// Build the Slack authorization URL, including an S256 PKCE challenge.
-pub fn authorize_url(cfg: &OidcConfig, state: &str, nonce: &str, code_challenge: &str) -> String {
+/// Build a Sign in with Slack authorization URL.
+///
+/// This follows Slack's OpenID Connect endpoint contract. The migration app's
+/// own device-verifier handoff is separate from Slack's authorization-code
+/// exchange.
+pub fn authorize_url(cfg: &OidcConfig, state: &str, nonce: &str) -> String {
     format!(
-        "{AUTHORIZE_URL}?response_type=code&scope=openid&client_id={}&redirect_uri={}&state={}&nonce={}&team={}&code_challenge={}&code_challenge_method=S256",
+        "{AUTHORIZE_URL}?response_type=code&scope=openid&client_id={}&redirect_uri={}&state={}&nonce={}&team={}",
         urlencode(&cfg.client_id),
         urlencode(&cfg.redirect_uri),
         urlencode(state),
         urlencode(nonce),
         urlencode(&cfg.team_id),
-        urlencode(code_challenge),
     )
 }
 
@@ -152,23 +156,11 @@ pub async fn exchange_code_for_subject(
     cfg: &OidcConfig,
     code: &str,
     expected_nonce: &str,
-    code_verifier: &str,
 ) -> Result<String, OidcError> {
     if code.is_empty() {
         return Err(OidcError::Token("missing authorization code".into()));
     }
-    let body = [
-        ("client_id", cfg.client_id.as_str()),
-        ("client_secret", cfg.client_secret.as_str()),
-        ("code", code),
-        ("redirect_uri", cfg.redirect_uri.as_str()),
-        ("grant_type", "authorization_code"),
-        ("code_verifier", code_verifier),
-    ]
-    .iter()
-    .map(|(key, value)| format!("{}={}", urlencode(key), urlencode(value)))
-    .collect::<Vec<_>>()
-    .join("&");
+    let body = token_request_body(cfg, code);
     let token: TokenResp = http
         .post(TOKEN_URL)
         .header("content-type", "application/x-www-form-urlencoded")
@@ -228,6 +220,20 @@ pub async fn exchange_code_for_subject(
         ));
     }
     Ok(format!("slack:{}:{user_id}", cfg.team_id))
+}
+
+fn token_request_body(cfg: &OidcConfig, code: &str) -> String {
+    let body = [
+        ("client_id", cfg.client_id.as_str()),
+        ("client_secret", cfg.client_secret.as_str()),
+        ("code", code),
+        ("redirect_uri", cfg.redirect_uri.as_str()),
+    ]
+    .iter()
+    .map(|(key, value)| format!("{}={}", urlencode(key), urlencode(value)))
+    .collect::<Vec<_>>()
+    .join("&");
+    body
 }
 
 async fn verify_id_token(
@@ -358,8 +364,8 @@ mod tests {
     }
 
     #[test]
-    fn authorize_url_encodes_params_and_pkce() {
-        let url = authorize_url(&cfg(), "st ate", "non/ce", "challenge");
+    fn authorize_url_encodes_openid_params() {
+        let url = authorize_url(&cfg(), "st ate", "non/ce");
         assert!(url.starts_with(AUTHORIZE_URL));
         assert!(url.contains("client_id=123.456"));
         assert!(url.contains("redirect_uri=https%3A%2F%2Fmig.example%2Foidc%2Fcallback"));
@@ -367,8 +373,15 @@ mod tests {
         assert!(url.contains("nonce=non%2Fce"));
         assert!(url.contains("team=T060"));
         assert!(url.contains("scope=openid"));
-        assert!(url.contains("code_challenge=challenge"));
-        assert!(url.contains("code_challenge_method=S256"));
+        assert!(!url.contains("code_challenge"));
+    }
+
+    #[test]
+    fn token_request_matches_sign_in_with_slack_contract() {
+        assert_eq!(
+            token_request_body(&cfg(), "co/de"),
+            "client_id=123.456&client_secret=shh&code=co%2Fde&redirect_uri=https%3A%2F%2Fmig.example%2Foidc%2Fcallback"
+        );
     }
 
     #[test]
