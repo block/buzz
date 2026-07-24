@@ -714,6 +714,40 @@ async fn info_refs_subprocess(
         .unwrap())
 }
 
+/// Decode a smart-HTTP git request body according to its `Content-Encoding`.
+///
+/// Git's smart-HTTP client gzip-compresses the `git-upload-pack` /
+/// `git-receive-pack` request body once it exceeds an internal size
+/// threshold (`http.postBuffer`-independent; triggered by the number of
+/// want/have lines, so it fires reliably on many-ref clones). The relay
+/// pipes the request body straight into the git subprocess's stdin, so a
+/// still-compressed body reaches `git upload-pack` as raw gzip and fails
+/// with `fatal: protocol error: bad line length character`. Transparently
+/// inflate here so the subprocess always sees plain pkt-lines.
+///
+/// Only `gzip` is decoded (the sole encoding git emits). An unknown
+/// non-identity encoding is passed through unchanged rather than rejected;
+/// the subprocess surfaces any real mismatch as an in-band protocol error.
+fn decode_git_request_body(headers: &axum::http::HeaderMap, body: Body) -> Body {
+    let is_gzip = headers
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip"))
+        .unwrap_or(false);
+    if !is_gzip {
+        return body;
+    }
+    use futures_util::StreamExt;
+    use tokio_util::io::{ReaderStream, StreamReader};
+    let byte_stream = body
+        .into_data_stream()
+        .map(|res| res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+        .boxed();
+    let decoder =
+        async_compression::tokio::bufread::GzipDecoder::new(StreamReader::new(byte_stream));
+    Body::from_stream(ReaderStream::new(decoder))
+}
+
 /// `POST /git/{owner}/{repo}/git-upload-pack`
 ///
 /// Handles clone/fetch — client sends wants/haves, server sends pack data.
@@ -723,10 +757,12 @@ async fn info_refs_subprocess(
 pub async fn upload_pack(
     State(state): State<Arc<AppState>>,
     auth: GitAuth,
+    headers: axum::http::HeaderMap,
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
     let _ = validate_repo_id(&params.owner, &params.repo)?;
+    let body = decode_git_request_body(&headers, body);
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
@@ -793,10 +829,12 @@ pub async fn upload_pack(
 pub async fn receive_pack(
     State(state): State<Arc<AppState>>,
     auth: GitAuth,
+    headers: axum::http::HeaderMap,
     AxumPath(params): AxumPath<GitRepoParams>,
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
+    let body = decode_git_request_body(&headers, body);
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;
 
@@ -1692,6 +1730,43 @@ mod track_c_tests {
 
     fn oid_sha1() -> String {
         "cb09a769da1c01f458fa6959d4e8eded38fac8d3".to_string()
+    }
+
+    /// A gzip-encoded request body is transparently inflated before it
+    /// reaches the git subprocess. Git's smart-HTTP client gzips the
+    /// upload-pack/receive-pack request body past a size threshold (fires
+    /// on many-ref clones); without this the subprocess sees raw gzip and
+    /// dies with `fatal: protocol error: bad line length character`.
+    #[tokio::test]
+    async fn gzip_request_body_is_inflated() {
+        use axum::http::HeaderMap;
+        use std::io::Write;
+
+        let plaintext = b"0032want cb09a769da1c01f458fa6959d4e8eded38fac8d3\n0000";
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(plaintext).unwrap();
+        let gzipped = encoder.finish().unwrap();
+        assert_ne!(
+            gzipped, plaintext,
+            "precondition: body is actually compressed"
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        let decoded = decode_git_request_body(&headers, Body::from(gzipped));
+        let bytes = axum::body::to_bytes(decoded, usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), plaintext);
+    }
+
+    /// Without a gzip `Content-Encoding`, the body is passed through byte
+    /// for byte (the common small-clone / already-inflated case).
+    #[tokio::test]
+    async fn identity_request_body_is_passthrough() {
+        use axum::http::HeaderMap;
+        let plaintext = b"0032want cb09a769da1c01f458fa6959d4e8eded38fac8d3\n0000";
+        let decoded = decode_git_request_body(&HeaderMap::new(), Body::from(plaintext.to_vec()));
+        let bytes = axum::body::to_bytes(decoded, usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), plaintext);
     }
 
     fn branches_only_manifest() -> Manifest {
