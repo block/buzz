@@ -80,3 +80,17 @@ Fresh corrective verification:
 
 No live backup, restore, service stop, credential rotation, migration, or
 destructive command was run.
+
+## Final rereview correction
+
+The remaining failure-atomicity finding in `task-5-rereview.md` is addressed:
+the destructive custom-archive restore now combines `--clean --if-exists` with
+explicit `--exit-on-error --single-transaction`. PostgreSQL cleanup and restore
+therefore commit together or roll back together, while the existing database
+writer lock remains active until `pg_restore` succeeds.
+
+A test-first mocked regression asserted the complete compatible flag sequence.
+It failed against the prior command, then passed after the minimal command-line
+change. The full mocked suite, macOS Bash 3.2 syntax checks, Hermit Just parsing,
+Compose configuration validation, and diff checks were rerun. No live restore
+or error-injection test was performed against the shared PostgreSQL service.

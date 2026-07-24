@@ -202,7 +202,8 @@ local_workspace_run_bounded \
   "PostgreSQL restore" \
   "${database_timeout_seconds}" \
   docker compose exec -T postgres \
-    pg_restore --clean --if-exists --no-owner --no-acl \
+    pg_restore --clean --if-exists --exit-on-error --single-transaction \
+    --no-owner --no-acl \
     --username=buzz --dbname=buzz <"${backup_dir}/postgres.dump"
 
 local_workspace_capture_minio_credentials \

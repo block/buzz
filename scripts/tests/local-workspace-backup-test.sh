@@ -279,7 +279,9 @@ assert_contains "$MOCK_LOG" \
   "restore stops every present known Compose writer"
 assert_contains "$MOCK_LOG" "pg_stat_activity" \
   "restore proves PostgreSQL writer quiescence"
-assert_contains "$MOCK_LOG" "pg_restore" "restore loads the PostgreSQL archive"
+assert_contains "$MOCK_LOG" \
+  "pg_restore --clean --if-exists --exit-on-error --single-transaction --no-owner --no-acl" \
+  "restore loads PostgreSQL atomically and fails on the first SQL error"
 assert_contains "$MOCK_LOG" "mc mirror" "restore mirrors MinIO objects"
 assert_contains "$MOCK_LOG" "migrate" "restore runs migrations"
 assert_contains "$MOCK_LOG" "ready" "restore verifies readiness"
