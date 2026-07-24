@@ -1,3 +1,20 @@
+import {
+  DndContext,
+  DragOverlay,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent, DragStartEvent } from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  sortableKeyboardCoordinates,
+  verticalListSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 import { CheckCheck, Link2, Plus, Settings2 } from "lucide-react";
 import * as React from "react";
 
@@ -21,6 +38,7 @@ import { cn } from "@/shared/lib/cn";
 import { getInitials } from "@/shared/lib/initials";
 import { isMacPlatform } from "@/shared/lib/platform";
 import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type CommunityRailProps = {
   communities: Community[];
@@ -32,6 +50,7 @@ type CommunityRailProps = {
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
   onRemoveCommunity: (id: string) => void;
+  onReorderCommunities: (orderedIds: string[]) => void;
 };
 
 const MAX_BADGE = 99;
@@ -75,6 +94,9 @@ function CommunityButton({
   iconUrl,
   onSwitch,
   menu,
+  dragListeners,
+  dragAttributes,
+  isDragging,
 }: {
   community: Community;
   isActive: boolean;
@@ -82,6 +104,9 @@ function CommunityButton({
   iconUrl: string | null;
   onSwitch: () => void;
   menu: React.ReactNode;
+  dragListeners?: React.HTMLAttributes<HTMLElement>;
+  dragAttributes?: React.HTMLAttributes<HTMLElement>;
+  isDragging?: boolean;
 }) {
   const { mentionCount, showBadge, showDot, pending, badgeLabel } =
     communityRailIndicators(unread);
@@ -100,10 +125,15 @@ function CommunityButton({
             <button
               aria-current={isActive ? "true" : undefined}
               aria-label={tooltipLabel}
-              className="relative flex h-9 w-9 items-center justify-center outline-hidden focus:outline-none focus-visible:outline-none"
+              className={cn(
+                "relative flex h-9 w-9 items-center justify-center touch-none outline-hidden focus:outline-none focus-visible:outline-none",
+                isDragging && "opacity-30",
+              )}
               data-testid={`community-rail-button-${community.id}`}
               onClick={onSwitch}
               type="button"
+              {...dragAttributes}
+              {...dragListeners}
             >
               <span
                 className={cn(
@@ -153,6 +183,105 @@ function CommunityButton({
   );
 }
 
+function CommunityDragOverlay({
+  community,
+  iconUrl,
+}: {
+  community: Community;
+  iconUrl: string | null;
+}) {
+  return (
+    <div
+      className="flex h-9 w-9 cursor-grabbing items-center justify-center overflow-hidden rounded-xl bg-primary text-xs font-semibold text-primary-foreground opacity-90 shadow-lg ring-1 ring-sidebar-border"
+      data-buzz-flat
+    >
+      {iconUrl ? (
+        <img
+          alt=""
+          className="h-full w-full object-cover"
+          draggable={false}
+          src={iconUrl}
+        />
+      ) : (
+        getInitials(community.name) || "🐝"
+      )}
+    </div>
+  );
+}
+
+function SortableCommunityButton({
+  community,
+  activeCommunityId,
+  iconsByCommunity,
+  unreadByCommunity,
+  onSwitchCommunity,
+  onMarkAllRead,
+  onSetEditingCommunity,
+}: {
+  community: Community;
+  activeCommunityId: string | null;
+  iconsByCommunity: Record<string, string | null | undefined>;
+  unreadByCommunity: Record<string, CommunityUnreadState>;
+  onSwitchCommunity: (id: string) => void;
+  onMarkAllRead: (community: Community) => void;
+  onSetEditingCommunity: (community: Community) => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: community.id });
+
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  };
+
+  return (
+    <div ref={setNodeRef} style={style}>
+      <CommunityButton
+        community={community}
+        dragAttributes={attributes}
+        dragListeners={listeners}
+        iconUrl={iconsByCommunity[community.id] ?? null}
+        isActive={community.id === activeCommunityId}
+        isDragging={isDragging}
+        menu={
+          <>
+            <ContextMenuItem onClick={() => onMarkAllRead(community)}>
+              <CheckCheck className="h-4 w-4" />
+              Mark all as read
+            </ContextMenuItem>
+            <ContextMenuItem
+              onClick={() => {
+                void writeTextToClipboard(community.relayUrl);
+              }}
+            >
+              <Link2 className="h-4 w-4" />
+              Copy relay URL
+            </ContextMenuItem>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={() => onSetEditingCommunity(community)}>
+              <Settings2 className="h-4 w-4" />
+              Community settings
+            </ContextMenuItem>
+          </>
+        }
+        onSwitch={() => onSwitchCommunity(community.id)}
+        unread={
+          unreadByCommunity[community.id] ?? {
+            hasUnread: false,
+            state: "unknown",
+          }
+        }
+      />
+    </div>
+  );
+}
+
 /**
  * Discord/Slack-style vertical rail of communities on the far left of the app.
  * Shows a mention-count badge for inactive communities (observed via
@@ -168,6 +297,7 @@ export function CommunityRail({
   onAddCommunity,
   onUpdateCommunity,
   onRemoveCommunity,
+  onReorderCommunities,
 }: CommunityRailProps) {
   const { unreadByCommunity, markCommunityRead } = useCommunityUnread(
     communities,
@@ -178,9 +308,38 @@ export function CommunityRail({
   const { markAllChannelsRead } = useAppShell();
   const [editingCommunity, setEditingCommunity] =
     React.useState<Community | null>(null);
+  const [draggingId, setDraggingId] = React.useState<string | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
+
   if (communities.length <= 1) {
     return null;
   }
+
+  const communityIds = communities.map((c) => c.id);
+  const draggingCommunity = draggingId
+    ? (communities.find((c) => c.id === draggingId) ?? null)
+    : null;
+
+  const handleDragStart = (event: DragStartEvent) => {
+    setDraggingId(event.active.id as string);
+  };
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    setDraggingId(null);
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+    const oldIdx = communityIds.indexOf(active.id as string);
+    const newIdx = communityIds.indexOf(over.id as string);
+    if (oldIdx !== -1 && newIdx !== -1) {
+      onReorderCommunities(arrayMove(communityIds, oldIdx, newIdx));
+    }
+  };
 
   const handleMarkAllRead = (community: Community) => {
     if (community.id === activeCommunityId) {
@@ -210,42 +369,37 @@ export function CommunityRail({
       )}
       data-testid="community-rail"
     >
-      {communities.map((community) => (
-        <CommunityButton
-          key={community.id}
-          iconUrl={iconsByCommunity[community.id] ?? null}
-          isActive={community.id === activeCommunityId}
-          menu={
-            <>
-              <ContextMenuItem onClick={() => handleMarkAllRead(community)}>
-                <CheckCheck className="h-4 w-4" />
-                Mark all as read
-              </ContextMenuItem>
-              <ContextMenuItem
-                onClick={() => {
-                  void navigator.clipboard.writeText(community.relayUrl);
-                }}
-              >
-                <Link2 className="h-4 w-4" />
-                Copy relay URL
-              </ContextMenuItem>
-              <ContextMenuSeparator />
-              <ContextMenuItem onClick={() => setEditingCommunity(community)}>
-                <Settings2 className="h-4 w-4" />
-                Community settings
-              </ContextMenuItem>
-            </>
-          }
-          onSwitch={() => onSwitchCommunity(community.id)}
-          unread={
-            unreadByCommunity[community.id] ?? {
-              hasUnread: false,
-              state: "unknown",
-            }
-          }
-          community={community}
-        />
-      ))}
+      <DndContext
+        onDragEnd={handleDragEnd}
+        onDragStart={handleDragStart}
+        sensors={sensors}
+      >
+        <SortableContext
+          items={communityIds}
+          strategy={verticalListSortingStrategy}
+        >
+          {communities.map((community) => (
+            <SortableCommunityButton
+              key={community.id}
+              activeCommunityId={activeCommunityId}
+              community={community}
+              iconsByCommunity={iconsByCommunity}
+              unreadByCommunity={unreadByCommunity}
+              onMarkAllRead={handleMarkAllRead}
+              onSetEditingCommunity={setEditingCommunity}
+              onSwitchCommunity={onSwitchCommunity}
+            />
+          ))}
+        </SortableContext>
+        <DragOverlay>
+          {draggingCommunity ? (
+            <CommunityDragOverlay
+              community={draggingCommunity}
+              iconUrl={iconsByCommunity[draggingCommunity.id] ?? null}
+            />
+          ) : null}
+        </DragOverlay>
+      </DndContext>
       <Tooltip>
         <TooltipTrigger asChild>
           <button

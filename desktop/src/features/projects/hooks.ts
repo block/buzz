@@ -2,16 +2,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
+import { getRelaySelf } from "@/features/moderation/lib/relaySelf";
+import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import {
   getProjectLocalRepoDiff,
   getProjectRepoDiff,
-  getProjectRepoSyncStatus,
   getProjectLocalRepoSnapshot,
   getProjectRepoSnapshot,
   listProjectLocalRepositories,
-  pushProjectLocalRepository,
 } from "@/shared/api/projectGit";
 import {
   KIND_DELETION,
@@ -39,12 +39,30 @@ import type {
   RelayEvent,
 } from "@/shared/api/types";
 import { summarizeProjectActivityEvents } from "./projectActivity.mjs";
+import { resolveProjectDefaultBranch } from "./lib/projectBranches";
+import { effectiveCloneUrls } from "./lib/projectCloneUrl";
 import type { ProjectIssue } from "./projectIssues.mjs";
 import { projectIssueEventsToIssues } from "./projectIssues.mjs";
-import type { ProjectPullRequest } from "./projectPullRequests.mjs";
-import { projectPullRequestEventsToPullRequests } from "./projectPullRequests.mjs";
+import type {
+  ProjectPullRequest,
+  ProjectPullRequestCommentAnchor,
+} from "./projectPullRequests.mjs";
+import {
+  nextProjectPullRequestReviewCreatedAt,
+  normalizeProjectPullRequestCommentAnchor,
+  PR_CHANGES_REQUESTED_LABEL,
+  PR_INLINE_COMMENT_LABEL,
+  projectPullRequestEventsToPullRequests,
+} from "./projectPullRequests.mjs";
+import { fetchProjectsWorkItems } from "./projectWorkItems";
 
-export type { ProjectIssue, ProjectPullRequest };
+export type {
+  ProjectIssue,
+  ProjectPullRequest,
+  ProjectPullRequestCommentAnchor,
+};
+
+export type ProjectPullRequestCommentDecision = "request-changes";
 
 const HIDDEN_PROJECT_CARDS_KEY = "buzz.projects.hidden-cards.v1";
 
@@ -162,11 +180,27 @@ function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
   );
 }
 
-function eventToProject(event: RelayEvent): Project {
+/**
+ * Converts a kind:30617 repo announcement into a `Project`.
+ *
+ * `relayOrigin` is the resolved relay HTTP origin (from `getCachedRelayOrigin`)
+ * used to synthesize a canonical clone URL when the announcement omits an
+ * explicit `clone` tag. Callers outside the relay-connected app (e.g. unit
+ * tests) may omit it, in which case no default is derived.
+ */
+export function eventToProject(
+  event: RelayEvent,
+  relayOrigin?: string | null,
+): Project {
   const d = getTag(event, "d") ?? event.id;
   const name = getTag(event, "name") || d;
   const description = getTag(event, "description") || event.content || "";
-  const cloneUrls = getCloneUrls(event);
+  const cloneUrls = effectiveCloneUrls(
+    getCloneUrls(event),
+    relayOrigin,
+    event.pubkey,
+    d,
+  );
   const webUrl = getTag(event, "web") ?? null;
   const setupUsers = getAllTags(event, "auth");
   const contributors = [...new Set([...getAllTags(event, "p"), ...setupUsers])];
@@ -212,7 +246,7 @@ function dedup(events: RelayEvent[]): RelayEvent[] {
   return [...best.values()];
 }
 
-async function fetchProjects(): Promise<Project[]> {
+export async function fetchProjects(): Promise<Project[]> {
   const [events, deletionEvents] = await Promise.all([
     relayClient.fetchEvents({
       kinds: [KIND_REPO_ANNOUNCEMENT],
@@ -225,7 +259,7 @@ async function fetchProjects(): Promise<Project[]> {
   ]);
 
   return dedup(events)
-    .map(eventToProject)
+    .map((event) => eventToProject(event, getCachedRelayOrigin()))
     .filter(
       (project) =>
         !isHiddenLocally(project) && !isDeletedByA(project, deletionEvents),
@@ -263,7 +297,10 @@ async function fetchProject(projectId: string): Promise<Project | null> {
   const deduped = dedup(events).filter(
     (event) => !owner || event.pubkey.toLowerCase() === owner,
   );
-  const project = deduped.length > 0 ? eventToProject(deduped[0]) : null;
+  const project =
+    deduped.length > 0
+      ? eventToProject(deduped[0], getCachedRelayOrigin())
+      : null;
   if (!project) {
     return null;
   }
@@ -275,7 +312,15 @@ async function fetchProject(projectId: string): Promise<Project | null> {
     limit: 10,
   });
 
-  return isDeletedByA(project, deletionEvents) ? null : project;
+  if (isDeletedByA(project, deletionEvents)) return null;
+  const repoState = await fetchRepoState(project);
+  return {
+    ...project,
+    defaultBranch: resolveProjectDefaultBranch(
+      project.defaultBranch,
+      repoState,
+    ),
+  };
 }
 
 function eventToRepoState(event: RelayEvent): RepoState {
@@ -292,7 +337,7 @@ function eventToRepoState(event: RelayEvent): RepoState {
     } else if (name.startsWith("refs/tags/")) {
       tags.push({ name: name.slice("refs/tags/".length), commit: value });
     } else if (name === "HEAD") {
-      head = value.replace(/^ref:\s*/, "");
+      head = value.replace(/^ref:\s*/, "").replace(/^refs\/heads\//, "");
     }
   }
 
@@ -305,9 +350,17 @@ function eventToRepoState(event: RelayEvent): RepoState {
 }
 
 async function fetchRepoState(project: Project): Promise<RepoState | null> {
+  const relaySelf = await getRelaySelf();
+  const trustedAuthors = [
+    ...new Set(
+      [project.owner, relaySelf].filter((value): value is string =>
+        Boolean(value),
+      ),
+    ),
+  ];
   const events = await relayClient.fetchEvents({
     kinds: [KIND_REPO_STATE],
-    authors: [project.owner],
+    authors: trustedAuthors,
     "#d": [project.dtag],
     limit: 1,
   });
@@ -388,13 +441,17 @@ async function fetchProjectPullRequests(
 // features/pulse/lib/projectComments.ts). If the relay ever allowlists
 // 1111, migrate these to NIP-22 comments and drop that filter.
 async function createProjectPullRequestComment({
+  anchor,
   content,
+  decision,
   mediaTags,
   mentionPubkeys = [],
   project,
   pullRequest,
 }: {
+  anchor?: ProjectPullRequestCommentAnchor;
   content: string;
+  decision?: ProjectPullRequestCommentDecision;
   mediaTags?: string[][];
   mentionPubkeys?: string[];
   project: Project;
@@ -403,6 +460,15 @@ async function createProjectPullRequestComment({
   const body = content.trim();
   if (!body) {
     throw new Error("Comment cannot be empty.");
+  }
+  const normalizedAnchor = anchor
+    ? normalizeProjectPullRequestCommentAnchor(anchor)
+    : null;
+  if (anchor && !normalizedAnchor) {
+    throw new Error("Comment location is invalid.");
+  }
+  if ((normalizedAnchor || decision) && !pullRequest.commit) {
+    throw new Error("Pull request commit is required for review comments.");
   }
 
   const recipients = new Set([
@@ -415,12 +481,35 @@ async function createProjectPullRequestComment({
     ["e", pullRequest.id, "", "root"],
     ["a", project.repoAddress],
     ...[...recipients].map((recipient) => ["p", recipient]),
+    ...(normalizedAnchor
+      ? [
+          ["t", PR_INLINE_COMMENT_LABEL],
+          ["c", pullRequest.commit as string],
+          ["file", normalizedAnchor.path],
+          ["side", normalizedAnchor.side],
+          ["line", String(normalizedAnchor.line)],
+        ]
+      : []),
+    ...(decision
+      ? [
+          ["t", PR_CHANGES_REQUESTED_LABEL],
+          ...(!normalizedAnchor ? [["c", pullRequest.commit as string]] : []),
+        ]
+      : []),
     ...(mediaTags ?? []),
   ];
 
   const event = await signRelayEvent({
     kind: KIND_TEXT_NOTE,
     content: body,
+    ...(decision
+      ? {
+          createdAt: nextProjectPullRequestReviewCreatedAt(
+            pullRequest,
+            Math.floor(Date.now() / 1_000),
+          ),
+        }
+      : {}),
     tags,
   });
 
@@ -479,6 +568,7 @@ async function fetchProjectRepoSnapshot(
   project: Project,
   branchName?: string | null,
   pullRequest?: ProjectPullRequest | null,
+  tag?: { name: string; commit: string } | null,
 ): Promise<ProjectRepoSnapshot | null> {
   const cloneUrl = pullRequest?.cloneUrls[0] ?? project.cloneUrls[0];
   if (!cloneUrl) return null;
@@ -487,8 +577,12 @@ async function fetchProjectRepoSnapshot(
     cloneUrl,
     defaultBranch: branchName ?? project.defaultBranch,
     baseBranch: project.defaultBranch,
-    targetCommit: pullRequest?.commit ?? null,
-    targetRef: pullRequest ? `refs/nostr/${pullRequest.id}` : null,
+    targetCommit: tag?.commit ?? pullRequest?.commit ?? null,
+    targetRef: tag
+      ? `refs/tags/${tag.name}`
+      : pullRequest
+        ? `refs/nostr/${pullRequest.id}`
+        : null,
   });
 }
 
@@ -623,6 +717,7 @@ export function useProjectRepoSnapshotQuery(
   project: Project | null | undefined,
   branchName?: string | null,
   pullRequest?: ProjectPullRequest | null,
+  tag?: { name: string; commit: string } | null,
 ) {
   const selectedBranch = branchName ?? project?.defaultBranch ?? null;
 
@@ -635,10 +730,17 @@ export function useProjectRepoSnapshotQuery(
       selectedBranch ?? "default",
       pullRequest?.id ?? "none",
       pullRequest?.commit ?? "none",
+      tag?.name ?? "no-tag",
+      tag?.commit ?? "no-tag-commit",
     ],
     queryFn: () => {
       if (!project) throw new Error("No project selected.");
-      return fetchProjectRepoSnapshot(project, selectedBranch, pullRequest);
+      return fetchProjectRepoSnapshot(
+        project,
+        selectedBranch,
+        pullRequest,
+        tag,
+      );
     },
     staleTime: 30_000,
     retry: 1,
@@ -740,36 +842,6 @@ export function useProjectLocalRepositoriesQuery(reposDir?: string | null) {
   });
 }
 
-export function useProjectRepoSyncStatusQuery(
-  project: Project | null | undefined,
-  reposDir?: string | null,
-  branchName?: string | null,
-) {
-  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
-
-  return useQuery({
-    enabled: Boolean(project?.cloneUrls[0]),
-    queryKey: [
-      "project",
-      project?.id ?? "none",
-      "repo-sync-status",
-      reposDir ?? "default",
-      selectedBranch ?? "default",
-    ],
-    queryFn: () => {
-      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
-      return getProjectRepoSyncStatus({
-        reposDir,
-        projectDtag: project.dtag,
-        cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
-      });
-    },
-    staleTime: 10_000,
-    retry: 1,
-  });
-}
-
 export function useProjectIssuesQuery(project: Project | null | undefined) {
   return useQuery({
     enabled: Boolean(project),
@@ -796,47 +868,12 @@ export function useProjectPullRequestsQuery(
   });
 }
 
-export function useProjectsIssuesQuery(projects: Project[]) {
+/** Loads cross-project issues and pull requests with partial-failure metadata. */
+export function useProjectsWorkItemsQuery(projects: Project[]) {
   return useQuery({
     enabled: projects.length > 0,
-    queryKey: ["projects", "issues", projects.map((project) => project.id)],
-    queryFn: async (): Promise<ProjectIssueListItem[]> => {
-      const results = await Promise.all(
-        projects.map(async (project) => {
-          const issues = await fetchProjectIssues(project);
-          return issues.map((issue) => ({ project, issue }));
-        }),
-      );
-      return results
-        .flat()
-        .sort((left, right) => right.issue.updatedAt - left.issue.updatedAt);
-    },
-    staleTime: 30_000,
-  });
-}
-
-export function useProjectsPullRequestsQuery(projects: Project[]) {
-  return useQuery({
-    enabled: projects.length > 0,
-    queryKey: [
-      "projects",
-      "pull-requests",
-      projects.map((project) => project.id),
-    ],
-    queryFn: async (): Promise<ProjectPullRequestListItem[]> => {
-      const results = await Promise.all(
-        projects.map(async (project) => {
-          const pullRequests = await fetchProjectPullRequests(project);
-          return pullRequests.map((pullRequest) => ({ project, pullRequest }));
-        }),
-      );
-      return results
-        .flat()
-        .sort(
-          (left, right) =>
-            right.pullRequest.updatedAt - left.pullRequest.updatedAt,
-        );
-    },
+    queryKey: ["projects", "work-items", projects.map((project) => project.id)],
+    queryFn: () => fetchProjectsWorkItems(projects),
     staleTime: 30_000,
   });
 }
@@ -871,7 +908,9 @@ export function useCreateProjectIssueCommentMutation(
       void queryClient.invalidateQueries({
         queryKey: ["project", project?.id ?? "none", "issues"],
       });
-      void queryClient.invalidateQueries({ queryKey: ["projects", "issues"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["projects", "work-items"],
+      });
       void queryClient.invalidateQueries({
         queryKey: ["projects", "activity-summaries"],
       });
@@ -886,19 +925,25 @@ export function useCreateProjectPullRequestCommentMutation(
 
   return useMutation({
     mutationFn: ({
+      anchor,
       content,
+      decision,
       mediaTags,
       mentionPubkeys,
       pullRequest,
     }: {
+      anchor?: ProjectPullRequestCommentAnchor;
       content: string;
+      decision?: ProjectPullRequestCommentDecision;
       mediaTags?: string[][];
       mentionPubkeys?: string[];
       pullRequest: ProjectPullRequest;
     }) => {
       if (!project) throw new Error("No project selected.");
       return createProjectPullRequestComment({
+        anchor,
         content,
+        decision,
         mediaTags,
         mentionPubkeys,
         project,
@@ -910,7 +955,7 @@ export function useCreateProjectPullRequestCommentMutation(
         queryKey: ["project", project?.id ?? "none", "pull-requests"],
       });
       void queryClient.invalidateQueries({
-        queryKey: ["projects", "pull-requests"],
+        queryKey: ["projects", "work-items"],
       });
       void queryClient.invalidateQueries({
         queryKey: ["projects", "activity-summaries"],
@@ -947,33 +992,6 @@ export function useDeleteProjectMutation() {
       void queryClient.invalidateQueries({
         queryKey: ["project", project.id],
       });
-    },
-  });
-}
-
-export function usePushProjectLocalRepositoryMutation(
-  project: Project | null | undefined,
-  reposDir?: string | null,
-  branchName?: string | null,
-) {
-  const queryClient = useQueryClient();
-  const selectedBranch = branchName ?? project?.defaultBranch ?? null;
-
-  return useMutation({
-    mutationFn: () => {
-      if (!project?.cloneUrls[0]) throw new Error("No project selected.");
-      return pushProjectLocalRepository({
-        reposDir,
-        projectDtag: project.dtag,
-        cloneUrl: project.cloneUrls[0],
-        defaultBranch: selectedBranch,
-      });
-    },
-    onSuccess: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ["project", project?.id ?? "none"],
-      });
-      void queryClient.invalidateQueries({ queryKey: ["projects"] });
     },
   });
 }

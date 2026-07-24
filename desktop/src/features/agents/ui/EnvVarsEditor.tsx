@@ -7,7 +7,7 @@ import { cn } from "@/shared/lib/cn";
 import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 
 export type EnvVarsValue = Record<string, string>;
 

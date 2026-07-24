@@ -7,6 +7,7 @@ import { formatTimeWithoutDayPeriod } from "@/features/messages/lib/dateFormatte
 import type { TimelineMessage } from "@/features/messages/types";
 import { getConfigNudgeAuthorPubkey } from "@/features/messages/ui/configNudgeAuthPubkey";
 import { MessageActionBar } from "@/features/messages/ui/MessageActionBar";
+import { MessageAgentOwner } from "@/features/messages/ui/MessageAgentOwner";
 import { MessageReactions } from "@/features/messages/ui/MessageReactions";
 import { useReactionHandler } from "@/features/messages/ui/useReactionHandler";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
@@ -26,6 +27,7 @@ type InboxMessageRowProps = {
   /** Channel UUID for "Copy link" — passed straight through to MessageActionBar. */
   channelId?: string | null;
   isContinuation?: boolean;
+  isFirst?: boolean;
   isFocusHighlightVisible: boolean;
   message: InboxDisplayMessage;
   onSelectReplyTarget: (message: InboxDisplayMessage) => void;
@@ -41,6 +43,7 @@ export function InboxMessageRow({
   canReply,
   channelId = null,
   isContinuation = false,
+  isFirst = false,
   isFocusHighlightVisible,
   message,
   onSelectReplyTarget,
@@ -110,7 +113,12 @@ export function InboxMessageRow({
         }
       >
         {canReply || canToggleReactions ? (
-          <div className="absolute right-2 top-1 z-10 sm:top-0 sm:-translate-y-1/2">
+          <div
+            className={cn(
+              "absolute right-2 top-1 z-10",
+              !isFirst && "sm:top-0 sm:-translate-y-1/2",
+            )}
+          >
             <MessageActionBar
               channelId={channelId}
               message={timelineMessage}
@@ -172,6 +180,12 @@ export function InboxMessageRow({
                   {message.authorLabel}
                 </span>
               </UserProfilePopover>
+              {message.isAgent ? (
+                <MessageAgentOwner
+                  ownerLabel={message.ownerLabel}
+                  ownerPubkey={message.ownerPubkey}
+                />
+              ) : null}
               <p className="shrink-0 text-xs font-normal tabular-nums text-muted-foreground/55">
                 {message.fullTimestampLabel}
               </p>
@@ -187,8 +201,8 @@ export function InboxMessageRow({
               )}
               // Only pass the author pubkey for agent-authored messages so
               // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey) — not the tag-attributed
-              // display author — to prevent actor/p-tag spoofing.
+              // raw event signer (signerPubkey), not a relay-delegated display
+              // author, because the agent itself must have signed the card.
               configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
                 timelineMessage,
                 isKnownAgentPubkey,

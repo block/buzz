@@ -96,6 +96,17 @@ pub async fn handle_moderation_command(
     let kind = event.kind.as_u16() as u32;
     let actor = event.pubkey.to_bytes().to_vec();
 
+    // A ban is an admission boundary, not only a WebSocket-auth check. HTTP
+    // NIP-98 requests and already-authenticated sockets can reach this handler
+    // without passing through a fresh NIP-42 challenge, so enforce the durable
+    // tenant-scoped restriction before any command can lift or mutate it.
+    let restriction = state
+        .db
+        .moderation_restriction_state(tenant.community(), &actor)
+        .await
+        .map_err(|e| error(format!("database error checking restriction state: {e}")))?;
+    ensure_actor_not_banned(&restriction)?;
+
     // Freshness: reject stale/replayed commands (they are never stored).
     let event_ts = event.created_at.as_secs() as i64;
     let now = std::time::SystemTime::now()
@@ -119,6 +130,15 @@ pub async fn handle_moderation_command(
             "unexpected moderation command kind: {other}"
         ))),
     }
+}
+
+fn ensure_actor_not_banned(
+    restriction: &buzz_db::moderation::RestrictionState,
+) -> Result<(), String> {
+    if restriction.banned {
+        return Err("blocked: you are banned from this community".to_string());
+    }
+    Ok(())
 }
 
 // ── 9040: ban ───────────────────────────────────────────────────────────────
@@ -598,7 +618,28 @@ fn extract_tag_value(event: &Event, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{Duration, Utc};
     use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    #[test]
+    fn banned_admin_cannot_reach_an_unban_command() {
+        let banned = buzz_db::moderation::RestrictionState {
+            banned: true,
+            muted_until: None,
+        };
+        assert_eq!(
+            ensure_actor_not_banned(&banned),
+            Err("blocked: you are banned from this community".to_string())
+        );
+
+        // A timeout remains a write restriction rather than an authentication
+        // ban, so an authorized moderator can still lift it.
+        let timed_out = buzz_db::moderation::RestrictionState {
+            banned: false,
+            muted_until: Some(Utc::now() + Duration::minutes(5)),
+        };
+        assert!(ensure_actor_not_banned(&timed_out).is_ok());
+    }
 
     /// Build a signed event with the given kind, timestamp, and tags.
     fn make_event(kind: u16, created_at_secs: u64, tags: Vec<Vec<String>>) -> Event {

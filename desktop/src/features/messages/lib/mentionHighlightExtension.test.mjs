@@ -59,6 +59,18 @@ test("matches @mention after whitespace", () => {
   assert.equal(matches[0].match, "@bob");
 });
 
+test("matches the first mention in a parenthesized team expansion", () => {
+  const patterns = buildHighlightPatterns(["Planner", "Builder"], []);
+  const matches = findHighlightMatches(
+    "Launch Team(@Planner @Builder)",
+    patterns,
+  );
+  assert.deepEqual(
+    matches.map((match) => match.match),
+    ["@Planner", "@Builder"],
+  );
+});
+
 test("does not match @mention embedded in a word", () => {
   const patterns = buildHighlightPatterns(["bob"], []);
   const matches = findHighlightMatches("email@bob.com", patterns);

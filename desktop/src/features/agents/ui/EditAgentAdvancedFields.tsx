@@ -6,7 +6,7 @@ import {
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   PERSONA_LABEL_OPTIONAL_CLASS,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import type { AgentPersona } from "@/shared/api/types";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
@@ -14,7 +14,6 @@ import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 export function EditAgentAdvancedFields({
   acpCommand,
   agentArgs,
-  agentCommand,
   autoRestartOnConfigChange,
   disabled,
   envVars,
@@ -28,23 +27,18 @@ export function EditAgentAdvancedFields({
   modelTuningRuntimeId,
   parallelism,
   provider,
-  relayUrl,
   requiredEnvKeys,
-  selectedRuntimeId,
   systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
-  onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
   onParallelismChange,
-  onRelayUrlChange,
   onAutoRestartChange,
   onSystemPromptChange,
 }: {
   acpCommand: string;
   agentArgs: string;
-  agentCommand: string;
   autoRestartOnConfigChange: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
@@ -66,17 +60,13 @@ export function EditAgentAdvancedFields({
   parallelism: string;
   /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   provider?: string;
-  relayUrl: string;
   requiredEnvKeys: readonly string[];
-  selectedRuntimeId: string;
   systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
-  onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
-  onRelayUrlChange: (value: string) => void;
   onAutoRestartChange: (value: boolean) => void;
   onSystemPromptChange: (value: string) => void;
 }) {
@@ -127,37 +117,6 @@ export function EditAgentAdvancedFields({
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
       </div>
-
-      {/* Custom agent command (when custom runtime) */}
-      {selectedRuntimeId === "custom" && !inheritHarness ? (
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="edit-agent-command"
-          >
-            Agent command
-          </label>
-          <div
-            className={cn(
-              "flex min-h-11 items-center px-3",
-              PERSONA_FIELD_SHELL_CLASS,
-            )}
-          >
-            <Input
-              autoCorrect="off"
-              className={cn(
-                "h-8 px-0 py-0 leading-6",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={disabled}
-              id="edit-agent-command"
-              onChange={(event) => onAgentCommandChange(event.target.value)}
-              placeholder="Full path or shell command"
-              value={agentCommand}
-            />
-          </div>
-        </div>
-      ) : null}
 
       {/* Agent runtime args */}
       <div className="space-y-1.5">
@@ -219,35 +178,10 @@ export function EditAgentAdvancedFields({
         </div>
       </div>
 
-      {/* Relay URL */}
-      <div className="space-y-1.5">
-        <label
-          className="text-sm font-medium text-foreground"
-          htmlFor="edit-agent-relay-url"
-        >
-          Relay URL
-          <span className={PERSONA_LABEL_OPTIONAL_CLASS}>Optional</span>
-        </label>
-        <div
-          className={cn(
-            "flex min-h-11 items-center px-3",
-            PERSONA_FIELD_SHELL_CLASS,
-          )}
-        >
-          <Input
-            autoCorrect="off"
-            className={cn(
-              "h-8 px-0 py-0 leading-6",
-              PERSONA_FIELD_CONTROL_CLASS,
-            )}
-            disabled={disabled}
-            id="edit-agent-relay-url"
-            onChange={(event) => onRelayUrlChange(event.target.value)}
-            placeholder="Leave blank to use the community relay"
-            value={relayUrl}
-          />
-        </div>
-      </div>
+      {/* Relay URL: intentionally no editor. The legacy per-record relay pin
+          is ignored (#2122 agents-everywhere) — agents always run on the
+          active community relay — so offering a knob here would advertise a
+          setting with no effect. The stored field is preserved untouched. */}
 
       {/* ACP command */}
       <div className="space-y-1.5">

@@ -8,6 +8,8 @@ import { cn } from "@/shared/lib/cn";
 import { isRelayUnreachableError } from "@/shared/lib/relayError";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
   type OnboardingTransitionEffect,
@@ -20,6 +22,7 @@ type ProfileStepProps = {
   direction: OnboardingTransitionDirection;
   transitionEffect?: OnboardingTransitionEffect;
   state: ProfileStepState;
+  usesExistingIdentity?: boolean;
 };
 
 const ONBOARDING_CONNECTIVITY_SUCCESS_AUTO_DISMISS_MS = 2_500;
@@ -188,6 +191,7 @@ export function ProfileStep({
   direction,
   transitionEffect = "line-slide",
   state,
+  usesExistingIdentity = false,
 }: ProfileStepProps) {
   const {
     advanceWithoutSaving,
@@ -216,10 +220,10 @@ export function ProfileStep({
       transitionKey={`profile-${direction}`}
     >
       <div className="w-full max-w-2xl">
-        <h1 className="text-3xl font-semibold text-foreground">
+        <h1 className="text-title font-normal text-foreground">
           What should we call you?
         </h1>
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">
+        <p className="mt-5 text-sm leading-6 text-muted-foreground">
           Pick the name people and agents will see in Buzz. You can change it
           anytime.
         </p>
@@ -275,9 +279,9 @@ export function ProfileStep({
         <ErrorBanner isSaving={isSaving} message={saveRecovery.errorMessage} />
       ) : null}
 
-      <div className="mt-12 flex w-full max-w-[500px] flex-col gap-3">
+      <OnboardingFooter>
         <Button
-          className="h-10 w-full"
+          className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-next"
           disabled={!canSubmit}
           onClick={submit}
@@ -285,6 +289,8 @@ export function ProfileStep({
         >
           {isSaving ? (
             <Spinner aria-label="Saving profile" className="h-4 w-4 border-2" />
+          ) : usesExistingIdentity ? (
+            "Continue"
           ) : (
             "Create an identity key"
           )}
@@ -303,16 +309,18 @@ export function ProfileStep({
           </Button>
         ) : null}
 
-        <Button
-          className="text-muted-foreground hover:text-accent-foreground"
-          data-testid="onboarding-import-key"
-          disabled={isSaving}
-          onClick={importExistingKey}
-          type="button"
-          variant="ghost"
-        >
-          I already have a key
-        </Button>
+        {!usesExistingIdentity ? (
+          <Button
+            className="text-muted-foreground hover:text-accent-foreground"
+            data-testid="onboarding-import-key"
+            disabled={isSaving}
+            onClick={importExistingKey}
+            type="button"
+            variant="ghost"
+          >
+            I already have a key
+          </Button>
+        ) : null}
 
         <div className="flex min-h-8 items-center gap-2">
           <div className="flex-1" />
@@ -340,7 +348,7 @@ export function ProfileStep({
           ) : null}
           <div className="flex-1" />
         </div>
-      </div>
+      </OnboardingFooter>
     </OnboardingSlideTransition>
   );
 }

@@ -11,6 +11,7 @@ use tauri::{http, Manager};
 use tokio::net::TcpListener;
 
 use crate::app_state::AppState;
+use crate::commands::media::mint_media_get_auth;
 use crate::relay;
 
 /// Defense-in-depth cap: refuse to buffer responses larger than this into RAM.
@@ -55,6 +56,12 @@ async fn proxy_handler(AxumState(state): AxumState<ProxyState>, req: Request) ->
         .client
         .get(&upstream_url)
         .timeout(std::time::Duration::from_secs(120));
+
+    // `upstream_url` is always `{relay base}{path}`, so the token can't reach
+    // a third-party origin (mint_media_get_auth safety contract).
+    if let Some(auth) = mint_media_get_auth(&app_state, &base_url) {
+        upstream = upstream.header("authorization", auth);
+    }
 
     if let Some(range) = req.headers().get("range") {
         if let Ok(v) = range.to_str() {
@@ -177,6 +184,13 @@ pub async fn handle_buzz_media(
         .http_client
         .get(&upstream_url)
         .timeout(std::time::Duration::from_secs(60));
+
+    // `upstream_url` is always `{relay base}{path}`, so the token can't reach
+    // a third-party origin (mint_media_get_auth safety contract).
+    if let Some(auth) = mint_media_get_auth(&state, &base) {
+        upstream = upstream.header("authorization", auth);
+    }
+
     if let Some(range) = request.headers().get("range") {
         if let Ok(v) = range.to_str() {
             upstream = upstream.header("range", v);

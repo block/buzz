@@ -13,12 +13,12 @@ describe("resolveEnabled (preview-only)", () => {
   });
 
   it("uses an enabled manifest default when no override exists", () => {
-    assert.equal(resolveEnabled("workspaceRail", {}, true), true);
+    assert.equal(resolveEnabled("defaultOnFeature", {}, true), true);
   });
 
   it("lets an explicit opt-out override an enabled default", () => {
     assert.equal(
-      resolveEnabled("workspaceRail", { workspaceRail: false }, true),
+      resolveEnabled("defaultOnFeature", { defaultOnFeature: false }, true),
       false,
     );
   });

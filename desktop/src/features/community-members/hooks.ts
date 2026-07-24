@@ -4,6 +4,7 @@ import {
   addRelayMember,
   changeRelayMemberRole,
   getMyRelayMembership,
+  getMyRelayMembershipLookup,
   listRelayMembers,
   removeRelayMember,
 } from "@/shared/api/relayMembers";
@@ -11,6 +12,9 @@ import type { RelayMember } from "@/shared/api/types";
 
 export const relayMembersQueryKey = ["relayMembers"] as const;
 export const myRelayMembershipQueryKey = ["myRelayMembership"] as const;
+export const myRelayMembershipLookupQueryKey = [
+  "myRelayMembershipLookup",
+] as const;
 
 export function useRelayMembersQuery(enabled = true) {
   return useQuery({
@@ -25,6 +29,14 @@ export function useMyRelayMembershipQuery() {
   return useQuery({
     queryKey: myRelayMembershipQueryKey,
     queryFn: getMyRelayMembership,
+    staleTime: 60_000,
+  });
+}
+
+export function useMyRelayMembershipLookupQuery() {
+  return useQuery({
+    queryKey: myRelayMembershipLookupQueryKey,
+    queryFn: getMyRelayMembershipLookup,
     staleTime: 60_000,
   });
 }
@@ -61,6 +73,9 @@ export function useAddRelayMemberMutation() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: relayMembersQueryKey }),
         queryClient.invalidateQueries({ queryKey: myRelayMembershipQueryKey }),
+        queryClient.invalidateQueries({
+          queryKey: myRelayMembershipLookupQueryKey,
+        }),
       ]);
     },
   });
@@ -91,6 +106,9 @@ export function useRemoveRelayMemberMutation() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: relayMembersQueryKey }),
         queryClient.invalidateQueries({ queryKey: myRelayMembershipQueryKey }),
+        queryClient.invalidateQueries({
+          queryKey: myRelayMembershipLookupQueryKey,
+        }),
       ]);
     },
   });
@@ -134,6 +152,9 @@ export function useChangeRelayMemberRoleMutation() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: relayMembersQueryKey }),
         queryClient.invalidateQueries({ queryKey: myRelayMembershipQueryKey }),
+        queryClient.invalidateQueries({
+          queryKey: myRelayMembershipLookupQueryKey,
+        }),
       ]);
     },
   });

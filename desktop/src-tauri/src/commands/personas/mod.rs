@@ -175,10 +175,6 @@ pub async fn update_persona(
                 .find(|record| record.id == input.id)
                 .ok_or_else(|| format!("agent {} not found", input.id))?;
 
-            if persona.is_builtin {
-                return Err("Built-in agents cannot be edited.".to_string());
-            }
-
             // Track what changed so we can propagate to linked agent records.
             let avatar_changed = persona.avatar_url != avatar_url;
             let name_changed = persona.display_name != display_name;
@@ -423,7 +419,7 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
                     save_managed_agents(&app, &agents)?;
                 }
                 for pk in &exited_pubkeys {
-                    state.clear_session_cache(pk);
+                    state.clear_agent_session_caches(pk);
                 }
                 // runtimes drops here (process lock released before Phase 2).
             }
@@ -495,10 +491,11 @@ pub async fn delete_persona(id: String, app: AppHandle) -> Result<(), String> {
 
             // Side effects — strictly after records leave disk.
             for pk in &cascade {
-                state.clear_session_cache(pk);
+                state.clear_agent_session_caches(pk);
                 // Remove nsec from keyring after the record is gone.
                 delete_agent_key(pk);
                 super::agents::tombstone_managed_agent_pending(&app, &state, pk);
+                super::agents::archive_managed_agent_pending(&app, &state, pk);
             }
             tombstone_persona_pending(&app, &state, &d_tag);
 
@@ -880,15 +877,25 @@ fn apply_inbound_team(teams: &mut Vec<TeamRecord>, d_tag: String, inbound: TeamE
         Some(local) => {
             local.name = inbound.name;
             local.description = inbound.description;
-            local.instructions = inbound.instructions;
-            local.persona_ids = inbound.persona_ids;
+            // `None` means the event came from a client that predates
+            // always-publish — its true value is unknown, so preserve
+            // local. Only `Some` (including the explicit-clear variants)
+            // overwrites. See `TeamEventContent` for the wire rules.
+            if let Some(instructions) = inbound.instructions {
+                local.instructions = instructions;
+            }
+            if let Some(persona_ids) = inbound.persona_ids {
+                local.persona_ids = persona_ids;
+            }
         }
         None => teams.push(TeamRecord {
             id: d_tag,
             name: inbound.name,
             description: inbound.description,
-            instructions: inbound.instructions,
-            persona_ids: inbound.persona_ids,
+            // Fresh insert has no local value to preserve; `None` from a
+            // pre-fix client simply means no known value.
+            instructions: inbound.instructions.unwrap_or_default(),
+            persona_ids: inbound.persona_ids.unwrap_or_default(),
             is_builtin: false,
             source_dir: None,
             is_symlink: false,

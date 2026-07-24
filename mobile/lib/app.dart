@@ -75,7 +75,10 @@ class App extends HookConsumerWidget {
           AuthStatus.authenticated => const DeepLinkDispatcher(
             child: HomePage(),
           ),
-          _ => const PairingPage(),
+          _ => const DeepLinkDispatcher(
+            dispatchMessageLinks: false,
+            child: PairingPage(),
+          ),
         },
       ),
     );

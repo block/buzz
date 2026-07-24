@@ -45,19 +45,91 @@ fn load_mesh_sharing_config(app: &AppHandle) -> Result<Option<MeshSharingConfig>
 const RELAY_MESH_RUNTIME_NO_TARGET: &str =
     "Buzz shared compute requires a live serving member; start serving the selected model on a member, then try again";
 
+/// Whether the Share-compute "stop sharing" path (`mesh_stop_node`) should tear
+/// down the runtime currently occupying the single slot.
+///
+/// Serve nodes (this machine SHARING compute) are torn down. Client nodes (this
+/// machine CONSUMING a peer's compute) share the same slot and MUST be left
+/// running — stopping "Share compute" must never kill a consume session the
+/// user didn't start from this switch.
+#[cfg(feature = "mesh-llm")]
+fn share_stop_should_teardown(mode: mesh_llm::MeshNodeMode) -> bool {
+    matches!(mode, mesh_llm::MeshNodeMode::Serve)
+}
+
 pub type CmdResult<T> = Result<T, String>;
 
+fn advance_mesh_status_cursor(
+    filter: &mut serde_json::Value,
+    page: &[nostr::Event],
+) -> Result<(u64, String), String> {
+    let last = page
+        .last()
+        .ok_or_else(|| "cannot advance an empty mesh status page".to_string())?;
+    let cursor = (last.created_at.as_secs(), last.id.to_hex());
+    filter["until"] = serde_json::json!(cursor.0);
+    filter["before_id"] = serde_json::json!(cursor.1);
+    Ok(cursor)
+}
+
+async fn query_mesh_discovery_events(state: &AppState) -> Result<Vec<nostr::Event>, String> {
+    let mut events = relay::query_relay(state, &[mesh_llm::relay_membership_filter()]).await?;
+    let member_pubkeys = mesh_llm::current_member_pubkeys(&events);
+    if member_pubkeys.is_empty() {
+        // Distinguish "relay returned a membership snapshot listing zero
+        // members" (authoritative empty — allowed to shrink the roster to
+        // self-only) from "no membership snapshot came back at all" (a
+        // transient gap / replication lag). The relay publishes an explicit
+        // kind:13534 event even for a zero-member community, so its absence
+        // means the query is incomplete: surface it as an error so the
+        // reconcile loop keeps the current allowlist instead of flapping the
+        // node down to self-only on a successful-but-empty response.
+        if !mesh_llm::has_membership_snapshot(&events) {
+            return Err("relay returned no membership snapshot".to_string());
+        }
+        return Ok(events);
+    }
+    let mut status_filter = mesh_llm::mesh_status_filter();
+    status_filter["authors"] = serde_json::json!(member_pubkeys);
+    let mut previous_cursor: Option<(u64, String)> = None;
+
+    loop {
+        let page = relay::query_relay(state, &[status_filter.clone()]).await?;
+        let done = page.len() < mesh_llm::MESH_STATUS_PAGE_SIZE;
+        if !done {
+            let cursor = advance_mesh_status_cursor(&mut status_filter, &page)?;
+            if previous_cursor.as_ref() == Some(&cursor) {
+                return Err("mesh status pagination did not advance".to_string());
+            }
+            previous_cursor = Some(cursor);
+        }
+        events.extend(page);
+        if done {
+            return Ok(events);
+        }
+    }
+}
+
 /// Resolve the admission roster by intersecting member-signed mesh status
-/// reporters with the current NIP-43 direct-member list. Missing membership or
-/// a failed query returns an empty roster, which the runtime normalizes to
-/// self-only admission.
-pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Vec<String> {
-    let filters = [
-        mesh_llm::mesh_status_filter(),
-        mesh_llm::relay_membership_filter(),
-    ];
-    match relay::query_relay(state, &filters).await {
-        Ok(events) => mesh_llm::owner_ids_from_events(&events),
+/// reporters with the current NIP-43 direct-member list.
+///
+/// Returns `Err` when the relay query fails. Callers MUST distinguish this from
+/// an `Ok(empty)` roster (a genuinely empty community): a failed query must
+/// never be collapsed into "self-only", or a transient relay blip de-admits
+/// every other member. `reconcile_roster` relies on this to keep the current
+/// allowlist on error instead of restarting the node down to self-only.
+pub(crate) async fn resolve_trusted_owner_ids(state: &AppState) -> Result<Vec<String>, String> {
+    let events = query_mesh_discovery_events(state).await?;
+    Ok(mesh_llm::owner_ids_from_events(&events))
+}
+
+/// Resolve the roster for an initial node *start*, failing closed to self-only
+/// (an empty roster) when the relay query fails. This is safe only at start:
+/// there is no established allowlist to preserve yet. The periodic
+/// `reconcile_roster` path must NOT use this — it has a live roster to keep.
+pub(crate) async fn resolve_trusted_owner_ids_or_self_only(state: &AppState) -> Vec<String> {
+    match resolve_trusted_owner_ids(state).await {
+        Ok(owners) => owners,
         Err(error) => {
             eprintln!("buzz-mesh: roster query failed; allowing only this node: {error}");
             Vec::new()
@@ -81,7 +153,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
         join_token: None,
-        trusted_owner_ids: Some(resolve_trusted_owner_ids(state).await),
+        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
@@ -101,7 +173,7 @@ pub async fn mesh_start_node(
     // Frontend requests never carry a roster; resolve it here so every
     // UI-started node enforces the member allowlist.
     if request.trusted_owner_ids.is_none() {
-        request.trusted_owner_ids = Some(resolve_trusted_owner_ids(&state).await);
+        request.trusted_owner_ids = Some(resolve_trusted_owner_ids_or_self_only(&state).await);
     }
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
@@ -137,19 +209,110 @@ pub async fn mesh_start_node(
 /// Mesh can bind its HTTP ingress and advertise a model shortly before the
 /// router has installed a usable target. Probe the exact chat path agents use
 /// so startup cannot race that gap (`single target None unavailable`).
+/// Which startup stage a mesh client is stuck at when it never becomes
+/// inference-ready. The two live-observed failure modes are physically
+/// distinct and want different user copy:
+///
+///   * `CatalogNeverSynced` — the local client node came up and connected to
+///     the host at the control level (ping/RTT fine), but the served model
+///     never appeared in the local `/v1/models` catalog. That catalog is
+///     populated by the peer gossip exchange; when the gossip bi-stream can't
+///     establish across the network (observed as iroh
+///     `MultipathNotNegotiated` / unreachable direct path), the catalog stays
+///     empty forever and every request is rejected "model not available".
+///     Root cause is the network path between this machine and the host.
+///   * `RoutingNeverCompleted` — the model *did* sync into the catalog, but
+///     inference requests never completed (routing/transport to the host
+///     failing per-request). The host is discoverable and advertised but not
+///     actually serving us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshReadinessFailure {
+    CatalogNeverSynced,
+    RoutingNeverCompleted,
+}
+
+/// Pure classifier: given whether the served model was ever observed in the
+/// local `/v1/models` catalog during the wait, decide which stage failed.
+/// Split out so the diagnosis is unit-testable without a live mesh.
+fn classify_mesh_readiness_failure(model_ever_visible: bool) -> MeshReadinessFailure {
+    if model_ever_visible {
+        MeshReadinessFailure::RoutingNeverCompleted
+    } else {
+        MeshReadinessFailure::CatalogNeverSynced
+    }
+}
+
+/// Actionable, non-technical copy for a readiness failure. `last_detail` is the
+/// last raw transport/HTTP error, appended for support triage.
+fn mesh_readiness_failure_message(
+    failure: MeshReadinessFailure,
+    model_id: &str,
+    last_detail: &str,
+) -> String {
+    match failure {
+        MeshReadinessFailure::CatalogNeverSynced => format!(
+            "Buzz shared compute connected to the serving member but could not sync \
+             the model list for \"{model_id}\" — this is a network path problem \
+             between this machine and the host (the compute node is reachable for \
+             pings but the model-sync stream did not establish). Try again, or have \
+             the host and this machine on a more direct network. (last: {last_detail})"
+        ),
+        MeshReadinessFailure::RoutingNeverCompleted => format!(
+            "Buzz shared compute found \"{model_id}\" on a serving member but inference \
+             requests did not complete — the host is discoverable but not currently \
+             reachable for requests. Try again shortly. (last: {last_detail})"
+        ),
+    }
+}
+
+/// Poll the local mesh OpenAI ingress until a real inference for `model_id`
+/// succeeds, or a deadline elapses. On failure, returns a stage-specific,
+/// actionable message (see [`MeshReadinessFailure`]) rather than a raw
+/// `HTTP 429`, so the UI can tell "still warming up" apart from "can't reach
+/// the host".
 async fn wait_for_mesh_inference(model_id: &str) -> CmdResult<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|error| format!("failed to build mesh readiness client: {error}"))?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let models_url = format!("{}/models", crate::managed_agents::RELAY_MESH_API_BASE_URL);
+    let chat_url = format!(
+        "{}/chat/completions",
+        crate::managed_agents::RELAY_MESH_API_BASE_URL
+    );
     let mut last_error = "mesh inference is not ready".to_string();
+    // Track whether the served model ever reached the local catalog — the
+    // signal that splits "catalog never synced" from "routing never completed".
+    let mut model_ever_visible = false;
+
     while tokio::time::Instant::now() < deadline {
+        // Refresh catalog visibility. "auto" delegates model choice to the
+        // router, so any advertised model counts as the catalog having synced.
+        if let Ok(response) = client
+            .get(&models_url)
+            .bearer_auth(crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER)
+            .send()
+            .await
+        {
+            if let Ok(body) = response.json::<serde_json::Value>().await {
+                if let Some(data) = body.get("data").and_then(|d| d.as_array()) {
+                    let wanted = model_id.trim().replace("@main", "");
+                    let visible = !data.is_empty()
+                        && (model_id == crate::mesh_llm::AUTO_MODEL_ID
+                            || data.iter().any(|m| {
+                                m.get("id")
+                                    .and_then(|id| id.as_str())
+                                    .map(|id| id.replace("@main", "") == wanted)
+                                    .unwrap_or(false)
+                            }));
+                    model_ever_visible |= visible;
+                }
+            }
+        }
+
         match client
-            .post(format!(
-                "{}/chat/completions",
-                crate::managed_agents::RELAY_MESH_API_BASE_URL
-            ))
+            .post(&chat_url)
             .bearer_auth(crate::managed_agents::RELAY_MESH_API_KEY_PLACEHOLDER)
             .json(&serde_json::json!({
                 "model": model_id,
@@ -170,8 +333,12 @@ async fn wait_for_mesh_inference(model_id: &str) -> CmdResult<()> {
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     }
-    Err(format!(
-        "Buzz shared compute did not become inference-ready for {model_id}: {last_error}"
+
+    let failure = classify_mesh_readiness_failure(model_ever_visible);
+    Err(mesh_readiness_failure_message(
+        failure,
+        model_id,
+        &last_error,
     ))
 }
 
@@ -232,7 +399,7 @@ pub(crate) async fn ensure_client_node_for_model(
         model_id: None,
         max_vram_gb: None,
         join_token: Some(join_token),
-        trusted_owner_ids: Some(resolve_trusted_owner_ids(state).await),
+        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
@@ -272,14 +439,7 @@ pub(crate) async fn resolve_mesh_bootstrap_target(
     if model_id.is_empty() {
         return Ok(None);
     }
-    let events = relay::query_relay(
-        state,
-        &[
-            mesh_llm::mesh_status_filter(),
-            mesh_llm::relay_membership_filter(),
-        ],
-    )
-    .await?;
+    let events = query_mesh_discovery_events(state).await?;
     Ok(pick_serve_target_for_model(
         mesh_llm::availability_from_events(events).serve_targets,
         model_id,
@@ -358,8 +518,22 @@ pub async fn mesh_stop_node(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    let runtime = state.mesh_llm_runtime.lock().await.take();
-    if let Some(runtime) = runtime {
+    // The single runtime slot is shared by serve (this machine SHARING
+    // compute) and client (this machine CONSUMING a peer's compute) roles.
+    // Stopping "Share compute" must NEVER tear down a client node: inspect the
+    // role under the lock and, when it's a consume session, leave it running
+    // and return its live status unchanged. The frontend also guards this, but
+    // status can be stale between polls, so the backend is authoritative.
+    let taken = {
+        let mut guard = state.mesh_llm_runtime.lock().await;
+        if let Some(runtime) = guard.as_ref() {
+            if !share_stop_should_teardown(runtime.mode()) {
+                return runtime.status().await.map_err(|error| error.to_string());
+            }
+        }
+        guard.take()
+    };
+    if let Some(runtime) = taken {
         runtime.stop().await.map_err(|error| error.to_string())?;
     }
     save_mesh_sharing_config(
@@ -380,6 +554,20 @@ pub async fn mesh_node_status(state: State<'_, AppState>) -> CmdResult<mesh_llm:
     match runtime.as_ref() {
         Some(runtime) => runtime.status().await.map_err(|error| error.to_string()),
         None => Ok(mesh_llm::stopped_status()),
+    }
+}
+
+/// Read-only host-side usage: who/what is using the compute this machine is
+/// sharing. Returns a zeroed snapshot when no runtime is active. No new trust
+/// surface — it reads the serving node's own runtime metrics.
+#[tauri::command]
+pub async fn mesh_serving_usage(
+    state: State<'_, AppState>,
+) -> CmdResult<mesh_llm::MeshServingUsage> {
+    let runtime = state.mesh_llm_runtime.lock().await;
+    match runtime.as_ref() {
+        Some(runtime) => runtime.serving_usage().await.map_err(|e| e.to_string()),
+        None => Ok(mesh_llm::MeshServingUsage::default()),
     }
 }
 
@@ -427,6 +615,62 @@ mod tests {
     }
 
     #[test]
+    fn readiness_failure_is_catalog_sync_when_model_never_visible() {
+        assert_eq!(
+            classify_mesh_readiness_failure(false),
+            MeshReadinessFailure::CatalogNeverSynced
+        );
+    }
+
+    #[test]
+    fn readiness_failure_is_routing_when_model_was_visible() {
+        assert_eq!(
+            classify_mesh_readiness_failure(true),
+            MeshReadinessFailure::RoutingNeverCompleted
+        );
+    }
+
+    #[test]
+    fn readiness_messages_are_distinct_and_actionable() {
+        let catalog = mesh_readiness_failure_message(
+            MeshReadinessFailure::CatalogNeverSynced,
+            "auto",
+            "HTTP 429",
+        );
+        let routing = mesh_readiness_failure_message(
+            MeshReadinessFailure::RoutingNeverCompleted,
+            "auto",
+            "HTTP 503",
+        );
+        // Distinct diagnoses, each names the model and carries the raw detail.
+        assert_ne!(catalog, routing);
+        assert!(catalog.contains("network path"));
+        assert!(catalog.contains("HTTP 429"));
+        assert!(routing.contains("did not complete"));
+        assert!(routing.contains("HTTP 503"));
+    }
+
+    #[test]
+    fn mesh_status_cursor_uses_relay_composite_tiebreak() {
+        let event = nostr::EventBuilder::new(nostr::Kind::TextNote, "status")
+            .custom_created_at(nostr::Timestamp::from(1_234))
+            .sign_with_keys(&nostr::Keys::generate())
+            .expect("sign test status");
+        let mut filter = mesh_llm::mesh_status_filter();
+
+        let cursor = advance_mesh_status_cursor(&mut filter, std::slice::from_ref(&event))
+            .expect("advance status cursor");
+
+        assert_eq!(cursor, (1_234, event.id.to_hex()));
+        assert_eq!(filter["until"], serde_json::json!(1_234));
+        assert_eq!(filter["before_id"], serde_json::json!(event.id.to_hex()));
+        assert_eq!(
+            filter["limit"],
+            serde_json::json!(mesh_llm::MESH_STATUS_PAGE_SIZE)
+        );
+    }
+
+    #[test]
     fn pick_serve_target_returns_first_match_for_model() {
         let targets = vec![
             target("model-a", "addr-a"),
@@ -471,6 +715,52 @@ mod tests {
         let targets = vec![target("model-a", "addr-a")];
         // No live target serves this model -> caller falls closed.
         assert_eq!(pick_serve_target_for_model(targets, "model-missing"), None);
+    }
+
+    #[test]
+    fn share_stop_tears_down_serve_but_not_client() {
+        // Stopping "Share compute" tears down a serve node (we were sharing)
+        // but must leave a client node alone (we are consuming a peer). This is
+        // the backend half of the toggle-on regression: a client node occupies
+        // the single slot and reports state:"running", and the stop path must
+        // not kill it.
+        assert!(
+            share_stop_should_teardown(mesh_llm::MeshNodeMode::Serve),
+            "serve node is our sharing runtime; stop must tear it down"
+        );
+        assert!(
+            !share_stop_should_teardown(mesh_llm::MeshNodeMode::Client),
+            "client node is a consume session; stop must NOT tear it down"
+        );
+    }
+
+    #[test]
+    fn client_status_serializes_with_running_state_and_client_mode() {
+        // Contract pin for the TS mock (e2eBridge.ts) and the frontend
+        // predicate: a consuming node serializes as
+        // {"state":"running","mode":"client"}. If serde renaming drifts, the
+        // hand-written mock shape and `deriveMeshShareToggle` would silently
+        // stop matching the real IPC payload.
+        let status = mesh_llm::MeshNodeStatus {
+            state: mesh_llm::MeshNodeState::Running,
+            mode: Some(mesh_llm::MeshNodeMode::Client),
+            // `MeshHealth::ok()` is module-private; build via the public fields.
+            health: mesh_llm::MeshHealth {
+                status: mesh_llm::MeshHealthStatus::Ok,
+                reason: None,
+            },
+            api_base_url: Some("http://127.0.0.1:9337/v1".to_string()),
+            console_url: None,
+            model_id: None,
+            model_name: None,
+            invite_token: None,
+            endpoint_id: None,
+            device_id: None,
+            device_name: None,
+        };
+        let value = serde_json::to_value(&status).expect("serialize mesh status");
+        assert_eq!(value["state"], serde_json::json!("running"));
+        assert_eq!(value["mode"], serde_json::json!("client"));
     }
 
     #[tokio::test]

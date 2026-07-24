@@ -3,11 +3,7 @@ import * as React from "react";
 import { useBakedBuildEnvQuery } from "../hooks";
 import { useGlobalAgentConfig } from "../useGlobalAgentConfig";
 import { BUZZ_AGENT_THINKING_EFFORT } from "./buzzAgentConfig";
-import {
-  countNonSecretInheritedEnvVars,
-  getAdvancedInheritedSummary,
-  getInheritedAgentDefaults,
-} from "./bakedEnvHelpers";
+import { getInheritedAgentDefaults } from "./bakedEnvHelpers";
 
 export function useAgentDialogDefaults({
   inheritedEnvVars = {},
@@ -29,16 +25,7 @@ export function useAgentDialogDefaults({
     }),
     [globalConfig.env_vars, inheritedDefaults.effort.value, inheritedEnvVars],
   );
-  const advancedInheritedSummary = getAdvancedInheritedSummary(
-    inheritedDefaults.effort,
-    countNonSecretInheritedEnvVars(
-      globalConfig.env_vars,
-      BUZZ_AGENT_THINKING_EFFORT,
-    ),
-  );
-
   return {
-    advancedInheritedSummary,
     globalConfig,
     inheritedDefaults,
     inheritedEnvVars: effectiveInheritedEnvVars,

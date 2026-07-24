@@ -1,14 +1,26 @@
 import * as React from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import {
+  getJoinPolicy,
+  isJoinPolicyDiscoveryCandidate,
+  type JoinPolicy,
+} from "@/shared/api/invites";
 import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
+import { JoinPolicyNotice } from "@/features/onboarding/ui/JoinPolicyNotice";
 import { normalizeRelayUrl, probeRelayReachable } from "../relayProbe";
+
+const POLICY_DISCOVERY_DELAY_MS = 250;
+const POLICY_REVEAL_EASE = [0.23, 1, 0.32, 1] as const;
 
 export type CommunityEditFormProps = {
   cancelLabel?: string;
   initialName: string;
   initialRelayUrl: string;
   isSubmitting?: boolean;
+  joinPolicyRequired?: boolean;
   onCancel: () => void;
   onSubmit: (name: string, relayUrl: string) => void;
   submitLabel: string;
@@ -19,6 +31,7 @@ export function CommunityEditForm({
   initialName,
   initialRelayUrl,
   isSubmitting = false,
+  joinPolicyRequired = false,
   onCancel,
   onSubmit,
   submitLabel,
@@ -29,6 +42,13 @@ export function CommunityEditForm({
   const [probeWarning, setProbeWarning] = React.useState<string | null>(null);
   const [isProbing, setIsProbing] = React.useState(false);
   const [useAnywayOverride, setUseAnywayOverride] = React.useState(false);
+  const [joinPolicy, setJoinPolicy] = React.useState<JoinPolicy | null>(null);
+  const [policyRelayUrl, setPolicyRelayUrl] = React.useState<string | null>(
+    null,
+  );
+  const [ageConfirmed, setAgeConfirmed] = React.useState(false);
+  const [agreementConfirmed, setAgreementConfirmed] = React.useState(false);
+  const shouldReduceMotion = useReducedMotion();
 
   const cancelRef = React.useRef<(() => void) | null>(null);
 
@@ -37,6 +57,37 @@ export function CommunityEditForm({
       cancelRef.current?.();
     };
   }, []);
+
+  React.useEffect(() => {
+    if (!joinPolicyRequired) return;
+
+    const normalizedUrl = normalizeRelayUrl(relayUrl);
+    if (!normalizedUrl || !isJoinPolicyDiscoveryCandidate(normalizedUrl)) {
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      void getJoinPolicy(normalizedUrl)
+        .then((policy) => {
+          if (cancelled || !policy) return;
+          setJoinPolicy(policy);
+          setPolicyRelayUrl(normalizedUrl);
+          setAgeConfirmed(false);
+          setAgreementConfirmed(false);
+          setError(null);
+        })
+        .catch(() => {
+          // Background discovery is best-effort. A deliberate submit retries
+          // the request and surfaces any relay error to the user.
+        });
+    }, POLICY_DISCOVERY_DELAY_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [joinPolicyRequired, relayUrl]);
 
   const handleSubmit = React.useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
@@ -50,6 +101,41 @@ export function CommunityEditForm({
       if (!normalizedUrl) {
         setError("Enter a valid ws:// or wss:// relay URL.");
         return;
+      }
+
+      if (joinPolicyRequired) {
+        try {
+          const policy = await getJoinPolicy(normalizedUrl);
+          if (!policy) {
+            onSubmit(trimmedName, normalizedUrl);
+            return;
+          }
+          if (
+            !joinPolicy ||
+            joinPolicy.version !== policy.version ||
+            policyRelayUrl !== normalizedUrl
+          ) {
+            setJoinPolicy(policy);
+            setPolicyRelayUrl(normalizedUrl);
+            setAgeConfirmed(false);
+            setAgreementConfirmed(false);
+            return;
+          }
+          if (policy.ageAttestationRequired && !ageConfirmed) {
+            setError("Confirm that you are at least 18 years old.");
+            return;
+          }
+          if (
+            (policy.termsMarkdown || policy.privacyMarkdown) &&
+            !agreementConfirmed
+          ) {
+            setError("Agree to the Terms of Service and Privacy Policy.");
+            return;
+          }
+        } catch (policyError) {
+          setError(inviteErrorMessage(policyError));
+          return;
+        }
       }
 
       if (useAnywayOverride) {
@@ -79,7 +165,17 @@ export function CommunityEditForm({
 
       onSubmit(trimmedName, normalizedUrl);
     },
-    [name, onSubmit, relayUrl, useAnywayOverride],
+    [
+      ageConfirmed,
+      agreementConfirmed,
+      joinPolicy,
+      joinPolicyRequired,
+      name,
+      onSubmit,
+      policyRelayUrl,
+      relayUrl,
+      useAnywayOverride,
+    ],
   );
 
   const handleUseAnyway = React.useCallback(() => {
@@ -139,6 +235,10 @@ export function CommunityEditForm({
             setError(null);
             setProbeWarning(null);
             setUseAnywayOverride(false);
+            setJoinPolicy(null);
+            setPolicyRelayUrl(null);
+            setAgeConfirmed(false);
+            setAgreementConfirmed(false);
           }}
           placeholder="wss://relay.example.com"
           type="text"
@@ -146,10 +246,75 @@ export function CommunityEditForm({
         />
       </div>
 
+      <AnimatePresence initial={false}>
+        {joinPolicy && policyRelayUrl ? (
+          <motion.div
+            animate={{
+              height: "auto",
+              marginTop: 0,
+              opacity: 1,
+              transform: "translateY(0rem)",
+            }}
+            className="overflow-hidden"
+            exit={
+              shouldReduceMotion
+                ? { height: 0, marginTop: "-1rem", opacity: 0 }
+                : {
+                    height: 0,
+                    marginTop: "-1rem",
+                    opacity: 0,
+                    transform: "translateY(-0.25rem)",
+                  }
+            }
+            initial={
+              shouldReduceMotion
+                ? false
+                : {
+                    height: 0,
+                    marginTop: "-1rem",
+                    opacity: 0,
+                    transform: "translateY(-0.25rem)",
+                  }
+            }
+            key={`${policyRelayUrl}:${joinPolicy.version}`}
+            transition={
+              shouldReduceMotion
+                ? { duration: 0 }
+                : { duration: 0.22, ease: POLICY_REVEAL_EASE }
+            }
+          >
+            <JoinPolicyNotice
+              ageConfirmed={ageConfirmed}
+              agreementConfirmed={agreementConfirmed}
+              onAgeConfirmedChange={(confirmed) => {
+                setAgeConfirmed(confirmed);
+                setError(null);
+              }}
+              onAgreementConfirmedChange={(confirmed) => {
+                setAgreementConfirmed(confirmed);
+                setError(null);
+              }}
+              policy={joinPolicy}
+              relayWsUrl={policyRelayUrl}
+            />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
       <div className="flex w-full flex-col gap-3 pt-1">
         <Button
           className="h-10 w-full"
-          disabled={isBusy || !name.trim() || !relayUrl.trim()}
+          disabled={
+            isBusy ||
+            !name.trim() ||
+            !relayUrl.trim() ||
+            Boolean(joinPolicy?.ageAttestationRequired && !ageConfirmed) ||
+            Boolean(
+              joinPolicy &&
+                (joinPolicy.termsMarkdown || joinPolicy.privacyMarkdown) &&
+                !agreementConfirmed,
+            )
+          }
           type="submit"
         >
           {isProbing ? (

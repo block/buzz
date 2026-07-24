@@ -43,7 +43,7 @@ import {
   shouldClearKnownModelForSelectionScope,
   sortPersonaRuntimes,
   type PersonaDropdownOption,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import {
   modelDropdownOptions as buildModelDropdownOptions,
   relayMeshModelPickerState,
@@ -76,9 +76,13 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./personaDialogPickers";
+import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
+import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import { resolveModelFieldStatusMessage } from "./agentConfigControls";
+import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -110,7 +114,8 @@ export function AgentInstanceEditDialog({
   const runtimes = runtimesQuery.data ?? [];
 
   const [name, setName] = React.useState(agent.name);
-  const [relayUrl, setRelayUrl] = React.useState(agent.relayUrl);
+  const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
+  const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
   const [acpCommand, setAcpCommand] = React.useState(agent.acpCommand);
   const [agentCommand, setAgentCommand] = React.useState(agent.agentCommand);
   const [originalAgentCommand, setOriginalAgentCommand] = React.useState(
@@ -167,7 +172,6 @@ export function AgentInstanceEditDialog({
   React.useEffect(() => {
     if (open) {
       setName(agent.name);
-      setRelayUrl(agent.relayUrl);
       setAcpCommand(agent.acpCommand);
       setAgentCommand(agent.agentCommand);
       setOriginalAgentCommand(agent.agentCommand);
@@ -356,7 +360,6 @@ export function AgentInstanceEditDialog({
   );
 
   const {
-    advancedInheritedSummary,
     globalConfig,
     inheritedDefaults: {
       provider: inheritedProviderDefault,
@@ -366,26 +369,21 @@ export function AgentInstanceEditDialog({
   } = useAgentDialogDefaults({ inheritedEnvVars, open });
 
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
-  // post-submit runtime — see the hook for the inherit-transition and
-  // Advanced-auto-expand rationale.
+  // post-submit runtime — see the hook for the inherit-transition rationale.
   // Pass globalProvider so the hook uses it as a fallback when the per-agent
   // provider is empty (global-provider-only configs must surface required keys).
   // Pass globalEnvVars so keys satisfied by global config are excluded from
   // requiredEnvKeys and do not block Save (display and gate agree).
-  const {
-    requiredEnvKeys,
-    fileSatisfiedEnvKeys,
-    requiredEnvKeyMissing,
-    settled: credentialSettled,
-  } = useRequiredCredentialState({
-    open,
-    prospectiveRuntimeId,
-    provider: inheritedSubmission.provider ?? "",
-    globalProvider: inheritedProviderDefault.value,
-    envVars: inheritedSubmission.envVars,
-    globalEnvVars: globalConfig.env_vars,
-    personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
-  });
+  const { requiredEnvKeys, fileSatisfiedEnvKeys, requiredEnvKeyMissing } =
+    useRequiredCredentialState({
+      open,
+      prospectiveRuntimeId,
+      provider: inheritedSubmission.provider ?? "",
+      globalProvider: inheritedProviderDefault.value,
+      envVars: inheritedSubmission.envVars,
+      globalEnvVars: globalConfig.env_vars,
+      personaEnvVars: inheritHarness ? inheritedEnvVars : undefined,
+    });
 
   const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
@@ -417,7 +415,7 @@ export function AgentInstanceEditDialog({
     selectedRuntime,
   });
 
-  // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display + auto-open.
+  // D2: derive advancedRequiredEnvKeys for EnvVarsEditor display.
   // The full requiredEnvKeys/requiredEnvKeyMissing continue driving Save gating.
   // D2/D3: the top-level API key owns display, while the readiness gate keeps
   // the complete required-key list. The effective snapshot covers persona
@@ -433,12 +431,9 @@ export function AgentInstanceEditDialog({
     envVars,
     fileSatisfiedEnvKeys,
     globalEnvVars: globalConfig.env_vars,
-    open,
     personaSatisfied,
     provider: effectiveProvider,
     requiredEnvKeys,
-    satisfactionSettled: credentialSettled,
-    setShowAdvancedFields,
   });
   const {
     advancedRequiredEnvKeys,
@@ -448,7 +443,6 @@ export function AgentInstanceEditDialog({
     secretEnvVar: topLevelSecretEnvVar,
     value: apiKeyValue,
   } = apiKeyFieldState;
-
   // Clear model when provider scope changes and current model is no longer valid.
   React.useEffect(() => {
     if (
@@ -517,17 +511,6 @@ export function AgentInstanceEditDialog({
     // Claude. Keep inheriting in that case.
     if (isCustomCommand || nextRuntime?.command) {
       setInheritHarness(false);
-    }
-
-    // "Custom command" is the only selection whose command must be typed by
-    // the user, and that input lives inside the collapsed Advanced section.
-    // Auto-expand Advanced so the command field is visible — otherwise the
-    // user can Save without ever seeing it, leaving agentCommand equal to the
-    // original effective command (so the update is omitted) and the custom
-    // selection silently no-ops. See handleSubmit's customCommandPinned gate,
-    // which blocks Save when the revealed field is still empty.
-    if (isCustomCommand) {
-      setShowAdvancedFields(true);
     }
 
     // When switching to a catalog-known runtime, update the agent command to
@@ -652,8 +635,8 @@ export function AgentInstanceEditDialog({
       const input: UpdateManagedAgentInput = {
         pubkey: agent.pubkey,
         name: name.trim() !== agent.name ? name.trim() : undefined,
-        relayUrl:
-          relayUrl.trim() !== agent.relayUrl ? relayUrl.trim() : undefined,
+        // relayUrl deliberately never submitted: the legacy per-record pin is
+        // ignored (#2122) and the stored value is preserved as-is.
         acpCommand:
           acpCommand.trim() !== agent.acpCommand
             ? acpCommand.trim()
@@ -723,9 +706,6 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
-      if (result.profileSyncError) {
-        console.warn("Relay profile sync failed:", result.profileSyncError);
-      }
       handleOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
@@ -789,6 +769,11 @@ export function AgentInstanceEditDialog({
     loading: modelDiscoveryLoading && discoveredModelOptions === null,
     loadingValue: MODEL_DISCOVERY_LOADING_VALUE,
     options: effectiveModelOptions,
+  });
+  const modelStatusMessage = resolveModelFieldStatusMessage({
+    discoveredModelOptions,
+    loading: modelDiscoveryLoading,
+    status: modelDiscoveryStatus,
   });
 
   // Provider field derived state
@@ -959,6 +944,35 @@ export function AgentInstanceEditDialog({
                 </p>
               ) : null}
             </div>
+            {selectedRuntimeId === "custom" && !inheritHarness ? (
+              <div className="space-y-1.5">
+                <label
+                  className="text-sm font-medium text-foreground"
+                  htmlFor="edit-agent-command"
+                >
+                  Agent command
+                </label>
+                <div
+                  className={cn(
+                    "flex min-h-11 items-center px-3",
+                    PERSONA_FIELD_SHELL_CLASS,
+                  )}
+                >
+                  <Input
+                    autoCorrect="off"
+                    className={cn(
+                      "h-8 px-0 py-0 leading-6",
+                      PERSONA_FIELD_CONTROL_CLASS,
+                    )}
+                    disabled={updateMutation.isPending}
+                    id="edit-agent-command"
+                    onChange={(event) => setAgentCommand(event.target.value)}
+                    placeholder="Full path or shell command"
+                    value={agentCommand}
+                  />
+                </div>
+              </div>
+            ) : null}
             {/* LLM provider */}
             {llmProviderFieldVisible ? (
               <div className="space-y-1.5">
@@ -1076,16 +1090,27 @@ export function AgentInstanceEditDialog({
                   />
                 </div>
               ) : null}
-              <p className="text-xs text-muted-foreground">
-                {modelDiscoveryLoading
-                  ? "Loading models..."
-                  : modelDiscoveryStatus !== null
-                    ? modelDiscoveryStatus.message
-                    : discoveredModelOptions !== null
-                      ? "Saved changes take effect on the next start."
-                      : "Select a provider above to see available models."}
-              </p>
+              {modelStatusMessage ? (
+                <p className="text-xs text-muted-foreground">
+                  {modelStatusMessage}
+                </p>
+              ) : null}
             </div>
+
+            <AgentAiDefaultsNotice
+              onEditDefaults={() => setAiDefaultsOpen(true)}
+              triggerRef={aiDefaultsTriggerRef}
+              explicitModel={inheritedSubmission.model ?? ""}
+              explicitProvider={inheritedSubmission.provider ?? ""}
+              inheritedModel={inheritedModelDefault}
+              inheritedProvider={inheritedProviderDefault}
+            />
+
+            <AgentDefaultsDialog
+              onOpenChange={setAiDefaultsOpen}
+              open={aiDefaultsOpen}
+              returnFocusRef={aiDefaultsTriggerRef}
+            />
 
             {/* Advanced settings */}
             <div className="space-y-3">
@@ -1096,6 +1121,11 @@ export function AgentInstanceEditDialog({
                 type="button"
               >
                 <span>Advanced</span>
+                <AdvancedRequiredBadge
+                  envVars={inheritedSubmission.envVars}
+                  requiredEnvKeys={advancedRequiredEnvKeys}
+                  testId="edit-agent-advanced-required-badge"
+                />
                 <ChevronDown
                   className={cn(
                     "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
@@ -1103,12 +1133,6 @@ export function AgentInstanceEditDialog({
                   )}
                 />
               </button>
-              {!showAdvancedFields && advancedInheritedSummary ? (
-                <p className="text-xs text-muted-foreground">
-                  {advancedInheritedSummary}
-                </p>
-              ) : null}
-
               <AnimatePresence initial={false}>
                 {showAdvancedFields ? (
                   <motion.div
@@ -1122,7 +1146,6 @@ export function AgentInstanceEditDialog({
                     <EditAgentAdvancedFields
                       acpCommand={acpCommand}
                       agentArgs={agentArgs}
-                      agentCommand={agentCommand}
                       autoRestartOnConfigChange={autoRestartOnConfigChange}
                       disabled={updateMutation.isPending}
                       envVars={envVars}
@@ -1142,18 +1165,14 @@ export function AgentInstanceEditDialog({
                       modelTuningRuntimeId={prospectiveRuntimeId}
                       parallelism={parallelism}
                       provider={effectiveProvider}
-                      relayUrl={relayUrl}
                       requiredEnvKeys={advancedRequiredEnvKeys}
-                      selectedRuntimeId={selectedRuntimeId}
                       systemPrompt={systemPrompt}
                       onAcpCommandChange={setAcpCommand}
                       onAgentArgsChange={setAgentArgs}
-                      onAgentCommandChange={setAgentCommand}
                       onAutoRestartChange={setAutoRestartOnConfigChange}
                       onEnvVarsChange={setEnvVars}
                       onInheritHarnessChange={setInheritHarness}
                       onParallelismChange={setParallelism}
-                      onRelayUrlChange={setRelayUrl}
                       onSystemPromptChange={setSystemPrompt}
                     />
                   </motion.div>

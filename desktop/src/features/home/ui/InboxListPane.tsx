@@ -1,8 +1,8 @@
 import {
+  ChevronDown,
   Clock,
   Ellipsis,
   ExternalLink,
-  ListFilter,
   MailOpen,
 } from "lucide-react";
 import * as React from "react";
@@ -13,7 +13,10 @@ import {
   type InboxItem,
   type InboxTypeLabel,
 } from "@/features/home/lib/inbox";
-import { DraftsPanel } from "@/features/messages/ui/DraftsPanel";
+import {
+  DraftsPanel,
+  type DraftViewItem,
+} from "@/features/messages/ui/DraftsPanel";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { RemindersPanel } from "@/features/reminders/ui/RemindersPanel";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
@@ -102,17 +105,21 @@ type InboxListPaneProps = {
   activeReminderEventIds?: ReadonlySet<string>;
   agentPubkeys?: ReadonlySet<string>;
   activeDraftCount: number;
+  draftItems: DraftViewItem[];
   doneSet: ReadonlySet<string>;
   filter: InboxFilter;
   items: InboxItem[];
   onFilterChange: (filter: InboxFilter) => void;
+  onDeleteDraft: (draftKey: string) => void;
   onMarkRead: (itemId: string) => void;
   onMarkUnread: (itemId: string) => void;
   onOpenDirect: (item: InboxItem) => void;
   onRemindLater: (item: InboxItem) => void;
   onSelect: (itemId: string) => void;
+  onSelectDraft: (draftKey: string) => void;
   onUnreadOnlyChange: (checked: boolean) => void;
   selectedConversationId: string | null;
+  selectedDraftKey: string | null;
   showRightDivider?: boolean;
   dueReminderCount: number;
   reminderPubkey?: string;
@@ -123,17 +130,21 @@ export function InboxListPane({
   activeReminderEventIds,
   agentPubkeys,
   activeDraftCount,
+  draftItems,
   doneSet,
   filter,
   items,
   onFilterChange,
+  onDeleteDraft,
   onMarkRead,
   onMarkUnread,
   onOpenDirect,
   onRemindLater,
   onSelect,
+  onSelectDraft,
   onUnreadOnlyChange,
   selectedConversationId,
+  selectedDraftKey,
   showRightDivider = false,
   dueReminderCount,
   reminderPubkey,
@@ -142,6 +153,12 @@ export function InboxListPane({
   const activeFilter = FILTER_OPTIONS.find((option) => option.value === filter);
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
+  const inboxStatusLabel =
+    dueReminderCount > 0
+      ? `${dueReminderCount} due reminder${dueReminderCount === 1 ? "" : "s"}`
+      : activeDraftCount > 0
+        ? `${activeDraftCount} active draft${activeDraftCount === 1 ? "" : "s"}`
+        : null;
   const scrollRef = React.useRef<HTMLDivElement>(null);
   const unreadVisibleItemCount = React.useMemo(
     () =>
@@ -156,7 +173,7 @@ export function InboxListPane({
     }
   }, [doneSet, items, onMarkRead]);
 
-  const renderItem = (item: InboxItem, index: number) => {
+  const renderItem = (item: InboxItem) => {
     const isSelected = item.conversationId === selectedConversationId;
     const isDone = doneSet.has(item.id);
     const hasActiveReminder = activeReminderEventIds?.has(item.id) ?? false;
@@ -191,17 +208,14 @@ export function InboxListPane({
       >
         <button
           aria-label={`Open inbox item from ${item.senderLabel}`}
-          className={cn(
-            "absolute inset-0 z-0 block w-full border-l border-l-transparent text-left after:pointer-events-none after:absolute after:bottom-0 after:left-[3.625rem] after:right-3 after:h-px after:bg-border/45 after:content-['']",
-            index === items.length - 1 && "after:hidden",
-          )}
+          className="absolute inset-0 z-0 block w-full border-l border-l-transparent text-left"
           onClick={() => onSelect(item.id)}
           type="button"
         >
           <span
             aria-hidden="true"
             className={cn(
-              "pointer-events-none absolute inset-y-0 left-0 right-3 transition-colors",
+              "pointer-events-none absolute inset-y-0 left-0 right-0 transition-colors",
               isSelected
                 ? "bg-[var(--inbox-row-highlight-bg)]"
                 : "group-hover/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-focus-within/inbox-item:bg-[var(--inbox-row-highlight-bg)] group-active/inbox-item:bg-muted/40",
@@ -387,89 +401,90 @@ export function InboxListPane({
         showRightDivider && INBOX_PANE_RIGHT_DIVIDER_CLASS,
       )}
     >
-      <TopChromeInsetHeader flush>
+      <TopChromeInsetHeader flush transparent>
         <div className="px-5 py-2">
           <div className="flex min-h-9 w-full min-w-0 items-center justify-between gap-3">
-            <Popover>
-              <PopoverTrigger asChild>
-                <button
-                  aria-label="Inbox options"
-                  className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "-ml-4")}
-                  data-testid="inbox-options-trigger"
-                  type="button"
-                >
-                  <Ellipsis className="h-4 w-4" />
-                </button>
-              </PopoverTrigger>
-              <PopoverContent align="start" className="w-60 p-2">
-                <div
-                  className={cn(
-                    "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
-                    (isReminders || isDrafts) && "opacity-50",
-                  )}
-                >
-                  <label
-                    className="text-sm font-medium text-foreground"
-                    htmlFor="inbox-unread-only-switch"
+            <div className="order-2 ml-auto flex shrink-0 items-center justify-end">
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    aria-label="Inbox options"
+                    className={cn(INBOX_HEADER_ICON_BUTTON_CLASS, "-mr-4")}
+                    data-testid="inbox-options-trigger"
+                    type="button"
                   >
-                    Show unread
-                  </label>
-                  <Switch
-                    checked={unreadOnly}
-                    className="shadow-none [&>span]:shadow-none"
-                    data-testid="inbox-unread-only-toggle"
-                    disabled={isReminders || isDrafts}
-                    id="inbox-unread-only-switch"
-                    onCheckedChange={onUnreadOnlyChange}
-                  />
-                </div>
-                <Separator className="my-1 bg-muted" />
-                <button
-                  className="flex min-h-9 w-full items-center rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
-                  disabled={unreadVisibleItemCount === 0}
-                  onClick={handleMarkAllRead}
-                  type="button"
-                >
-                  <span>Mark all as read</span>
-                  {unreadVisibleItemCount > 0 ? (
-                    <span className="ml-auto text-xs text-muted-foreground">
-                      {unreadVisibleItemCount}
-                    </span>
-                  ) : null}
-                </button>
-              </PopoverContent>
-            </Popover>
-            <div className="ml-auto flex shrink-0 items-center justify-end">
+                    <Ellipsis className="h-4 w-4" />
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent align="end" className="w-60 p-2">
+                  <div
+                    className={cn(
+                      "flex min-h-9 items-center justify-between gap-3 rounded-lg px-2 py-1.5",
+                      (isReminders || isDrafts) && "opacity-50",
+                    )}
+                  >
+                    <label
+                      className="text-sm font-medium text-foreground"
+                      htmlFor="inbox-unread-only-switch"
+                    >
+                      Show unread
+                    </label>
+                    <Switch
+                      checked={unreadOnly}
+                      className="shadow-none [&>span]:shadow-none"
+                      data-testid="inbox-unread-only-toggle"
+                      disabled={isReminders || isDrafts}
+                      id="inbox-unread-only-switch"
+                      onCheckedChange={onUnreadOnlyChange}
+                    />
+                  </div>
+                  <Separator className="my-1 bg-muted" />
+                  <button
+                    className="flex min-h-9 w-full items-center rounded-lg px-2 py-2 text-left text-sm transition-colors hover:bg-muted/50 disabled:pointer-events-none disabled:opacity-50"
+                    disabled={unreadVisibleItemCount === 0}
+                    onClick={handleMarkAllRead}
+                    type="button"
+                  >
+                    <span>Mark all as read</span>
+                    {unreadVisibleItemCount > 0 ? (
+                      <span className="ml-auto text-xs text-muted-foreground">
+                        {unreadVisibleItemCount}
+                      </span>
+                    ) : null}
+                  </button>
+                </PopoverContent>
+              </Popover>
+            </div>
+            <div className="order-1 flex shrink-0 items-center justify-start">
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <button
-                    aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}`}
+                    aria-label={`Filter inbox: ${activeFilter?.label ?? "All"}${inboxStatusLabel ? `. ${inboxStatusLabel}` : ""}`}
                     className={cn(
                       INBOX_HEADER_ICON_BUTTON_CLASS,
-                      "relative -mr-4",
+                      "relative -ml-2 w-auto gap-1 px-2 text-sm font-medium text-foreground",
                     )}
                     data-testid="inbox-filter-trigger"
                     type="button"
                   >
-                    <ListFilter className="h-4 w-4" />
+                    <span>{activeFilter?.label ?? "All"}</span>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
                     {dueReminderCount > 0 ? (
                       <span
-                        className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                        aria-hidden="true"
+                        className="absolute right-1.5 top-0 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
                         data-testid="inbox-reminder-badge"
-                      >
-                        {dueReminderCount}
-                      </span>
+                      />
                     ) : activeDraftCount > 0 ? (
                       <span
-                        className="absolute -right-1 -top-1 inline-flex h-4 min-w-4 items-center justify-center rounded-full border border-background bg-primary px-1 text-2xs font-semibold leading-none text-primary-foreground"
+                        aria-hidden="true"
+                        className="absolute right-1.5 top-0 h-1.5 w-1.5 rounded-full bg-primary ring-2 ring-background"
                         data-testid="inbox-draft-badge"
-                      >
-                        {activeDraftCount}
-                      </span>
+                      />
                     ) : null}
                   </button>
                 </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuContent align="start" className="w-48">
                   <DropdownMenuRadioGroup
                     onValueChange={(value) =>
                       onFilterChange(value as InboxFilter)
@@ -513,7 +528,7 @@ export function InboxListPane({
 
       {isReminders ? (
         <div
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className="-mt-13 flex min-h-0 flex-1 flex-col overflow-hidden pt-13"
           data-testid="home-inbox-reminders"
         >
           {reminderPubkey ? (
@@ -522,14 +537,19 @@ export function InboxListPane({
         </div>
       ) : isDrafts ? (
         <div
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+          className="-mt-13 flex min-h-0 flex-1 flex-col overflow-hidden pt-13"
           data-testid="home-inbox-drafts"
         >
-          <DraftsPanel />
+          <DraftsPanel
+            items={draftItems}
+            onDeleteDraft={onDeleteDraft}
+            onSelectDraft={onSelectDraft}
+            selectedDraftKey={selectedDraftKey}
+          />
         </div>
       ) : (
         <div
-          className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain"
+          className="-mt-13 min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain pt-13"
           data-testid="home-inbox-list"
           ref={scrollRef}
         >

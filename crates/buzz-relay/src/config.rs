@@ -3,6 +3,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::warn;
 
@@ -23,6 +24,28 @@ pub enum ConfigError {
     InvalidValue(String),
 }
 
+/// Deny-by-default read-only deployment-admin configuration.
+#[derive(Debug, Clone)]
+pub struct AdminConfig {
+    /// Exact admin HTTP authority.
+    pub host: String,
+    /// Optional admin SPA bundle directory.
+    pub web_dir: Option<std::path::PathBuf>,
+}
+
+/// Relay-hosted policy content presented on join surfaces.
+#[derive(Debug, Clone)]
+pub struct JoinPolicyConfig {
+    /// Operator-provided Terms of Service document in Markdown.
+    pub terms_markdown: Option<String>,
+    /// Operator-provided Privacy Policy document in Markdown.
+    pub privacy_markdown: Option<String>,
+    /// Whether join surfaces must collect an 18+ attestation.
+    pub age_attestation_required: bool,
+    /// Content-derived identifier binding receipts to the exact policy revision.
+    pub version: String,
+}
+
 /// Relay runtime configuration, loaded from environment variables.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,8 +53,17 @@ pub struct Config {
     pub bind_addr: SocketAddr,
     /// Postgres database connection URL.
     pub database_url: String,
+    /// Optional read-replica connection URL (e.g. an Aurora `cluster-ro-`
+    /// endpoint). Unset means all reads stay on the writer.
+    pub read_database_url: Option<String>,
     /// Redis connection URL used by the pub/sub manager.
     pub redis_url: String,
+    /// Maximum connections in the shared Redis pool. Defaults to 16.
+    ///
+    /// deadpool's own default is `CPU_COUNT * 2`, which on a 2-vCPU relay
+    /// pod is only 4 — small enough that rate-limit checks, presence, and
+    /// pub/sub publishes queue behind each other under load.
+    pub redis_pool_size: usize,
     /// Public WebSocket URL of this relay, advertised in NIP-11.
     pub relay_url: String,
     /// Public WebSocket URL of the dedicated device-pairing relay, when configured.
@@ -160,6 +192,15 @@ pub struct Config {
     /// Maximum media upload starts accepted from one pubkey per minute.
     pub media_uploads_per_minute: u32,
 
+    /// Require Blossom kind:24242 `t=get` auth plus relay membership before
+    /// serving media GET/HEAD. Default off for staged client rollout.
+    pub require_media_get_auth: bool,
+
+    /// Whether tamper-evident event/media audit logging is enabled. Defaults to true.
+    /// This does not control the separate `moderation_actions` audit trail.
+    /// Set `BUZZ_AUDIT_ENABLED=false` for deployments that do not require it.
+    pub audit_enabled: bool,
+
     /// Optional override for ephemeral channel TTL (in seconds).
     /// When set, any channel created with a TTL tag will use this value instead
     /// of the client-provided one. Useful for testing ephemeral expiry quickly.
@@ -167,13 +208,16 @@ pub struct Config {
     /// 60 seconds after the last message.
     pub ephemeral_ttl_override: Option<i32>,
 
-    /// Root directory for the relay's local git scratch. No per-repo bare repos
-    /// or persistent git state live here — runtime reads/writes hydrate
-    /// ephemeral repos from object storage per request, and all temporary Git
-    /// workspaces and buffered subprocess output are created beneath this path.
+    /// Root directory for the relay's local git scratch. No authoritative
+    /// repository state lives here — runtime reads/writes hydrate ephemeral
+    /// repos from object storage per request. Temporary workspaces, buffered
+    /// subprocess output, and the disposable immutable pack cache live below
+    /// this path.
     /// Repo-name uniqueness lives in Postgres (`git_repo_names`), not on disk,
     /// so this directory need not be persistent or shared across replicas.
     pub git_repo_path: std::path::PathBuf,
+    /// Parent directory for process-isolated immutable pack cache sessions.
+    pub git_pack_cache_path: std::path::PathBuf,
     /// Maximum pack file size for git push (bytes). Default: 500 MB.
     pub git_max_pack_bytes: u64,
     /// Maximum total bytes materialized for one git repo request. Default: 1 GB.
@@ -181,6 +225,11 @@ pub struct Config {
     /// This bounds clone/fetch hydration work across a repo's historical pack
     /// set rather than only bounding one incoming push body.
     pub git_max_repo_bytes: u64,
+    /// Maximum bytes retained in the process-local immutable pack/index cache.
+    /// Zero disables retention while preserving request-local hydration.
+    pub git_pack_cache_max_bytes: u64,
+    /// Maximum pack digests populated concurrently in one relay process.
+    pub git_pack_cache_max_concurrent_populations: usize,
     /// Maximum number of repos per pubkey. Default: 100.
     pub git_max_repos_per_pubkey: u32,
     /// Maximum concurrent git subprocess operations. Default: 20.
@@ -197,6 +246,13 @@ pub struct Config {
     /// Hard timeout for one gateway delivery request.
     pub push_gateway_timeout: Duration,
 
+    /// Optional relay-hosted policy shown on join surfaces. Disabled when no
+    /// documents or age attestation are configured.
+    pub join_policy: Option<JoinPolicyConfig>,
+
+    /// Deployment-admin API and SPA configuration. Absent means the surface is disabled.
+    pub admin: Option<AdminConfig>,
+
     /// Optional path to the web UI `dist/` directory.
     /// When set, the relay serves the invite landing page and its static assets.
     /// When unset, no static file serving happens (relay behaves as before).
@@ -209,6 +265,54 @@ pub struct Config {
 fn parse_bind_addr(raw: &str) -> Result<SocketAddr, ConfigError> {
     raw.parse::<SocketAddr>()
         .map_err(|e| ConfigError::InvalidBindAddr(e.to_string()))
+}
+
+fn positive_u64_from_env(name: &str, default: u64) -> Result<u64, ConfigError> {
+    match std::env::var(name) {
+        Ok(raw) => raw
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| ConfigError::InvalidValue(format!("{name} must be a positive integer"))),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid Unicode"
+        ))),
+    }
+}
+
+fn rate_limit_config_from_env() -> Result<buzz_auth::RateLimitConfig, ConfigError> {
+    let defaults = buzz_auth::RateLimitConfig::default();
+    Ok(buzz_auth::RateLimitConfig {
+        human_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN",
+            defaults.human_messages_per_min,
+        )?,
+        human_api_calls_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN",
+            defaults.human_api_calls_per_min,
+        )?,
+        human_ws_events_per_sec: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC",
+            defaults.human_ws_events_per_sec,
+        )?,
+        agent_standard_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_STANDARD_MESSAGES_PER_MIN",
+            defaults.agent_standard_messages_per_min,
+        )?,
+        agent_standard_api_calls_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_STANDARD_API_CALLS_PER_MIN",
+            defaults.agent_standard_api_calls_per_min,
+        )?,
+        agent_elevated_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_ELEVATED_MESSAGES_PER_MIN",
+            defaults.agent_elevated_messages_per_min,
+        )?,
+        agent_platform_messages_per_min: positive_u64_from_env(
+            "BUZZ_RATE_LIMIT_AGENT_PLATFORM_MESSAGES_PER_MIN",
+            defaults.agent_platform_messages_per_min,
+        )?,
+    })
 }
 
 fn parse_operator_api_origin(raw: &str) -> Result<String, ConfigError> {
@@ -256,13 +360,40 @@ fn parse_push_gateway_delivery_url(raw: &str) -> Result<url::Url, ConfigError> {
     Ok(url)
 }
 
+fn parse_bool(name: &str, default: bool) -> Result<bool, ConfigError> {
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(ConfigError::InvalidValue(format!(
+            "{name} must be valid UTF-8: {error}"
+        ))),
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "on" => Ok(true),
+            "false" | "0" | "off" | "" => Ok(false),
+            _ => Err(ConfigError::InvalidValue(format!(
+                "{name} must be true or false"
+            ))),
+        },
+    }
+}
+
+fn parse_optional_bool(name: &str) -> Result<bool, ConfigError> {
+    parse_bool(name, false)
+}
+
 fn ensure_git_repo_path(
+    raw: impl Into<std::path::PathBuf>,
+) -> Result<std::path::PathBuf, ConfigError> {
+    ensure_git_path("BUZZ_GIT_REPO_PATH", raw)
+}
+
+fn ensure_git_path(
+    setting: &str,
     raw: impl Into<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, ConfigError> {
     let git_repo_path = raw.into();
     if let Err(e) = std::fs::create_dir_all(&git_repo_path) {
         return Err(ConfigError::InvalidValue(format!(
-            "BUZZ_GIT_REPO_PATH={} could not be created: {e}",
+            "{setting}={} could not be created: {e}",
             git_repo_path.display()
         )));
     }
@@ -279,8 +410,19 @@ impl Config {
         let database_url = std::env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
 
+        let read_database_url = std::env::var("READ_DATABASE_URL")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty());
+
         let redis_url =
             std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
+
+        let redis_pool_size = std::env::var("BUZZ_REDIS_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v > 0)
+            .unwrap_or(16);
 
         let relay_url =
             std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -439,7 +581,9 @@ impl Config {
             ));
         }
 
-        let auth = buzz_auth::AuthConfig::default();
+        let auth = buzz_auth::AuthConfig {
+            rate_limits: rate_limit_config_from_env()?,
+        };
 
         if !require_auth_token {
             warn!(
@@ -535,6 +679,15 @@ impl Config {
             .filter(|&v| v > 0)
             .unwrap_or(30);
 
+        let require_media_get_auth = std::env::var("BUZZ_REQUIRE_MEDIA_GET_AUTH")
+            .map(|v| {
+                v == "true"
+                    || v == "1"
+                    || v.eq_ignore_ascii_case("yes")
+                    || v.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false);
+
         let ephemeral_ttl_override = std::env::var("BUZZ_EPHEMERAL_TTL_OVERRIDE")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
@@ -551,6 +704,12 @@ impl Config {
         let git_repo_path = ensure_git_repo_path(
             std::env::var("BUZZ_GIT_REPO_PATH").unwrap_or_else(|_| "./repos".to_string()),
         )?;
+        let git_pack_cache_path = ensure_git_path(
+            "BUZZ_GIT_PACK_CACHE_PATH",
+            std::env::var("BUZZ_GIT_PACK_CACHE_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| git_repo_path.join(".pack-cache")),
+        )?;
         let git_max_pack_bytes: u64 = std::env::var("BUZZ_GIT_MAX_PACK_BYTES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -559,6 +718,16 @@ impl Config {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or_else(|| git_max_pack_bytes.saturating_mul(2)); // 1 GB at defaults
+        let git_pack_cache_max_bytes: u64 = std::env::var("BUZZ_GIT_PACK_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or_else(|| git_max_repo_bytes.saturating_mul(5)); // 5 GB at defaults
+        let git_pack_cache_max_concurrent_populations: usize =
+            std::env::var("BUZZ_GIT_PACK_CACHE_MAX_CONCURRENT_POPULATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(2);
         let git_max_repos_per_pubkey: u32 = std::env::var("BUZZ_GIT_MAX_REPOS_PER_PUBKEY")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -602,6 +771,74 @@ impl Config {
         };
         let push_gateway_timeout = Duration::from_millis(push_gateway_timeout_millis);
 
+        const MAX_POLICY_MARKDOWN_BYTES: usize = 256 * 1024;
+        let read_policy_markdown = |name: &str| -> Result<Option<String>, ConfigError> {
+            let value = std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            if value
+                .as_ref()
+                .is_some_and(|value| value.len() > MAX_POLICY_MARKDOWN_BYTES)
+            {
+                return Err(ConfigError::InvalidValue(format!(
+                    "{name} must contain at most {MAX_POLICY_MARKDOWN_BYTES} bytes"
+                )));
+            }
+            Ok(value)
+        };
+        let terms_markdown = read_policy_markdown("BUZZ_TERMS_OF_SERVICE_MARKDOWN")?;
+        let privacy_markdown = read_policy_markdown("BUZZ_PRIVACY_POLICY_MARKDOWN")?;
+        let age_attestation_required = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED")?;
+        let audit_enabled = parse_bool("BUZZ_AUDIT_ENABLED", true)?;
+        let join_policy = if terms_markdown.is_none()
+            && privacy_markdown.is_none()
+            && !age_attestation_required
+        {
+            None
+        } else {
+            let mut hasher = Sha256::new();
+            hasher.update(terms_markdown.as_deref().unwrap_or_default().as_bytes());
+            hasher.update([0]);
+            hasher.update(privacy_markdown.as_deref().unwrap_or_default().as_bytes());
+            hasher.update([0, u8::from(age_attestation_required)]);
+            Some(JoinPolicyConfig {
+                terms_markdown,
+                privacy_markdown,
+                age_attestation_required,
+                version: hex::encode(hasher.finalize()),
+            })
+        };
+
+        // Read-only deployment-admin surface. The route is absent when the host is unset.
+        let admin = match std::env::var("BUZZ_ADMIN_HOST")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+        {
+            None => None,
+            Some(host) => {
+                if host.contains(['/', '\\', '@']) {
+                    return Err(ConfigError::InvalidValue(
+                        "BUZZ_ADMIN_HOST must be an exact authority".to_string(),
+                    ));
+                }
+                let web_dir = std::env::var("BUZZ_ADMIN_WEB_DIR")
+                    .ok()
+                    .map(|value| std::path::PathBuf::from(value.trim()))
+                    .filter(|value| !value.as_os_str().is_empty());
+                if let Some(ref dir) = web_dir {
+                    if !dir.join("index.html").is_file() {
+                        return Err(ConfigError::InvalidValue(format!(
+                            "BUZZ_ADMIN_WEB_DIR={} does not contain index.html",
+                            dir.display()
+                        )));
+                    }
+                }
+                Some(AdminConfig { host, web_dir })
+            }
+        };
+
         // Web UI static file serving
         let web_dir = std::env::var("BUZZ_WEB_DIR")
             .ok()
@@ -635,7 +872,9 @@ impl Config {
         Ok(Self {
             bind_addr,
             database_url,
+            read_database_url,
             redis_url,
+            redis_pool_size,
             relay_url,
             pairing_relay_url,
             max_connections,
@@ -663,16 +902,23 @@ impl Config {
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
             media_uploads_per_minute,
+            require_media_get_auth,
+            audit_enabled,
             ephemeral_ttl_override,
             git_repo_path,
+            git_pack_cache_path,
             git_max_pack_bytes,
             git_max_repo_bytes,
+            git_pack_cache_max_bytes,
+            git_pack_cache_max_concurrent_populations,
             git_max_repos_per_pubkey,
             git_max_concurrent_ops,
             git_hook_hmac_secret,
             push_executor_key_id,
             push_gateway_delivery_url,
             push_gateway_timeout,
+            join_policy,
+            admin,
             web_dir,
             serve_git_web_gui,
         })
@@ -695,6 +941,7 @@ mod tests {
         assert!(config.bind_addr.port() > 0);
         assert!(!config.database_url.is_empty());
         assert!(!config.redis_url.is_empty());
+        assert_eq!(config.redis_pool_size, 16);
         assert!(config.max_connections > 0);
         assert!(config.send_buffer_size > 0);
         assert_eq!(config.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
@@ -724,9 +971,152 @@ mod tests {
             "serve_git_web_gui should default to false"
         );
         assert!(
+            !config.require_media_get_auth,
+            "require_media_get_auth should default to false for staged client rollout"
+        );
+        assert!(
+            config.join_policy.is_none(),
+            "join_policy should default to None so policy prompts and acceptance receipts are opt-in"
+        );
+        assert!(
             config.huddle_audio_available,
             "huddle_audio_available should default to true so single-pod (N=1) keeps today's huddle behavior"
         );
+    }
+
+    #[test]
+    fn redis_pool_size_env_override_and_invalid_fallback() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_REDIS_POOL_SIZE");
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "32");
+        let overridden = Config::from_env().expect("config").redis_pool_size;
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "0");
+        let zero = Config::from_env().expect("config").redis_pool_size;
+
+        std::env::set_var("BUZZ_REDIS_POOL_SIZE", "not-a-number");
+        let junk = Config::from_env().expect("config").redis_pool_size;
+
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_REDIS_POOL_SIZE", value);
+        } else {
+            std::env::remove_var("BUZZ_REDIS_POOL_SIZE");
+        }
+
+        assert_eq!(overridden, 32);
+        assert_eq!(zero, 16, "zero must fall back to the default");
+        assert_eq!(junk, 16, "unparsable value must fall back to the default");
+    }
+
+    #[test]
+    fn read_database_url_unset_or_blank_is_none() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("READ_DATABASE_URL");
+
+        std::env::remove_var("READ_DATABASE_URL");
+        let unset = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "   ");
+        let blank = Config::from_env().expect("config").read_database_url;
+
+        std::env::set_var("READ_DATABASE_URL", "postgres://buzz:pw@replica:5432/buzz"); // sadscan:disable np.postgres.1
+        let set = Config::from_env().expect("config").read_database_url;
+
+        if let Some(value) = previous {
+            std::env::set_var("READ_DATABASE_URL", value);
+        } else {
+            std::env::remove_var("READ_DATABASE_URL");
+        }
+
+        assert_eq!(unset, None, "unset READ_DATABASE_URL must disable routing");
+        assert_eq!(blank, None, "blank READ_DATABASE_URL must disable routing");
+        assert_eq!(
+            set.as_deref(),
+            Some("postgres://buzz:pw@replica:5432/buzz") // sadscan:disable np.postgres.1
+        );
+    }
+
+    #[test]
+    fn audit_logging_defaults_on_and_accepts_explicit_off() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
+        std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        assert!(parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
+        std::env::set_var("BUZZ_AUDIT_ENABLED", "false");
+        assert!(!parse_bool("BUZZ_AUDIT_ENABLED", true).unwrap());
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+    }
+
+    #[test]
+    fn audit_logging_rejects_invalid_boolean() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AUDIT_ENABLED");
+        std::env::set_var("BUZZ_AUDIT_ENABLED", "sometimes");
+        let result = parse_bool("BUZZ_AUDIT_ENABLED", true);
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AUDIT_ENABLED", value);
+        } else {
+            std::env::remove_var("BUZZ_AUDIT_ENABLED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_AUDIT_ENABLED")
+        ));
+    }
+
+    #[test]
+    fn join_policy_age_attestation_rejects_invalid_boolean() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let previous = std::env::var_os("BUZZ_AGE_ATTESTATION_REQUIRED");
+        std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", "sometimes");
+        let result = parse_optional_bool("BUZZ_AGE_ATTESTATION_REQUIRED");
+        if let Some(value) = previous {
+            std::env::set_var("BUZZ_AGE_ATTESTATION_REQUIRED", value);
+        } else {
+            std::env::remove_var("BUZZ_AGE_ATTESTATION_REQUIRED");
+        }
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_AGE_ATTESTATION_REQUIRED")
+        ));
+    }
+
+    #[test]
+    fn rate_limits_can_be_overridden() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN", "1001");
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN", "1002");
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "1003");
+
+        let config = Config::from_env().expect("config");
+
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_MESSAGES_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_API_CALLS_PER_MIN");
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
+        assert_eq!(config.auth.rate_limits.human_messages_per_min, 1001);
+        assert_eq!(config.auth.rate_limits.human_api_calls_per_min, 1002);
+        assert_eq!(config.auth.rate_limits.human_ws_events_per_sec, 1003);
+    }
+
+    #[test]
+    fn rate_limit_overrides_reject_zero() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC", "0");
+        let result = Config::from_env();
+        std::env::remove_var("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC");
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidValue(ref message))
+                if message.contains("BUZZ_RATE_LIMIT_HUMAN_WS_EVENTS_PER_SEC")
+        ));
     }
 
     #[test]

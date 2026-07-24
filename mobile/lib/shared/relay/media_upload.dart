@@ -9,9 +9,13 @@ import 'package:image_picker/image_picker.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:pointycastle/digests/sha256.dart';
 
+import 'animated_image_sanitizer.dart';
+import 'media_auth.dart';
+import 'mp4_fast_start.dart';
 import 'relay_provider.dart';
 
-const _mediaUploadPath = '/media/upload';
+const _mediaUploadPath = '/upload';
+const _legacyMediaUploadPath = '/media/upload';
 const _mediaUploadPlatformChannelName = 'buzz/media_upload';
 const _sanitizeImageForUploadMethod = 'sanitizeImageForUpload';
 const _transcodeVideoToMp4Method = 'transcodeVideoToMp4';
@@ -34,16 +38,15 @@ final _mediaUploadPlatformChannel = MethodChannel(
   _mediaUploadPlatformChannelName,
 );
 
-const _allowedImageMimeTypes = {'image/jpeg', 'image/png', 'image/webp'};
+const _allowedImageMimeTypes = {
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+};
 const _allowedVideoMimeTypes = {'video/mp4'};
 const _maxVideoSizeBytes = 100 * 1024 * 1024; // 100MB
-const _unsupportedAnimatedImageMimeTypes = {'image/gif'};
-const _unsupportedGifUploadMessage =
-    'GIF uploads are not supported on mobile yet';
-const _unsupportedAnimatedPngUploadMessage =
-    'Animated PNG uploads are not supported on mobile yet';
-const _unsupportedAnimatedWebpUploadMessage =
-    'Animated WebP uploads are not supported on mobile yet';
+const _mediaPolicyUploadMessage = "We couldn't prepare this image for upload.";
 
 typedef PickGalleryImage = Future<XFile?> Function();
 typedef PickGalleryVideo = Future<XFile?> Function();
@@ -52,6 +55,13 @@ typedef SanitizeImageBytes =
 typedef TranscodeImageToJpeg = Future<Uint8List> Function(Uint8List bytes);
 typedef TranscodeVideoToMp4 = Future<String> Function(String filePath);
 typedef ReadClipboardImage = Future<Uint8List?> Function();
+
+class MediaPolicyUploadException implements Exception {
+  const MediaPolicyUploadException();
+
+  @override
+  String toString() => _mediaPolicyUploadMessage;
+}
 
 @immutable
 class _PreparedUploadImage {
@@ -168,7 +178,10 @@ class MediaUploadService {
 
   Future<BlobDescriptor> uploadImage(XFile image) async {
     final preparedImage = await _prepareUploadImage(image);
-    return uploadBytes(preparedImage.bytes, mimeType: preparedImage.mimeType);
+    return _uploadPreparedBytes(
+      preparedImage.bytes,
+      mimeType: preparedImage.mimeType,
+    );
   }
 
   Future<bool> clipboardHasImage() async {
@@ -196,16 +209,8 @@ class MediaUploadService {
       );
     }
 
-    // Read first 32 bytes to check if it's already an MP4 container.
-    final header = await _readFileHeader(pickedVideo.path, 32);
-
-    if (_isAlreadyMp4Container(header)) {
-      // Already MP4 — upload directly.
-      final bytes = await pickedVideo.readAsBytes();
-      return uploadBytes(bytes, mimeType: 'video/mp4');
-    }
-
-    // Non-MP4 container (e.g. QuickTime .mov) — remux to MP4 via platform.
+    // Always rebuild the container. Passing an existing MP4 through would retain
+    // QuickTime GPS, global metadata, chapters, or non-A/V tracks.
     String? transcodedPath;
     try {
       transcodedPath = await _transcodeVideoToMp4(pickedVideo.path);
@@ -233,22 +238,54 @@ class MediaUploadService {
     Uint8List bytes, {
     required String mimeType,
   }) async {
-    _validateUpload(bytes, mimeType);
+    if (mimeType == 'image/gif' ||
+        (mimeType == 'image/png' && _isAnimatedPng(bytes)) ||
+        (mimeType == 'image/webp' && _isAnimatedWebp(bytes))) {
+      try {
+        bytes = sanitizeAnimatedImageForUpload(bytes, mimeType);
+      } on FormatException {
+        throw Exception('failed to sanitize image for upload');
+      }
+    }
+    return _uploadPreparedBytes(bytes, mimeType: mimeType);
+  }
+
+  Future<BlobDescriptor> _uploadPreparedBytes(
+    Uint8List bytes, {
+    required String mimeType,
+  }) async {
     if (!_allowedImageMimeTypes.contains(mimeType) &&
         !_allowedVideoMimeTypes.contains(mimeType)) {
       throw Exception('unsupported file type: $mimeType');
     }
 
     final sha256 = _sha256Hex(bytes);
-    final request = _buildUploadRequest(
+    var request = _buildUploadRequest(
       bytes: bytes,
       mimeType: mimeType,
       sha256: sha256,
+      path: _mediaUploadPath,
     );
 
-    final streamed = await _http.send(request);
-    final response = await http.Response.fromStream(streamed);
+    var streamed = await _http.send(request);
+    var response = await http.Response.fromStream(streamed);
+    if (response.statusCode == HttpStatus.notFound ||
+        response.statusCode == HttpStatus.methodNotAllowed) {
+      request = _buildUploadRequest(
+        bytes: bytes,
+        mimeType: mimeType,
+        sha256: sha256,
+        path: _legacyMediaUploadPath,
+      );
+      streamed = await _http.send(request);
+      response = await http.Response.fromStream(streamed);
+    }
     if (response.statusCode < 200 || response.statusCode >= 300) {
+      if (_allowedImageMimeTypes.contains(mimeType) &&
+          (response.statusCode == HttpStatus.unsupportedMediaType ||
+              response.statusCode == HttpStatus.unprocessableEntity)) {
+        throw const MediaPolicyUploadException();
+      }
       throw Exception(
         'upload failed (${response.statusCode}): ${response.body}',
       );
@@ -263,11 +300,9 @@ class MediaUploadService {
     required Uint8List bytes,
     required String mimeType,
     required String sha256,
+    required String path,
   }) {
-    final request = http.Request(
-      'PUT',
-      Uri.parse(_baseUrl).resolve(_mediaUploadPath),
-    );
+    final request = http.Request('PUT', Uri.parse(_baseUrl).resolve(path));
     request.bodyBytes = bytes;
     request.headers.addAll(
       _buildUploadHeaders(mimeType: mimeType, sha256: sha256),
@@ -311,7 +346,7 @@ class MediaUploadService {
       ['t', 'upload'],
       ['x', sha256],
       ['expiration', '$expiration'],
-      if (_extractServerAuthority(_baseUrl) case final authority?)
+      if (extractServerAuthority(_baseUrl) case final authority?)
         ['server', authority],
     ];
 
@@ -342,7 +377,6 @@ class MediaUploadService {
     Uint8List bytes,
     String mimeType,
   ) async {
-    _validateUpload(bytes, mimeType);
     final preparedBytes = await _sanitizeImageBytesIfNeeded(bytes, mimeType);
     return _buildPreparedUploadImage(preparedBytes);
   }
@@ -365,6 +399,16 @@ class MediaUploadService {
     Uint8List bytes,
     String mimeType,
   ) async {
+    if (mimeType == 'image/gif' ||
+        (mimeType == 'image/png' && _isAnimatedPng(bytes)) ||
+        (mimeType == 'image/webp' && _isAnimatedWebp(bytes))) {
+      try {
+        return sanitizeAnimatedImageForUpload(bytes, mimeType);
+      } on FormatException {
+        throw Exception('failed to sanitize image for upload');
+      }
+    }
+
     if (!_shouldSanitizePickedImage(mimeType)) {
       return bytes;
     }
@@ -387,18 +431,6 @@ String? _tryDetectImageMimeType(Uint8List bytes) {
     return _detectImageMimeType(bytes);
   } on Exception {
     return null;
-  }
-}
-
-void _validateUpload(Uint8List bytes, String mimeType) {
-  if (_unsupportedAnimatedImageMimeTypes.contains(mimeType)) {
-    throw Exception(_unsupportedGifUploadMessage);
-  }
-  if (mimeType == 'image/png' && _isAnimatedPng(bytes)) {
-    throw Exception(_unsupportedAnimatedPngUploadMessage);
-  }
-  if (mimeType == 'image/webp' && _isAnimatedWebp(bytes)) {
-    throw Exception(_unsupportedAnimatedWebpUploadMessage);
   }
 }
 
@@ -499,7 +531,9 @@ bool _isAnimatedWebp(Uint8List bytes) {
 
 bool _shouldSanitizePickedImage(String mimeType) {
   return _supportsNativeUploadImageProcessing() &&
-      (mimeType == 'image/jpeg' || mimeType == 'image/png');
+      (mimeType == 'image/jpeg' ||
+          mimeType == 'image/png' ||
+          mimeType == 'image/webp');
 }
 
 bool _supportsNativeUploadImageProcessing() {
@@ -573,36 +607,6 @@ int _readUint32LittleEndian(Uint8List bytes, int offset) {
 /// Always returns `video/mp4` — the relay only accepts MP4 and does its own
 /// magic-byte validation. Most iPhone `.mov` files are ftyp-isom containers
 /// that the relay accepts as MP4.
-/// Known MP4 ftyp major brands. If the file's major brand (bytes 8–11)
-/// matches one of these, it's already an MP4-compatible container.
-const _mp4FtypBrands = {'isom', 'mp41', 'mp42', 'M4V ', 'avc1', 'iso5'};
-
-/// Checks whether [bytes] (at least 12 bytes of file header) represent
-/// an MP4-family container by inspecting the ftyp box major brand.
-///
-/// Exposed for testing as [isAlreadyMp4Container].
-@visibleForTesting
-bool isAlreadyMp4Container(Uint8List bytes) => _isAlreadyMp4Container(bytes);
-
-bool _isAlreadyMp4Container(Uint8List bytes) {
-  if (bytes.length < 12) return false;
-  if (!_matchesAscii(bytes, 4, 'ftyp')) return false;
-  final brand = ascii.decode(bytes.sublist(8, 12), allowInvalid: true);
-  return _mp4FtypBrands.contains(brand);
-}
-
-/// Reads the first [count] bytes of a file without loading it entirely.
-Future<Uint8List> _readFileHeader(String path, int count) async {
-  final file = File(path);
-  final raf = await file.open(mode: FileMode.read);
-  try {
-    final bytes = await raf.read(count);
-    return bytes;
-  } finally {
-    await raf.close();
-  }
-}
-
 Future<Uint8List?> _readPlatformClipboardImage() async {
   return _mediaUploadPlatformChannel.invokeMethod<Uint8List>(
     _readClipboardImageMethod,
@@ -617,14 +621,25 @@ Future<String> _transcodePickedVideoToMp4(String filePath) async {
   if (result == null || result.isEmpty) {
     throw Exception('Failed to convert video to MP4.');
   }
+  if (defaultTargetPlatform == TargetPlatform.android) {
+    final source = File(result);
+    final destination = File(
+      '$result.faststart-${DateTime.now().microsecondsSinceEpoch}.mp4',
+    );
+    try {
+      await rewriteMp4ForFastStart(source, destination);
+      await source.delete();
+      return destination.path;
+    } catch (_) {
+      try {
+        await destination.delete();
+      } on FileSystemException {
+        // Best-effort cleanup; preserve the original platform error.
+      }
+      rethrow;
+    }
+  }
   return result;
-}
-
-String? _extractServerAuthority(String baseUrl) {
-  final uri = Uri.parse(baseUrl);
-  if (uri.host.isEmpty) return null;
-  final host = uri.host.contains(':') ? '[${uri.host}]' : uri.host;
-  return uri.hasPort ? '$host:${uri.port}' : host;
 }
 
 Future<Uint8List> _transcodePickedImageToJpeg(Uint8List bytes) async {

@@ -103,6 +103,7 @@ pub async fn apply_workspace(
     relay_url: String,
     nsec: Option<String>,
     repos_dir: Option<String>,
+    agent_managed_profiles: Option<bool>,
     app: AppHandle,
 ) -> Result<(), String> {
     let restore_app = app.clone();
@@ -142,11 +143,21 @@ pub async fn apply_workspace(
             let mut override_guard = state.relay_url_override.lock().map_err(|e| e.to_string())?;
             *override_guard = Some(relay_url);
         }
+        // Reset the Rust-side admission gate when switching workspace/community,
+        // matching `resetRateLimitGate()` on the TS side (useCommunityInit.ts:38).
+        crate::relay_admission::reset_gate_for_workspace_change();
 
         if let Some(keys) = parsed_keys {
             let mut keys_guard = state.keys.lock().map_err(|e| e.to_string())?;
             *keys_guard = keys;
         }
+
+        // Keep the backend-side reconcile guard aligned with the frontend
+        // experiment before launch-time restore can spawn any agents. Missing
+        // means the stable behavior: desktop remains authoritative.
+        state
+            .managed_agent_profile_reconcile_enabled
+            .store(!agent_managed_profiles.unwrap_or(false), Ordering::Release);
 
         // ── Filesystem side-effect (non-fatal) ────────────────────────────────
         // Persist the *effective* repos_dir (None when the candidate failed
@@ -176,18 +187,45 @@ pub async fn apply_workspace(
     .map_err(|e| format!("spawn_blocking failed: {e}"))??;
 
     let state = restore_app.state::<AppState>();
-    if state
+    let restore_pending = state
         .managed_agent_restore_pending
-        .swap(false, Ordering::AcqRel)
+        .swap(false, Ordering::AcqRel);
+
+    // The coordinator starts before React applies the selected workspace, so
+    // its startup publication may have used the fallback relay and placeholder
+    // identity. Correct it off the command path so an unavailable relay cannot
+    // hold the frontend on its loading gate. On initial launch, restore MeshLLM
+    // first so a slow stopped-status request cannot overwrite a newly restored
+    // serving status, then restore managed agents after the admission identity
+    // has been published (or the bounded publication attempt has timed out).
+    #[cfg(feature = "mesh-llm")]
     {
         let app = restore_app.clone();
         tauri::async_runtime::spawn(async move {
             let state = app.state::<AppState>();
-            #[cfg(feature = "mesh-llm")]
-            if let Err(error) = crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
-            {
-                eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
+            if restore_pending {
+                if let Err(error) =
+                    crate::commands::mesh_llm::restore_mesh_sharing(&app, &state).await
+                {
+                    eprintln!("buzz-desktop: failed to restore Share Compute: {error}");
+                }
             }
+            crate::mesh_llm::publish_current_status_once(&app, "workspace apply").await;
+            if restore_pending {
+                if let Err(error) =
+                    restore_managed_agents_on_launch(&app, &state.shutdown_started).await
+                {
+                    eprintln!("buzz-desktop: failed to restore managed agents: {error}");
+                }
+            }
+        });
+    }
+
+    #[cfg(not(feature = "mesh-llm"))]
+    if restore_pending {
+        let app = restore_app.clone();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<AppState>();
             if let Err(error) =
                 restore_managed_agents_on_launch(&app, &state.shutdown_started).await
             {

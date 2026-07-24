@@ -1,28 +1,24 @@
 import { expect, test } from "@playwright/test";
 
-import { installMockBridge } from "../helpers/bridge";
+import { waitForAnimations } from "../helpers/animations";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/global-agent-config";
 
-// Settle any in-flight CSS / Web Animations before capture.
-async function settleAnimations(page: import("@playwright/test").Page) {
-  await page.evaluate(() =>
-    Promise.all(document.getAnimations().map((a) => a.finished)),
-  );
-}
-
 /**
- * Navigate to the Agents view (where GlobalAgentConfigSettingsCard lives) and
- * wait for the card to finish loading.
+ * Open Settings → Agents through the app UI and wait for the defaults card to
+ * load. CI serves the built SPA with a static file server, so navigating to
+ * `/settings` directly returns a 404 before the client router can start.
  */
-async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
-  // Wait for the global agent config card to mount and finish its load effect.
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
-  // The card shows a spinner while loading; wait for it to disappear.
   await expect(page.locator(".animate-spin").first()).not.toBeVisible({
     timeout: 5_000,
   });
@@ -36,9 +32,135 @@ async function openCreateDialog(page: import("@playwright/test").Page) {
   await page.goto("/");
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: /^New agent$/ }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
   await page.locator("#persona-display-name").fill("Test Agent");
 }
+
+async function customizeAgentAi(page: import("@playwright/test").Page) {
+  await page.getByRole("tab", { name: "Customize for this agent" }).click();
+}
+
+/**
+ * Pick an option from a PersonaDropdownField (menu-based, not a native
+ * <select>): focus the trigger, open it, then click the matching
+ * menuitemradio. Mirrors the helper in agent-readiness-screenshots.spec.ts.
+ */
+async function selectDropdownOption(
+  page: import("@playwright/test").Page,
+  trigger: import("@playwright/test").Locator,
+  optionName: string | RegExp,
+) {
+  await expect(trigger).toBeVisible({ timeout: 10_000 });
+  await trigger.press("Enter");
+  await page
+    .getByRole("menuitemradio", { name: optionName })
+    .click({ timeout: 5_000 });
+}
+
+// A runtime catalog with both a provider-selection runtime (buzz-agent) and a
+// CLI-login runtime (Claude Code) marked available, so Claude Code appears and
+// is selectable in the harness dropdown. Same shape the readiness spec uses.
+const CATALOG_WITH_CLAUDE = [
+  {
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    avatar_url: "",
+    availability: "available",
+    command: "buzz-agent",
+    binary_path: "/usr/local/bin/buzz-agent",
+    default_args: [],
+    mcp_command: "buzz-dev-mcp",
+    install_hint: "Ships with the Buzz desktop app.",
+    install_instructions_url: "https://github.com/block/buzz",
+    can_auto_install: false,
+    underlying_cli_path: null,
+  },
+  {
+    id: "claude",
+    label: "Claude Code",
+    avatar_url: "",
+    availability: "available",
+    command: "/usr/local/bin/claude-agent",
+    binary_path: "/usr/local/bin/claude-agent",
+    default_args: ["acp"],
+    mcp_command: null,
+    install_hint: "Install the Claude Code ACP adapter via npm.",
+    install_instructions_url:
+      "https://www.npmjs.com/package/@anthropic-ai/claude-agent-acp",
+    can_auto_install: true,
+    underlying_cli_path: "/usr/local/bin/claude",
+  },
+];
+
+// A runtime catalog with Codex marked available (the default catalog ships it
+// as `not_installed`). Codex is a CLI-login runtime — it drives its own
+// provider, so the definition dialog hides the provider picker for it. Used by
+// the Edit/Save-mode test to seed an editable Codex agent.
+const CATALOG_WITH_CODEX = [
+  {
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    avatar_url: "",
+    availability: "available",
+    command: "buzz-agent",
+    binary_path: "/usr/local/bin/buzz-agent",
+    default_args: [],
+    mcp_command: "buzz-dev-mcp",
+    install_hint: "Ships with the Buzz desktop app.",
+    install_instructions_url: "https://github.com/block/buzz",
+    can_auto_install: false,
+    underlying_cli_path: null,
+  },
+  {
+    id: "codex",
+    label: "Codex",
+    avatar_url: "",
+    availability: "available",
+    command: "/usr/local/bin/codex-agent",
+    binary_path: "/usr/local/bin/codex-agent",
+    default_args: ["acp"],
+    mcp_command: null,
+    install_hint: "The codex-acp adapter must be built from source.",
+    install_instructions_url: "https://github.com/openai/codex",
+    can_auto_install: false,
+    underlying_cli_path: "/usr/local/bin/codex",
+  },
+];
+
+// A catalog where every runtime is unavailable (not installed). With nothing
+// available, getDefaultPersonaRuntime returns null, so the definition dialog's
+// runtime auto-seed effect is a no-op and a runtime-less definition keeps its
+// empty runtime — the precondition for blankRuntimeModelProviderEditable.
+const CATALOG_NONE_AVAILABLE = [
+  {
+    id: "buzz-agent",
+    label: "Buzz Agent",
+    avatar_url: "",
+    availability: "not_installed",
+    command: "buzz-agent",
+    binary_path: null,
+    default_args: [],
+    mcp_command: "buzz-dev-mcp",
+    install_hint: "Ships with the Buzz desktop app.",
+    install_instructions_url: "https://github.com/block/buzz",
+    can_auto_install: false,
+    underlying_cli_path: null,
+  },
+  {
+    id: "goose",
+    label: "Goose",
+    avatar_url: "",
+    availability: "not_installed",
+    command: "goose",
+    binary_path: null,
+    default_args: [],
+    mcp_command: null,
+    install_hint: "Install Goose to use this runtime.",
+    install_instructions_url: "https://github.com/block/goose",
+    can_auto_install: false,
+    underlying_cli_path: null,
+  },
+];
 
 test.describe("global agent config screenshots", () => {
   test.use({ viewport: { width: 1280, height: 900 } });
@@ -53,7 +175,7 @@ test.describe("global agent config screenshots", () => {
     });
   });
 
-  // Shot 01: GlobalAgentConfigSettingsCard populated with provider + model +
+  // Shot 01: AgentDefaultsSettingsCard populated with provider + model +
   // env var — shows the "Agent defaults" card in the Agents view as it looks
   // when a user has set global defaults.
   test("01-global-agent-config-card-populated", async ({ page }) => {
@@ -65,15 +187,109 @@ test.describe("global agent config screenshots", () => {
       },
     });
 
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
     const card = page.getByTestId("settings-global-agent-config");
     await card.scrollIntoViewIfNeeded();
-    await settleAnimations(page);
+    await waitForAnimations(page);
 
     await card.screenshot({
       path: `${SHOTS}/01-global-agent-config-card-populated.png`,
     });
+  });
+
+  test("settings renders and saves the persisted preferred harness", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "claude",
+        provider: null,
+        model: null,
+        env_vars: {},
+      },
+      acpRuntimesCatalog: [...CATALOG_WITH_CLAUDE, CATALOG_WITH_CODEX[1]],
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const harness = page.getByTestId("global-agent-default-harness");
+    await expect(harness).toHaveText("Claude Code");
+    await expect(page.getByText("Provider", { exact: true })).toHaveCount(0);
+    await expect(page.locator("#global-agent-model")).toBeVisible();
+
+    // Make the form dirty, then return to Claude with no model override. The
+    // harness-native default keeps the now-actionable Save button enabled.
+    await harness.press("Enter");
+    await page.getByTestId("global-agent-default-harness-option-codex").click();
+    await harness.press("Enter");
+    await page
+      .getByTestId("global-agent-default-harness-option-claude")
+      .click();
+    await expect(page.getByTestId("global-agent-model")).toHaveText(
+      /Default model/,
+    );
+    await expect(
+      page.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+
+    await harness.press("Enter");
+    await page.getByTestId("global-agent-default-harness-option-codex").click();
+    const model = page.getByTestId("global-agent-model");
+    await model.click();
+    await page.getByTestId("global-agent-model-option-gpt-5.5[high]").click();
+    await page.getByRole("button", { name: "Save defaults" }).click();
+
+    const saved = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(saved).toMatchObject({ preferred_runtime: "codex" });
+  });
+
+  test("defaults honor credentials set in the harness config file", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "goose",
+        provider: "databricks_v2",
+        model: "goose-claude-4-6-opus",
+        env_vars: {},
+      },
+      runtimeFileConfigs: {
+        goose: {
+          provider: "databricks_v2",
+          model: "goose-claude-4-6-opus",
+          satisfiedEnvKeys: ["DATABRICKS_HOST"],
+        },
+      },
+    });
+
+    await openAiDefaultsSettings(page);
+
+    const advanced = page.getByTestId("global-agent-advanced-toggle");
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("global-agent-advanced-required-badge"),
+    ).toHaveCount(0);
+
+    await page.getByTestId("global-agent-model").click();
+    await page.getByTestId("global-agent-model-option-gpt-5.5").click();
+    await expect(
+      page.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+
+    await advanced.click();
+    await expect(page.getByTestId("env-vars-file-satisfied-key")).toHaveText(
+      "DATABRICKS_HOST",
+    );
   });
 
   test("02-create-global-provider-shows-top-level-api-key", async ({
@@ -88,7 +304,13 @@ test.describe("global agent config screenshots", () => {
     });
 
     await openCreateDialog(page);
+    await customizeAgentAi(page);
 
+    await expect(
+      page
+        .getByTestId("agent-custom-configuration-section")
+        .locator("#persona-runtime"),
+    ).toBeVisible();
     await expect(page.getByLabel("Anthropic API Key")).toBeVisible({
       timeout: 10_000,
     });
@@ -96,6 +318,27 @@ test.describe("global agent config screenshots", () => {
       page.getByRole("button", { name: "Advanced", exact: true }),
     ).toHaveAttribute("aria-expanded", "false");
     await expect(page.getByTestId("env-vars-required-key")).not.toBeVisible();
+
+    await waitForAnimations(page);
+    await page.getByRole("dialog").screenshot({
+      path: `${SHOTS}/02-create-custom-agent-configuration.png`,
+    });
+
+    const advanced = page.getByRole("button", {
+      name: "Advanced",
+      exact: true,
+    });
+    await selectDropdownOption(
+      page,
+      page.locator("#persona-llm-provider"),
+      "Databricks v2",
+    );
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByTestId("persona-advanced-required-badge"),
+    ).toHaveText("Required");
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
   });
 
   test("03-global-env-satisfies-required-key", async ({ page }) => {
@@ -108,6 +351,7 @@ test.describe("global agent config screenshots", () => {
     });
 
     await openCreateDialog(page);
+    await customizeAgentAi(page);
 
     await expect(page.getByLabel("Anthropic API Key")).toHaveAttribute(
       "placeholder",
@@ -149,15 +393,15 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
-    await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Anthropic (inherited from build)",
-    );
-    await expect(page.locator("#persona-model")).toHaveText(
-      "Inherit build default (claude-opus-4-8)",
-    );
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(
-      page.getByText("Using build defaults: effort high"),
+      defaults.getByText("Anthropic", { exact: true }),
     ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-8", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-model")).not.toBeVisible();
   });
 
   test("07-explicit-global-defaults-override-baked-labels", async ({
@@ -181,20 +425,25 @@ test.describe("global agent config screenshots", () => {
           value: "high",
           masked: false,
         },
+        {
+          key: "ANTHROPIC_API_KEY",
+          value: "sk-ant-baked-test",
+          masked: true,
+        },
       ],
     });
 
     await openCreateDialog(page);
 
-    await expect(page.locator("#persona-llm-provider")).toHaveText(
-      "Inherit global default (anthropic)",
-    );
-    await expect(page.locator("#persona-model")).toHaveText(
-      "Inherit global default (claude-opus-4-5)",
-    );
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
     await expect(
-      page.getByText("Using global defaults: effort low"),
+      defaults.getByText("Anthropic", { exact: true }),
     ).toBeVisible();
+    await expect(
+      defaults.getByText("claude-opus-4-5", { exact: true }),
+    ).toBeVisible();
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.locator("#persona-model")).not.toBeVisible();
   });
 
   // Shot 04: Create gate BLOCKED — no per-agent provider, no global provider
@@ -210,12 +459,267 @@ test.describe("global agent config screenshots", () => {
     await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
       timeout: 10_000,
     });
-    await settleAnimations(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Global defaults not set");
+    await expect(defaults.getByText("Harness", { exact: true })).toHaveCount(0);
+    await expect(defaults.getByText("Provider", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
+
+    const setDefaults = defaults.getByRole("button", {
+      name: "Set",
+    });
+    await expect(setDefaults).toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await setDefaults.click();
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    await expect(defaultsDialog).toBeVisible();
+    await expect(
+      defaultsDialog.getByTestId("global-agent-config-fields"),
+    ).toBeVisible();
+    await expect(defaultsDialog.getByTestId("global-agent-model")).toHaveCount(
+      0,
+    );
+
+    const harness = defaultsDialog.getByTestId("global-agent-default-harness");
+    await expect(harness).toHaveText("Buzz Agent");
+    const provider = defaultsDialog.getByTestId("global-agent-provider");
+    await expect(provider).toBeVisible();
+    await waitForAnimations(page);
+    const providerHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+
+    await provider.click();
+    await page.getByTestId("global-agent-provider-option-anthropic").click();
+    await expect(
+      defaultsDialog.getByTestId("global-agent-model"),
+    ).toBeVisible();
+    for (const field of [
+      harness,
+      provider,
+      defaultsDialog.getByTestId("global-agent-model"),
+      defaultsDialog.getByTestId("global-agent-thinking-effort-select"),
+    ]) {
+      await expect(field).toHaveClass(/h-11/);
+      await expect(field).toHaveClass(/rounded-xl/);
+      await expect(field).toHaveClass(/bg-muted\/40/);
+      await expect(field).toHaveClass(/shadow-none/);
+    }
+    await waitForAnimations(page);
+    const configuredHeight = (await defaultsDialog.boundingBox())?.height ?? 0;
+    expect(configuredHeight).toBeGreaterThan(providerHeight);
+    await expect(
+      defaultsDialog.getByTestId("global-agent-config-fields"),
+    ).not.toHaveClass(/bg-muted\/20/);
+    const harnessBox = await defaultsDialog
+      .getByTestId("global-agent-default-harness")
+      .boundingBox();
+    const providerBox = await defaultsDialog
+      .getByTestId("global-agent-provider")
+      .boundingBox();
+    expect(harnessBox?.x).toBe(providerBox?.x);
+    expect(harnessBox?.width).toBe(providerBox?.width);
+    await waitForAnimations(page);
+    await defaultsDialog.screenshot({
+      path: `${SHOTS}/04-global-defaults-dialog-flat.png`,
+    });
+    const advanced = defaultsDialog.getByTestId("global-agent-advanced-toggle");
+    await provider.click();
+    await page
+      .getByTestId("global-agent-provider-option-databricks_v2")
+      .click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "false");
+    const saveDefaults = defaultsDialog.getByRole("button", {
+      name: "Save defaults",
+    });
+    await expect(
+      defaultsDialog.getByTestId("global-agent-advanced-required-badge"),
+    ).toHaveText("Required");
+    await expect(saveDefaults).toBeDisabled();
+    await advanced.click();
+    await expect(advanced).toHaveAttribute("aria-expanded", "true");
+    await defaultsDialog
+      .getByLabel("Value for DATABRICKS_HOST")
+      .fill("https://databricks.example.test");
+    await expect(saveDefaults).toBeEnabled();
+    await defaultsDialog
+      .getByRole("button", {
+        name: "Close",
+      })
+      .click();
+    await page.getByRole("button", { name: "Discard changes" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    await waitForAnimations(page);
 
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
       path: `${SHOTS}/04-create-blocked-no-provider-no-global.png`,
     });
+  });
+
+  test("unset defaults persist the visible Buzz Agent fallback", async ({
+    page,
+  }) => {
+    await installMockBridge(page);
+    await openCreateDialog(page);
+    await page
+      .getByTestId("agent-ai-defaults-notice")
+      .getByRole("button", { name: "Set" })
+      .click();
+
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    await expect(
+      defaultsDialog.getByTestId("global-agent-default-harness"),
+    ).toHaveText("Buzz Agent");
+
+    await defaultsDialog.getByTestId("global-agent-provider").click();
+    await page.getByTestId("global-agent-provider-option-anthropic").click();
+    await defaultsDialog.getByLabel("Anthropic API Key").fill("sk-ant-test");
+    await expect(
+      defaultsDialog.getByRole("button", { name: "Save defaults" }),
+    ).toBeEnabled();
+    await defaultsDialog.getByRole("button", { name: "Save defaults" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    const saved = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(saved).toMatchObject({
+      preferred_runtime: "buzz-agent",
+      provider: "anthropic",
+    });
+  });
+
+  test("create defaults follow a preferred harness saved while open", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CLAUDE,
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
+      },
+    });
+    await openCreateDialog(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Buzz Agent");
+    await defaults
+      .getByRole("button", { name: "Edit global defaults" })
+      .click();
+
+    const defaultsDialog = page.getByTestId("agent-ai-defaults-dialog");
+    const harness = defaultsDialog.getByTestId("global-agent-default-harness");
+    await harness.press("Enter");
+    await page
+      .getByTestId("global-agent-default-harness-option-claude")
+      .click();
+    await defaultsDialog.getByRole("button", { name: "Save defaults" }).click();
+    await expect(defaultsDialog).not.toBeVisible();
+
+    const harnessDefaults = page.getByTestId("agent-harness-defaults-notice");
+    await expect(harnessDefaults).toContainText("Claude Code");
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();
+    await page.getByTestId("persona-dialog-submit").click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const log = (
+            window as Window & {
+              __BUZZ_E2E_COMMAND_LOG__?: Array<{
+                command: string;
+                payload: { input?: Record<string, unknown> };
+              }>;
+            }
+          ).__BUZZ_E2E_COMMAND_LOG__;
+          const createPayload = log?.find(
+            (entry) => entry.command === "create_persona",
+          )?.payload.input;
+          return createPayload?.runtime;
+        }),
+      )
+      .toBe("claude");
+  });
+
+  test("missing global credentials show the unset defaults notice", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        preferred_runtime: "buzz-agent",
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: {},
+      },
+    });
+    await openCreateDialog(page);
+
+    const defaults = page.getByTestId("agent-ai-defaults-notice");
+    await expect(defaults).toContainText("Global defaults not set");
+    await expect(defaults.getByRole("button", { name: "Set" })).toBeVisible();
+    await expect(defaults.getByText("Harness", { exact: true })).toHaveCount(0);
+    await expect(defaults.getByText("Provider", { exact: true })).toHaveCount(
+      0,
+    );
+    await expect(defaults.getByText("Model", { exact: true })).toHaveCount(0);
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
+  });
+
+  test("create exposes setup guidance when no harness is available", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_NONE_AVAILABLE,
+    });
+    await openCreateDialog(page);
+
+    const customSection = page.getByTestId(
+      "agent-custom-configuration-section",
+    );
+    const harness = customSection.locator("#persona-runtime");
+    await expect(harness).toBeVisible();
+    await expect(harness).toContainText("Choose a harness");
+
+    await selectDropdownOption(page, harness, "Buzz Agent (not installed)");
+    await expect(
+      customSection
+        .locator("p")
+        .filter({ hasText: "Buzz Agent is not installed." }),
+    ).toContainText(
+      "Buzz Agent is not installed. Visit Settings > Agents to set it up.",
+    );
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled();
+  });
+
+  test("create with a missing name has no footer message", async ({ page }) => {
+    await installMockBridge(page);
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+    await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
   });
 
   // Shot 05: Create gate ENABLED — global provider = anthropic provides a
@@ -231,15 +735,249 @@ test.describe("global agent config screenshots", () => {
 
     await openCreateDialog(page);
 
+    const defaultsSection = page.getByTestId(
+      "agent-defaults-configuration-section",
+    );
+    await expect(defaultsSection.locator("#persona-runtime")).toHaveCount(0);
+    await expect(
+      defaultsSection.getByTestId("agent-ai-defaults-notice"),
+    ).toBeVisible();
+    await expect(
+      defaultsSection.getByText("Harness", { exact: true }),
+    ).toBeVisible();
+    await expect(
+      defaultsSection.getByText("Buzz Agent", { exact: true }),
+    ).toBeVisible();
+
     // Global provider satisfies the provider-default rule → submit enabled.
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 10_000,
     });
-    await settleAnimations(page);
+    // The reason is null exactly when the form can submit — no footer reason.
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await waitForAnimations(page);
 
     const dialog = page.getByRole("dialog");
     await dialog.screenshot({
       path: `${SHOTS}/05-create-enabled-with-global-provider.png`,
+    });
+  });
+
+  // Shot 09: CLI-login runtime (Claude Code / Codex) drives its own provider,
+  // so the provider picker is intentionally hidden. This is Ian's regression:
+  // before the provider-aware gate, the hidden provider left the button
+  // permanently disabled with no explanation. Now the provider is not required,
+  // the button is enabled, and — critically — no spurious provider reason is
+  // shown in the footer. Create and Save share this rendering path.
+  test("09-cli-login-runtime-enabled-no-reason", async ({ page }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CLAUDE,
+    });
+
+    await openCreateDialog(page);
+
+    // Harness selection belongs to the per-agent customization flow.
+    await customizeAgentAi(page);
+    await selectDropdownOption(
+      page,
+      page.locator("#persona-runtime"),
+      "Claude Code",
+    );
+    await page.getByRole("tab", { name: "Use harness defaults" }).click();
+
+    // Provider picker hidden — the runtime drives its own provider.
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    // The hidden provider must not block submit, and must not surface a reason.
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await waitForAnimations(page);
+
+    const dialog = page.getByRole("dialog");
+    await dialog.screenshot({
+      path: `${SHOTS}/09-cli-login-runtime-enabled-no-reason.png`,
+    });
+  });
+
+  // Shot 10: the ORIGINAL defect — Ian's "Save button stays disabled after
+  // editing an agent." This drives the real EDIT/Save path (not create): a
+  // persona-linked Codex agent with an explicit custom model and no provider is
+  // opened via the Agents view → profile → Edit affordance, which mounts
+  // AgentDefinitionDialog in edit mode (id present in initialValues, "Save
+  // changes" label). Before the provider-aware gate, the hidden Codex provider
+  // left Save permanently disabled on a value the user could never set. Now:
+  // provider picker hidden, Save enabled, and no submit-block reason. Create
+  // and Save share this rendering path, but the defect was Save-specific, so
+  // this exercises Save directly.
+  test("10-edit-codex-custom-model-save-enabled-no-reason", async ({
+    page,
+  }) => {
+    const PERSONA_ID = "persona-codex-edit-e2e";
+    await installMockBridge(page, {
+      acpRuntimesCatalog: CATALOG_WITH_CODEX,
+      managedAgents: [
+        {
+          pubkey: TEST_IDENTITIES.tyler.pubkey,
+          name: "Codex Editor",
+          personaId: PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      personas: [
+        {
+          id: PERSONA_ID,
+          displayName: "Codex Editor",
+          systemPrompt: "You are the Codex edit-mode e2e persona.",
+          // CLI-login runtime with an explicit custom model and NO provider —
+          // the exact shape that used to pin Save disabled.
+          runtime: "codex",
+          model: "gpt-5-codex",
+          provider: null,
+        },
+      ],
+    });
+
+    // Agents view → persona-grouped agent card → Edit quick action.
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    const agentButton = page.getByRole("button", {
+      name: "Codex Editor agent profile",
+    });
+    await expect(agentButton).toBeVisible({ timeout: 10_000 });
+    await agentButton.click();
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    // The definition dialog opens in EDIT mode ("Save changes"), seeded from
+    // the persona — confirm it's the edit path, not create.
+    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.locator("#persona-display-name")).toHaveValue(
+      "Codex Editor",
+    );
+    await expect(page.getByTestId("persona-dialog-submit")).toHaveText(
+      /Save changes/,
+    );
+
+    // The core assertions: Codex hides the provider picker, so the hidden
+    // provider must NOT block Save and must NOT surface a reason.
+    await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
+    await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await waitForAnimations(page);
+
+    const dialog = page.getByRole("dialog");
+    await dialog.screenshot({
+      path: `${SHOTS}/10-edit-codex-custom-model-save-enabled-no-reason.png`,
+    });
+  });
+
+  // Shot 11: the inverse of Ian's fix, and wesbillman's blocking review point.
+  // A runtime-LESS legacy/builtin definition (no runtime, but a saved model)
+  // still EXPOSES the provider picker via blankRuntimeModelProviderEditable, so
+  // an empty provider must keep Save DISABLED. The gate must key off the field's
+  // visibility (runtimeCanChooseLlmProvider), not the raw runtime capability —
+  // otherwise Save persists `provider: undefined` despite the visible picker.
+  // A global provider/model default keeps localMode satisfied, so the ONLY thing
+  // that can block Save here is the Customize-pair provider gate (step 7), which
+  // is exactly what this regression pins.
+  test("11-edit-runtime-less-provider-required-save-blocked", async ({
+    page,
+  }) => {
+    const PERSONA_ID = "persona-runtime-less-edit-e2e";
+    await installMockBridge(page, {
+      // No runtime is available, so getDefaultPersonaRuntime returns null and
+      // the dialog does NOT auto-seed a runtime on open — the runtime-less
+      // definition stays runtime-less, which is the only state where
+      // blankRuntimeModelProviderEditable exposes the provider picker.
+      acpRuntimesCatalog: CATALOG_NONE_AVAILABLE,
+      // Global defaults satisfy localMode, so any block is the pair gate alone.
+      globalAgentConfig: {
+        provider: "anthropic",
+        model: "claude-opus-4-5",
+        env_vars: { ANTHROPIC_API_KEY: "sk-ant-global-value" },
+      },
+      managedAgents: [
+        {
+          pubkey: TEST_IDENTITIES.tyler.pubkey,
+          name: "Legacy Editor",
+          personaId: PERSONA_ID,
+          status: "stopped",
+          channelNames: ["agents"],
+        },
+      ],
+      personas: [
+        {
+          id: PERSONA_ID,
+          displayName: "Legacy Editor",
+          systemPrompt: "You are the runtime-less edit-mode e2e persona.",
+          // Runtime-less definition with a saved model and NO provider — the
+          // picker is editable-without-runtime, so the provider stays required.
+          runtime: null,
+          model: "claude-opus-4-5",
+          provider: null,
+        },
+      ],
+    });
+
+    // Agents view → persona-grouped agent card → Edit quick action.
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    const agentButton = page.getByRole("button", {
+      name: "Legacy Editor agent profile",
+    });
+    await expect(agentButton).toBeVisible({ timeout: 10_000 });
+    await agentButton.click();
+    await expect(page.getByTestId("user-profile-panel")).toBeVisible({
+      timeout: 10_000,
+    });
+    await page.getByTestId("user-profile-edit-agent").click();
+
+    // Confirm the real EDIT dialog, seeded from the persona.
+    await expect(page.getByTestId("persona-dialog")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.locator("#persona-display-name")).toHaveValue(
+      "Legacy Editor",
+    );
+    await expect(page.getByTestId("persona-dialog-submit")).toHaveText(
+      /Save changes/,
+    );
+
+    // The provider picker IS visible (runtime-less editable definition) …
+    await expect(page.locator("#persona-llm-provider")).toBeVisible({
+      timeout: 10_000,
+    });
+    // … so the empty provider must block Save …
+    await expect(page.getByTestId("persona-dialog-submit")).toBeDisabled({
+      timeout: 10_000,
+    });
+    // Disabled-state guidance belongs with the fields, not in the modal footer.
+    await expect(page.getByTestId("persona-dialog-submit-reason")).toHaveCount(
+      0,
+    );
+
+    await waitForAnimations(page);
+
+    const dialog = page.getByRole("dialog");
+    await dialog.screenshot({
+      path: `${SHOTS}/11-edit-runtime-less-provider-required-save-blocked.png`,
     });
   });
 });

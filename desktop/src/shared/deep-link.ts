@@ -1,21 +1,18 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { toast } from "sonner";
+import { invoke } from "@tauri-apps/api/core";
+import type { StartCommunityOnboardingInput } from "@/features/onboarding/communityOnboarding";
 
-import {
-  inviteErrorMessage,
-  isInviteExpiredError,
-} from "@/shared/api/inviteHelpers";
-import { claimInvite } from "@/shared/api/invites";
-import type { Community } from "@/features/communities/types";
-import {
-  deriveCommunityName,
-  normalizeRelayUrl,
-} from "@/features/communities/communityStorage";
+export type AddCommunityDeepLinkPayload = {
+  relayUrl: string;
+  name?: string;
+};
 
 export interface DeepLinkDeps {
-  addCommunity: (community: Community) => string;
-  switchCommunity: (id: string) => void;
-  reconnectCommunity: () => void;
+  startCommunityOnboarding: (input: StartCommunityOnboardingInput) => boolean;
+  openAddCommunity: (
+    payload: AddCommunityDeepLinkPayload & { requestId: string },
+  ) => boolean;
+  onAddCommunityAvailable: (listener: () => void) => () => void;
 }
 
 /**
@@ -38,7 +35,7 @@ export type NostrBindDeepLinkPayload = {
   version: "1";
   origin: string;
   expiresAt: string;
-  returnMode: "clipboard";
+  returnMode: "clipboard" | "browser_fragment_v1";
   callbackUrl?: string;
 };
 
@@ -49,7 +46,53 @@ export type NostrBindDeepLinkPayload = {
 export type JoinDeepLinkPayload = {
   relayUrl: string;
   code: string;
+  policyReceipt: string | null;
 };
+
+type PendingCommunityDeepLink = {
+  id: string;
+  kind: "connect" | "join" | "add-community";
+  relayUrl: string;
+  code: string | null;
+  name: string | null;
+  policyReceipt: string | null;
+};
+
+function acceptPendingCommunityDeepLink(
+  pending: PendingCommunityDeepLink,
+  deps: DeepLinkDeps,
+) {
+  const accepted =
+    pending.kind === "add-community"
+      ? deps.openAddCommunity({
+          requestId: pending.id,
+          relayUrl: pending.relayUrl,
+          name: pending.name ?? undefined,
+        })
+      : deps.startCommunityOnboarding({
+          source:
+            pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
+          relayUrl: pending.relayUrl,
+          inviteCode: pending.code ?? undefined,
+          policyReceipt: pending.policyReceipt ?? undefined,
+        });
+  return accepted
+    ? invoke<boolean>("acknowledge_pending_community_deep_link", {
+        id: pending.id,
+      })
+    : Promise.resolve(false);
+}
+
+async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
+  while (true) {
+    const pending = await invoke<PendingCommunityDeepLink | null>(
+      "take_pending_community_deep_link",
+    );
+    if (!pending) return;
+    if (!(await acceptPendingCommunityDeepLink(pending, deps))) return;
+    if (pending.kind === "add-community") return;
+  }
+}
 
 /**
  * Register listeners for deep-link events emitted by the Rust backend.
@@ -67,52 +110,46 @@ export type JoinDeepLinkPayload = {
  * because it needs to dispatch into the router which only exists below the
  * `RouterProvider` in the component tree.
  */
-export function listenForDeepLinks(deps: DeepLinkDeps): Promise<UnlistenFn> {
-  const addAndSwitch = (rawRelayUrl: string) => {
-    const relayUrl = normalizeRelayUrl(rawRelayUrl);
-    const name = deriveCommunityName(relayUrl);
-    const id = deps.addCommunity({
-      id: crypto.randomUUID(),
-      name,
-      relayUrl,
-      addedAt: new Date().toISOString(),
-    });
-    deps.switchCommunity(id);
-    // If addCommunity returned the already-active community (same relay URL),
-    // switchCommunity is a no-op — force re-init so the connection refreshes.
-    deps.reconnectCommunity();
-    return name;
+export async function listenForDeepLinks(
+  deps: DeepLinkDeps,
+): Promise<UnlistenFn> {
+  let drainRunning = false;
+  let drainRequested = false;
+  const drain = () => {
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          await drainPendingCommunityDeepLinks(deps);
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending community deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
   };
-
-  const connectPromise = listen<string>("deep-link-connect", (event) => {
-    const name = addAndSwitch(event.payload);
-    toast.success(`Connected to ${name}`);
-  });
-
-  const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", (event) => {
-    const { relayUrl, code } = event.payload;
-    void claimInvite(relayUrl, code)
-      .then((result) => {
-        const name = addAndSwitch(relayUrl);
-        toast.success(
-          result.status === "already_member"
-            ? `Already a member of ${name}`
-            : `Joined ${name}`,
-        );
-      })
-      .catch((error: unknown) => {
-        const message = inviteErrorMessage(error);
-        toast.error(
-          isInviteExpiredError(error)
-            ? "This invite link has expired — ask for a new one."
-            : `Couldn't accept the invite: ${message}`,
-        );
-      });
-  });
-
-  return Promise.all([connectPromise, joinPromise]).then((unlistens) => () => {
+  const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
+  const connectPromise = listen<string>("deep-link-connect", drain);
+  const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
+  const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
+    "deep-link-add-community",
+    drain,
+  );
+  const unlistens = await Promise.all([
+    connectPromise,
+    joinPromise,
+    addCommunityPromise,
+  ]);
+  drain();
+  return () => {
+    stopAvailabilityListener();
     for (const unlisten of unlistens) unlisten();
-  });
+  };
 }
 
 /**

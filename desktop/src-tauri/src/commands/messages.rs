@@ -1,6 +1,10 @@
 use nostr::{Event, EventId, Keys, PublicKey};
 use tauri::{AppHandle, State};
 
+mod forum;
+
+use forum::{forum_message_from_event, forum_reply_from_event};
+
 use crate::{
     app_state::AppState,
     events,
@@ -8,7 +12,7 @@ use crate::{
     models::{
         FeedItemInfo, FeedMeta, FeedResponse, FeedSections, ForumMessageInfo, ForumPostsResponse,
         ForumThreadReplyInfo, ForumThreadResponse, SearchResponse, SendChannelMessageResponse,
-        ThreadRepliesResponse, ThreadSummary,
+        ThreadRepliesResponse,
     },
     nostr_convert,
     relay::{query_relay, submit_event, submit_event_with_keys},
@@ -618,12 +622,40 @@ async fn find_managed_agent_channel_message_by_marker(
 
 fn marker_author_for_scope<'a>(
     marker_scope: Option<&str>,
-    agent_pubkey: &'a str,
-) -> Option<&'a str> {
+    agent_pubkey: Option<&'a str>,
+) -> Result<Option<&'a str>, String> {
     match marker_scope {
-        Some("channel") => None,
-        _ => Some(agent_pubkey),
+        Some("channel") => Ok(None),
+        Some("agent") | None => agent_pubkey
+            .map(Some)
+            .ok_or_else(|| "agent pubkey is required for agent-scoped markers".to_string()),
+        Some(scope) => Err(format!("unsupported marker scope: {scope}")),
     }
+}
+
+#[tauri::command]
+pub async fn has_managed_agent_channel_message_marker(
+    channel_id: String,
+    marker: String,
+    agent_pubkey: Option<String>,
+    marker_scope: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    uuid::Uuid::parse_str(&channel_id)
+        .map_err(|_| format!("invalid channel UUID: {channel_id}"))?;
+    let marker = marker.trim();
+    if marker.is_empty() {
+        return Err("message marker is required".into());
+    }
+    let agent_pubkey = agent_pubkey
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let marker_author = marker_author_for_scope(marker_scope.as_deref(), agent_pubkey)?;
+    find_managed_agent_channel_message_by_marker(&state, marker_author, &channel_id, marker)
+        .await
+        .map(|event| event.is_some())
 }
 
 fn stored_managed_agent_auth_tag(auth_tag: Option<&str>) -> Option<String> {
@@ -659,6 +691,27 @@ fn managed_agent_submission_auth_tag(
     legacy_managed_agent_auth_tag(&owner_keys, agent_pubkey)
 }
 
+fn build_managed_agent_channel_message(
+    channel_id: uuid::Uuid,
+    content: &str,
+    thread_ref: Option<&events::ThreadRef>,
+    mention_pubkeys: &[String],
+    client_tags: &[Vec<String>],
+) -> Result<nostr::EventBuilder, String> {
+    let mention_refs: Vec<&str> = mention_pubkeys.iter().map(String::as_str).collect();
+    events::build_message_with_client_tags(
+        channel_id,
+        content,
+        thread_ref,
+        &mention_refs,
+        &[],
+        &[],
+        &[],
+        client_tags,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn send_managed_agent_channel_message(
     agent_pubkey: String,
@@ -666,6 +719,9 @@ pub async fn send_managed_agent_channel_message(
     content: String,
     marker: Option<String>,
     marker_scope: Option<String>,
+    mention_pubkeys: Option<Vec<String>>,
+    parent_event_id: Option<String>,
+    additional_markers: Option<Vec<String>>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<SendChannelMessageResponse, String> {
@@ -702,11 +758,15 @@ pub async fn send_managed_agent_channel_message(
     }
     let submission_auth_tag =
         managed_agent_submission_auth_tag(&record, &state, &keys.public_key())?;
+    let thread_ref = match parent_event_id.as_deref() {
+        Some(parent_id) => Some(resolve_thread_ref(parent_id, &state).await?),
+        None => None,
+    };
 
     if let Some(marker) = marker.as_deref() {
         if let Some(existing) = find_managed_agent_channel_message_by_marker(
             &state,
-            marker_author_for_scope(marker_scope.as_deref(), &record.pubkey),
+            marker_author_for_scope(marker_scope.as_deref(), Some(&record.pubkey))?,
             &channel_id,
             marker,
         )
@@ -714,26 +774,34 @@ pub async fn send_managed_agent_channel_message(
         {
             return Ok(SendChannelMessageResponse {
                 event_id: existing.id.to_hex(),
-                parent_event_id: None,
-                root_event_id: None,
-                depth: 0,
+                parent_event_id: thread_ref
+                    .as_ref()
+                    .map(|reference| reference.parent_event_id.to_hex()),
+                root_event_id: thread_ref
+                    .as_ref()
+                    .map(|reference| reference.root_event_id.to_hex()),
+                depth: if thread_ref.is_some() { 1 } else { 0 },
                 created_at: existing.created_at.as_secs() as i64,
             });
         }
     }
 
-    let client_tags = marker
+    let mut client_tags = marker
         .as_deref()
         .map(|marker| vec![vec!["client".to_string(), marker.to_string()]])
         .unwrap_or_default();
-    let builder = events::build_message_with_client_tags(
+    for marker in additional_markers.unwrap_or_default() {
+        let marker = marker.trim();
+        if !marker.is_empty() {
+            client_tags.push(vec!["client".to_string(), marker.to_string()]);
+        }
+    }
+    let mentions = mention_pubkeys.unwrap_or_default();
+    let builder = build_managed_agent_channel_message(
         channel_uuid,
         trimmed,
-        None,
-        &[],
-        &[],
-        &[],
-        &[],
+        thread_ref.as_ref(),
+        &mentions,
         &client_tags,
     )?;
     let result =
@@ -741,155 +809,11 @@ pub async fn send_managed_agent_channel_message(
 
     Ok(SendChannelMessageResponse {
         event_id: result.event_id,
-        parent_event_id: None,
-        root_event_id: None,
-        depth: 0,
+        parent_event_id: parent_event_id.clone(),
+        root_event_id: thread_ref.map(|reference| reference.root_event_id.to_hex()),
+        depth: if parent_event_id.is_some() { 1 } else { 0 },
         created_at: chrono::Utc::now().timestamp(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn marker_author_scope_defaults_to_agent() {
-        assert_eq!(
-            marker_author_for_scope(None, "agent-pubkey"),
-            Some("agent-pubkey")
-        );
-        assert_eq!(
-            marker_author_for_scope(Some("agent"), "agent-pubkey"),
-            Some("agent-pubkey")
-        );
-        assert_eq!(
-            marker_author_for_scope(Some("unknown"), "agent-pubkey"),
-            Some("agent-pubkey")
-        );
-    }
-
-    #[test]
-    fn marker_author_scope_can_dedupe_across_channel() {
-        assert_eq!(
-            marker_author_for_scope(Some("channel"), "agent-pubkey"),
-            None
-        );
-    }
-
-    #[test]
-    fn search_messages_filter_requests_prefix_mode_for_topbar_typeahead() {
-        let filter = build_search_messages_filter("  pro  ", 12, Some("channel-1"));
-
-        assert_eq!(filter["search"], serde_json::json!("pro"));
-        assert_eq!(filter["search_mode"], serde_json::json!("prefix"));
-        assert_eq!(filter["limit"], serde_json::json!(12));
-        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
-    }
-
-    #[test]
-    fn channel_messages_before_filter_sends_before_id_the_relay_reads() {
-        // The relay bridge's `extract_before_id` reads the composite tiebreak
-        // from `before_id`. If this filter sent the id under any other key (an
-        // earlier cut used `n`), the relay would silently drop the tiebreak and
-        // the dense-second keyset would degrade to a bare inclusive `until` —
-        // re-returning the same page forever. Pin the field name here so the
-        // client/relay contract can't drift without a red test (the Playwright
-        // mock reimplements the keyset in JS and cannot catch this).
-        let filter =
-            build_channel_messages_before_filter("channel-1", 1_700_000_000, Some("ab"), 200);
-
-        assert_eq!(filter["until"], serde_json::json!(1_700_000_000));
-        assert_eq!(filter["before_id"], serde_json::json!("ab"));
-        assert_eq!(filter["limit"], serde_json::json!(200));
-        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
-        assert!(
-            !filter.contains_key("n"),
-            "tiebreak must be `before_id`, not the `n` alias the relay ignores"
-        );
-    }
-
-    #[test]
-    fn thread_replies_filter_carries_non_p_gated_kinds_to_clear_the_gate() {
-        // The relay bridge p-gates EVERY filter before routing
-        // (`p_gated_filters_authorized`): a kindless filter "could match" a
-        // p-gated kind, so it demands a `#p` tag we don't send -> HTTP 403,
-        // before the thread-subtree query runs. The headline Lane-1 fix
-        // (`useThreadReplies` closing the descendant gap) then fails on every
-        // call against a real relay. So the thread filter MUST carry `kinds`,
-        // and every kind MUST be non-p-gated (else the gate still fires). The
-        // Playwright mock does not model p-gating, so this unit test is the
-        // only guard against the client/relay auth contract drifting.
-        let filter = build_thread_replies_filter("root-hex", Some("channel-1"), 64, 200, None);
-
-        let kinds = filter
-            .get("kinds")
-            .and_then(|v| v.as_array())
-            .expect("thread filter must carry `kinds` so the p-gate passes");
-        assert!(!kinds.is_empty(), "kinds must be non-empty");
-        for kind in kinds {
-            let k = kind.as_u64().expect("kind is a number") as u32;
-            assert!(
-                !buzz_core_pkg::kind::P_GATED_KINDS.contains(&k),
-                "kind {k} is p-gated; a p-gated kind in the filter re-triggers the \
-                 403 that this fix exists to prevent"
-            );
-        }
-        assert_eq!(filter["#e"], serde_json::json!(["root-hex"]));
-        assert_eq!(filter["depth_limit"], serde_json::json!(64));
-        assert_eq!(filter["#h"], serde_json::json!(["channel-1"]));
-    }
-
-    #[test]
-    fn thread_replies_filter_pages_with_composite_cursor() {
-        // When a cursor is supplied, both the timestamp and the event-id
-        // tiebreak must be emitted (`thread_cursor` + `thread_cursor_id`), else
-        // paging degrades to timestamp-only and drops same-second replies.
-        let cursor = crate::models::ThreadCursor {
-            created_at: 1_700_000_000,
-            event_id: "abcd".to_string(),
-        };
-        let filter = build_thread_replies_filter("root-hex", None, 64, 200, Some(&cursor));
-        assert_eq!(filter["thread_cursor"], serde_json::json!(1_700_000_000));
-        assert_eq!(filter["thread_cursor_id"], serde_json::json!("abcd"));
-        assert!(
-            !filter.contains_key("#h"),
-            "no channel_id -> no #h scope in the filter"
-        );
-    }
-
-    #[test]
-    fn stored_managed_agent_auth_tag_trims_blank_values() {
-        assert_eq!(
-            stored_managed_agent_auth_tag(Some("  [\"auth\",\"owner\",\"\",\"sig\"]  ")),
-            Some("[\"auth\",\"owner\",\"\",\"sig\"]".to_string())
-        );
-        assert_eq!(stored_managed_agent_auth_tag(Some("   ")), None);
-        assert_eq!(stored_managed_agent_auth_tag(None), None);
-    }
-
-    #[test]
-    fn legacy_managed_agent_auth_tag_verifies_for_agent_pubkey() {
-        let owner_keys = Keys::generate();
-        let agent_keys = Keys::generate();
-
-        let tag = legacy_managed_agent_auth_tag(&owner_keys, &agent_keys.public_key())
-            .expect("legacy auth tag should compute")
-            .expect("legacy auth tag should be present");
-
-        let owner = buzz_sdk_pkg::nip_oa::verify_auth_tag(&tag, &agent_keys.public_key())
-            .expect("legacy auth tag should verify");
-        assert_eq!(owner, owner_keys.public_key());
-    }
-
-    #[test]
-    fn legacy_managed_agent_auth_tag_skips_self_attestation() {
-        let owner_keys = Keys::generate();
-
-        let tag = legacy_managed_agent_auth_tag(&owner_keys, &owner_keys.public_key())
-            .expect("self-attestation should be skipped");
-
-        assert_eq!(tag, None);
-    }
 }
 
 #[tauri::command]
@@ -953,6 +877,10 @@ pub async fn edit_message(
     content: String,
     media_tags: Vec<Vec<String>>,
     emoji_tags: Option<Vec<Vec<String>>>,
+    // Pubkeys of mentions *newly added* by this edit (the composer diffs the
+    // edited body against the original). Only these get a `p` tag, so a typo-fix
+    // edit that leaves the mention set unchanged never re-wakes anyone.
+    mention_pubkeys: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let channel_uuid = uuid::Uuid::parse_str(&channel_id)
@@ -965,8 +893,16 @@ pub async fn edit_message(
         return Err("edit must have content or attachments".into());
     }
     let emoji = emoji_tags.unwrap_or_default();
-    let builder =
-        events::build_message_edit(channel_uuid, target_eid, trimmed, &media_tags, &emoji)?;
+    let mentions = mention_pubkeys.unwrap_or_default();
+    let mention_refs: Vec<&str> = mentions.iter().map(|s| s.as_str()).collect();
+    let builder = events::build_message_edit(
+        channel_uuid,
+        target_eid,
+        trimmed,
+        &media_tags,
+        &emoji,
+        &mention_refs,
+    )?;
     submit_event(builder, &state).await?;
     Ok(())
 }
@@ -1017,65 +953,6 @@ fn feed_item_from_event(ev: &nostr::Event, category: &str) -> FeedItemInfo {
         category: category.to_string(),
     }
 }
-
-fn forum_message_from_event(ev: &nostr::Event, channel_id: &str) -> ForumMessageInfo {
-    ForumMessageInfo {
-        event_id: ev.id.to_hex(),
-        pubkey: ev.pubkey.to_hex(),
-        content: ev.content.clone(),
-        kind: ev.kind.as_u16() as u32,
-        created_at: ev.created_at.as_secs() as i64,
-        channel_id: channel_id.to_string(),
-        tags: tags_to_vec(ev),
-        thread_summary: Some(ThreadSummary {
-            reply_count: 0,
-            descendant_count: 0,
-            last_reply_at: None,
-            participants: Vec::new(),
-        }),
-        reactions: serde_json::Value::Null,
-    }
-}
-
-fn forum_reply_from_event(
-    ev: &nostr::Event,
-    channel_id: &str,
-    root_event_id: &str,
-) -> ForumThreadReplyInfo {
-    // Walk e-tags for NIP-10 parent/root markers.
-    let (mut parent_id, mut explicit_root) = (None, None);
-    for t in ev.tags.iter() {
-        let s = t.as_slice();
-        if s.len() >= 2 && s[0] == "e" {
-            match s.get(3).map(|x| x.as_str()) {
-                Some("root") => explicit_root = Some(s[1].clone()),
-                Some("reply") => parent_id = Some(s[1].clone()),
-                _ => {
-                    if parent_id.is_none() {
-                        parent_id = Some(s[1].clone());
-                    }
-                }
-            }
-        }
-    }
-    let parent = parent_id
-        .clone()
-        .unwrap_or_else(|| root_event_id.to_string());
-    let root = explicit_root.unwrap_or_else(|| root_event_id.to_string());
-    let depth = if parent == root { 1 } else { 2 };
-
-    ForumThreadReplyInfo {
-        event_id: ev.id.to_hex(),
-        pubkey: ev.pubkey.to_hex(),
-        content: ev.content.clone(),
-        kind: ev.kind.as_u16() as u32,
-        created_at: ev.created_at.as_secs() as i64,
-        channel_id: channel_id.to_string(),
-        tags: tags_to_vec(ev),
-        parent_event_id: Some(parent),
-        root_event_id: Some(root),
-        depth,
-        broadcast: false,
-        reactions: serde_json::Value::Null,
-    }
-}
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod tests;

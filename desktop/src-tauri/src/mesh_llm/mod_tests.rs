@@ -54,6 +54,34 @@ fn sdk_ready_models_are_parsed_from_real_status_shape() {
 }
 
 #[test]
+fn dedupe_models_collapses_at_main_and_plain_forms() {
+    // Regression: a serving node advertises the SAME model under two strings —
+    // `org/model@main:Q4` (serveTargets[].modelId) and `org/model:Q4`
+    // (available_models). Keying on the raw id left BOTH in the picker (the
+    // "two model listing" bug). They must dedup to a single canonical entry.
+    let models = vec![
+        super::MeshModelOption {
+            id: "unsloth/gemma-4-E4B-it-GGUF@main:Q4_K_M".to_string(),
+            name: None,
+        },
+        super::MeshModelOption {
+            id: "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M".to_string(),
+            name: Some("Gemma 4".to_string()),
+        },
+    ];
+
+    let deduped = super::dedupe_models(models);
+    assert_eq!(
+        deduped,
+        vec![super::MeshModelOption {
+            id: "unsloth/gemma-4-E4B-it-GGUF:Q4_K_M".to_string(),
+            name: Some("Gemma 4".to_string()),
+        }],
+        "@main and plain forms of the same model must collapse to one entry"
+    );
+}
+
+#[test]
 fn requested_model_is_not_ready_while_sdk_is_in_standby() {
     let payload = json!({
         "node_state": "standby",
@@ -212,6 +240,34 @@ fn signed_membership_event(members: &[String]) -> nostr::Event {
         .tags(tags)
         .sign_with_keys(&keys)
         .expect("test membership event signs")
+}
+
+#[test]
+fn has_membership_snapshot_distinguishes_empty_from_missing() {
+    // A zero-member community still publishes an explicit kind:13534 event, so
+    // its presence — not the member count — is what makes an empty roster
+    // authoritative. No snapshot at all means the query was incomplete.
+    let zero_member_snapshot = signed_membership_event(&[]);
+    assert!(
+        super::has_membership_snapshot(std::slice::from_ref(&zero_member_snapshot)),
+        "an explicit zero-member snapshot counts as present"
+    );
+
+    let member = nostr::Keys::parse(&"1".repeat(64))
+        .unwrap()
+        .public_key()
+        .to_hex();
+    let populated = signed_membership_event(std::slice::from_ref(&member));
+    assert!(super::has_membership_snapshot(std::slice::from_ref(
+        &populated
+    )));
+
+    // A response with only status events (or nothing) has no snapshot.
+    assert!(!super::has_membership_snapshot(&[]));
+    let status_only = signed_reporter_status(&"2".repeat(64), "owner-x");
+    assert!(!super::has_membership_snapshot(std::slice::from_ref(
+        &status_only
+    )));
 }
 
 #[test]
@@ -388,18 +444,43 @@ fn signed_reporter_target(reporter_secret: &str, model: &str, endpoint: &str) ->
 }
 
 #[test]
-fn stale_status_is_excluded_from_admission_and_availability() {
+fn stale_status_keeps_member_admitted_but_excluded_from_routing() {
     let secret = "8".repeat(64);
     let member = nostr::Keys::parse(&secret).unwrap().public_key().to_hex();
     let stale = signed_reporter_target_at(&secret, "stale-model", &test_endpoint_token(), 1_000);
-    // No newer event is required to age this status out. Freshness is measured
-    // against wall clock, so an entirely offline mesh cannot remain live forever.
+    // Membership is the trust boundary: a current member whose device went
+    // offline (stale status) must stay admitted, otherwise every app
+    // open/close in the community churns the allowlist and restarts serving
+    // nodes. Freshness still gates routing: a stale node is never selected as
+    // a serve target.
     let membership = signed_membership_event_at(std::slice::from_ref(&member), 900);
     let events = vec![stale, membership];
 
-    assert!(super::owner_ids_from_events(&events).is_empty());
+    assert_eq!(super::owner_ids_from_events(&events).len(), 1);
     let availability = super::availability_from_events(events);
     assert!(availability.serve_targets.is_empty());
+}
+
+#[test]
+fn removed_member_is_dropped_from_admission_despite_fresh_status() {
+    // Revocation path: freshness must never resurrect trust. A reporter with a
+    // perfectly fresh status who is absent from the latest NIP-43 roster gets
+    // no admission entry.
+    let member_secret = "8".repeat(64);
+    let outsider_secret = "9".repeat(64);
+    let member = nostr::Keys::parse(&member_secret)
+        .unwrap()
+        .public_key()
+        .to_hex();
+    let now = nostr::Timestamp::now().as_secs();
+    let fresh_outsider =
+        signed_reporter_target_at(&outsider_secret, "model", &test_endpoint_token(), now);
+    // Latest roster lists only `member`; the outsider was removed (or never
+    // admitted).
+    let membership = signed_membership_event_at(std::slice::from_ref(&member), now);
+    let events = vec![fresh_outsider, membership];
+
+    assert!(super::owner_ids_from_events(&events).is_empty());
 }
 
 #[test]
@@ -515,4 +596,70 @@ fn owner_roster_without_membership_list_fails_closed() {
     ];
 
     assert!(super::owner_ids_from_events(&events).is_empty());
+}
+
+#[test]
+fn serving_usage_extracts_local_and_remote_attempts() {
+    // Captured shape from a live serving node's status payload. The local vs
+    // remote/endpoint split is what tells "my own agent" apart from "a peer
+    // consuming my compute".
+    let payload = json!({
+        "inflight_requests": 0,
+        "peers": [],
+        "routing_metrics": {
+            "request_count": 5,
+            "completion_tokens_observed": 764,
+            "avg_tokens_per_second": 29.651,
+            "local_node": {
+                "current_inflight_requests": 1,
+                "peak_inflight_requests": 2,
+                "local_attempt_count": 4,
+                "remote_attempt_count": 0,
+                "endpoint_attempt_count": 0
+            }
+        }
+    });
+    let usage = super::serving_usage_from_payload(&payload);
+    assert_eq!(usage.inflight, 1);
+    assert_eq!(usage.peak_inflight, 2);
+    assert_eq!(usage.requests_served, 5);
+    assert_eq!(usage.tokens_served, 764);
+    assert_eq!(usage.local_attempts, 4);
+    assert_eq!(usage.remote_attempts, 0);
+    assert_eq!(usage.endpoint_attempts, 0);
+    assert!(
+        !usage.has_remote_consumers(),
+        "all-local traffic is not a remote consumer"
+    );
+}
+
+#[test]
+fn serving_usage_flags_remote_consumer() {
+    let payload = json!({
+        "peers": [{"id": "a"}, {"id": "b"}],
+        "routing_metrics": {
+            "request_count": 10,
+            "local_node": {
+                "local_attempt_count": 3,
+                "remote_attempt_count": 6,
+                "endpoint_attempt_count": 1
+            }
+        }
+    });
+    let usage = super::serving_usage_from_payload(&payload);
+    assert_eq!(usage.remote_attempts, 6);
+    assert_eq!(usage.endpoint_attempts, 1);
+    assert_eq!(usage.peers, 2);
+    assert!(
+        usage.has_remote_consumers(),
+        "remote/endpoint attempts mean someone else is using my compute"
+    );
+}
+
+#[test]
+fn serving_usage_defaults_to_zero_on_missing_fields() {
+    // SDK shape drift must degrade to "no usage" not panic.
+    let usage = super::serving_usage_from_payload(&json!({}));
+    assert_eq!(usage, super::MeshServingUsage::default());
+    assert!(!usage.has_remote_consumers());
 }

@@ -10,7 +10,6 @@ use rmcp::{
 use std::path::Path;
 use std::sync::Arc;
 
-mod buzz_message;
 mod paths;
 mod read_file;
 mod rg;
@@ -48,17 +47,6 @@ impl DevMcp {
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         shell::run(&self.state, p, context.ct).await
-    }
-
-    #[tool(
-        name = "buzz_send_message",
-        description = "Publish the user-visible reply for the current Buzz turn. Use the channel UUID and optional reply event id from the prompt Context. Every Buzz turn must call this before ending; use shell-based buzz messages send only if this tool is unavailable."
-    )]
-    async fn buzz_send_message(
-        &self,
-        Parameters(p): Parameters<buzz_message::SendMessageParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        buzz_message::run(&self.state, p).await
     }
 
     #[tool(
@@ -195,4 +183,31 @@ async fn async_main(cmd: String) -> Result<(), Box<dyn std::error::Error>> {
     let service = DevMcp::new(state).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+/// Suppress the console window that Windows otherwise allocates for every
+/// console-subsystem child process spawned from a non-console parent.
+/// No-op on non-Windows platforms.
+pub(crate) fn configure_no_window(cmd: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
+/// Suppress the console window for async (`tokio::process::Command`) spawns.
+/// Equivalent to `configure_no_window` but accepts a tokio command.
+/// No-op on non-Windows platforms.
+pub(crate) fn configure_no_window_async(cmd: &mut tokio::process::Command) {
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
 }

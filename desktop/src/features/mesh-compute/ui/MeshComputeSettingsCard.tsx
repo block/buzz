@@ -29,6 +29,9 @@ import {
   useMeshDownloadProgress,
 } from "../hooks/useMeshDownloadProgress";
 import { useMeshNodeStatus } from "../hooks/useMeshNodeStatus";
+import { useMeshServingUsage } from "../hooks/useMeshServingUsage";
+import { deriveMeshShareToggle } from "../shareToggleState";
+import { deriveServingIndicator } from "../servingUsage";
 
 const MODEL_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.model.v1";
 const MAX_VRAM_DRAFT_STORAGE_KEY = "buzz.mesh-compute.share.max-vram-gb.v1";
@@ -122,16 +125,35 @@ export function MeshComputeSettingsCard() {
   }, []);
 
   // Mirror the running node's modelId back into the field so the card shows
-  // what's actually being served, even after a fresh app load.
+  // what's ACTUALLY being served — not just on a fresh load (empty field) but
+  // whenever the served model differs from the field (e.g. the member switched
+  // models and the node restarted on the new one). This is safe from clobbering
+  // a mid-edit because the field is disabled whenever the slot is occupied
+  // (`controlsDisabled`), so the user can't be typing while a node is running.
   React.useEffect(() => {
-    if (status?.state === "running" && status.modelId && modelInput === "") {
+    if (
+      status?.state === "running" &&
+      status.modelId &&
+      status.modelId !== modelInput
+    ) {
       setModelInput(status.modelId);
       writeDraft(MODEL_DRAFT_STORAGE_KEY, status.modelId);
     }
   }, [status?.state, status?.modelId, modelInput]);
 
-  const isOn = status?.state === "running" || status?.state === "starting";
-  const controlsDisabled = isOn || actionInFlight;
+  // The Share toggle reflects ONLY serve-mode occupancy. A client-mode runtime
+  // (this machine consuming a peer's compute) shares the single runtime slot
+  // and also reports state:"running" — but it must NOT light this switch, and
+  // toggling off must never tear down that unrelated consume session.
+  const { isSharing, isConsuming, slotOccupied } =
+    deriveMeshShareToggle(status);
+  // Host-side "who is using the compute I'm sharing" — only polled while
+  // actively sharing (serve mode). Read-only; reads the node's own metrics.
+  const servingUsage = useMeshServingUsage(isSharing);
+  const servingIndicator = deriveServingIndicator(servingUsage, isSharing);
+  // Any occupying runtime (serve or client, healthy or failed) locks the model
+  // inputs and blocks a fresh start — stop it before reconfiguring.
+  const controlsDisabled = slotOccupied || actionInFlight;
   const refClass = classifyModelRef(modelInput);
   const canStart =
     refClass.kind !== "unknown" &&
@@ -139,6 +161,13 @@ export function MeshComputeSettingsCard() {
     status?.state !== "starting";
 
   async function handleToggle(next: boolean) {
+    // Never let the Share switch tear down a consume session. The switch is
+    // already disabled while consuming, but status can be stale between polls,
+    // so refuse a stop that isn't stopping OUR serve node as a belt-and-braces
+    // guard (the backend enforces this authoritatively too).
+    if (!next && !isSharing) {
+      return;
+    }
     setActionError(null);
     setPendingAction(next ? "start" : "stop");
     setActionInFlight(true);
@@ -202,12 +231,43 @@ export function MeshComputeSettingsCard() {
             >
               Share this machine
             </label>
-            <StatusLine pendingAction={pendingAction} status={status} />
+            <StatusLine
+              isConsuming={isConsuming}
+              pendingAction={pendingAction}
+              status={status}
+            />
+            {servingIndicator.show ? (
+              <p
+                className={
+                  servingIndicator.hasRemoteConsumers
+                    ? "mt-0.5 text-2xs text-emerald-600 dark:text-emerald-400"
+                    : "mt-0.5 text-2xs text-muted-foreground"
+                }
+                data-testid="mesh-serving-usage"
+                title={servingIndicator.detail ?? undefined}
+              >
+                {servingIndicator.label}
+                {servingIndicator.detail ? (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    · {servingIndicator.detail}
+                  </span>
+                ) : null}
+              </p>
+            ) : null}
           </div>
           <Switch
-            checked={isOn}
+            checked={isSharing}
             data-testid="mesh-share-compute-toggle"
-            disabled={actionInFlight || (!isOn && !canStart)}
+            disabled={
+              // When the slot is occupied, the switch is only actionable if
+              // WE are sharing (so it can stop a serve node — even a failed
+              // one). Any other occupant (consuming, or an unexpected
+              // modeless-running node) would make a fresh start throw "already
+              // running", so keep it disabled. When the slot is empty, gate on
+              // a valid model ref.
+              actionInFlight || (slotOccupied ? !isSharing : !canStart)
+            }
             id="mesh-share-compute-toggle"
             onCheckedChange={handleToggle}
           />
@@ -415,16 +475,19 @@ function CatalogPicker({
   selected: string;
 }) {
   const [expanded, setExpanded] = React.useState(false);
-  // Collapsed: recommended + the next few viable entries. Expanded: all.
-  const visible = expanded ? catalog.entries : catalog.entries.slice(0, 4);
+  // Above the fold: the Buzz-curated picks (models known to work well with
+  // agents on shared compute). Below: everything else, as advanced options.
+  const curated = catalog.entries.filter((e) => e.curated);
+  const advanced = catalog.entries.filter((e) => !e.curated);
+  const visible = expanded ? catalog.entries : curated;
   return (
     <div className="mt-1" data-testid="mesh-share-compute-catalog">
       <p className="text-sm font-normal text-muted-foreground">
-        Suggested for this machine
+        Recommended for this machine
         {catalog.gpuName ? ` (${catalog.gpuName}, ` : " ("}
         {catalog.vramDisplay} AI memory):
       </p>
-      <ul className="mt-1.5 flex flex-col gap-1">
+      <ul className="mt-1.5 flex max-h-56 flex-col gap-1 overflow-y-auto">
         {visible.map((entry) => {
           const isSelected = entry.name === selected;
           const tooLarge = entry.fit === "too_large";
@@ -468,15 +531,16 @@ function CatalogPicker({
           );
         })}
       </ul>
-      {catalog.entries.length > visible.length || expanded ? (
+      {advanced.length > 0 ? (
         <button
           className="mt-1 text-sm text-muted-foreground underline hover:text-foreground"
+          data-testid="mesh-catalog-advanced-toggle"
           onClick={() => setExpanded((v) => !v)}
           type="button"
         >
           {expanded
-            ? "Show fewer"
-            : `Show all ${catalog.entries.length} models`}
+            ? "Hide advanced models"
+            : `Advanced: ${advanced.length} more models`}
         </button>
       ) : null}
     </div>
@@ -484,9 +548,11 @@ function CatalogPicker({
 }
 
 function StatusLine({
+  isConsuming,
   pendingAction,
   status,
 }: {
+  isConsuming: boolean;
   pendingAction: "start" | "stop" | null;
   status: MeshNodeStatus | null;
 }) {
@@ -495,6 +561,18 @@ function StatusLine({
   }
   if (pendingAction === "stop") {
     return <p className="text-sm text-muted-foreground">Stopping…</p>;
+  }
+  // A client-mode runtime owns the single slot: this machine is consuming a
+  // peer's compute, not sharing. Explain why Share is off + disabled instead
+  // of showing the misleading "Sharing … with relay members" serve copy. The
+  // client node is app-session-lived infra with no user stop control, so the
+  // copy states the fact rather than promising an action that doesn't exist.
+  if (isConsuming) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        This machine is currently using another member's shared compute.
+      </p>
+    );
   }
   if (!status) {
     return <p className="text-sm text-muted-foreground">Checking status…</p>;

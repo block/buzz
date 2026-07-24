@@ -50,6 +50,12 @@ const rules = [
 // Do not add to this list; split the file instead. Remove each entry as its
 // file is broken up. Tracked as a follow-up.
 const overrides = new Map([
+  // Native Builderlab auth/community commands add a small registration surface
+  // to the existing Tauri composition root. The implementation lives in
+  // builderlab.rs; this narrowly ratchets the command wiring while lib.rs is
+  // queued for a broader composition-root split. Bumped for the
+  // archive/unarchive/transfer community-management commands (web parity).
+  ["src-tauri/src/lib.rs", 1013],
   // persona-events rebase: build_deploy_payload threads `state` for the
   // read-time relay-URL workspace fallback while keeping the create-time env
   // pin (the credential-leak guard). Load-bearing feature growth from the
@@ -108,7 +114,11 @@ const overrides = new Map([
   // keyring-dev-isolation: agent key migration added copy_agent_keys_between_stores
   // and load_readonly support; file grew past 1000 default. Queued to split.
   // +7 for try_delete_agent_key result-returning seam (snapshot-import rollback).
-  ["src-tauri/src/managed_agents/storage.rs", 1335],
+  // +48 (1335 -> 1383): agents-everywhere pair re-key — pair-scoped runtime
+  // receipts (write_agent_runtime_receipt atomic JSON + remove/read_all
+  // helpers) replace the pubkey-keyed PID file, plus the hashed pair-scoped
+  // runtime log path. Load-bearing crash-recovery surface; queued to split.
+  ["src-tauri/src/managed_agents/storage.rs", 1383],
   // harness-persona-sync: persona-runtime resolution threaded into the spawn
   // path here. Load-bearing feature growth; queued to split in the resolver
   // unify refactor followup. +26 for resolve_effective_prompt_model_provider
@@ -168,6 +178,10 @@ const overrides = new Map([
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
   ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
+  // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
+  // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1041],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -279,7 +293,10 @@ const overrides = new Map([
   // +13: fetch_login_shell_path_inner Windows guard (POSIX PATH → None).
   // resolve_git_bash made pub(crate) for Windows test access.
   // +1: login_shell_candidates doc comment expanded for resolve_bash_path.
-  ["src-tauri/src/managed_agents/discovery.rs", 1366],
+  // Buzz-managed Node path helpers and resolution tests moved to
+  // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
+  // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
+  ["src-tauri/src/managed_agents/discovery.rs", 1393],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -289,9 +306,8 @@ const overrides = new Map([
   // candidates, cli_install_commands_for_os PowerShell selection, login_shell_path
   // None regression, .cmd shim resolution, no-git-bash error hint.
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
-  // team-instructions-first-class: record_with test fixture gained the new
-  // ManagedAgentRecord.team_id field (+1 line) alongside persona_team_dir.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1271],
+  // Managed-path resolution test split to discovery/tests/managed_path_resolution.rs.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -308,7 +324,20 @@ const overrides = new Map([
   // migration/materialize.rs; ratchet held at 1110.
   ["src-tauri/src/migration_tests.rs", 1110],
   ["src-tauri/src/nostr_convert.rs", 1126],
-  ["src/shared/api/relayClientSession.ts", 1022],
+  // degraded-network resilience: relay.rs grew past 1000 with the addition of
+  // relay_error_message hint-capping (oversized-hint test via loopback TCP) and
+  // the relay_admission freshness-verification test. The loopback mock was
+  // hardened (std::net + request-read-before-write) adding ~10 lines.
+  // Queued to split test helpers to relay/tests.rs.
+  // +30 (1047 -> 1077): agents-everywhere pair re-key — query_relay_at_with_keys
+  // (NIP-98 signed /query with explicit agent keys + optional x-auth-tag) for
+  // bounded-auth agent relay-membership discovery. Load-bearing; queued to
+  // split alongside the test-helper split.
+  ["src-tauri/src/relay.rs", 1077],
+  // degraded-network resilience: visibleChannelId field + getter/setter, NOTICE
+  // handler for relay back-pressure, and rate-limit gate imports add ~74 lines
+  // of load-bearing degraded-network recovery code. Queued to split.
+  ["src/shared/api/relayClientSession.ts", 1096],
   // Boot-time event sync (persona/team/agent event reconcile) was split out
   // to event_sync.rs, ratcheting this limit 1575 → 1310. Remaining content is
   // the pre-identity data migrations; still queued to split further.
@@ -353,15 +382,25 @@ const overrides = new Map([
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
   ["src-tauri/src/secret_store.rs", 1307],
-  // sign-out wipe: Sign Out section (AlertDialog + controlled state) added
-  // at the bottom of the Profile settings page. Load-bearing UX feature;
-  // queued to split when ProfileSettingsCard is broken into sub-components.
-  // +20 lines: scroll-position save/restore across avatar editor open/close
-  // to prevent layout shift from the Sign Out section causing a viewport jump.
-  ["src/features/settings/ui/ProfileSettingsCard.tsx", 1033],
   // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
   // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
-  ["src-tauri/src/app_state.rs", 1042],
+  // +10 (1042 -> 1052): media_fetch_client with redirect::Policy::none() so a
+  // relay 3xx cannot forward the minted auth header cross-origin (SSRF fix).
+  // +16 (1052 -> 1068): extracted that client into `build_media_fetch_client()`
+  // -> Result so the fail-closed invariant is testable (no silent redirect-
+  // following fallback; startup panics loudly instead). The function belongs
+  // here beside `build_app_state` and its sibling client; its doc comment
+  // carries the load-bearing SSRF rationale. Extraction would only relocate,
+  // not reduce, the security-critical code.
+  // +5 (1068 -> 1073): merge with main, which independently added the
+  // managed_agent_profile_reconcile_enabled flag (field + doc + init) under
+  // its own 1042-line override. Union of two separately approved additions.
+  // +8 (1073 -> 1081): agents-everywhere pair re-key — managed_agent_processes
+  // and session_config_cache re-keyed by ManagedAgentRuntimeKey, the runtime
+  // transition lock doc broadened to cover all protected-PID transitions, and
+  // clear_agent_session_caches (per-pubkey retain) added alongside the
+  // per-key clear. Load-bearing identity-contract change; queued to split.
+  ["src-tauri/src/app_state.rs", 1081],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
@@ -389,7 +428,11 @@ const overrides = new Map([
   // large shared renderers cannot grow further while follow-up splits land.
   // +33 for config-nudge detect-and-render + author-auth gate (normalizePubkey guard).
   ["src/shared/ui/markdown.tsx", 2152],
-  ["src/shared/ui/VideoPlayer.tsx", 2199],
+  // +15 (2199 -> 2214): the video right-click Download/Copy menu's props,
+  // hook wiring, and render slot. The stateful menu logic (~52 lines) was
+  // extracted to useVideoContextMenu.tsx; what remains here is the component's
+  // public interface (downloadUrl/filename props) and cannot move out.
+  ["src/shared/ui/VideoPlayer.tsx", 2214],
   ["src/shared/ui/sidebar.tsx", 1042],
   // permission-outcome (fix #1381 regression): pendingPermissions state map,
   // describePermissionOutcome helper, jsonRpcId key helper (handles both
@@ -427,7 +470,15 @@ const overrides = new Map([
   // is_safe_to_reveal allowlist + baked_env_thinking_effort_is_unmasked test.
   // +1: doctor-install-reliability: login_hint: None added to goose_runtime test stub.
   // +1: doctor-install-reliability review fixes: auth_probe_args: None added to stub.
-  ["src-tauri/src/commands/agent_config.rs", 1021],
+  // +11 (1021 -> 1032): agents-everywhere pair re-key — session-cache reads in
+  // get_agent_config_surface derive the ManagedAgentRuntimeKey (relay-URL
+  // fallback resolution) and put_agent_session_config gains a relay_url param.
+  // Load-bearing identity plumbing; queued to split.
+  // +18 (1032 -> 1050): review fix — put_agent_session_config reads the pair
+  // relay from the harness-attached payload relayUrl (with effective-relay
+  // fallback for older harnesses) instead of a required arg the frontend
+  // wrapper never passed, which silently broke the session-config cache.
+  ["src-tauri/src/commands/agent_config.rs", 1050],
   // codex-install-auto-restart review-fixes: should_restart_after_install
   // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
   // cache tests replaced with 6 pure availability_drift predicate tests;
@@ -458,7 +509,15 @@ const overrides = new Map([
   // +3: onLinkShortcutRef wiring (ref decl + editor option + assignment) for
   // the ⌘K link-editor shortcut, mirroring the existing onEditLinkRef
   // pattern. Queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1036],
+  // +35: persistent audience scope/hook wiring and chip component handoff. The
+  // chip markup lives separately; remaining lines connect existing composer
+  // send state to the audience store. Queued with the existing split.
+  // +23: edit-to-add-mention notify (8ace8eed) — onEditSave/edit-branch
+  // mentionPubkeys threading + two snapshot refs (extractMentionPubkeys,
+  // ownerPubkey) feeding the newly-added-mentions diff. Diff logic itself
+  // lives in threading.ts (diffAddedMentionPubkeys); this is the minimal
+  // composer-side wiring. Queued to split with the rest of this list.
+  ["src/features/messages/ui/MessageComposer.tsx", 1114],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing

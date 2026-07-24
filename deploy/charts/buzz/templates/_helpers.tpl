@@ -103,11 +103,20 @@ secrets.existingSecret, use that. Otherwise use the chart-managed one.
 {{- printf "http://%s.%s.svc.cluster.local:9000" (include "buzz.minioFullname" .) .Release.Namespace -}}
 {{- end -}}
 
+{{/* Minimum number of relay replicas the release can run. */}}
+{{- define "buzz.minimumReplicas" -}}
+{{- if .Values.autoscaling.enabled -}}
+{{- .Values.autoscaling.minReplicas -}}
+{{- else -}}
+{{- .Values.replicaCount -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Effective huddle-audio availability. Nil means safe chart default: on for
      one replica, off for multi-pod until an SFU/shared-room story exists. */}}
 {{- define "buzz.huddleAudioAvailable" -}}
 {{- if kindIs "invalid" .Values.relay.huddleAudioAvailable -}}
-{{- if gt (.Values.replicaCount | int) 1 -}}false{{- else -}}true{{- end -}}
+{{- if gt (include "buzz.minimumReplicas" . | int) 1 -}}false{{- else -}}true{{- end -}}
 {{- else -}}
 {{- .Values.relay.huddleAudioAvailable -}}
 {{- end -}}

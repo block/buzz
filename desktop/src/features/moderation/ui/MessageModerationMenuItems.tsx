@@ -36,8 +36,8 @@ const TIMEOUT_PRESETS: { label: string; seconds: number }[] = [
  *
  * Renders nothing unless the viewer is a relay owner/admin, the message has a
  * real signer, and that signer is not the viewer. Actions target
- * `signerPubkey` — the raw signer, never the display-author (which `p`/`actor`
- * tags can override) — per the security note on TimelineMessage.
+ * `signerPubkey` — the raw signer, never a relay-delegated display author — per
+ * the security note on TimelineMessage.
  */
 export function MessageModerationMenuItems({
   channelId,
@@ -51,9 +51,8 @@ export function MessageModerationMenuItems({
   const canModerate = relayRole === "owner" || relayRole === "admin";
 
   const identityQuery = useIdentityQuery();
-  // Fail closed: moderate only the raw signer, never the display `pubkey`
-  // (which `p`/`actor` tags can override — see the security note above). A
-  // message without a signer is not moderatable here; render nothing.
+  // Moderate the raw signer, never a relay-delegated display author. A message
+  // without a signer is not moderatable here; render nothing.
   const targetPubkey = message.signerPubkey ?? null;
   const isSelf =
     targetPubkey != null &&

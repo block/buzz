@@ -143,7 +143,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
         .post(
           Uri.parse(url),
           headers: {
-            'Authorization': _buildNip98AuthHeader(
+            'Authorization': buildNip98AuthHeader(
               method: 'POST',
               url: url,
               bodyBytes: bodyBytes,
@@ -653,7 +653,7 @@ final relaySessionProvider =
       RelaySessionNotifier.new,
     );
 
-String _buildNip98AuthHeader({
+String buildNip98AuthHeader({
   required String method,
   required String url,
   required List<int> bodyBytes,

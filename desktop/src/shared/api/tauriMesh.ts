@@ -52,6 +52,27 @@ export async function meshNodeStatus(): Promise<MeshNodeStatus> {
   return await invokeTauri<MeshNodeStatus>("mesh_node_status");
 }
 
+/**
+ * Host-side usage of the compute this machine is sharing. The
+ * local/remote/endpoint attempt split distinguishes this machine's own agents
+ * (local) from another member consuming this machine's compute (remote/endpoint).
+ */
+export type MeshServingUsage = {
+  inflight: number;
+  peakInflight: number;
+  requestsServed: number;
+  tokensServed: number;
+  tokensPerSecond: number;
+  localAttempts: number;
+  remoteAttempts: number;
+  endpointAttempts: number;
+  peers: number;
+};
+
+export async function meshServingUsage(): Promise<MeshServingUsage> {
+  return await invokeTauri<MeshServingUsage>("mesh_serving_usage");
+}
+
 export async function meshInstalledModels(): Promise<MeshModelOption[]> {
   return await invokeTauri<MeshModelOption[]>("mesh_installed_models");
 }
@@ -68,6 +89,11 @@ export type MeshCatalogEntry = {
   fit: MeshModelFit;
   installed: boolean;
   recommended: boolean;
+  /**
+   * Buzz-curated pick — known to survive the agent harness. Curated entries
+   * render above the fold; everything else is "advanced".
+   */
+  curated: boolean;
 };
 
 export type MeshModelCatalog = {
@@ -75,7 +101,7 @@ export type MeshModelCatalog = {
   vramDisplay: string;
   vramGb: number;
   recommended: string | null;
-  /** Ranked: recommended first, then by fit, then larger first within a fit. */
+  /** Ranked: recommended first, then curated, then by fit, larger first. */
   entries: MeshCatalogEntry[];
 };
 

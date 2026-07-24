@@ -8,10 +8,34 @@
 use serde::Serialize;
 
 use mesh_llm_client::models::catalog::{parse_size_gb, MODEL_CATALOG};
-use mesh_llm_client::network::nostr::auto_model_pack;
 use mesh_llm_node::models::{default_huggingface_cache_dir, scan_installed_models};
 use mesh_llm_system::hardware;
-use mesh_llm_system::vram::format_rated_capacity;
+use mesh_llm_system::vram::{format_rated_capacity, rated_capacity_gb};
+
+/// Buzz-curated tier picks. These are the models we know survive the agent
+/// harness on shared compute — deliberately non-reasoning instruction models,
+/// so agents stay snappy instead of burning hidden reasoning tokens.
+///
+/// The large pick is resolved through mesh-llm's remote catalog
+/// (huggingface.co/datasets/meshllm/catalog), so it does not need to exist in
+/// the compiled `MODEL_CATALOG`; the entry is synthesized below.
+const CURATED_LARGE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M";
+const CURATED_LARGE_SIZE: &str = "17GB";
+const CURATED_LARGE_FILE: &str = "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf";
+const CURATED_LARGE_DESCRIPTION: &str =
+    "Gemma 4 26B MoE (4B active) — Buzz default for 64GB+ machines";
+const CURATED_SMALL: &str = "Gemma-4-E4B-it-Q4_K_M";
+/// Rated-capacity boundary between the two curated tiers, in GB (marketing
+/// capacity — a "64GB" Mac rates as 64 even though usable AI memory is less).
+const CURATED_LARGE_MIN_RATED_GB: u64 = 64;
+
+/// The Buzz-curated recommendation for a machine's rated memory capacity.
+fn buzz_recommended_model(rated_gb: Option<u64>) -> &'static str {
+    match rated_gb {
+        Some(gb) if gb >= CURATED_LARGE_MIN_RATED_GB => CURATED_LARGE,
+        _ => CURATED_SMALL,
+    }
+}
 
 /// How a model sits inside this machine's usable AI memory.
 /// Mirrors mesh-llm's private `fit_code_for_size_label` thresholds.
@@ -57,6 +81,9 @@ pub struct MeshCatalogEntry {
     pub fit: ModelFit,
     pub installed: bool,
     pub recommended: bool,
+    /// Buzz-curated pick — known to survive the agent harness. Curated
+    /// entries render above the fold; everything else is "advanced".
+    pub curated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,6 +150,7 @@ fn build_catalog(
                 fit: fit_code(size_gb, vram_gb),
                 installed: is_installed(&m.file, &m.name),
                 recommended: false,
+                curated: false,
                 name: m.name.clone(),
                 size: m.size.clone(),
                 size_gb,
@@ -131,14 +159,36 @@ fn build_catalog(
         })
         .collect();
 
-    let recommended = auto_model_pack(vram_gb).into_iter().next();
+    // The compiled MODEL_CATALOG does not know the Buzz large pick; it
+    // resolves through mesh-llm's remote catalog at download time. Synthesize
+    // its entry so the picker can offer it.
+    if !entries.iter().any(|e| e.name == CURATED_LARGE) {
+        let size_gb = parse_size_gb(CURATED_LARGE_SIZE);
+        entries.push(MeshCatalogEntry {
+            fit: fit_code(size_gb, vram_gb),
+            installed: is_installed(CURATED_LARGE_FILE, CURATED_LARGE),
+            recommended: false,
+            curated: false,
+            name: CURATED_LARGE.to_string(),
+            size: CURATED_LARGE_SIZE.to_string(),
+            size_gb,
+            description: CURATED_LARGE_DESCRIPTION.to_string(),
+        });
+    }
+
+    let recommended = Some(buzz_recommended_model(rated_capacity_gb(vram_bytes)).to_string());
     for entry in &mut entries {
         entry.recommended = recommended.as_deref() == Some(entry.name.as_str());
+        // Both curated tiers are always offered: the recommended one for this
+        // machine plus the other pick (e.g. the small one as an explicit
+        // lighter choice on big machines).
+        entry.curated = entry.name == CURATED_LARGE || entry.name == CURATED_SMALL;
     }
 
     entries.sort_by(|a, b| {
         b.recommended
             .cmp(&a.recommended)
+            .then(b.curated.cmp(&a.curated))
             .then(fit_rank(a.fit).cmp(&fit_rank(b.fit)))
             .then(b.size_gb.total_cmp(&a.size_gb))
     });
@@ -191,11 +241,11 @@ mod tests {
                 assert!(catalog.entries[0].recommended);
             }
         }
-        // Fit ranks must be non-decreasing after the recommended head.
+        // Fit ranks must be non-decreasing after the recommended/curated head.
         let ranks: Vec<u8> = catalog
             .entries
             .iter()
-            .skip_while(|e| e.recommended)
+            .skip_while(|e| e.recommended || e.curated)
             .map(|e| fit_rank(e.fit))
             .collect();
         assert!(
@@ -205,12 +255,32 @@ mod tests {
     }
 
     #[test]
-    fn recommendation_uses_mesh_llm_auto_selection() {
-        let catalog = build_catalog(None, 62_000_000_000, 62.0, &[]);
-        assert_eq!(
-            catalog.recommended,
-            auto_model_pack(62.0).into_iter().next()
-        );
+    fn recommendation_follows_buzz_curated_tiers() {
+        // 64GB+ rated machines get the large curated pick.
+        let large = build_catalog(None, 64_000_000_000, 64.0, &[]);
+        assert_eq!(large.recommended.as_deref(), Some(CURATED_LARGE));
+        let big = build_catalog(None, 128_000_000_000, 128.0, &[]);
+        assert_eq!(big.recommended.as_deref(), Some(CURATED_LARGE));
+        // Below the boundary: the small curated pick — never a reasoning
+        // model, never sub-4B guesswork.
+        let small = build_catalog(None, 32_000_000_000, 32.0, &[]);
+        assert_eq!(small.recommended.as_deref(), Some(CURATED_SMALL));
+        let tiny = build_catalog(None, 16_000_000_000, 16.0, &[]);
+        assert_eq!(tiny.recommended.as_deref(), Some(CURATED_SMALL));
+    }
+
+    #[test]
+    fn curated_picks_lead_the_catalog() {
+        let catalog = build_catalog(None, 96_000_000_000, 96.0, &[]);
+        // Recommended curated entry first, the other curated pick second,
+        // advanced entries after.
+        assert_eq!(catalog.entries[0].name, CURATED_LARGE);
+        assert!(catalog.entries[0].recommended && catalog.entries[0].curated);
+        assert_eq!(catalog.entries[1].name, CURATED_SMALL);
+        assert!(catalog.entries[1].curated && !catalog.entries[1].recommended);
+        assert!(catalog.entries[2..].iter().all(|e| !e.curated));
+        // The synthesized large pick carries a real size for fit ranking.
+        assert!(catalog.entries[0].size_gb > 10.0);
     }
 
     #[test]

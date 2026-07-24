@@ -46,15 +46,6 @@ type LatencyReport = {
   longtaskTotal: number;
 };
 
-function quantile(sorted: number[], q: number): number {
-  if (sorted.length === 0) return 0;
-  const index = Math.min(
-    sorted.length - 1,
-    Math.floor(q * (sorted.length - 1)),
-  );
-  return sorted[index];
-}
-
 async function resetWindowMetrics(page: import("@playwright/test").Page) {
   await page.evaluate(() => {
     const store = window as unknown as {

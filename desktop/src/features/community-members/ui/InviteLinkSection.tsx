@@ -1,8 +1,10 @@
 import { Check, Copy, Link2 } from "lucide-react";
+import { QRCodeCanvas } from "qrcode.react";
 import * as React from "react";
 import { toast } from "sonner";
 
 import { mintInvite } from "@/shared/api/invites";
+import { invokeTauri } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
 import {
   DropdownMenu,
@@ -13,6 +15,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/shared/ui/dropdown-menu";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import {
+  MediaContextMenu,
+  type MediaContextMenuPosition,
+  useDismissMediaContextMenu,
+} from "@/shared/ui/markdown/MediaContextMenu";
 
 const TTL_OPTIONS: { label: string; value: number }[] = [
   { label: "1 day", value: 24 * 60 * 60 },
@@ -46,6 +54,12 @@ export function InviteLinkSection() {
     expiresAt: number;
   } | null>(null);
   const [copied, setCopied] = React.useState(false);
+  const [qrMenu, setQrMenu] = React.useState<MediaContextMenuPosition | null>(
+    null,
+  );
+  const qrRef = React.useRef<HTMLCanvasElement | null>(null);
+  const closeQrMenu = React.useCallback(() => setQrMenu(null), []);
+  useDismissMediaContextMenu(Boolean(qrMenu), closeQrMenu);
 
   const ttlLabel =
     TTL_OPTIONS.find((option) => option.value === ttlSecs)?.label ?? "3 days";
@@ -71,12 +85,26 @@ export function InviteLinkSection() {
   async function handleCopy() {
     if (!invite) return;
     try {
-      await navigator.clipboard.writeText(invite.url);
+      await writeTextToClipboard(invite.url);
       setCopied(true);
       toast.success("Invite link copied");
       setTimeout(() => setCopied(false), 2000);
     } catch {
       toast.error("Couldn't copy to clipboard");
+    }
+  }
+
+  async function handleDownloadQr() {
+    closeQrMenu();
+    const dataUrl = qrRef.current?.toDataURL("image/png");
+    if (!dataUrl) return;
+    try {
+      await invokeTauri("save_png_data_url", {
+        dataUrl,
+        filename: "buzz-community-invite.png",
+      });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Download failed");
     }
   }
 
@@ -155,11 +183,53 @@ export function InviteLinkSection() {
           </div>
         ) : null}
       </div>
-      <p className="text-xs text-muted-foreground">
-        {invite
-          ? `Anyone with this link can join as a member until ${formatExpiry(invite.expiresAt)}.`
-          : "Create a shareable link that lets anyone join this relay as a member until it expires."}
-      </p>
+      {invite ? (
+        <div className="flex flex-col gap-3 rounded-md border border-border/70 bg-background/70 p-3 sm:flex-row sm:items-center">
+          <div className="shrink-0 self-center rounded-md bg-white p-2 text-black">
+            <QRCodeCanvas
+              ref={qrRef}
+              aria-label="Invite QR code"
+              data-testid="invite-link-qr-code"
+              level="M"
+              onContextMenuCapture={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                event.nativeEvent.stopImmediatePropagation();
+                setQrMenu({ x: event.clientX, y: event.clientY });
+              }}
+              size={128}
+              value={invite.url}
+            />
+          </div>
+          <div className="space-y-1 text-xs text-muted-foreground">
+            <p>
+              Scan this QR code or share the link above to invite someone to
+              this relay.
+            </p>
+            <p>
+              Anyone with this link or QR code can join as a member until{" "}
+              {formatExpiry(invite.expiresAt)}.
+            </p>
+          </div>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          Create a shareable link that lets anyone join this relay as a member
+          until it expires.
+        </p>
+      )}
+      {qrMenu ? (
+        <MediaContextMenu
+          dataAttributes={["data-invite-qr-context-menu"]}
+          items={[
+            {
+              label: "Download image",
+              onSelect: () => void handleDownloadQr(),
+            },
+          ]}
+          position={qrMenu}
+        />
+      ) : null}
     </div>
   );
 }

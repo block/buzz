@@ -3,10 +3,7 @@ import type { AcpRuntimeCatalogEntry, Profile } from "@/shared/api/types";
 export type OnboardingPage =
   | "profile"
   | "key-import"
-  | "backup"
   | "avatar"
-  | "theme"
-  | "setup"
   | "membership-denied";
 
 export type OnboardingActions = {
@@ -61,12 +58,12 @@ export type ProfileStepActions = {
 
 export type SetupStepActions = {
   back: () => void;
-  complete: () => void;
+  next: (readyRuntimeIds: readonly string[]) => void;
 };
 
-export type ThemeStepActions = {
-  skip: () => void;
-  submit: () => void;
+export type DefaultConfigStepActions = {
+  back: () => void;
+  complete: () => void;
 };
 
 export type SetupStepRuntimeState = {

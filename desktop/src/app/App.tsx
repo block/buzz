@@ -2,7 +2,6 @@ import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
-import { Hexagon } from "lucide-react";
 import {
   type ReactNode,
   useCallback,
@@ -13,33 +12,61 @@ import {
 } from "react";
 
 import { router } from "@/app/router";
+import {
+  completeCommunityViewTransition,
+  replaceCommunityDestinationRoute,
+} from "@/app/communityViewTransition";
+import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
-import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
+import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
+import {
+  type FirstCommunityPage,
+  useCommunityOnboarding,
+  markCommunityOnboardingComplete,
+  resolveProfileCheckAction,
+  isTransactionStillConnecting,
+} from "@/features/onboarding/communityOnboarding";
+import { CommunityOnboardingFlow } from "@/features/onboarding/ui/CommunityOnboardingFlow";
+import {
+  MachineOnboardingFlow,
+  type MachineOnboardingPage,
+} from "@/features/onboarding/ui/MachineOnboardingFlow";
 import { OnboardingFlow } from "@/features/onboarding/ui/OnboardingFlow";
+import { PendingInviteGate } from "@/features/onboarding/ui/PendingInviteGate";
 import { KeyringLockedScreen } from "@/features/onboarding/ui/KeyringLockedScreen";
 import { RelaunchRequiredScreen } from "@/features/onboarding/ui/RelaunchRequiredScreen";
 import { ResetFailedScreen } from "@/features/onboarding/ui/ResetFailedScreen";
-import type { Community } from "@/features/communities/types";
 import { useCommunityInit } from "@/features/communities/useCommunityInit";
 import { useNestNotifications } from "@/features/communities/useNestNotifications";
 import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  loadCommunityDestination,
+  markPendingCommunityRestore,
+  saveCommunityDestination,
+} from "@/features/communities/communityNavigationStorage";
+import {
+  onAddCommunityPrefillAvailable,
+  requestAddCommunityPrefill,
+} from "@/features/communities/addCommunityPrefill";
 import { WelcomeSetup } from "@/features/communities/ui/WelcomeSetup";
 import { CommunityApplyErrorScreen } from "@/features/communities/ui/CommunityApplyErrorScreen";
 import { CommunityChangeOverlay } from "@/features/communities/ui/CommunityChangeOverlay";
+import { setAvatarProfileSyncQueryClient } from "@/features/profile/avatarProfileSync";
 import { createBuzzQueryClient } from "@/shared/api/queryClient";
 import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
-import { listenForDeepLinks } from "@/shared/deep-link";
-import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { getProfile } from "@/shared/api/tauriProfiles";
+import {
+  type AddCommunityDeepLinkPayload,
+  listenForDeepLinks,
+} from "@/shared/deep-link";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
 import { FuzzyLogo } from "@/shared/ui/buzz-logo/FuzzyLogo";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import { StepProgress } from "@/shared/ui/step-progress";
 
 const LOADING_TEXT = "Setting up your community...";
 
@@ -178,80 +205,10 @@ function CommunitySwitchGate() {
   );
 }
 
-function OnboardingLoadingGate() {
-  const systemColorScheme = useSystemColorScheme();
-
-  return (
-    <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
-      data-system-color-scheme={systemColorScheme}
-    >
-      <StartupWindowDragRegion />
-      <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
-        <StepProgress
-          activeSegmentClassName="bg-primary"
-          className="fixed bottom-12 left-1/2 z-40 -translate-x-1/2"
-          completeSegmentClassName="bg-primary/35"
-          currentStep={2}
-          inactiveSegmentClassName="bg-muted-foreground/25"
-        />
-
-        <OnboardingSlideTransition
-          className="flex w-full flex-col items-center text-center"
-          direction="forward"
-          effect="none"
-          transitionKey="community-connecting"
-        >
-          <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-border bg-background text-foreground shadow-xs">
-            <Hexagon className="h-7 w-7" aria-hidden="true" />
-          </div>
-
-          <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-            Welcome to Buzz
-          </h1>
-          <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-            Choose your first community to get started.
-          </p>
-
-          <div className="mt-8 flex w-full max-w-[500px] flex-col gap-3">
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-            >
-              Continue with default community
-            </Button>
-
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              tabIndex={-1}
-              type="button"
-              variant="secondary"
-            >
-              Join a community
-            </Button>
-
-            <Button
-              aria-disabled="true"
-              className="h-10 w-full"
-              data-testid="welcome-continue-nostr"
-              tabIndex={-1}
-              type="button"
-              variant="ghost"
-            >
-              I already have a key
-            </Button>
-          </div>
-        </OnboardingSlideTransition>
-      </div>
-    </div>
-  );
-}
-
 function CommunityQueryProvider({ children }: { children: ReactNode }) {
   const [queryClient] = useState(createBuzzQueryClient);
+
+  useEffect(() => setAvatarProfileSyncQueryClient(queryClient), [queryClient]);
 
   useEffect(() => {
     const e2eWindow = window as Window & {
@@ -276,27 +233,13 @@ function CommunityQueryProvider({ children }: { children: ReactNode }) {
 }
 
 function AppReady({
-  isCompletingFirstRunCommunity,
   isSharedIdentity,
   isCommunitySwitch,
-  onFirstRunCommunitySettled,
 }: {
-  isCompletingFirstRunCommunity: boolean;
   isSharedIdentity: boolean;
   isCommunitySwitch: boolean;
-  onFirstRunCommunitySettled: () => void;
 }) {
   const onboarding = useAppOnboardingState(isSharedIdentity);
-
-  useEffect(() => {
-    if (isCompletingFirstRunCommunity && onboarding.stage !== "blocking") {
-      onFirstRunCommunitySettled();
-    }
-  }, [
-    isCompletingFirstRunCommunity,
-    onboarding.stage,
-    onFirstRunCommunitySettled,
-  ]);
 
   if (onboarding.stage === "reset-failed") {
     return <ResetFailedScreen />;
@@ -322,10 +265,6 @@ function AppReady({
   }
 
   if (onboarding.stage === "blocking") {
-    if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
-    }
-
     return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
   }
 
@@ -336,43 +275,39 @@ function AppReady({
   );
 }
 
-export function App() {
-  // Mounted at the root so Cmd/Ctrl+R reloads in every app state,
-  // including the loading and first-run setup screens below.
-  useReloadShortcut();
-  useInitialRenderReady();
-
-  const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
-  useEffect(() => {
-    isSharedIdentityCmd()
-      .then(setSharedIdentity)
-      .catch((err) => {
-        console.warn("is_shared_identity command failed:", err);
-        setSharedIdentity(false);
-      });
-  }, []);
-
+function CommunityApp({
+  currentPubkey,
+  onBackToMachineConfig,
+  sharedIdentity,
+}: {
+  currentPubkey: string | null;
+  onBackToMachineConfig: () => void;
+  sharedIdentity: boolean;
+}) {
   const {
     activeCommunity,
+    communities,
     reinitKey,
     addCommunity,
+    clearCommunities,
+    removeCommunity,
     switchCommunity,
     reconnectCommunity,
   } = useCommunities();
-  const [isCompletingFirstRunCommunity, setIsCompletingFirstRunCommunity] =
-    useState(false);
+  const communityOnboarding = useCommunityOnboarding();
+  const connectingTransactionRef = useRef<string | null>(null);
+  // Tracks the ID of the profile-check request that has been launched for the
+  // current connecting transaction. Prevents the effect from launching a
+  // second request if it re-runs while a fetch is in flight.
+  const profileCheckTransactionRef = useRef<string | null>(null);
+  // Always reflects the live transaction object so async callbacks can perform
+  // an atomic check of both ID and stage before mutating state.
+  const transactionRef = useRef(communityOnboarding.transaction);
+  transactionRef.current = communityOnboarding.transaction;
   const [isCommunityChangeOpen, setIsCommunityChangeOpen] = useState(false);
+  const [resumeFirstCommunityPage, setResumeFirstCommunityPage] =
+    useState<FirstCommunityPage | null>(null);
 
-  useEffect(() => {
-    const unlisten = listenForDeepLinks({
-      addCommunity,
-      switchCommunity,
-      reconnectCommunity,
-    });
-    return () => {
-      void unlisten.then((fn) => fn());
-    };
-  }, [addCommunity, switchCommunity, reconnectCommunity]);
   // Surface nest-related backend events (repos-dir errors, legacy migration)
   // as toasts. Mounted before useCommunityInit so the listeners are registered
   // ahead of the first apply_workspace call.
@@ -395,101 +330,367 @@ export function App() {
   const community = useCommunityInit(
     activeCommunity,
     communityKey,
-    sharedIdentity ?? false,
+    sharedIdentity,
   );
 
-  const handleSetupComplete = useCallback(
-    (community: Community) => {
-      setIsCompletingFirstRunCommunity(true);
-      const communityId = addCommunity(community);
-      switchCommunity(communityId);
+  const transitionCommunity = useCallback(
+    async (targetCommunityId: string) => {
+      const activeCommunityId = activeCommunity?.id;
+      if (targetCommunityId === activeCommunityId) return;
+      if (activeCommunityId) {
+        const route = deriveShellRoute(router.state.location.pathname);
+        saveCommunityDestination(
+          activeCommunityId,
+          route.selectedView === "channel" && route.selectedChannelId
+            ? { kind: "channel", channelId: route.selectedChannelId }
+            : { kind: "home" },
+        );
+        await router.navigate({ to: "/", replace: true });
+        markPendingCommunityRestore(targetCommunityId);
+        const destination = loadCommunityDestination(targetCommunityId);
+        if (destination?.kind === "channel") {
+          replaceCommunityDestinationRoute(
+            destination.channelId,
+            router.history,
+          );
+        }
+      }
+      switchCommunity(targetCommunityId);
     },
-    [addCommunity, switchCommunity],
+    [activeCommunity?.id, switchCommunity],
   );
 
-  const handleFirstRunCommunitySettled = useCallback(() => {
-    setIsCompletingFirstRunCommunity(false);
-  }, []);
+  const handleCommunityOnboardingConnect = useCallback(async () => {
+    const transaction = communityOnboarding.transaction;
+    if (transaction?.stage !== "connecting") return;
+    if (connectingTransactionRef.current === transaction.id) return;
+    connectingTransactionRef.current = transaction.id;
+    if (transaction.communityId) {
+      await transitionCommunity(transaction.communityId);
+      return;
+    }
+    const previousCommunityId = activeCommunity?.id;
+    const relayAlreadyExists = communities.some(
+      (community) => community.relayUrl === transaction.relayUrl,
+    );
+    const id = addCommunity({
+      id: crypto.randomUUID(),
+      name: transaction.communityName,
+      relayUrl: transaction.relayUrl,
+      token: transaction.token,
+      reposDir: transaction.reposDir,
+      pubkey: currentPubkey ?? undefined,
+      addedAt: new Date().toISOString(),
+    });
+    communityOnboarding.update({
+      communityId: id,
+      previousCommunityId,
+      addedCommunity: !relayAlreadyExists,
+      error: undefined,
+    });
+    await transitionCommunity(id);
+    reconnectCommunity();
+  }, [
+    activeCommunity?.id,
+    addCommunity,
+    communities,
+    communityOnboarding,
+    currentPubkey,
+    reconnectCommunity,
+    transitionCommunity,
+  ]);
+
+  const handleCommunityOnboardingCancel = useCallback(async () => {
+    const transaction = communityOnboarding.transaction;
+    communityOnboarding.clear();
+
+    if (!transaction?.communityId) return;
+    if (!transaction.addedCommunity) {
+      if (transaction.previousCommunityId) {
+        await transitionCommunity(transaction.previousCommunityId);
+      }
+      return;
+    }
+    if (communities.length === 1) {
+      if (transaction.source === "first-community") {
+        setResumeFirstCommunityPage(transaction.firstCommunityPage ?? "join");
+      }
+      clearCommunities();
+      return;
+    }
+    if (transaction.previousCommunityId) {
+      await transitionCommunity(transaction.previousCommunityId);
+    }
+    removeCommunity(transaction.communityId);
+  }, [
+    clearCommunities,
+    communities.length,
+    communityOnboarding,
+    removeCommunity,
+    transitionCommunity,
+  ]);
 
   const bootSplashPhase = useBootSplashHold();
 
-  // Wait for the shared-identity IPC call to resolve before rendering
-  // anything that depends on it. Without this gate, children briefly see
-  // isSharedIdentity=false and may flash WelcomeSetup or the onboarding flow.
-  if (sharedIdentity === null) {
-    return <AppLoadingGate />;
-  }
-
-  // Show welcome setup for first-run users with no communities
-  if (community.needsSetup) {
-    return (
-      <WelcomeSetup
-        defaultRelayUrl={community.defaultRelayUrl}
-        onComplete={handleSetupComplete}
-      />
-    );
-  }
-
-  // Surface apply failures so the user can retry or change community.
-  if ("error" in community && community.error) {
-    return (
-      <>
-        <CommunityApplyErrorScreen
-          error={community.error}
-          onChangeCommunity={() => setIsCommunityChangeOpen(true)}
-          onRetry={reconnectCommunity}
-        />
-        {isCommunityChangeOpen ? (
-          <CommunityChangeOverlay
-            onClose={() => setIsCommunityChangeOpen(false)}
-          />
-        ) : null}
-      </>
-    );
-  }
-
-  // Wait for this exact community config to be applied to the backend before
-  // rendering anything that connects to the relay. The appliedKey check avoids
-  // a one-render race where React sees the new active community while the Tauri
-  // backend is still configured for the previous one.
-  if (!community.isReady || community.appliedKey !== communityKey) {
-    if (isCompletingFirstRunCommunity) {
-      return <OnboardingLoadingGate />;
+  const transaction = communityOnboarding.transaction;
+  useEffect(() => {
+    if (transaction?.stage !== "connecting") {
+      connectingTransactionRef.current = null;
+      profileCheckTransactionRef.current = null;
     }
+  }, [transaction?.stage]);
+  const targetIsReady =
+    transaction?.communityId === activeCommunity?.id &&
+    community.isReady &&
+    community.appliedKey === communityKey;
+  useEffect(() => {
+    if (transaction?.stage !== "connecting" || !targetIsReady) return;
+    const transactionId = transaction.id;
+    const relayUrl = transaction.relayUrl;
+    if (profileCheckTransactionRef.current === transactionId) return;
+    profileCheckTransactionRef.current = transactionId;
 
-    return isCommunitySwitch ? <CommunitySwitchGate /> : <AppLoadingGate />;
-  }
+    // resolveProfileCheckAction resolves exactly once (Promise.race + timer
+    // cleared on settle), so no settled flag is needed here.
+    void resolveProfileCheckAction(getProfile, 10_000).then((result) => {
+      // Atomic staleness guard via isTransactionStillConnecting: the
+      // transaction must still be the same one that launched this request
+      // AND still be in connecting. Covers cancel+replacement (B's ID !== A's)
+      // and cancel-without-replacement (transactionRef.current is null).
+      if (!isTransactionStillConnecting(transactionRef.current, transactionId))
+        return;
+
+      if (result.action === "skip") {
+        markCommunityOnboardingComplete(result.profile.pubkey, relayUrl);
+        communityOnboarding.clear();
+      } else {
+        communityOnboarding.update(
+          { stage: "profile", error: undefined },
+          transactionId,
+        );
+      }
+    });
+  }, [
+    communityOnboarding,
+    targetIsReady,
+    transaction?.stage,
+    transaction?.id,
+    transaction?.relayUrl,
+  ]);
+  // During "entering" the transaction stays alive as a curtain: the app mounts
+  // underneath (already pointed at the Welcome channel route) while the
+  // onboarding screen covers it, then fades once Welcome reports ready.
+  //
+  // The flow must keep ONE stable position in the element tree across every
+  // stage. Rendering it from a different slot when the stage flips to
+  // "entering" would remount it — React state resets and the "Meet your
+  // starter team" screen visibly restarts mid-handoff.
+  const isEnteringCurtain = transaction?.stage === "entering";
 
   // The app mounts (and starts loading data) beneath the splash overlay; the
   // overlay just keeps the bee on screen long enough to be seen, then fades.
-  // Community switches and first-run completion keep their quiet gates.
+  // Community switches keep their quiet gate.
   const showBootSplashOverlay =
-    bootSplashPhase !== "done" &&
-    !isCommunitySwitch &&
-    !isCompletingFirstRunCommunity;
+    bootSplashPhase !== "done" && !isCommunitySwitch;
+
+  let appContent: ReactNode = null;
+  if (!transaction) {
+    if (community.needsSetup) {
+      // Show welcome setup for first-run users with no communities
+      appContent = (
+        <WelcomeSetup
+          initialPage={resumeFirstCommunityPage ?? undefined}
+          onBack={onBackToMachineConfig}
+        />
+      );
+    } else if ("error" in community && community.error) {
+      // Surface apply failures so the user can retry or change community.
+      appContent = (
+        <>
+          <CommunityApplyErrorScreen
+            error={community.error}
+            onChangeCommunity={() => setIsCommunityChangeOpen(true)}
+            onRetry={reconnectCommunity}
+          />
+          {isCommunityChangeOpen ? (
+            <CommunityChangeOverlay
+              onClose={() => setIsCommunityChangeOpen(false)}
+            />
+          ) : null}
+        </>
+      );
+    }
+  }
+  // Wait for this exact community config to be applied to the backend before
+  // rendering anything that connects to the relay. The appliedKey check avoids
+  // a one-render race where React sees the new active community while the
+  // Tauri backend is still configured for the previous one.
+  const communityApplied =
+    community.isReady && community.appliedKey === communityKey;
+  useLayoutEffect(() => {
+    if (communityApplied) {
+      completeCommunityViewTransition();
+    }
+  }, [communityApplied]);
+  if (appContent === null && (!transaction || isEnteringCurtain)) {
+    appContent = communityApplied ? (
+      <CommunityQueryProvider key={communityKey}>
+        <AppReady
+          isCommunitySwitch={isCommunitySwitch}
+          key={communityKey}
+          isSharedIdentity={sharedIdentity}
+        />
+        {showBootSplashOverlay ? (
+          <div
+            aria-hidden="true"
+            className={cn(
+              "fixed inset-0 z-50 transition-opacity",
+              bootSplashPhase === "fading" ? "opacity-0" : "opacity-100",
+            )}
+            data-testid="boot-splash-overlay"
+            style={{ transitionDuration: `${BOOT_SPLASH_FADE_MS}ms` }}
+          >
+            <AppLoadingGate />
+          </div>
+        ) : null}
+      </CommunityQueryProvider>
+    ) : isCommunitySwitch ? (
+      <CommunitySwitchGate />
+    ) : (
+      <AppLoadingGate />
+    );
+  }
 
   return (
-    <CommunityQueryProvider key={communityKey}>
-      <AppReady
-        isCompletingFirstRunCommunity={isCompletingFirstRunCommunity}
-        isCommunitySwitch={isCommunitySwitch}
-        key={communityKey}
-        isSharedIdentity={sharedIdentity}
-        onFirstRunCommunitySettled={handleFirstRunCommunitySettled}
-      />
-      {showBootSplashOverlay ? (
+    <>
+      {appContent}
+      {transaction ? (
         <div
-          aria-hidden="true"
-          className={cn(
-            "fixed inset-0 z-50 transition-opacity",
-            bootSplashPhase === "fading" ? "opacity-0" : "opacity-100",
-          )}
-          data-testid="boot-splash-overlay"
-          style={{ transitionDuration: `${BOOT_SPLASH_FADE_MS}ms` }}
+          className={isEnteringCurtain ? "fixed inset-0 z-50" : undefined}
+          data-testid={
+            isEnteringCurtain ? "onboarding-entering-curtain" : undefined
+          }
         >
-          <AppLoadingGate />
+          <CommunityOnboardingFlow
+            onCancel={handleCommunityOnboardingCancel}
+            onConnect={handleCommunityOnboardingConnect}
+          />
         </div>
       ) : null}
-    </CommunityQueryProvider>
+    </>
+  );
+}
+
+function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
+  const { activeCommunity } = useCommunities();
+  const communityOnboarding = useCommunityOnboarding();
+  const machine = useMachineOnboardingState({
+    activeCommunityPubkey: activeCommunity
+      ? (activeCommunity.pubkey ?? null)
+      : undefined,
+    isSharedIdentity: sharedIdentity,
+  });
+  const [machineInitialPage, setMachineInitialPage] =
+    useState<MachineOnboardingPage>();
+
+  const reopenMachineConfig = useCallback(() => {
+    setMachineInitialPage("config");
+    machine.reopen();
+  }, [machine.reopen]);
+
+  const completeMachineOnboarding = useCallback(
+    (pubkey?: string) => {
+      setMachineInitialPage(undefined);
+      machine.complete(pubkey);
+    },
+    [machine.complete],
+  );
+
+  const openAddCommunity = useCallback(
+    (payload: AddCommunityDeepLinkPayload & { requestId: string }) =>
+      activeCommunity
+        ? requestAddCommunityPrefill(payload)
+        : communityOnboarding.start({
+            source: "add-community",
+            relayUrl: payload.relayUrl,
+            communityName: payload.name,
+          }),
+    [activeCommunity, communityOnboarding.start],
+  );
+
+  // Deep links are captured here — above the machine-onboarding gate — not in
+  // CommunityApp. The Rust side queues them; draining into the persisted
+  // community-onboarding transaction immediately means an invite opened on a
+  // fresh install is acknowledged on screen while the identity steps are
+  // still pending, and survives a relaunch in between.
+  useEffect(() => {
+    const unlisten = listenForDeepLinks({
+      startCommunityOnboarding: communityOnboarding.start,
+      openAddCommunity,
+      onAddCommunityAvailable: onAddCommunityPrefillAvailable,
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, [communityOnboarding.start, openAddCommunity]);
+
+  if (machine.stage === "reset-failed") return <ResetFailedScreen />;
+  if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;
+  if (machine.stage === "relaunch-required") return <RelaunchRequiredScreen />;
+  if (machine.stage === "blocking") return <AppLoadingGate />;
+  if (machine.stage === "ready") {
+    return (
+      <CommunityApp
+        currentPubkey={machine.currentPubkey}
+        onBackToMachineConfig={reopenMachineConfig}
+        sharedIdentity={sharedIdentity}
+      />
+    );
+  }
+
+  // A community deep link that arrived before machine onboarding finished is
+  // persisted immediately and acknowledged here. Invite claiming waits until
+  // setup completes so it is signed only by the user's final identity.
+  const transaction = communityOnboarding.transaction;
+  const isDeepLink =
+    transaction?.source === "deep-link-join" ||
+    transaction?.source === "deep-link-connect";
+  const shouldAcknowledgeDeepLink = isDeepLink && !transaction.acknowledged;
+
+  return (
+    <>
+      <MachineOnboardingFlow
+        complete={completeMachineOnboarding}
+        continueWithIdentity={machine.continueWithIdentity}
+        identityLost={machine.identityLost}
+        initialPage={machineInitialPage}
+        queryClient={machine.queryClient}
+      />
+      {shouldAcknowledgeDeepLink ? <PendingInviteGate /> : null}
+    </>
+  );
+}
+
+export function App() {
+  useReloadShortcut();
+  useInitialRenderReady();
+  const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
+  const [queryClient] = useState(createBuzzQueryClient);
+
+  useEffect(() => {
+    isSharedIdentityCmd()
+      .then(setSharedIdentity)
+      .catch((err) => {
+        console.warn("is_shared_identity command failed:", err);
+        setSharedIdentity(false);
+      });
+  }, []);
+
+  if (sharedIdentity === null) return <AppLoadingGate />;
+
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MachineBootstrap sharedIdentity={sharedIdentity} />
+    </QueryClientProvider>
   );
 }

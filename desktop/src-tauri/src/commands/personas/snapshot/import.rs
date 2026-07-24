@@ -640,6 +640,10 @@ async fn submit_engram_event(
     use crate::relay::build_nip98_auth_header_for_keys;
     use reqwest::Method;
 
+    // Wait before signing: the relay enforces NIP-98 freshness (±60s) and the
+    // gate may hold for up to MAX_HINT_SECONDS (300s). Building auth before the
+    // wait produces a stale `created_at` that the relay will reject.
+    crate::relay_admission::wait_for_rate_limit().await;
     let auth = build_nip98_auth_header_for_keys(agent_keys, &Method::POST, url, event_json)?;
     let mut request = state
         .http_client

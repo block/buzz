@@ -42,6 +42,11 @@ environment:
 The keystore path must be absolute, and the keystore must remain outside the
 repository. Development and debug builds do not require these variables.
 
+Release pipelines that sign through the central APK Signer service instead of
+a local upload keystore must set `BUZZ_ANDROID_RELEASE_SIGNING=external`. That
+mode produces an unsigned release bundle and refuses to run if any
+`BUZZ_ANDROID_UPLOAD_*` value is also set.
+
 ## Architecture
 
 ```

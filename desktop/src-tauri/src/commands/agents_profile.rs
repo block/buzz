@@ -81,6 +81,13 @@ pub(crate) async fn reconcile_agent_profile(
         &relay_ws_url_with_override(state),
     );
 
+    if !state
+        .managed_agent_profile_reconcile_enabled
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(());
+    }
+
     // Query the relay for the agent's existing kind:0 profile.
     let existing = query_agent_profile(state, &relay_url, agent_pubkey).await?;
 
@@ -135,6 +142,13 @@ pub(crate) async fn reconcile_agent_profile(
 
     let agent_keys = Keys::parse(&data.private_key_nsec)
         .map_err(|e| format!("failed to parse agent keys: {e}"))?;
+
+    if !state
+        .managed_agent_profile_reconcile_enabled
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return Ok(());
+    }
 
     sync_managed_agent_profile(
         state,

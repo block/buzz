@@ -28,9 +28,9 @@ export const relaySelfQueryKey = ["relaySelf"] as const;
 
 /**
  * The active relay's NIP-11 `self` pubkey (hex), or `null` when it advertises
- * none / is unreachable. Used to recognize a moderation DM. Community-scoped
- * and effectively static for a session, so it is cached indefinitely; a `null`
- * result is a valid answer (fail open), not an error to retry into.
+ * none. Used to recognize relay-signed state and moderation DMs. Community-
+ * scoped and effectively static for a session, so it is cached indefinitely;
+ * a `null` result is a valid answer, while request failures remain query errors.
  */
 export function useRelaySelfQuery(enabled = true) {
   return useQuery({

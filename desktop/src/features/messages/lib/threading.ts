@@ -74,6 +74,30 @@ export function normalizeMentionPubkeys(
   return result;
 }
 
+/**
+ * Mentions an edit *newly adds*, relative to the original message body.
+ *
+ * The composer resolves both bodies to pubkey lists with the same
+ * channel-roster resolver the send path uses, then hands them here. We
+ * normalize the edited body's set (lowercase / dedup / drop self) and keep
+ * only pubkeys that were not already present in the original body — compared
+ * case-insensitively so a case-only difference is never treated as "new".
+ *
+ * A typo-fix edit that leaves the mention set unchanged yields `[]`, so the
+ * edit event carries no `p` tags and re-wakes nobody. Only genuinely new
+ * mentions get notified.
+ */
+export function diffAddedMentionPubkeys(
+  originalPubkeys: string[],
+  editedPubkeys: string[],
+  selfPubkey: string,
+): string[] {
+  const original = new Set(originalPubkeys.map((pk) => pk.toLowerCase()));
+  return normalizeMentionPubkeys(editedPubkeys, selfPubkey).filter(
+    (pubkey) => !original.has(pubkey),
+  );
+}
+
 export function buildReplyTags(
   channelId: string,
   authorPubkey: string,

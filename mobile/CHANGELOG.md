@@ -1,5 +1,43 @@
 # Changelog
 
+## mobile-v0.4.11
+
+- fix(mobile): stop media fetch stampede — stable cache keys, bounded decode, 429 cooldown ([#2219](https://github.com/block/buzz/pull/2219)) ([`591bbbfa7`](https://github.com/block/buzz/commit/591bbbfa7e5931318a226555d6bf921ba50d97c2))
+
+
+## mobile-v0.4.9
+
+- fix(mobile): sanitize Android image uploads ([#2188](https://github.com/block/buzz/pull/2188)) ([`ee21da90b`](https://github.com/block/buzz/commit/ee21da90bd6b1da6bfaaf22ba00749398aaa9640))
+- chore(release): release Buzz Mobile version 0.4.8 ([#2187](https://github.com/block/buzz/pull/2187)) ([`fb8c90cf5`](https://github.com/block/buzz/commit/fb8c90cf597960e48fe55a9baceb8a5a08112ccc))
+- fix(mobile): image upload fails due to unstripped metadata ([#2185](https://github.com/block/buzz/pull/2185)) ([`37f15b200`](https://github.com/block/buzz/commit/37f15b20019169363b697aee41c99573b7bc3f24))
+- chore(deps): update all non-major dependencies ([#2152](https://github.com/block/buzz/pull/2152)) ([`6da407742`](https://github.com/block/buzz/commit/6da407742a09ee531c53a99ca5d2d314f0b38aef))
+
+
+## mobile-v0.4.8
+
+- fix(mobile): image upload fails due to unstripped metadata ([#2185](https://github.com/block/buzz/pull/2185)) ([`37f15b200`](https://github.com/block/buzz/commit/37f15b20019169363b697aee41c99573b7bc3f24))
+- chore(deps): update all non-major dependencies ([#2152](https://github.com/block/buzz/pull/2152)) ([`6da407742`](https://github.com/block/buzz/commit/6da407742a09ee531c53a99ca5d2d314f0b38aef))
+
+
+## mobile-v0.4.7
+
+- fix(ui): relabel agent owner attribution from "owned by" to "managed by" ([#2133](https://github.com/block/buzz/pull/2133)) ([`a1e977cd1`](https://github.com/block/buzz/commit/a1e977cd1bda3f5421533b47f12c38f4a336224e))
+- chore(release): release Buzz Mobile version 0.4.6-rc.1 ([#2049](https://github.com/block/buzz/pull/2049)) ([`3aba3a531`](https://github.com/block/buzz/commit/3aba3a5316ae8bb1aed518e01e68c3e3a2166a46))
+- Strip media metadata on clients and reject it at the relay ([#2006](https://github.com/block/buzz/pull/2006)) ([`5cfd69cb0`](https://github.com/block/buzz/commit/5cfd69cb0cf1dc63d718454defe3b8a8aaf5f15b))
+
+
+## mobile-v0.4.6-rc.1
+
+- Strip media metadata on clients and reject it at the relay ([#2006](https://github.com/block/buzz/pull/2006)) ([`5cfd69cb`](https://github.com/block/buzz/commit/5cfd69cb0cf1dc63d718454defe3b8a8aaf5f15b))
+
+
+## mobile-v0.4.5
+
+- fix(mobile): support open pairing relays ([#1939](https://github.com/block/buzz/pull/1939)) ([`a0081944`](https://github.com/block/buzz/commit/a0081944edbb3d33a2bcee0b4890ae5ef8ad4966))
+- fix(mobile): replace pairing placeholder with Buzz icon ([#1952](https://github.com/block/buzz/pull/1952)) ([`7eea924f`](https://github.com/block/buzz/commit/7eea924f3d7cf9ee816ae5f206c88762274fd7c6))
+- feat(media): require auth for relay media reads ([#1926](https://github.com/block/buzz/pull/1926)) ([`f3087628`](https://github.com/block/buzz/commit/f3087628524951de91028c9d263bcd0d0a727fab))
+
+
 ## mobile-v0.4.4
 
 - fix(mobile): surface non-member people and owned agents in @mention autocomplete ([#1877](https://github.com/block/buzz/pull/1877)) ([`54f41659`](https://github.com/block/buzz/commit/54f4165942ab5b3e2cf1fa1b47bbb907587cd5f4))

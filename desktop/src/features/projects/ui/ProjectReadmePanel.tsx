@@ -9,7 +9,8 @@ import {
 } from "./ProjectRepositoryPanel";
 import {
   type RepoSourceHeaderControls,
-  RepoSourceToggle,
+  RepoSourceDropdown,
+  RepoSyncActionButton,
   RepositoryBranchDropdown,
 } from "./ProjectRepositorySource";
 
@@ -88,15 +89,25 @@ export function ReadmePanel({
   const header = (
     <>
       {sourceControls ? (
-        <div className="flex min-h-10 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-1.5">
+        <div className="flex min-h-14 min-w-0 items-center gap-1 border-border/50 border-b px-3 py-3">
+          <RepoSourceDropdown controls={sourceControls} />
           <RepositoryBranchDropdown
             branch={sourceControls.branch}
             branchOptions={sourceControls.branchOptions}
             compact
+            createBranchDisabled={sourceControls.createBranchDisabled}
+            createBranchTitle={sourceControls.createBranchTitle}
+            deleteBranchDisabled={sourceControls.deleteBranchDisabled}
+            deleteBranchTitle={sourceControls.deleteBranchTitle}
             onBranchChange={sourceControls.onBranchChange}
+            onCreateBranch={sourceControls.onCreateBranch}
+            onDeleteBranch={sourceControls.onDeleteBranch}
+            onTagChange={sourceControls.onTagChange}
+            selectedTag={sourceControls.selectedTag}
+            tagOptions={sourceControls.tagOptions}
           />
           <div className="ml-auto flex shrink-0 items-center">
-            <RepoSourceToggle controls={sourceControls} />
+            <RepoSyncActionButton controls={sourceControls} />
           </div>
         </div>
       ) : null}

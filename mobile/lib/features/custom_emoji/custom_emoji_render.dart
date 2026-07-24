@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 
+import '../../shared/relay/relay.dart';
+
 import 'custom_emoji.dart';
 
 /// Default rendered height of an inline custom emoji, in logical pixels.
@@ -29,10 +31,11 @@ class CustomEmojiImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final fallbackStyle = DefaultTextStyle.of(context).style;
-    return Image.network(
-      url,
+    return MediaImage(
+      url: url,
       width: size,
       height: size,
+      decodeWidth: size,
       fit: BoxFit.contain,
       filterQuality: FilterQuality.medium,
       semanticLabel: ':$shortcode:',

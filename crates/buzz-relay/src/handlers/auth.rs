@@ -252,102 +252,25 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 }
             });
 
-            // Stash NIP-OA owner on the auth context (session-scoped) only if
-            // the DB confirms this owner relationship (first-write-wins).
+            // Stash NIP-OA owner on the auth context only after the shared
+            // backfill confirms the first-write-wins relationship.
             if let Some(owner) = nip_oa_owner {
-                // Ensure both agent and owner have users rows (BYO agents may not,
-                // and agent_owner_pubkey has a FK constraint to users.pubkey).
-                match state
-                    .db
-                    .ensure_user(conn.tenant.community(), pubkey.as_bytes())
-                    .await
+                if crate::api::relay_members::materialize_nip_oa_owner(
+                    &state,
+                    &conn.tenant,
+                    &pubkey,
+                    &owner,
+                )
+                .await
                 {
-                    Ok(true) => {
-                        metrics::counter!(
-                            "buzz_users_created_total",
-                            "community" => conn.tenant.host().to_owned()
-                        )
-                        .increment(1);
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, error = %e, "ensure_user(agent) failed during NIP-OA backfill");
-                    }
-                }
-                match state
-                    .db
-                    .ensure_user(conn.tenant.community(), owner.as_bytes())
-                    .await
-                {
-                    Ok(true) => {
-                        metrics::counter!(
-                            "buzz_users_created_total",
-                            "community" => conn.tenant.host().to_owned()
-                        )
-                        .increment(1);
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, error = %e, "ensure_user(owner) failed during NIP-OA backfill");
-                    }
-                }
-
-                // Idempotent backfill: record agent→owner in DB so cross-connection
-                // features (observer frames, channel policy) work for BYO agents.
-                // Returns Ok(true) if written, Ok(false) if already owned by someone else.
-                match state
-                    .db
-                    .set_agent_owner(conn.tenant.community(), pubkey.as_bytes(), owner.as_bytes())
-                    .await
-                {
-                    Ok(true) => {
-                        // Successfully materialized — this owner is authoritative.
-                        auth_ctx.agent_owner_pubkey = Some(owner);
-                        // Pre-warm the observer cache to avoid stale negatives.
-                        let cache_key = (pubkey.to_bytes().to_vec(), owner.to_bytes().to_vec());
-                        state.observer_owner_cache.insert(cache_key, true);
-                    }
-                    Ok(false) => {
-                        // Agent already owned by someone else. Verify if this
-                        // owner matches the existing DB record before trusting it.
-                        match state
-                            .db
-                            .is_agent_owner(
-                                conn.tenant.community(),
-                                pubkey.as_bytes(),
-                                owner.as_bytes(),
-                            )
-                            .await
-                        {
-                            Ok(true) => {
-                                auth_ctx.agent_owner_pubkey = Some(owner);
-                            }
-                            Ok(false) => {
-                                warn!(
-                                    conn_id = %conn_id,
-                                    agent = %pubkey.to_hex(),
-                                    nip_oa_owner = %owner.to_hex(),
-                                    "NIP-OA owner differs from DB owner — session will not get owner fast-path"
-                                );
-                            }
-                            Err(e) => {
-                                warn!(
-                                    conn_id = %conn_id,
-                                    error = %e,
-                                    "is_agent_owner check failed after set_agent_owner conflict"
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        warn!(
-                            conn_id = %conn_id,
-                            agent = %pubkey.to_hex(),
-                            owner = %owner.to_hex(),
-                            error = %e,
-                            "failed to backfill agent_owner_pubkey"
-                        );
-                    }
+                    auth_ctx.agent_owner_pubkey = Some(owner);
+                } else {
+                    warn!(
+                        conn_id = %conn_id,
+                        agent = %pubkey.to_hex(),
+                        nip_oa_owner = %owner.to_hex(),
+                        "NIP-OA owner could not be materialized"
+                    );
                 }
             }
 
@@ -368,5 +291,60 @@ pub async fn handle_auth(event: nostr::Event, conn: Arc<ConnectionState>, state:
                 "auth-required: verification failed",
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_auth_tag_json;
+    use nostr::{EventBuilder, Keys, Kind, Tag};
+
+    /// Build a signed NIP-98 (kind 27235) event carrying the given tags. The
+    /// `auth` tag lives inside the signed event exactly as the git and
+    /// WebSocket auth paths receive it.
+    fn signed_event_with_tags(tags: Vec<Tag>) -> nostr::Event {
+        EventBuilder::new(Kind::HttpAuth, "")
+            .tags(tags)
+            .sign_with_keys(&Keys::generate())
+            .expect("sign auth event")
+    }
+
+    /// A single `auth` tag is extracted verbatim as its JSON-array string —
+    /// this is the exact value fed to `verify_auth_tag` on the git path.
+    #[test]
+    fn single_auth_tag_extracted_verbatim() {
+        let owner = Keys::generate().public_key().to_hex();
+        let sig = "00".repeat(64);
+        let event = signed_event_with_tags(vec![
+            Tag::parse(["u", "https://relay/git/x/y"]).unwrap(),
+            Tag::parse(["auth", owner.as_str(), "", sig.as_str()]).unwrap(),
+        ]);
+
+        let extracted = extract_auth_tag_json(&event).expect("auth tag present");
+        let expected = serde_json::to_string(&["auth", owner.as_str(), "", sig.as_str()]).unwrap();
+        assert_eq!(extracted, expected);
+    }
+
+    /// No `auth` tag → `None` (the direct-member path, tag absent).
+    #[test]
+    fn no_auth_tag_returns_none() {
+        let event =
+            signed_event_with_tags(vec![Tag::parse(["u", "https://relay/git/x/y"]).unwrap()]);
+        assert_eq!(extract_auth_tag_json(&event), None);
+    }
+
+    /// More than one `auth` tag → `None`. Per NIP-OA, an ambiguous set of
+    /// attestations is treated as no valid attestation (fail-closed), so a
+    /// second forged tag cannot smuggle an alternate delegation past the gate.
+    #[test]
+    fn duplicate_auth_tags_return_none() {
+        let a = Keys::generate().public_key().to_hex();
+        let b = Keys::generate().public_key().to_hex();
+        let sig = "00".repeat(64);
+        let event = signed_event_with_tags(vec![
+            Tag::parse(["auth", a.as_str(), "", sig.as_str()]).unwrap(),
+            Tag::parse(["auth", b.as_str(), "", sig.as_str()]).unwrap(),
+        ]);
+        assert_eq!(extract_auth_tag_json(&event), None);
     }
 }

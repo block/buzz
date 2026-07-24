@@ -14,7 +14,7 @@ use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
 use uuid::Uuid;
 
-use buzz_auth::{generate_challenge, AuthContext};
+use buzz_auth::{generate_challenge, AuthContext, LimitType};
 use buzz_core::tenant::TenantContext;
 use nostr::Filter;
 
@@ -495,6 +495,10 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
     };
 
+    if !enforce_ws_admission(&msg, &conn, &state).await {
+        return;
+    }
+
     match msg {
         ClientMessage::Auth(event) => {
             // Auth is synchronous in the WS loop — no span context is lost.
@@ -537,7 +541,8 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
             let permit = match state.handler_semaphore.clone().try_acquire_owned() {
                 Ok(p) => p,
                 Err(_) => {
-                    conn.send(RelayMessage::notice(
+                    conn.send(request_rejection_message(
+                        Some(&sub_id),
                         "rate-limited: too many concurrent requests",
                     ));
                     return;
@@ -575,6 +580,100 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
         }
         ClientMessage::Close(sub_id) => {
             handlers::close::handle_close(sub_id, Arc::clone(&conn), Arc::clone(&state)).await;
+        }
+    }
+}
+
+fn request_rejection_message(sub_id: Option<&str>, reason: &str) -> String {
+    match sub_id {
+        Some(sub_id) => RelayMessage::closed(sub_id, reason),
+        None => RelayMessage::notice(reason),
+    }
+}
+
+async fn enforce_ws_admission(
+    msg: &ClientMessage,
+    conn: &ConnectionState,
+    state: &AppState,
+) -> bool {
+    let is_event = matches!(msg, ClientMessage::Event(_));
+    if !is_event && !matches!(msg, ClientMessage::Req { .. } | ClientMessage::Count { .. }) {
+        return true;
+    }
+
+    let (pubkey, is_agent) = {
+        let auth = conn.auth_state.read().await;
+        match &*auth {
+            AuthState::Authenticated(ctx) => (ctx.pubkey, ctx.agent_owner_pubkey.is_some()),
+            _ => return true,
+        }
+    };
+
+    let limits = &state.auth.config().rate_limits;
+    let (ws_window_secs, ws_limit) =
+        crate::admission::ws_admission_budget(limits.human_ws_events_per_sec);
+    let ws_result = crate::admission::check_principal(
+        state.admission_rate_limiter.as_ref(),
+        &conn.tenant,
+        &pubkey,
+        LimitType::WsEvents,
+        ws_window_secs,
+        ws_limit,
+    )
+    .await;
+    let sub_id = match msg {
+        ClientMessage::Req { sub_id, .. } => Some(sub_id.as_str()),
+        _ => None,
+    };
+    if !send_admission_result(conn, ws_result, sub_id) {
+        return false;
+    }
+
+    if is_event {
+        let message_limit = if is_agent {
+            limits.agent_standard_messages_per_min
+        } else {
+            limits.human_messages_per_min
+        };
+        let message_result = crate::admission::check_principal(
+            state.admission_rate_limiter.as_ref(),
+            &conn.tenant,
+            &pubkey,
+            LimitType::Messages,
+            60,
+            message_limit,
+        )
+        .await;
+        if !send_admission_result(conn, message_result, None) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn send_admission_result(
+    conn: &ConnectionState,
+    result: Result<(), crate::admission::AdmissionError>,
+    sub_id: Option<&str>,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(crate::admission::AdmissionError::Exceeded { reset_in_secs }) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "quota").increment(1);
+            conn.send(request_rejection_message(
+                sub_id,
+                &format!("rate-limited: quota exceeded; retry in {reset_in_secs}s"),
+            ));
+            false
+        }
+        Err(crate::admission::AdmissionError::Unavailable) => {
+            metrics::counter!("buzz_admission_rejections_total", "transport" => "websocket", "reason" => "unavailable").increment(1);
+            conn.send(request_rejection_message(
+                sub_id,
+                "rate-limited: shared admission unavailable",
+            ));
+            false
         }
     }
 }
@@ -671,6 +770,19 @@ mod tests {
                 other => panic!("unexpected websocket message in test: {other:?}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn req_rejections_are_subscription_scoped() {
+        let reason = "rate-limited: too many concurrent requests";
+        let closed: serde_json::Value =
+            serde_json::from_str(&request_rejection_message(Some("history-123"), reason))
+                .expect("parse CLOSED");
+        assert_eq!(closed, serde_json::json!(["CLOSED", "history-123", reason]));
+
+        let notice: serde_json::Value =
+            serde_json::from_str(&request_rejection_message(None, reason)).expect("parse NOTICE");
+        assert_eq!(notice, serde_json::json!(["NOTICE", reason]));
     }
 
     #[tokio::test]

@@ -7,10 +7,11 @@
 # and polls readiness.
 #
 # Usage:
-#   ./scripts/start-relay-for-tests.sh [--profile <cargo-profile>]
+#   ./scripts/start-relay-for-tests.sh [--profile <cargo-profile>] [--no-build]
 #
 # Options:
 #   --profile <profile>   Cargo build profile (default: ci)
+#   --no-build            Use existing target/<profile>/ binaries (CI artifact reuse)
 #
 # Exports:
 #   RELAY_URL=ws://localhost:3000
@@ -23,6 +24,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
 CARGO_PROFILE="${CARGO_PROFILE:-ci}"
+SKIP_BUILD=false
 
 # ── Parse args ────────────────────────────────────────────────────────────────
 
@@ -31,6 +33,10 @@ while [[ $# -gt 0 ]]; do
     --profile)
       CARGO_PROFILE="$2"
       shift 2
+      ;;
+    --no-build)
+      SKIP_BUILD=true
+      shift
       ;;
     *)
       echo "Unknown option: $1" >&2
@@ -128,9 +134,19 @@ ok "Community seeded"
 
 # ── Build relay ──────────────────────────────────────────────────────────────
 
-log "Building relay (profile: ${CARGO_PROFILE})..."
-cargo build --profile "${CARGO_PROFILE}" -p buzz-relay -p git-credential-nostr
-ok "Relay built"
+if [[ "${SKIP_BUILD}" == "true" ]]; then
+  for bin in buzz-relay git-credential-nostr; do
+    if [[ ! -x "./target/${CARGO_PROFILE}/${bin}" ]]; then
+      err "--no-build: ./target/${CARGO_PROFILE}/${bin} missing or not executable"
+      exit 1
+    fi
+  done
+  log "Skipping relay build (--no-build); using existing target/${CARGO_PROFILE}/ binaries"
+else
+  log "Building relay (profile: ${CARGO_PROFILE})..."
+  cargo build --profile "${CARGO_PROFILE}" -p buzz-relay -p git-credential-nostr
+  ok "Relay built"
+fi
 
 # ── Start relay ──────────────────────────────────────────────────────────────
 

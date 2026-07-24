@@ -67,3 +67,43 @@ test("flushMentionDebounce returns null for an empty fresh query", () => {
 
   assert.equal(flushed, null);
 });
+
+test("flushMentionDebounce preserves a team expansion selected with Enter", () => {
+  const teamMembers = [
+    {
+      displayName: "Planner",
+      kind: "persona",
+      personaId: "planner",
+    },
+    {
+      displayName: "Builder",
+      kind: "identity",
+      personaId: "builder",
+      pubkey: "c".repeat(64),
+    },
+  ];
+  const flushed = flushMentionDebounce({
+    debounceTimerRef: ref(setTimeout(() => {}, 1000)),
+    latestValueRef: ref("Ask @launch"),
+    latestCursorRef: ref("Ask @launch".length),
+    searchableNamesLowerRef: ref(["launch team"]),
+    candidates: [
+      candidate({
+        kind: "team",
+        displayName: "Launch Team",
+        isAgent: true,
+        isMember: false,
+        pubkey: undefined,
+        teamId: "launch",
+        teamMembers,
+      }),
+    ],
+    activePersonaIds: new Set(),
+    channelType: "group",
+  });
+
+  assert.equal(flushed?.type, "match");
+  assert.equal(flushed?.suggestion.kind, "team");
+  assert.deepEqual(flushed?.suggestion.teamMembers, teamMembers);
+  assert.equal(flushed?.suggestion.notInChannel, false);
+});

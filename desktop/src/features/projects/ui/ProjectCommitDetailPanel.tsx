@@ -55,7 +55,7 @@ export function ProjectCommitDetailPanel({
 
   return (
     <div className="space-y-3">
-      <header className="space-y-2 border border-border/60 bg-card p-4">
+      <header className="space-y-2 rounded-xl border border-border/60 bg-card p-4">
         <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
           <GitCommitHorizontal className="h-3.5 w-3.5" />
           Commit from {authorLabel}

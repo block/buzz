@@ -4,6 +4,18 @@ use crate::config::{
 };
 use crate::types::HistoryItem;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HandoffTokenCounts {
+    before: u64,
+    after: u64,
+}
+
+impl std::fmt::Display for HandoffTokenCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} -> {} tokens", self.before, self.after)
+    }
+}
+
 pub(crate) enum HandoffOutcome {
     Performed,
     Skipped,
@@ -28,6 +40,7 @@ impl RunCtx<'_> {
             return HandoffOutcome::Skipped;
         }
         let prompt = self.build_handoff_prompt();
+        let tokens_before = self.projected_handoff_input_tokens();
         let summary = tokio::select! {
             biased;
             _ = self.cancel.changed() => return HandoffOutcome::Cancelled,
@@ -81,8 +94,12 @@ impl RunCtx<'_> {
             self.history.push(HistoryItem::User(prompt));
         }
         *self.handoff_count += 1;
+        let token_counts = HandoffTokenCounts {
+            before: tokens_before,
+            after: estimate_history_tokens(self.history),
+        };
         tracing::info!(
-            "handoff #{} (history {prior} -> {} items)",
+            "handoff #{} (history {prior} -> {} items; {token_counts})",
             *self.handoff_count,
             self.history.len()
         );
@@ -90,6 +107,29 @@ impl RunCtx<'_> {
     }
 
     fn should_handoff(&self) -> bool {
+        match *self.last_request_input_tokens {
+            Some(_) => {
+                self.projected_handoff_input_tokens()
+                    >= token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens)
+            }
+            None => {
+                let bytes: usize = self
+                    .history
+                    .iter()
+                    .map(HistoryItem::context_pressure_bytes)
+                    .sum();
+                bytes
+                    > byte_fallback_threshold(
+                        self.cfg.max_context_tokens,
+                        self.cfg.max_output_tokens,
+                        self.cfg.max_history_bytes,
+                    )
+            }
+        }
+    }
+
+    fn projected_handoff_input_tokens(&self) -> u64 {
+        let current_tokens = estimate_history_tokens(self.history);
         match *self.last_request_input_tokens {
             // Token-first: the provider told us exactly how many input tokens
             // the PREVIOUS request used. But history has grown since that
@@ -107,9 +147,7 @@ impl RunCtx<'_> {
                     .map(HistoryItem::context_pressure_bytes)
                     .sum();
                 let grown = current_bytes.saturating_sub(measured_bytes);
-                let projected = measured_tokens.saturating_add(estimate_tokens_from_bytes(grown));
-                projected
-                    >= token_threshold(self.cfg.max_context_tokens, self.cfg.max_output_tokens)
+                measured_tokens.saturating_add(estimate_tokens_from_bytes(grown))
             }
             // No usage yet (first request, or just after a handoff reset).
             // Fall back to the byte heuristic, capped conservatively so a
@@ -122,19 +160,7 @@ impl RunCtx<'_> {
             // Caveat: this can't shrink a single oversized current prompt,
             // since a handoff re-adds the current prompt verbatim — that is a
             // prompt-cap concern (MAX_PROMPT_BYTES), not this gate.
-            None => {
-                let bytes: usize = self
-                    .history
-                    .iter()
-                    .map(HistoryItem::context_pressure_bytes)
-                    .sum();
-                bytes
-                    > byte_fallback_threshold(
-                        self.cfg.max_context_tokens,
-                        self.cfg.max_output_tokens,
-                        self.cfg.max_history_bytes,
-                    )
-            }
+            None => current_tokens,
         }
     }
 
@@ -298,6 +324,15 @@ pub(crate) fn clamp_bytes(s: &str, max_bytes: usize) -> String {
 /// exactly what a fail-early preflight gate wants: it hands off sooner rather
 /// than risk the next request exceeding the window.
 const CONSERVATIVE_BYTES_PER_TOKEN: u64 = 1;
+
+fn estimate_history_tokens(history: &[HistoryItem]) -> u64 {
+    estimate_tokens_from_bytes(
+        history
+            .iter()
+            .map(HistoryItem::context_pressure_bytes)
+            .sum(),
+    )
+}
 
 /// Estimate tokens from a byte count at the conservative ratio (rounding up,
 /// so a partial token still counts). At a 1:1 ratio this is just the byte

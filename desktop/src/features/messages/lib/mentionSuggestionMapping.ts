@@ -3,11 +3,14 @@ import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { formatOwnerLabel } from "@/features/profile/lib/identity";
 import type { ChannelRole, ChannelType } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import type { TeamMentionMember } from "./mentionCandidates";
 
 export type MentionSuggestionCandidate = {
-  kind: "identity" | "persona";
+  kind: "identity" | "persona" | "team";
   pubkey?: string;
   personaId?: string | null;
+  teamId?: string;
+  teamMembers?: TeamMentionMember[];
   avatarUrl?: string | null;
   isAgent: boolean;
   isMember: boolean;
@@ -38,6 +41,8 @@ export function mapMentionCandidateToSuggestion(opts: {
   return {
     pubkey: candidate.pubkey,
     personaId: candidate.personaId ?? undefined,
+    teamId: candidate.teamId,
+    teamMembers: candidate.teamMembers,
     kind: candidate.kind,
     displayName: label,
     avatarUrl:
@@ -47,7 +52,10 @@ export function mapMentionCandidateToSuggestion(opts: {
         : null) ??
       null,
     isAgent: candidate.isAgent,
-    notInChannel: channelType !== "dm" && candidate.isMember === false,
+    notInChannel:
+      candidate.kind !== "team" &&
+      channelType !== "dm" &&
+      candidate.isMember === false,
     ownerLabel,
     role: !candidate.isAgent && candidate.role === "admin" ? "admin" : null,
   };

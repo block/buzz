@@ -63,6 +63,10 @@ pub struct GlobalAgentConfig {
     /// a model. `None` = no global default.
     #[serde(default)]
     pub model: Option<String>,
+
+    /// Preferred ACP runtime for definitions without an explicit runtime.
+    #[serde(default)]
+    pub preferred_runtime: Option<String>,
 }
 
 /// Validate a `GlobalAgentConfig` before persisting it.

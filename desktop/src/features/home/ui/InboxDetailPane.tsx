@@ -7,6 +7,7 @@ import type {
   InboxReply,
 } from "@/features/home/lib/inbox";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
 import {
   type InboxDisplayMessage,
@@ -18,11 +19,15 @@ import {
   hasSameMessageAuthor,
   isWithinGroupingWindow,
 } from "@/features/messages/lib/messageGrouping";
+import { orderMentionPubkeysByText } from "@/features/messages/lib/orderMentionPubkeys";
 import { getThreadReference } from "@/features/messages/lib/threading";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { MessageComposer } from "@/features/messages/ui/MessageComposer";
 import { useAnchoredScroll } from "@/features/messages/ui/useAnchoredScroll";
+import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { UpdateIndicator } from "@/features/settings/UpdateIndicator";
-import type { Channel } from "@/shared/api/types";
+import type { Channel, UserProfileSummary } from "@/shared/api/types";
+import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { TopChromeInsetHeader } from "@/shared/layout/TopChromeInsetHeader";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
@@ -56,6 +61,7 @@ type InboxDetailPaneProps = {
   isThreadContextLoading?: boolean;
   item: InboxItem | null;
   messages?: InboxContextMessage[];
+  profiles?: Record<string, UserProfileSummary>;
   replies?: InboxReply[];
   channel: Channel | null;
   contextChannelName?: string | null;
@@ -108,6 +114,7 @@ export function InboxDetailPane({
   isThreadContextLoading = false,
   item,
   messages = [],
+  profiles,
   replies = [],
   channel,
   contextChannelName = null,
@@ -122,9 +129,11 @@ export function InboxDetailPane({
   onToggleReaction,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
+  const { activeCommunity } = useCommunities();
   // Refs for the shared anchored-scroll hook's container and content roots.
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const composerWrapperRef = React.useRef<HTMLDivElement | null>(null);
   const [replyTargetId, setReplyTargetId] = React.useState<string | null>(null);
   const [isFocusHighlightVisible, setIsFocusHighlightVisible] =
     React.useState(true);
@@ -138,6 +147,40 @@ export function InboxDetailPane({
   // Live arrivals rerun its layout compensation without changing the target.
 
   const selectedMessage = messages.find((message) => message.isSelected);
+  // A latest reply can represent an Inbox conversation. Resolve the actual
+  // root from loaded context or the complete feed group; never treat an
+  // unresolved root/profile lookup as an authoritative empty audience.
+  const contextRoot = messages.find((message) => message.id === conversationId);
+  const feedRoot = item
+    ? [item.item, ...item.groupItems].find(
+        (groupItem) => groupItem.id === conversationId,
+      )
+    : undefined;
+  const rootMessage = contextRoot
+    ? {
+        authorPubkey: contextRoot.authorPubkey,
+        content: contextRoot.content,
+        mentionPubkeysByName: contextRoot.mentionPubkeysByName,
+      }
+    : feedRoot && profiles
+      ? {
+          authorPubkey: feedRoot.pubkey,
+          content: feedRoot.content,
+          mentionPubkeysByName: resolveMentionProps(feedRoot.tags, profiles)
+            .mentionPubkeysByName,
+        }
+      : null;
+  const initialAgentPubkeys = rootMessage
+    ? currentPubkey &&
+      normalizePubkey(rootMessage.authorPubkey) ===
+        normalizePubkey(currentPubkey)
+      ? orderMentionPubkeysByText(
+          rootMessage.content,
+          rootMessage.mentionPubkeysByName,
+          (pubkey) => agentPubkeys?.has(pubkey) === true,
+        )
+      : []
+    : undefined;
   const pendingReplyMessages: InboxDisplayMessage[] = replies.map((reply) => ({
     ...reply,
     depth: reply.depth ?? (selectedMessage?.depth ?? 0) + 1,
@@ -280,6 +323,12 @@ export function InboxDetailPane({
     setCapturedDefaultParentId(fallback);
   }, [conversationId, selectedEventId, item, latchedDefaultParentId]);
 
+  useComposerHeightPadding(
+    scrollContainerRef,
+    composerWrapperRef,
+    conversationId,
+  );
+
   if (!item) {
     return (
       <section
@@ -340,7 +389,7 @@ export function InboxDetailPane({
       ref={detailPaneRef}
     >
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        <TopChromeInsetHeader flush>
+        <TopChromeInsetHeader flush transparent>
           <div className="px-5 py-2">
             <div className="flex min-h-9 min-w-0 items-center justify-between gap-3">
               <div
@@ -429,7 +478,8 @@ export function InboxDetailPane({
 
         <div
           aria-busy={isThreadContextLoading}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 [overflow-anchor:none]"
+          className="-mt-13 min-h-0 flex-1 overflow-y-auto overscroll-contain pb-32 pt-13 [overflow-anchor:none]"
+          data-testid="home-inbox-detail-scroll"
           onScroll={onScroll}
           ref={scrollContainerRef}
         >
@@ -449,29 +499,55 @@ export function InboxDetailPane({
                 );
 
               return (
-                <React.Fragment key={message.id}>
-                  {isAfterSeparator ? (
-                    <div className="mx-6 my-3 border-t border-border/60" />
-                  ) : null}
-                  <InboxMessageRow
-                    agentPubkeys={agentPubkeys}
-                    canReply={canReply}
-                    channelId={item.item.channelId}
-                    isContinuation={isContinuation}
-                    isFocusHighlightVisible={isFocusHighlightVisible}
-                    message={message}
-                    onSelectReplyTarget={handleSelectReplyTarget}
-                    onToggleReaction={onToggleReaction}
-                  />
-                </React.Fragment>
+                <InboxMessageRow
+                  agentPubkeys={agentPubkeys}
+                  canReply={canReply}
+                  channelId={item.item.channelId}
+                  isContinuation={isContinuation}
+                  isFirst={index === 0}
+                  isFocusHighlightVisible={isFocusHighlightVisible}
+                  key={message.id}
+                  message={message}
+                  onSelectReplyTarget={handleSelectReplyTarget}
+                  onToggleReaction={onToggleReaction}
+                />
               );
             })}
           </div>
         </div>
 
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10">
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-40 isolate before:absolute before:inset-x-0 before:bottom-0 before:h-12 before:bg-gradient-to-b before:from-transparent before:to-background before:content-[''] after:absolute after:inset-x-0 after:bottom-0 after:h-4 after:bg-background after:content-['']"
+          data-testid="home-inbox-detail-composer-overlay"
+          ref={composerWrapperRef}
+        >
+          <span
+            aria-hidden="true"
+            className="absolute bottom-4 left-4 h-4 w-4 bg-background"
+            style={{
+              maskImage:
+                "radial-gradient(circle at top right, transparent 0 1rem, black calc(1rem + 0.5px))",
+              WebkitMaskImage:
+                "radial-gradient(circle at top right, transparent 0 1rem, black calc(1rem + 0.5px))",
+            }}
+          />
+          <span
+            aria-hidden="true"
+            className="absolute bottom-4 right-4 h-4 w-4 bg-background"
+            style={{
+              maskImage:
+                "radial-gradient(circle at top left, transparent 0 1rem, black calc(1rem + 0.5px))",
+              WebkitMaskImage:
+                "radial-gradient(circle at top left, transparent 0 1rem, black calc(1rem + 0.5px))",
+            }}
+          />
           <div className="pointer-events-auto">
             <MessageComposer
+              audienceContext={{
+                type: "thread",
+                threadRootId: item.conversationId,
+                initialAgentPubkeys,
+              }}
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
               channelType={composerChannelType}
@@ -509,6 +585,7 @@ export function InboxDetailPane({
             currentPubkey={currentPubkey}
             onOpenChange={setIsMembersSidebarOpen}
             open={isMembersSidebarOpen}
+            relayUrl={activeCommunity?.relayUrl}
           />
         </React.Suspense>
       ) : null}

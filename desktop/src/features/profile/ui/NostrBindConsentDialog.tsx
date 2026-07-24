@@ -1,5 +1,6 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -9,11 +10,13 @@ import type { Identity } from "@/shared/api/types";
 import type { NostrBindDeepLinkPayload } from "@/shared/deep-link";
 import { listenForNostrBindDeepLinks } from "@/shared/deep-link";
 import { OnboardingSlideTransition } from "@/features/onboarding/ui/OnboardingSlideTransition";
+import { buildNostrBindCallbackUrl } from "@/features/profile/lib/nostrBindCallback";
 import { signNostrIdentityBinding } from "@/features/profile/lib/nostrIdentityBinding";
 import { cn } from "@/shared/lib/cn";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 const COPY_SUCCESS_MESSAGE =
   "Signed response copied. Paste it into the Buzz admin console.";
@@ -87,6 +90,11 @@ function normalizeVerificationCode(value: string): string[] {
     .map((character) => character.trim());
 }
 
+function isNostrBindRequestExpired(payload: NostrBindDeepLinkPayload): boolean {
+  const expiry = new Date(payload.expiresAt).getTime();
+  return Number.isNaN(expiry) || expiry <= Date.now();
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
@@ -96,7 +104,7 @@ function formatError(error: unknown): string {
 
 async function copyToClipboard(text: string): Promise<boolean> {
   try {
-    await navigator.clipboard.writeText(text);
+    await writeTextToClipboard(text);
     return true;
   } catch (error) {
     console.warn("copy signed nostr binding response failed:", error);
@@ -121,6 +129,87 @@ async function notifySignedResponseReady(callbackUrl: string | undefined) {
   }
 }
 
+async function returnSignedResponseToBrowser(
+  callbackUrl: string,
+  signedResponse: string,
+): Promise<string | null> {
+  try {
+    await openUrl(buildNostrBindCallbackUrl(callbackUrl, signedResponse));
+    return null;
+  } catch (error) {
+    console.warn("return signed nostr binding response failed:", error);
+    return "Could not open the browser. Copy the response below to finish manually.";
+  }
+}
+
+function SignedResponseControls({
+  copyFailed,
+  copyLabel,
+  onCopy,
+  signedResponse,
+}: {
+  copyFailed: boolean;
+  copyLabel: string;
+  onCopy: () => void;
+  signedResponse: string;
+}) {
+  return (
+    <div className="space-y-4" data-testid="nostr-bind-manual-fallback-content">
+      <pre
+        className="max-h-56 w-full overflow-auto rounded-2xl border border-border/70 bg-muted/60 p-4 text-left shadow-xs"
+        data-testid="nostr-bind-signed-response"
+      >
+        <code className="whitespace-pre-wrap break-all font-mono text-xs leading-5 text-foreground">
+          {signedResponse}
+        </code>
+      </pre>
+
+      {copyFailed ? (
+        <p className="w-full rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-sm text-destructive">
+          {COPY_FAILURE_MESSAGE}
+        </p>
+      ) : null}
+
+      <Button
+        aria-label={copyLabel}
+        className="h-10 w-full"
+        data-testid="nostr-bind-copy-response"
+        onClick={onCopy}
+        type="button"
+      >
+        <span aria-live="polite" className="sr-only">
+          {copyLabel}
+        </span>
+        <span
+          aria-hidden="true"
+          className="inline-grid h-5 place-items-center overflow-hidden"
+        >
+          <span
+            className={cn(
+              COPY_BUTTON_LABEL_CLASS,
+              copyLabel === "Copy response"
+                ? "translate-y-0 opacity-100"
+                : "-translate-y-0.5 opacity-0",
+            )}
+          >
+            Copy response
+          </span>
+          <span
+            className={cn(
+              COPY_BUTTON_LABEL_CLASS,
+              copyLabel === "Copied"
+                ? "translate-y-0 opacity-100"
+                : "translate-y-0.5 opacity-0",
+            )}
+          >
+            Copied
+          </span>
+        </span>
+      </Button>
+    </div>
+  );
+}
+
 export function NostrBindConsentDialog() {
   const isPreview = isNostrBindPreviewEnabled();
   const [payload, setPayload] = React.useState<NostrBindDeepLinkPayload | null>(
@@ -140,12 +229,15 @@ export function NostrBindConsentDialog() {
   const [hasCodeMismatch, setHasCodeMismatch] = React.useState(false);
   const [copyFailed, setCopyFailed] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [isManualFallbackOpen, setIsManualFallbackOpen] = React.useState(false);
   const codeInputRefs = React.useRef<Array<HTMLInputElement | null>>([]);
   const codeShakeRef = React.useRef<HTMLDivElement | null>(null);
   const codeShakeAnimationRef = React.useRef<Animation | null>(null);
   const copiedTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const autoSignAttemptRef = React.useRef<string | null>(null);
+  const activeSignAttemptRef = React.useRef<symbol | null>(null);
   const systemColorScheme = useSystemColorScheme();
   const shouldReduceMotion = useReducedMotion();
   const enteredVerificationCode = verificationCode.join("");
@@ -190,13 +282,17 @@ export function NostrBindConsentDialog() {
 
     const unlistenPromise = listenForNostrBindDeepLinks((nextPayload) => {
       clearCopiedState();
+      autoSignAttemptRef.current = null;
+      activeSignAttemptRef.current = null;
       setPayload(nextPayload);
       setIdentity(null);
+      setIsSigning(false);
       setSignedResponse(null);
       setVerificationCode(createEmptyVerificationCode());
       setHasCodeMismatch(false);
       setCopyFailed(false);
       setError(null);
+      setIsManualFallbackOpen(false);
       getIdentity()
         .then(setIdentity)
         .catch((error) => {
@@ -211,22 +307,19 @@ export function NostrBindConsentDialog() {
     };
   }, [clearCopiedState, isPreview]);
 
-  const isExpired = React.useMemo(() => {
-    if (!payload) {
-      return false;
-    }
-    const expiry = new Date(payload.expiresAt).getTime();
-    return Number.isNaN(expiry) || expiry <= Date.now();
-  }, [payload]);
+  const isExpired = payload !== null && isNostrBindRequestExpired(payload);
 
   const resetDialog = React.useCallback(() => {
     clearCopiedState();
+    autoSignAttemptRef.current = null;
+    activeSignAttemptRef.current = null;
     setPayload(null);
     setSignedResponse(null);
     setVerificationCode(createEmptyVerificationCode());
     setHasCodeMismatch(false);
     setCopyFailed(false);
     setError(null);
+    setIsManualFallbackOpen(false);
     setIdentity(null);
     setIsSigning(false);
   }, [clearCopiedState]);
@@ -283,6 +376,7 @@ export function NostrBindConsentDialog() {
     (index: number, value: string) => {
       const nextDigits = value.replace(/\D/g, "");
       const next = [...verificationCode];
+      autoSignAttemptRef.current = null;
 
       if (!nextDigits) {
         next[index] = "";
@@ -349,6 +443,7 @@ export function NostrBindConsentDialog() {
       }
 
       event.preventDefault();
+      autoSignAttemptRef.current = null;
       const next = normalizeVerificationCode(pastedCode);
       setVerificationCode(next);
       if (
@@ -388,6 +483,7 @@ export function NostrBindConsentDialog() {
 
       if (event.key === "Backspace") {
         event.preventDefault();
+        autoSignAttemptRef.current = null;
         const targetIndex = verificationCode[index]
           ? index
           : Math.max(index - 1, 0);
@@ -415,10 +511,10 @@ export function NostrBindConsentDialog() {
   );
 
   const handleSign = React.useCallback(async () => {
-    if (!payload) {
+    if (activeSignAttemptRef.current || !payload) {
       return;
     }
-    if (isExpired) {
+    if (isNostrBindRequestExpired(payload)) {
       setError(EXPIRED_LINK_MESSAGE);
       return;
     }
@@ -433,6 +529,8 @@ export function NostrBindConsentDialog() {
       return;
     }
 
+    const attempt = Symbol("nostr-bind-sign");
+    activeSignAttemptRef.current = attempt;
     setIsSigning(true);
     clearCopiedState();
     setError(null);
@@ -447,22 +545,70 @@ export function NostrBindConsentDialog() {
             origin: payload.origin,
             expiresAt: payload.expiresAt,
           });
+      if (activeSignAttemptRef.current !== attempt) {
+        return;
+      }
+
       setSignedResponse(signed);
+      if (payload.returnMode === "browser_fragment_v1" && payload.callbackUrl) {
+        const callbackError = await returnSignedResponseToBrowser(
+          payload.callbackUrl,
+          signed,
+        );
+        if (activeSignAttemptRef.current !== attempt) {
+          return;
+        }
+        setError(callbackError);
+        setIsManualFallbackOpen(callbackError !== null);
+      }
     } catch (error) {
-      setError(formatError(error) || "Failed to sign binding response.");
+      if (activeSignAttemptRef.current === attempt) {
+        setError(formatError(error) || "Failed to sign binding response.");
+      }
     } finally {
-      setIsSigning(false);
+      if (activeSignAttemptRef.current === attempt) {
+        activeSignAttemptRef.current = null;
+        setIsSigning(false);
+      }
     }
   }, [
     clearCopiedState,
     enteredVerificationCode,
-    isExpired,
     isPreview,
     isVerificationCodeComplete,
     isVerificationCodeValid,
     payload,
     showVerificationCodeMismatch,
     verificationCode,
+  ]);
+
+  React.useEffect(() => {
+    if (
+      !payload ||
+      identity === null ||
+      isExpired ||
+      isSigning ||
+      signedResponse !== null ||
+      !isVerificationCodeValid
+    ) {
+      return;
+    }
+
+    const attemptKey = `${payload.challengeId}:${enteredVerificationCode}`;
+    if (autoSignAttemptRef.current === attemptKey) {
+      return;
+    }
+    autoSignAttemptRef.current = attemptKey;
+    void handleSign();
+  }, [
+    enteredVerificationCode,
+    handleSign,
+    identity,
+    isExpired,
+    isSigning,
+    isVerificationCodeValid,
+    payload,
+    signedResponse,
   ]);
 
   const handleCopyAgain = React.useCallback(async () => {
@@ -473,14 +619,22 @@ export function NostrBindConsentDialog() {
     setCopyFailed(!copied);
     if (copied) {
       showCopiedState();
-      await notifySignedResponseReady(payload?.callbackUrl);
+      if (payload?.returnMode === "clipboard") {
+        await notifySignedResponseReady(payload.callbackUrl);
+      }
       toast.success(
         isPreview ? PREVIEW_COPY_SUCCESS_MESSAGE : COPY_SUCCESS_MESSAGE,
       );
     } else {
       toast.warning(COPY_FAILURE_MESSAGE);
     }
-  }, [isPreview, payload?.callbackUrl, showCopiedState, signedResponse]);
+  }, [
+    isPreview,
+    payload?.callbackUrl,
+    payload?.returnMode,
+    showCopiedState,
+    signedResponse,
+  ]);
 
   return (
     <DialogPrimitive.Root
@@ -512,75 +666,69 @@ export function NostrBindConsentDialog() {
                   transitionKey="nostr-bind-finish"
                 >
                   <DialogPrimitive.Title className="mt-6 text-3xl font-semibold tracking-tight">
-                    Finish on the Buzz website
+                    {payload.returnMode === "browser_fragment_v1"
+                      ? "Continue in your browser"
+                      : "Finish on the Buzz website"}
                   </DialogPrimitive.Title>
                   <DialogPrimitive.Description
                     className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground"
                     id="nostr-bind-description"
                   >
-                    Copy the response below, then paste it into the Buzz website
-                    to finish verification.
+                    {payload.returnMode === "browser_fragment_v1"
+                      ? "Buzz opened your browser to finish verification."
+                      : "Copy the response below, then paste it into the Buzz website to finish verification."}
                   </DialogPrimitive.Description>
 
-                  <pre
-                    className="mt-10 max-h-56 w-full overflow-auto rounded-2xl border border-border/70 bg-muted/60 p-4 text-left shadow-xs"
-                    data-testid="nostr-bind-signed-response"
-                  >
-                    <code className="whitespace-pre-wrap break-all font-mono text-xs leading-5 text-foreground">
-                      {signedResponse}
-                    </code>
-                  </pre>
-
-                  {copyFailed ? (
+                  {error ? (
                     <p className="mt-4 w-full rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-left text-sm text-destructive">
-                      {COPY_FAILURE_MESSAGE}
+                      {error}
                     </p>
                   ) : null}
 
-                  <div className="mt-8 flex w-full flex-col gap-3">
-                    <Button
-                      aria-label={finishCopyButtonLabel}
-                      className="h-10 w-full"
-                      data-testid="nostr-bind-copy-response"
-                      onClick={handleCopyAgain}
-                      type="button"
+                  {payload.returnMode === "browser_fragment_v1" ? (
+                    <details
+                      className="group mt-10 w-full overflow-hidden rounded-2xl border border-border/70 bg-muted/30 text-left shadow-xs"
+                      data-testid="nostr-bind-manual-fallback"
+                      onToggle={(event) =>
+                        setIsManualFallbackOpen(event.currentTarget.open)
+                      }
+                      open={isManualFallbackOpen}
                     >
-                      <span aria-live="polite" className="sr-only">
-                        {finishCopyButtonLabel}
-                      </span>
-                      <span
-                        aria-hidden="true"
-                        className="inline-grid h-5 place-items-center overflow-hidden"
-                      >
-                        <span
-                          className={cn(
-                            COPY_BUTTON_LABEL_CLASS,
-                            finishCopyButtonLabel === "Copy response"
-                              ? "translate-y-0 opacity-100"
-                              : "-translate-y-0.5 opacity-0",
-                          )}
-                        >
-                          Copy response
-                        </span>
-                        <span
-                          className={cn(
-                            COPY_BUTTON_LABEL_CLASS,
-                            finishCopyButtonLabel === "Copied"
-                              ? "translate-y-0 opacity-100"
-                              : "translate-y-0.5 opacity-0",
-                          )}
-                        >
-                          Copied
-                        </span>
-                      </span>
-                    </Button>
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-3 text-sm font-medium transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
+                        <span>Pairing didn’t finish automatically?</span>
+                        <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150 group-open:rotate-180" />
+                      </summary>
+                      <div className="space-y-4 border-t border-border/55 p-4">
+                        <p className="text-sm leading-6 text-muted-foreground">
+                          Copy this response and paste it into the pairing page.
+                        </p>
+                        <SignedResponseControls
+                          copyFailed={copyFailed}
+                          copyLabel={finishCopyButtonLabel}
+                          onCopy={handleCopyAgain}
+                          signedResponse={signedResponse}
+                        />
+                      </div>
+                    </details>
+                  ) : (
+                    <div className="mt-10 w-full">
+                      <SignedResponseControls
+                        copyFailed={copyFailed}
+                        copyLabel={finishCopyButtonLabel}
+                        onCopy={handleCopyAgain}
+                        signedResponse={signedResponse}
+                      />
+                    </div>
+                  )}
+
+                  <div className="mt-8 flex w-full flex-col gap-3">
                     <Button
                       className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
                       onClick={() => handleOpenChange(false)}
                       type="button"
                       variant="ghost"
                     >
-                      Close
+                      Continue
                     </Button>
                   </div>
                 </OnboardingSlideTransition>

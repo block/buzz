@@ -3,7 +3,7 @@ import * as React from "react";
 import { useHomeFeedQuery } from "@/features/home/hooks";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
-import type { FeedItem, HomeFeedResponse } from "@/shared/api/types";
+import type { Channel, FeedItem, HomeFeedResponse } from "@/shared/api/types";
 import {
   getDesktopNotificationPermissionState,
   requestDesktopNotificationAccess,
@@ -376,6 +376,7 @@ export function useHomeFeedNotificationState(
   // has been revealed in-channel, even if the aggregate `thread:<root>` marker
   // has not been advanced by opening Home.
   getMessageReadAt: (messageId: string) => number | null = () => null,
+  channels: ReadonlyArray<Pick<Channel, "id" | "name" | "channelType">> = [],
 ) {
   useFeedDesktopNotifications(
     feed,
@@ -384,6 +385,7 @@ export function useHomeFeedNotificationState(
     setDesktopEnabled,
     profiles,
     mutedChannelIds,
+    channels,
   );
   const normalizedPubkey = pubkey?.trim().toLowerCase() ?? "";
   const [seenFeedIds, setSeenFeedIds] = React.useState<string[]>(() =>

@@ -8,7 +8,8 @@ import { Plus } from "lucide-react";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { Spinner } from "@/shared/ui/spinner";
-import { StepProgress } from "@/shared/ui/step-progress";
+import { ONBOARDING_PRIMARY_CTA_CLASS } from "./OnboardingChrome";
+import { OnboardingFooter } from "./OnboardingFooter";
 import { AnimatePresence, motion } from "motion/react";
 import * as React from "react";
 import {
@@ -26,8 +27,6 @@ type AvatarStepProps = {
     submit: ProfileStepActions["submit"];
     updateAvatarUrl: ProfileStepActions["updateAvatarUrl"];
   };
-  /** Step number for the compact progress bar (mobile layout). */
-  currentStep: number;
   direction: OnboardingTransitionDirection;
   /** When true, a ghost "Skip for now" button is always visible (not just on error). */
   showAlwaysSkip?: boolean;
@@ -35,8 +34,6 @@ type AvatarStepProps = {
     ProfileStepState,
     "avatar" | "isSaving" | "isUploadingAvatar" | "name" | "saveRecovery"
   >;
-  /** Total steps for the compact progress bar (mobile layout). */
-  totalSteps?: number;
 };
 
 function ErrorBanner({ message }: { message: string | null }) {
@@ -125,7 +122,6 @@ function AvatarPreview({
 
 function AvatarStepActions({
   canSubmit,
-  currentStep,
   hidden,
   isSaving,
   isUploadingAvatar,
@@ -135,10 +131,8 @@ function AvatarStepActions({
   onSubmit,
   saveRecovery,
   showAlwaysSkip,
-  totalSteps,
 }: {
   canSubmit: boolean;
-  currentStep: number;
   hidden: boolean;
   isSaving: boolean;
   isUploadingAvatar: boolean;
@@ -148,118 +142,108 @@ function AvatarStepActions({
   onSubmit: () => void;
   saveRecovery: ProfileStepState["saveRecovery"];
   showAlwaysSkip: boolean;
-  totalSteps?: number;
 }) {
   const areNavigationActionsDisabled = isSaving || isUploadingAvatar;
 
   return (
-    <AnimatePresence initial={false} mode="popLayout">
-      {hidden ? null : (
-        <motion.div
-          className="mx-auto mt-4 flex w-full max-w-[576px] origin-center flex-col gap-3 max-lg:pointer-events-none max-lg:fixed max-lg:inset-x-0 max-lg:bottom-0 max-lg:z-40 max-lg:mt-0 max-lg:max-w-none max-lg:border-t max-lg:border-border max-lg:bg-background max-lg:p-4 max-lg:pb-[max(1rem,env(safe-area-inset-bottom))]"
-          animate={{
-            opacity: 1,
-            scale: 1,
-          }}
-          exit={{
-            opacity: 0,
-            scale: 0.94,
-          }}
-          initial={{
-            opacity: 0,
-            scale: 0.94,
-          }}
-          transition={AVATAR_ACTIONS_MOTION_TRANSITION}
-        >
-          <Button
-            className="h-10 w-full max-lg:pointer-events-auto"
-            data-testid="onboarding-next"
-            disabled={!canSubmit}
-            onClick={onSubmit}
-            type="button"
+    <OnboardingFooter>
+      <AnimatePresence initial={false} mode="popLayout">
+        {hidden ? null : (
+          <motion.div
+            className="flex w-full origin-center flex-col items-center gap-3"
+            animate={{
+              opacity: 1,
+              scale: 1,
+            }}
+            exit={{
+              opacity: 0,
+              scale: 0.94,
+            }}
+            initial={{
+              opacity: 0,
+              scale: 0.94,
+            }}
+            transition={AVATAR_ACTIONS_MOTION_TRANSITION}
           >
-            {isSaving || isUploadingAvatar ? (
-              <Spinner
-                aria-label={isSaving ? "Saving profile" : "Uploading avatar"}
-                className="h-4 w-4 border-2"
-              />
-            ) : (
-              "Next"
-            )}
-          </Button>
-
-          {saveRecovery.canSkipForNow ? (
-            // Error-recovery path: exits onboarding entirely when there is no
-            // saved display name to fall back on.
             <Button
-              className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
-              data-testid="onboarding-skip"
+              className={ONBOARDING_PRIMARY_CTA_CLASS}
+              data-testid="onboarding-next"
+              disabled={!canSubmit}
+              onClick={onSubmit}
+              type="button"
+            >
+              {isSaving || isUploadingAvatar ? (
+                <Spinner
+                  aria-label={isSaving ? "Saving profile" : "Uploading avatar"}
+                  className="h-4 w-4 border-2"
+                />
+              ) : (
+                "Next"
+              )}
+            </Button>
+
+            {saveRecovery.canSkipForNow ? (
+              // Error-recovery path: exits onboarding entirely when there is no
+              // saved display name to fall back on.
+              <Button
+                className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+                data-testid="onboarding-skip"
+                disabled={areNavigationActionsDisabled}
+                onClick={onSkipForNow}
+                type="button"
+                variant="ghost"
+              >
+                Skip for now
+              </Button>
+            ) : showAlwaysSkip && !saveRecovery.errorMessage ? (
+              // Normal path: advances to the theme step without saving an avatar.
+              <Button
+                className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+                data-testid="onboarding-skip"
+                disabled={areNavigationActionsDisabled}
+                onClick={onContinueWithoutSaving}
+                type="button"
+                variant="ghost"
+              >
+                Skip for now
+              </Button>
+            ) : null}
+
+            {saveRecovery.canAdvanceWithoutSaving ? (
+              <Button
+                className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+                data-testid="onboarding-next-without-saving"
+                disabled={areNavigationActionsDisabled}
+                onClick={onContinueWithoutSaving}
+                type="button"
+                variant="ghost"
+              >
+                Continue without saving
+              </Button>
+            ) : null}
+
+            <Button
+              className="h-10 w-full text-muted-foreground hover:text-accent-foreground"
+              data-testid="onboarding-back"
               disabled={areNavigationActionsDisabled}
-              onClick={onSkipForNow}
+              onClick={onBack}
               type="button"
               variant="ghost"
             >
-              Skip for now
+              Back
             </Button>
-          ) : showAlwaysSkip && !saveRecovery.errorMessage ? (
-            // Normal path: advances to the theme step without saving an avatar.
-            <Button
-              className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
-              data-testid="onboarding-skip"
-              disabled={areNavigationActionsDisabled}
-              onClick={onContinueWithoutSaving}
-              type="button"
-              variant="ghost"
-            >
-              Skip for now
-            </Button>
-          ) : null}
-
-          {saveRecovery.canAdvanceWithoutSaving ? (
-            <Button
-              className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
-              data-testid="onboarding-next-without-saving"
-              disabled={areNavigationActionsDisabled}
-              onClick={onContinueWithoutSaving}
-              type="button"
-              variant="ghost"
-            >
-              Continue without saving
-            </Button>
-          ) : null}
-
-          <Button
-            className="h-10 w-full text-muted-foreground hover:text-accent-foreground max-lg:pointer-events-auto"
-            data-testid="onboarding-back"
-            disabled={areNavigationActionsDisabled}
-            onClick={onBack}
-            type="button"
-            variant="ghost"
-          >
-            Back
-          </Button>
-
-          <StepProgress
-            activeSegmentClassName="bg-primary"
-            className="mt-1 max-lg:pointer-events-auto lg:hidden"
-            completeSegmentClassName="bg-primary/35"
-            currentStep={currentStep}
-            inactiveSegmentClassName="bg-muted-foreground/25"
-            totalSteps={totalSteps}
-          />
-        </motion.div>
-      )}
-    </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </OnboardingFooter>
   );
 }
 
 export function AvatarStep({
   actions,
-  currentStep,
   direction,
   showAlwaysSkip = false,
   state,
-  totalSteps,
 }: AvatarStepProps) {
   const {
     advanceWithoutSaving,
@@ -328,7 +312,11 @@ export function AvatarStep({
 
   return (
     <OnboardingSlideTransition
-      className="flex w-full flex-col items-center pb-60 lg:pb-0"
+      // pb clears the always-docked footer: the emoji/color grid is the tallest
+      // onboarding content and overflows on short windows, so the shell's own
+      // bottom reserve isn't enough to scroll the last rows out from under the
+      // fixed CTA group + scrim.
+      className="flex w-full flex-col items-center pb-20"
       data-testid="onboarding-page-avatar"
       direction={direction}
       transitionKey={`avatar-${direction}`}
@@ -341,10 +329,10 @@ export function AvatarStep({
       >
         <div className="flex w-full flex-col items-center text-center lg:items-start lg:text-left">
           <div className="w-full max-w-[500px]">
-            <h1 className="text-3xl font-semibold text-foreground">
+            <h1 className="text-title font-normal text-foreground">
               Next, add a display image
             </h1>
-            <p className="mt-3 text-sm leading-6 text-muted-foreground">
+            <p className="mt-5 text-sm leading-6 text-muted-foreground">
               Choose an image or emoji as your avatar
             </p>
           </div>
@@ -411,7 +399,6 @@ export function AvatarStep({
 
           <AvatarStepActions
             canSubmit={canSubmit}
-            currentStep={currentStep}
             hidden={areActionsHidden}
             isSaving={isSaving}
             isUploadingAvatar={isUploadingAvatar}
@@ -421,7 +408,6 @@ export function AvatarStep({
             onSubmit={submit}
             saveRecovery={saveRecovery}
             showAlwaysSkip={showAlwaysSkip}
-            totalSteps={totalSteps}
           />
         </motion.div>
       </motion.div>

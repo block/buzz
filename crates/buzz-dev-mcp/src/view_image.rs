@@ -48,6 +48,9 @@ pub(crate) const MAX_PIXELS: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_DECODER_ALLOC: u64 = 256 * 1024 * 1024;
 /// Connect + read timeout for URL fetches.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// Lifetime of a Blossom `t=get` read token for relay media fetches.
+/// Matches the desktop client's `MEDIA_GET_AUTH_EXPIRY_SECS`.
+const MEDIA_GET_AUTH_EXPIRY_SECS: u64 = 600;
 
 /// Build the decoder allocation cap. Centralised so the resize path uses the
 /// same value tests can reason about.
@@ -221,23 +224,140 @@ fn decode_data_url(src: &str) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("data: URL base64 decode failed: {e}"))
 }
 
+/// True when `target` is a relay-hosted Blossom media URL: an http(s) URL
+/// whose path is under `/media/` and whose authority (host + effective port)
+/// matches the configured relay URL. The relay URL may use ws/wss schemes —
+/// the url crate's known default ports (ws=80/wss=443) make those compare
+/// equal to their http/https counterparts.
+///
+/// Safety contract: this is the *only* gate that decides whether we attach a
+/// signed auth header. It must never match arbitrary third-party origins,
+/// where the bearer token would leak.
+fn is_relay_media_url(target: &reqwest::Url, relay: &reqwest::Url) -> bool {
+    if !matches!(target.scheme(), "http" | "https") {
+        return false;
+    }
+    if !target.path().starts_with("/media/") {
+        return false;
+    }
+    target.host_str().is_some()
+        && target.host_str() == relay.host_str()
+        && target.port_or_known_default() == relay.port_or_known_default()
+}
+
+/// Sign a Blossom (BUD-01) `t=get` authorization event, server-scoped to
+/// `authority` (`host[:port]`), and return the full `Authorization` header
+/// value. Mirrors the desktop client's signer: kind 24242, `t=get`,
+/// `expiration`, `server` tag — no `x` tag (BUD-01 allows x OR server).
+fn sign_media_get_auth(keys: &nostr::Keys, authority: &str) -> Result<String, String> {
+    use nostr::{EventBuilder, JsonUtil, Kind, Tag, Timestamp};
+    let now = Timestamp::now().as_secs();
+    let tags = vec![
+        Tag::parse(["t", "get"]).map_err(|e| e.to_string())?,
+        Tag::parse([
+            "expiration",
+            &(now + MEDIA_GET_AUTH_EXPIRY_SECS).to_string(),
+        ])
+        .map_err(|e| e.to_string())?,
+        Tag::parse(["server", authority]).map_err(|e| e.to_string())?,
+    ];
+    let event = EventBuilder::new(Kind::from(24242), "Get buzz-media")
+        .tags(tags)
+        .sign_with_keys(keys)
+        .map_err(|e| e.to_string())?;
+    Ok(format!(
+        "Nostr {}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(event.as_json().as_bytes())
+    ))
+}
+
+/// `host[:port]` for the `server` tag, normalized the same way relay tenant
+/// lookup normalizes Host/RELAY_URL. Explicit non-default ports and IPv6
+/// brackets are preserved; default ports collapse to the bare host.
+fn server_authority(url: &reqwest::Url) -> Option<String> {
+    let authority = buzz_core::tenant::relay_url_authority(url.as_str());
+    if authority.is_empty() {
+        None
+    } else {
+        Some(authority)
+    }
+}
+
+/// Mint a `t=get` Authorization header for `url` when it is relay-hosted
+/// media and `BUZZ_PRIVATE_KEY` is available; `None` otherwise.
+///
+/// Fail-open by design: while the relay's media-read-auth flag is off, an
+/// unauthenticated request still succeeds, so a missing/invalid key degrades
+/// to an unsigned fetch instead of an error. Once the flag is on, the fetch
+/// 403s and the error path below names the missing key.
+fn relay_media_get_auth(url: &reqwest::Url) -> Option<String> {
+    let relay = std::env::var("BUZZ_RELAY_URL").ok()?;
+    let relay = reqwest::Url::parse(&relay).ok()?;
+    if !is_relay_media_url(url, &relay) {
+        return None;
+    }
+    let key = std::env::var("BUZZ_PRIVATE_KEY").ok()?;
+    let keys = match nostr::Keys::parse(&key) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!("BUZZ_PRIVATE_KEY invalid; fetching relay media unauthenticated: {e}");
+            return None;
+        }
+    };
+    let authority = server_authority(url)?;
+    match sign_media_get_auth(&keys, &authority) {
+        Ok(header) => Some(header),
+        Err(e) => {
+            tracing::warn!("media get auth signing failed; fetching unauthenticated: {e}");
+            None
+        }
+    }
+}
+
 /// Fetch an http(s) URL with a streaming read and a hard byte cap.
 /// Refuses up-front if `Content-Length` advertises more than the cap.
+/// Relay-hosted `/media/` URLs get a signed Blossom `t=get` header when
+/// `BUZZ_RELAY_URL` + `BUZZ_PRIVATE_KEY` are configured.
 async fn fetch_url(url: &str) -> Result<Vec<u8>, ErrorData> {
-    let client = reqwest::Client::builder()
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| invalid_params(format!("invalid URL: {url} ({e})")))?;
+    let auth = relay_media_get_auth(&parsed);
+    let mut client_builder = reqwest::Client::builder()
         .connect_timeout(FETCH_TIMEOUT)
-        .timeout(FETCH_TIMEOUT)
+        .timeout(FETCH_TIMEOUT);
+    if auth.is_some() {
+        // Do not forward Buzz auth headers to a redirect target. reqwest strips
+        // Authorization cross-host, but `x-auth-tag` is not on reqwest's
+        // sensitive-header list.
+        client_builder = client_builder.redirect(reqwest::redirect::Policy::none());
+    }
+    let client = client_builder
         .build()
         .map_err(|e| ErrorData::internal_error(format!("http client init failed: {e}"), None))?;
-    let resp = client
-        .get(url)
+    let mut req = client.get(parsed);
+    let authed = auth.is_some();
+    if let Some(header) = auth {
+        req = req.header("Authorization", header);
+        if let Ok(auth_tag) = std::env::var("BUZZ_AUTH_TAG") {
+            if !auth_tag.trim().is_empty() {
+                req = req.header("x-auth-tag", auth_tag);
+            }
+        }
+    }
+    let resp = req
         .send()
         .await
         .map_err(|e| ErrorData::internal_error(format!("fetch failed: {url} ({e})"), None))?;
     if !resp.status().is_success() {
+        let status = resp.status();
+        if matches!(status.as_u16(), 401 | 403) && !authed {
+            return Err(invalid_params(format!(
+                "fetch {url} returned HTTP {status} — this relay requires authenticated media \
+                 reads; set BUZZ_PRIVATE_KEY (and BUZZ_RELAY_URL) to a member identity"
+            )));
+        }
         return Err(invalid_params(format!(
-            "fetch {url} returned HTTP {}",
-            resp.status()
+            "fetch {url} returned HTTP {status}"
         )));
     }
     if let Some(len) = resp.content_length() {
@@ -933,5 +1053,84 @@ mod tests {
         webp.extend_from_slice(b"VP8 ");
         assert_eq!(sniff_mime(&webp).unwrap(), "image/webp");
         sniff_mime(b"not-an-image").unwrap_err();
+    }
+
+    fn u(s: &str) -> reqwest::Url {
+        reqwest::Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn relay_media_url_matches_relay_host_only() {
+        let relay = u("http://relay.example.com:3000");
+        // Exact authority + /media/ path → match.
+        assert!(is_relay_media_url(
+            &u("http://relay.example.com:3000/media/abc.png"),
+            &relay
+        ));
+        // Different host / port / path → no match (token must not leak).
+        assert!(!is_relay_media_url(
+            &u("http://evil.example.com:3000/media/abc.png"),
+            &relay
+        ));
+        assert!(!is_relay_media_url(
+            &u("http://relay.example.com:4000/media/abc.png"),
+            &relay
+        ));
+        assert!(!is_relay_media_url(
+            &u("http://relay.example.com:3000/other/abc.png"),
+            &relay
+        ));
+        // Path prefix must be a real segment boundary under /media/.
+        assert!(!is_relay_media_url(
+            &u("http://relay.example.com:3000/mediafake/abc.png"),
+            &relay
+        ));
+    }
+
+    #[test]
+    fn relay_media_url_ws_scheme_and_default_ports() {
+        // wss relay ↔ https media on default ports compare equal.
+        assert!(is_relay_media_url(
+            &u("https://relay.example.com/media/abc.png"),
+            &u("wss://relay.example.com")
+        ));
+        assert!(is_relay_media_url(
+            &u("http://localhost:3000/media/abc.png"),
+            &u("ws://localhost:3000")
+        ));
+        // http media against a wss (443) relay must NOT match.
+        assert!(!is_relay_media_url(
+            &u("http://relay.example.com/media/abc.png"),
+            &u("wss://relay.example.com")
+        ));
+    }
+
+    #[test]
+    fn media_get_auth_header_shape() {
+        use nostr::JsonUtil;
+        let keys = nostr::Keys::generate();
+        let header = sign_media_get_auth(&keys, "localhost:3000").unwrap();
+        let b64 = header.strip_prefix("Nostr ").expect("Nostr scheme prefix");
+        let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(b64)
+            .unwrap();
+        let event = nostr::Event::from_json(std::str::from_utf8(&json).unwrap()).unwrap();
+
+        assert_eq!(event.kind, nostr::Kind::from(24242));
+        event.verify().expect("valid signature");
+
+        let tag = |name: &str| -> Option<String> {
+            event.tags.iter().find_map(|t| {
+                let v = t.as_slice();
+                (v.first().map(String::as_str) == Some(name)).then(|| v[1].clone())
+            })
+        };
+        assert_eq!(tag("t").as_deref(), Some("get"));
+        assert_eq!(tag("server").as_deref(), Some("localhost:3000"));
+        // Server-scoped token: no x tag (BUD-01 allows x OR server).
+        assert!(tag("x").is_none());
+        let expiration: u64 = tag("expiration").unwrap().parse().unwrap();
+        let now = nostr::Timestamp::now().as_secs();
+        assert!(expiration > now && expiration <= now + MEDIA_GET_AUTH_EXPIRY_SECS);
     }
 }

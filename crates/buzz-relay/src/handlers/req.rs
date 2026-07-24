@@ -86,15 +86,21 @@ pub async fn handle_req(
         }
     };
 
-    let mut accessible_channels = match state
-        .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(e) => {
-            warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
-            conn.send(RelayMessage::closed(&sub_id, "error: database error"));
-            return;
+    let mut accessible_channels = if filters_are_nip43_membership_only(&filters) {
+        metrics::counter!("buzz_req_global_access_resolution_skips_total", "kind" => "13534")
+            .increment(1);
+        Vec::new()
+    } else {
+        match state
+            .get_accessible_channel_ids_cached(conn.tenant.community(), &pubkey_bytes)
+            .await
+        {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(conn_id = %conn_id, "Failed to get accessible channels: {e}");
+                conn.send(RelayMessage::closed(&sub_id, "error: database error"));
+                return;
+            }
         }
     };
     if let Some(allowed) = token_channel_ids.as_deref() {
@@ -283,8 +289,9 @@ pub async fn handle_req(
                     })
                     .or(channel_id)
             };
-            let params =
+            let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
+            apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
             (idx, per_filter_channel, params)
         })
         .collect();
@@ -816,6 +823,21 @@ pub fn filter_fully_pushable(filter: &Filter) -> bool {
     true
 }
 
+/// Return whether every filter exclusively targets the globally stored NIP-43
+/// membership snapshot. Such requests cannot return channel-scoped rows, so
+/// resolving the caller's complete accessible-channel set is wasted I/O.
+fn filters_are_nip43_membership_only(filters: &[Filter]) -> bool {
+    !filters.is_empty()
+        && filters.iter().all(|filter| {
+            filter.kinds.as_ref().is_some_and(|kinds| {
+                !kinds.is_empty()
+                    && kinds.iter().all(|kind| {
+                        kind.as_u16() as u32 == buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST
+                    })
+            })
+        })
+}
+
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_id_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
     for (tag_key, tag_values) in filter.generic_tags.iter() {
@@ -961,6 +983,20 @@ fn filter_to_query_params(
         ids,
         e_tags,
         ..EventQuery::for_community(community)
+    }
+}
+
+/// Push the caller's authorized channel set into logically global historical
+/// queries so SQL `LIMIT` counts visible rows. Channel-less events remain in
+/// scope by `EventQuery::channel_ids` contract; an explicit single-channel
+/// filter keeps its narrower `channel_id` predicate.
+pub(crate) fn apply_access_scope_to_query(
+    query: &mut EventQuery,
+    channel_id: Option<uuid::Uuid>,
+    accessible_channels: &[uuid::Uuid],
+) {
+    if channel_id.is_none() {
+        query.channel_ids = Some(accessible_channels.to_vec());
     }
 }
 
@@ -1198,6 +1234,33 @@ mod tests {
     use super::*;
     use nostr::{Alphabet, Filter, SingleLetterTag};
 
+    #[test]
+    fn global_queries_push_access_scope_before_limit() {
+        let accessible = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let mut query = EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(
+            uuid::Uuid::new_v4(),
+        ));
+
+        apply_access_scope_to_query(&mut query, None, &accessible);
+
+        assert_eq!(query.channel_ids.as_deref(), Some(accessible.as_slice()));
+    }
+
+    #[test]
+    fn channel_scoped_queries_keep_exact_channel_predicate() {
+        let channel = uuid::Uuid::new_v4();
+        let accessible = vec![channel, uuid::Uuid::new_v4()];
+        let mut query = EventQuery::for_community(buzz_core::tenant::CommunityId::from_uuid(
+            uuid::Uuid::new_v4(),
+        ));
+        query.channel_id = Some(channel);
+
+        apply_access_scope_to_query(&mut query, Some(channel), &accessible);
+
+        assert!(query.channel_ids.is_none());
+        assert_eq!(query.channel_id, Some(channel));
+    }
+
     /// S2 invariant: the bounded-concurrency pipeline (phase 2) must yield
     /// per-filter results in original filter order even when an earlier
     /// filter's DB query completes *after* a later one. `buffered` guarantees
@@ -1321,6 +1384,20 @@ mod tests {
         assert!(count_fallback_exceeded(
             COUNT_FALLBACK_CANDIDATE_LIMIT as usize + 1
         ));
+    }
+
+    #[test]
+    fn nip43_only_filters_skip_channel_access_resolution() {
+        let membership = Filter::new().kind(nostr::Kind::Custom(13_534));
+        assert!(filters_are_nip43_membership_only(&[
+            membership.clone(),
+            membership,
+        ]));
+        assert!(!filters_are_nip43_membership_only(&[]));
+        assert!(!filters_are_nip43_membership_only(&[Filter::new()]));
+        assert!(!filters_are_nip43_membership_only(&[
+            Filter::new().kinds([nostr::Kind::Custom(13_534), nostr::Kind::TextNote]),
+        ]));
     }
 
     #[test]

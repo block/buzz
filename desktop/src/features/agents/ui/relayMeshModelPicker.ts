@@ -6,7 +6,7 @@ import {
   hasPersonaModelOption,
   type PersonaDropdownOption,
   type PersonaModelOption,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 
 function withSharedComputeAutoOption(
   options: readonly PersonaModelOption[],

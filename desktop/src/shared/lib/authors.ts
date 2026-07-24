@@ -1,6 +1,16 @@
 import { normalizePubkey } from "@/shared/lib/pubkey";
+import { verifyEvent } from "nostr-tools/pure";
 
 const PUBKEY_HEX_RE = /^[0-9a-f]{64}$/i;
+
+function normalizeValidPubkey(pubkey: string | null | undefined) {
+  if (!pubkey) {
+    return null;
+  }
+
+  const normalized = normalizePubkey(pubkey);
+  return PUBKEY_HEX_RE.test(normalized) ? normalized : null;
+}
 
 function getTaggedPubkey(
   tags: string[][],
@@ -21,34 +31,67 @@ function getTaggedPubkey(
   return null;
 }
 
-export function resolveEventAuthorPubkey(input: {
+type AuthorResolutionEvent = {
+  id: string;
   pubkey: string;
+  created_at: number;
+  kind: number;
   tags: string[][];
+  content: string;
+  sig: string;
+};
+
+function hasValidSignature(event: AuthorResolutionEvent) {
+  try {
+    return verifyEvent(event);
+  } catch {
+    return false;
+  }
+}
+
+export function resolveEventAuthorPubkey(input: {
+  event: AuthorResolutionEvent;
   preferActorTag?: boolean;
+  relaySelfPubkey?: string | null;
   requireChannelTagForPTags?: boolean;
 }) {
   const {
+    event,
     preferActorTag = false,
-    pubkey,
+    relaySelfPubkey,
     requireChannelTagForPTags = false,
-    tags,
   } = input;
 
+  const signerPubkey = normalizePubkey(event.pubkey);
+  const normalizedRelaySelf = normalizeValidPubkey(relaySelfPubkey);
+
+  // `actor` and author-attributing `p` tags are delegated authorship claims.
+  // The relay creates these for workflow-generated and legacy relay-signed
+  // attributed events, so they are only authoritative when the event is signed
+  // by the active relay advertised in NIP-11. Missing or malformed relay
+  // identity data must leave the signer as the visible author.
+  if (!normalizedRelaySelf || signerPubkey !== normalizedRelaySelf) {
+    return signerPubkey;
+  }
+
+  let attributedPubkey: string | null = null;
   if (preferActorTag) {
-    const actorPubkey = getTaggedPubkey(tags, "actor");
-    if (actorPubkey) {
-      return actorPubkey;
+    attributedPubkey = getTaggedPubkey(event.tags, "actor");
+  }
+
+  if (!attributedPubkey) {
+    const canUseAttributedPTag =
+      !requireChannelTagForPTags || event.tags.some((tag) => tag[0] === "h");
+    if (canUseAttributedPTag) {
+      attributedPubkey = getTaggedPubkey(event.tags, "p", {
+        firstTagOnly: true,
+      });
     }
   }
 
-  const canUseAttributedPTag =
-    !requireChannelTagForPTags || tags.some((tag) => tag[0] === "h");
-  if (canUseAttributedPTag) {
-    const attributedPubkey = getTaggedPubkey(tags, "p", { firstTagOnly: true });
-    if (attributedPubkey) {
-      return attributedPubkey;
-    }
+  if (!attributedPubkey || !hasValidSignature(event)) {
+    return signerPubkey;
   }
 
-  return normalizePubkey(pubkey);
+  return attributedPubkey;
 }

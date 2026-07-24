@@ -5,12 +5,32 @@ use crate::{
     events,
     models::{ChannelDetailInfo, ChannelInfo, ChannelMembersResponse},
     nostr_convert,
-    relay::{query_relay, submit_event, submit_event_with_keys},
+    relay::{query_relay, relay_api_base_url_with_override, submit_event, submit_event_with_keys},
 };
 
 // ── Reads (pure-nostr via /query) ────────────────────────────────────────────
 
 const DIRECTORY_PAGE_SIZE: usize = 500;
+const STARTER_CHANNEL_NAMESPACE: uuid::Uuid = uuid::uuid!("3ce33bea-8f09-5f1b-9c85-8a7d2659e6b0");
+
+struct StarterChannelSpec {
+    slug: &'static str,
+    name: &'static str,
+    description: &'static str,
+}
+
+const STARTER_CHANNELS: &[StarterChannelSpec] = &[
+    StarterChannelSpec {
+        slug: "general",
+        name: "general",
+        description: "General conversation and community updates.",
+    },
+    StarterChannelSpec {
+        slug: "welcome-everyone",
+        name: "welcome-everyone",
+        description: "Say hi, ask a question, or share what brought you here.",
+    },
+];
 
 fn advance_directory_cursor(filter: &mut serde_json::Value, page: &[nostr::Event]) {
     let last = page
@@ -445,6 +465,84 @@ fn parse_channel_uuid(channel_id: &str) -> Result<uuid::Uuid, String> {
     uuid::Uuid::parse_str(channel_id).map_err(|_| format!("invalid channel UUID: {channel_id}"))
 }
 
+fn normalize_channel_name(name: &str) -> String {
+    name.trim().to_ascii_lowercase()
+}
+
+fn starter_channel_uuid(relay_scope: &str, slug: &str) -> uuid::Uuid {
+    let name = format!("starter-channel:v1:{}:{}", relay_scope.trim(), slug);
+    uuid::Uuid::new_v5(&STARTER_CHANNEL_NAMESPACE, name.as_bytes())
+}
+
+fn is_duplicate_channel_rejection(error: &str) -> bool {
+    error.contains("relay rejected event:") && error.contains("duplicate: channel already exists")
+}
+
+fn is_matching_starter_channel(channel: &ChannelInfo, spec: &StarterChannelSpec) -> bool {
+    normalize_channel_name(&channel.name) == normalize_channel_name(spec.name)
+        && channel.channel_type == "stream"
+        && channel.visibility == "open"
+        && channel.archived_at.is_none()
+}
+
+fn has_all_starter_channels(channels: &[ChannelInfo]) -> bool {
+    STARTER_CHANNELS.iter().all(|spec| {
+        channels
+            .iter()
+            .any(|channel| is_matching_starter_channel(channel, spec))
+    })
+}
+
+async fn ensure_starter_channel_memberships(
+    state: &AppState,
+    keys: &nostr::Keys,
+    channels: &mut [ChannelInfo],
+) -> Result<(), String> {
+    for spec in STARTER_CHANNELS {
+        let Some(channel) = channels
+            .iter_mut()
+            .find(|channel| is_matching_starter_channel(channel, spec))
+        else {
+            continue;
+        };
+
+        if channel.is_member {
+            continue;
+        }
+
+        let channel_uuid = parse_channel_uuid(&channel.id)?;
+        let builder = events::build_join(channel_uuid)?;
+        submit_event_with_keys(builder, state, keys, None).await?;
+        channel.is_member = true;
+    }
+
+    Ok(())
+}
+
+async fn fetch_starter_channel_metadata(
+    state: &AppState,
+    channel_ids: &[String],
+) -> Result<Vec<ChannelInfo>, String> {
+    if channel_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let events = query_relay(
+        state,
+        &[serde_json::json!({
+            "kinds": [39000],
+            "#d": channel_ids,
+            "limit": channel_ids.len(),
+        })],
+    )
+    .await?;
+
+    events
+        .iter()
+        .map(|ev| nostr_convert::channel_info_from_event(ev, None, Some(false)))
+        .collect()
+}
+
 #[tauri::command]
 pub async fn create_channel(
     name: String,
@@ -508,6 +606,80 @@ pub async fn create_channel(
         .map(|ev| nostr_convert::channel_info_from_event(ev, None, None))
         .transpose()?
         .ok_or_else(|| "channel created but metadata not yet available".to_string())
+}
+
+#[tauri::command]
+pub async fn ensure_starter_channels(
+    state: State<'_, AppState>,
+) -> Result<Vec<ChannelInfo>, String> {
+    let mut existing_channels = get_channels(state.clone()).await?;
+    let relay_scope = relay_api_base_url_with_override(&state);
+    let creator_keys = state.signing_keys()?;
+    let creator_pubkey = creator_keys.public_key().to_hex();
+    let mut starter_ids = Vec::with_capacity(STARTER_CHANNELS.len());
+    let mut created_ids = std::collections::HashSet::new();
+
+    for spec in STARTER_CHANNELS {
+        if existing_channels
+            .iter()
+            .any(|channel| is_matching_starter_channel(channel, spec))
+        {
+            continue;
+        }
+
+        let channel_uuid = starter_channel_uuid(&relay_scope, spec.slug);
+        let channel_uuid_string = channel_uuid.to_string();
+        starter_ids.push(channel_uuid_string.clone());
+        let builder = events::build_create_channel(
+            channel_uuid,
+            spec.name,
+            "open",
+            "stream",
+            Some(spec.description),
+            None,
+        )?;
+
+        match submit_event_with_keys(builder, &state, &creator_keys, None).await {
+            Ok(_) => {
+                state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
+                created_ids.insert(channel_uuid_string.clone());
+            }
+            Err(error) if is_duplicate_channel_rejection(&error) => {
+                state.mark_pending_owned_channel(&creator_pubkey, &channel_uuid_string);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    for _ in 0..3 {
+        let metadata = fetch_starter_channel_metadata(&state, &starter_ids).await?;
+        for mut channel in metadata {
+            if created_ids.contains(&channel.id) {
+                channel.is_member = true;
+            }
+            if !existing_channels
+                .iter()
+                .any(|existing| existing.id == channel.id)
+            {
+                existing_channels.push(channel);
+            }
+        }
+        if has_all_starter_channels(&existing_channels) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+
+    if !has_all_starter_channels(&existing_channels) {
+        existing_channels = get_channels(state.clone()).await?;
+    }
+
+    if !has_all_starter_channels(&existing_channels) {
+        return Err("starter channels created but metadata not yet available".to_string());
+    }
+
+    ensure_starter_channel_memberships(&state, &creator_keys, &mut existing_channels).await?;
+    Ok(existing_channels)
 }
 
 #[derive(serde::Deserialize)]

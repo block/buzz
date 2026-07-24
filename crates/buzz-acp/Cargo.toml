@@ -78,3 +78,4 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+httparse = "1"

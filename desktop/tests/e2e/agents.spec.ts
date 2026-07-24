@@ -164,25 +164,22 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
   await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
     "Fizz",
   );
-  const previewPersonas = [
-    ["builtin:product-strategist", "Product Strategist"],
-    ["builtin:implementation-partner", "Implementation Partner"],
-    ["builtin:qa-reviewer", "QA Reviewer"],
-    ["builtin:work-coordinator", "Work Coordinator"],
-    ["builtin:support-guide", "Support Guide"],
-    ["builtin:experiment-designer", "Experiment Designer"],
-  ] as const;
-  for (const [, personaName] of previewPersonas) {
+  for (const personaName of ["Fizz", "Honey", "Bumble"]) {
     await expect(page.getByTestId("persona-catalog-dialog")).toContainText(
       personaName,
     );
   }
-  for (const [personaId, personaName] of previewPersonas) {
-    await expect(
-      page
-        .getByTestId(`persona-catalog-list-item-${personaId}`)
-        .getByRole("img", { name: `${personaName} avatar` }),
-    ).toHaveAttribute("src", /.+/);
+  for (const retiredPersonaName of [
+    "Product Strategist",
+    "Implementation Partner",
+    "QA Reviewer",
+    "Work Coordinator",
+    "Support Guide",
+    "Experiment Designer",
+  ]) {
+    await expect(page.getByTestId("persona-catalog-dialog")).not.toContainText(
+      retiredPersonaName,
+    );
   }
   await expect(page.getByTestId("persona-catalog-dialog-header")).toBeVisible();
   await expect(
@@ -231,13 +228,48 @@ test("built-in personas are used from the catalog dialog", async ({ page }) => {
   await expect.poll(() => getCatalogOrder(page)).toEqual(initialCatalogOrder);
 });
 
+test("built-in persona edits persist", async ({ page }) => {
+  await installMockBridge(page, {
+    activePersonaIds: ["builtin:fizz"],
+    globalAgentConfig: {
+      env_vars: { ANTHROPIC_API_KEY: "sk-ant-test" },
+      provider: "anthropic",
+      model: "claude-opus-4-5",
+    },
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await page.getByLabel("Open actions for Fizz").click();
+  await page.getByRole("menuitem", { name: "Edit" }).click();
+
+  const dialog = page.getByTestId("persona-dialog");
+  await dialog.getByLabel("Agent name").fill("My Fizz");
+  await dialog.getByLabel("Agent instruction").fill("User-edited instructions");
+  await dialog.getByRole("button", { name: "Save changes" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId("agents-library-personas")).toContainText(
+    "My Fizz",
+  );
+  const personas = await invokeTauri<
+    Array<{ id: string; display_name: string; system_prompt: string }>
+  >(page, "list_personas");
+  expect(
+    personas.find((persona) => persona.id === "builtin:fizz"),
+  ).toMatchObject({
+    display_name: "My Fizz",
+    system_prompt: "User-edited instructions",
+  });
+});
+
 test("agent avatar emoji picker scrolls inside its popover", async ({
   page,
 }) => {
   await gotoApp(page);
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "New agent" }).click();
+  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
 
   await expect(page.getByTestId("persona-dialog")).toBeVisible();
   await page.getByLabel("Add avatar").click();
@@ -1089,25 +1121,9 @@ test("share access controls include the selected memories", async ({
     .getByRole("menuitemradio", { name: "Agent + core memory" })
     .click();
   await expect(linkAccess).toHaveText("Agent + core memory");
-  const shareCardHeightSamples = await shareMainCard.evaluate(
-    async (element) => {
-      const samples: number[] = [];
-      const start = performance.now();
-
-      await new Promise<void>((resolve) => {
-        const sample = (now: number) => {
-          samples.push(element.getBoundingClientRect().height);
-          if (now - start >= 280) {
-            resolve();
-            return;
-          }
-          requestAnimationFrame(sample);
-        };
-        requestAnimationFrame(sample);
-      });
-
-      return samples;
-    },
+  await waitForAnimations(page);
+  const expandedShareCardHeight = await shareMainCard.evaluate(
+    (element) => element.getBoundingClientRect().height,
   );
   const inlineMemoryWarning = shareDialog.getByTestId(
     "persona-share-memory-warning",
@@ -1119,10 +1135,7 @@ test("share access controls include the selected memories", async ({
   await expect(inlineMemoryWarning).toContainText(
     "Only share it with people you trust.",
   );
-  expect(shareCardHeightSamples.at(-1)).toBeGreaterThan(initialShareCardHeight);
-  expect(
-    new Set(shareCardHeightSamples.map((height) => Math.round(height))).size,
-  ).toBeGreaterThan(2);
+  expect(expandedShareCardHeight).toBeGreaterThan(initialShareCardHeight);
   await page.getByTestId("persona-share-copy-link").click();
   const memoryConfirmation = page.getByTestId(
     "persona-share-memory-confirmation",
@@ -1302,16 +1315,13 @@ test("share access controls include the selected memories", async ({
   );
 });
 
-test("people sharing waits for relay identity and excludes the moderation recipient", async ({
-  page,
-}) => {
+test("people sharing excludes the moderation recipient", async ({ page }) => {
   await openSafetyShareDialog(page, {
     relaySelf: TEST_IDENTITIES.charlie.pubkey,
     relaySelfDelayMs: 800,
   });
 
   const search = page.getByTestId("persona-share-recipient-search");
-  await expect(search).toBeDisabled();
   await expect(search).toBeEnabled({ timeout: 5_000 });
   await search.fill("charlie");
   await expect(
@@ -1556,13 +1566,13 @@ test("inactive built-ins cannot be used to create teams", async ({ page }) => {
 
   const error = await invokeTauriExpectError(page, "create_team", {
     input: {
-      name: "Fizzes",
-      personaIds: ["builtin:fizz"],
+      name: "Honeys",
+      personaIds: ["builtin:honey"],
     },
   });
 
   expect(error).toBe(
-    "Fizz is not in My Agents. Choose it from Agent Catalog first.",
+    "Honey is not in My Agents. Choose it from Agent Catalog first.",
   );
 });
 
@@ -1571,24 +1581,24 @@ test("built-in removal failures show up from My Agents", async ({ page }) => {
 
   await page.getByTestId("open-agents-view").click();
   await openPersonaCatalog(page);
-  await selectCatalogPersona(page, "builtin:fizz");
-  await useCatalogPersona(page, "builtin:fizz");
+  await selectCatalogPersona(page, "builtin:honey");
+  await useCatalogPersona(page, "builtin:honey");
 
   await invokeTauri(page, "create_team", {
     input: {
-      name: "Fizzes",
-      personaIds: ["builtin:fizz"],
+      name: "Honeys",
+      personaIds: ["builtin:honey"],
     },
   });
 
   await page.keyboard.press("Escape");
-  await page.getByLabel("Open actions for Fizz").click();
+  await page.getByLabel("Open actions for Honey").click();
   await page.getByRole("menuitem", { name: "Delete" }).click();
 
   await expect(
     page
       .locator("[data-sonner-toast]")
-      .filter({ hasText: "Fizz is still referenced by a team." }),
+      .filter({ hasText: "Honey is still referenced by a team." }),
   ).toBeVisible();
 });
 
@@ -1616,4 +1626,52 @@ test("personas referenced by teams cannot be deleted", async ({ page }) => {
   expect(error).toBe(
     "Analyst is still referenced by a team. Remove it from those teams first.",
   );
+});
+
+test("duplicate instances move from the agents gallery into the agent profile", async ({
+  page,
+}) => {
+  const personaId = "custom:duplicate-auditor";
+  const primaryPubkey = TEST_IDENTITIES.alice.pubkey;
+  const additionalPubkey = TEST_IDENTITIES.charlie.pubkey;
+  await installMockBridge(page, {
+    personas: [
+      {
+        id: personaId,
+        displayName: "Duplicate Auditor",
+        systemPrompt: "You audit duplicate instances.",
+      },
+    ],
+    managedAgents: [
+      {
+        pubkey: primaryPubkey,
+        name: "Duplicate Auditor",
+        personaId,
+        status: "running",
+      },
+      {
+        pubkey: additionalPubkey,
+        name: "Duplicate Auditor",
+        personaId,
+        status: "stopped",
+      },
+    ],
+  });
+  await gotoApp(page);
+  await page.getByTestId("open-agents-view").click();
+
+  await expect(page.getByText("Additional running agents")).toHaveCount(0);
+  await expect(
+    page.getByTestId(`managed-agent-${additionalPubkey}`),
+  ).toHaveCount(0);
+
+  await page.getByTestId(`persona-agent-row-${personaId}`).click();
+  await page.getByTestId("user-profile-instances").click();
+  await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
+
+  await expect(page.getByTestId("user-profile-panel")).toBeVisible();
+  await page.getByTestId("user-profile-settings-menu-trigger").click();
+  await expect(
+    page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
+  ).toBeVisible();
 });

@@ -4,10 +4,30 @@ import type {
   RelaySubscriptionFilter,
 } from "@/shared/api/relayClientShared";
 import type { RelayEvent } from "@/shared/api/types";
+import {
+  isRateLimited,
+  waitForRateLimit,
+} from "@/shared/api/relayRateLimitGate";
 
 const RECONNECT_REPLAY_SKEW_SECS = 5;
 export const RECONNECT_REPLAY_PAGE_LIMIT = 500;
 export const RECONNECT_REPLAY_PAGE_CONCURRENCY = 4;
+
+/**
+ * Maximum live subscriptions sent per relay REQ burst during reconnect.
+ *
+ * Capping the initial blast prevents admission-control bursts on degraded
+ * networks where the relay is already near its per-pubkey quota.
+ */
+export const REPLAY_BATCH_SIZE = 8;
+
+/**
+ * Delay between consecutive replay batches (milliseconds).
+ *
+ * Spreads the REQ storm across time so the relay's sliding quota window
+ * can absorb each batch without triggering rate-limiting on the next.
+ */
+export const REPLAY_INTER_BATCH_DELAY_MS = 50;
 
 async function runWithConcurrency<T>(
   items: T[],
@@ -104,13 +124,41 @@ export async function replayLiveSubscriptions({
   requestHistory,
   now = Math.floor(Date.now() / 1_000),
   pageReplayConcurrency = RECONNECT_REPLAY_PAGE_CONCURRENCY,
+  visibleChannelId = null,
+  replayBatchSize = REPLAY_BATCH_SIZE,
+  interBatchDelayMs = REPLAY_INTER_BATCH_DELAY_MS,
+  setTimeoutFn = (fn: () => void, ms: number) =>
+    window.setTimeout(fn, ms) as unknown as number,
+  isActive = () => true,
 }: {
   subscriptions: Map<string, RelaySubscription>;
   sendRaw: (payload: unknown[]) => Promise<void>;
   requestHistory: (filter: RelaySubscriptionFilter) => Promise<RelayEvent[]>;
   now?: number;
   pageReplayConcurrency?: number;
+  /** Channel currently visible in the UI — its subscriptions go in the first batch. */
+  visibleChannelId?: string | null;
+  /** Max subscriptions per REQ burst (injectable for tests). */
+  replayBatchSize?: number;
+  /** Milliseconds between bursts (injectable for tests). */
+  interBatchDelayMs?: number;
+  /** setTimeout implementation (injectable for tests). */
+  setTimeoutFn?: (fn: () => void, ms: number) => number;
+  /**
+   * Returns false when the connection that initiated this replay has been
+   * superseded by a newer one. After the gate await resumes, a stale replay
+   * must not double-send REQs on the live socket.
+   */
+  isActive?: () => boolean;
 }) {
+  // If the relay has signalled back-pressure, wait for the gate to clear
+  // before blasting a full set of REQs that would immediately be rate-limited.
+  if (isRateLimited()) await waitForRateLimit();
+
+  // A newer connection may have replayed while this one was suspended at the
+  // gate — abort silently to avoid double-sending every REQ on the live socket.
+  if (!isActive()) return;
+
   const replayRequests = Array.from(subscriptions.entries())
     .filter(
       (
@@ -133,9 +181,35 @@ export async function replayLiveSubscriptions({
       return { subId, subscription, replaySince, shouldPageReplay };
     });
 
-  await Promise.all(
-    replayRequests.map(
-      ({ subId, subscription, replaySince, shouldPageReplay }) =>
+  // Sort the visible channel's subscriptions first so the user sees their
+  // active channel recover before others on degraded networks.
+  if (visibleChannelId !== null) {
+    replayRequests.sort((a, b) => {
+      const aVis =
+        (a.subscription.filter["#h"] as string[] | undefined)?.includes(
+          visibleChannelId,
+        ) ?? false;
+      const bVis =
+        (b.subscription.filter["#h"] as string[] | undefined)?.includes(
+          visibleChannelId,
+        ) ?? false;
+      if (aVis === bVis) return 0;
+      return aVis ? -1 : 1;
+    });
+  }
+
+  // Send live REQs in capped batches with inter-batch delays to avoid
+  // triggering per-pubkey admission control on degraded/recovering connections.
+  for (let i = 0; i < replayRequests.length; i += replayBatchSize) {
+    // Re-check the gate before every batch: a previous batch may have triggered
+    // admission control and armed the gate mid-replay. Wait for it to clear,
+    // then verify the connection is still current — a newer connection may have
+    // replayed while we were suspended.
+    if (isRateLimited()) await waitForRateLimit();
+    if (!isActive()) return;
+    const batch = replayRequests.slice(i, i + replayBatchSize);
+    await Promise.all(
+      batch.map(({ subId, subscription, replaySince, shouldPageReplay }) =>
         sendRaw([
           "REQ",
           subId,
@@ -143,8 +217,14 @@ export async function replayLiveSubscriptions({
             ? subscription.filter
             : buildReconnectReplayFilter(subscription.filter, replaySince),
         ]),
-    ),
-  );
+      ),
+    );
+    if (i + replayBatchSize < replayRequests.length) {
+      await new Promise<void>((resolve) =>
+        setTimeoutFn(resolve, interBatchDelayMs),
+      );
+    }
+  }
 
   await runWithConcurrency(
     replayRequests.filter(

@@ -53,6 +53,13 @@ export type ChannelPaneProps = {
   isSinglePanelView?: boolean;
   isSending: boolean;
   isTimelineLoading: boolean;
+  /** Newly-created message that should receive the one-shot conversation arrival motion. */
+  entranceMessageId?: string | null;
+  onEntranceMessageComplete?: (messageId: string) => void;
+  /** Welcome kickoff characters, rendered standing on the Welcome composer banner. */
+  welcomeKickoffStage?: React.ReactNode;
+  /** The kickoff is still setting up the team — the banner copy reads as setup status. */
+  welcomeKickoffSettingUp?: boolean;
   messages: TimelineMessage[];
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
   firstUnreadMessageId?: string | null;
@@ -71,11 +78,16 @@ export type ChannelPaneProps = {
   onChannelManagementDeleted?: () => void;
   onCloseProfilePanel: () => void;
   onAddAgent?: (options?: { beforeSend?: () => void }) => void;
+  onBrowseChannels?: () => void;
   onCreateChannel?: () => void;
   onCloseThread: () => void;
   onDelete?: (message: TimelineMessage) => void;
   onEdit?: (message: TimelineMessage) => void;
-  onEditSave?: (content: string, mediaTags?: string[][]) => Promise<void>;
+  onEditSave?: (
+    content: string,
+    mediaTags?: string[][],
+    mentionPubkeys?: string[],
+  ) => Promise<void>;
   onMarkUnread?: (message: TimelineMessage) => void;
   onMarkRead?: (message: TimelineMessage) => void;
   onExpandThreadReplies: (message: TimelineMessage) => void;
@@ -122,6 +134,7 @@ export type ChannelPaneProps = {
   ) => void;
   personaLookup?: Map<string, string>;
   profiles?: UserProfileLookup;
+  ownerProfiles?: UserProfileLookup;
   openThreadHeadId: string | null;
   shouldShowThreadSkeleton: boolean;
   openAgentSessionChannelId: string | null;

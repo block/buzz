@@ -106,7 +106,10 @@ export function buildHighlightPatterns(
       n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
     );
     patterns.push(
-      new RegExp(`(?:^|(?<=\\s))@(${escapedNames.join("|")})(?=\\W|$)`, "gi"),
+      new RegExp(
+        `(?:^|(?<=[\\s(]))@(${escapedNames.join("|")})(?=\\W|$)`,
+        "gi",
+      ),
     );
   }
 

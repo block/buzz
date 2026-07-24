@@ -11,7 +11,7 @@ import { toast } from "sonner";
 
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
-import { Switch } from "@/shared/ui/switch";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 function getChannelIcon(channelType: Channel["channelType"]): LucideIcon {
   if (channelType === "forum") {
@@ -126,7 +126,7 @@ export function CopyFieldRow({
   testId?: string;
 }) {
   async function handleCopy() {
-    await navigator.clipboard.writeText(value);
+    await writeTextToClipboard(value);
     toast.success(`Copied ${label.toLowerCase()}`);
   }
 
@@ -265,40 +265,5 @@ export function IngressRow({
       ) : null}
       <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground" />
     </button>
-  );
-}
-
-export function ToggleRow({
-  checked,
-  description,
-  disabled,
-  label,
-  onCheckedChange,
-  testId,
-}: {
-  checked: boolean;
-  description: string;
-  disabled?: boolean;
-  label: string;
-  onCheckedChange: (checked: boolean) => void;
-  testId: string;
-}) {
-  return (
-    <div className="flex items-center gap-3 px-4 py-3">
-      <span className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-foreground">
-          {label}
-        </span>
-        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">
-          {description}
-        </span>
-      </span>
-      <Switch
-        checked={checked}
-        data-testid={testId}
-        disabled={disabled}
-        onCheckedChange={onCheckedChange}
-      />
-    </div>
   );
 }

@@ -1171,7 +1171,13 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     let msg = match event {
                         Ok(delta) => roster_delta_msg(delta),
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                            let Some(room) = self.rooms.get(session_id) else {
+                            let Some(community_id) = stream_community else {
+                                break Ok(());
+                            };
+                            let Some(room) = self.rooms.get(
+                                CommunityId::from_uuid(community_id),
+                                session_id,
+                            ) else {
                                 break Ok(());
                             };
                             roster_snapshot_msg(&room)
@@ -1245,7 +1251,7 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                         teardown_reason = Some(GoodbyeReason::Draining);
                         break Ok(());
                     }
-                    let room = self.rooms.get_or_create(session_id);
+                    let room = self.rooms.get_or_create(community, session_id);
                     // Subscribe before admission; PeerRegistered carries a
                     // snapshot after admission, and queued deltas at or below
                     // that revision are ignored by the receiver.
@@ -1282,7 +1288,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                 }
                 HuddleControlMsg::UnregisterPeer { pubkey } => {
                     if let Some(peer_id) = registered.remove(&pubkey) {
-                        if let Some(room) = self.rooms.get(session_id) {
+                        if let Some(room) = stream_community.and_then(|community_id| {
+                            self.rooms
+                                .get(CommunityId::from_uuid(community_id), session_id)
+                        }) {
                             let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
                             room.remove_peer(peer_id);
                             if let Some(peer_index) = peer_index {
@@ -1299,7 +1308,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
                     }
                 }
                 HuddleControlMsg::RosterResync => {
-                    let Some(room) = self.rooms.get(session_id) else {
+                    let Some(room) = stream_community.and_then(|community_id| {
+                        self.rooms
+                            .get(CommunityId::from_uuid(community_id), session_id)
+                    }) else {
                         break Ok(());
                     };
                     stream
@@ -1335,7 +1347,10 @@ impl<D: HuddleDirectory + ?Sized> HuddleControlAcceptor<D> {
         // Teardown: drop every peer this stream registered, regardless of how
         // the loop ended. Dropping the peer drops its `audio_tx`, which ends the
         // matching `spawn_remote_peer_sink` task.
-        if let Some(room) = self.rooms.get(session_id) {
+        if let Some(room) = stream_community.and_then(|community_id| {
+            self.rooms
+                .get(CommunityId::from_uuid(community_id), session_id)
+        }) {
             for (pubkey, peer_id) in registered {
                 let peer_index = room.peers.get(&peer_id).map(|peer| peer.peer_index);
                 room.remove_peer(peer_id);
@@ -2261,7 +2276,7 @@ mod tests {
         let session_id = Uuid::new_v4();
         let fenced = fenced_owned_by(owner_rt, session_id);
         let rooms = Arc::new(AudioRoomManager::new());
-        let room = rooms.get_or_create(session_id);
+        let room = rooms.get_or_create(community(), session_id);
         let (_local_id, _local_index, _audio_rx, mut local_ctrl_rx) =
             room.add_peer("owner-local".into(), 2).unwrap();
         // Discard the local peer's own roster delta; this assertion targets the

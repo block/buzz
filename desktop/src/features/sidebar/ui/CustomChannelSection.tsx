@@ -28,6 +28,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -57,6 +58,7 @@ import type { ActiveChannelTurnSummary } from "@/features/agents/activeAgentTurn
 import type { ChannelSection } from "@/features/sidebar/lib/useChannelSections";
 import type { Channel } from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
+import { getPlatformKeysById } from "@/shared/lib/keyboard-shortcuts";
 import { HashSearch } from "@/shared/ui/icons";
 import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 
@@ -200,6 +202,9 @@ export function SectionActionsMenu({
           <DropdownMenuItem onSelect={() => deferMenuAction(onBrowse)}>
             <HashSearch className="h-4 w-4" />
             <span>{browseLabel ?? "Browse channels"}</span>
+            <DropdownMenuShortcut>
+              {getPlatformKeysById("browse-channels")}
+            </DropdownMenuShortcut>
           </DropdownMenuItem>
         ) : null}
         {onCreate ? (
@@ -288,12 +293,14 @@ function ChannelSectionHeader({
   isCollapsed,
   onToggleCollapsed,
   title,
+  testId,
   actions,
 }: {
   contentId: string;
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
   title: string;
+  testId: string;
   actions: React.ReactNode;
 }) {
   return (
@@ -303,10 +310,11 @@ function ChannelSectionHeader({
           aria-controls={contentId}
           aria-expanded={!isCollapsed}
           className={SECTION_LABEL_BUTTON_CLASS}
+          data-testid={`${testId}-section-label`}
           onClick={onToggleCollapsed}
           type="button"
         >
-          <span>{title}</span>
+          <span data-sidebar-section-title>{title}</span>
           <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
             <ChevronDown
               className={cn(
@@ -337,6 +345,8 @@ export function ChannelGroupSection({
   listTestId,
   onBrowseClick,
   onCreateClick,
+  onQuickCreateClick,
+  quickCreateLabel,
   showQuickCreate,
   onMarkAllRead,
   onMarkChannelRead,
@@ -361,6 +371,7 @@ export function ChannelGroupSection({
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
+  onDeleteChannel,
   onLeaveChannel,
 }: {
   browseLabel?: string;
@@ -374,6 +385,14 @@ export function ChannelGroupSection({
   listTestId: string;
   onBrowseClick?: () => void;
   onCreateClick?: () => void;
+  /**
+   * Overrides the quick-create (`+`) button's click handler. Defaults to
+   * `onCreateClick`. Used to point the sidebar `+` at the unified
+   * "Add channel" search-and-create browser instead of the bare create form.
+   */
+  onQuickCreateClick?: () => void;
+  /** Overrides the quick-create button's aria-label/tooltip. */
+  quickCreateLabel?: string;
   showQuickCreate?: boolean;
   onMarkChannelRead: (
     channelId: string,
@@ -402,6 +421,7 @@ export function ChannelGroupSection({
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
+  onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-${listTestId}`;
@@ -460,6 +480,7 @@ export function ChannelGroupSection({
                 onAssignChannel={onAssignChannel}
                 onUnassignChannel={onUnassignChannel}
                 onCreateSectionForChannel={onCreateSectionForChannel}
+                onDeleteChannel={onDeleteChannel}
                 onLeaveChannel={onLeaveChannel}
               />
             </ContextMenuContent>
@@ -478,12 +499,13 @@ export function ChannelGroupSection({
         isCollapsed={isCollapsed}
         onToggleCollapsed={onToggleCollapsed}
         title={title}
+        testId={listTestId}
         actions={
           <>
-            {showQuickCreate && onCreateClick ? (
+            {showQuickCreate && (onQuickCreateClick ?? onCreateClick) ? (
               <SectionQuickAction
-                label={createLabel ?? "Create channel"}
-                onClick={onCreateClick}
+                label={quickCreateLabel ?? createLabel ?? "Create channel"}
+                onClick={(onQuickCreateClick ?? onCreateClick) as () => void}
                 testId={
                   actionsTestId ? `${actionsTestId}-quick-create` : undefined
                 }
@@ -542,6 +564,7 @@ export function CustomChannelSection({
   onAssignChannel,
   onUnassignChannel,
   onCreateSectionForChannel,
+  onCreateChannel,
   onRenameSection,
   onDeleteSection,
   onMoveSectionUp,
@@ -552,6 +575,7 @@ export function CustomChannelSection({
   starredChannelIds,
   onStarChannel,
   onUnstarChannel,
+  onDeleteChannel,
   onLeaveChannel,
 }: {
   section: ChannelSection;
@@ -580,6 +604,7 @@ export function CustomChannelSection({
   onAssignChannel: (channelId: string, sectionId: string) => void;
   onUnassignChannel: (channelId: string) => void;
   onCreateSectionForChannel: (channelId: string) => void;
+  onCreateChannel: () => void;
   onRenameSection: () => void;
   onDeleteSection: () => void;
   onMoveSectionUp: () => void;
@@ -590,6 +615,7 @@ export function CustomChannelSection({
   starredChannelIds?: ReadonlySet<string>;
   onStarChannel?: (channelId: string) => void;
   onUnstarChannel?: (channelId: string) => void;
+  onDeleteChannel?: (channel: Channel) => void;
   onLeaveChannel?: (channel: Channel) => void;
 }) {
   const contentId = `sidebar-section-${section.id}`;
@@ -609,11 +635,17 @@ export function CustomChannelSection({
             <ContextMenu>
               <ContextMenuTrigger asChild>
                 <div className="relative" {...dragHandleProps}>
-                  <SidebarGroupLabel asChild>
+                  <SidebarGroupLabel
+                    asChild
+                    className={section.icon ? undefined : "pl-8"}
+                  >
                     <button
                       aria-controls={contentId}
                       aria-expanded={!isCollapsed}
-                      className={SECTION_LABEL_BUTTON_CLASS}
+                      className={cn(
+                        SECTION_LABEL_BUTTON_CLASS,
+                        section.icon && "gap-2",
+                      )}
                       onClick={onToggleCollapsed}
                       type="button"
                     >
@@ -631,6 +663,7 @@ export function CustomChannelSection({
                       ) : null}
                       <span
                         className="truncate"
+                        data-sidebar-section-title
                         data-testid={`section-title-${section.id}`}
                       >
                         {section.name}
@@ -649,6 +682,11 @@ export function CustomChannelSection({
                     </button>
                   </SidebarGroupLabel>
                   <div className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center gap-0.5">
+                    <SectionQuickAction
+                      label={`Add channel to ${section.name}`}
+                      onClick={onCreateChannel}
+                      testId={`section-actions-${section.id}-quick-create`}
+                    />
                     <SectionActionsMenu
                       sectionLabel={section.name}
                       testId={`section-actions-${section.id}`}
@@ -737,6 +775,7 @@ export function CustomChannelSection({
                             onCreateSectionForChannel={
                               onCreateSectionForChannel
                             }
+                            onDeleteChannel={onDeleteChannel}
                             onLeaveChannel={onLeaveChannel}
                           />
                         </ContextMenuContent>

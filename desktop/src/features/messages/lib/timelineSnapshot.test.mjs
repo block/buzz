@@ -403,6 +403,7 @@ test("timeline-body-surface: loading and deferred-pending both paint the single 
   assert.equal(
     selectTimelineBodySurface({
       deferredCount: 0,
+      hasPersistentIntro: false,
       isLoading: true,
       liveCount: 0,
     }),
@@ -411,10 +412,23 @@ test("timeline-body-surface: loading and deferred-pending both paint the single 
   assert.equal(
     selectTimelineBodySurface({
       deferredCount: 0,
+      hasPersistentIntro: false,
       isLoading: false,
       liveCount: 3,
     }),
     "skeleton",
+  );
+});
+
+test("timeline-body-surface: first deferred message preserves a persistent channel intro", () => {
+  assert.equal(
+    selectTimelineBodySurface({
+      deferredCount: 0,
+      hasPersistentIntro: true,
+      isLoading: false,
+      liveCount: 1,
+    }),
+    "empty",
   );
 });
 

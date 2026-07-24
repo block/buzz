@@ -34,6 +34,7 @@ type TopbarSearchProps = {
   onOpenChannel: (channelId: string) => void;
   onOpenResult: (hit: SearchHit) => void;
   onOpenUser?: (user: UserSearchResult) => void | Promise<void>;
+  onBrowseChannels?: () => void | Promise<void>;
   onCreateAgent?: () => void | Promise<void>;
   onCreateChannel?: () => void | Promise<void>;
   suggestionChannels?: Channel[];
@@ -393,6 +394,7 @@ export function TopbarSearch({
   onOpenChannel,
   onOpenResult,
   onOpenUser,
+  onBrowseChannels,
   onCreateAgent,
   onCreateChannel,
   suggestionChannels,
@@ -426,6 +428,16 @@ export function TopbarSearch({
   const suggestionActionResults = React.useMemo(() => {
     const actions: SearchResult[] = [];
 
+    if (onBrowseChannels) {
+      actions.push({
+        kind: "action",
+        action: {
+          id: "browse-channels",
+          title: "Browse channels",
+        },
+      });
+    }
+
     if (onCreateChannel) {
       actions.push({
         kind: "action",
@@ -447,7 +459,7 @@ export function TopbarSearch({
     }
 
     return actions;
-  }, [onCreateAgent, onCreateChannel]);
+  }, [onBrowseChannels, onCreateAgent, onCreateChannel]);
   const suggestionResults = React.useMemo(
     () => [...suggestedResults, ...suggestionActionResults],
     [suggestedResults, suggestionActionResults],
@@ -513,7 +525,11 @@ export function TopbarSearch({
 
       if (result.kind === "action") {
         setSelectedMenuIndex(0);
-        if (result.action.id === "create-channel") {
+        if (result.action.id === "browse-channels") {
+          openAfterExit(() => {
+            void onBrowseChannels?.();
+          });
+        } else if (result.action.id === "create-channel") {
           openAfterExit(() => {
             void onCreateChannel?.();
           });
@@ -528,6 +544,7 @@ export function TopbarSearch({
       onOpenResult(result.hit);
     },
     [
+      onBrowseChannels,
       onCreateAgent,
       onCreateChannel,
       onOpenChannel,

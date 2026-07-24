@@ -1,9 +1,7 @@
-// Deep async call chains (mesh ensure→download→start under Tauri command
-// futures) exceed the default query depth when computing layouts.
-#![recursion_limit = "256"]
-
+#![recursion_limit = "256"] // Deep Tauri command futures exceed the default layout query depth.
 mod app_state;
 mod archive;
+mod builderlab;
 mod commands;
 mod deep_link;
 mod event_sync;
@@ -13,29 +11,31 @@ mod managed_agents;
 mod media_proxy;
 #[cfg(feature = "mesh-llm")]
 mod mesh_llm;
+#[cfg(not(feature = "mesh-llm"))]
+mod mesh_llm_stubs;
 mod migration;
 #[cfg(test)]
 mod model_tests;
 mod models;
+mod native_websocket;
 mod nostr_bind;
 pub mod nostr_convert;
 mod prevent_sleep;
 mod ptt_shortcut;
 mod relay;
+mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
 mod templates;
 mod util;
-
-#[cfg(not(feature = "mesh-llm"))]
-mod mesh_llm_stubs;
-#[cfg(not(feature = "mesh-llm"))]
-use mesh_llm_stubs::*;
-
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
+use builderlab::*;
 use commands::*;
-use deep_link::handle_deep_link_url;
+use deep_link::{
+    acknowledge_pending_community_deep_link, handle_deep_link_url,
+    take_pending_community_deep_link, PendingCommunityDeepLinks,
+};
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
@@ -46,12 +46,17 @@ use huddle::{
     join_huddle, leave_huddle, push_audio_pcm, set_huddle_transcription_enabled, set_tts_enabled,
     set_voice_input_mode, speak_agent_message, start_huddle, start_stt_pipeline,
 };
-use managed_agents::{backfill_persona_snapshots, ensure_nest, try_regenerate_nest};
+use managed_agents::{
+    backfill_persona_snapshots, ensure_nest, list_managed_agent_runtimes,
+    put_managed_agent_runtime_lifecycle, reconcile_managed_agent_runtimes,
+    restart_managed_agent_runtime, start_managed_agent_runtime, stop_managed_agent_runtime,
+    try_regenerate_nest,
+};
+#[cfg(not(feature = "mesh-llm"))]
+use mesh_llm_stubs::*;
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
-use shutdown::hard_exit_after_mesh_shutdown;
-use shutdown::shutdown_managed_agents;
-#[cfg(feature = "mesh-llm")]
-use shutdown::shutdown_mesh_runtime;
+use shutdown::{hard_exit_after_mesh_shutdown, relaunch_after_mesh_shutdown};
+use shutdown::{is_restart_request, shut_down_app};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -63,107 +68,6 @@ use tauri_plugin_window_state::StateFlags;
 
 #[cfg(target_os = "macos")]
 const INITIAL_RENDER_READY_EVENT: &str = "initial-render-ready";
-
-#[tauri::command]
-fn perform_sidebar_default_haptic() {
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::{
-            NSHapticFeedbackManager, NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime,
-            NSHapticFeedbackPerformer,
-        };
-
-        NSHapticFeedbackManager::defaultPerformer().performFeedbackPattern_performanceTime(
-            NSHapticFeedbackPattern::Alignment,
-            NSHapticFeedbackPerformanceTime::Now,
-        );
-    }
-}
-
-/// Performs the window action matching the macOS "double-click a window's
-/// title bar to" preference (`AppleActionOnDoubleClick`).
-///
-/// macOS values are `Minimize`, `Maximize` (default when unset), `Fill`, or
-/// `None`.
-/// The desktop app uses a web-based title-bar drag region, so the frontend
-/// forwards double-clicks here and suppresses Tauri's injected drag-region
-/// handler, whose default macOS path hardcodes maximize.
-///
-/// For `Fill`, resize to the current monitor work area instead of using
-/// Tauri's maximize path, which maps to macOS zoom for titled, resizable
-/// windows.
-///
-/// On non-macOS platforms this always toggles maximize (the historical
-/// behavior).
-#[tauri::command]
-fn title_bar_double_click(window: tauri::Window) {
-    #[cfg(target_os = "macos")]
-    {
-        let action = {
-            let output = std::process::Command::new("defaults")
-                .args(["read", "-g", "AppleActionOnDoubleClick"])
-                .output();
-            match output {
-                Ok(output) if output.status.success() => {
-                    String::from_utf8_lossy(&output.stdout).trim().to_string()
-                }
-                _ => "Maximize".to_string(),
-            }
-        };
-
-        match action.as_str() {
-            "None" => {}
-            "Minimize" => {
-                let _ = window.minimize();
-            }
-            "Fill" => {
-                fill_window(&window);
-            }
-            // "Maximize" or any unexpected value.
-            _ => {
-                toggle_maximize(&window);
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        toggle_maximize(&window);
-    }
-}
-
-/// Fills the current display work area, excluding system UI like the menu bar
-/// and Dock.
-#[cfg(target_os = "macos")]
-fn fill_window(window: &tauri::Window) {
-    match window.current_monitor() {
-        Ok(Some(monitor)) => {
-            if window.is_maximized().unwrap_or(false) {
-                let _ = window.unmaximize();
-            }
-
-            let work_area = monitor.work_area();
-            let _ = window.set_position(work_area.position);
-            let _ = window.set_size(work_area.size);
-        }
-        _ => {
-            let _ = window.maximize();
-        }
-    }
-}
-
-/// Toggles the window between maximized and its previous size, matching the
-/// historical double-click behavior.
-fn toggle_maximize(window: &tauri::Window) {
-    match window.is_maximized() {
-        Ok(true) => {
-            let _ = window.unmaximize();
-        }
-        _ => {
-            let _ = window.maximize();
-        }
-    }
-}
 
 fn reveal_initial_window<R: tauri::Runtime>(window: &tauri::Window<R>) {
     if let Err(error) = window.show() {
@@ -332,7 +236,7 @@ pub fn run() {
                 })
                 .build(),
         )
-        .plugin(tauri_plugin_websocket::init())
+        .plugin(native_websocket::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init());
 
@@ -427,9 +331,7 @@ pub fn run() {
             .build()
     });
 
-    // Only register the updater in release builds that were compiled with a
-    // real updater configuration. Local unsigned builds omit that config and
-    // should still launch for debugging.
+    // Register the updater only in configured release builds; omit it locally.
     #[cfg(buzz_updater_enabled)]
     let builder = if cfg!(debug_assertions) {
         builder
@@ -449,6 +351,10 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
+        .manage(ClipboardState::new())
+        .manage(PendingCommunityDeepLinks::default())
+        .manage(BuilderlabSession::default())
+        .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
         .setup(move |app| {
             let app_handle = app.handle().clone();
@@ -739,6 +645,21 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            take_pending_community_deep_link,
+            acknowledge_pending_community_deep_link,
+            start_builderlab_login,
+            cancel_builderlab_login,
+            get_builderlab_auth,
+            clear_builderlab_auth,
+            get_builderlab_nostr_identity,
+            bind_builderlab_nostr_identity,
+            delete_builderlab_nostr_identity,
+            list_builderlab_communities,
+            check_builderlab_community_name,
+            create_builderlab_community,
+            archive_builderlab_community,
+            unarchive_builderlab_community,
+            transfer_builderlab_community,
             title_bar_double_click,
             get_identity,
             get_nsec,
@@ -746,6 +667,7 @@ pub fn run() {
             persist_current_identity,
             get_profile,
             update_profile,
+            update_profile_at_relay,
             get_user_profile,
             get_users_batch,
             get_user_notes,
@@ -756,20 +678,33 @@ pub fn run() {
             get_project_local_repo_snapshot,
             get_project_repo_sync_status,
             list_project_local_repositories,
+            clone_project_repository,
+            create_project_remote_branch,
+            delete_project_remote_branch,
             push_project_local_repository,
+            pull_project_local_repository,
+            sign_project_pull_request_status,
+            sign_project_pull_request_review_request,
+            publish_project_pull_request_merged_status,
+            merge_project_pull_request,
             open_project_terminal,
+            open_project_merge_recovery_terminal,
             search_users,
             get_presence,
+            get_os_idle_seconds,
             get_default_relay_url,
+            auto_connect_default_relay_enabled,
             get_legacy_workspace_storage,
             is_shared_identity,
             get_relay_ws_url,
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_title,
+            discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,
             install_acp_runtime,
+            connect_acp_runtime,
             discover_managed_agent_prereqs,
             sign_event,
             sign_nostr_identity_binding,
@@ -781,6 +716,7 @@ pub fn run() {
             nip44_decrypt_from_self,
             get_channels,
             create_channel,
+            ensure_starter_channels,
             open_dm,
             hide_dm,
             get_channel_details,
@@ -802,6 +738,7 @@ pub fn run() {
             search_messages,
             send_channel_message,
             send_managed_agent_channel_message,
+            has_managed_agent_channel_message_marker,
             get_forum_posts,
             get_forum_thread,
             get_thread_replies,
@@ -818,11 +755,13 @@ pub fn run() {
             pick_and_upload_image,
             upload_media_bytes,
             download_image,
+            save_png_data_url,
             download_file,
             fetch_media_bytes,
             copy_image_to_clipboard,
             copy_text_to_clipboard,
             fetch_snapshot_bytes,
+            relay_requires_membership,
             list_relay_members,
             get_my_relay_membership,
             add_relay_member,
@@ -835,9 +774,16 @@ pub fn run() {
             resolve_oa_owner,
             list_relay_agents,
             list_managed_agents,
+            list_managed_agent_runtimes,
+            start_managed_agent_runtime,
+            stop_managed_agent_runtime,
+            restart_managed_agent_runtime,
+            reconcile_managed_agent_runtimes,
+            put_managed_agent_runtime_lifecycle,
             create_managed_agent,
             start_managed_agent,
             stop_managed_agent,
+            set_agent_managed_profiles,
             set_managed_agent_start_on_app_launch,
             set_managed_agent_auto_restart,
             delete_managed_agent,
@@ -854,6 +800,7 @@ pub fn run() {
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,
+            mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,
@@ -959,19 +906,21 @@ pub fn run() {
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));
 
     let run_shutdown_done = Arc::clone(&shutdown_done);
+    let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
-        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
-            app_handle
-                .state::<AppState>()
-                .shutdown_started
-                .store(true, Ordering::SeqCst);
-            if !run_shutdown_done.swap(true, Ordering::SeqCst) {
-                prevent_sleep::release(&app_handle.state::<AppState>().prevent_sleep);
-                if let Err(error) = shutdown_managed_agents(app_handle) {
-                    eprintln!("buzz-desktop: failed to stop managed agents: {error}");
-                }
-                #[cfg(feature = "mesh-llm")]
-                shutdown_mesh_runtime(app_handle);
+        RunEvent::ExitRequested { code, .. } => {
+            if is_restart_request(code) {
+                restart_requested.store(true, Ordering::SeqCst);
+            }
+            shut_down_app(app_handle, &run_shutdown_done);
+        }
+        RunEvent::Exit => {
+            shut_down_app(app_handle, &run_shutdown_done);
+            app_handle.state::<ClipboardState>().release();
+
+            #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+            if restart_requested.load(Ordering::SeqCst) {
+                relaunch_after_mesh_shutdown(app_handle);
             }
 
             // AppKit terminates through libc exit(), which runs C++ static

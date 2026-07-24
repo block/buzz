@@ -31,7 +31,7 @@ import {
   clearTimeoutState,
   recordTimeoutFromRejection,
 } from "@/features/moderation/lib/timeoutStore";
-import { relayClient } from "@/shared/api/relayClient";
+import { relayClient, setVisibleChannel } from "@/shared/api/relayClient";
 import { customEmojiQueryKey } from "@/features/custom-emoji/hooks";
 import { channelsQueryKey } from "@/features/channels/hooks";
 import { reactionEmojiUrl } from "@/shared/api/customEmoji";
@@ -329,6 +329,17 @@ export function useChannelSubscription(channel: Channel | null) {
       }
     }
   });
+
+  // Notify the relay client which channel is currently visible so its live
+  // subscriptions are replayed first on reconnect, reducing latency on
+  // degraded networks.
+  useEffect(() => {
+    if (!channelId || channelType === "forum") return;
+    setVisibleChannel(channelId);
+    return () => {
+      setVisibleChannel(null);
+    };
+  }, [channelId, channelType]);
 
   useEffect(() => {
     if (!channelId || channelType === "forum") {
@@ -685,9 +696,12 @@ export function useEditMessageMutation(channel: Channel | null) {
       eventId: string;
       content: string;
       mediaTags?: string[][];
+      // Pubkeys of mentions *newly added* by this edit, diffed at the composer.
+      // Only these receive a `p` tag so a typo-fix edit re-wakes nobody.
+      mentionPubkeys?: string[];
     }
   >({
-    mutationFn: async ({ eventId, content, mediaTags }) => {
+    mutationFn: async ({ eventId, content, mediaTags, mentionPubkeys }) => {
       if (!channel) {
         throw new Error("No channel selected.");
       }
@@ -698,7 +712,14 @@ export function useEditMessageMutation(channel: Channel | null) {
       // guard rejects any non-imeta prefix), mirroring the send path.
       const { mediaTags: imetaTags, emojiTags } = splitOutgoingTags(mediaTags);
 
-      await editMessage(channel.id, eventId, content, imetaTags, emojiTags);
+      await editMessage(
+        channel.id,
+        eventId,
+        content,
+        imetaTags,
+        emojiTags,
+        mentionPubkeys,
+      );
     },
     onSuccess: (_data, { eventId, content, mediaTags }) => {
       if (!channel) {

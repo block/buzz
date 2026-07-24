@@ -12,6 +12,7 @@ import {
 } from "@/features/agents/hooks";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
+import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
@@ -45,6 +46,10 @@ type PendingNonMemberMentionSend = {
   savedImeta: ImetaMedia[];
   savedSpoileredAttachmentUrls: Set<string>;
   sentDraftKey: string | null | undefined;
+  audienceGeneration: number;
+  audienceRevision: number | null;
+  /** Agent mentions explicitly authored in this draft (never inferred). */
+  explicitAgentPubkeys: string[];
 };
 
 type SendMessageWithMentionFlowInput = {
@@ -58,6 +63,8 @@ type SendMessageWithMentionFlowInput = {
   sentDraftKey: string | null | undefined;
   spoileredAttachmentUrls?: ReadonlySet<string>;
   trimmed: string;
+  audienceGeneration?: number;
+  audienceRevision?: number | null;
 };
 
 type UseMentionSendFlowOptions = {
@@ -84,13 +91,23 @@ type UseMentionSendFlowOptions = {
       } | null,
     ) => Promise<void>
   >;
-  richText: Pick<UseRichTextEditorResult, "clearContent" | "setContent">;
+  richText: Pick<
+    UseRichTextEditorResult,
+    "clearContent" | "setContent" | "setContentAndFocusEnd"
+  >;
   setContent: (content: string) => void;
   setIsEmojiPickerOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setPendingImeta: (pendingImeta: ImetaMedia[]) => void;
   setSpoileredAttachmentUrls?: React.Dispatch<
     React.SetStateAction<Set<string>>
   >;
+  onSuccessfulExplicitAgentAudience?: (audience: {
+    channelId: string;
+    expectedGeneration: number;
+    expectedRevision: number | null;
+    explicitAgentPubkeys: string[];
+  }) => void;
+  resolvePostSendContent?: (effectiveExplicitAgentPubkeys: string[]) => string;
 };
 
 function mergeOutgoingTagsWithReferenceMentions(
@@ -145,6 +162,8 @@ export function useMentionSendFlow({
   setIsEmojiPickerOpen,
   setPendingImeta,
   setSpoileredAttachmentUrls,
+  onSuccessfulExplicitAgentAudience,
+  resolvePostSendContent,
 }: UseMentionSendFlowOptions) {
   const [pendingNonMemberSend, setPendingNonMemberSend] =
     React.useState<PendingNonMemberMentionSend | null>(null);
@@ -368,29 +387,37 @@ export function useMentionSendFlow({
     ],
   );
 
-  const clearComposer = React.useCallback(() => {
-    setPendingNonMemberSend(null);
-    setNonMemberPromptError(null);
-    setContent("");
-    contentRef.current = "";
-    richText.clearContent();
-    setPendingImeta([]);
-    setSpoileredAttachmentUrls?.(new Set());
-    mentions.clearMentions();
-    channelLinks.clearChannels();
-    emojiAutocomplete.clearEmojis();
-    setIsEmojiPickerOpen(false);
-  }, [
-    channelLinks.clearChannels,
-    contentRef,
-    emojiAutocomplete.clearEmojis,
-    mentions.clearMentions,
-    richText.clearContent,
-    setContent,
-    setIsEmojiPickerOpen,
-    setPendingImeta,
-    setSpoileredAttachmentUrls,
-  ]);
+  const clearComposer = React.useCallback(
+    (postSendContent = "") => {
+      setPendingNonMemberSend(null);
+      setNonMemberPromptError(null);
+      setContent(postSendContent);
+      contentRef.current = postSendContent;
+      if (postSendContent) {
+        richText.setContentAndFocusEnd(postSendContent);
+        mentions.cancelMentionAutocomplete();
+      } else richText.clearContent();
+      setPendingImeta([]);
+      setSpoileredAttachmentUrls?.(new Set());
+      if (!postSendContent) mentions.clearMentions();
+      channelLinks.clearChannels();
+      emojiAutocomplete.clearEmojis();
+      setIsEmojiPickerOpen(false);
+    },
+    [
+      channelLinks.clearChannels,
+      contentRef,
+      emojiAutocomplete.clearEmojis,
+      mentions.cancelMentionAutocomplete,
+      mentions.clearMentions,
+      richText.clearContent,
+      richText.setContentAndFocusEnd,
+      setContent,
+      setIsEmojiPickerOpen,
+      setPendingImeta,
+      setSpoileredAttachmentUrls,
+    ],
+  );
 
   React.useEffect(() => {
     if (previousChannelIdRef.current === channelId) {
@@ -472,11 +499,19 @@ export function useMentionSendFlow({
           return;
         }
 
-        // Only clear the composer if the user has not switched channels since
-        // submit. If they have, the composer they see belongs to the new channel
-        // and we must not wipe it.
+        const effectiveExplicitAgentPubkeys =
+          filterEffectiveExplicitAgentPubkeys(
+            draft.explicitAgentPubkeys,
+            mentionPubkeys,
+          );
+
+        // Replace the sent body directly with its final post-send state before
+        // the async network send starts. This avoids an intermediate blank frame
+        // for persistent audiences while preserving the ordinary empty state.
         if (draft.capturedChannelId === channelIdRef.current) {
-          clearComposer();
+          clearComposer(
+            resolvePostSendContent?.(effectiveExplicitAgentPubkeys),
+          );
         }
 
         try {
@@ -487,6 +522,17 @@ export function useMentionSendFlow({
             sendChannelId,
             draft.capturedThreadContext,
           );
+          if (effectiveExplicitAgentPubkeys.length > 0) {
+            // Promote only explicitly authored agents that remained effective
+            // for this successful send. "Send without inviting" removes its
+            // excluded recipients here as well as from event routing.
+            onSuccessfulExplicitAgentAudience?.({
+              channelId: sendChannelId ?? draft.capturedChannelId ?? "",
+              expectedGeneration: draft.audienceGeneration,
+              expectedRevision: draft.audienceRevision,
+              explicitAgentPubkeys: effectiveExplicitAgentPubkeys,
+            });
+          }
           if (draft.sentDraftKey) {
             drafts.markDraftSent(
               draft.sentDraftKey,
@@ -525,6 +571,8 @@ export function useMentionSendFlow({
       mentions.isAgentPubkey,
       onPrepareSendChannel,
       onSendRef,
+      onSuccessfulExplicitAgentAudience,
+      resolvePostSendContent,
       richText.setContent,
       setContent,
       setPendingImeta,
@@ -597,6 +645,8 @@ export function useMentionSendFlow({
       sentDraftKey,
       spoileredAttachmentUrls = new Set(),
       trimmed,
+      audienceGeneration = 0,
+      audienceRevision = null,
     }: SendMessageWithMentionFlowInput) => {
       if (isMentionSendPendingRef.current) {
         return;
@@ -643,10 +693,16 @@ export function useMentionSendFlow({
         const createdPersonaAgentPubkeySet = new Set(
           createdPersonaAgentPubkeys.map(normalizePubkey),
         );
-        const pubkeys = uniqueNormalizedPubkeys([
+        const explicitMentionPubkeys = uniqueNormalizedPubkeys([
           ...mentions.extractMentionPubkeys(trimmed),
           ...createdPersonaAgentPubkeys,
         ]);
+        const explicitAgentPubkeys = explicitMentionPubkeys.filter(
+          (pubkey) =>
+            mentions.isAgentPubkey(pubkey) ||
+            createdPersonaAgentPubkeySet.has(pubkey),
+        );
+        const pubkeys = explicitMentionPubkeys;
         const { content: finalContent, mediaTags } = buildOutgoingMessage(
           trimmed,
           pendingImeta,
@@ -691,6 +747,9 @@ export function useMentionSendFlow({
           savedImeta: [...pendingImeta],
           savedSpoileredAttachmentUrls: new Set(spoileredAttachmentUrls),
           sentDraftKey,
+          audienceGeneration,
+          audienceRevision,
+          explicitAgentPubkeys,
         };
 
         if (promptNonMemberPubkeys.length > 0) {
@@ -714,6 +773,7 @@ export function useMentionSendFlow({
       getNonMemberMentionPubkeys,
       getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
+      mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,
     ],

@@ -1,11 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
-import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
+import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
+import {
+  applyCommunity,
+  autoConnectDefaultRelayEnabled,
+  getDefaultRelayUrl,
+} from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
+import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
 import { clearSearchHitEventCache } from "@/app/navigation/searchHitEventCache";
-import { initDraftStore } from "@/features/messages/lib/useDrafts";
+import {
+  clearAllDrafts,
+  initDraftStore,
+} from "@/features/messages/lib/useDrafts";
 import { resetRenderScopedReactionHydration } from "@/features/messages/lib/renderScopedReactions";
 import {
   resetActiveAgentTurnsStore,
@@ -14,11 +23,16 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
+import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
-import { initFirstCommunity } from "./communityStorage";
+import {
+  initFirstCommunity,
+  shouldAutoConnectDefaultRelay,
+} from "./communityStorage";
 import type { Community } from "./types";
 
 /**
@@ -28,11 +42,21 @@ import type { Community } from "./types";
  * destroyed via effect cleanup and do not need entries here.
  * See AGENTS.md "Community Switching" for the full contract.
  */
-function resetCommunityState(): void {
+function resetCommunityState({
+  resetAvatarState,
+}: {
+  resetAvatarState: boolean;
+}): void {
   relayClient.disconnect();
+  resetRateLimitGate();
+  clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
+  if (resetAvatarState) {
+    resetAvatarProfileSync();
+    resetAvatarPresentations();
+  }
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetVideoPlayerState();
@@ -77,6 +101,10 @@ export function useCommunityInit(
   // Track the previously-applied community ID so we can save its turn state
   // before resetting when the user switches to a different community.
   const prevCommunityIdRef = useRef<string | null>(null);
+  // Deferred avatar work owns the relay captured when it was queued. A
+  // same-relay reconnect during onboarding must not cancel that work, while an
+  // actual relay boundary must clear both the queue and its presentation probe.
+  const appliedRelayUrlRef = useRef<string | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
@@ -86,13 +114,33 @@ export function useCommunityInit(
       if (!activeCommunity) {
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
+          const autoConnectDefaultRelay =
+            await autoConnectDefaultRelayEnabled();
 
-          if (isSharedIdentity) {
+          // Internal builds explicitly opt into treating their reviewed default
+          // relay as the first community. Public builds retain community
+          // selection even when BUZZ_RELAY_URL is overridden at runtime.
+          if (
+            isSharedIdentity ||
+            (autoConnectDefaultRelay &&
+              shouldAutoConnectDefaultRelay(defaultRelayUrl))
+          ) {
             const identity = await getIdentity();
             if (cancelled) return;
-            initFirstCommunity(defaultRelayUrl, identity.pubkey);
-            if (!cancelled) {
+            const community = initFirstCommunity(
+              defaultRelayUrl,
+              identity.pubkey,
+            );
+            if (community && !cancelled) {
               window.location.reload();
+              return;
+            }
+            if (!cancelled) {
+              setResult({
+                isReady: false,
+                needsSetup: true,
+                defaultRelayUrl,
+              });
             }
             return;
           }
@@ -138,9 +186,13 @@ export function useCommunityInit(
           // store under the outgoing community ID and delete its snapshot.
           prevCommunityIdRef.current = null;
         }
-        resetCommunityState();
+        resetCommunityState({
+          resetAvatarState:
+            appliedRelayUrlRef.current !== activeCommunity.relayUrl,
+        });
       }
       hasInitializedRef.current = true;
+      appliedRelayUrlRef.current = activeCommunity.relayUrl;
 
       // Apply community config to the Tauri backend.
       //
@@ -157,6 +209,7 @@ export function useCommunityInit(
           undefined,
           activeCommunity.token,
           activeCommunity.reposDir,
+          getOverrides().agentManagedProfiles === true,
         );
       } catch (error) {
         // A bad `repos_dir` no longer reaches here — `apply_workspace` treats
@@ -184,10 +237,23 @@ export function useCommunityInit(
       }
 
       if (!cancelled) {
-        // Initialise the draft store for this identity so localStorage drafts
-        // are scoped to the correct pubkey before the app renders.
-        if (activeCommunity.pubkey) {
-          initDraftStore(activeCommunity.pubkey);
+        // Refresh relay-derived media state only after the backend has installed
+        // this community's relay override. On cold launch, mediaUrl.ts may have
+        // eagerly cached the default relay origin before applyCommunity ran;
+        // leaving that stale value makes authenticated relay media look external
+        // and bypass the localhost proxy.
+        resetMediaCaches();
+
+        try {
+          const identity = await getIdentity();
+          if (cancelled) return;
+          initDraftStore(identity.pubkey, activeCommunity.relayUrl);
+        } catch (err) {
+          if (cancelled) return;
+          console.error(
+            "[useCommunityInit] getIdentity failed, draft store uninitialized:",
+            err,
+          );
         }
         // Restore any turn state saved for this community (a prior A→B round-
         // trip). This runs after applyCommunity succeeds and before the app

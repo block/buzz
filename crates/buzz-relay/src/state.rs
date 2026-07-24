@@ -23,6 +23,7 @@ use buzz_db::Db;
 use buzz_media::MediaStorage;
 use buzz_pubsub::cache_invalidation::CacheInvalidation;
 use buzz_pubsub::conn_control::ConnControl;
+use buzz_pubsub::rate_limiter::RedisRateLimiter;
 use buzz_pubsub::{PubSubManager, RedisNip98ReplayGuard};
 use buzz_search::SearchService;
 use buzz_workflow::WorkflowEngine;
@@ -180,6 +181,10 @@ where
 /// Tracks active Nostr WebSocket connections and provides message routing by connection ID.
 pub struct ConnectionManager {
     connections: DashMap<Uuid, ConnEntry>,
+    /// Sticky drain flag set by [`Self::drain_all`]. Registrations that land
+    /// after the drain snapshot self-signal, so no upgrade-vs-shutdown
+    /// interleaving can produce a connection that misses the restart close.
+    draining: AtomicBool,
 }
 
 impl ConnectionManager {
@@ -187,6 +192,7 @@ impl ConnectionManager {
     pub fn new() -> Self {
         Self {
             connections: DashMap::new(),
+            draining: AtomicBool::new(false),
         }
     }
 
@@ -207,6 +213,8 @@ impl ConnectionManager {
         subscriptions: ConnectionSubscriptions,
         grace_limit: u8,
     ) {
+        let drain_ctrl_tx = ctrl_tx.clone();
+        let drain_cancel = cancel.clone();
         self.connections.insert(
             conn_id,
             ConnEntry {
@@ -220,6 +228,14 @@ impl ConnectionManager {
                 grace_limit,
             },
         );
+        // Insert-then-check pairs with drain_all's store-then-iterate: either
+        // the drain iteration sees this entry, or this check sees the flag.
+        // A registration that raced past the snapshot self-signals here, so
+        // no connection can outlive graceful shutdown unclosed.
+        if self.draining.load(Ordering::SeqCst) {
+            let _ = drain_ctrl_tx.try_send(Self::restart_close_frame());
+            drain_cancel.cancel();
+        }
     }
 
     /// Removes a connection from the registry.
@@ -315,6 +331,45 @@ impl ConnectionManager {
             }
         }
         closed
+    }
+
+    /// Closes every live connection with a `1012 Service Restart` close frame.
+    ///
+    /// Called when graceful shutdown starts draining. Without this, upgraded
+    /// WebSocket connections outlive the axum listener drain: clients ride the
+    /// dying pod until the forced exit and then learn about the restart from a
+    /// TCP reset (or, on an abrupt kill, from up to 60s of stall-watchdog
+    /// silence). The explicit close frame tells them to reconnect immediately
+    /// — and that the disconnect is a restart, not a policy action.
+    ///
+    /// Uses the "queue frame on ctrl, then cancel" idiom (see
+    /// [`ConnectionManager::disconnect_pubkey`]): the send loop drains queued
+    /// control frames — including this close — before its cancel branch closes
+    /// the socket. Best-effort: a full control buffer still gets the close via
+    /// cancel, just without the restart code.
+    ///
+    /// Returns the number of connections signalled.
+    pub fn drain_all(&self) -> usize {
+        // Store-then-iterate pairs with register's insert-then-check: a
+        // registration that misses this iteration observes the flag and
+        // self-signals instead. The flag is sticky — drain is one-way.
+        self.draining.store(true, Ordering::SeqCst);
+        let frame = Self::restart_close_frame();
+        let mut closed = 0usize;
+        for entry in self.connections.iter() {
+            let _ = entry.ctrl_tx.try_send(frame.clone());
+            entry.cancel.cancel();
+            closed += 1;
+        }
+        closed
+    }
+
+    /// The WS close frame announcing a graceful restart: 1012 Service Restart.
+    fn restart_close_frame() -> WsMessage {
+        WsMessage::Close(Some(axum::extract::ws::CloseFrame {
+            code: axum::extract::ws::close_code::RESTART,
+            reason: axum::extract::ws::Utf8Bytes::from_static("relay restarting"),
+        }))
     }
 
     /// Return the server-resolved community that the connection's host bound to.
@@ -437,8 +492,8 @@ pub struct AppState {
     pub db: Db,
     /// Redis pool for readiness health checks.
     pub redis_pool: deadpool_redis::Pool,
-    /// Audit event service.
-    pub audit: Arc<AuditService>,
+    /// Audit event service, absent when audit logging is disabled.
+    pub audit: Option<Arc<AuditService>>,
     /// Pub/sub manager for broadcasting events to subscribers.
     pub pubsub: Arc<PubSubManager>,
     /// Authentication service.
@@ -496,15 +551,22 @@ pub struct AppState {
     /// access check so open channels stay zero-cost. Invalidated on a flip.
     pub channel_visibility_cache: Arc<moka::sync::Cache<(CommunityId, Uuid), String>>,
 
-    /// Bounded channel for audit logging — backpressure instead of unbounded spawns.
-    /// Uses .send().await (blocks caller if full) because audit entries must not be lost.
-    pub audit_tx: mpsc::Sender<buzz_audit::NewAuditEntry>,
+    /// Bounded channel for audit logging, absent when audit logging is disabled.
+    pub audit_tx: Option<mpsc::Sender<buzz_audit::NewAuditEntry>>,
     /// Media storage client (S3/MinIO).
     pub media_storage: Arc<MediaStorage>,
+    /// Single-flight + cache state for the hourly S3 storage sweep. See
+    /// `storage_sweep` module docs; shared with the usage-metrics tick via
+    /// `Arc` the same way other cross-tick poller state lives on `AppState`.
+    pub storage_sweep: Arc<tokio::sync::Mutex<crate::storage_sweep::StorageSweepState>>,
     /// Git object-store backend (content-addressed packs/manifests plus
     /// CAS-guarded manifest pointer). This is the durable git source of truth;
     /// see `api::git::store` and `docs/git-on-object-storage.md`.
     pub git_store: crate::api::git::store::GitStore,
+    /// Process-local, byte-bounded cache of immutable Git pack/index pairs.
+    /// Object storage remains authoritative; this only avoids repeated reads
+    /// and index generation for content-addressed packs.
+    pub git_pack_cache: Arc<crate::api::git::pack_cache::GitPackCache>,
     /// Audio relay room manager — tracks active huddle audio rooms.
     pub audio_rooms: Arc<AudioRoomManager>,
     /// Set to `true` on SIGTERM — readiness probe returns 503.
@@ -518,6 +580,8 @@ pub struct AppState {
     /// replace this with process-local caching; replay freshness must survive
     /// cross-pod routing.
     pub nip98_replay: Arc<dyn Nip98ReplayGuard>,
+    /// Shared Redis-backed admission limits for ordinary HTTP and WebSocket work.
+    pub admission_rate_limiter: Arc<RedisRateLimiter>,
 
     /// Per-agent sliding-window rate limiter for observer frames (kind 24200).
     /// Key: (community_id, agent pubkey bytes). Value: (count, window_start).
@@ -535,11 +599,18 @@ pub struct AppState {
     /// Current in-flight media uploads per (community, uploader pubkey).
     pub media_uploads_in_flight: Arc<DashMap<ScopedPubkeyKey, u32>>,
     /// Cache for observer agent-owner authorization (kind 24200).
-    /// Key: (agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
-    /// agent_owner_pubkey is immutable so a long TTL (5 min) is safe.
+    /// Key: (community_id, agent_pubkey_bytes, owner_pubkey_bytes). Value: is_owner.
+    /// `agent_owner_pubkey` is immutable inside one community, so a long TTL
+    /// (5 min) is safe once the community label is part of the key.
     /// Prevents repeated DB lookups from bursty observer traffic.
     #[allow(clippy::type_complexity)]
-    pub observer_owner_cache: Arc<moka::sync::Cache<(Vec<u8>, Vec<u8>), bool>>,
+    pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
+    /// Cache for the `author_type` metric label on the ingest path.
+    /// Key: (community_id, author pubkey bytes). Value: is_agent
+    /// (`users.agent_owner_pubkey IS NOT NULL`). The mapping is
+    /// first-write-wins and set during auth before an agent's first event,
+    /// so a short TTL only bounds staleness for the rare backfill race.
+    pub author_type_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
 
     /// Runtime conformance tracer. Production binds [`crate::conformance::NoopTracer`]
     /// (zero cost). Conformance tests bind [`crate::conformance::JsonlTracer`] to
@@ -567,7 +638,7 @@ impl AppState {
         config: Config,
         db: Db,
         redis_pool: deadpool_redis::Pool,
-        audit: AuditService,
+        audit: impl Into<Option<AuditService>>,
         pubsub: Arc<PubSubManager>,
         auth: AuthService,
         search: SearchService,
@@ -579,12 +650,16 @@ impl AppState {
         let max_concurrent_handlers = config.max_concurrent_handlers;
         let search_arc = Arc::new(search);
 
-        let audit_arc = Arc::new(audit);
+        let audit_arc = audit.into().map(Arc::new);
         let (audit_tx, mut audit_rx) = mpsc::channel::<buzz_audit::NewAuditEntry>(1000);
-        let audit_for_worker = Arc::clone(&audit_arc);
+        let audit_for_worker = audit_arc.clone();
         let audit_cancel = CancellationToken::new();
         let audit_cancel_worker = audit_cancel.clone();
         let audit_worker_handle = tokio::spawn(async move {
+            let Some(audit_for_worker) = audit_for_worker else {
+                audit_cancel_worker.cancelled().await;
+                return;
+            };
             // Normal operation: process entries as they arrive.
             loop {
                 tokio::select! {
@@ -624,8 +699,18 @@ impl AppState {
             &config.media.s3_region,
         )
         .expect("media storage was already constructed with this S3 config");
+        let git_pack_cache = Arc::new(
+            crate::api::git::pack_cache::GitPackCache::new(
+                &config.git_pack_cache_path,
+                config.git_pack_cache_max_bytes,
+                config.git_pack_cache_max_concurrent_populations,
+            )
+            .expect("git pack cache path must be available"),
+        );
         let nip98_replay: Arc<dyn Nip98ReplayGuard> =
             Arc::new(RedisNip98ReplayGuard::new(redis_pool.clone()));
+        let admission_rate_limiter = Arc::new(RedisRateLimiter::new(redis_pool.clone()));
+        let audit_enabled = audit_arc.is_some();
         let state = Self {
             config: Arc::new(config),
             db,
@@ -673,13 +758,18 @@ impl AppState {
                     .support_invalidation_closures()
                     .build(),
             ),
-            audit_tx,
+            audit_tx: audit_enabled.then_some(audit_tx),
             media_storage: Arc::new(media_storage),
+            storage_sweep: Arc::new(tokio::sync::Mutex::new(
+                crate::storage_sweep::StorageSweepState::default(),
+            )),
             git_store,
+            git_pack_cache,
             audio_rooms: Arc::new(AudioRoomManager::new()),
             shutting_down: Arc::new(AtomicBool::new(false)),
             started_at: Instant::now(),
             nip98_replay,
+            admission_rate_limiter,
             observer_rate_limiter: Arc::new(DashMap::new()),
             media_upload_rate_limiter: Arc::new(DashMap::new()),
             invite_claim_rate_limiter: Arc::new(
@@ -692,6 +782,12 @@ impl AppState {
             observer_owner_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(1_000)
+                    .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            author_type_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(10_000)
                     .time_to_live(std::time::Duration::from_secs(300))
                     .build(),
             ),
@@ -1694,5 +1790,143 @@ mod tests {
             !cancel_b.is_cancelled(),
             "community-B session stays live — ban does not cross the tenant fence"
         );
+    }
+
+    #[tokio::test]
+    async fn drain_all_sends_restart_close_and_cancels_every_conn() {
+        // Graceful shutdown must tell every live client to reconnect — across
+        // all communities — with a 1012 restart close frame queued ahead of
+        // the cancel-driven socket close.
+        let mgr = ConnectionManager::new();
+
+        let register = |community| {
+            let conn_id = Uuid::new_v4();
+            let (tx, _rx) = mpsc::channel(8);
+            let (ctrl_tx, ctrl_rx) = mpsc::channel(8);
+            let cancel = CancellationToken::new();
+            mgr.register(
+                conn_id,
+                tx,
+                ctrl_tx,
+                cancel.clone(),
+                community,
+                Arc::new(AtomicU8::new(0)),
+                Arc::new(Mutex::new(HashMap::new())),
+                3,
+            );
+            (ctrl_rx, cancel)
+        };
+
+        let (mut ctrl_a, cancel_a) = register(buzz_core::tenant::CommunityId::from_uuid(
+            Uuid::from_u128(0xa),
+        ));
+        let (mut ctrl_b, cancel_b) = register(buzz_core::tenant::CommunityId::from_uuid(
+            Uuid::from_u128(0xb),
+        ));
+
+        let closed = mgr.drain_all();
+
+        assert_eq!(closed, 2, "every connection is signalled, no tenant fence");
+        assert!(cancel_a.is_cancelled(), "community-A session is cancelled");
+        assert!(cancel_b.is_cancelled(), "community-B session is cancelled");
+
+        for ctrl_rx in [&mut ctrl_a, &mut ctrl_b] {
+            let frame = ctrl_rx.try_recv().expect("close frame delivered");
+            match frame {
+                WsMessage::Close(Some(close)) => {
+                    assert_eq!(
+                        close.code,
+                        axum::extract::ws::close_code::RESTART,
+                        "close code is 1012 Service Restart"
+                    );
+                    assert_eq!(close.reason.as_str(), "relay restarting");
+                }
+                other => panic!("expected a restart close frame, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_all_full_control_buffer_still_cancels() {
+        // Best-effort delivery: a wedged control channel must not block the
+        // drain — the cancel still closes the socket, just without the frame.
+        let mgr = ConnectionManager::new();
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx.clone(),
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+        // Wedge the 1-slot control channel.
+        ctrl_tx
+            .try_send(WsMessage::Text("wedge".into()))
+            .expect("fill control channel");
+
+        let closed = mgr.drain_all();
+
+        assert_eq!(closed, 1);
+        assert!(
+            cancel.is_cancelled(),
+            "cancel fires even when the close frame cannot be queued"
+        );
+        // Only the wedge frame is present — the close was dropped, not queued.
+        assert!(matches!(
+            ctrl_rx.try_recv().expect("wedge frame"),
+            WsMessage::Text(_)
+        ));
+        assert!(ctrl_rx.try_recv().is_err(), "no second frame queued");
+    }
+
+    #[tokio::test]
+    async fn register_after_drain_self_signals_restart_close_and_cancel() {
+        // The shutdown-boundary race: an upgrade accepted before SIGTERM can
+        // finish its async admission check and register AFTER drain_all's
+        // one-shot snapshot. The sticky drain flag makes that interleaving
+        // deterministic — register itself queues the 1012 and cancels, so no
+        // late registration can ride out graceful shutdown unclosed.
+        let mgr = ConnectionManager::new();
+
+        // Drain with zero connections — sets the sticky flag.
+        assert_eq!(mgr.drain_all(), 0);
+
+        // Late registration lands after the snapshot.
+        let conn_id = Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel(8);
+        let (ctrl_tx, mut ctrl_rx) = mpsc::channel(8);
+        let cancel = CancellationToken::new();
+        mgr.register(
+            conn_id,
+            tx,
+            ctrl_tx,
+            cancel.clone(),
+            buzz_core::tenant::CommunityId::from_uuid(Uuid::nil()),
+            Arc::new(AtomicU8::new(0)),
+            Arc::new(Mutex::new(HashMap::new())),
+            3,
+        );
+
+        assert!(
+            cancel.is_cancelled(),
+            "late registration is cancelled by the sticky drain flag"
+        );
+        match ctrl_rx.try_recv().expect("close frame delivered") {
+            WsMessage::Close(Some(close)) => {
+                assert_eq!(
+                    close.code,
+                    axum::extract::ws::close_code::RESTART,
+                    "late registration still gets the 1012 restart close"
+                );
+                assert_eq!(close.reason.as_str(), "relay restarting");
+            }
+            other => panic!("expected a restart close frame, got {other:?}"),
+        }
     }
 }

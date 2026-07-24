@@ -41,7 +41,7 @@ export function PersonaActionsMenu({
   onDelete: (persona: AgentPersona) => void;
 }) {
   const disabled = isActionPending || isPending;
-  const canEdit = !persona.isBuiltIn && !persona.sourceTeam;
+  const canEdit = !persona.sourceTeam;
 
   return (
     <DropdownMenu modal={false}>

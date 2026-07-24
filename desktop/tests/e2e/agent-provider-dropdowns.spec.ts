@@ -24,12 +24,16 @@ import { waitForAnimations } from "../helpers/animations";
 const SHOTS = "test-results/screenshots-dialogs";
 
 /**
- * Navigate to the agents view and wait for the global agent config card to
- * finish its async load (spinner gone, card content visible).
+ * Open Settings → Agents through the app UI and wait for the defaults card to
+ * finish loading. The CI static server does not provide SPA fallbacks for a
+ * direct `/settings` request.
  */
-async function openAgentsView(page: import("@playwright/test").Page) {
-  await page.goto("/");
-  await page.getByTestId("open-agents-view").click();
+async function openAiDefaultsSettings(page: import("@playwright/test").Page) {
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await expect(page.getByTestId("settings-view")).toBeVisible();
+  await page.getByTestId("settings-nav-agents").click();
   await expect(page.getByTestId("settings-global-agent-config")).toBeVisible({
     timeout: 10_000,
   });
@@ -58,17 +62,24 @@ test.describe("agent provider dropdown screenshots", () => {
   // BUZZ_AGENT_PROVIDER is baked and hideProviderIds is empty → v1 appears.
   test("01-provider-dropdown-oss", async ({ page }) => {
     await installMockBridge(page);
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
-    const providerSelect = page.locator("#global-agent-provider");
+    const providerSelect = page.getByTestId("global-agent-provider");
     await expect(providerSelect).toBeVisible({ timeout: 5_000 });
 
-    // Regression: both v1 and v2 must be present on OSS.
-    const optionTexts = await providerSelect.evaluate((el: HTMLSelectElement) =>
-      Array.from(el.options).map((o) => o.text.trim()),
-    );
-    expect(optionTexts).toContain("Databricks");
-    expect(optionTexts).toContain("Databricks v2");
+    // Regression: both v1 and v2 must be present on OSS. The defaults editor
+    // renders the app's styled dropdown, so open it and assert option rows.
+    await providerSelect.click();
+    await expect(
+      page.getByTestId("global-agent-provider-option-databricks"),
+    ).toHaveText("Databricks");
+    await expect(
+      page.getByTestId("global-agent-provider-option-databricks_v2"),
+    ).toHaveText("Databricks v2");
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByTestId("global-agent-provider-option-databricks"),
+    ).toHaveCount(0);
 
     await waitForAnimations(page);
 
@@ -98,20 +109,26 @@ test.describe("agent provider dropdown screenshots", () => {
         env_vars: {},
       },
     });
-    await openAgentsView(page);
+    await openAiDefaultsSettings(page);
 
-    const effortSelect = page.locator("#global-agent-thinking-effort");
+    const effortSelect = page.getByTestId(
+      "global-agent-thinking-effort-select",
+    );
     await expect(effortSelect).toBeVisible({ timeout: 5_000 });
 
     // Regression: the zero-value option must show the provider's default
-    // effort rather than a bare "Inherit".
-    const zeroOptionText = await effortSelect.evaluate(
-      (el: HTMLSelectElement) =>
-        Array.from(el.options)
-          .find((o) => o.value === "")
-          ?.text.trim() ?? "",
-    );
-    expect(zeroOptionText).toBe("Default (medium)");
+    // effort rather than a bare "Inherit". The styled dropdown renders the
+    // zero value as the closed trigger's label (nothing is persisted) and as
+    // the "empty" option row when opened.
+    await expect(effortSelect).toHaveText("Default (medium)");
+    await effortSelect.click();
+    await expect(
+      page.getByTestId("global-agent-thinking-effort-select-option-empty"),
+    ).toHaveText("Default (medium)");
+    await page.keyboard.press("Escape");
+    await expect(
+      page.getByTestId("global-agent-thinking-effort-select-option-empty"),
+    ).toHaveCount(0);
 
     await waitForAnimations(page);
 
@@ -157,6 +174,8 @@ test.describe("agent provider dropdown screenshots", () => {
     const dialog = page.getByTestId("persona-dialog");
     await expect(dialog).toBeVisible({ timeout: 10_000 });
 
+    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+
     // Regression: the runtime trigger must not be empty — the auto-seed effect
     // must have run and selected the app default (buzz-agent in the mock catalog).
     const runtimeTrigger = dialog.locator("#persona-runtime");
@@ -190,5 +209,47 @@ test.describe("agent provider dropdown screenshots", () => {
     await dialog.screenshot({
       path: `${SHOTS}/03-builtin-edit-runtime-seeded.png`,
     });
+  });
+
+  test("04-codex-definition-exposes-model-without-global-provider-defaults", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      globalAgentConfig: {
+        provider: "databricks_v2",
+        model: "global-databricks-model",
+        env_vars: {},
+      },
+      personas: [
+        {
+          displayName: "Codex Definition",
+          systemPrompt: "A Codex-backed definition.",
+          runtime: "codex",
+        },
+      ],
+    });
+
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page
+      .getByRole("button", { name: "Open actions for Codex Definition" })
+      .click();
+    await page.getByRole("menuitem", { name: "Edit" }).click();
+
+    const dialog = page.getByTestId("persona-dialog");
+    await expect(dialog).toBeVisible({ timeout: 10_000 });
+    await expect(
+      dialog.getByRole("tab", { name: "Customize for this agent" }),
+    ).toBeVisible();
+    await expect(
+      dialog.getByText("Harness default", { exact: true }),
+    ).toBeVisible();
+    await expect(dialog.getByText(/Databricks/i)).toHaveCount(0);
+
+    await dialog.getByRole("tab", { name: "Customize for this agent" }).click();
+    await expect(
+      dialog.getByRole("combobox", { name: /model/i }),
+    ).toBeVisible();
+    await expect(dialog.getByText("Model changes apply only")).toHaveCount(0);
   });
 });

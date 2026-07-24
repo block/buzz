@@ -25,6 +25,18 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString> + Clone,
 {
+    // Install ring as the process-level rustls CryptoProvider. Required because the
+    // release workflow builds all binaries in one cargo invocation, which unifies
+    // features across the workspace and enables *both* ring (from buzz-acp/buzz-dev-mcp)
+    // and aws-lc-rs (from reqwest's rustls feature via hyper-rustls). With both on,
+    // rustls cannot auto-select a provider, and any code that reaches
+    // ClientConfig::builder() — specifically the WSS path in publish_ephemeral_event
+    // used by `agents draft-create`, `agents draft-update`, and `users set-presence`
+    // — panics at rustls crypto/mod.rs. The `let _ =` swallow is intentional: when
+    // buzz-dev-mcp delegates to run_from_args, it has already installed ring; the
+    // double-install returns Err and is harmless.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(e) => {
@@ -209,6 +221,9 @@ enum Cmd {
     /// Open, update, list, and set status on git pull requests (NIP-34)
     #[command(subcommand)]
     Pr(PrCmd),
+    /// Upload and download relay Blossom media
+    #[command(subcommand)]
+    Media(MediaCmd),
     /// Upload files to the relay's Blossom store
     #[command(subcommand)]
     Upload(UploadCmd),
@@ -277,6 +292,56 @@ pub enum AgentsCmd {
         #[arg(long, value_enum)]
         respond_to: Option<RespondToArg>,
     },
+    /// Submit a NIP-IA archive request for an identity (kind 9035)
+    #[command(
+        after_help = "The relay chooses the consent path (self / admin / owner) from the \
+submitted request; this command does not retry with a different shape.\n\n\
+Suggested --reason codes (unknown values are allowed): rotated, retired, \
+bot-rebuilt, left-organization, spam\n\n\
+Archiving a third-party identity is a human owner/admin action: an agent \
+running under BUZZ_AUTH_TAG signs as itself, so it can only ever satisfy \
+the self path (target == signer) — not the owner-of-agent path for another \
+identity.\n\n\
+Examples:\n  \
+buzz agents archive <PUBKEY> --reason retired\n  \
+buzz agents archive <PUBKEY> --reason bot-rebuilt --replaced-by <NEW_PUBKEY>"
+    )]
+    Archive {
+        /// Target identity pubkey (hex)
+        target_pubkey: String,
+        /// Machine-readable reason code, max 64 UTF-8 bytes
+        #[arg(long)]
+        reason: Option<String>,
+        /// Rotation pointer pubkey (hex); must differ from the target
+        #[arg(long)]
+        replaced_by: Option<String>,
+        /// Optional human-readable note (not parsed for authorization)
+        #[arg(long, default_value = "")]
+        content: String,
+    },
+    /// Submit a NIP-IA unarchive request for an identity (kind 9036)
+    #[command(after_help = "Examples:\n  \
+buzz agents unarchive <PUBKEY> --reason returned")]
+    Unarchive {
+        /// Target identity pubkey (hex)
+        target_pubkey: String,
+        /// Machine-readable reason code, max 64 UTF-8 bytes
+        #[arg(long)]
+        reason: Option<String>,
+        /// Optional human-readable note (not parsed for authorization)
+        #[arg(long, default_value = "")]
+        content: String,
+    },
+    /// Read the relay's current NIP-IA archive snapshot (kind 13535)
+    #[command(
+        after_help = "Verifies the snapshot's NIP-11 `self` authorship, event id, signature, \
+and NIP-70 `-` protection tag before trusting it. Any trust failure is a \
+nonzero-exit error, never a false-empty success — this command's whole \
+purpose is verification.\n\n\
+Examples:\n  \
+buzz agents archived"
+    )]
+    Archived,
 }
 
 #[derive(Subcommand)]
@@ -476,18 +541,18 @@ pub enum ChannelsCmd {
     },
     /// Create a new channel
     #[command(
-        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle"
+        after_help = "Examples:\n  buzz channels create --name general --type stream --visibility open\n  buzz channels create --name design --type forum --visibility open --description \"Design discussions\"\n  buzz channels create --name standup --type stream --visibility open --ttl 3600  # ephemeral, archived after 1h idle\n  buzz channels create --name project-x --template \"Buzz Team\"  # type/visibility/canvas/roster from the template; explicit flags override"
     )]
     Create {
         /// Channel name
         #[arg(long)]
         name: String,
-        /// Channel type
-        #[arg(long = "type", value_enum)]
-        channel_type: ChannelType,
-        /// Channel visibility
-        #[arg(long, value_enum)]
-        visibility: ChannelVisibility,
+        /// Channel type. Required unless --template supplies one.
+        #[arg(long = "type", value_enum, required_unless_present = "template")]
+        channel_type: Option<ChannelType>,
+        /// Channel visibility. Required unless --template supplies one.
+        #[arg(long, value_enum, required_unless_present = "template")]
+        visibility: Option<ChannelVisibility>,
         /// Channel description
         #[arg(long)]
         description: Option<String>,
@@ -495,6 +560,15 @@ pub enum ChannelsCmd {
         /// it once this many seconds pass without a new message.
         #[arg(long, value_name = "SECONDS")]
         ttl: Option<i64>,
+        /// Apply a desktop-local channel template by name (case-insensitive):
+        /// supplies default type/visibility/description/canvas, and resolves
+        /// its agent roster against the relay to add as members.
+        #[arg(long)]
+        template: Option<String>,
+        /// Override the channel-templates.json path (default: the desktop
+        /// app's prod app-data dir). Mainly for the dev store or testing.
+        #[arg(long, value_name = "PATH")]
+        templates_file: Option<String>,
     },
     /// Update channel name, description, or ephemeral TTL
     Update {
@@ -1058,6 +1132,61 @@ pub enum ReposCmd {
         #[arg(long)]
         limit: Option<u32>,
     },
+    /// Manage branch and tag protection rules on one of your repositories.
+    #[command(subcommand)]
+    Protect(ReposProtectCmd),
+}
+
+/// Commands for inspecting and changing repository protection rules.
+#[derive(Subcommand)]
+pub enum ReposProtectCmd {
+    /// List the repository's protection rules.
+    List {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+    },
+    /// Create or replace the rule for an exact ref pattern.
+    Set {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Full ref pattern, such as refs/heads/main or refs/heads/*.
+        #[arg(long = "ref")]
+        ref_pattern: String,
+        /// Minimum role allowed to push.
+        #[arg(long)]
+        push: Option<RepoPushRole>,
+        /// Reject non-fast-forward updates.
+        #[arg(long, default_value_t = false)]
+        no_force_push: bool,
+        /// Reject deletion of matching refs.
+        #[arg(long, default_value_t = false)]
+        no_delete: bool,
+        /// Require the NIP-34 patch workflow instead of direct pushes.
+        #[arg(long, default_value_t = false)]
+        require_patch: bool,
+    },
+    /// Remove every protection rule for an exact ref pattern.
+    Remove {
+        /// Repository identifier (d-tag).
+        #[arg(long)]
+        id: String,
+        /// Full ref pattern to remove.
+        #[arg(long = "ref")]
+        ref_pattern: String,
+    },
+}
+
+/// Minimum channel role accepted by a repository push rule.
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum RepoPushRole {
+    /// Repository owner only.
+    Owner,
+    /// Repository owner or channel admin.
+    Admin,
+    /// Any channel member.
+    Member,
 }
 
 #[derive(Subcommand)]
@@ -1209,6 +1338,9 @@ pub enum PrCmd {
         /// Additional recipient pubkey(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
+        /// Channel where this pull request originated (NIP-29 h-tag)
+        #[arg(long)]
+        channel: Option<String>,
         /// Root patch event id this PR revises
         #[arg(long)]
         revision_of: Option<String>,
@@ -1389,6 +1521,18 @@ pub enum UploadCmd {
         /// Path to the file to upload
         #[arg(long)]
         file: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum MediaCmd {
+    /// Download relay media with Blossom get auth
+    Get {
+        /// Relay media URL or sha256[.ext] path segment
+        input: String,
+        /// Output path. Omit or use '-' to write raw bytes to stdout.
+        #[arg(short, long)]
+        output: Option<String>,
     },
 }
 
@@ -1640,6 +1784,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Patches(sub) => commands::patches::dispatch(sub, &client).await,
         Cmd::Issues(sub) => commands::issues::dispatch(sub, &client).await,
         Cmd::Pr(sub) => commands::pr::dispatch(sub, &client).await,
+        Cmd::Media(sub) => commands::upload::dispatch_media(sub, &client).await,
         Cmd::Upload(sub) => commands::upload::dispatch(sub, &client).await,
         Cmd::Mem(sub) => commands::mem::dispatch(sub, &client).await,
         Cmd::Moderation(sub) => commands::moderation::dispatch(sub, &client, &cli.format).await,
@@ -1668,6 +1813,7 @@ mod tests {
             "emoji",
             "feed",
             "issues",
+            "media",
             "mem",
             "messages",
             "moderation",
@@ -1722,7 +1868,16 @@ mod tests {
         }
 
         let cmd = Cli::command();
-        assert_eq!(names(&cmd, "agents"), vec!["draft-create", "draft-update"]);
+        assert_eq!(
+            names(&cmd, "agents"),
+            vec![
+                "archive",
+                "archived",
+                "draft-create",
+                "draft-update",
+                "unarchive"
+            ]
+        );
         assert_eq!(
             names(&cmd, "messages"),
             vec![
@@ -1788,7 +1943,25 @@ mod tests {
                 "set-list"
             ]
         );
-        assert_eq!(names(&cmd, "repos"), vec!["create", "get", "list"]);
+        assert_eq!(
+            names(&cmd, "repos"),
+            vec!["create", "get", "list", "protect"]
+        );
+        let repos = cmd
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "repos")
+            .expect("repos command");
+        let protect = repos
+            .get_subcommands()
+            .find(|subcommand| subcommand.get_name() == "protect")
+            .expect("repos protect command");
+        let mut protect_names: Vec<String> = protect
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_string())
+            .filter(|name| name != "help")
+            .collect();
+        protect_names.sort();
+        assert_eq!(protect_names, vec!["list", "remove", "set"]);
         assert_eq!(
             names(&cmd, "pr"),
             vec!["get", "list", "open", "status", "update"]
@@ -1801,6 +1974,7 @@ mod tests {
             names(&cmd, "issues"),
             vec!["create", "get", "list", "status"]
         );
+        assert_eq!(names(&cmd, "media"), vec!["get"]);
         assert_eq!(names(&cmd, "upload"), vec!["file"]);
         assert_eq!(names(&cmd, "pack"), vec!["inspect", "validate"]);
         assert_eq!(
@@ -1821,19 +1995,20 @@ mod tests {
     #[test]
     fn subcommand_counts_are_stable() {
         let expected: Vec<(&str, usize)> = vec![
-            ("agents", 2),
+            ("agents", 5),
             ("canvas", 2),
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
             ("issues", 4),
+            ("media", 1),
             ("messages", 8),
             ("pack", 2),
             ("patches", 4),
             ("pr", 5),
             ("reactions", 3),
-            ("repos", 3),
+            ("repos", 4),
             ("social", 7),
             ("upload", 1),
             ("users", 4),

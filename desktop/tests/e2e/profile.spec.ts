@@ -164,6 +164,52 @@ test.beforeEach(async ({ page }) => {
   await installMockBridge(page);
 });
 
+test("keeps the saved profile description after a community round trip", async ({
+  page,
+}) => {
+  const communities = [
+    {
+      id: "profile-community-a",
+      name: "Alpha",
+      relayUrl: "ws://localhost:3000",
+      addedAt: "2026-01-01T00:00:00.000Z",
+    },
+    {
+      id: "profile-community-b",
+      name: "Bravo",
+      relayUrl: "ws://localhost:3001",
+      addedAt: "2026-01-02T00:00:00.000Z",
+    },
+  ];
+  await page.addInitScript((seed) => {
+    window.localStorage.setItem("buzz-communities", JSON.stringify(seed));
+    window.localStorage.setItem("buzz-active-community-id", seed[0].id);
+  }, communities);
+  await page.goto("/");
+
+  const description = "Description that should survive switching";
+  await openSettings(page, "profile");
+  await page.getByTestId("profile-metadata-edit").click();
+  await page.getByTestId("profile-about").fill(description);
+  await page.getByTestId("profile-metadata-edit").click();
+  await expect(page.getByTestId("profile-about-value")).toHaveText(description);
+  await page.getByTestId("settings-back-to-app").click();
+
+  const communityA = page.getByTestId(
+    "community-rail-button-profile-community-a",
+  );
+  const communityB = page.getByTestId(
+    "community-rail-button-profile-community-b",
+  );
+  await communityB.click();
+  await expect(communityB).toHaveAttribute("aria-current", "true");
+  await communityA.click();
+  await expect(communityA).toHaveAttribute("aria-current", "true");
+
+  await openSettings(page, "profile");
+  await expect(page.getByTestId("profile-about-value")).toHaveText(description);
+});
+
 test("updates the relay-backed profile from settings", async ({ page }) => {
   const stamp = Date.now();
   const displayName = `Tyler QA ${stamp}`;
@@ -296,6 +342,13 @@ test("shows profile save feedback as a toast", async ({ page }) => {
 });
 
 test("nests the avatar edit button in a clipped notch", async ({ page }) => {
+  // Under the Buzz default theme the settings nav overrides `--sidebar-active`
+  // (white pill on the gradient) while the avatar edit button deliberately
+  // keeps the root accent-driven token, so the shared-token comparison below
+  // only holds outside the Buzz theme.
+  await page.addInitScript(() => {
+    window.localStorage.setItem("buzz-theme", "github-light");
+  });
   await page.goto("/");
 
   await openSettings(page, "profile");
@@ -1350,15 +1403,18 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
   ).toBeVisible();
   await page.getByTestId("settings-nav-appearance").click();
 
-  // Default theme is catppuccin-macchiato (dark)
+  // Default is Buzz in System mode; Playwright's default color scheme is
+  // light, so the app boots with the light Buzz theme.
   await expect
     .poll(() =>
-      page.evaluate(() => document.documentElement.classList.contains("dark")),
+      page.evaluate(() => document.documentElement.classList.contains("light")),
     )
     .toBe(true);
 
-  // Switch to Light mode tab to reveal light themes
-  await page.getByRole("button", { name: "Light" }).click();
+  // Switch to Light mode tab to reveal light themes. Target the testid — in
+  // the default System mode the "Light" paired-theme tile shares the same
+  // accessible name as the mode button.
+  await page.getByTestId("appearance-mode-light").click();
 
   // Switch to a light theme — verifies dark→light transition
   await page.getByTestId("theme-option-github-light").click();
@@ -1390,7 +1446,7 @@ test("opens settings with the keyboard shortcut and updates theme", async ({
     .toBe("github-light");
 
   // Switch to Dark mode tab to reveal dark themes
-  await page.getByRole("button", { name: "Dark" }).click();
+  await page.getByTestId("appearance-mode-dark").click();
 
   // Switch back to a dark theme — verifies light→dark transition
   await page.getByTestId("theme-option-dracula").click();
@@ -1481,11 +1537,11 @@ test("supports webview zoom keyboard shortcuts", async ({ page }) => {
   });
 });
 
-test("shows doctor checks for local CLI tooling", async ({ page }) => {
+test("shows agent runtimes in agent settings", async ({ page }) => {
   await page.goto("/");
 
-  await openSettings(page, "doctor");
+  await openSettings(page, "agents");
 
-  await expect(page.getByTestId("settings-doctor")).toBeVisible();
+  await expect(page.getByTestId("settings-agent-runtimes")).toBeVisible();
   await expect(page.getByTestId("doctor-runtime-goose")).toContainText("Goose");
 });

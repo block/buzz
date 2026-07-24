@@ -14,10 +14,19 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
 use crate::managed_agents::config_bridge::SessionConfigCache;
-use crate::managed_agents::ManagedAgentProcess;
+use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
+    /// A no-redirect client for authenticated relay media fetches (download,
+    /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
+    /// origin, but the app-wide `http_client` follows redirects by default, so
+    /// a relay `/media/` URL returning a 3xx to an off-origin or private host
+    /// would forward the minted media Authorization header across origins —
+    /// a redirect-hop SSRF. This client treats any 3xx as a non-success
+    /// response (surfaced as an error) so the auth token never leaves the
+    /// validated relay origin.
+    pub media_fetch_client: reqwest::Client,
     /// Workspace-provided relay URL override. Set by `apply_workspace` on app
     /// init and takes priority over env vars and compile-time defaults.
     pub relay_url_override: Mutex<Option<String>>,
@@ -25,14 +34,19 @@ pub struct AppState {
     /// restore. `apply_workspace` consumes it after installing the workspace
     /// relay and identity, so agents never start against the fallback relay.
     pub managed_agent_restore_pending: AtomicBool,
+    /// Whether desktop may repair managed-agent kind:0 profiles from its local
+    /// records. Disabled by the agent-managed profiles experiment so an agent's
+    /// own profile updates are not overwritten on start or restore.
+    pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
-    /// Serializes the restore spawn/register transition with shutdown cleanup,
-    /// preventing an agent from spawning after shutdown has swept processes.
-    pub managed_agent_restore_transition: Mutex<()>,
+    /// Serializes every managed-runtime transition that changes the protected
+    /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
+    /// Never perform network I/O while holding this lock.
+    pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
-    pub managed_agent_processes: Mutex<HashMap<String, ManagedAgentProcess>>,
+    pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
@@ -85,9 +99,10 @@ pub struct AppState {
     /// Ordering: written once in `setup()` with `Ordering::Release`; read in
     /// `get_identity` with `Ordering::Acquire`.
     pub reset_failed: AtomicBool,
-    /// Cached ACP session config from running agents, keyed by agent pubkey.
+    /// Cached ACP session config from running agents, keyed by canonical
+    /// `(agent pubkey, relay URL)` runtime identity.
     /// Populated when the harness emits `session_config_captured` observer events.
-    pub session_config_cache: Mutex<HashMap<String, SessionConfigCache>>,
+    pub session_config_cache: Mutex<HashMap<ManagedAgentRuntimeKey, SessionConfigCache>>,
     /// IOKit power assertion state — prevents idle sleep while agents run.
     pub prevent_sleep: Arc<Mutex<crate::prevent_sleep::PreventSleepState>>,
     /// In-process mesh-llm node started by Buzz Desktop.
@@ -137,6 +152,27 @@ fn identity_from_env() -> Option<Keys> {
     }
 }
 
+/// Build the no-redirect HTTP client used for authenticated relay media
+/// fetches (download / copy).
+///
+/// This client is a security boundary, not a convenience: it carries a minted
+/// media `Authorization` header, so it MUST NOT follow redirects. A relay 3xx
+/// to an off-origin or private host would otherwise forward that header across
+/// origins (a redirect-hop SSRF). `redirect::Policy::none()` returns the 3xx
+/// verbatim so the caller can reject it.
+///
+/// Returned as a `Result` so the fail-closed invariant is testable — callers
+/// must never substitute a redirect-following client on build failure. Shares
+/// the localhost `resolve`/pool config with the app-wide `http_client`.
+pub fn build_media_fetch_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
+        .pool_idle_timeout(std::time::Duration::from_secs(10))
+        .pool_max_idle_per_host(1)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 pub fn build_app_state() -> AppState {
     // Env var takes precedence (dev/CI). If absent, resolve_persisted_identity()
     // in setup() will replace the ephemeral placeholder with a persisted key.
@@ -159,10 +195,16 @@ pub fn build_app_state() -> AppState {
             .pool_max_idle_per_host(1)
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
+        media_fetch_client: build_media_fetch_client().expect(
+            "media_fetch_client must build with redirect::Policy::none(); a \
+             redirect-following fallback would forward the minted media auth \
+             header across origins (redirect-hop SSRF)",
+        ),
         relay_url_override: Mutex::new(None),
         managed_agent_restore_pending: AtomicBool::new(false),
+        managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
-        managed_agent_restore_transition: Mutex::new(()),
+        managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
@@ -196,19 +238,25 @@ impl AppState {
         self.huddle_state.lock().map_err(|e| e.to_string())
     }
 
-    pub fn get_session_cache(&self, pubkey: &str) -> Option<SessionConfigCache> {
-        self.session_config_cache.lock().ok()?.get(pubkey).cloned()
+    pub fn get_session_cache(&self, key: &ManagedAgentRuntimeKey) -> Option<SessionConfigCache> {
+        self.session_config_cache.lock().ok()?.get(key).cloned()
     }
 
-    pub fn put_session_cache(&self, pubkey: &str, cache: SessionConfigCache) {
+    pub fn put_session_cache(&self, key: ManagedAgentRuntimeKey, cache: SessionConfigCache) {
         if let Ok(mut map) = self.session_config_cache.lock() {
-            map.insert(pubkey.to_string(), cache);
+            map.insert(key, cache);
         }
     }
 
-    pub fn clear_session_cache(&self, pubkey: &str) {
+    pub fn clear_agent_session_cache(&self, key: &ManagedAgentRuntimeKey) {
         if let Ok(mut map) = self.session_config_cache.lock() {
-            map.remove(pubkey);
+            map.remove(key);
+        }
+    }
+
+    pub fn clear_agent_session_caches(&self, pubkey: &str) {
+        if let Ok(mut map) = self.session_config_cache.lock() {
+            map.retain(|key, _| key.pubkey != pubkey);
         }
     }
 
@@ -328,18 +376,9 @@ pub fn resolve_persisted_identity(app: &AppHandle, state: &AppState) -> Result<(
     Ok(())
 }
 
-/// Service name for the desktop OS keyring. Shared by the human identity key
-/// and managed-agent keys (each addressed by a distinct key name within it).
-///
-/// Debug builds use a distinct service name so dev and production keyring
-/// entries never collide on the same machine.
-pub(crate) fn keyring_service() -> &'static str {
-    if cfg!(debug_assertions) {
-        "buzz-desktop-dev"
-    } else {
-        "buzz-desktop"
-    }
-}
+#[path = "app_state_keyring.rs"]
+mod keyring_config;
+pub(crate) use keyring_config::keyring_service;
 
 /// Keyring key name for the human identity nsec.
 const IDENTITY_KEY_NAME: &str = "identity";
@@ -855,7 +894,10 @@ pub(crate) fn persist_imported_identity(
 
 /// Path of the migration-completed marker within `data_dir`.
 fn migration_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join(MIGRATION_MARKER_NAME)
+    data_dir.join(keyring_config::migration_marker_name(
+        keyring_service(),
+        MIGRATION_MARKER_NAME,
+    ))
 }
 
 /// Atomically write (and fsync) the migration-completed marker. The content is

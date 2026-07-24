@@ -69,6 +69,7 @@ export function useChannelTyping(
   channel: Channel | null,
   currentPubkey?: string,
   latestMessageEvent?: RelayEvent | null,
+  relaySelfPubkey?: string | null,
 ) {
   const channelId = channel?.id ?? null;
   const channelType = channel?.channelType ?? null;
@@ -150,9 +151,9 @@ export function useChannelTyping(
     }
 
     const authorPubkey = resolveEventAuthorPubkey({
-      pubkey: latestMessageEvent.pubkey,
-      tags: latestMessageEvent.tags,
+      event: latestMessageEvent,
       preferActorTag: true,
+      relaySelfPubkey,
       requireChannelTagForPTags: true,
     }).toLowerCase();
     const threadHeadId = getTypingScopeId(latestMessageEvent);
@@ -173,7 +174,7 @@ export function useChannelTyping(
       delete updated[typingKey];
       return updated;
     });
-  }, [channelId, latestMessageEvent]);
+  }, [channelId, latestMessageEvent, relaySelfPubkey]);
 
   useEffect(() => {
     if (!channelId || channelType === "forum") {

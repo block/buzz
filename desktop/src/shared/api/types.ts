@@ -187,83 +187,22 @@ export type UserStatus = {
 
 export type UserStatusLookup = Record<string, UserStatus | null>;
 
-export type ProjectRepoCommit = {
-  hash: string;
-  shortHash: string;
-  authorName: string;
-  authorEmail: string;
-  timestamp: number;
-  subject: string;
-};
-
-export type ProjectRepoFile = {
-  path: string;
-  kind: string;
-  size: number | null;
-  previewContent: string | null;
-  lastChangedAt: number | null;
-  latestCommit: ProjectRepoCommit | null;
-};
-
-export type ProjectRepoContributor = {
-  name: string;
-  email: string;
-  commitCount: number;
-  lastCommitAt: number;
-};
-
-export type ProjectRepoSnapshot = {
-  latestCommit: ProjectRepoCommit | null;
-  commits: ProjectRepoCommit[];
-  files: ProjectRepoFile[];
-  contributors: ProjectRepoContributor[];
-};
-
-export type ProjectRepoDiffFile = {
-  path: string;
-  additions: number;
-  deletions: number;
-  patch: string;
-  /** True when the patch was cut off at the backend's per-file line cap. */
-  truncated: boolean;
-};
-
-export type ProjectRepoDiff = {
-  files: ProjectRepoDiffFile[];
-  additions: number;
-  deletions: number;
-};
-
-export type ProjectLocalRepoSnapshot = {
-  path: string;
-  snapshot: ProjectRepoSnapshot;
-};
-
-export type ProjectLocalRepository = {
-  name: string;
-  path: string;
-};
-
-export type ProjectRepoSyncStatus = {
-  localPath: string | null;
-  localBranch: string | null;
-  localHead: string | null;
-  localShortHead: string | null;
-  remoteBranch: string | null;
-  remoteHead: string | null;
-  remoteShortHead: string | null;
-  aheadCount: number;
-  behindCount: number;
-  hasUncommittedChanges: boolean;
-  hasUntrackedFiles: boolean;
-  canPush: boolean;
-  pushBlockReason: string | null;
-};
-
-export type ProjectRepoPushResult = {
-  pushed: boolean;
-  message: string;
-};
+export type {
+  ProjectLocalRepository,
+  ProjectLocalRepoSnapshot,
+  ProjectRepoBranchResult,
+  ProjectRepoCommit,
+  ProjectRepoContributor,
+  ProjectRepoCloneResult,
+  ProjectRepoDiff,
+  ProjectRepoDiffFile,
+  ProjectRepoFile,
+  ProjectRepoMergeResult,
+  ProjectRepoPullResult,
+  ProjectRepoPushResult,
+  ProjectRepoSnapshot,
+  ProjectRepoSyncStatus,
+} from "./projectGitTypes";
 
 export type RelayEvent = {
   id: string;
@@ -375,6 +314,27 @@ export type RelayAgent = {
   respondToAllowlist: string[];
 };
 
+export type ManagedAgentRuntimeLifecycle =
+  | "starting"
+  | "listening"
+  | "waking"
+  | "ready"
+  | "failed"
+  | "stopped";
+
+export type ManagedAgentRuntimeStatus = {
+  pubkey: string;
+  /** Exact submitted descriptor, present only on startup reconcile results. */
+  requestedRelayUrl?: string;
+  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
+  relayUrl: string;
+  localSetup: boolean;
+  lifecycle: ManagedAgentRuntimeLifecycle;
+  pid: number | null;
+  error: string | null;
+  logPath: string | null;
+};
+
 export type ManagedAgentBackend =
   | { type: "local" }
   | { type: "provider"; id: string; config: Record<string, unknown> };
@@ -383,6 +343,7 @@ export type ManagedAgent = {
   pubkey: string;
   name: string;
   personaId: string | null;
+  teamId?: string | null;
   relayUrl: string;
   acpCommand: string;
   /** Resolved/effective harness command (persona-wins, override-honored). */
@@ -578,6 +539,12 @@ export type AcpRuntimeCatalogEntry = {
   binaryPath: string | null;
   defaultArgs: string[];
   mcpCommand: string | null;
+  /** Environment variable used to apply the initial model, when supported. */
+  modelEnvVar: string | null;
+  /** Environment variable used to apply the selected LLM provider, when supported. */
+  providerEnvVar: string | null;
+  /** Environment variable used to apply thinking effort, when supported. */
+  thinkingEnvVar: string | null;
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
@@ -612,6 +579,24 @@ export type InstallRuntimeResult = {
   steps: InstallStepResult[];
   restartedCount: number;
   failedRestartCount: number;
+};
+
+export type AcpAuthMethod = {
+  id: string;
+  name: string;
+  description: string | null;
+  type: string | null;
+  args: string[];
+  command: string[];
+  meta: unknown | null;
+};
+
+export type AcpAuthMethodsResult = {
+  methods: AcpAuthMethod[];
+};
+
+export type ConnectAcpRuntimeResult = {
+  launched: boolean;
 };
 
 export type CommandAvailability = {
@@ -1029,6 +1014,8 @@ export type GlobalAgentConfig = {
   provider: string | null;
   /** Global fallback model identifier. Null = no global default. */
   model: string | null;
+  /** Preferred ACP runtime for agents without a persona-specific runtime. */
+  preferred_runtime: string | null;
 };
 
 /**

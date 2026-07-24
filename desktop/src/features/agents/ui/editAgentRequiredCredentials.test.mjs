@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
-} from "./personaDialogPickers.tsx";
+} from "./agentConfigOptions.tsx";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel.ts";
 
 // These tests cover the Edit Agent required-credential gate behaviour added in

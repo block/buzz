@@ -41,9 +41,21 @@ const { values: args } = parseArgs({
     viewport: { type: "string", default: "1280x720" },
     outdir: { type: "string", default: "test-results/screenshots" },
     messages: { type: "string" },
+    "local-storage": { type: "string", multiple: true, default: [] },
     "update-ready": { type: "boolean", default: false },
   },
   strict: true,
+});
+
+// `--local-storage key=value` (repeatable) seeds a localStorage entry before the
+// app mounts, so device-level preferences (thread layout, transcript options, …)
+// can be captured in their non-default state.
+const localStorageSeeds = args["local-storage"].map((entry) => {
+  const separatorIndex = entry.indexOf("=");
+  if (separatorIndex < 1) {
+    throw new Error(`--local-storage expects key=value, received "${entry}"`);
+  }
+  return [entry.slice(0, separatorIndex), entry.slice(separatorIndex + 1)];
 });
 
 const activeChannel = args["active-channel"];
@@ -80,7 +92,16 @@ const TEST_PUBKEYS = [
   "df8e91b86fda13a9a67896df77232f7bdab2ba9c3e165378e1ba3d24c13a328e",
 ];
 
-const browser = await chromium.launch({ headless: true });
+// `BUZZ_HEADED=1` runs a real browser window instead of headless.
+//
+// Headless Chromium rasterizes in software (SwiftShader), which mis-renders
+// `backdrop-filter` when an ancestor establishes a rounded clip
+// (`overflow-hidden` + `border-radius`) — the blurred surface paints as solid
+// cyan garbage. The app's blurred chrome (panel headers, composers) hits this
+// inside the rounded focus drawer. Headed rendering is correct, as is the real
+// app's WKWebView, so this is a capture-only artifact. Default stays headless so
+// CI is unaffected.
+const browser = await chromium.launch({ headless: !process.env.BUZZ_HEADED });
 const page = await browser.newPage({
   viewport: { width: vpWidth, height: vpHeight },
 });
@@ -107,6 +128,16 @@ await page.addInitScript(
   },
   { prefix: ONBOARDING_PREFIX, pubkeys: TEST_PUBKEYS },
 );
+
+// Seed caller-supplied preferences. Must run before the bridge init script:
+// React reads persisted state on mount, and the bridge triggers mount.
+if (localStorageSeeds.length > 0) {
+  await page.addInitScript((seeds) => {
+    for (const [key, value] of seeds) {
+      window.localStorage.setItem(key, value);
+    }
+  }, localStorageSeeds);
+}
 
 // Install E2E mock bridge config + MockNotification (mirrors installBridge in bridge.ts)
 await page.addInitScript(

@@ -118,6 +118,17 @@ export async function load(url, context, nextLoad) {
     };
   }
 
+  // Vite handles side-effect CSS imports (e.g. `import "./card-texture.css"`
+  // in shared/ui) at bundle time; node's ESM loader has no CSS support. Serve
+  // them as empty modules so components with style imports stay unit-testable.
+  if (url.endsWith(".css")) {
+    return {
+      format: "module",
+      shortCircuit: true,
+      source: "",
+    };
+  }
+
   if (url.endsWith(".tsx")) {
     const source = fs.readFileSync(fileURLToPath(url), "utf8");
     const transpiled = ts.transpileModule(source, {

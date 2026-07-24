@@ -1,4 +1,4 @@
-import { runtimeSupportsLlmProviderSelection } from "./personaDialogPickers";
+import { runtimeSupportsLlmProviderSelection } from "./agentConfigOptions";
 
 /**
  * Pure helper extracted from the `handleSubmit` path of `AgentDefinitionDialog`

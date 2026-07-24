@@ -62,6 +62,10 @@
 {{- if not .Values.relay.requireRelayMembership }}
   ⚠ relay.requireRelayMembership=false — relay is OPEN. Anyone can publish.
 {{- end }}
+{{- if not .Values.relay.requireMediaGetAuth }}
+  ⚠ relay.requireMediaGetAuth=false — media GET/HEAD reads are not auth-gated.
+    Keep this false only during staged client rollout.
+{{- end }}
 {{- if not .Values.migrate.autoMigrate }}
   ⚠ migrate.autoMigrate=false — relay startup will NOT run sqlx migrations.
     You must run `buzz-admin migrate` against the database before every

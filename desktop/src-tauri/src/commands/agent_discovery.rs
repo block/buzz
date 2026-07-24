@@ -145,15 +145,13 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
     let mut steps = Vec::new();
 
     // Phase 1: Install CLI if missing and commands are available.
-    // NOTE: the npm EACCES preflight and `npm_eacces_hint` classifier only run
-    // in Phase 2 below. Today every entry in `cli_install_commands` is a
-    // curl-pipe; all `npm install -g` commands live in `adapter_install_commands`.
-    // If a future runtime adds an npm-global CLI install it must also add the
-    // preflight and classifier to this loop.
+    // Today every entry in `cli_install_commands` is a curl-pipe; npm-backed
+    // adapter installs live in Phase 2 below where they are rewritten to a
+    // Buzz-private prefix before execution.
     if let Some(cli) = runtime.underlying_cli {
         if crate::managed_agents::resolve_command(cli).is_none() {
             for cmd in runtime.cli_install_commands_for_os() {
-                let result = run_install_command("cli", cmd);
+                let result = run_install_command_with_retry("cli", cmd);
                 let success = result.success;
                 steps.push(result);
                 if !success {
@@ -181,10 +179,30 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         adapter_path.as_deref(),
         runtime.adapter_install_commands,
     ) {
+        let use_managed_npm =
+            cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
+        if use_managed_npm {
+            if let Err(step) = ensure_managed_node_runtime_blocking() {
+                steps.push(*step);
+                return Ok(InstallRuntimeResult {
+                    success: false,
+                    steps,
+                    restarted_count: 0,
+                    failed_restart_count: 0,
+                });
+            }
+        }
+
         for cmd in cmds {
-            if is_npm_global_install(cmd) {
-                if let Some(step) = npm_preflight_check("adapter", cmd) {
-                    steps.push(step);
+            let planned = match if use_managed_npm {
+                managed_npm_command(cmd)
+            } else {
+                Ok(None)
+            } {
+                Ok(Some(command)) => command,
+                Ok(None) => cmd.to_string(),
+                Err(step) => {
+                    steps.push(*step);
                     return Ok(InstallRuntimeResult {
                         success: false,
                         steps,
@@ -192,8 +210,9 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
                         failed_restart_count: 0,
                     });
                 }
-            }
-            let mut result = run_install_command("adapter", cmd);
+            };
+
+            let mut result = run_install_command_with_retry("adapter", &planned);
             if !result.success && result.hint.is_none() && is_npm_global_install(cmd) {
                 result.hint = npm_eacces_hint(&result.stderr, cmd);
             }
@@ -278,17 +297,6 @@ async fn restart_setup_mode_agents_after_install(
     use tauri::Manager;
 
     // ── Pre-scan: collect candidate pubkeys without holding locks ────────────
-    let state = app.state::<AppState>();
-    let owner_hex = match super::agents::workspace_owner_hex(&state) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!(
-                "buzz-desktop: install_acp_runtime: failed to compute owner_hex for restart: {e}"
-            );
-            return (0, 0);
-        }
-    };
-
     let app_for_scan = app.clone();
     let runtime_id_owned = runtime_id.to_string();
     let candidates = tokio::task::spawn_blocking(move || {
@@ -307,13 +315,13 @@ async fn restart_setup_mode_agents_after_install(
             .iter()
             .filter(|record| {
                 let is_local = record.backend == BackendKind::Local;
-                let pid = record.runtime_pid;
                 let effective_cmd = record_agent_command(record, &personas);
                 let runtime_matches =
                     known_acp_runtime(&effective_cmd).is_some_and(|r| r.id == runtime_id_owned);
                 let setup_mode = runtimes
-                    .get(&record.pubkey)
-                    .map(|p| p.setup_mode)
+                    .iter()
+                    .find(|(key, _)| key.pubkey == record.pubkey)
+                    .map(|(_, p)| p.setup_mode)
                     .unwrap_or(false);
                 let effective = resolve_effective_agent_env(
                     record,
@@ -322,7 +330,10 @@ async fn restart_setup_mode_agents_after_install(
                     &global,
                 );
                 let now_ready = matches!(agent_readiness(&effective), AgentReadiness::Ready);
-                let pid_alive = pid.is_some_and(crate::managed_agents::process_is_running);
+                let pid_alive = runtimes.iter().any(|(key, runtime)| {
+                    key.pubkey.eq_ignore_ascii_case(&record.pubkey)
+                        && crate::managed_agents::process_is_running(runtime.child.id())
+                });
                 should_restart_after_install(
                     is_local,
                     pid_alive,
@@ -345,7 +356,7 @@ async fn restart_setup_mode_agents_after_install(
     let mut failed_restart_count: u32 = 0;
 
     for pubkey in &candidates {
-        let outcome = restart_single_agent_after_install(app, pubkey, &owner_hex, runtime_id).await;
+        let outcome = restart_single_agent_after_install(app, pubkey, runtime_id).await;
         match outcome {
             InstallRestartOutcome::Restarted => restarted_count += 1,
             InstallRestartOutcome::FailedAfterStop => failed_restart_count += 1,
@@ -364,16 +375,15 @@ async fn restart_setup_mode_agents_after_install(
 async fn restart_single_agent_after_install(
     app: &tauri::AppHandle,
     pubkey: &str,
-    owner_hex: &str,
     runtime_id: &str,
 ) -> InstallRestartOutcome {
     use crate::{
         app_state::AppState,
         managed_agents::{
             agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-            load_global_agent_config, load_managed_agents, load_personas, process_is_running,
-            record_agent_command, resolve_effective_agent_env, save_managed_agents,
-            stop_managed_agent_process, sync_managed_agent_processes, AgentReadiness, BackendKind,
+            load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
+            resolve_effective_agent_env, save_managed_agents, stop_managed_agent_process,
+            sync_managed_agent_processes, AgentReadiness, BackendKind,
         },
     };
     use tauri::Manager;
@@ -415,14 +425,11 @@ async fn restart_single_agent_after_install(
         if record.backend != BackendKind::Local {
             return Err(format!("agent {pubkey_owned} is no longer a local agent"));
         }
-        let Some(pid) = record.runtime_pid else {
+        let runtime_keys =
+            crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
+        if runtime_keys.is_empty() {
             return Err(format!(
-                "agent {pubkey_owned} no longer has a recorded PID after sync"
-            ));
-        };
-        if !process_is_running(pid) {
-            return Err(format!(
-                "agent {pubkey_owned} process {pid} is no longer running"
+                "agent {pubkey_owned} no longer has a live pair runtime after sync"
             ));
         }
 
@@ -439,8 +446,9 @@ async fn restart_single_agent_after_install(
         }
 
         let setup_mode = runtimes
-            .get(&pubkey_owned)
-            .map(|p| p.setup_mode)
+            .iter()
+            .find(|(key, _)| key.pubkey == pubkey_owned)
+            .map(|(_, p)| p.setup_mode)
             .unwrap_or(false);
         if !setup_mode {
             return Err(format!(
@@ -461,53 +469,45 @@ async fn restart_single_agent_after_install(
         stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
         save_managed_agents(&app_for_stop, &records)?;
 
-        Ok(())
+        Ok(runtime_keys)
     })
     .await;
 
-    let stopped = match stop_result {
-        Ok(Ok(())) => true,
+    let runtime_keys = match stop_result {
+        Ok(Ok(runtime_keys)) => runtime_keys,
         Ok(Err(e)) => {
             eprintln!("buzz-desktop: install_acp_runtime: skipping restart of {pubkey}: {e}");
-            false
+            return InstallRestartOutcome::Skipped;
         }
         Err(e) => {
             eprintln!(
                 "buzz-desktop: install_acp_runtime: spawn_blocking failed for stop of {pubkey}: {e}"
             );
-            false
+            return InstallRestartOutcome::Skipped;
         }
     };
 
-    if !stopped {
-        return InstallRestartOutcome::Skipped;
-    }
-
-    // Start via the normal preflight path — same as config-change restart.
+    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+    let state = app.state::<AppState>();
+    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
+        .await
     {
-        use tauri::Manager;
-        let state = app.state::<AppState>();
-        match super::agents::start_local_agent_with_preflight(app, &state, pubkey, owner_hex, false)
-            .await
-        {
-            Ok(_) => {
+        Ok(_) => {
+            eprintln!(
+                "buzz-desktop: install_acp_runtime: restarted setup-mode agent {pubkey} after install"
+            );
+            InstallRestartOutcome::Restarted
+        }
+        Err(e) => {
+            eprintln!(
+                "buzz-desktop: install_acp_runtime: failed to start {pubkey} after install: {e}"
+            );
+            if let Err(save_err) = persist_last_error_on_install(app, pubkey, &e) {
                 eprintln!(
-                    "buzz-desktop: install_acp_runtime: restarted setup-mode agent {pubkey} after install"
+                    "buzz-desktop: install_acp_runtime: failed to persist last_error for {pubkey}: {save_err}"
                 );
-                InstallRestartOutcome::Restarted
             }
-            Err(e) => {
-                eprintln!(
-                    "buzz-desktop: install_acp_runtime: failed to start {pubkey} after install: {e}"
-                );
-                // Persist last_error so the UI surfaces a diagnosable stopped state.
-                if let Err(save_err) = persist_last_error_on_install(app, pubkey, &e) {
-                    eprintln!(
-                        "buzz-desktop: install_acp_runtime: failed to persist last_error for {pubkey}: {save_err}"
-                    );
-                }
-                InstallRestartOutcome::FailedAfterStop
-            }
+            InstallRestartOutcome::FailedAfterStop
         }
     }
 }
@@ -536,11 +536,12 @@ fn persist_last_error_on_install(
     save_managed_agents(app, &records)
 }
 
-/// Build a login-shell `Command` for `command` with the hermit env vars
-/// stripped and the user's PATH set. This is the single source of truth for
+/// Build a login-shell `Command` for `command` with hermit env vars stripped,
+/// Buzz-managed npm locations set, and the user's PATH set. This is the
+/// single source of truth for
 /// the shell selection and environment cleanup shared by `run_install_command`
-/// and `resolve_npm_prefix` — keeping them in sync so the hermit-strip list
-/// can't drift between the two paths.
+/// and managed npm install path — keeping them in sync so the hermit-strip list
+/// can't drift between command execution paths.
 ///
 /// On Windows, resolves Git Bash via `resolve_bash_path` (skips `BUZZ_SHELL`
 /// since install commands require bash syntax). Returns `Err` when no shell
@@ -551,14 +552,52 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     let mut cmd = std::process::Command::new(&shell);
     cmd.args(["-l", "-c", command]);
 
-    // Strip hermit env vars so npm/node use the user's normal registry and
-    // global prefix rather than the project-local hermit-managed paths.
+    // Strip hermit env vars so npm/node use the user's normal registry rather
+    // than the project-local hermit-managed paths, then give npm defaults for
+    // Buzz-owned app data. Adapter install commands also pass --prefix
+    // explicitly; these env vars keep subprocesses/cache/corepack aligned.
     cmd.env_remove("NPM_CONFIG_PREFIX");
     cmd.env_remove("NPM_CONFIG_CACHE");
     cmd.env_remove("COREPACK_HOME");
 
-    if let Some(ref path) = crate::managed_agents::login_shell_path() {
-        cmd.env("PATH", path);
+    if let Some(prefix) = crate::managed_agents::buzz_managed_npm_prefix() {
+        cmd.env("NPM_CONFIG_PREFIX", &prefix);
+        cmd.env("npm_config_prefix", &prefix);
+        cmd.env("COREPACK_HOME", prefix.join("corepack"));
+        cmd.env("NPM_CONFIG_CACHE", prefix.join("cache"));
+        cmd.env("npm_config_cache", prefix.join("cache"));
+    }
+
+    // Compose the PATH for the install shell using the same kernel as the
+    // runtime/probe path so the two can never drift.  managed entries first
+    // (Node/npm bins keep precedence); login-shell entries next; inherited
+    // process PATH appended last on Windows when no login-shell PATH exists
+    // (login_shell_path() always returns None on Windows — Git Bash paths are
+    // POSIX-shaped and poison native children; cmd.env("PATH", …) replaces
+    // rather than extends, so without inherited the install shell loses npm).
+    let login_path = crate::managed_agents::login_shell_path();
+    let had_login = login_path.is_some();
+    let managed: Vec<std::path::PathBuf> = [
+        crate::managed_agents::buzz_managed_node_bin_dir(),
+        crate::managed_agents::buzz_managed_npm_bin_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let login: Vec<std::path::PathBuf> = login_path
+        .as_deref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    let inherited: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let use_inherited = crate::managed_agents::should_use_inherited(had_login, true, cfg!(windows));
+    let path_parts =
+        crate::managed_agents::compose_path_entries(managed, login, inherited, use_inherited);
+    if !path_parts.is_empty() {
+        if let Ok(path) = std::env::join_paths(path_parts) {
+            cmd.env("PATH", path);
+        }
     }
 
     // Detach from the controlling terminal so install scripts that read from
@@ -614,6 +653,72 @@ pub(crate) fn install_shell_from(
     resolved: Option<std::path::PathBuf>,
 ) -> Result<std::path::PathBuf, String> {
     resolved.ok_or_else(|| crate::managed_agents::git_bash::GIT_BASH_INSTALL_HINT.to_string())
+}
+
+/// Maximum number of attempts for a transient-looking install command.
+const INSTALL_MAX_ATTEMPTS: u32 = 3;
+
+/// Run an install command, retrying transient failures with backoff.
+///
+/// Runtime installs pull artifacts over the network — Goose's `curl … | bash`
+/// fetches a native release-asset tarball from GitHub's CDN with no retry of
+/// its own, and the npm adapter installs hit the registry. A single blip there
+/// currently fails onboarding outright. This retries a command that ran to
+/// completion but exited nonzero (the transient-download signature) up to
+/// `INSTALL_MAX_ATTEMPTS` times. Failures with no exit code — a timeout or a
+/// shell that never spawned — are not retried, since re-running them just costs
+/// the user more time without a plausible path to success.
+fn run_install_command_with_retry(step: &str, command: &str) -> InstallStepResult {
+    run_install_with_retry(
+        INSTALL_MAX_ATTEMPTS,
+        |_attempt| run_install_command(step, command),
+        std::thread::sleep,
+    )
+}
+
+/// Core retry loop, decoupled from the real command runner and clock so it can
+/// be unit-tested without spawning shells or sleeping. `run` receives the
+/// 1-based attempt number.
+fn run_install_with_retry(
+    max_attempts: u32,
+    mut run: impl FnMut(u32) -> InstallStepResult,
+    mut sleep: impl FnMut(std::time::Duration),
+) -> InstallStepResult {
+    let mut attempt = 1;
+    loop {
+        let result = run(attempt);
+        if result.success || !install_failure_is_retryable(&result) || attempt >= max_attempts {
+            return if attempt > 1 && !result.success {
+                annotate_retry_attempts(result, attempt)
+            } else {
+                result
+            };
+        }
+        sleep(install_retry_backoff(attempt));
+        attempt += 1;
+    }
+}
+
+/// Only retry commands that actually ran and exited nonzero — the signature of
+/// a transient download failure. A missing exit code means the command timed
+/// out or the shell failed to spawn, neither of which a retry is likely to fix.
+fn install_failure_is_retryable(result: &InstallStepResult) -> bool {
+    !result.success && result.exit_code.is_some()
+}
+
+/// Linear backoff: 3s before attempt 2, 6s before attempt 3.
+fn install_retry_backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_secs(3 * attempt as u64)
+}
+
+/// Prefix the surfaced error so the UI shows the install was retried rather than
+/// failed on a single unlucky attempt.
+fn annotate_retry_attempts(mut result: InstallStepResult, attempts: u32) -> InstallStepResult {
+    result.stderr = format!(
+        "install failed after {attempts} attempts (retried with backoff)\n{}",
+        result.stderr
+    );
+    result
 }
 
 fn run_install_command(step: &str, command: &str) -> InstallStepResult {
@@ -790,232 +895,12 @@ fn floor_char_boundary(s: &str, mut index: usize) -> usize {
     index
 }
 
-// ── npm EACCES preflight ──────────────────────────────────────────────────────
-
-/// Guidance text for the EACCES / unwritable-prefix case.
-fn npm_eacces_guidance(command: &str) -> String {
-    format!(
-        "npm's global install directory isn't writable by your user.\n\
-\n\
-Fix (no sudo):\n\
-  1. Run:  npm config set prefix ~/.npm-global\n\
-  2. Add to ~/.zprofile:  export PATH=\"$HOME/.npm-global/bin:$PATH\"\n\
-  3. Restart Buzz, then click Install again.\n\
-\n\
-Or install manually, then click Refresh:\n\
-  sudo {command}"
-    )
-}
-
-/// Guidance text shown when npm / Node.js is not found in the login-shell PATH.
-const NPM_MISSING_HINT: &str = "Node.js / npm was not found. Install Node.js \
-(https://nodejs.org or your version manager), restart Buzz, then click Install again.\n\
-If npm works in your terminal, make sure your Node version manager is initialized in \
-~/.zprofile (not only ~/.zshrc) — Buzz resolves tools via non-interactive login shells.";
-
-/// Result of probing `npm prefix -g` in the hermit-stripped login shell.
-#[cfg(unix)]
-enum NpmPrefix {
-    /// npm responded with a parseable prefix path.
-    Found(std::path::PathBuf),
-    /// npm was not found, the spawn failed, the command returned a non-zero
-    /// exit, or the output could not be parsed.
-    Unavailable,
-    /// The probe exceeded the 30-second deadline (e.g. a version-manager init
-    /// that blocks on `/dev/tty`). The install should proceed so the stderr
-    /// classifier remains the backstop.
-    TimedOut,
-}
-
-/// Spawn the same login shell used by `run_install_command` and run
-/// `npm prefix -g` to discover where npm would install global packages.
-#[cfg(unix)]
-fn resolve_npm_prefix() -> NpmPrefix {
-    let mut cmd = match install_shell_command("npm prefix -g") {
-        Ok(cmd) => cmd,
-        Err(_) => return NpmPrefix::Unavailable,
-    };
-    let mut child = match cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(_) => return NpmPrefix::Unavailable,
-    };
-
-    // Drain stdout/stderr on background threads to prevent pipe-buffer deadlock.
-    let stdout_pipe = child.stdout.take();
-    let stderr_pipe = child.stderr.take();
-    let stdout_thread = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(mut pipe) = stdout_pipe {
-            let _ = pipe.read_to_end(&mut buf);
-        }
-        buf
-    });
-    let stderr_thread = std::thread::spawn(move || {
-        // Drain stderr so the child doesn't block on a full pipe.
-        if let Some(mut pipe) = stderr_pipe {
-            let _ = std::io::copy(&mut pipe, &mut std::io::sink());
-        }
-    });
-
-    let child_pid = child.id();
-    let (tx, rx) = std::sync::mpsc::channel();
-    let wait_thread = std::thread::spawn(move || {
-        let status = child.wait();
-        let _ = tx.send(status);
-    });
-
-    // 30-second timeout — plenty for `npm prefix -g`; intentionally shorter
-    // than the 5-minute install budget in `run_install_command`.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let raw_bytes: Option<Vec<u8>> = loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            // Timed out: send SIGTERM, clean up threads, signal the caller to
-            // fall through to the install path rather than abort.
-            unsafe { libc::kill(child_pid as i32, libc::SIGTERM) };
-            drop(rx);
-            let _ = wait_thread.join();
-            let _ = stdout_thread.join();
-            let _ = stderr_thread.join();
-            eprintln!(
-                "buzz: npm prefix probe timed out after 30s; \
-                 proceeding to install (stderr classifier is the backstop)"
-            );
-            return NpmPrefix::TimedOut;
-        }
-        match rx.recv_timeout(std::time::Duration::from_millis(200).min(remaining)) {
-            Ok(Ok(status)) => {
-                let _ = wait_thread.join();
-                let stdout = stdout_thread.join().unwrap_or_default();
-                let _ = stderr_thread.join();
-                break if status.success() { Some(stdout) } else { None };
-            }
-            Ok(Err(_)) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                let _ = wait_thread.join();
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                break None;
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-        }
-    };
-
-    let bytes = match raw_bytes {
-        Some(b) => b,
-        None => return NpmPrefix::Unavailable,
-    };
-    let raw = String::from_utf8_lossy(&bytes).into_owned();
-    // Version managers can print banner lines before the real prefix — take the
-    // last non-empty line to skip any preamble.
-    let prefix = match raw.lines().rfind(|l| !l.trim().is_empty()) {
-        Some(l) => l.trim().to_string(),
-        None => return NpmPrefix::Unavailable,
-    };
-    if prefix.is_empty() {
-        return NpmPrefix::Unavailable;
-    }
-    NpmPrefix::Found(std::path::PathBuf::from(prefix))
-}
-
-/// Check write access to a file-system path using the POSIX `access(2)` syscall.
-#[cfg(unix)]
-fn unix_is_writable(path: &std::path::Path) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    let bytes = path.as_os_str().as_bytes();
-    let Ok(c_path) = std::ffi::CString::new(bytes) else {
-        return false;
-    };
-    // SAFETY: `access` is a pure read-only syscall; we pass a valid NUL-terminated
-    // path and a standard flag constant.  This mirrors the existing `setsid`/`kill`
-    // usage in this file.
-    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
-}
-
-/// Returns true when the directory where npm would write global packages is
-/// writable by the current process user.
-///
-/// On non-unix platforms always returns `true` — the EACCES preflight is a
-/// no-op there; the stderr classifier still applies.
-fn npm_install_target_is_writable(prefix: &std::path::Path) -> bool {
-    #[cfg(unix)]
-    {
-        // Probe the most specific candidate that exists; fall back up the tree.
-        for candidate in &[
-            prefix.join("lib/node_modules"),
-            prefix.join("lib"),
-            prefix.to_path_buf(),
-        ] {
-            if candidate.exists() {
-                return unix_is_writable(candidate);
-            }
-        }
-        // Nothing exists — npm couldn't create it either.
-        unix_is_writable(prefix)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = prefix;
-        true
-    }
-}
-
-/// Inspect `stderr` for known npm EACCES patterns and return actionable
-/// guidance if matched, or `None` when the error is unrelated.
-fn npm_eacces_hint(stderr: &str, command: &str) -> Option<String> {
-    if stderr.contains("EACCES: permission denied") || stderr.contains("npm error EACCES") {
-        Some(npm_eacces_guidance(command))
-    } else {
-        None
-    }
-}
-
-/// Run the npm preflight before executing an npm global install command.
-/// Returns `Some(failed InstallStepResult)` to abort, or `None` to proceed.
-fn npm_preflight_check(step: &str, command: &str) -> Option<InstallStepResult> {
-    #[cfg(unix)]
-    {
-        match resolve_npm_prefix() {
-            NpmPrefix::Unavailable => Some(InstallStepResult {
-                step: step.to_string(),
-                command: command.to_string(),
-                success: false,
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                hint: Some(NPM_MISSING_HINT.to_string()),
-            }),
-            NpmPrefix::Found(prefix) if !npm_install_target_is_writable(&prefix) => {
-                Some(InstallStepResult {
-                    step: step.to_string(),
-                    command: command.to_string(),
-                    success: false,
-                    stdout: String::new(),
-                    stderr: format!(
-                        "npm global prefix '{}' is not writable by the current user.",
-                        prefix.display()
-                    ),
-                    exit_code: None,
-                    hint: Some(npm_eacces_guidance(command)),
-                })
-            }
-            // `Found` + writable, or `TimedOut` — proceed; let the install run and
-            // the stderr classifier serve as the backstop.
-            _ => None,
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (step, command);
-        None
-    }
-}
-
-// ── end npm preflight ─────────────────────────────────────────────────────────
+// ── managed Node/npm runtime ──────────────────────────────────────────────────
+mod managed_node;
+use managed_node::{
+    ensure_managed_node_runtime_blocking, managed_node_runtime_supported, managed_npm_command,
+    npm_eacces_hint,
+};
 
 #[tauri::command]
 pub async fn discover_managed_agent_prereqs(
@@ -1091,6 +976,13 @@ mod tests {
     }
 
     #[test]
+    fn test_is_npm_global_install_accepts_uninstall() {
+        assert!(is_npm_global_install(
+            "npm uninstall -g @zed-industries/codex-acp"
+        ));
+    }
+
+    #[test]
     fn test_is_npm_global_install_accepts_leading_whitespace() {
         assert!(is_npm_global_install("  npm install -g foo"));
     }
@@ -1130,61 +1022,6 @@ mod tests {
     fn test_npm_eacces_hint_returns_none_for_404_stderr() {
         let stderr = "npm error 404 Not Found - GET https://registry.npmjs.org/no-such-pkg";
         assert!(npm_eacces_hint(stderr, "npm install -g no-such-pkg").is_none());
-    }
-
-    #[test]
-    fn test_npm_eacces_hint_guidance_contains_npm_global_path() {
-        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
-        assert!(hint.contains("~/.npm-global"), "hint: {hint}");
-    }
-
-    #[test]
-    fn test_npm_eacces_hint_guidance_contains_zprofile() {
-        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
-        assert!(hint.contains("~/.zprofile"), "hint: {hint}");
-    }
-
-    #[test]
-    fn test_npm_eacces_hint_guidance_contains_sudo_command() {
-        let hint = npm_eacces_hint("EACCES: permission denied", "npm install -g foo").unwrap();
-        assert!(hint.contains("sudo npm install -g foo"), "hint: {hint}");
-    }
-
-    // ── npm_install_target_is_writable ────────────────────────────────────────
-
-    #[cfg(unix)]
-    #[test]
-    fn test_npm_install_target_is_writable_true_on_writable_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(npm_install_target_is_writable(dir.path()));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_npm_install_target_is_writable_false_when_lib_node_modules_unwritable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let lib = dir.path().join("lib");
-        let node_modules = lib.join("node_modules");
-        std::fs::create_dir_all(&node_modules).unwrap();
-        // Make node_modules read-only.
-        std::fs::set_permissions(&node_modules, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = npm_install_target_is_writable(dir.path());
-        // Restore before the dir is dropped so cleanup can delete it.
-        std::fs::set_permissions(&node_modules, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // Skip this assertion when running as root (root can write to 0o555).
-        if unsafe { libc::getuid() } != 0 {
-            assert!(!result);
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_npm_install_target_is_writable_walks_up_to_lib() {
-        let dir = tempfile::tempdir().unwrap();
-        // Create only `lib/` — no `lib/node_modules`.
-        std::fs::create_dir(dir.path().join("lib")).unwrap();
-        assert!(npm_install_target_is_writable(dir.path()));
     }
 
     // ── adapter_needs_install (codex version gate) ────────────────────────────
@@ -1475,6 +1312,45 @@ mod tests {
         );
     }
 
+    /// On Windows, `install_shell_command` must set PATH to a value that
+    /// includes the inherited process PATH, so node/npm are visible inside
+    /// the install shell even when no managed Node runtime is present.
+    #[cfg(windows)]
+    #[test]
+    fn test_install_shell_command_includes_process_path_on_windows() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        // Plant a sentinel in the process PATH that the test can detect.
+        let sentinel = r"C:\TestSentinel\bin";
+        std::env::set_var("PATH", sentinel);
+
+        let result = super::install_shell_command("echo test");
+
+        match previous {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let cmd = result.expect("install_shell_command must succeed on Windows with Git");
+        let path_value = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, val)| val)
+            .map(|v| v.to_string_lossy().into_owned())
+            .expect("install_shell_command must always set a PATH env var on Windows");
+
+        // The sentinel (inherited process PATH) must appear in the composed PATH.
+        assert!(
+            path_value.contains(sentinel),
+            "install_shell_command PATH must include the inherited process PATH; got: {path_value}"
+        );
+        // The sentinel must appear LAST — managed Buzz dirs must have precedence.
+        assert!(
+            path_value.ends_with(sentinel),
+            "inherited process PATH must be appended LAST so managed dirs keep precedence; got: {path_value}"
+        );
+    }
+
     // ── Phase B: per-OS install commands ──────────────────────────────────────
 
     /// On non-Windows, cli_install_commands_for_os returns the default commands.
@@ -1507,6 +1383,128 @@ mod tests {
         assert!(
             buzz.cli_install_commands_for_os().is_empty(),
             "buzz-agent ships with the app — must never have install commands"
+        );
+    }
+
+    // ── install retry ─────────────────────────────────────────────────────────
+
+    /// Build an `InstallStepResult` with just the fields the retry loop reads.
+    fn step_result(success: bool, exit_code: Option<i32>, stderr: &str) -> InstallStepResult {
+        InstallStepResult {
+            step: "cli".to_string(),
+            command: "curl … | bash".to_string(),
+            success,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+            exit_code,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn test_retryable_only_for_nonzero_exit() {
+        // Ran to completion but exited nonzero — the transient-download signature.
+        assert!(install_failure_is_retryable(&step_result(
+            false,
+            Some(1),
+            ""
+        )));
+        // No exit code — timeout or shell-never-spawned; retry won't help.
+        assert!(!install_failure_is_retryable(&step_result(false, None, "")));
+        // Success is never retryable.
+        assert!(!install_failure_is_retryable(&step_result(
+            true,
+            Some(0),
+            ""
+        )));
+    }
+
+    #[test]
+    fn test_retry_backoff_is_linear() {
+        assert_eq!(install_retry_backoff(1), std::time::Duration::from_secs(3));
+        assert_eq!(install_retry_backoff(2), std::time::Duration::from_secs(6));
+    }
+
+    #[test]
+    fn test_retry_stops_on_first_success() {
+        let mut calls = 0;
+        let mut sleeps = 0;
+        let result = run_install_with_retry(
+            3,
+            |_| {
+                calls += 1;
+                step_result(true, Some(0), "")
+            },
+            |_| sleeps += 1,
+        );
+        assert!(result.success);
+        assert_eq!(calls, 1, "a first-attempt success must not re-run");
+        assert_eq!(sleeps, 0, "no backoff sleep when nothing is retried");
+    }
+
+    #[test]
+    fn test_retry_recovers_after_transient_failure() {
+        let mut calls = 0;
+        let result = run_install_with_retry(
+            3,
+            |attempt| {
+                calls += 1;
+                // Fail the first attempt with a nonzero exit, then succeed.
+                step_result(attempt >= 2, Some(if attempt >= 2 { 0 } else { 1 }), "blip")
+            },
+            |_| {},
+        );
+        assert!(result.success);
+        assert_eq!(calls, 2, "should retry once then succeed");
+        // A recovered install must not carry the retry-failure annotation.
+        assert!(!result.stderr.contains("attempts"));
+    }
+
+    #[test]
+    fn test_retry_does_not_retry_unretryable_failure() {
+        let mut calls = 0;
+        let result = run_install_with_retry(
+            3,
+            |_| {
+                calls += 1;
+                step_result(false, None, "timed out")
+            },
+            |_| {},
+        );
+        assert!(!result.success);
+        assert_eq!(calls, 1, "a failure with no exit code must not be retried");
+        assert_eq!(
+            result.stderr, "timed out",
+            "unretried failure is unannotated"
+        );
+    }
+
+    #[test]
+    fn test_retry_exhausts_attempts_and_annotates() {
+        let mut calls = 0;
+        let mut sleeps = 0;
+        let result = run_install_with_retry(
+            3,
+            |_| {
+                calls += 1;
+                step_result(false, Some(1), "download failed")
+            },
+            |_| sleeps += 1,
+        );
+        assert!(!result.success);
+        assert_eq!(calls, 3, "must try exactly max_attempts times");
+        assert_eq!(
+            sleeps, 2,
+            "backoff sleeps between attempts, not after the last"
+        );
+        assert!(
+            result.stderr.contains("after 3 attempts"),
+            "exhausted retries must surface the attempt count, got: {}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("download failed"),
+            "original stderr must be preserved"
         );
     }
 }

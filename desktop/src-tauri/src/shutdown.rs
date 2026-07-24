@@ -3,9 +3,29 @@ use tauri::Manager;
 use crate::app_state::AppState;
 use crate::managed_agents::{
     self, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
-    sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
+    sync_managed_agent_processes, BackendKind,
 };
-use crate::util;
+use crate::{prevent_sleep, util};
+
+pub(crate) fn is_restart_request(code: Option<i32>) -> bool {
+    code == Some(tauri::RESTART_EXIT_CODE)
+}
+
+pub(crate) fn shut_down_app(app: &tauri::AppHandle, shutdown_done: &std::sync::atomic::AtomicBool) {
+    use std::sync::atomic::Ordering;
+
+    app.state::<AppState>()
+        .shutdown_started
+        .store(true, Ordering::SeqCst);
+    if !shutdown_done.swap(true, Ordering::SeqCst) {
+        prevent_sleep::release(&app.state::<AppState>().prevent_sleep);
+        if let Err(error) = shutdown_managed_agents(app) {
+            eprintln!("buzz-desktop: failed to stop managed agents: {error}");
+        }
+        #[cfg(feature = "mesh-llm")]
+        shutdown_mesh_runtime(app);
+    }
+}
 
 /// Install SIGINT/SIGTERM/SIGHUP cleanup on ctrlc's dedicated handler thread.
 #[cfg(unix)]
@@ -31,6 +51,43 @@ pub(crate) fn install_signal_handler(
     }) {
         eprintln!("buzz-desktop: failed to register signal handler: {error}");
     }
+}
+
+#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+fn updated_macos_binary(current_binary: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos_directory = current_binary.parent()?;
+    if macos_directory.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents_directory = macos_directory.parent()?;
+    if contents_directory.file_name()? != "Contents" {
+        return None;
+    }
+    let info_plist =
+        plist::from_file::<_, plist::Dictionary>(contents_directory.join("Info.plist")).ok()?;
+    let binary_name = info_plist.get("CFBundleExecutable")?.as_string()?;
+    Some(macos_directory.join(binary_name))
+}
+
+#[cfg(all(feature = "mesh-llm", target_os = "macos"))]
+pub(crate) fn relaunch_after_mesh_shutdown(app: &tauri::AppHandle) -> ! {
+    use std::process::Command;
+
+    tauri_plugin_single_instance::destroy(app);
+    let env = app.env();
+    match tauri::process::current_binary(&env) {
+        Ok(current_binary) => {
+            let binary = updated_macos_binary(&current_binary).unwrap_or(current_binary);
+            if let Err(error) = Command::new(binary)
+                .args(env.args_os.iter().skip(1))
+                .spawn()
+            {
+                eprintln!("buzz-desktop: failed to relaunch app: {error}");
+            }
+        }
+        Err(error) => eprintln!("buzz-desktop: failed to locate app for relaunch: {error}"),
+    }
+    hard_exit_after_mesh_shutdown();
 }
 
 #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
@@ -64,7 +121,7 @@ pub(crate) fn shutdown_mesh_runtime(app: &tauri::AppHandle) {
 pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _restore_transition = state
-        .managed_agent_restore_transition
+        .managed_agent_runtime_transition
         .lock()
         .map_err(|error| error.to_string())?;
     let _store_guard = state
@@ -92,26 +149,30 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
     struct AgentToStop {
         idx: usize,
         pid: u32,
-        runtime: Option<ManagedAgentProcess>,
+        runtime: Option<managed_agents::ManagedAgentPairRuntime>,
     }
 
     let mut to_stop: Vec<AgentToStop> = Vec::new();
-    for (idx, record) in records.iter_mut().enumerate() {
+    for (idx, record) in records.iter().enumerate() {
         if record.backend != BackendKind::Local {
             continue;
         }
-        if record.runtime_pid.is_none() && !runtimes.contains_key(&record.pubkey) {
-            continue;
+        // Drain every tracked pair for this record, not just the first — an
+        // agent can run one harness per community, and each pair gets the
+        // graceful SIGTERM → 2s wait → SIGKILL fan-out with a stop log
+        // marker, instead of falling through to the orphan sweep's 200ms
+        // grace below.
+        for key in managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey) {
+            let runtime = runtimes.remove(&key);
+            let Some(pid) = runtime
+                .as_ref()
+                .map(|rt| rt.child.id())
+                .or(record.runtime_pid)
+            else {
+                continue;
+            };
+            to_stop.push(AgentToStop { idx, pid, runtime });
         }
-        let runtime = runtimes.remove(&record.pubkey);
-        let Some(pid) = runtime
-            .as_ref()
-            .map(|rt| rt.child.id())
-            .or(record.runtime_pid)
-        else {
-            continue;
-        };
-        to_stop.push(AgentToStop { idx, pid, runtime });
     }
 
     if !to_stop.is_empty() {
@@ -200,4 +261,16 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_restart_request;
+
+    #[test]
+    fn only_tauri_restart_exit_code_requests_a_relaunch() {
+        assert!(is_restart_request(Some(tauri::RESTART_EXIT_CODE)));
+        assert!(!is_restart_request(None));
+        assert!(!is_restart_request(Some(0)));
+    }
 }

@@ -91,7 +91,7 @@ test("new-DM agent name swaps to its public key on name hover", async ({
 
   const agentName = agentResult.getByTestId(`new-dm-name-${AGENT_PUBKEY}`);
   const agentNpub = agentResult.getByTestId(`new-dm-npub-${AGENT_PUBKEY}`);
-  await expect(agentResult).toContainText("owned by you");
+  await expect(agentResult).toContainText("managed by you");
   await expect(agentName).toContainText("Pinky");
   await expect(agentNpub).toHaveCSS("opacity", "0");
 
@@ -127,7 +127,7 @@ test("new-DM agent name swaps to its public key on name hover", async ({
   await expect(
     settledAgentName.getByText("Pinky", { exact: true }),
   ).not.toHaveCSS("opacity", "1");
-  await expect(settledAgentResult).toContainText("owned by you");
+  await expect(settledAgentResult).toContainText("managed by you");
   await waitForAnimations(page);
   await page.getByTestId("new-message-page").screenshot({
     path: `${SHOTS}/new-dm-agent-name-hover.png`,

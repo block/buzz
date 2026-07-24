@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   classifyTool,
-  extractSimpleEchoPipeContent,
   parseBuzzCliCommand,
   tokenizeShellCommand,
 } from "./agentSessionToolClassifier.ts";
@@ -32,25 +31,96 @@ test("tokenizeShellCommand preserves quoted strings and command separators", () 
   );
 });
 
-test("extractSimpleEchoPipeContent reads the simple echo before a buzz pipe", () => {
-  const tokens = tokenizeShellCommand(
-    'echo -n "Done. Eat my shorts." | buzz messages send --content - --channel agents',
-  );
-  assert.equal(
-    extractSimpleEchoPipeContent(tokens, tokens.indexOf("buzz")),
-    "Done. Eat my shorts.",
-  );
-});
-
-test("parseBuzzCliCommand promotes buzz message sends to message descriptors", () => {
+test("parseBuzzCliCommand returns null preview for echo-piped stdin sends", () => {
   const descriptor = parseBuzzCliCommand(
     'echo "Permission wired" | buzz messages send --channel agents --content -',
   );
 
   assert.equal(descriptor?.renderClass, "message");
   assert.equal(descriptor?.label, "Send Message");
-  assert.equal(descriptor?.preview, "Permission wired");
+  assert.equal(descriptor?.preview, null);
   assert.equal(descriptor?.operation, "messages.send");
+});
+
+test("parseBuzzCliCommand returns null preview for printf-piped stdin sends", () => {
+  const descriptor = parseBuzzCliCommand(
+    "printf 'hello\\n\\nworld\\n' | buzz messages send --channel a6e0737c-4205-4bcc-9741-2aad800e613f --content -",
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand returns null preview for heredoc/cat stdin sends", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "$(cat /tmp/file)"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand returns null preview for --content with embedded command substitution", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "prefix $(cat /tmp/f)"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand returns null preview for --content with a bare variable", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "$MESSAGE"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand returns null preview for --content with a prefixed variable", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel some-uuid --content "prefix $MESSAGE"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, null);
+});
+
+test("parseBuzzCliCommand preserves inline --content for sends", () => {
+  const descriptor = parseBuzzCliCommand(
+    'buzz messages send --channel agents --content "Hello from inline"',
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, "Hello from inline");
+});
+
+test("parseBuzzCliCommand preserves --content=inline for sends", () => {
+  const descriptor = parseBuzzCliCommand(
+    "buzz messages send --channel agents --content=Acknowledged",
+  );
+
+  assert.equal(descriptor?.renderClass, "message");
+  assert.equal(descriptor?.preview, "Acknowledged");
+});
+
+test("parseBuzzCliCommand never surfaces --channel as preview for sends", () => {
+  const commands = [
+    "printf 'msg' | buzz messages send --channel my-uuid --content -",
+    'buzz messages send --channel my-uuid --content "$(cat /tmp/f)"',
+    "buzz messages send --channel my-uuid --content -",
+  ];
+
+  for (const cmd of commands) {
+    const descriptor = parseBuzzCliCommand(cmd);
+    assert.equal(descriptor?.renderClass, "message");
+    assert.notEqual(
+      descriptor?.preview,
+      "my-uuid",
+      `send preview leaked --channel for: ${cmd}`,
+    );
+  }
 });
 
 test("classifyTool promotes load_skill to skill-read descriptors", () => {

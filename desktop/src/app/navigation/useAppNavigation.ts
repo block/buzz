@@ -94,6 +94,7 @@ export function useAppNavigation() {
     (
       projectId: string,
       behavior?: NavigationBehavior & {
+        commitHash?: string;
         pullRequestId?: string;
         issueId?: string;
       },
@@ -105,6 +106,9 @@ export function useAppNavigation() {
             projectId,
           },
           search: {
+            ...(behavior?.commitHash
+              ? { commitHash: behavior.commitHash }
+              : {}),
             ...(behavior?.pullRequestId
               ? { pullRequestId: behavior.pullRequestId }
               : {}),

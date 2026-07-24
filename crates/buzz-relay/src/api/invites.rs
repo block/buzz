@@ -19,7 +19,7 @@ use std::time::Duration;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::Json,
+    response::{Html, Json},
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -54,6 +54,138 @@ pub struct MintInviteRequest {
 pub struct ClaimInviteRequest {
     /// The invite code to redeem.
     pub code: String,
+    /// Relay-issued proof of accepting the configured terms, when required.
+    #[serde(default)]
+    pub policy_receipt: Option<String>,
+}
+
+/// Body for `POST /api/invites/accept-policy`.
+#[derive(Debug, Deserialize)]
+pub struct AcceptPolicyRequest {
+    /// Invite code the acceptance receipt will be bound to.
+    pub code: String,
+    /// Policy revision displayed by the client.
+    pub policy_version: String,
+    /// Minimum-age assertion, required only when configured by the operator.
+    #[serde(default)]
+    pub age_confirmed: bool,
+}
+
+/// Public join policy shared by every client-side join surface.
+pub async fn join_policy(State(state): State<Arc<AppState>>) -> Json<Value> {
+    match &state.config.join_policy {
+        Some(policy) => Json(serde_json::json!({
+            "policy": {
+                "terms_markdown": policy.terms_markdown,
+                "privacy_markdown": policy.privacy_markdown,
+                "age_attestation_required": policy.age_attestation_required,
+                "version": policy.version
+            }
+        })),
+        None => Json(serde_json::json!({})),
+    }
+}
+
+/// `GET /api/join-policy/terms` — Terms of Service as a standalone HTML page.
+///
+/// Serves the operator-configured Markdown as a real browser page so desktop
+/// clients can hand the link to the system browser instead of rendering the
+/// document inside the webview (which requires app chrome the onboarding
+/// surfaces don't have). 404 when no terms document is configured.
+pub async fn join_policy_terms(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    policy_document_page(&state, "Terms of Service", |policy| {
+        policy.terms_markdown.as_deref()
+    })
+}
+
+/// `GET /api/join-policy/privacy` — Privacy Policy as a standalone HTML page.
+pub async fn join_policy_privacy(
+    State(state): State<Arc<AppState>>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    policy_document_page(&state, "Privacy Policy", |policy| {
+        policy.privacy_markdown.as_deref()
+    })
+}
+
+fn policy_document_page(
+    state: &AppState,
+    title: &str,
+    select: impl Fn(&crate::config::JoinPolicyConfig) -> Option<&str>,
+) -> Result<Html<String>, (StatusCode, Json<Value>)> {
+    let markdown = state
+        .config
+        .join_policy
+        .as_ref()
+        .and_then(select)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "join_policy_not_configured"))?;
+    Ok(Html(render_policy_document(title, markdown)))
+}
+
+/// Render operator Markdown into a minimal self-contained HTML page.
+///
+/// Raw HTML embedded in the Markdown is escaped and rendered as text — the
+/// operator authors a policy document, not a web page, and this keeps the
+/// endpoint from serving arbitrary operator-controlled markup.
+fn render_policy_document(title: &str, markdown: &str) -> String {
+    use pulldown_cmark::{html, Event, Parser};
+
+    let mut body = String::new();
+    html::push_html(
+        &mut body,
+        Parser::new(markdown).map(|event| match event {
+            Event::Html(raw) => Event::Text(raw.into_string().into()),
+            Event::InlineHtml(raw) => Event::Text(raw.into_string().into()),
+            other => other,
+        }),
+    );
+
+    // Titles are fixed literals today; escape anyway so a future caller
+    // can't accidentally inject markup through this seam.
+    let escaped_title = title
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{escaped_title}</title>\n\
+         <style>body{{max-width:42rem;margin:2rem auto;padding:0 1rem;\
+         font-family:system-ui,sans-serif;line-height:1.6}}</style>\n\
+         </head>\n<body>\n{body}</body>\n</html>\n"
+    )
+}
+
+/// Exchange explicit policy acceptance for a short-lived, invite-bound receipt.
+pub async fn accept_policy(
+    State(state): State<Arc<AppState>>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(policy) = &state.config.join_policy else {
+        return Err(api_error(
+            StatusCode::NOT_FOUND,
+            "join_policy_not_configured",
+        ));
+    };
+    let request: AcceptPolicyRequest = serde_json::from_slice(&body).map_err(|e| {
+        api_error(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid policy acceptance JSON: {e}"),
+        )
+    })?;
+    if request.policy_version != policy.version
+        || (policy.age_attestation_required && !request.age_confirmed)
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "join_policy_not_accepted",
+        ));
+    }
+    let key = invite_token::derive_invite_key(&state.relay_keypair);
+    let receipt = invite_token::mint_policy_acceptance(&key, &request.code, &policy.version);
+    Ok(Json(serde_json::json!({ "receipt": receipt })))
 }
 
 /// Shared prelude: bind the tenant from the Host header and verify the NIP-98
@@ -186,9 +318,27 @@ pub async fn claim_invite(
     )?;
 
     let claimer_hex = pubkey.to_hex();
+    if let Some(policy) = &state.config.join_policy {
+        let receipt = request
+            .policy_receipt
+            .as_deref()
+            .ok_or_else(|| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+        invite_token::verify_policy_acceptance(&key, receipt, &request.code, &policy.version)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "join_policy_required"))?;
+    }
+
     let was_inserted = state
         .db
-        .add_relay_member(tenant.community(), &claimer_hex, &payload.r, Some("invite"))
+        .claim_relay_membership(
+            tenant.community(),
+            &claimer_hex,
+            &payload.r,
+            state
+                .config
+                .join_policy
+                .as_ref()
+                .map(|policy| policy.version.as_str()),
+        )
         .await
         .map_err(|e| internal_error(&format!("invite claim insert: {e}")))?;
 
@@ -250,12 +400,16 @@ mod tests {
         body::{to_bytes, Body},
         http::{header, Request, StatusCode},
     };
-    use base64::Engine;
-    use nostr::{EventBuilder, Keys, Kind, Tag};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+    use hmac::{Hmac, KeyInit, Mac};
+    use nostr::{EventBuilder, EventId, Keys, Kind, Tag};
     use serde_json::Value;
     use sha2::{Digest, Sha256};
+    use std::sync::Mutex;
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    use crate::invite_token::{derive_invite_key, InvitePayload};
 
     use crate::router::build_router;
     use crate::state::AppState;
@@ -361,14 +515,17 @@ mod tests {
     /// a fresh community on `host`; returns `None` when Postgres is unavailable.
     async fn invite_test_state(host: &str) -> Option<Arc<AppState>> {
         let mut config = crate::config::Config::from_env().ok()?;
-        config.database_url = TEST_DB_URL.to_string();
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_string());
+        config.database_url = database_url.clone();
         config.redis_url = "redis://127.0.0.1:1".to_string();
         config.relay_url = format!("wss://{host}");
         // The claim route must work on relays where membership is enforced —
         // that is the entire point of an invite.
         config.require_relay_membership = true;
 
-        let pool = sqlx::PgPool::connect(TEST_DB_URL).await.ok()?;
+        let pool = sqlx::PgPool::connect(&database_url).await.ok()?;
         let db = buzz_db::Db::from_pool(pool.clone());
         db.ensure_configured_community(host).await.ok()?;
 
@@ -507,6 +664,215 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn join_policy_gate_end_to_end() {
+        let host = format!("invites-policy-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+        // Force the join policy on regardless of env.
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.join_policy = Some(crate::config::JoinPolicyConfig {
+            terms_markdown: Some("# Terms".to_string()),
+            privacy_markdown: Some("# Privacy".to_string()),
+            age_attestation_required: true,
+            version: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        });
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        // Mint an invite.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites",
+            &owner,
+            "{}".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        let code = json
+            .get("code")
+            .and_then(Value::as_str)
+            .expect("code")
+            .to_string();
+
+        // 1. Claim WITHOUT receipt -> 403 (checkbox bypass).
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "no-receipt claim must fail"
+        );
+
+        // 2. Forged receipt (wrong key) -> 403.
+        let forged = crate::invite_token::mint_policy_acceptance(
+            &[9u8; 32],
+            &code,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": forged }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "forged receipt must fail"
+        );
+
+        // 3. Receipt bound to a DIFFERENT invite code -> 403.
+        let key = crate::invite_token::derive_invite_key(&state.relay_keypair);
+        let other = crate::invite_token::mint_policy_acceptance(
+            &key,
+            "some-other-code",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": other }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "cross-invite receipt must fail"
+        );
+
+        // 4. Receipt for a STALE policy version -> 403.
+        let stale = crate::invite_token::mint_policy_acceptance(
+            &key,
+            &code,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        );
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": stale }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "stale-version receipt must fail"
+        );
+
+        // 5. accept-policy without age confirmation -> 400.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/accept-policy",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "age_confirmed": false })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "age not confirmed must be rejected when required"
+        );
+
+        // 5b. accept-policy with stale version -> 400.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/accept-policy",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_version": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "age_confirmed": true })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // 6. Legit flow: accept-policy -> receipt -> claim OK.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/accept-policy",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "age_confirmed": true })
+                .to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let receipt = read_json(response)
+            .await
+            .get("receipt")
+            .and_then(Value::as_str)
+            .expect("receipt")
+            .to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &joiner,
+            serde_json::json!({ "code": code, "policy_receipt": receipt }).to_string(),
+        )
+        .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "legit receipt claim must succeed"
+        );
+        let json = read_json(response).await;
+        assert_eq!(json.get("status").and_then(Value::as_str), Some("joined"));
+
+        let member = state
+            .db
+            .get_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("member lookup")
+            .expect("joiner is now a member");
+        assert_eq!(member.role, "member");
+        assert!(
+            state
+                .db
+                .has_join_policy_acceptance(
+                    community.id,
+                    &joiner.public_key().to_hex(),
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .await
+                .expect("policy acceptance lookup"),
+            "accepted policy version must be persisted",
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn non_admin_cannot_mint() {
         let host = format!("invites-{}.example", Uuid::new_v4().simple());
         let member = Keys::generate();
@@ -609,5 +975,330 @@ mod tests {
         let body = serde_json::json!({ "code": code }).to_string();
         let response = post_json(state, &host_b, "/api/invites/claim", &joiner, body).await;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Forge an already-expired invite payload signed with the relay's derived
+    /// invite key. `mint_invite` clamps ttl to 60s minimum, so the only way to
+    /// produce an expired code is to build the payload by hand at the token
+    /// layer.
+    fn forge_expired_invite_code(
+        state: &AppState,
+        community: buzz_core::CommunityId,
+        seconds_ago: u64,
+    ) -> String {
+        let key = derive_invite_key(&state.relay_keypair);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time")
+            .as_secs();
+        let payload = InvitePayload {
+            c: community.as_uuid().to_string(),
+            r: "member".to_string(),
+            e: now.saturating_sub(seconds_ago),
+            n: "test-nonce".to_string(),
+        };
+        let payload_bytes = serde_json::to_vec(&payload).expect("payload serializes");
+        let mut mac =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(&key).expect("HMAC accepts any key size");
+        mac.update(&payload_bytes);
+        let mac_bytes = mac.finalize().into_bytes();
+        format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(&payload_bytes),
+            URL_SAFE_NO_PAD.encode(mac_bytes),
+        )
+    }
+
+    /// Endpoint-level proof that expired codes (with a valid MAC) are
+    /// rejected by `/api/invites/claim` with the distinguishable
+    /// `invite_expired` body, and do not admit the caller.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_expired_code() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        let code = forge_expired_invite_code(&state, community.id, 10);
+
+        let body = serde_json::json!({ "code": code }).to_string();
+        let response = post_json(state.clone(), &host, "/api/invites/claim", &joiner, body).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let json = read_json(response).await;
+        // The expired branch is deliberately distinguishable from the generic
+        // `invite_invalid` so the UX can prompt the user for a fresh link
+        // without becoming a MAC oracle.
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("invite_expired"),
+            "expired branch must be distinguishable from generic invalid",
+        );
+
+        let is_member = state
+            .db
+            .is_relay_member(community.id, &joiner.public_key().to_hex())
+            .await
+            .expect("member check");
+        assert!(!is_member, "expired code must not admit anyone");
+    }
+
+    /// NIP-98 replay guard that returns `Ok(true)` the first time a given
+    /// event id is seen and `Ok(false)` on every subsequent call — mirrors
+    /// what the Redis guard does after a `SET NX` succeeds and then fails.
+    struct SeenOnceReplayGuard {
+        seen: Mutex<std::collections::HashSet<[u8; 32]>>,
+    }
+
+    impl SeenOnceReplayGuard {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(std::collections::HashSet::new()),
+            }
+        }
+    }
+
+    impl buzz_auth::Nip98ReplayGuard for SeenOnceReplayGuard {
+        fn try_mark_in_scope<'a>(
+            &'a self,
+            _scope: &'a str,
+            event_id: &'a EventId,
+            _ttl_secs: u64,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<bool, buzz_auth::AuthError>> + Send + 'a>,
+        > {
+            let bytes = *event_id.as_bytes();
+            let inserted = self.seen.lock().expect("replay set").insert(bytes);
+            Box::pin(async move { Ok(inserted) })
+        }
+    }
+
+    /// Endpoint-level proof that a replayed NIP-98 auth event on a claim POST
+    /// is rejected — the first claim succeeds, but reusing the exact same
+    /// Authorization header (same signed NIP-98 event id) is rejected as
+    /// replay before the invite verification ever runs.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rejects_replayed_nip98_auth() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let joiner = Keys::generate();
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        // Swap the always-fresh guard for one that fires the second time the
+        // same event id is presented — the code path we're pinning.
+        let mut state_owned =
+            Arc::try_unwrap(state_arc).unwrap_or_else(|_| panic!("sole owner of AppState"));
+        state_owned.nip98_replay = Arc::new(SeenOnceReplayGuard::new());
+        let state = Arc::new(state_owned);
+
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        // Mint a valid code so the replay under test is on the claim path.
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites",
+            &owner,
+            "{}".to_string(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = read_json(response).await;
+        let code = json.get("code").and_then(Value::as_str).expect("code");
+
+        // Build one NIP-98 header and reuse it verbatim on two claim POSTs.
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+        let claim_url = format!("https://{host}/api/invites/claim");
+        let claim_auth = nip98_auth_header(&joiner, &claim_url, claim_body.as_bytes());
+
+        let send_claim = |auth: String, body: String| {
+            let state = state.clone();
+            let host = host.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/invites/claim")
+                            .header(header::HOST, host.as_str())
+                            .header(header::AUTHORIZATION, auth)
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(Body::from(body))
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response")
+            }
+        };
+
+        let first = send_claim(claim_auth.clone(), claim_body.clone()).await;
+        assert_eq!(first.status(), StatusCode::OK);
+
+        // Same signed auth event, sent again → replay guard fires.
+        let second = send_claim(claim_auth, claim_body).await;
+        assert_eq!(second.status(), StatusCode::UNAUTHORIZED);
+        let json = read_json(second).await;
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("NIP-98: replay detected"),
+        );
+    }
+
+    /// Endpoint-level proof that `/api/invites/claim` enforces the per-pubkey
+    /// fixed-window rate limit — the same joiner probing the endpoint hits
+    /// 429 on the `CLAIM_RATE_LIMIT + 1`th attempt inside the window.
+    ///
+    /// We use invalid codes throughout so no membership state can change; the
+    /// limiter runs before code verification, so the transition from
+    /// `invite_invalid` (403) to `too many invite claim attempts` (429) proves
+    /// the limiter guard is on the request path and fires on repeat pubkey.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn claim_rate_limit_fires_on_repeat_pubkey() {
+        let host = format!("invites-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state_arc = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        // Fresh limiter with the production limit so the assertion pins the
+        // in-endpoint threshold, not a test-only budget.
+        let mut state_owned =
+            Arc::try_unwrap(state_arc).unwrap_or_else(|_| panic!("sole owner of AppState"));
+        state_owned.invite_claim_rate_limiter = Arc::new(claim_cache(
+            super::CLAIM_RATE_CACHE_CAPACITY,
+            super::CLAIM_RATE_WINDOW,
+        ));
+        let state = Arc::new(state_owned);
+
+        let body = serde_json::json!({ "code": "garbage.code" }).to_string();
+        for _ in 0..CLAIM_RATE_LIMIT {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &joiner,
+                body.clone(),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::FORBIDDEN,
+                "attempts up to the limit should reach code verification and be rejected as invalid",
+            );
+            let json = read_json(response).await;
+            assert_eq!(
+                json.get("error").and_then(Value::as_str),
+                Some("invite_invalid"),
+            );
+        }
+
+        let over_limit = post_json(state, &host, "/api/invites/claim", &joiner, body).await;
+        assert_eq!(over_limit.status(), StatusCode::TOO_MANY_REQUESTS);
+        let json = read_json(over_limit).await;
+        assert_eq!(
+            json.get("error").and_then(Value::as_str),
+            Some("too many invite claim attempts, slow down"),
+        );
+    }
+
+    #[test]
+    fn policy_document_renders_markdown_and_escapes_raw_html() {
+        let page = super::render_policy_document(
+            "Terms of Service",
+            "# Terms\n\nBe kind & honest.\n\n<script>alert(1)</script>",
+        );
+        assert!(page.contains("<title>Terms of Service</title>"), "{page}");
+        assert!(page.contains("<h1>Terms</h1>"), "{page}");
+        // `&` inside prose must be entity-encoded by the HTML writer.
+        assert!(page.contains("Be kind &amp; honest."), "{page}");
+        // Raw HTML in operator Markdown renders as escaped text, never markup.
+        assert!(!page.contains("<script>"), "{page}");
+        assert!(
+            page.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+            "{page}"
+        );
+    }
+
+    /// The document routes are public (no NIP-98) and 404 until configured,
+    /// exactly like the JSON policy endpoint they sit beside.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn join_policy_document_pages_serve_configured_markdown() {
+        let host = format!("invites-docs-{}.example", Uuid::new_v4().simple());
+        let Some(state) = invite_test_state(&host).await else {
+            return;
+        };
+
+        let get_page = |state: Arc<crate::state::AppState>, path: &'static str| {
+            let host = host.clone();
+            async move {
+                build_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("GET")
+                            .uri(path)
+                            .header(header::HOST, host)
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response")
+            }
+        };
+
+        // Unconfigured relay: both documents 404.
+        let response = get_page(state.clone(), "/api/join-policy/terms").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = get_page(state.clone(), "/api/join-policy/privacy").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // Configure terms only — terms serves HTML, privacy still 404s.
+        let mut state_inner = (*state).clone();
+        let mut config = state_inner.config.as_ref().clone();
+        config.join_policy = Some(crate::config::JoinPolicyConfig {
+            terms_markdown: Some("# Terms\n\nNo funny business.".to_string()),
+            privacy_markdown: None,
+            age_attestation_required: false,
+            version: "v".repeat(64),
+        });
+        state_inner.config = Arc::new(config);
+        let state = Arc::new(state_inner);
+
+        let response = get_page(state.clone(), "/api/join-policy/terms").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(content_type.starts_with("text/html"), "{content_type}");
+        let bytes = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read body");
+        let page = String::from_utf8(bytes.to_vec()).expect("utf8");
+        assert!(page.contains("<h1>Terms</h1>"), "{page}");
+        assert!(page.contains("No funny business."), "{page}");
+
+        let response = get_page(state, "/api/join-policy/privacy").await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

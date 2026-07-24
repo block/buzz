@@ -235,6 +235,14 @@ The justfile also ships `just goose key="$AGENT_NSEC"` (foreground) and
 same env. See `crates/buzz-acp/README.md` for parallel agents, heartbeats,
 respond-to gates, and forum subscriptions.
 
+To exercise deferred ACP startup, add `BUZZ_ACP_LAZY_POOL=true` before launching
+`buzz-acp`. The harness should connect, authenticate, subscribe, and publish
+online presence without starting the configured ACP child. The first accepted,
+flushable mention should start exactly one child and then dispatch the queued
+message. Automated coverage in `pool_lifecycle_state` pins single-wake,
+retry/backoff, and stale-result behavior; it does not replace this real
+relay/process smoke test.
+
 Send the agent a task — switch your shell back to the **sender** identity
 from step 4 and @mention the agent:
 
@@ -269,6 +277,8 @@ out of the box with `just setup` or `just relay`. Common overrides:
 | `REDIS_URL`                       | `redis://localhost:6379`    | |
 | `BUZZ_REQUIRE_AUTH_TOKEN`       | `false`                     | When true, REST requires NIP-98 (no `X-Pubkey` fallback) |
 | `BUZZ_REQUIRE_RELAY_MEMBERSHIP` | `false`                     | When true, only pubkeys in `relay_members` can connect |
+| `BUZZ_REQUIRE_MEDIA_GET_AUTH`   | `false`                     | When true, `GET`/`HEAD /media/*` require Blossom kind 24242 `t=get` auth plus relay membership. |
+| `BUZZ_AUDIT_ENABLED`            | `true`                      | Tamper-evident event/media audit log. Set `false`/`0`/`off` to skip its DB pool and writes. Does not disable the separate moderation audit trail. |
 | `BUZZ_AUTO_MIGRATE`             | `false`                     | Opt in with `true`/`1`/`yes`/`on` to run embedded SQLx migrations on relay startup |
 | `RELAY_OWNER_PUBKEY`              | unset                       | Bootstrapped as `owner` in `relay_members` at first start |
 | `BUZZ_ALLOW_NIP_OA_AUTH`        | `false`                     | Enable NIP-OA owner attestation for membership |

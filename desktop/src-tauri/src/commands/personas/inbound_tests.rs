@@ -402,8 +402,30 @@ fn team_content(name: &str) -> TeamEventContent {
     TeamEventContent {
         name: name.to_string(),
         description: Some("remote desc".to_string()),
-        instructions: Some("remote instructions".to_string()),
-        persona_ids: vec!["p-remote-1".to_string(), "p-remote-2".to_string()],
+        instructions: Some(Some("remote instructions".to_string())),
+        persona_ids: Some(vec!["p-remote-1".to_string(), "p-remote-2".to_string()]),
+    }
+}
+
+/// An inbound event shaped like one from a client that predates
+/// always-publish: `instructions`/`persona_ids` both omitted (`None`).
+fn team_content_omitting_optional_fields(name: &str) -> TeamEventContent {
+    TeamEventContent {
+        name: name.to_string(),
+        description: Some("remote desc".to_string()),
+        instructions: None,
+        persona_ids: None,
+    }
+}
+
+/// An inbound event that explicitly clears both fields: `instructions` is
+/// `Some(None)` (JSON `null`), `persona_ids` is `Some(vec![])`.
+fn team_content_clearing_optional_fields(name: &str) -> TeamEventContent {
+    TeamEventContent {
+        name: name.to_string(),
+        description: Some("remote desc".to_string()),
+        instructions: Some(None),
+        persona_ids: Some(vec![]),
     }
 }
 
@@ -436,6 +458,66 @@ fn inbound_team_match_patches_shared_preserves_local() {
     assert_eq!(t.symlink_target, Some("/external".to_string()));
     assert_eq!(t.version, Some("1.0".to_string()));
     assert_eq!(t.created_at, "2025-01-01T00:00:00Z");
+}
+
+#[test]
+fn inbound_team_omitted_fields_preserve_local() {
+    // A `None` for instructions/persona_ids means the publisher predates
+    // always-publish — its true value is unknown, so reconcile must
+    // preserve whatever this device already has. This is the fix for the
+    // Sietch Tabr wipe: an old-shaped (or genuinely field-omitting) event
+    // must not blank out a team that has real membership/instructions.
+    let mut teams = vec![local_team()];
+    // Give local_team real instructions so preservation is discriminating:
+    // the pre-fix blind-overwrite bug would collapse this to `None`, while
+    // the fix must leave it untouched on an omitted field.
+    teams[0].instructions = Some("local instructions".to_string());
+    apply_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content_omitting_optional_fields("Renamed Team"),
+    );
+
+    assert_eq!(teams.len(), 1);
+    let t = &teams[0];
+    assert_eq!(
+        t.name, "Renamed Team",
+        "shared non-optional field still overwrites"
+    );
+    assert_eq!(
+        t.instructions,
+        Some("local instructions".to_string()),
+        "omitted instructions preserves local value rather than wiping it"
+    );
+    assert_eq!(
+        t.persona_ids,
+        vec!["p-local".to_string()],
+        "omitted persona_ids preserves local membership rather than wiping it"
+    );
+}
+
+#[test]
+fn inbound_team_explicit_clear_overwrites_local() {
+    // `Some(None)` / `Some(vec![])` are the explicit-clear signals a
+    // pre-fix client can never produce — these must still overwrite local.
+    let mut teams = vec![local_team()];
+    // Give local_team real instructions so the clear has something to erase.
+    teams[0].instructions = Some("local instructions".to_string());
+
+    apply_inbound_team(
+        &mut teams,
+        TEAM_ID.to_string(),
+        team_content_clearing_optional_fields("Cleared Team"),
+    );
+
+    assert_eq!(teams.len(), 1);
+    let t = &teams[0];
+    assert_eq!(t.instructions, None, "explicit null clears instructions");
+    assert_eq!(
+        t.persona_ids,
+        Vec::<String>::new(),
+        "explicit empty array clears membership"
+    );
 }
 
 #[test]

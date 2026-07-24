@@ -267,6 +267,17 @@ async function mountStrictMode(Comp) {
     );
   });
   return {
+    rerender: async () => {
+      await act(async () => {
+        root.render(
+          React.createElement(
+            React.StrictMode,
+            null,
+            React.createElement(Comp),
+          ),
+        );
+      });
+    },
     unmount: async () => {
       await act(async () => {
         root.unmount();
@@ -321,6 +332,8 @@ test("strictmode_draft_restore_cleanup_preserves_images_via_production_hook", as
       persistDraft: (key, content, channelId, pendingImeta, spoileredUrls) => {
         persistDraftEntry(key, content, channelId, pendingImeta, spoileredUrls);
       },
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
       livePendingImeta: asyncState,
       setPendingImeta: (imeta) => {
         asyncState = imeta; // async — won't commit before StrictMode cleanup
@@ -374,6 +387,8 @@ test("strictmode_draft_no_draft_cleanup_persists_empty_imeta", async () => {
       persistDraft: (key, content, channelId, pendingImeta, spoileredUrls) => {
         persistDraftEntry(key, content, channelId, pendingImeta, spoileredUrls);
       },
+      getMentionRefs: () => [],
+      restoreMentionRefs: () => {},
       livePendingImeta: [],
       setPendingImeta: () => {},
       setContent: () => {},
@@ -397,6 +412,170 @@ test("strictmode_draft_no_draft_cleanup_persists_empty_imeta", async () => {
     0,
     "no-draft path: cleanup must persist empty imeta, not a stale value",
   );
+
+  await handle.unmount();
+});
+
+test("draft_lifecycle_restores_and_repersists_mention_routing_refs", async () => {
+  const DRAFT_KEY = "chan-lifecycle-mentions";
+  const MENTION_REFS = [
+    { displayName: "Agent Ada", pubkey: "abcdef1234", isAgent: true },
+  ];
+  setupStore("pubkey-lifecycle-mentions");
+  persistDraftEntry(
+    DRAFT_KEY,
+    "hello @Agent Ada",
+    DRAFT_KEY,
+    [],
+    [],
+    MENTION_REFS,
+  );
+
+  let restoredRefs = null;
+  const spoileredRef = { current: new Set() };
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: DRAFT_KEY,
+      channelId: DRAFT_KEY,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        content.includes("@Agent Ada") ? MENTION_REFS : [],
+      restoreMentionRefs: (refs) => {
+        restoredRefs = [...refs];
+      },
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: () => {},
+      clearContent: () => {},
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => "hello @Agent Ada",
+    });
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.deepEqual(restoredRefs, MENTION_REFS);
+  assert.deepEqual(loadDraftEntry(DRAFT_KEY)?.mentionRefs, MENTION_REFS);
+  await handle.unmount();
+});
+
+test("draft_lifecycle_switches_a_b_a_without_leaking_or_losing_mention_refs", async () => {
+  const REFS_A = [
+    { displayName: "Agent Ada", pubkey: "aaaaaaaa", isAgent: true },
+  ];
+  const REFS_B = [
+    { displayName: "Person Bea", pubkey: "bbbbbbbb", isAgent: false },
+  ];
+  setupStore("pubkey-switch-mentions");
+  persistDraftEntry("chan-a", "hello @Agent Ada", "chan-a", [], [], REFS_A);
+  persistDraftEntry("chan-b", "hello @Person Bea", "chan-b", [], [], REFS_B);
+
+  let draftKey = "chan-a";
+  let editorContent = "";
+  let activeRefs = [];
+  const restored = [];
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        activeRefs.filter((ref) => content.includes(`@${ref.displayName}`)),
+      restoreMentionRefs: (refs) => {
+        activeRefs = [...refs];
+        restored.push(activeRefs);
+      },
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    });
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.deepEqual(activeRefs, REFS_A);
+
+  draftKey = "chan-b";
+  await handle.rerender();
+  assert.deepEqual(activeRefs, REFS_B, "B replaces A refs rather than merging");
+
+  draftKey = "chan-a";
+  await handle.rerender();
+  assert.deepEqual(
+    activeRefs,
+    REFS_A,
+    "A refs survive a full A → B → A switch",
+  );
+  assert.deepEqual(loadDraftEntry("chan-a")?.mentionRefs, REFS_A);
+  assert.deepEqual(loadDraftEntry("chan-b")?.mentionRefs, REFS_B);
+  assert.equal(
+    restored.some((refs) => refs.length === 0),
+    false,
+    "saved channel switches never transiently restore empty routing refs",
+  );
+
+  await handle.unmount();
+});
+
+test("draft_lifecycle_empty_target_clears_stale_mention_refs", async () => {
+  const REFS_A = [
+    { displayName: "Agent Ada", pubkey: "aaaaaaaa", isAgent: true },
+  ];
+  setupStore("pubkey-empty-target-mentions");
+  persistDraftEntry("chan-a", "hello @Agent Ada", "chan-a", [], [], REFS_A);
+
+  let draftKey = "chan-a";
+  let editorContent = "";
+  let activeRefs = [];
+  const spoileredRef = { current: new Set() };
+
+  function HarnessComposer() {
+    useDraftPersistLifecycle({
+      effectiveDraftKey: draftKey,
+      channelId: draftKey,
+      loadDraft: loadDraftEntry,
+      persistDraft: persistDraftEntry,
+      getMentionRefs: (content) =>
+        activeRefs.filter((ref) => content.includes(`@${ref.displayName}`)),
+      restoreMentionRefs: (refs) => {
+        activeRefs = [...refs];
+      },
+      livePendingImeta: [],
+      setPendingImeta: () => {},
+      setContent: (content) => {
+        editorContent = content;
+      },
+      clearContent: () => {
+        editorContent = "";
+      },
+      setSpoileredAttachmentUrls: () => {},
+      spoileredAttachmentUrlsRef: spoileredRef,
+      syncComposerContentFromEditor: () => editorContent,
+    });
+    return null;
+  }
+
+  const handle = await mountStrictMode(HarnessComposer);
+  assert.deepEqual(activeRefs, REFS_A);
+
+  draftKey = "chan-empty";
+  await handle.rerender();
+  assert.deepEqual(activeRefs, []);
+  assert.equal(editorContent, "");
+  assert.equal(loadDraftEntry("chan-empty"), undefined);
 
   await handle.unmount();
 });

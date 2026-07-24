@@ -11,6 +11,7 @@ mod discovery;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
+mod managed_node_paths;
 mod nest;
 mod persona_avatars;
 pub(crate) mod persona_events;
@@ -24,6 +25,8 @@ mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
+mod runtime_commands;
+mod runtime_types;
 pub(crate) mod spawn_hash;
 pub(crate) mod storage;
 pub(crate) mod team_events;
@@ -50,6 +53,7 @@ pub(crate) use global_config::{
     load_global_agent_config, resolve_effective_model_provider, save_global_agent_config,
     validate_global_config, GlobalAgentConfig,
 };
+pub(crate) use managed_node_paths::*;
 pub use nest::*;
 pub use personas::*;
 #[cfg(windows)]
@@ -64,6 +68,8 @@ pub use repos::{
 };
 pub use restore::*;
 pub use runtime::*;
+pub use runtime_commands::*;
+pub use runtime_types::*;
 pub use storage::*;
 pub use teams::*;
 pub use types::*;

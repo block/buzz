@@ -52,6 +52,8 @@ type LiveSubscription = {
   onEvent: (event: RelayEvent) => void;
   resolveReady?: () => void;
   lastSeenCreatedAt?: number;
+  closedRetryAttempt?: number;
+  closedRetryTimeout?: number;
 };
 
 export type PendingEvent = {

@@ -1,212 +1,97 @@
 import * as React from "react";
-import { flushSync } from "react-dom";
+import { Check, Copy } from "lucide-react";
 
-import {
-  getIdentity,
-  importIdentity as tauriImportIdentity,
-} from "@/shared/api/tauriIdentity";
-import { claimInvite } from "@/shared/api/invites";
-import { inviteErrorMessage } from "@/shared/api/inviteHelpers";
+import { HostedCommunityOnboarding } from "@/features/communities/ui/HostedCommunityOnboarding";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
 import { InviteRedeemForm } from "@/features/onboarding/ui/InviteRedeemForm";
-import { NostrKeyImportForm } from "@/features/onboarding/ui/NostrKeyImportForm";
+import { OnboardingChrome } from "@/features/onboarding/ui/OnboardingChrome";
+import {
+  OnboardingFooter,
+  OnboardingFooterProvider,
+} from "@/features/onboarding/ui/OnboardingFooter";
 import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "@/features/onboarding/ui/OnboardingSlideTransition";
-import { Button } from "@/shared/ui/button";
-import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
-import { StepProgress } from "@/shared/ui/step-progress";
+import { useIdentityQuery } from "@/shared/api/hooks";
+import { writeTextToClipboard } from "@/shared/lib/clipboard";
+import { pubkeyToNpub } from "@/shared/lib/nostrUtils";
 import { useSystemColorScheme } from "@/shared/theme/useSystemColorScheme";
+import { Button } from "@/shared/ui/button";
+import { Card } from "@/shared/ui/card";
+import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 
-import type { Community } from "../types";
-import { initFirstCommunity } from "../communityStorage";
-import { CommunityEditForm } from "./CommunityEditForm";
-
-type WelcomeSetupPage = "welcome" | "create-community" | "invite" | "nostr-key";
+type WelcomeSetupPage = "welcome" | "existing" | "join" | "member" | "owned";
 type WelcomeTransitionMode = "initial" | OnboardingTransitionDirection;
 
 type WelcomeSetupProps = {
-  defaultRelayUrl: string;
+  initialPage?: WelcomeSetupPage;
   initialTransitionMode?: WelcomeTransitionMode;
-  onComplete: (community: Community) => void;
+  onBack: () => void;
 };
 
-const DEFAULT_COMMUNITY_HANDOFF_MIN_MS = 200;
-const LOCAL_DEV_RELAY_URLS = new Set([
-  "ws://localhost:3000",
-  "ws://127.0.0.1:3000",
-]);
-
-function isLocalDevRelayUrl(relayUrl: string) {
-  return LOCAL_DEV_RELAY_URLS.has(relayUrl.trim().replace(/\/$/, ""));
-}
-
-function wait(ms: number) {
-  return new Promise<void>((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
-}
-
-function NostrKeyImportPage({
-  connectionError,
-  disabled,
-  onBack,
-  onImport,
-}: {
-  connectionError: string | null;
-  disabled: boolean;
-  onBack: () => void;
-  onImport: (nsec: string) => Promise<void>;
-}) {
-  return (
-    <OnboardingSlideTransition
-      className="flex w-full flex-col items-center text-center"
-      direction="forward"
-      transitionKey="nostr-key-forward"
-    >
-      <div className="w-full max-w-[440px]">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          Use your existing key
-        </h1>
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">
-          Import your Nostr private key to use that identity with Buzz. If this
-          key already has a profile on the relay, your name and avatar are
-          restored automatically.
-        </p>
-      </div>
-
-      <NostrKeyImportForm
-        disabled={disabled}
-        errorMessage={connectionError}
-        onBack={onBack}
-        onImport={onImport}
-      />
-    </OnboardingSlideTransition>
-  );
-}
+const COMMUNITY_OPTION_CARD_CLASS =
+  "w-full max-w-[320px] items-center px-6 py-4 text-center text-sm font-normal leading-6 text-foreground [--buzz-card-textured-min-height:88px] transition-[filter] duration-150 ease-out hover:brightness-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-foreground/35";
 
 export function WelcomeSetup({
-  defaultRelayUrl,
+  initialPage = "welcome",
   initialTransitionMode = "initial",
-  onComplete,
+  onBack,
 }: WelcomeSetupProps) {
-  const [page, setPage] = React.useState<WelcomeSetupPage>("welcome");
+  const [page, setPage] = React.useState<WelcomeSetupPage>(initialPage);
   const [transitionMode, setTransitionMode] =
     React.useState<WelcomeTransitionMode>(initialTransitionMode);
-  const [isConnecting, setIsConnecting] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [isRedeeming, setIsRedeeming] = React.useState(false);
-  const [inviteError, setInviteError] = React.useState<string | null>(null);
+  // While true, the Builderlab sign-in modal floats over the current page —
+  // we only navigate to the hosted stage once sign-in completes, so the page
+  // behind the modal never changes out from under the user.
+  const [isHostedSignInOpen, setIsHostedSignInOpen] = React.useState(false);
+  const [copiedNpub, setCopiedNpub] = React.useState(false);
+  const communityOnboarding = useCommunityOnboarding();
+  const identityQuery = useIdentityQuery();
   const systemColorScheme = useSystemColorScheme();
+  const npub = identityQuery.data?.pubkey
+    ? pubkeyToNpub(identityQuery.data.pubkey)
+    : "";
+  const npubError = identityQuery.error
+    ? identityQuery.error instanceof Error
+      ? identityQuery.error.message
+      : "Could not load your public key."
+    : null;
 
-  const handleConnect = React.useCallback(
-    async (relayUrl: string, communityName?: string, pubkey?: string) => {
-      const trimmedUrl = relayUrl.trim();
-      if (!trimmedUrl) {
-        setError("Please enter a community URL.");
-        return;
-      }
-      if (!communityName && isLocalDevRelayUrl(trimmedUrl)) {
-        setError("Enter your relay URL to join a community.");
-        setTransitionMode("forward");
-        setPage("create-community");
-        return;
-      }
+  const showPage = React.useCallback(
+    (nextPage: WelcomeSetupPage, direction?: OnboardingTransitionDirection) => {
+      setTransitionMode(
+        direction ?? (nextPage === "welcome" ? "backward" : "forward"),
+      );
+      setPage(nextPage);
+    },
+    [],
+  );
 
-      const handoffStartedAt = performance.now();
-      flushSync(() => {
-        setIsConnecting(true);
-        setError(null);
+  const startConnection = React.useCallback(
+    (relayUrl: string) => {
+      communityOnboarding.start({
+        source: "first-community",
+        firstCommunityPage: page === "member" ? "member" : "join",
+        relayUrl,
       });
-
-      try {
-        // We snapshot only the pubkey for display purposes (community switcher
-        // labels, etc.). The private key lives on disk in `identity.key` and
-        // is the single source of truth — never copied into localStorage.
-        const identityPubkey = pubkey ?? (await getIdentity()).pubkey;
-        const community = initFirstCommunity(
-          trimmedUrl,
-          identityPubkey,
-          communityName,
-        );
-
-        if (!communityName) {
-          const elapsedMs = performance.now() - handoffStartedAt;
-          if (elapsedMs < DEFAULT_COMMUNITY_HANDOFF_MIN_MS) {
-            await wait(DEFAULT_COMMUNITY_HANDOFF_MIN_MS - elapsedMs);
-          }
-        }
-
-        // The parent moves this community into React state so first-run setup
-        // can continue without a full page reload.
-        onComplete(community);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to connect. Try again.",
-        );
-        setIsConnecting(false);
-      }
     },
-    [onComplete],
+    [communityOnboarding, page],
   );
 
-  const handleNostrImport = React.useCallback(
-    async (nsec: string) => {
-      const identity = await tauriImportIdentity(nsec);
-      await handleConnect(defaultRelayUrl, undefined, identity.pubkey);
+  const redeemInvite = React.useCallback(
+    (relayUrl: string, code: string, policyReceipt?: string) => {
+      communityOnboarding.start({
+        source: "first-community",
+        firstCommunityPage: page === "member" ? "member" : "join",
+        relayUrl,
+        inviteCode: code,
+        policyReceipt,
+      });
     },
-    [defaultRelayUrl, handleConnect],
+    [communityOnboarding, page],
   );
 
-  const handleWelcomeInviteRedeem = React.useCallback(
-    async (relayWsUrl: string, code: string) => {
-      setIsRedeeming(true);
-      setInviteError(null);
-      try {
-        await claimInvite(relayWsUrl, code);
-        await handleConnect(relayWsUrl);
-      } catch (err) {
-        setInviteError(inviteErrorMessage(err));
-      } finally {
-        setIsRedeeming(false);
-      }
-    },
-    [handleConnect],
-  );
-
-  const showCreateCommunityPage = React.useCallback(() => {
-    setError(null);
-    setTransitionMode("forward");
-    setPage("create-community");
-  }, []);
-
-  const showInvitePage = React.useCallback(() => {
-    setInviteError(null);
-    setTransitionMode("forward");
-    setPage("invite");
-  }, []);
-
-  const showNostrKeyPage = React.useCallback(() => {
-    setError(null);
-    setTransitionMode("forward");
-    setPage("nostr-key");
-  }, []);
-
-  const showWelcomePage = React.useCallback(() => {
-    setError(null);
-    setInviteError(null);
-    setTransitionMode("backward");
-    setPage("welcome");
-  }, []);
-
-  const currentStep =
-    page === "welcome"
-      ? isConnecting
-        ? 2
-        : 1
-      : page === "nostr-key" || page === "invite"
-        ? 1
-        : 2;
   const transitionDirection =
     transitionMode === "backward" ? "backward" : "forward";
   const welcomeEffect =
@@ -214,187 +99,237 @@ export function WelcomeSetup({
 
   return (
     <div
-      className="buzz-onboarding-neutral-theme buzz-startup-shell flex items-center justify-center bg-background px-4 py-8 text-foreground"
+      className="buzz-onboarding-neutral-theme buzz-startup-shell flex h-dvh items-start justify-center overflow-y-auto bg-background px-4 pb-36 pt-[106px] text-foreground"
       data-system-color-scheme={systemColorScheme}
     >
       <StartupWindowDragRegion />
-      <div className="relative flex w-full max-w-[500px] flex-col items-center text-center">
-        <StepProgress
-          activeSegmentClassName="bg-primary"
-          className="fixed bottom-12 left-1/2 z-40 -translate-x-1/2"
-          completeSegmentClassName="bg-primary/35"
-          currentStep={currentStep}
-          inactiveSegmentClassName="bg-muted-foreground/25"
-        />
-
-        {page === "welcome" ? (
-          <OnboardingSlideTransition
-            className="flex w-full flex-col items-center text-center"
-            direction={transitionDirection}
-            effect={welcomeEffect}
-            transitionKey={`welcome-${welcomeEffect}-${transitionDirection}`}
-          >
-            <img
-              alt="Buzz"
-              className="h-14 w-14 rounded-xl shadow-xs"
-              src="/app-icon@2x.png"
-              srcSet="/app-icon@2x.png 1x, /app-icon@3x.png 2x"
-            />
-
-            <h1 className="mt-6 text-3xl font-semibold tracking-tight">
-              Welcome to Buzz
-            </h1>
-            <p className="mt-3 max-w-[440px] text-sm leading-6 text-muted-foreground">
-              Choose your first community to get started.
-            </p>
-
-            <div className="mt-8 flex w-full flex-col gap-3">
-              {isLocalDevRelayUrl(defaultRelayUrl) ? null : (
-                <Button
-                  className="h-10 w-full"
-                  aria-disabled={isConnecting}
-                  onClick={() => {
-                    if (isConnecting) {
-                      return;
-                    }
-                    setError(null);
-                    void handleConnect(defaultRelayUrl);
-                  }}
-                  type="button"
-                >
-                  Continue with default community
-                </Button>
-              )}
-
-              <Button
-                className="h-10 w-full"
-                aria-disabled={isConnecting}
-                onClick={() => {
-                  if (isConnecting) {
-                    return;
-                  }
-                  showCreateCommunityPage();
-                }}
-                type="button"
-                variant="secondary"
-              >
-                Join a community
-              </Button>
-
-              <Button
-                className="h-10 w-full"
-                aria-disabled={isConnecting}
-                onClick={() => {
-                  if (isConnecting) {
-                    return;
-                  }
-                  showInvitePage();
-                }}
-                type="button"
-                variant="ghost"
-              >
-                Have an invite?
-              </Button>
-
-              <Button
-                className="h-10 w-full"
-                aria-disabled={isConnecting}
-                data-testid="welcome-continue-nostr"
-                onClick={() => {
-                  if (isConnecting) {
-                    return;
-                  }
-                  showNostrKeyPage();
-                }}
-                type="button"
-                variant="ghost"
-              >
-                I already have a key
-              </Button>
-            </div>
-
-            {error ? (
-              <div className="mt-4 w-full">
-                <p className="text-sm text-destructive">{error}</p>
-              </div>
-            ) : null}
-          </OnboardingSlideTransition>
-        ) : page === "create-community" ? (
-          <OnboardingSlideTransition
-            className="flex w-full flex-col items-center text-center"
-            direction={transitionDirection}
-            transitionKey={`create-community-${transitionDirection}`}
-          >
-            <div className="w-full max-w-[440px]">
-              <h1 className="text-3xl font-semibold tracking-tight">
-                Join a community
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                Communities are where teammates and agents collaborate across
-                channels, DMs, and shared projects.
-              </p>
-            </div>
-
-            <div className="mt-8 w-full">
-              <CommunityEditForm
-                cancelLabel="Back"
-                initialName=""
-                initialRelayUrl=""
-                isSubmitting={isConnecting}
-                onCancel={showWelcomePage}
-                onSubmit={(name, url) => {
-                  void handleConnect(url, name);
-                }}
-                submitLabel="Join a community"
-              />
-              {error ? (
-                <p className="mt-2 text-center text-sm text-destructive">
-                  {error}
+      <OnboardingChrome current={5} />
+      <OnboardingFooterProvider>
+        <div className="relative flex min-h-0 w-full max-w-[920px] flex-1 flex-col items-center text-center">
+          {page === "welcome" ? (
+            <OnboardingSlideTransition
+              className="flex h-full min-h-0 w-full flex-col items-center text-center"
+              containerClassName="h-full min-h-0 [&>.buzz-onboarding-transition-line]:h-full"
+              direction={transitionDirection}
+              effect={welcomeEffect}
+              transitionKey={`welcome-${welcomeEffect}-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[760px]">
+                <h1 className="text-title font-normal">
+                  Join or create a community
+                </h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  Join with an invite, create your own community, or reconnect
+                  one you already have.
                 </p>
-              ) : null}
-            </div>
-          </OnboardingSlideTransition>
-        ) : page === "invite" ? (
-          <OnboardingSlideTransition
-            className="flex w-full flex-col items-center text-center"
-            direction={transitionDirection}
-            transitionKey={`invite-${transitionDirection}`}
-          >
-            <div className="w-full max-w-[440px]">
-              <h1 className="text-3xl font-semibold tracking-tight">
-                Redeem an invite
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-muted-foreground">
-                Paste an invite link or code from a relay admin to join their
-                community.
-              </p>
-            </div>
-
-            <div className="mt-8 w-full">
-              <InviteRedeemForm
-                defaultRelayUrl={
-                  isLocalDevRelayUrl(defaultRelayUrl)
-                    ? undefined
-                    : defaultRelayUrl
-                }
-                error={inviteError}
-                isRedeeming={isRedeeming}
-                onCancel={showWelcomePage}
-                onRedeem={(relayWsUrl, code) => {
-                  void handleWelcomeInviteRedeem(relayWsUrl, code);
-                }}
-              />
-            </div>
-          </OnboardingSlideTransition>
-        ) : (
-          <NostrKeyImportPage
-            connectionError={error}
-            disabled={isConnecting}
-            onBack={showWelcomePage}
-            onImport={handleNostrImport}
-          />
-        )}
-      </div>
+              </div>
+              <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="community-choice-join"
+                    onClick={() => showPage("join")}
+                    type="button"
+                  >
+                    Join a community
+                  </button>
+                </Card>
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="community-choice-create"
+                    onClick={() => setIsHostedSignInOpen(true)}
+                    type="button"
+                  >
+                    Create a community
+                  </button>
+                </Card>
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="community-choice-existing"
+                    onClick={() => showPage("existing")}
+                    type="button"
+                  >
+                    I already have a community
+                  </button>
+                </Card>
+              </div>
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="welcome-setup-back"
+                  onClick={onBack}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "existing" ? (
+            <OnboardingSlideTransition
+              className="flex h-full min-h-0 w-full flex-col items-center text-center"
+              containerClassName="h-full min-h-0 [&>.buzz-onboarding-transition-line]:h-full"
+              direction={transitionDirection}
+              transitionKey={`existing-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[760px]">
+                <h1 className="text-title font-normal">
+                  Reconnect to your community
+                </h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  Tell us your role so we can find the fastest way back in.
+                </p>
+              </div>
+              <div className="flex w-full flex-1 translate-y-16 flex-col items-center justify-center gap-20 py-8">
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="existing-choice-owner"
+                    onClick={() => setIsHostedSignInOpen(true)}
+                    type="button"
+                  >
+                    I own the community
+                  </button>
+                </Card>
+                <Card
+                  asChild
+                  className={COMMUNITY_OPTION_CARD_CLASS}
+                  variant="textured"
+                >
+                  <button
+                    data-testid="existing-choice-member"
+                    onClick={() => showPage("member")}
+                    type="button"
+                  >
+                    I’m a member or admin
+                  </button>
+                </Card>
+              </div>
+              <OnboardingFooter>
+                <Button
+                  className="h-9 rounded-full bg-foreground/10 px-6 hover:bg-foreground/15"
+                  data-testid="existing-back"
+                  onClick={() => showPage("welcome")}
+                  type="button"
+                  variant="ghost"
+                >
+                  Back
+                </Button>
+              </OnboardingFooter>
+            </OnboardingSlideTransition>
+          ) : page === "owned" ? (
+            <OnboardingSlideTransition
+              className="flex w-full flex-col items-center text-center"
+              direction={transitionDirection}
+              transitionKey={`owned-${transitionDirection}`}
+            >
+              <HostedCommunityOnboarding onBack={() => showPage("welcome")} />
+            </OnboardingSlideTransition>
+          ) : (
+            <OnboardingSlideTransition
+              className="flex min-h-[calc(100dvh-15.625rem)] w-full flex-col items-center text-center"
+              direction={transitionDirection}
+              transitionKey={`${page}-${transitionDirection}`}
+            >
+              <div className="w-full max-w-[620px]">
+                <h1 className="text-title font-normal">
+                  {page === "member"
+                    ? "Reconnect to your community"
+                    : "Join a community"}
+                </h1>
+                <p className="mt-3 text-sm leading-6 text-foreground/80">
+                  {page === "member"
+                    ? "Enter the community URL or an invite link. Your role will be restored when you connect."
+                    : "Enter the invite link or community URL you received."}
+                </p>
+              </div>
+              <div className="flex w-full flex-1 flex-col items-center justify-center gap-16">
+                <InviteRedeemForm
+                  error={null}
+                  isRedeeming={false}
+                  onCancel={() =>
+                    showPage(page === "member" ? "existing" : "welcome")
+                  }
+                  onConnect={startConnection}
+                  onRedeem={redeemInvite}
+                  placeholder="Invite link or community URL"
+                  variant="onboarding-spotlight"
+                />
+                {page === "join" ? (
+                  <div className="w-full max-w-[560px] text-left">
+                    <p className="text-sm font-medium text-foreground">
+                      Joining a private community?
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-foreground/75">
+                      Some communities need the owner to add you before you can
+                      join. Copy your public ID and send it to the community
+                      owner.
+                    </p>
+                    <div className="mt-4 flex items-center gap-3 rounded-xl border border-foreground/10 bg-background/35 px-4 py-3">
+                      <code
+                        className="min-w-0 flex-1 truncate font-mono text-xs text-foreground/80"
+                        data-testid="welcome-join-npub"
+                      >
+                        {npub || "Loading…"}
+                      </code>
+                      <Button
+                        aria-label="Copy public ID"
+                        className="h-9 shrink-0 rounded-full px-3"
+                        disabled={!npub}
+                        onClick={() => {
+                          void writeTextToClipboard(npub).then(() => {
+                            setCopiedNpub(true);
+                            window.setTimeout(() => setCopiedNpub(false), 1500);
+                          });
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        {copiedNpub ? (
+                          <Check className="h-4 w-4" aria-hidden="true" />
+                        ) : (
+                          <Copy className="h-4 w-4" aria-hidden="true" />
+                        )}
+                        <span>{copiedNpub ? "Copied" : "Copy"}</span>
+                      </Button>
+                    </div>
+                    {npubError ? (
+                      <p className="mt-3 text-sm text-destructive">
+                        {npubError}
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </OnboardingSlideTransition>
+          )}
+          {isHostedSignInOpen && page !== "owned" ? (
+            <HostedCommunityOnboarding
+              onBack={() => setIsHostedSignInOpen(false)}
+              onReady={() => {
+                setIsHostedSignInOpen(false);
+                showPage("owned");
+              }}
+              stageHidden
+            />
+          ) : null}
+        </div>
+      </OnboardingFooterProvider>
     </div>
   );
 }

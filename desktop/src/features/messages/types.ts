@@ -19,12 +19,18 @@ export type TimelineMessage = {
   pubkey?: string;
   /**
    * Raw signer pubkey (`event.pubkey`), normalized to lowercase hex.
-   * Distinct from `pubkey`, which is the resolved display-author and may be
-   * overridden by `actor` or `p` tags. Use this field — not `pubkey` — for
-   * security-sensitive checks such as authenticating config-nudge cards.
+   * Distinct from `pubkey`, which may be a delegated author on an event signed
+   * by the active relay. Use this field for checks that require the process or
+   * user that cryptographically signed the event.
    */
   signerPubkey?: string;
   author: string;
+  /** True when the displayed author is known to be an agent. */
+  isAgent?: boolean;
+  /** Verified owner pubkey for an agent author, when available. */
+  ownerPubkey?: string | null;
+  /** Viewer-relative owner label (for example, "you" or "baxen"). */
+  ownerLabel?: string | null;
   avatarUrl?: string | null;
   role?: string;
   /** For bot messages, the display name of the persona this bot was created from. */

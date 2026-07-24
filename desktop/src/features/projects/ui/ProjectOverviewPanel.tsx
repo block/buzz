@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type * as React from "react";
 
+import { cn } from "@/shared/lib/cn";
 import type {
   Project,
   ProjectPullRequest,
@@ -117,13 +118,19 @@ export function LanguageChips({
 export function OverviewRailSection({
   children,
   title,
+  titleClassName,
 }: {
   children: React.ReactNode;
   title: string;
+  titleClassName?: string;
 }) {
   return (
     <section className="space-y-2">
-      <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+      <h3
+        className={cn("text-sm font-semibold text-foreground", titleClassName)}
+      >
+        {title}
+      </h3>
       {children}
     </section>
   );

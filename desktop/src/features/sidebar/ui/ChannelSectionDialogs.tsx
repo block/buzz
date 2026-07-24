@@ -26,7 +26,11 @@ import { StatusEmoji } from "@/features/user-status/ui/StatusEmoji";
 import { Input } from "@/shared/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/shared/ui/popover";
 import type { Channel } from "@/shared/api/types";
-import { useLeaveChannelMutation } from "@/features/channels/hooks";
+import {
+  useDeleteChannelMutation,
+  useLeaveChannelMutation,
+} from "@/features/channels/hooks";
+import { ChannelDeleteConfirmationDialog } from "@/features/channels/ui/ChannelManagementModerationActions";
 
 export type SectionDialogValue = {
   name: string;
@@ -334,4 +338,35 @@ export function useLeaveChannelDialog() {
   );
 
   return { requestLeaveChannel: setTarget, dialog };
+}
+
+export function useDeleteChannelDialog(onDeleted: (channel: Channel) => void) {
+  const [target, setTarget] = React.useState<Channel | null>(null);
+  const deleteChannel = useDeleteChannelMutation(target?.id ?? null);
+
+  const dialog = (
+    <ChannelDeleteConfirmationDialog
+      channelName={target?.name ?? ""}
+      error={deleteChannel.error}
+      isPending={deleteChannel.isPending}
+      onConfirm={() => {
+        const deletedChannel = target;
+        deleteChannel.mutate(undefined, {
+          onSuccess: () => {
+            setTarget(null);
+            if (deletedChannel) onDeleted(deletedChannel);
+          },
+        });
+      }}
+      onOpenChange={(open) => {
+        if (!open) {
+          deleteChannel.reset();
+          setTarget(null);
+        }
+      }}
+      open={target !== null}
+    />
+  );
+
+  return { requestDeleteChannel: setTarget, dialog };
 }

@@ -7,6 +7,7 @@ import "@/shared/styles/globals.css";
 import { UpdaterProvider } from "@/features/settings/hooks/UpdaterProvider";
 import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communities/legacyCommunityStorage";
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
+import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
 import { PoofBurstProvider } from "@/shared/ui/PoofBurstProvider";
@@ -72,28 +73,33 @@ function renderApp() {
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       <CommunitiesProvider>
-        <ThemeProvider defaultTheme="houston">
-          <TooltipProvider delayDuration={300}>
-            <EmojiBurstProvider>
-              <PoofBurstProvider>
-                <UpdaterProvider>
-                  <App />
-                  <NostrBindConsentDialog />
-                </UpdaterProvider>
-                <Toaster />
-              </PoofBurstProvider>
-            </EmojiBurstProvider>
-          </TooltipProvider>
-        </ThemeProvider>
+        <CommunityOnboardingProvider>
+          <ThemeProvider defaultTheme="buzz">
+            <TooltipProvider delayDuration={300}>
+              <EmojiBurstProvider>
+                <PoofBurstProvider>
+                  <UpdaterProvider>
+                    <App />
+                    <NostrBindConsentDialog />
+                  </UpdaterProvider>
+                  <Toaster />
+                </PoofBurstProvider>
+              </EmojiBurstProvider>
+            </TooltipProvider>
+          </ThemeProvider>
+        </CommunityOnboardingProvider>
       </CommunitiesProvider>
     </React.StrictMode>,
   );
 }
 
 async function installE2eBridgeIfConfigured() {
-  // Keep the large E2E bridge out of the normal startup path and production
-  // bundle; only load it when tests explicitly inject an E2E config.
-  if (!(window as E2eWindow).__BUZZ_E2E__) {
+  // The mock bridge is compiled only into dev and explicit E2E builds. A
+  // pre-bootstrap global alone must never activate mock IPC in production.
+  if (
+    !(import.meta.env.DEV || import.meta.env.MODE === "e2e") ||
+    !(window as E2eWindow).__BUZZ_E2E__
+  ) {
     return;
   }
 

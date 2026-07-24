@@ -1,4 +1,5 @@
-use tauri::{AppHandle, Manager};
+use std::sync::atomic::Ordering;
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     app_state::AppState,
@@ -9,6 +10,13 @@ use crate::{
     },
     util::now_iso,
 };
+
+#[tauri::command]
+pub fn set_agent_managed_profiles(enabled: bool, state: State<'_, AppState>) {
+    state
+        .managed_agent_profile_reconcile_enabled
+        .store(!enabled, Ordering::Release);
+}
 
 #[tauri::command]
 pub async fn set_managed_agent_start_on_app_launch(
@@ -34,7 +42,7 @@ pub async fn set_managed_agent_start_on_app_launch(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         {
@@ -79,7 +87,7 @@ pub async fn set_managed_agent_auto_restart(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         {

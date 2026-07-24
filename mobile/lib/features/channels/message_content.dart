@@ -9,6 +9,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/clipboard_utils.dart';
+import '../../shared/relay/relay.dart';
 import '../../shared/syntax_highlight.dart';
 import '../../shared/theme/theme.dart';
 import '../custom_emoji/custom_emoji.dart';
@@ -220,7 +221,7 @@ List<CustomEmoji> _mergeCustomEmoji(
   return merged;
 }
 
-class _MessageImagePreview extends HookWidget {
+class _MessageImagePreview extends HookConsumerWidget {
   final String url;
   final ImetaEntry? imeta;
   final String semanticLabel;
@@ -232,7 +233,7 @@ class _MessageImagePreview extends HookWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final heroTag = useMemoized(() => Object());
     final layout = _resolveImagePreviewLayout(context, imeta?.aspectRatio);
 
@@ -253,8 +254,8 @@ class _MessageImagePreview extends HookWidget {
           constraints: layout.constraints,
           child: Hero(
             tag: heroTag,
-            child: Image.network(
-              url,
+            child: MediaImage(
+              url: url,
               fit: layout.fit,
               semanticLabel: semanticLabel,
               errorBuilder: (_, _, _) => _MediaPreviewFallback(
@@ -295,8 +296,8 @@ class _MessageVideoPreview extends StatelessWidget {
               fit: StackFit.expand,
               children: [
                 if (posterUrl != null)
-                  Image.network(
-                    posterUrl,
+                  MediaImage(
+                    url: posterUrl,
                     fit: BoxFit.cover,
                     errorBuilder: (_, _, _) => const _MediaPreviewFallback(
                       icon: LucideIcons.video,

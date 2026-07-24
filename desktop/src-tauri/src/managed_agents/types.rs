@@ -188,7 +188,7 @@ pub struct RelayAgentInfo {
     #[serde(default)]
     pub respond_to_allowlist: Vec<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ManagedAgentRecord {
     pub pubkey: String,
     pub name: String,
@@ -441,6 +441,8 @@ pub struct ManagedAgentProcess {
     /// cached availability and sets `needs_restart` on drift, catching out-of-
     /// band adapter changes that Phase-1 auto-restart doesn't cover.
     pub adapter_availability: Option<AcpAvailabilityStatus>,
+    /// Unpredictable identity shared only with this harness generation.
+    pub start_nonce: String,
     /// Win32 Job Object owning the harness + its entire process tree. Closing
     /// the handle (via `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`) kills the whole
     /// tree — the Windows mirror of the Unix process-group teardown. `None`
@@ -454,6 +456,7 @@ pub struct ManagedAgentSummary {
     pub pubkey: String,
     pub name: String,
     pub persona_id: Option<String>,
+    pub team_id: Option<String>,
     pub relay_url: String,
     pub acp_command: String,
     pub agent_command: String,
@@ -572,6 +575,12 @@ pub struct AcpRuntimeCatalogEntry {
     pub binary_path: Option<String>,
     pub default_args: Vec<String>,
     pub mcp_command: Option<String>,
+    /// Environment variable used to apply the initial model, when supported.
+    pub model_env_var: Option<String>,
+    /// Environment variable used to apply the selected LLM provider, when supported.
+    pub provider_env_var: Option<String>,
+    /// Environment variable used to apply thinking effort, when supported.
+    pub thinking_env_var: Option<String>,
     pub install_hint: String,
     pub install_instructions_url: String,
     /// true when at least one automated install step is available
@@ -597,7 +606,7 @@ pub struct InstallStepResult {
     pub stderr: String,
     pub exit_code: Option<i32>,
     /// Actionable guidance shown in the UI when this step failed due to a
-    /// recognized condition (e.g. EACCES on a root-owned npm global prefix).
+    /// recognized condition (e.g. EACCES writing Buzz's private npm prefix).
     /// `None` when the step succeeded or no pattern matched.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -719,8 +728,6 @@ pub struct UpdateTeamRequest {
 pub const DEFAULT_ACP_COMMAND: &str = "buzz-acp";
 /// ~5 min (320s) — matches the CLI harness default (BUZZ_ACP_IDLE_TIMEOUT).
 pub const DEFAULT_AGENT_TURN_TIMEOUT_SECONDS: u64 = 320;
-/// 1 hour — absolute wall-clock safety cap per turn.
-pub const DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS: u64 = 3600;
 pub const DEFAULT_AGENT_PARALLELISM: u32 = 24;
 
 fn default_agent_parallelism() -> u32 {

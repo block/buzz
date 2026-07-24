@@ -77,6 +77,8 @@ moka            = { workspace = true }
 metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
+pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 
 [features]
 dev = ["buzz-auth/dev"]
@@ -87,3 +89,6 @@ mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag 
 buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures = "0.3"
+flate2 = "1.1.9"

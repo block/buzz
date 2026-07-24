@@ -9,7 +9,8 @@
 (* Pushers race to advance a single manifest pointer holding a ref value.   *)
 (* We assert (see SAFETY PROPERTIES for the full set and per-invariant docs):*)
 (*   T1  fence: observed success => the obligated push is durably published  *)
-(*   T2  closure: a published manifest's pack set covers its parent's        *)
+(*   T2  closure: a published manifest either covers its parent's packs or   *)
+(*       names a trusted full-closure compaction pack                         *)
 (*   T3  ref linearizability: installs form a fork-free chain, each commits  *)
 (*       exactly the value it proposed, derived from the pointer it read     *)
 (* Each invariant is mutation-tested non-vacuous; see docs/ Mechanized §.    *)
@@ -28,12 +29,13 @@ VARIABLES
     staged,     \* pusher id -> manifest id it intends to install
     parent,     \* manifest id -> the manifest id it was derived from (history)
     refs,       \* manifest id -> objectId that this manifest binds the ref "main" to
+    compacted,  \* manifests whose own pack is a full closure of their refs
     newVal,     \* pusher id -> objectId this push proposes for "main" (its effect)
     snapErr,    \* pusher id -> did either ref-snapshot read fail? (BOOLEAN)
     observed    \* set of pusher ids that have observed success (fence passed)
 
 vars == <<pointer, published, packs, pc, readEtag, staged,
-          parent, refs, newVal, snapErr, observed>>
+          parent, refs, compacted, newVal, snapErr, observed>>
 
 \* We model a single ref, "main", whose value is an objectId in ObjIds. This is
 \* enough to exhibit ref-update linearizability: a lost update is the published
@@ -57,6 +59,7 @@ TypeOK ==
     /\ staged \in [Pushers -> ManifestIds]
     /\ parent \in [ManifestIds -> ManifestIds]
     /\ refs \in [ManifestIds -> ObjIds]
+    /\ compacted \subseteq ManifestIds
     /\ newVal \in [Pushers -> ObjIds]
     /\ snapErr \in [Pushers -> BOOLEAN]
     /\ observed \subseteq Pushers
@@ -70,6 +73,7 @@ Init ==
     /\ staged = [p \in Pushers |-> 0]
     /\ parent = [m \in ManifestIds |-> 0]
     /\ refs = [m \in ManifestIds |-> 0]   \* "main" starts at objectId 0 (empty)
+    /\ compacted = {}
     /\ newVal = [p \in Pushers |-> 0]
     /\ snapErr = [p \in Pushers |-> FALSE]
     /\ observed = {}
@@ -99,15 +103,24 @@ Begin(p) ==
     \* fail (e). The staged manifest binds "main" to v and is derived from the
     \* manifest the push READ -- so a stale reader builds on stale ref state, and
     \* only the CAS guard stops it from clobbering a newer published value.
-    /\ \E v \in ObjIds, e \in BOOLEAN :
+    /\ \E v \in ObjIds, e \in BOOLEAN, compact \in BOOLEAN :
          /\ newVal'  = [newVal  EXCEPT ![p] = v]
          /\ snapErr' = [snapErr EXCEPT ![p] = e]
          /\ LET m == FreshId IN
               /\ readEtag' = [readEtag EXCEPT ![p] = pointer]
               /\ staged'   = [staged   EXCEPT ![p] = m]
               /\ parent'   = [parent   EXCEPT ![m] = pointer]
-              /\ packs'    = [packs    EXCEPT ![m] = packs[pointer] \union {m}]
+              \* A compact stage models `pack-objects` over every post-push
+              \* ref tip. Its own pack is therefore trusted to cover the full
+              \* reachable closure; a normal stage extends the parent pack set.
+              /\ packs'    = [packs EXCEPT
+                                  ![m] = IF compact
+                                        THEN {m}
+                                        ELSE packs[pointer] \union {m}]
               /\ refs'     = [refs     EXCEPT ![m] = v]
+              /\ compacted' = IF compact
+                              THEN compacted \union {m}
+                              ELSE compacted \ {m}
     /\ pc' = [pc EXCEPT ![p] = "staged"]
     /\ UNCHANGED <<pointer, published, observed>>
 
@@ -117,7 +130,7 @@ SkipPublish(p) ==
     /\ pc[p] = "staged"
     /\ ~MustPublish(p)
     /\ pc' = [pc EXCEPT ![p] = "done"]
-    /\ UNCHANGED <<pointer, published, packs, readEtag, staged, parent, refs, newVal, snapErr, observed>>
+    /\ UNCHANGED <<pointer, published, packs, readEtag, staged, parent, refs, compacted, newVal, snapErr, observed>>
 
 \* Step 7: CAS.  Succeeds iff pointer still equals the etag this pusher read (A3).
 CasSucceed(p) ==
@@ -127,27 +140,27 @@ CasSucceed(p) ==
     /\ pointer' = staged[p]
     /\ published' = published \union {staged[p]}
     /\ pc' = [pc EXCEPT ![p] = "done"]
-    /\ UNCHANGED <<packs, readEtag, staged, parent, refs, newVal, snapErr, observed>>
+    /\ UNCHANGED <<packs, readEtag, staged, parent, refs, compacted, newVal, snapErr, observed>>
 
 CasFail(p) ==
     /\ pc[p] = "staged"
     /\ MustPublish(p)
     /\ pointer # readEtag[p]
     /\ pc' = [pc EXCEPT ![p] = "lost"]   \* will retry from idle
-    /\ UNCHANGED <<pointer, published, packs, readEtag, staged, parent, refs, newVal, snapErr, observed>>
+    /\ UNCHANGED <<pointer, published, packs, readEtag, staged, parent, refs, compacted, newVal, snapErr, observed>>
 
 \* Step 8: the fence.  Observe success ONLY after the push reached "done"
 \* (either via successful CAS or a legitimate skip).
 Observe(p) ==
     /\ pc[p] = "done"
     /\ observed' = observed \union {p}
-    /\ UNCHANGED <<pointer, published, packs, pc, readEtag, staged, parent, refs, newVal, snapErr>>
+    /\ UNCHANGED <<pointer, published, packs, pc, readEtag, staged, parent, refs, compacted, newVal, snapErr>>
 
 \* A loser retries: back to idle, ready to re-read the advanced pointer.
 Retry(p) ==
     /\ pc[p] = "lost"
     /\ pc' = [pc EXCEPT ![p] = "idle"]
-    /\ UNCHANGED <<pointer, published, packs, readEtag, staged, parent, refs, newVal, snapErr, observed>>
+    /\ UNCHANGED <<pointer, published, packs, readEtag, staged, parent, refs, compacted, newVal, snapErr, observed>>
 
 Next ==
     \E p \in Pushers :
@@ -209,14 +222,16 @@ Inv_RefDerivedFromParent ==
     \A p \in Pushers :
         Installed(p) => (parent[staged[p]] = readEtag[p] /\ readEtag[p] \in published)
 
-\* T2 (Reconstruction coverage -- non-vacuous): every published non-root manifest
-\* names a pack set that COVERS its published parent's pack set plus its own pack.
-\* Perci's mutation (packs[m] = {m} instead of packs[parent] U {m}) breaks this,
-\* because then packs[parent[m]] is not a subset of packs[m].
+\* T2 (Reconstruction coverage -- non-vacuous): every published non-root
+\* manifest either names its trusted full-closure compaction pack, or covers its
+\* published parent's pack set plus its own delta pack. The model abstracts
+\* Git's reachability walk as the `compacted` marker; production earns that
+\* marker only by feeding every post-push ref tip to `git pack-objects --revs`.
 Inv_Closed ==
     \A m \in published :
         (m # 0 /\ parent[m] \in published) =>
-            (packs[parent[m]] \subseteq packs[m] /\ m \in packs[m])
+            (m \in packs[m] /\
+                (m \in compacted \/ packs[parent[m]] \subseteq packs[m]))
 
 \* Parent integrity: every published non-root manifest's parent is also published
 \* (the install chain is grounded in durable history, never in vapor).

@@ -45,7 +45,7 @@ unacceptable behavior to **conduct@buzz-relay.org**.
 | Flutter | 3.41+ | Required for mobile app — install via [flutter.dev](https://docs.flutter.dev/get-started/install) |
 | Docker | 24+ | For Postgres, Redis, MinIO |
 | `just` | latest | Task runner — `cargo install just` |
-| `lefthook` | latest | Optional; run `lefthook install` for local Git hooks |
+| `lefthook` | 2.1.3 (Hermit-pinned) | Auto-installed by `just hooks` — no manual install needed |
 | `sqlx` migrations | workspace crate | `just migrate` applies embedded migrations from `migrations/` |
 
 This repo uses [Hermit](https://cashapp.github.io/hermit/) for toolchain

@@ -10,13 +10,13 @@ import type { TimelineMessage } from "@/features/messages/types";
  *      wire format.
  *   2. `message.signerPubkey` is set and passes `isKnownAgentPubkey` —
  *      authenticates against the raw event signer (NOT `message.pubkey`,
- *      which is the tag-attributed display author and can be spoofed via
- *      `actor`/`p` tags). The caller's predicate combines the community-wide
- *      known-agent baseline (`useKnownAgentPubkeys`) with any surface-local
- *      signals such as the signer profile's `isAgent` flag.
+ *      which may be a relay-delegated display author). The caller's predicate
+ *      combines the community-wide known-agent baseline
+ *      (`useKnownAgentPubkeys`) with any surface-local signals such as the
+ *      signer profile's `isAgent` flag.
  *
  * Extracting this predicate as a pure helper lets tests exercise the exact
- * signer-vs-attributed-author distinction with a real `TimelineMessage` from
+ * signer-vs-delegated-author distinction with a real `TimelineMessage` from
  * `formatTimelineMessages`, without a full React render harness.
  */
 export function getConfigNudgeAuthorPubkey(

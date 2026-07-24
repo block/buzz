@@ -67,6 +67,70 @@ export function nextProjectPullRequestStatusCreatedAt(pullRequest, now) {
   return Math.max(now, (pullRequest.statusCreatedAt ?? 0) + 1);
 }
 
+/** Keep consecutive decisions ordered across whole-second Nostr timestamps. */
+export function nextProjectPullRequestReviewCreatedAt(pullRequest, now) {
+  const latestDecisionCreatedAt = [
+    ...pullRequest.approvals,
+    ...pullRequest.changeRequests,
+  ].reduce((latest, decision) => Math.max(latest, decision.createdAt), 0);
+  return Math.max(now, latestDecisionCreatedAt + 1);
+}
+
+/** Trusted presentation kind for a compact review timeline row. */
+export function projectPullRequestCommentTimelineKind(comment) {
+  if (comment.isTrustedReviewRequest) return "review-request";
+  if (
+    !comment.isTrustedReviewDecision ||
+    !comment.reviewDecisionStatus ||
+    !comment.reviewDecision
+  ) {
+    return null;
+  }
+  return comment.reviewDecision;
+}
+
+/** Effective review summary shown above the PR review actions. */
+export function projectPullRequestReviewSummary(pullRequest) {
+  const approvalCount = pullRequest.approvals.length;
+  const changeRequestCount = pullRequest.changeRequests.length;
+  const isDraft = pullRequest.status === "Draft";
+  const state = isDraft
+    ? "This pull request is still a work in progress."
+    : changeRequestCount > 0
+      ? `${changeRequestCount} reviewer${changeRequestCount === 1 ? "" : "s"} requested changes.`
+      : pullRequest.reviewers.length > 0
+        ? "Review requested — no approvals yet."
+        : "No reviews yet.";
+
+  return {
+    approvalCount,
+    changeRequestCount,
+    detail: isDraft
+      ? "Draft pull requests cannot be merged."
+      : approvalCount === 0 && changeRequestCount === 0
+        ? "Approvals from reviewers will show up here."
+        : null,
+    showState: approvalCount === 0 || changeRequestCount > 0,
+    state,
+  };
+}
+
+/** Effective trusted, current-commit review decision represented by a comment. */
+export function projectPullRequestEffectiveReviewDecision(
+  pullRequest,
+  comment,
+) {
+  if (pullRequest.approvals.some((decision) => decision.id === comment.id)) {
+    return "approved";
+  }
+  if (
+    pullRequest.changeRequests.some((decision) => decision.id === comment.id)
+  ) {
+    return "changes-requested";
+  }
+  return null;
+}
+
 function eventToPullRequestUpdate(event) {
   return {
     id: event.id,
@@ -83,17 +147,64 @@ function eventToPullRequestUpdate(event) {
 // for any client (including `buzz` CLI users) that treats them as comments.
 export const PR_REVIEW_REQUEST_LABEL = "review-request";
 export const PR_APPROVAL_LABEL = "approval";
+export const PR_CHANGES_REQUESTED_LABEL = "changes-requested";
+export const PR_INLINE_COMMENT_LABEL = "inline-comment";
+
+/** Validate an inline diff anchor without normalizing attacker-controlled paths. */
+export function normalizeProjectPullRequestCommentAnchor(anchor) {
+  if (!anchor || typeof anchor.path !== "string") return null;
+  const path = anchor.path;
+  if (
+    path.length === 0 ||
+    path.length > 4_096 ||
+    path.startsWith("/") ||
+    path.includes("\\") ||
+    path.includes("\0") ||
+    path
+      .split("/")
+      .some((segment) => !segment || segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+  if (anchor.side !== "old" && anchor.side !== "new") return null;
+  if (!Number.isSafeInteger(anchor.line) || anchor.line < 1) return null;
+  return { line: anchor.line, path, side: anchor.side };
+}
 
 function eventToPullRequestComment(event) {
   const labels = getAllTags(event, "t").map((label) => label.toLowerCase());
   const isReviewRequest = labels.includes(PR_REVIEW_REQUEST_LABEL);
+  const isApproval = labels.includes(PR_APPROVAL_LABEL);
+  const isChangeRequest = labels.includes(PR_CHANGES_REQUESTED_LABEL);
+  const lineTag = getTag(event, "line");
+  const parsedLine =
+    lineTag && /^[1-9]\d*$/.test(lineTag) ? Number(lineTag) : Number.NaN;
+  const anchor =
+    isReviewRequest || isApproval
+      ? null
+      : normalizeProjectPullRequestCommentAnchor({
+          line: parsedLine,
+          path: getTag(event, "file"),
+          side: getTag(event, "side"),
+        });
   return {
     id: event.id,
     content: event.content,
     author: event.pubkey,
     createdAt: event.created_at,
-    isApproval: labels.includes(PR_APPROVAL_LABEL),
+    commit: getTag(event, "c") ?? null,
+    anchor,
+    isInlineComment:
+      Boolean(anchor) || labels.includes(PR_INLINE_COMMENT_LABEL),
+    isApproval,
+    isChangeRequest,
     isReviewRequest,
+    reviewDecision:
+      isApproval === isChangeRequest
+        ? null
+        : isApproval
+          ? "approved"
+          : "changes-requested",
     // For review requests the `p` tags are the requested reviewers.
     reviewerPubkeys: isReviewRequest
       ? getAllTags(event, "p").map((pubkey) => pubkey.toLowerCase())
@@ -125,20 +236,62 @@ function reviewersForPullRequest(pullRequest, comments) {
   return [...reviewers];
 }
 
-/** Latest approval comment per author, oldest first. */
-function approvalsForPullRequest(comments) {
+function reviewDecisionCommit(comment, initialCommit) {
+  return comment.commit ?? initialCommit;
+}
+
+function trustedReviewActors(pullRequest, reviewers) {
+  const author = pullRequest.pubkey.toLowerCase();
+  const trustedActors = new Set(reviewers);
+  for (const actor of allowedActorsForRoot(pullRequest)) {
+    if (actor !== author) trustedActors.add(actor);
+  }
+  return trustedActors;
+}
+
+/** Latest trusted, current-commit review decision per author. */
+function reviewDecisionsForPullRequest(
+  comments,
+  trustedActors,
+  initialCommit,
+  currentCommit,
+) {
   const byAuthor = new Map();
   for (const comment of comments) {
-    if (!comment.isApproval) continue;
+    if (!comment.reviewDecision || !currentCommit) continue;
     const key = comment.author.toLowerCase();
+    if (!trustedActors.has(key)) continue;
+    const commit = reviewDecisionCommit(comment, initialCommit);
+    if (commit !== currentCommit) continue;
     const existing = byAuthor.get(key);
-    if (!existing || comment.createdAt > existing.createdAt) {
-      byAuthor.set(key, comment);
+    if (
+      !existing ||
+      comment.createdAt > existing.createdAt ||
+      (comment.createdAt === existing.createdAt && comment.id > existing.id)
+    ) {
+      byAuthor.set(key, { ...comment, commit });
     }
   }
-  return [...byAuthor.values()]
-    .map(({ id, author, createdAt }) => ({ id, author, createdAt }))
-    .sort((left, right) => left.createdAt - right.createdAt);
+  const decisions = [...byAuthor.values()]
+    .map(({ id, author: reviewer, createdAt, commit, reviewDecision }) => ({
+      id,
+      author: reviewer,
+      createdAt,
+      commit,
+      reviewDecision,
+    }))
+    .sort(
+      (left, right) =>
+        left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+    );
+  return {
+    approvals: decisions.filter(
+      (decision) => decision.reviewDecision === "approved",
+    ),
+    changeRequests: decisions.filter(
+      (decision) => decision.reviewDecision === "changes-requested",
+    ),
+  };
 }
 
 export function eventToProjectPullRequest(
@@ -153,17 +306,47 @@ export function eventToProjectPullRequest(
     pullRequest.id,
     trustedUpdatesForPullRequest(pullRequest, updateEvents),
   ).map(eventToPullRequestUpdate);
-  const comments = eventsForPullRequest(pullRequest.id, commentEvents).map(
-    eventToPullRequestComment,
-  );
-  const reviewers = reviewersForPullRequest(pullRequest, comments);
-  const approvals = approvalsForPullRequest(comments);
+  const parsedComments = eventsForPullRequest(
+    pullRequest.id,
+    commentEvents,
+  ).map(eventToPullRequestComment);
+  const reviewers = reviewersForPullRequest(pullRequest, parsedComments);
+  const trustedActors = trustedReviewActors(pullRequest, reviewers);
+  const trustedReviewRequestActors = allowedActorsForRoot(pullRequest);
+  const latestCommit = getTag(latestUpdate ?? pullRequest, "c") ?? null;
+  const initialCommit = getTag(pullRequest, "c") ?? null;
+  const comments = parsedComments.map((comment) => ({
+    ...comment,
+    inlineCommentStatus: comment.anchor
+      ? latestCommit &&
+        reviewDecisionCommit(comment, initialCommit) === latestCommit
+        ? "current"
+        : "outdated"
+      : null,
+    isTrustedReviewDecision:
+      Boolean(comment.reviewDecision) &&
+      trustedActors.has(comment.author.toLowerCase()),
+    reviewDecisionStatus:
+      comment.reviewDecision && trustedActors.has(comment.author.toLowerCase())
+        ? latestCommit &&
+          reviewDecisionCommit(comment, initialCommit) === latestCommit
+          ? "current"
+          : "historical"
+        : null,
+    isTrustedReviewRequest:
+      comment.isReviewRequest &&
+      trustedReviewRequestActors.has(comment.author.toLowerCase()),
+  }));
   const title =
     getTag(pullRequest, "subject") ||
     pullRequest.content.split("\n")[0] ||
     "Untitled pull request";
-  const latestCommit = getTag(latestUpdate ?? pullRequest, "c") ?? null;
-  const initialCommit = getTag(pullRequest, "c") ?? null;
+  const reviewDecisions = reviewDecisionsForPullRequest(
+    comments,
+    trustedActors,
+    initialCommit,
+    latestCommit,
+  );
 
   return {
     id: pullRequest.id,
@@ -172,14 +355,17 @@ export function eventToProjectPullRequest(
     author: pullRequest.pubkey,
     createdAt: pullRequest.created_at,
     repoAddress: getTag(pullRequest, "a") ?? null,
+    channelId: getTag(pullRequest, "h") ?? null,
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
     reviewers,
-    approvals,
+    approvals: reviewDecisions.approvals,
+    changeRequests: reviewDecisions.changeRequests,
     status: statusFromEvent(pullRequest, latestStatus),
     statusEventId: latestStatus?.id ?? null,
     statusCreatedAt: latestStatus?.created_at ?? null,
     branchName: getTag(pullRequest, "branch-name") ?? null,
+    targetBranch: getTag(pullRequest, "target-branch") ?? null,
     initialCommit,
     commit: latestCommit,
     cloneUrls: getCloneUrls(latestUpdate ?? pullRequest),

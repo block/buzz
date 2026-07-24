@@ -17,6 +17,7 @@ use buzz_relay::config::Config;
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
+use buzz_relay::storage_sweep;
 use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
 use tokio_util::sync::CancellationToken;
@@ -128,12 +129,14 @@ async fn main() -> anyhow::Result<()> {
         health_port = config.health_port,
         metrics_port = config.metrics_port,
         max_frame_bytes = config.max_frame_bytes,
+        audit_enabled = config.audit_enabled,
         "Config loaded"
     );
 
     let usage_interval_secs = usage_metrics_interval_secs();
     let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
+    metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     info!(
         port = config.metrics_port,
         idle_timeout_secs = usage_idle_timeout_secs,
@@ -142,13 +145,18 @@ async fn main() -> anyhow::Result<()> {
 
     let db_config = DbConfig {
         database_url: config.database_url.clone(),
+        read_database_url: config.read_database_url.clone(),
         ..DbConfig::default()
     };
     let db = Db::new(&db_config).await.map_err(|e| {
         error!("Failed to connect to Postgres: {e}");
         anyhow::anyhow!("DB connection failed: {e}")
     })?;
-    info!("Postgres connected");
+    if db.has_read_pool() {
+        info!("Postgres connected (writer + read replica)");
+    } else {
+        info!("Postgres connected");
+    }
 
     let auto_migrate =
         buzz_auto_migrate_enabled(std::env::var("BUZZ_AUTO_MIGRATE").ok().as_deref());
@@ -164,6 +172,26 @@ async fn main() -> anyhow::Result<()> {
 
     if let Err(e) = db.ensure_future_partitions(3).await {
         error!("Failed to ensure partitions: {e}");
+    }
+
+    // Freshness fence probe: cursor pages route to the replica only for
+    // history the probe has verified as fully replayed. Deliberately AFTER
+    // the migration decision: spawn_fence_probe first verifies the
+    // commit-time floor guard (catalog shape + observed behavior through the
+    // armed pool) against the live schema, so a relay running with
+    // BUZZ_AUTO_MIGRATE off and migration 0021 unapplied can never open the
+    // fence over an unenforced floor. Verification failure is loud but
+    // non-fatal: the fence stays closed and every cursor page routes to the
+    // writer.
+    match db.spawn_fence_probe().await {
+        Ok(true) => info!("Replica fence probe started (floor guard verified)"),
+        Ok(false) => {}
+        Err(e) => {
+            error!(
+                "Replica fence disabled — floor guard verification failed: {e}. \
+                 All cursor reads stay on the writer."
+            );
+        }
     }
 
     // NIP-43: if membership enforcement is on, a valid owner pubkey is required.
@@ -291,20 +319,23 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => error!("Failed to backfill d_tags: {e}"),
     }
 
-    let audit_pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .min_connections(1)
-        .connect(&config.database_url)
-        .await
-        .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
-    let audit = AuditService::new(audit_pool);
-    // Audit schema is provisioned by the sqlx migrations at startup (the
-    // `audit_log` DDL is part of the migrated schema), so there is no runtime
-    // schema-ensure step.
-    info!("Audit service ready");
+    let audit = if config.audit_enabled {
+        let audit_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .min_connections(1)
+            .connect(&config.database_url)
+            .await
+            .map_err(|e| anyhow::anyhow!("Audit DB connection failed: {e}"))?;
+        info!("Audit service ready");
+        Some(AuditService::new(audit_pool))
+    } else {
+        info!("Audit logging disabled by BUZZ_AUDIT_ENABLED");
+        None
+    };
 
     let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&config.redis_url);
+        let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
+        cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
     };
@@ -339,13 +370,21 @@ async fn main() -> anyhow::Result<()> {
     // Postgres FTS: the searchable row IS the persisted event row (its
     // `tsvector` column is populated by the `insert_event` write), so there is
     // no external collection to provision — the search service just queries the
-    // same Postgres over its own pool.
+    // same Postgres over its own pool. Search is lag-tolerant, so it prefers
+    // the read replica when one is configured.
+    let search_db_url = config
+        .read_database_url
+        .as_deref()
+        .unwrap_or(&config.database_url);
     let search_pool = sqlx::postgres::PgPoolOptions::new()
-        .connect(&config.database_url)
+        .connect(search_db_url)
         .await
         .map_err(|e| anyhow::anyhow!("Search DB connection failed: {e}"))?;
     let search = SearchService::new(search_pool);
-    info!("Search service ready (Postgres FTS)");
+    info!(
+        replica = config.read_database_url.is_some(),
+        "Search service ready (Postgres FTS)"
+    );
 
     let workflow_config = buzz_workflow::WorkflowConfig::default();
     let workflow_engine = Arc::new(WorkflowEngine::new(db.clone(), workflow_config));
@@ -461,34 +500,46 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // NIP-43: publish the initial membership list on startup so clients can
-    // REQ kind:13534 immediately without waiting for the next membership change.
+    // NIP-43: reconcile the event-backed roster for every provisioned
+    // community before opening the listener. `relay_members` is canonical;
+    // this repairs pre-snapshot communities and any publication that failed
+    // after a membership transaction committed.
     if config.require_relay_membership {
-        // Resolve the deployment's community from the configured relay URL
-        // host (single-community per deployment), failing closed if the host
-        // isn't mapped. Await publication before opening the listener so the
-        // first client query observes the roster.
-        match buzz_relay::tenant::bind_deployment_community(&state.db, &state.config.relay_url)
-            .await
+        match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(&state).await
         {
-            Ok(tenant) => {
-                if let Err(e) = buzz_relay::handlers::side_effects::publish_nip43_membership_list(
-                    &tenant, &state,
+            Ok(count) => info!(count, "NIP-43 membership snapshots reconciled on startup"),
+            Err(error) => {
+                tracing::warn!(%error, "NIP-43 membership snapshot startup reconciliation failed")
+            }
+        }
+
+        let reconcile_state = Arc::clone(&state);
+        let interval_secs = std::env::var("BUZZ_NIP43_RECONCILE_INTERVAL_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(60)
+            .max(1);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match buzz_relay::handlers::side_effects::reconcile_nip43_membership_snapshots(
+                    &reconcile_state,
                 )
                 .await
                 {
-                    tracing::warn!(error = %e, "failed to publish initial NIP-43 membership list on startup");
-                } else {
-                    tracing::info!("NIP-43 membership list published on startup");
+                    Ok(count) if count > 0 => {
+                        info!(count, "NIP-43 membership snapshots repaired")
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        %error,
+                        "periodic NIP-43 membership snapshot reconciliation failed"
+                    ),
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = ?e,
-                    "initial NIP-43 membership list skipped: relay host is not mapped to a community"
-                );
-            }
-        }
+        });
     }
 
     // Emit kind:39000/39002 discovery events for channels that exist in the DB
@@ -907,6 +958,28 @@ async fn main() -> anyhow::Result<()> {
                 metrics::gauge!("buzz_db_pool_active").set(active as f64);
                 metrics::gauge!("buzz_db_pool_max").set(db_stats.max as f64);
 
+                if let Some(read_stats) = pool_state.db.read_pool_stats() {
+                    let read_active = read_stats.size.saturating_sub(read_stats.idle);
+                    metrics::gauge!("buzz_db_read_pool_size").set(read_stats.size as f64);
+                    metrics::gauge!("buzz_db_read_pool_idle").set(read_stats.idle as f64);
+                    metrics::gauge!("buzz_db_read_pool_active").set(read_active as f64);
+                    metrics::gauge!("buzz_db_read_pool_max").set(read_stats.max as f64);
+
+                    // Fence observability: 1 when replica routing is
+                    // eligible, and the verified-freshness lag in seconds.
+                    // Closed/stale fence reports open=0 with lag untouched.
+                    match pool_state.db.fence().verified_through() {
+                        Some(fence_ts) => {
+                            let lag = (chrono::Utc::now() - fence_ts).num_seconds();
+                            metrics::gauge!("buzz_db_replica_fence_open").set(1.0);
+                            metrics::gauge!("buzz_db_replica_fence_lag_seconds").set(lag as f64);
+                        }
+                        None => {
+                            metrics::gauge!("buzz_db_replica_fence_open").set(0.0);
+                        }
+                    }
+                }
+
                 let rs = pool_state.redis_pool.status();
                 metrics::gauge!("buzz_redis_pool_available").set(rs.available as f64);
                 metrics::gauge!("buzz_redis_pool_size").set(rs.size as f64);
@@ -1054,6 +1127,7 @@ async fn serve(
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
+    let drain_conn_manager = Arc::clone(&state.conn_manager);
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -1063,6 +1137,16 @@ async fn serve(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         info!("Starting graceful drain (30s timeout)");
         let _ = tx.send(true);
+        // Tell every connected client to reconnect NOW. Without this, upgraded
+        // WebSocket connections outlive the listener drain: clients ride the
+        // dying pod until the forced exit below and only learn about the
+        // restart from a TCP reset. The 1012 close frame turns a 35s silent
+        // death into an immediate, well-attributed reconnect.
+        let closed = drain_conn_manager.drain_all();
+        info!(
+            connections = closed,
+            "Sent restart close frame to all live WebSocket connections"
+        );
         // Hard timeout: force exit if connections don't drain within 30s.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         tracing::error!("Drain timeout exceeded — forcing exit");
@@ -1342,9 +1426,55 @@ async fn run_usage_metrics_tick(
             *leader = None;
             return Err(error);
         }
+        run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }
 
     Ok(())
+}
+
+/// Storage-sweep half of the leader-only tick: harvest/spawn (never awaits
+/// the sweep itself) then re-emit whatever snapshot is cached. Split out of
+/// [`run_usage_metrics_tick`] because it has its own always-on config
+/// (independent of `EmissionScope`) and a hard kill switch — a disabled
+/// sweep must never touch a single storage-family gauge, including the
+/// health ones, so a relay without `s3:ListBucket` can turn the whole
+/// feature off cleanly.
+async fn run_storage_sweep_tick(
+    state: &AppState,
+    emission_scope: &EmissionScope,
+    host_map: &HashMap<Uuid, String>,
+) {
+    static SWEEP_CONFIG: std::sync::OnceLock<storage_sweep::StorageSweepConfig> =
+        std::sync::OnceLock::new();
+    // SWEEP_CONFIG is a function-local OnceLock by design: it is localized
+    // feature config consumed only by this code path, read once on the first
+    // leader tick, and stable for the process lifetime (env is immutable).
+    // Keeping it here avoids widening Config/AppState for a single consumer.
+    let config = *SWEEP_CONFIG.get_or_init(storage_sweep::StorageSweepConfig::from_env);
+    if !config.enabled {
+        return;
+    }
+
+    let media_storage = Arc::clone(&state.media_storage);
+    let max_objects = config.max_objects;
+    storage_sweep::maybe_spawn_sweep(
+        &state.storage_sweep,
+        config.interval,
+        config.timeout,
+        async move {
+            buzz_media::fold_bucket_listing(max_objects, move |token| {
+                let media_storage = Arc::clone(&media_storage);
+                async move { media_storage.list_page(token, 1000).await }
+            })
+            .await
+        },
+    )
+    .await;
+
+    storage_sweep::emit_storage_metrics(&state.storage_sweep, host_map, |id| {
+        emission_scope.allows(id)
+    })
+    .await;
 }
 
 /// Emit the database-derived usage snapshot from the stable leader only.

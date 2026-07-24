@@ -25,19 +25,16 @@ import {
   useUpdateManagedAgentMutation,
   useUpdatePersonaMutation,
 } from "@/features/agents/hooks";
+import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { AddAgentToChannelDialog } from "@/features/agents/ui/AddAgentToChannelDialog";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "@/features/agents/lib/instanceInputForDefinition";
-import {
-  isManagedAgentActive,
-  startManagedAgentWithRules,
-  stopManagedAgentWithRules,
-} from "@/features/agents/lib/managedAgentControlActions";
 import { describeLogFile } from "@/features/agents/ui/agentUi";
 import { AgentDialog } from "@/features/agents/ui/AgentDialog";
+import { useAgentLifecycleActions } from "@/features/profile/ui/useAgentLifecycleActions";
 import {
   consumePendingOpenEditAgent,
   type EditAgentFocusTarget,
@@ -125,6 +122,7 @@ export function UserProfilePanel({
   widthPx,
   transparentChrome = false,
 }: UserProfilePanelProps) {
+  const { globalConfig } = useGlobalAgentConfig();
   const isOverlay = useIsThreadPanelOverlay();
   const isSplitLayout = layout === "split";
   useEscapeKey(onClose, isOverlay || isSinglePanelView);
@@ -197,6 +195,12 @@ export function UserProfilePanel({
     }
     return undefined;
   }, [managedAgentsQuery.data, persona, pubkey]);
+  const personaInstances = React.useMemo(() => {
+    if (!managedAgent?.personaId) return managedAgent ? [managedAgent] : [];
+    return (managedAgentsQuery.data ?? []).filter(
+      (agent) => agent.personaId === managedAgent.personaId,
+    );
+  }, [managedAgent, managedAgentsQuery.data]);
   const resolvedPersonaFromSource = React.useMemo(() => {
     const personaId = persona?.id ?? managedAgent?.personaId;
     if (personaId) {
@@ -322,8 +326,7 @@ export function UserProfilePanel({
   // covering both locally managed agents and declared-owned relay agents.
   const canEditAgent =
     isOwner === true &&
-    (managedAgent !== undefined ||
-      (resolvedPersona !== undefined && !resolvedPersona.isBuiltIn));
+    (managedAgent !== undefined || resolvedPersona !== undefined);
   const memoryQuery = useAgentMemoryQuery(effectivePubkey, {
     enabled: viewerIsOwner && Boolean(effectivePubkey),
   });
@@ -395,7 +398,7 @@ export function UserProfilePanel({
   });
 
   const handleEditAgent = React.useCallback(() => {
-    if (resolvedPersona && !resolvedPersona.isBuiltIn) {
+    if (resolvedPersona) {
       setPersonaDialogState(editPersonaDialogState(resolvedPersona));
       return;
     }
@@ -418,6 +421,7 @@ export function UserProfilePanel({
       const { runtime, warnings } = resolveStartRuntimeForDefinition(
         personaToStart,
         runtimes,
+        globalConfig.preferred_runtime,
       );
 
       for (const warning of warnings) {
@@ -437,47 +441,20 @@ export function UserProfilePanel({
     [
       availableRuntimesQuery,
       createAgentMutation.mutateAsync,
+      globalConfig.preferred_runtime,
       managedAgentsQuery.refetch,
       relayAgentsQuery.refetch,
     ],
   );
 
-  const handleAgentPrimaryAction = React.useCallback(async () => {
-    if (!managedAgent) return;
-
-    try {
-      if (isManagedAgentActive(managedAgent)) {
-        const result = await stopManagedAgentWithRules({
-          agent: managedAgent,
-          channels: channelsQuery.data ?? [],
-          relayAgents: relayAgentsQuery.data ?? [],
-          stopManagedAgent: stopAgentMutation.mutateAsync,
-        });
-        toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
-        return;
-      }
-
-      await startManagedAgentWithRules({
-        agent: managedAgent,
-        startManagedAgent: startAgentMutation.mutateAsync,
-      });
-      toast.success(
-        managedAgent.backend.type === "provider"
-          ? `Deploying ${managedAgent.name}.`
-          : `Started ${managedAgent.name}.`,
-      );
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Agent action failed.",
-      );
-    }
-  }, [
-    channelsQuery.data,
-    managedAgent,
-    relayAgentsQuery.data,
-    startAgentMutation.mutateAsync,
-    stopAgentMutation.mutateAsync,
-  ]);
+  const { handleAgentPrimaryAction, handleAgentRestart } =
+    useAgentLifecycleActions({
+      channels: channelsQuery.data,
+      managedAgent,
+      relayAgents: relayAgentsQuery.data,
+      startManagedAgent: startAgentMutation.mutateAsync,
+      stopManagedAgent: stopAgentMutation.mutateAsync,
+    });
 
   const handleInstantiateAgent = React.useCallback(async () => {
     if (!resolvedPersona) return;
@@ -567,7 +544,7 @@ export function UserProfilePanel({
   );
 
   const handleEditPersona = React.useCallback(() => {
-    if (!resolvedPersona || resolvedPersona.isBuiltIn) return;
+    if (!resolvedPersona) return;
     setPersonaDialogState(editPersonaDialogState(resolvedPersona));
   }, [resolvedPersona]);
 
@@ -737,8 +714,7 @@ export function UserProfilePanel({
     resolvedPersona,
   );
   const canManagePersona = isOwner === true && resolvedPersona !== undefined;
-  const canEditPersona =
-    canManagePersona && resolvedPersona?.isBuiltIn !== true;
+  const canEditPersona = canManagePersona;
   const canDeletePersona = canManagePersona && !resolvedPersona?.sourceTeam;
   const archiveActions = useIdentityArchive(effectivePubkey);
   const agentSettingsMenu = (
@@ -820,6 +796,7 @@ export function UserProfilePanel({
           followMutation={followMutation}
           agentInstruction={agentInstruction}
           handleAgentPrimaryAction={handleAgentPrimaryAction}
+          handleAgentRestart={handleAgentRestart}
           handleEditAgent={handleEditAgent}
           handleEditPersona={canEditPersona ? handleEditPersona : undefined}
           handleInstantiateAgent={handleInstantiateAgent}
@@ -831,6 +808,7 @@ export function UserProfilePanel({
           isFollowing={isFollowing}
           isOwner={viewerIsOwner}
           isSelf={isSelf}
+          instances={personaInstances}
           activityAgent={activityAgent}
           managedAgent={managedAgent}
           memoriesLoading={memoryQuery.isLoading}
@@ -839,6 +817,7 @@ export function UserProfilePanel({
           agentSettingsFields={agentSettingsFields}
           diagnosticsFields={diagnosticsFields}
           onAddToChannel={() => setAddToChannelOpen(true)}
+          onOpenInstance={(instancePubkey) => onOpenProfile?.(instancePubkey)}
           onOpenActivity={handleOpenActivity}
           onOpenChannel={handleOpenChannel}
           onOpenDiagnostics={() => setView("diagnostics")}

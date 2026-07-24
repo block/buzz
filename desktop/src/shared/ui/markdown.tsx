@@ -9,6 +9,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
@@ -22,6 +23,7 @@ import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { cn } from "@/shared/lib/cn";
+import { copyTextToClipboard } from "@/shared/lib/clipboard";
 import {
   extractSupportedLinkPreviews,
   parseSupportedLinkPreview,
@@ -43,11 +45,6 @@ import {
   MENTION_CHIP_PREFIX_CLASS,
   MESSAGE_MARKDOWN_CLASS,
 } from "@/shared/ui/mentionChip";
-import {
-  POPOVER_CUSTOM_ENTER_MOTION_CLASS,
-  POPOVER_SHADOW_STYLE,
-  POPOVER_SURFACE_CLASS,
-} from "@/shared/ui/popoverSurface";
 
 import {
   classifyChildren,
@@ -65,6 +62,12 @@ import {
 import { FileCard } from "./markdown/FileCard";
 import { InlineEmojiPopover } from "./markdown/InlineEmojiPopover";
 import { MarkdownInput } from "./markdown/MarkdownInput";
+import {
+  MediaContextMenu,
+  type MediaContextMenuPosition,
+  useDismissMediaContextMenu,
+} from "./markdown/MediaContextMenu";
+import { isVideoMedia } from "./markdown/mediaEntry";
 import {
   clampImageLightboxZoom,
   type ImageGalleryDirection,
@@ -142,11 +145,6 @@ type WebKitGestureLikeEvent = Event & {
   scale?: number;
 };
 
-type ImageContextMenuPosition = {
-  x: number;
-  y: number;
-};
-
 function getImageLightboxFocusableElements(
   container: HTMLElement,
 ): HTMLElement[] {
@@ -166,69 +164,6 @@ function getImageLightboxFocusableElements(
       !element.hasAttribute("disabled") &&
       element.getAttribute("aria-hidden") !== "true" &&
       element.getClientRects().length > 0,
-  );
-}
-
-function useDismissImageContextMenu(isOpen: boolean, onDismiss: () => void) {
-  React.useEffect(() => {
-    if (!isOpen) return;
-    // Defer attaching the dismiss listeners until after the current event
-    // loop turn. The right-click that opens the menu (a `contextmenu` on
-    // mousedown) is often followed by a trailing `click`/`pointerup` on the
-    // same interaction; attaching synchronously lets that trailing event —
-    // and the platform `click` some webviews emit on right-button release —
-    // immediately dismiss the menu, so it only flashes. Deferring guarantees
-    // the opening interaction can never be the one that closes it.
-    let attached = false;
-    const timer = window.setTimeout(() => {
-      attached = true;
-      window.addEventListener("click", onDismiss);
-      window.addEventListener("contextmenu", onDismiss);
-      window.addEventListener("scroll", onDismiss, true);
-    }, 0);
-    return () => {
-      window.clearTimeout(timer);
-      if (attached) {
-        window.removeEventListener("click", onDismiss);
-        window.removeEventListener("contextmenu", onDismiss);
-        window.removeEventListener("scroll", onDismiss, true);
-      }
-    };
-  }, [isOpen, onDismiss]);
-}
-
-function ImageContextMenu({
-  onCopy,
-  onDownload,
-  portalContainer,
-  position,
-}: {
-  onCopy: () => void;
-  onDownload: () => void;
-  portalContainer?: Element;
-  position: ImageContextMenuPosition;
-}) {
-  const itemClass =
-    "flex min-h-9 w-full cursor-default select-none items-center rounded-lg py-2 pl-2 pr-4 text-sm outline-hidden hover:bg-muted/50 hover:text-foreground";
-  return createPortal(
-    <div
-      className={cn(
-        "fixed z-[100] min-w-60 origin-top-left rounded-xl p-1 slide-in-from-top-1",
-        POPOVER_CUSTOM_ENTER_MOTION_CLASS,
-        POPOVER_SURFACE_CLASS,
-      )}
-      data-image-context-menu=""
-      data-image-lightbox-controls=""
-      style={{ ...POPOVER_SHADOW_STYLE, left: position.x, top: position.y }}
-    >
-      <button type="button" className={itemClass} onClick={onCopy}>
-        Copy image
-      </button>
-      <button type="button" className={itemClass} onClick={onDownload}>
-        Download image
-      </button>
-    </div>,
-    portalContainer ?? document.body,
   );
 }
 
@@ -287,7 +222,7 @@ function ImageZoomOverlay({
   const [hasEntered, setHasEntered] = React.useState(prefersReducedMotion);
   const [isAdjustingZoom, setIsAdjustingZoom] = React.useState(false);
   const [isGalleryNavigating, setIsGalleryNavigating] = React.useState(false);
-  const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
+  const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const currentItem = items[currentIndex] ?? items[0];
   const basisBox = React.useMemo(
     () => imageLightboxBasisBoxForItem(currentItem, sourceBox),
@@ -446,7 +381,7 @@ function ImageZoomOverlay({
     navigateGallery(currentIndex + 1);
   }, [currentIndex, navigateGallery]);
 
-  useDismissImageContextMenu(Boolean(menu), closeMenu);
+  useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
   React.useEffect(() => {
     if (prefersReducedMotion) {
@@ -1042,9 +977,15 @@ function ImageZoomOverlay({
         </div>
       </div>
       {menu && canActOnCurrentImage ? (
-        <ImageContextMenu
-          onCopy={handleMenuCopy}
-          onDownload={handleMenuDownload}
+        <MediaContextMenu
+          dataAttributes={[
+            "data-image-context-menu",
+            "data-image-lightbox-controls",
+          ]}
+          items={[
+            { label: "Copy image", onSelect: handleMenuCopy },
+            { label: "Download image", onSelect: handleMenuDownload },
+          ]}
           portalContainer={dialogRef.current ?? undefined}
           position={menu}
         />
@@ -1072,7 +1013,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
     sourceScope: Element | null;
   } | null>(null);
   const [isHiddenInSpoiler, setIsHiddenInSpoiler] = React.useState(false);
-  const [menu, setMenu] = React.useState<ImageContextMenuPosition | null>(null);
+  const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
   const inlineImageRef = React.useRef<HTMLImageElement | null>(null);
   const thumbnailImageRef = React.useRef<HTMLImageElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
@@ -1158,7 +1099,7 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
   }, []);
 
   const closeMenu = React.useCallback(() => setMenu(null), []);
-  useDismissImageContextMenu(Boolean(menu), closeMenu);
+  useDismissMediaContextMenu(Boolean(menu), closeMenu);
 
   const handleContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -1279,9 +1220,12 @@ function ImageBlock({ alt, dim, resolvedSrc, src, thumbSrc }: ImageBlockProps) {
         />
       </button>
       {menu && src ? (
-        <ImageContextMenu
-          onCopy={() => handleCopyImage(src)}
-          onDownload={() => handleDownload(src)}
+        <MediaContextMenu
+          dataAttributes={["data-image-context-menu"]}
+          items={[
+            { label: "Copy image", onSelect: () => handleCopyImage(src) },
+            { label: "Download image", onSelect: () => handleDownload(src) },
+          ]}
           position={menu}
         />
       ) : null}
@@ -1325,6 +1269,85 @@ function ImageMosaic({ children }: { children: React.ReactNode[] }) {
     >
       {children}
     </div>
+  );
+}
+
+/**
+ * An external `[text](href)` link with a custom right-click menu.
+ *
+ * Buzz renders inside a native webview whose default context menu has no
+ * useful link actions, so a plain right-click on a link is a no-op. This adds
+ * an in-app menu with "Open link" (via the OS opener, matching the anchor's
+ * left-click `target="_blank"` behavior) and "Copy link" (the real href, not
+ * the masked display text).
+ */
+function ExternalLinkAnchor({
+  anchorProps,
+  children,
+  href,
+  isLinearLink,
+  label,
+}: {
+  anchorProps: React.ComponentPropsWithoutRef<"a">;
+  children: React.ReactNode;
+  href: string | undefined;
+  isLinearLink: boolean;
+  label: string;
+}) {
+  const [menu, setMenu] = React.useState<MediaContextMenuPosition | null>(null);
+  const closeMenu = React.useCallback(() => setMenu(null), []);
+  useDismissMediaContextMenu(Boolean(menu), closeMenu);
+
+  const anchor = (
+    <a
+      {...anchorProps}
+      className={cn(
+        "font-medium underline underline-offset-4 transition-colors",
+        isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
+      )}
+      href={href}
+      onContextMenuCapture={(event) => {
+        if (!href) return;
+        event.preventDefault();
+        setMenu({ x: event.clientX, y: event.clientY });
+      }}
+      rel="noreferrer"
+      target="_blank"
+    >
+      {children}
+    </a>
+  );
+
+  return (
+    <>
+      <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
+        {anchor}
+      </MaskedLinkTooltip>
+      {menu && href ? (
+        <MediaContextMenu
+          dataAttributes={["data-link-context-menu"]}
+          items={[
+            {
+              label: "Open link",
+              onSelect: () => {
+                closeMenu();
+                void openUrl(href).catch(() => {
+                  toast.error("Failed to open link");
+                });
+              },
+            },
+            {
+              label: "Copy link",
+              onSelect: () => {
+                closeMenu();
+                copyTextToClipboard(href, "Link copied to clipboard");
+              },
+            },
+          ]}
+          position={menu}
+        />
+      ) : null}
+    </>
   );
 }
 
@@ -1445,25 +1468,15 @@ function createMarkdownComponents(
     const supportedLinkPreview = href ? parseSupportedLinkPreview(href) : null;
     const isLinearLink = supportedLinkPreview?.kind === "linear-issue";
 
-    const anchor = (
-      <a
-        {...props}
-        className={cn(
-          "font-medium underline underline-offset-4 transition-colors",
-          isLinearLink ? "linear-link" : "text-primary hover:text-primary/80",
-        )}
+    return (
+      <ExternalLinkAnchor
+        anchorProps={props}
         href={href}
-        rel="noreferrer"
-        target="_blank"
+        isLinearLink={isLinearLink}
+        label={label}
       >
         {children}
-      </a>
-    );
-
-    return (
-      <MaskedLinkTooltip disabled={isLinearLink} href={href} label={label}>
-        {anchor}
-      </MaskedLinkTooltip>
+      </ExternalLinkAnchor>
     );
   }
 
@@ -1556,16 +1569,15 @@ function createMarkdownComponents(
     hr: () => <hr className="border-border/80" />,
     img: function MarkdownImage({ alt, src }) {
       const { imetaByUrl } = useMarkdownRuntime();
-      const resolvedSrc = src ? rewriteRelayUrl(src) : src;
+      const entry = src ? imetaByUrl?.get(src) : undefined;
+      const isVideo = src ? isVideoMedia(src, entry?.m) : false;
       if (!interactive) {
-        const fallbackLabel = resolvedSrc?.endsWith(".mp4")
-          ? "Video attachment"
-          : "Image attachment";
+        const fallbackLabel = isVideo ? "Video attachment" : "Image attachment";
         return <span>{alt?.trim() || fallbackLabel}</span>;
       }
 
-      if (resolvedSrc?.endsWith(".mp4")) {
-        const entry = src ? imetaByUrl?.get(src) : undefined;
+      const resolvedSrc = src ? rewriteRelayUrl(src) : src;
+      if (isVideo && src && resolvedSrc) {
         return (
           <span
             className={cn(
@@ -1583,7 +1595,6 @@ function createMarkdownComponents(
           </span>
         );
       }
-      const entry = src ? imetaByUrl?.get(src) : undefined;
       return (
         <span data-block-media="" className="block min-w-0 max-w-full">
           <ImageBlock

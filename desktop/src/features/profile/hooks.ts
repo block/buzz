@@ -42,6 +42,7 @@ import {
   resolveAvatarDataUrl,
 } from "@/features/profile/lib/selfProfileStorage";
 import { useCommunities } from "@/features/communities/useCommunities";
+import { updateCachedChannelMemberDisplayName } from "@/features/channels/channelMemberProfileCache";
 
 export const profileQueryKey = ["profile"] as const;
 export const contactListQueryKey = (pubkey: string) =>
@@ -73,6 +74,7 @@ async function persistSelfProfile(
     version: 1,
     displayName: profile.displayName,
     avatarUrl: profile.avatarUrl,
+    about: profile.about,
     avatarDataUrl,
     updatedAt: Date.now(),
     // Only persist the presence bit when true — no-event fallbacks
@@ -106,7 +108,7 @@ export function useProfileQuery(enabled = true) {
             pubkey,
             displayName: cached.displayName,
             avatarUrl: cached.avatarUrl,
-            about: null,
+            about: cached.about,
             nip05Handle: null,
             ownerPubkey: null,
             // Only true when the cache entry was explicitly written with a
@@ -510,6 +512,12 @@ export function useUpdateProfileMutation() {
         void persistSelfProfile(relayUrl, pubkey, profile);
       }
       if (pubkey) {
+        await updateCachedChannelMemberDisplayName(
+          queryClient,
+          pubkey,
+          profile.displayName,
+        );
+
         // Own author labels/avatars render through the users-batch delta
         // cache too — evict so the next batch run picks up the new profile
         // instead of the fresh-looking stale entry, then poke the aggregates.

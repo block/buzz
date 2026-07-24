@@ -40,6 +40,7 @@ import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
 import type { VideoReviewContext } from "@/shared/ui/VideoPlayer";
 import { MessageActionBar } from "./MessageActionBar";
+import { MessageAgentOwner } from "./MessageAgentOwner";
 import { MessageAuthorText, MessageHeaderRow } from "./MessageHeader";
 import { MessageTimestamp } from "./MessageTimestamp";
 import { WaveMessageAttachment } from "./WaveMessageAttachment";
@@ -86,6 +87,8 @@ export const MessageRow = React.memo(
     onMarkRead,
     onToggleReaction,
     onReply,
+    onEntranceComplete,
+    playEntrance = false,
     onUnfollowThread,
     profiles,
     searchQuery,
@@ -132,6 +135,8 @@ export const MessageRow = React.memo(
     ) => Promise<void>;
     onReply?: (message: TimelineMessage) => void;
     onUnfollowThread?: (message: TimelineMessage) => void;
+    onEntranceComplete?: (messageId: string) => void;
+    playEntrance?: boolean;
     profiles?: UserProfileLookup;
     searchQuery?: string;
     showDepthGuides?: boolean;
@@ -142,6 +147,17 @@ export const MessageRow = React.memo(
     );
     const [badgeBurstEmoji, setBadgeBurstEmoji] = React.useState<string | null>(
       null,
+    );
+    const handleEntranceAnimationEnd = React.useCallback(
+      (event: React.AnimationEvent<HTMLElement>) => {
+        if (
+          playEntrance &&
+          event.animationName === "motion-enter-conversation"
+        ) {
+          onEntranceComplete?.(message.id);
+        }
+      },
+      [message.id, onEntranceComplete, playEntrance],
     );
     const {
       reactions,
@@ -343,8 +359,8 @@ export const MessageRow = React.memo(
               )}
               // Only pass the author pubkey for agent-authored messages so
               // config-nudge cards can authenticate the sender. Uses the
-              // raw event signer (signerPubkey) — not the tag-attributed
-              // display author — to prevent actor/p-tag spoofing.
+              // raw event signer (signerPubkey), not a relay-delegated display
+              // author, because the agent itself must have signed the card.
               configNudgeAuthorPubkey={getConfigNudgeAuthorPubkey(
                 message,
                 isKnownAgentPubkey,
@@ -444,6 +460,12 @@ export const MessageRow = React.memo(
     ) : (
       <MessageAuthorText as="h3">{message.author}</MessageAuthorText>
     );
+    const agentOwnerNode = message.isAgent ? (
+      <MessageAgentOwner
+        ownerLabel={message.ownerLabel}
+        ownerPubkey={message.ownerPubkey}
+      />
+    ) : null;
 
     const actionBarNode = (
       <div
@@ -530,6 +552,7 @@ export const MessageRow = React.memo(
         ) : (
           authorNode
         )}
+        {agentOwnerNode}
         {inlineMetadataNode}
         {message.personaDisplayName &&
         message.personaDisplayName !== message.author ? (
@@ -749,6 +772,7 @@ export const MessageRow = React.memo(
         <article
           className={cn(
             "group/message relative z-10 rounded-2xl transition-colors",
+            playEntrance && "motion-enter-conversation",
             "py-1",
             hoverBackground
               ? "mx-1 px-2 hover:bg-muted/50 focus-within:bg-muted/50"
@@ -764,6 +788,7 @@ export const MessageRow = React.memo(
           )}
           data-message-id={message.id}
           data-testid="message-row"
+          onAnimationEnd={handleEntranceAnimationEnd}
         >
           {isThreadReplyLayout ? (
             <>
@@ -794,6 +819,9 @@ export const MessageRow = React.memo(
     prev.message.pubkey === next.message.pubkey &&
     prev.message.body === next.message.body &&
     prev.message.author === next.message.author &&
+    prev.message.isAgent === next.message.isAgent &&
+    prev.message.ownerPubkey === next.message.ownerPubkey &&
+    prev.message.ownerLabel === next.message.ownerLabel &&
     prev.message.avatarUrl === next.message.avatarUrl &&
     prev.message.accent === next.message.accent &&
     prev.message.time === next.message.time &&
@@ -836,6 +864,8 @@ export const MessageRow = React.memo(
     prev.onCollapseDescendants === next.onCollapseDescendants &&
     prev.onCollapseDescendantsHoverChange ===
       next.onCollapseDescendantsHoverChange &&
+    prev.onEntranceComplete === next.onEntranceComplete &&
+    prev.playEntrance === next.playEntrance &&
     prev.profiles === next.profiles &&
     prev.searchQuery === next.searchQuery &&
     prev.videoReviewContext === next.videoReviewContext,

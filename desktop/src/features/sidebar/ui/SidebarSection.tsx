@@ -294,7 +294,9 @@ export function ChannelMenuButton({
         dmParticipants={dmParticipants}
         presenceStatus={presenceStatus}
       />
-      <span className="min-w-0 flex-1 truncate">{resolvedLabel}</span>
+      <span className="min-w-0 flex-1 truncate" data-sidebar-row-label>
+        {resolvedLabel}
+      </span>
       {ephemeralDisplay ? (
         <EphemeralChannelBadge
           display={ephemeralDisplay}
@@ -405,10 +407,11 @@ export function SidebarSection({
               aria-controls={contentId}
               aria-expanded={!isCollapsed}
               className={SECTION_LABEL_BUTTON_CLASS}
+              data-testid={`${testId}-section-label`}
               onClick={onToggleCollapsed}
               type="button"
             >
-              <span>{title}</span>
+              <span data-sidebar-section-title>{title}</span>
               <span aria-hidden="true" className={SECTION_LABEL_CHEVRON_CLASS}>
                 <ChevronDown
                   className={cn(

@@ -6,6 +6,7 @@ mod engram_fetch;
 mod filter;
 mod observer;
 mod pool;
+mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
@@ -13,7 +14,7 @@ mod usage;
 
 pub use usage::TurnUsage;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,7 +29,10 @@ use buzz_core::observer::{
     OBSERVER_MAX_PLAINTEXT_LEN,
 };
 use clap::Parser;
-use config::{Config, DedupMode, ModelsArgs, MultipleEventHandling, RespondTo, SubscribeMode};
+use config::{
+    AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
+    MultipleEventHandling, RespondTo, SubscribeMode,
+};
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
 use nostr::{PublicKey, ToBech32};
@@ -36,6 +40,7 @@ use pool::{
     AgentPool, ControlSignal, IdleSwitchResult, OwnedAgent, PromptContext, PromptOutcome,
     PromptResult, PromptSource, SessionState, TimeoutKind,
 };
+use pool_lifecycle::PoolLifecycle;
 use queue::{CancelReason, EventQueue, FlushBatch, QueuedEvent, ThreadTags};
 use relay::{HarnessRelay, RelayEventPublisher};
 use tokio::sync::{mpsc, watch};
@@ -46,7 +51,7 @@ use uuid::Uuid;
 ///
 /// This avoids clap rejecting harness flags (like `--private-key`) that aren't
 /// declared on the subcommand's `Parser`. The `models` path has its own
-/// `ModelsArgs` parser; the default path uses the existing `CliArgs`.
+/// dedicated parser; the default path uses the existing `CliArgs`.
 ///
 /// **Constraint**: subcommand must be argv[1] — flags before the subcommand
 /// name (e.g., `buzz-acp --verbose models`) are not supported.
@@ -54,8 +59,12 @@ fn is_subcommand(name: &str) -> bool {
     std::env::args().nth(1).map(|a| a == name).unwrap_or(false)
 }
 
-/// Timeout for the `buzz-acp models` subcommand (spawn + init + session/new).
+/// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
 const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
+/// human interaction, so it must not share the short probe timeout.
+const AUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Publish a kind:20001 presence update event via the WebSocket connection.
 ///
@@ -79,6 +88,30 @@ async fn publish_presence(
         .map_err(|e| relay::RelayError::Http(format!("presence sign error: {e}")))?;
     publisher.publish_event(event).await?;
     Ok(())
+}
+
+fn emit_runtime_lifecycle(
+    observer: Option<&observer::ObserverHandle>,
+    start_nonce: &str,
+    pubkey: &str,
+    relay_url: &str,
+    lifecycle: &str,
+    error: Option<&str>,
+) {
+    if let Some(observer) = observer {
+        observer.emit(
+            "managed_agent_runtime_lifecycle",
+            None,
+            &observer::ObserverContext::default(),
+            serde_json::json!({
+                "pubkey": pubkey,
+                "relayUrl": relay_url,
+                "startNonce": start_nonce,
+                "lifecycle": lifecycle,
+                "error": error,
+            }),
+        );
+    }
 }
 
 /// Resolve the agent's owner pubkey at startup.
@@ -187,13 +220,32 @@ async fn is_owner_or_sibling(
 /// Coarse security policy applied before subscription rules. Both `OwnerOnly`
 /// and `Allowlist` accept the owner and same-owner siblings; `Allowlist`
 /// additionally accepts the explicit external pubkey list.
+///
+/// # DM hardening (`is_dm`)
+///
+/// Clients auto-p-tag every DM participant, so in a DM *any* participant's
+/// message looks like a mention and would fire a turn. Combined with
+/// agent-initiated DMs (the agent can be asked to DM a third party), that
+/// turns `anyone`/`allowlist` modes into transitive access grants: whoever
+/// lands in a DM with the agent can prompt it. To close that hole, when
+/// `is_dm` is true only the owner and cryptographically verified same-owner
+/// siblings may fire a turn — the explicit allowlist and `anyone` mode do
+/// NOT apply inside DMs. `Nobody` still drops everything. Callers must
+/// resolve `is_dm` fail-closed: unknown channel type ⇒ treat as DM.
 async fn author_allowed(
     respond_to: &RespondTo,
     allowlist: &HashSet<String>,
     author: &str,
+    is_dm: bool,
     owner_cache: &OwnerCache,
     rest_client: &relay::RestClient,
 ) -> bool {
+    if is_dm {
+        return match respond_to {
+            RespondTo::Nobody => false,
+            _ => is_owner_or_sibling(author, owner_cache, rest_client).await,
+        };
+    }
     match respond_to {
         RespondTo::Anyone => true,
         RespondTo::Nobody => false,
@@ -201,6 +253,35 @@ async fn author_allowed(
         RespondTo::Allowlist => {
             allowlist.contains(author)
                 || is_owner_or_sibling(author, owner_cache, rest_client).await
+        }
+    }
+}
+
+/// Resolve whether `channel_id` is a DM, for the inbound author gate.
+///
+/// Resolution order:
+/// 1. Startup discovery metadata (`startup_info`) — covers channels known at
+///    process start.
+/// 2. Per-loop resolution cache (`cache`) — covers channels resolved since.
+/// 3. Lazy REST fetch of the channel's kind:39000 metadata — covers channels
+///    the agent was added to *after* startup (the exploit path: an
+///    agent-initiated DM is exactly such a channel).
+///
+/// Fail-closed: if the fetch fails or times out, the channel is treated as a
+/// DM for this event and the result is NOT cached, so a later event retries
+/// the fetch instead of pinning a mis-classification.
+pub(crate) async fn is_dm_channel(
+    channel_id: Uuid,
+    channel_info: &pool::ChannelInfoResolver,
+) -> bool {
+    match channel_info.resolve(channel_id).await {
+        Some(info) => info.channel_type == "dm",
+        None => {
+            tracing::warn!(
+                channel_id = %channel_id,
+                "channel type unresolved — treating as DM for author gate (fail closed)"
+            );
+            true
         }
     }
 }
@@ -280,6 +361,53 @@ async fn check_sibling_via_profile(
     false
 }
 
+const OBSERVER_PUBLISH_INTERVAL: Duration = Duration::from_millis(167);
+const OBSERVER_PUBLISH_LIMIT_PER_MINUTE: usize = 90;
+
+struct ObserverPublishPacer {
+    next_publish: tokio::time::Instant,
+    published: VecDeque<tokio::time::Instant>,
+}
+
+impl ObserverPublishPacer {
+    fn new() -> Self {
+        Self {
+            // No initial burst: even the first snapshot frame waits for its slot.
+            next_publish: tokio::time::Instant::now() + OBSERVER_PUBLISH_INTERVAL,
+            published: VecDeque::with_capacity(OBSERVER_PUBLISH_LIMIT_PER_MINUTE),
+        }
+    }
+
+    async fn wait(&mut self) {
+        loop {
+            let now = tokio::time::Instant::now();
+            while self
+                .published
+                .front()
+                .is_some_and(|sent| now.duration_since(*sent) >= Duration::from_secs(60))
+            {
+                self.published.pop_front();
+            }
+
+            let minute_slot = self.published.front().and_then(|sent| {
+                (self.published.len() >= OBSERVER_PUBLISH_LIMIT_PER_MINUTE)
+                    .then_some(*sent + Duration::from_secs(60))
+            });
+            let publish_at =
+                minute_slot.map_or(self.next_publish, |slot| slot.max(self.next_publish));
+            if publish_at > now {
+                tokio::time::sleep_until(publish_at).await;
+                continue;
+            }
+
+            let published_at = tokio::time::Instant::now();
+            self.published.push_back(published_at);
+            self.next_publish = published_at + OBSERVER_PUBLISH_INTERVAL;
+            return;
+        }
+    }
+}
+
 fn spawn_relay_observer_publisher(
     observer: observer::ObserverHandle,
     publisher: RelayEventPublisher,
@@ -289,68 +417,102 @@ fn spawn_relay_observer_publisher(
     owner_pubkey: PublicKey,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut coalescer = ObserverChunkCoalescer::default();
-        for event in observer.snapshot() {
-            for event in coalescer.ingest(event) {
-                publish_relay_observer_event(
-                    &publisher,
-                    &keys,
-                    &agent_pubkey_hex,
-                    &owner_pubkey_hex,
-                    &owner_pubkey,
-                    event,
-                )
-                .await;
-            }
-        }
-
-        let mut rx = observer.subscribe();
-        let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
-        flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                result = rx.recv() => {
-                    match result {
-                        Ok(event) => {
-                            for event in coalescer.ingest(event) {
-                                publish_relay_observer_event(
-                                    &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, event,
-                                ).await;
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                            for event in coalescer.flush() {
-                                publish_relay_observer_event(
-                                    &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, event,
-                                ).await;
-                            }
-                            tracing::warn!(dropped = count, "relay observer publisher lagged");
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            for event in coalescer.flush() {
-                                publish_relay_observer_event(
-                                    &publisher, &keys, &agent_pubkey_hex,
-                                    &owner_pubkey_hex, &owner_pubkey, event,
-                                ).await;
-                            }
-                            break;
-                        }
-                    }
-                }
-                _ = flush_interval.tick() => {
-                    // Periodic flush ensures live streaming even during continuous chunk delivery.
-                    for event in coalescer.flush() {
-                        publish_relay_observer_event(
-                            &publisher, &keys, &agent_pubkey_hex,
-                            &owner_pubkey_hex, &owner_pubkey, event,
-                        ).await;
-                    }
-                }
-            }
-        }
+        // Subscribe BEFORE snapshotting so an event emitted between the two
+        // calls is never lost: it lands in the snapshot, the live receiver, or
+        // both. The overlap is deduped in the run loop via the snapshot's
+        // high-water `seq` (monotonic, assigned at emit).
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            keys,
+            agent_pubkey_hex,
+            owner_pubkey_hex,
+            owner_pubkey,
+        )
+        .await;
     })
+}
+
+async fn run_relay_observer_publisher(
+    snapshot: Vec<observer::ObserverEvent>,
+    mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
+    publisher: RelayEventPublisher,
+    keys: nostr::Keys,
+    agent_pubkey_hex: String,
+    owner_pubkey_hex: String,
+    owner_pubkey: PublicKey,
+) {
+    let mut coalescer = ObserverChunkCoalescer::default();
+    let mut pacer = ObserverPublishPacer::new();
+    let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
+    for event in snapshot {
+        for event in coalescer.ingest(event) {
+            publish_relay_observer_event(
+                &publisher,
+                &keys,
+                &agent_pubkey_hex,
+                &owner_pubkey_hex,
+                &owner_pubkey,
+                &mut pacer,
+                event,
+            )
+            .await;
+        }
+    }
+
+    let mut flush_interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    flush_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        // Skip live events already delivered via the snapshot
+                        // (the subscribe-before-snapshot overlap).
+                        if event.seq <= max_snapshot_seq {
+                            continue;
+                        }
+                        for event in coalescer.ingest(event) {
+                            publish_relay_observer_event(
+                                &publisher, &keys, &agent_pubkey_hex,
+                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                            ).await;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+                        for event in coalescer.flush() {
+                            publish_relay_observer_event(
+                                &publisher, &keys, &agent_pubkey_hex,
+                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                            ).await;
+                        }
+                        tracing::warn!(dropped = count, "relay observer publisher lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        for event in coalescer.flush() {
+                            publish_relay_observer_event(
+                                &publisher, &keys, &agent_pubkey_hex,
+                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                            ).await;
+                        }
+                        break;
+                    }
+                }
+            }
+            _ = flush_interval.tick() => {
+                // Periodic flush ensures live streaming even during continuous chunk delivery.
+                for event in coalescer.flush() {
+                    publish_relay_observer_event(
+                        &publisher, &keys, &agent_pubkey_hex,
+                        &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                    ).await;
+                }
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -631,8 +793,10 @@ async fn publish_relay_observer_event(
     agent_pubkey_hex: &str,
     owner_pubkey_hex: &str,
     owner_pubkey: &PublicKey,
+    pacer: &mut ObserverPublishPacer,
     mut event: observer::ObserverEvent,
 ) {
+    pacer.wait().await;
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
@@ -752,6 +916,7 @@ fn handle_cancel_turn_control(
                 channel_id: Some(channel_id.to_string()),
                 session_id: None,
                 turn_id: None,
+                started_at: None,
             },
             serde_json::json!({
                 "type": "cancel_turn",
@@ -828,6 +993,7 @@ fn handle_switch_model_control(
                 channel_id: Some(channel_id.to_string()),
                 session_id: None,
                 turn_id: None,
+                started_at: None,
             },
             serde_json::json!({
                 "type": "switch_model",
@@ -977,7 +1143,7 @@ struct RespawnResult {
     /// Tuple: (initialized client, protocol version, supports_goose_steer).
     /// The third element is always `true` — the supervisor uses
     /// try-and-tolerate for the steer extension.
-    result: Result<(AcpClient, u32, bool)>,
+    result: Result<(AcpClient, u32, String)>,
 }
 
 /// Outcome of a non-cancelling steer attempt, forwarded from a per-attempt
@@ -1021,7 +1187,7 @@ impl RespawnGuard {
     /// Send the result and disarm the guard. Uses `try_send` (sync) so there
     /// is no await boundary between marking `sent` and actually enqueueing —
     /// cancellation cannot slip between the two.
-    fn send(mut self, result: Result<(AcpClient, u32, bool)>) {
+    fn send(mut self, result: Result<(AcpClient, u32, String)>) {
         // Invariant: try_send succeeds because the channel capacity equals the
         // slot count, and respawn_in_flight guarantees at most one outstanding
         // result per slot. If this ever fails, the channel sizing or the
@@ -1076,8 +1242,8 @@ async fn tokio_main() -> Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
     if is_subcommand("models") {
-        // Strip the "models" token so clap doesn't reject it as a positional.
-        // Keeps argv[0] (binary name) and passes everything after "models".
+        // Strip the subcommand token so clap doesn't reject it as a positional.
+        // Keeps argv[0] (binary name) and passes everything after the subcommand.
         let filtered: Vec<String> = std::env::args()
             .enumerate()
             .filter(|(i, _)| *i != 1)
@@ -1085,6 +1251,26 @@ async fn tokio_main() -> Result<()> {
             .collect();
         let args = ModelsArgs::parse_from(&filtered);
         return run_models(args).await;
+    }
+
+    if is_subcommand("auth-methods") {
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = AuthMethodsArgs::parse_from(&filtered);
+        return run_auth_methods(args).await;
+    }
+
+    if is_subcommand("authenticate") {
+        let filtered: Vec<String> = std::env::args()
+            .enumerate()
+            .filter(|(i, _)| *i != 1)
+            .map(|(_, a)| a)
+            .collect();
+        let args = AuthenticateArgs::parse_from(&filtered);
+        return run_authenticate(args).await;
     }
 
     tracing_subscriber::fmt()
@@ -1128,101 +1314,19 @@ async fn tokio_main() -> Result<()> {
         );
     }
 
-    //
-    // Finding #10: one agent failing to start must not kill the whole pool.
-    // We attempt each spawn under a 60-second timeout; failures are logged and
-    // skipped. If ALL agents fail we return an error. A partial pool is valid —
-    // the harness continues with reduced capacity and logs a warning.
-    let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(config.agents as usize);
-    for i in 0..config.agents as usize {
-        // Spawn OUTSIDE the timeout so we always own the child for cleanup.
-        // This matches the run_models pattern and prevents zombie leaks on
-        // init timeout (the cancelled future would drop the AcpClient via
-        // Drop which is best-effort only).
-        let spawn_result = AcpClient::spawn(
-            &config.agent_command,
-            &config.agent_args,
-            &config.persona_env_vars,
-            config.has_generated_codex_config,
-        )
-        .await;
-        match spawn_result {
-            Ok(mut acp) => {
-                acp.set_observer(observer.clone(), i);
-                match tokio::time::timeout(Duration::from_secs(60), acp.initialize()).await {
-                    Ok(Ok(init_result)) => {
-                        tracing::info!(agent = i, "agent initialized: {init_result}");
-                        let protocol_version =
-                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
-                        tracing::info!(
-                            agent = i,
-                            name = init_result
-                                .get("agentInfo")
-                                .or_else(|| init_result.get("serverInfo"))
-                                .and_then(|info| info.get("name"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown"),
-                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
-                        );
-                        acp.observe(
-                            "agent_initialized",
-                            serde_json::json!({
-                                "agentIndex": i,
-                                "initializeResult": init_result,
-                            }),
-                        );
-                        agent_slots.push(Some(OwnedAgent {
-                            index: i,
-                            acp,
-                            state: SessionState::default(),
-                            model_capabilities: None,
-                            desired_model: config.model.clone(),
-                            model_overridden: false,
-                            protocol_version,
-                        }));
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!(agent = i, "agent initialize failed: {e}");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                    Err(_) => {
-                        tracing::error!(agent = i, "agent timed out during init (60s)");
-                        acp.shutdown().await;
-                        agent_slots.push(None);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::error!(agent = i, "agent failed to spawn: {e}");
-                agent_slots.push(None);
-            }
-        }
-    }
-    let live_count = agent_slots.iter().filter(|s| s.is_some()).count();
-    if live_count == 0 {
-        return Err(anyhow::anyhow!(
-            "all {} agents failed to start — cannot continue",
-            config.agents
-        ));
-    }
-    if live_count < config.agents as usize {
-        tracing::warn!(
-            "started {}/{} agents — continuing with reduced pool",
-            live_count,
-            config.agents
-        );
-    }
-    tracing::info!("agent_pool_ready agents={}", live_count);
-    let mut pool = AgentPool::from_slots(agent_slots);
+    let mut pool = if config.lazy_pool {
+        AgentPool::from_slots((0..config.agents).map(|_| None).collect())
+    } else {
+        initialize_agent_pool(&PoolStartup::from_config(&config, observer.clone()), None).await?
+    };
+    let mut pool_ready = !config.lazy_pool;
+    let mut pool_lifecycle: PoolLifecycle<AgentPool> = PoolLifecycle::listening();
 
-    //
-    // Finding #22: capture a startup watermark BEFORE connecting to the relay.
-    // This timestamp is used for membership notification replay (via
-    // startup_watermark) and as the initial subscribe_since for channels
-    // discovered at startup. The Subscribe handler falls back to
-    // subscribe_since when last_seen is None, closing the blind spot
-    // between "agents ready" and "first REQ sent".
+    // Capture a startup watermark BEFORE connecting to the relay. This timestamp
+    // is used for membership notification replay (via startup_watermark) and as
+    // the initial subscribe_since for channels discovered at startup. The Subscribe
+    // handler falls back to subscribe_since when last_seen is None, closing the
+    // blind spot between "agents ready" and "first REQ sent".
     let startup_watermark: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -1241,7 +1345,7 @@ async fn tokio_main() -> Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("relay connect error: {e}"))?;
 
-    // Finding #22: tell the relay background task the watermark so it can use
+    // Tell the relay background task the watermark so it can use
     // `since = watermark - 5s` on the first REQ instead of `since=now`.
     // Best-effort: a failure here is non-fatal (we just lose the startup window
     // protection, which is the same as the pre-fix behaviour).
@@ -1259,12 +1363,6 @@ async fn tokio_main() -> Result<()> {
 
     let presence_publisher = relay.event_publisher();
     let presence_keys = config.keys.clone();
-    if config.presence_enabled {
-        match publish_presence(&presence_publisher, &presence_keys, "online").await {
-            Ok(_) => tracing::info!("presence set to online"),
-            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
-        }
-    }
 
     // Priority: BUZZ_AUTH_TAG (NIP-OA attestation) → --agent-owner flag.
     let startup_owner: Option<String> = resolve_agent_owner(&config);
@@ -1296,13 +1394,14 @@ async fn tokio_main() -> Result<()> {
 
     let mut relay_observer_control_rx = None;
     let mut relay_observer_publisher_task = None;
+    let mut relay_observer_publisher = None;
     if config.relay_observer {
         if let (Some(observer), Some(owner_pubkey_hex)) =
             (observer.clone(), owner_cache.pubkey.clone())
         {
             match PublicKey::from_hex(&owner_pubkey_hex) {
                 Ok(owner_pubkey) => {
-                    relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
+                    relay_observer_publisher = Some((
                         observer,
                         relay.event_publisher(),
                         config.keys.clone(),
@@ -1378,17 +1477,54 @@ async fn tokio_main() -> Result<()> {
     if channel_filters.is_empty() {
         tracing::warn!("no channel subscriptions resolved — agent will sit idle");
     }
+    let mut subscribed_channel_ids = HashSet::with_capacity(channel_filters.len());
     for (channel_id, filter) in &channel_filters {
         if let Err(e) = relay.subscribe_channel(*channel_id, filter.clone()).await {
             tracing::warn!("failed to subscribe to channel {channel_id}: {e}");
         } else {
+            subscribed_channel_ids.insert(*channel_id);
             tracing::info!("subscribed to channel {channel_id}");
         }
     }
 
+    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
+        relay_observer_publisher.take()
+    {
+        relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
+            observer,
+            publisher,
+            keys,
+            agent_pubkey,
+            owner_pubkey,
+            owner,
+        ));
+    }
+
+    let runtime_start_nonce = std::env::var("BUZZ_MANAGED_AGENT_START_NONCE").unwrap_or_default();
     let dedup_mode = config.dedup_mode;
     let mut queue =
         EventQueue::new(dedup_mode).with_in_flight_deadline(config.max_turn_duration_secs);
+
+    // Online means the harness can receive work, not merely that its socket is
+    // connected. Publishing after channel subscriptions gives desktop callers
+    // a durable readiness boundary before they send a startup mention.
+    if config.presence_enabled {
+        match publish_presence(&presence_publisher, &presence_keys, "online").await {
+            Ok(_) => tracing::info!("presence set to online"),
+            Err(e) => tracing::warn!("failed to set initial presence: {e}"),
+        }
+    }
+
+    if config.lazy_pool {
+        emit_runtime_lifecycle(
+            observer.as_ref(),
+            &runtime_start_nonce,
+            &pubkey_hex,
+            &config.relay_url,
+            "listening",
+            None,
+        );
+    }
 
     let base_prompt_content = config.base_prompt_content.take();
     let ctx = Arc::new(PromptContext {
@@ -1413,7 +1549,7 @@ async fn tokio_main() -> Result<()> {
             .to_string_lossy()
             .to_string(),
         rest_client: relay.rest_client(),
-        channel_info: channel_info_map,
+        channel_info: pool::ChannelInfoResolver::new(channel_info_map, relay.rest_client()),
         context_message_limit: config.context_message_limit,
         max_turns_per_session: config.max_turns_per_session,
         permission_mode: config.permission_mode,
@@ -1423,6 +1559,7 @@ async fn tokio_main() -> Result<()> {
             .and_then(|hex| nostr::PublicKey::from_hex(hex).ok()),
         memory_enabled: config.memory_enabled,
         harness_name: crate::config::normalize_agent_command_identity(&config.agent_command),
+        relay_url: config.relay_url.clone(),
     });
 
     if !config.memory_enabled {
@@ -1476,6 +1613,8 @@ async fn tokio_main() -> Result<()> {
     let (respawn_tx, mut respawn_rx) = mpsc::channel::<RespawnResult>(config.agents as usize);
     // JoinSet for respawn tasks so shutdown can abort them.
     let mut respawn_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+    let (wake_tx, mut wake_rx) = mpsc::channel::<(u32, Result<AgentPool, String>)>(1);
+    let mut wake_tasks: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Channel for non-cancelling steer ack watchers to forward outcomes back
     // to the main loop. Each `pool.send_steer(...) == Ok(())` spawns a
@@ -1562,10 +1701,47 @@ async fn tokio_main() -> Result<()> {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
+        Wake(u32, Result<AgentPool, String>),
     }
 
     loop {
-        if last_maintenance.elapsed() >= maintenance_interval {
+        // Whether buffered work is waiting on a lazy pool. Also gates the
+        // retry-deadline sleep arm below: a `Failed` lifecycle keeps its
+        // (possibly past) `retry_at` until the next wake, so sleeping on it
+        // unconditionally would complete instantly on every iteration — a
+        // busy spin — whenever the queued work drained after a failed wake.
+        let mut lazy_wake_work_pending = false;
+        if config.lazy_pool && !pool_ready {
+            lazy_wake_work_pending = queue.has_flushable_work();
+            if let Some(attempt) = pool_lifecycle
+                .start_wake_if_due(lazy_wake_work_pending, tokio::time::Instant::now())
+            {
+                emit_runtime_lifecycle(
+                    observer.as_ref(),
+                    &runtime_start_nonce,
+                    &pubkey_hex,
+                    &config.relay_url,
+                    "waking",
+                    None,
+                );
+                let startup = PoolStartup::from_config(&config, observer.clone());
+                let wake_tx = wake_tx.clone();
+                let wake_shutdown = shutdown_rx.clone();
+                wake_tasks.spawn(async move {
+                    let result = initialize_agent_pool(&startup, Some(wake_shutdown))
+                        .await
+                        .map_err(|error| error.to_string());
+                    if let Err(error) = wake_tx.send((attempt, result)).await {
+                        let (_attempt, result) = error.0;
+                        if let Ok(mut abandoned_pool) = result {
+                            shutdown_agent_pool(&mut abandoned_pool).await;
+                        }
+                    }
+                });
+            }
+        }
+
+        if pool_ready && last_maintenance.elapsed() >= maintenance_interval {
             last_maintenance = std::time::Instant::now();
             queue.compact_expired_state();
 
@@ -1609,7 +1785,7 @@ async fn tokio_main() -> Result<()> {
         while let Ok(rr) = respawn_rx.try_recv() {
             crash_history[rr.index].respawn_in_flight = false;
             match rr.result {
-                Ok((acp, protocol_version, _)) => {
+                Ok((acp, protocol_version, agent_name)) => {
                     let agent = OwnedAgent {
                         index: rr.index,
                         acp,
@@ -1617,6 +1793,8 @@ async fn tokio_main() -> Result<()> {
                         model_capabilities: None,
                         desired_model: config.model.clone(),
                         model_overridden: false,
+                        agent_name,
+                        goose_system_prompt_supported: None,
                         protocol_version,
                     };
                     pool.return_agent(agent);
@@ -1643,9 +1821,9 @@ async fn tokio_main() -> Result<()> {
             let (result_rx, join_set) = pool.rx_and_join_set();
             tokio::select! {
                 biased;
-                // Finding #24: recv() returning None means all senders dropped
-                // (pool was torn down). Break cleanly instead of panicking.
-                r = result_rx.recv() => match r {
+                // recv() returning None means all senders dropped (pool was torn down).
+                // Break cleanly instead of panicking.
+                r = result_rx.recv(), if pool_ready => match r {
                     Some(result) => Some(PoolEvent::Result(Box::new(result))),
                     None => {
                         tracing::info!("result channel closed — exiting main loop");
@@ -1665,6 +1843,41 @@ async fn tokio_main() -> Result<()> {
                 // locked semantics (Eva + Max + Perci).
                 Some(ack_event) = steer_ack_rx.recv() => {
                     Some(PoolEvent::SteerAck(ack_event))
+                }
+                Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
+                    Some(PoolEvent::Wake(attempt, result))
+                }
+                // Gated on pending work: with an empty queue there is nothing
+                // for the retry to dispatch, and a past `retry_at` would
+                // otherwise complete instantly on every iteration (busy spin).
+                // The next accepted event re-enables the arm.
+                _ = async {
+                    match pool_lifecycle.retry_at() {
+                        Some(retry_at) if lazy_wake_work_pending => {
+                            tokio::time::sleep_until(retry_at).await
+                        }
+                        _ => std::future::pending().await,
+                    }
+                } => None,
+                Some(Err(error)) = wake_tasks.join_next(), if !wake_tasks.is_empty() => {
+                    if let Some(attempt) = pool_lifecycle.waking_attempt() {
+                        let message = format!("pool wake task failed: {error}");
+                        if pool_lifecycle.cancel_wake(
+                            attempt,
+                            message.clone(),
+                            tokio::time::Instant::now(),
+                        ) {
+                            emit_runtime_lifecycle(
+                                observer.as_ref(),
+                                &runtime_start_nonce,
+                                &pubkey_hex,
+                                &config.relay_url,
+                                "failed",
+                                Some(&message),
+                            );
+                        }
+                    }
+                    None
                 }
                 control_event = async {
                     match relay_observer_control_rx.as_mut() {
@@ -1752,15 +1965,20 @@ async fn tokio_main() -> Result<()> {
                                     // stripped for a legitimately re-added channel.
                                     removed_channels.remove(&ch);
 
-                                    if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
+                                    if subscribed_channel_ids.contains(&ch) {
+                                        tracing::debug!(channel_id = %ch, "membership notification: channel already subscribed");
+                                    } else if let Some(filter) = config::resolve_dynamic_channel_filter(&config, ch, &rules) {
                                         tracing::info!(channel_id = %ch, "membership notification: subscribing to new channel");
                                         if let Err(e) = relay.subscribe_channel_from(ch, filter, Some(ts)).await {
                                             tracing::warn!("failed to subscribe to new channel {ch}: {e}");
+                                        } else {
+                                            subscribed_channel_ids.insert(ch);
                                         }
                                     } else {
                                         tracing::debug!(channel_id = %ch, "membership notification: no matching rules — skipping");
                                     }
                                 } else {
+                                    subscribed_channel_ids.remove(&ch);
                                     tracing::info!(channel_id = %ch, "membership notification: unsubscribing from channel");
                                     if let Err(e) = relay.unsubscribe_channel(ch).await {
                                         tracing::warn!("failed to unsubscribe from channel {ch}: {e}");
@@ -1770,7 +1988,11 @@ async fn tokio_main() -> Result<()> {
                                     // complete normally (the relay may reject actions if
                                     // the agent lost access).
                                     let drained_ids = queue.drain_channel(ch);
-                                    let invalidated = pool.invalidate_channel_sessions(ch);
+                                    let invalidated = if pool_ready {
+                                        pool.invalidate_channel_sessions(ch)
+                                    } else {
+                                        0
+                                    };
                                     // Track removed channels so checked-out agents get
                                     // their sessions stripped when they return to the pool.
                                     removed_channels.insert(ch);
@@ -1923,10 +2145,16 @@ async fn tokio_main() -> Result<()> {
                             // it never revokes same-owner team bots.
                             {
                                 let author = buzz_event.event.pubkey.to_hex();
+                                // DM hardening: resolve channel type (fail-closed
+                                // to DM) so allowlist/anyone modes cannot be
+                                // exercised by non-owner authors inside DMs.
+                                let is_dm =
+                                    is_dm_channel(buzz_event.channel_id, &ctx.channel_info).await;
                                 let allowed = author_allowed(
                                     &config.respond_to,
                                     &config.respond_to_allowlist,
                                     &author,
+                                    is_dm,
                                     &owner_cache,
                                     &ctx.rest_client,
                                 )
@@ -1936,6 +2164,7 @@ async fn tokio_main() -> Result<()> {
                                         channel_id = %buzz_event.channel_id,
                                         author = %buzz_event.event.pubkey.to_hex(),
                                         mode = %config.respond_to,
+                                        is_dm,
                                         "inbound author gate — dropping event"
                                     );
                                     continue;
@@ -2028,10 +2257,12 @@ async fn tokio_main() -> Result<()> {
                                     }
                                 }
                             }
-                            for (channel_id, thread_tags) in
-                                dispatch_pending(&mut pool, &mut queue, &ctx)
-                            {
-                                typing_channels.insert(channel_id, thread_tags);
+                            if pool_ready {
+                                for (channel_id, thread_tags) in
+                                    dispatch_pending(&mut pool, &mut queue, &ctx)
+                                {
+                                    typing_channels.insert(channel_id, thread_tags);
+                                }
                             }
                         }
                         None => {
@@ -2052,7 +2283,9 @@ async fn tokio_main() -> Result<()> {
                     }
                 } => {
                     let _ = result_rx;
-                    if queue.has_flushable_work() {
+                    if !pool_ready {
+                        tracing::debug!("heartbeat_skipped_pool_not_ready");
+                    } else if queue.has_flushable_work() {
                         tracing::debug!("heartbeat_skipped_events");
                         for (channel_id, thread_tags) in
                             dispatch_pending(&mut pool, &mut queue, &ctx)
@@ -2272,6 +2505,9 @@ async fn tokio_main() -> Result<()> {
                     signal_fallback,
                     "non-cancelling steer ack received"
                 );
+                if matches!(ack, Ok(pool::SteerAck::Success)) {
+                    queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
+                }
                 if drop_withheld {
                     queue.remove_event(channel_id, &event_id);
                 }
@@ -2297,7 +2533,72 @@ async fn tokio_main() -> Result<()> {
                     typing_channels.insert(channel_id, thread_tags);
                 }
             }
+            Some(PoolEvent::Wake(attempt, result)) => {
+                let completion = result.as_ref().map(|_| ()).map_err(|error| error.clone());
+                if let Err(error) =
+                    pool_lifecycle.complete_wake(attempt, result, tokio::time::Instant::now())
+                {
+                    tracing::warn!(attempt, error, "discarding stale pool wake result");
+                    continue;
+                }
+                match completion {
+                    Ok(()) => {
+                        pool = pool_lifecycle
+                            .take_ready()
+                            .expect("successful wake stores a ready pool");
+                        pool_ready = true;
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "ready",
+                            None,
+                        );
+                        for (channel_id, thread_tags) in
+                            dispatch_pending(&mut pool, &mut queue, &ctx)
+                        {
+                            typing_channels.insert(channel_id, thread_tags);
+                        }
+                    }
+                    Err(error) => {
+                        debug_assert_eq!(pool_lifecycle.failed_error(), Some(error.as_str()));
+                        emit_runtime_lifecycle(
+                            observer.as_ref(),
+                            &runtime_start_nonce,
+                            &pubkey_hex,
+                            &config.relay_url,
+                            "failed",
+                            Some(&error),
+                        );
+                    }
+                }
+            }
             None => {} // relay/heartbeat/shutdown branches handled inline above
+        }
+    }
+
+    // Drain wake tasks gracefully rather than aborting: an in-flight
+    // initialize_agent_pool observes the shutdown watch at its biased per-slot
+    // select and reaps its partially-spawned agents itself. `shutdown()` here
+    // would abort the task mid-init and drop those AcpClients via best-effort
+    // Drop — the exact zombie class the eager path's spawn-outside-the-timeout
+    // comment exists to prevent. Fire the watch first so exits that bypass the
+    // signal handlers (result channel closed, LoopAction::Exit) cancel the wake
+    // just as promptly. Timeout is a backstop for a slot stuck outside the
+    // select (e.g. in spawn); only then do we fall back to aborting.
+    let _ = shutdown_tx.send(());
+    let wake_drain = tokio::time::timeout(Duration::from_secs(30), async {
+        while wake_tasks.join_next().await.is_some() {}
+    })
+    .await;
+    if wake_drain.is_err() {
+        tracing::warn!("wake task did not drain within grace period — aborting");
+        wake_tasks.shutdown().await;
+    }
+    while let Ok((_attempt, result)) = wake_rx.try_recv() {
+        if let Ok(mut awakened_pool) = result {
+            shutdown_agent_pool(&mut awakened_pool).await;
         }
     }
 
@@ -2640,6 +2941,8 @@ fn dispatch_pending(
         // Prompt text is now built inside run_prompt_task (needs async for
         // context fetching). Pass None for prompt_text; batch carries the data.
         let (control_tx, control_rx) = tokio::sync::oneshot::channel::<ControlSignal>();
+        let turn_id = Uuid::new_v4().to_string();
+        let task_turn_id = turn_id.clone();
 
         let abort_handle = pool.join_set.spawn(async move {
             pool::run_prompt_task(
@@ -2649,6 +2952,7 @@ fn dispatch_pending(
                 ctx_clone,
                 result_tx,
                 Some(control_rx),
+                task_turn_id,
             )
             .await;
         });
@@ -2658,6 +2962,7 @@ fn dispatch_pending(
             pool::TaskMeta {
                 agent_index,
                 channel_id: Some(channel_id),
+                turn_id,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
@@ -2716,6 +3021,15 @@ fn handle_prompt_result(
         .retain(|_, meta| meta.agent_index != agent_index);
     debug_assert_eq!(before, pool.task_map().len() + 1);
 
+    // The hard-timeout death_message (below) must describe the batch's
+    // *actual* fate, not just the `recently_active` eligibility flag — a
+    // recently-active batch that exhausts the retry budget in queue.requeue()
+    // is dead-lettered same as an immediate one, and both differ from a
+    // channel-removed drop or a heartbeat call with no batch at all. Each
+    // branch below records what actually happened; only the hard-timeout
+    // match arm in the death_message construction reads it.
+    let mut hard_timeout_fate_suffix: Option<&'static str> = None;
+
     // Requeue BEFORE mark_complete: requeue() sets retry_after with a future
     // deadline, and mark_complete() checks for it to decide whether to preserve
     // retry_counts. If mark_complete runs first, retry_counts is cleared and
@@ -2745,15 +3059,16 @@ fn handle_prompt_result(
                 // accounting, same as a clean cancel.
                 let reason = batch.cancel_reason.unwrap_or(CancelReason::Steer);
                 queue.requeue_as_cancelled(batch, reason);
-            } else if matches!(result.outcome, PromptOutcome::Timeout(TimeoutKind::Hard)) {
-                // Hard-cap timeout is deterministic: re-running the same task
-                // from a fresh session will reproduce the same death. Dead-letter
-                // immediately without requeueing so the channel isn't subjected to
-                // up to 10 × 1-hour retry cycles.
+            } else if matches!(
+                result.outcome,
+                PromptOutcome::Timeout(TimeoutKind::Hard {
+                    recently_active: false
+                })
+            ) {
                 tracing::error!(
                     channel_id = %batch.channel_id,
                     events = batch.events.len(),
-                    "dead-lettering batch after hard-cap timeout — discarding {} events",
+                    "dead-lettering batch after hard-cap timeout (no recent activity) — discarding {} events",
                     batch.events.len(),
                 );
                 let content = format!(
@@ -2761,16 +3076,32 @@ fn handle_prompt_result(
                     config.max_turn_duration_secs
                 );
                 spawn_failure_notice(rest_client, &batch, content);
+                hard_timeout_fate_suffix = Some(" — dead-lettered (no recent activity)");
+            } else if matches!(
+                result.outcome,
+                PromptOutcome::Timeout(TimeoutKind::Hard {
+                    recently_active: true
+                })
+            ) {
+                tracing::warn!(
+                    channel_id = %batch.channel_id,
+                    events = batch.events.len(),
+                    "hard-cap timeout with recent activity — requeueing for retry"
+                );
+                if let Some(dead) = queue.requeue(batch) {
+                    let content = format!(
+                        "⚠️ I couldn't process the last request after multiple retries (the turn exceeded the maximum duration ({}s)). Please re-send if it's still needed.",
+                        config.max_turn_duration_secs
+                    );
+                    spawn_failure_notice(rest_client, &dead, content);
+                    hard_timeout_fate_suffix = Some(" — dead-lettered (retry budget exhausted)");
+                } else {
+                    hard_timeout_fate_suffix = Some(" — requeued for retry (recently active)");
+                }
             } else if let Some(dead) = queue.requeue(batch) {
-                // Dead-lettered: retries exhausted and the events are gone.
-                // Post a visible notice so the channel isn't left waiting on
-                // a turn that will never happen.
                 let reason = match &result.outcome {
                     PromptOutcome::Timeout(TimeoutKind::Idle) => "the turn timed out".to_string(),
-                    // Unreachable today: Timeout(Hard) is consumed by the immediate
-                    // dead-letter arm above before requeue() runs. Fail soft rather
-                    // than panicking the main loop if that chain is ever reordered.
-                    PromptOutcome::Timeout(TimeoutKind::Hard) => {
+                    PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => {
                         "the turn exceeded the maximum duration".to_string()
                     }
                     PromptOutcome::AgentExited => "the agent process exited".to_string(),
@@ -2788,6 +3119,7 @@ fn handle_prompt_result(
                 events = batch.events.len(),
                 "dropping failed batch for removed channel"
             );
+            hard_timeout_fate_suffix = Some(" — batch dropped (channel removed)");
         }
     }
 
@@ -2807,7 +3139,7 @@ fn handle_prompt_result(
         PromptOutcome::Ok(_) => "ok",
         PromptOutcome::Error(_) => "error",
         PromptOutcome::Timeout(TimeoutKind::Idle) => "idle_timeout",
-        PromptOutcome::Timeout(TimeoutKind::Hard) => "hard_timeout",
+        PromptOutcome::Timeout(TimeoutKind::Hard { .. }) => "hard_timeout",
         PromptOutcome::AgentExited => "exited",
         PromptOutcome::Cancelled => "cancelled",
         PromptOutcome::CancelDrainTimeout(_) => "cancel_drain_timeout",
@@ -2831,6 +3163,7 @@ fn handle_prompt_result(
         PromptSource::Channel(ch) => Some(*ch),
         PromptSource::Heartbeat => None,
     };
+    let turn_id = result.turn_id.clone();
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -2843,7 +3176,7 @@ fn handle_prompt_result(
             observer.emit(
                 "turn_error",
                 Some(agent_index),
-                &observer::context_for(channel_id, None, None),
+                &observer::context_for(channel_id, None, Some(turn_id.clone())),
                 payload,
             );
         }
@@ -2870,10 +3203,16 @@ fn handle_prompt_result(
             );
             let death_message: String = match outcome_label {
                 "exited" => "Agent process exited unexpectedly".to_string(),
-                "hard_timeout" => format!(
-                    "Agent turn exceeded the maximum duration ({}s)",
-                    config.max_turn_duration_secs
-                ),
+                "hard_timeout" => {
+                    // Neutral wording when no fate was recorded above: a
+                    // heartbeat hard timeout carries no batch at all, so
+                    // nothing was requeued or dead-lettered.
+                    let suffix = hard_timeout_fate_suffix.unwrap_or(" (no batch to retry)");
+                    format!(
+                        "Agent turn exceeded the maximum duration ({}s){}",
+                        config.max_turn_duration_secs, suffix
+                    )
+                }
                 _ => "Agent session timed out due to inactivity".to_string(),
             };
             emit_turn_error(&death_message, None);
@@ -3066,7 +3405,7 @@ fn recover_panicked_agent(
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, None),
+            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -3168,16 +3507,23 @@ fn dispatch_heartbeat(
         .heartbeat_prompt
         .clone()
         .unwrap_or_else(default_heartbeat_prompt);
-    // For legacy agents (protocol_version < 2), prepend base_prompt to the
-    // heartbeat user message since they don't receive it via session/new.
-    let prompt_text =
-        pool::prepend_base_for_legacy(agent.protocol_version, ctx.base_prompt, &prompt_text);
     let result_tx = pool.result_tx();
     let ctx_clone = Arc::clone(ctx);
     let agent_index = agent.index;
+    let turn_id = Uuid::new_v4().to_string();
+    let task_turn_id = turn_id.clone();
 
     let abort_handle = pool.join_set.spawn(async move {
-        pool::run_prompt_task(agent, None, Some(prompt_text), ctx_clone, result_tx, None).await;
+        pool::run_prompt_task(
+            agent,
+            None,
+            Some(prompt_text),
+            ctx_clone,
+            result_tx,
+            None,
+            task_turn_id,
+        )
+        .await;
     });
 
     pool.task_map_mut().insert(
@@ -3185,6 +3531,7 @@ fn dispatch_heartbeat(
         pool::TaskMeta {
             agent_index,
             channel_id: None,
+            turn_id,
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
@@ -3204,6 +3551,14 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("what it should do day-to-day"));
         assert!(prompt.contains("owner saves it"));
         assert!(prompt.contains("Do not ask about runtime, provider, model, credentials"));
+    }
+
+    #[test]
+    fn shared_base_prompt_teaches_real_newlines_for_multiline_messages() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(prompt.contains("pass real newline bytes through stdin"));
+        assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
+        assert!(prompt.contains("buzz messages send ... --content -"));
     }
 }
 
@@ -3284,6 +3639,163 @@ fn spawn_respawn_task(
     true
 }
 
+fn normalized_agent_name(init_result: &serde_json::Value) -> String {
+    init_result
+        .get("agentInfo")
+        .or_else(|| init_result.get("serverInfo"))
+        .and_then(|info| info.get("name"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+async fn shutdown_agent_slots(slots: &mut [Option<OwnedAgent>]) {
+    for slot in slots {
+        if let Some(mut agent) = slot.take() {
+            agent.acp.shutdown().await;
+        }
+    }
+}
+
+async fn shutdown_agent_pool(pool: &mut AgentPool) {
+    pool.join_set.shutdown().await;
+    while let Ok(mut result) = pool.result_rx_try_recv() {
+        result.agent.acp.shutdown().await;
+    }
+    for slot in pool.agents_mut() {
+        if let Some(mut agent) = slot.take() {
+            agent.acp.shutdown().await;
+        }
+    }
+}
+
+struct PoolStartup {
+    agents: u32,
+    command: String,
+    args: Vec<String>,
+    extra_env: Vec<(String, String)>,
+    has_generated_codex_config: bool,
+    model: Option<String>,
+    observer: Option<observer::ObserverHandle>,
+}
+
+impl PoolStartup {
+    fn from_config(config: &Config, observer: Option<observer::ObserverHandle>) -> Self {
+        Self {
+            agents: config.agents,
+            command: config.agent_command.clone(),
+            args: config.agent_args.clone(),
+            extra_env: config.persona_env_vars.clone(),
+            has_generated_codex_config: config.has_generated_codex_config,
+            model: config.model.clone(),
+            observer,
+        }
+    }
+}
+
+async fn initialize_agent_pool(
+    startup: &PoolStartup,
+    mut shutdown: Option<watch::Receiver<()>>,
+) -> Result<AgentPool> {
+    // One agent failing to start must not kill the whole pool.
+    // Attempt each spawn under a 60-second timeout; a partial pool is valid.
+    let mut agent_slots: Vec<Option<OwnedAgent>> = Vec::with_capacity(startup.agents as usize);
+    for i in 0..startup.agents as usize {
+        let spawn_result = AcpClient::spawn(
+            &startup.command,
+            &startup.args,
+            &startup.extra_env,
+            startup.has_generated_codex_config,
+        )
+        .await;
+        match spawn_result {
+            Ok(mut acp) => {
+                acp.set_observer(startup.observer.clone(), i);
+                let initialize = tokio::time::timeout(Duration::from_secs(60), acp.initialize());
+                let initialize_result = match shutdown.as_mut() {
+                    Some(shutdown) => tokio::select! {
+                        biased;
+                        _ = shutdown.changed() => {
+                            acp.shutdown().await;
+                            shutdown_agent_slots(&mut agent_slots).await;
+                            return Err(anyhow::anyhow!("pool initialization cancelled by shutdown"));
+                        }
+                        result = initialize => result,
+                    },
+                    None => initialize.await,
+                };
+                match initialize_result {
+                    Ok(Ok(init_result)) => {
+                        tracing::info!(agent = i, "agent initialized: {init_result}");
+                        let protocol_version =
+                            init_result["protocolVersion"].as_u64().unwrap_or(1) as u32;
+                        tracing::info!(
+                            agent = i,
+                            name = init_result
+                                .get("agentInfo")
+                                .or_else(|| init_result.get("serverInfo"))
+                                .and_then(|info| info.get("name"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown"),
+                            "agent initialized — non-cancelling steer enabled (try-and-tolerate)"
+                        );
+                        acp.observe(
+                            "agent_initialized",
+                            serde_json::json!({
+                                "agentIndex": i,
+                                "initializeResult": init_result,
+                            }),
+                        );
+                        let agent_name = normalized_agent_name(&init_result);
+                        agent_slots.push(Some(OwnedAgent {
+                            index: i,
+                            acp,
+                            state: SessionState::default(),
+                            model_capabilities: None,
+                            desired_model: startup.model.clone(),
+                            model_overridden: false,
+                            agent_name,
+                            goose_system_prompt_supported: None,
+                            protocol_version,
+                        }));
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!(agent = i, "agent initialize failed: {e}");
+                        acp.shutdown().await;
+                        agent_slots.push(None);
+                    }
+                    Err(_) => {
+                        tracing::error!(agent = i, "agent timed out during init (60s)");
+                        acp.shutdown().await;
+                        agent_slots.push(None);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(agent = i, "agent failed to spawn: {e}");
+                agent_slots.push(None);
+            }
+        }
+    }
+    let live_count = agent_slots.iter().filter(|slot| slot.is_some()).count();
+    if live_count == 0 {
+        return Err(anyhow::anyhow!(
+            "all {} agents failed to start — cannot continue",
+            startup.agents
+        ));
+    }
+    if live_count < startup.agents as usize {
+        tracing::warn!(
+            "started {}/{} agents — continuing with reduced pool",
+            live_count,
+            startup.agents
+        );
+    }
+    tracing::info!("agent_pool_ready agents={}", live_count);
+    Ok(AgentPool::from_slots(agent_slots))
+}
+
 // ── spawn_and_init ────────────────────────────────────────────────────────────
 /// Spawn an agent subprocess and run the MCP `initialize` handshake.
 ///
@@ -3296,7 +3808,7 @@ async fn spawn_and_init(
     has_generated_codex_config: bool,
     agent_index: usize,
     observer: Option<observer::ObserverHandle>,
-) -> Result<(AcpClient, u32, bool)> {
+) -> Result<(AcpClient, u32, String)> {
     let mut acp = AcpClient::spawn(command, args, extra_env, has_generated_codex_config)
         .await
         .map_err(|e| anyhow::anyhow!("failed to spawn agent: {e}"))?;
@@ -3313,7 +3825,8 @@ async fn spawn_and_init(
                     "initializeResult": init_result,
                 }),
             );
-            Ok((acp, protocol_version, true))
+            let agent_name = normalized_agent_name(&init_result);
+            Ok((acp, protocol_version, agent_name))
         }
         Err(e) => {
             // Explicitly shut down the spawned child to prevent zombie/leak.
@@ -3325,14 +3838,130 @@ async fn spawn_and_init(
     }
 }
 
-/// `buzz-acp models` — spawn an agent, query its available models, exit.
-///
+async fn spawn_auth_client(agent: &AuthAgentArgs) -> Result<AcpClient, acp::AcpError> {
+    let agent_args = config::normalize_agent_args(&agent.agent_command, agent.agent_args.clone());
+    AcpClient::spawn(&agent.agent_command, &agent_args, &[], false).await
+}
+
+fn extract_auth_methods(init_result: &serde_json::Value) -> Vec<serde_json::Value> {
+    init_result
+        .get("authMethods")
+        .and_then(|methods| methods.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `buzz-acp auth-methods` — spawn an adapter, initialize it, print authMethods.
+async fn run_auth_methods(args: AuthMethodsArgs) -> Result<()> {
+    let mut client = match spawn_auth_client(&args.agent).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to spawn agent: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: agent initialize failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: agent timed out ({MODELS_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    };
+
+    let methods = extract_auth_methods(&init_result);
+    client.shutdown().await;
+
+    if args.json {
+        let output = serde_json::json!({ "methods": methods });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if methods.is_empty() {
+        println!("No auth methods advertised.");
+    } else {
+        for method in methods {
+            let id = method
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            let name = method
+                .get("name")
+                .and_then(|value| value.as_str())
+                .unwrap_or(id);
+            println!("{id}\t{name}");
+        }
+    }
+    Ok(())
+}
+
+/// `buzz-acp authenticate` — invoke one adapter-owned auth method.
+async fn run_authenticate(args: AuthenticateArgs) -> Result<()> {
+    let mut client = match spawn_auth_client(&args.agent).await {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: failed to spawn agent: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let init_result = match tokio::time::timeout(MODELS_TIMEOUT, client.initialize()).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: agent initialize failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: agent initialize timed out ({MODELS_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    };
+
+    let supports_method = extract_auth_methods(&init_result)
+        .iter()
+        .any(|method| method.get("id").and_then(|id| id.as_str()) == Some(args.method_id.as_str()));
+    if !supports_method {
+        client.shutdown().await;
+        eprintln!(
+            "error: auth method '{}' is not advertised by this adapter",
+            args.method_id
+        );
+        std::process::exit(1);
+    }
+
+    let result =
+        tokio::time::timeout(AUTHENTICATE_TIMEOUT, client.authenticate(&args.method_id)).await;
+
+    match result {
+        Ok(Ok(_)) => {
+            client.shutdown().await;
+            Ok(())
+        }
+        Ok(Err(e)) => {
+            client.shutdown().await;
+            eprintln!("error: authenticate failed: {e}");
+            std::process::exit(1);
+        }
+        Err(_) => {
+            client.shutdown().await;
+            eprintln!("error: authenticate timed out ({AUTHENTICATE_TIMEOUT:?})");
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Flow: spawn → initialize → session/new → print models → shutdown.
 /// No relay connection, no MCP servers, no subscriptions. ~2-5s total.
 async fn run_models(args: ModelsArgs) -> Result<()> {
     use acp::{extract_model_config_options, extract_model_state};
 
-    let agent_args = config::normalize_agent_args(&args.agent_command, args.agent_args);
+    let agent_args = config::normalize_agent_args(&args.agent.agent_command, args.agent.agent_args);
     let cwd = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("/"))
         .to_string_lossy()
@@ -3340,13 +3969,14 @@ async fn run_models(args: ModelsArgs) -> Result<()> {
 
     // Spawn outside the timeout so we always own the child for cleanup.
     // `models` subcommand doesn't use persona packs — no extra env, no codex config.
-    let mut client = match AcpClient::spawn(&args.agent_command, &agent_args, &[], false).await {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: failed to spawn agent: {e}");
-            std::process::exit(1);
-        }
-    };
+    let mut client =
+        match AcpClient::spawn(&args.agent.agent_command, &agent_args, &[], false).await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: failed to spawn agent: {e}");
+                std::process::exit(1);
+            }
+        };
 
     // Initialize + session/new under a timeout. Client is owned above,
     // so shutdown() runs on all paths (success, error, timeout).
@@ -3643,6 +4273,7 @@ mod owner_control_command_tests {
             pool::TaskMeta {
                 agent_index: 0,
                 channel_id: Some(channel_id),
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
@@ -3717,6 +4348,7 @@ mod author_gate_tests {
         let cache = OwnerCache::new(Some(OWNER.into()));
         cache.cache_sibling(SIBLING.into(), true);
         cache.cache_sibling(STRANGER.into(), false);
+        cache.cache_sibling(EXTERNAL.into(), false);
         cache
     }
 
@@ -3729,6 +4361,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 SIBLING,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -3746,6 +4379,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 EXTERNAL,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -3763,6 +4397,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 STRANGER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -3780,6 +4415,7 @@ mod author_gate_tests {
                 &RespondTo::Allowlist,
                 &allowlist,
                 OWNER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -3800,6 +4436,7 @@ mod author_gate_tests {
                 &RespondTo::OwnerOnly,
                 &HashSet::new(),
                 STRANGER,
+                false,
                 &cache,
                 &dummy_rest_client()
             )
@@ -3817,6 +4454,7 @@ mod author_gate_tests {
                     &RespondTo::OwnerOnly,
                     &HashSet::new(),
                     who,
+                    false,
                     &cache,
                     &dummy_rest_client()
                 )
@@ -3824,6 +4462,334 @@ mod author_gate_tests {
                 "under default OwnerOnly, the {label} must be admitted so steering can fire"
             );
         }
+    }
+
+    // ── DM hardening ──────────────────────────────────────────────────────
+    //
+    // In a DM, clients auto-p-tag every participant, and an agent can be
+    // asked to open a DM with a third party. The gate must therefore ignore
+    // the allowlist and `anyone` mode inside DMs: only owner + verified
+    // siblings fire turns.
+
+    #[tokio::test]
+    async fn test_dm_rejects_allowlisted_external_pubkey() {
+        let cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "an allowlisted external pubkey must NOT fire a turn inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_rejects_stranger_under_anyone() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::Anyone,
+                &HashSet::new(),
+                STRANGER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=anyone must still drop non-owner authors inside a DM"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dm_admits_owner_and_sibling_in_every_responding_mode() {
+        let cache = cache_with_sibling();
+        for mode in [
+            RespondTo::OwnerOnly,
+            RespondTo::Allowlist,
+            RespondTo::Anyone,
+        ] {
+            for (who, label) in [(OWNER, "owner"), (SIBLING, "sibling")] {
+                assert!(
+                    author_allowed(
+                        &mode,
+                        &HashSet::new(),
+                        who,
+                        true,
+                        &cache,
+                        &dummy_rest_client()
+                    )
+                    .await,
+                    "in a DM under {mode}, the {label} must still be admitted"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dm_nobody_rejects_even_owner() {
+        let cache = cache_with_sibling();
+        assert!(
+            !author_allowed(
+                &RespondTo::Nobody,
+                &HashSet::new(),
+                OWNER,
+                true,
+                &cache,
+                &dummy_rest_client()
+            )
+            .await,
+            "respond_to=nobody must drop everything, DMs included"
+        );
+    }
+
+    // ── is_dm_channel resolution ──────────────────────────────────────────
+
+    fn resolver(startup: HashMap<Uuid, relay::ChannelInfo>) -> pool::ChannelInfoResolver {
+        pool::ChannelInfoResolver::new(startup, dummy_rest_client())
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_uses_definitive_startup_metadata() {
+        let dm_id = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
+        let startup = HashMap::from([
+            (
+                dm_id,
+                relay::ChannelInfo {
+                    name: "dm".into(),
+                    channel_type: "dm".into(),
+                },
+            ),
+            (
+                stream_id,
+                relay::ChannelInfo {
+                    name: "stream".into(),
+                    channel_type: "stream".into(),
+                },
+            ),
+        ]);
+        let resolver = resolver(startup);
+        assert!(is_dm_channel(dm_id, &resolver).await);
+        assert!(!is_dm_channel(stream_id, &resolver).await);
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_fails_closed_for_unknown_startup_metadata() {
+        let id = Uuid::new_v4();
+        let startup = HashMap::from([(
+            id,
+            relay::ChannelInfo {
+                name: "unknown".into(),
+                channel_type: "unknown".into(),
+            },
+        )]);
+        assert!(
+            is_dm_channel(id, &resolver(startup)).await,
+            "missing startup metadata must not be trusted as a stream"
+        );
+    }
+
+    async fn lazy_resolver_with_response(
+        response: serde_json::Value,
+    ) -> (
+        pool::ChannelInfoResolver,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test HTTP server");
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let requests = std::sync::Arc::new(AtomicUsize::new(0));
+        let server_requests = requests.clone();
+        let body = response.to_string();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let mut request = vec![0; 8192];
+                let _ = socket.read(&mut request).await;
+                server_requests.fetch_add(1, Ordering::SeqCst);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let rest = relay::RestClient {
+            http: reqwest::Client::new(),
+            base_url,
+            keys: nostr::Keys::generate(),
+            auth_tag_json: None,
+        };
+        (
+            pool::ChannelInfoResolver::new(HashMap::new(), rest),
+            requests,
+            server,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_lazy_resolves_declared_dm_and_caches_it() {
+        use std::sync::atomic::Ordering;
+
+        let id = Uuid::new_v4();
+        let response = serde_json::json!([{
+            "tags": [["d", id.to_string()], ["name", "DM"], ["t", "dm"]]
+        }]);
+        let (resolver, requests, server) = lazy_resolver_with_response(response).await;
+
+        assert!(is_dm_channel(id, &resolver).await);
+        assert!(is_dm_channel(id, &resolver).await);
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "second resolution uses cache"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_discovery_without_metadata_stays_fail_closed_at_author_gate() {
+        let id = Uuid::new_v4();
+        let discovered = relay::merge_discovered_channels(vec![id], &serde_json::json!([]));
+        let channel_info = resolver(discovered);
+        let owner_cache = cache_with_sibling();
+        let allowlist = HashSet::from([EXTERNAL.to_string()]);
+
+        let is_dm = is_dm_channel(id, &channel_info).await;
+        assert!(is_dm, "unknown startup metadata must fail closed as DM");
+        assert!(
+            !author_allowed(
+                &RespondTo::Allowlist,
+                &allowlist,
+                EXTERNAL,
+                is_dm,
+                &owner_cache,
+                &dummy_rest_client(),
+            )
+            .await,
+            "an external author must not pass when startup discovery omitted metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_is_dm_channel_fails_closed_when_lazy_resolution_fails() {
+        assert!(
+            is_dm_channel(Uuid::new_v4(), &resolver(HashMap::new())).await,
+            "an unresolvable channel type must be treated as a DM"
+        );
+    }
+}
+
+#[cfg(test)]
+mod observer_snapshot_race_tests {
+    use super::*;
+    use nostr::Keys;
+
+    fn emit_marker(observer: &observer::ObserverHandle, marker: &str) {
+        observer.emit(
+            "test_event",
+            None,
+            &observer::context_for(None, None, None),
+            serde_json::json!({ "marker": marker }),
+        );
+    }
+
+    /// An event emitted between `subscribe()` and `snapshot()` lands in BOTH
+    /// the snapshot and the live receiver; the seq high-water dedupe must
+    /// deliver it exactly once — and never lose events on either side of it.
+    #[tokio::test(start_paused = true)]
+    async fn overlap_between_subscribe_and_snapshot_publishes_exactly_once() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        // Before the publisher starts: replay-buffer only.
+        emit_marker(&observer, "before");
+        // The race window: emitted after subscribe() but before snapshot(),
+        // so it is present in the snapshot AND queued on the receiver.
+        let rx = observer.subscribe();
+        emit_marker(&observer, "overlap");
+        let snapshot = observer.snapshot();
+        assert_eq!(snapshot.len(), 2, "overlap event must be in the snapshot");
+        // After the snapshot: live receiver only.
+        emit_marker(&observer, "after");
+        // Close the broadcast channel so the run loop drains and exits.
+        drop(observer);
+
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            agent_keys.public_key().to_hex(),
+            owner_keys.public_key().to_hex(),
+            owner_keys.public_key(),
+        )
+        .await;
+
+        // The run loop has exited, dropping the publisher; drain the forwarded
+        // events until the channel closes (deterministic — no try_recv race
+        // with the test_pair forwarding task).
+        let mut markers = Vec::new();
+        while let Some(event) = published_rx.recv().await {
+            let payload: serde_json::Value =
+                decrypt_observer_payload(&owner_keys, &event).expect("decrypt published frame");
+            markers.push(payload["payload"]["marker"].as_str().unwrap().to_string());
+        }
+        assert_eq!(
+            markers,
+            ["before", "overlap", "after"],
+            "each event must be published exactly once, in order"
+        );
+    }
+}
+
+#[cfg(test)]
+mod observer_publish_pacer_tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn starts_without_a_burst_and_spaces_frames() {
+        let started = tokio::time::Instant::now();
+        let mut pacer = ObserverPublishPacer::new();
+
+        pacer.wait().await;
+        let first = tokio::time::Instant::now();
+        pacer.wait().await;
+        let second = tokio::time::Instant::now();
+
+        assert_eq!(first.duration_since(started), OBSERVER_PUBLISH_INTERVAL);
+        assert_eq!(second.duration_since(first), OBSERVER_PUBLISH_INTERVAL);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn limits_frames_in_each_rolling_minute() {
+        let mut pacer = ObserverPublishPacer::new();
+        pacer.wait().await;
+        let first = tokio::time::Instant::now();
+        for _ in 1..OBSERVER_PUBLISH_LIMIT_PER_MINUTE {
+            pacer.wait().await;
+        }
+
+        pacer.wait().await;
+        let ninety_first = tokio::time::Instant::now();
+
+        assert_eq!(ninety_first.duration_since(first), Duration::from_secs(60));
     }
 }
 
@@ -3845,6 +4811,7 @@ mod observer_chunk_coalescer_tests {
             channel_id: Some("channel-1".to_string()),
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            started_at: None,
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -3872,6 +4839,7 @@ mod observer_chunk_coalescer_tests {
             channel_id: Some("channel-1".to_string()),
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            started_at: None,
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -3968,6 +4936,7 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
@@ -4133,10 +5102,27 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
             base_prompt_content: None,
         }
+    }
+
+    #[test]
+    fn normalizes_agent_name_from_initialize_result() {
+        assert_eq!(
+            normalized_agent_name(&serde_json::json!({
+                "agentInfo": { "name": " Goose ", "version": "1.43.0" }
+            })),
+            "goose"
+        );
+        assert_eq!(
+            normalized_agent_name(&serde_json::json!({
+                "serverInfo": { "name": "buzz-agent" }
+            })),
+            "buzz-agent"
+        );
     }
 
     /// Spawn a real but inert agent subprocess (`cat`) so the error paths have
@@ -4152,6 +5138,8 @@ mod error_outcome_emission_tests {
             model_capabilities: None,
             desired_model: None,
             model_overridden: false,
+            agent_name: "unknown".into(),
+            goose_system_prompt_supported: None,
             // Error branches under test never read this; 1 is the legacy
             // non-systemPrompt path, the simplest valid value.
             protocol_version: 1,
@@ -4174,6 +5162,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -4196,6 +5185,7 @@ mod error_outcome_emission_tests {
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(Uuid::new_v4()),
+            turn_id: "test-turn-id".to_string(),
             outcome,
             batch: None,
         };
@@ -4214,16 +5204,88 @@ mod error_outcome_emission_tests {
             None,
         );
 
-        observer
+        let turn_errors: Vec<_> = observer
             .snapshot()
-            .iter()
+            .into_iter()
             .filter(|e| e.kind == "turn_error")
-            .count()
+            .collect();
+        assert!(
+            turn_errors
+                .iter()
+                .all(|event| event.turn_id.as_deref() == Some("test-turn-id")),
+            "turn_error must retain the completed turn id"
+        );
+        turn_errors.len()
     }
 
     #[tokio::test]
     async fn agent_exited_emits_exactly_one_feed_event() {
         assert_eq!(turn_errors_emitted_for(PromptOutcome::AgentExited).await, 1);
+    }
+
+    #[tokio::test]
+    async fn panic_event_retains_task_turn_id() {
+        let mut pool = AgentPool::from_slots(vec![]);
+        let channel_id = Uuid::new_v4();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let abort_handle = pool.join_set.spawn(async move {
+            let _ = started_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        let task_id = abort_handle.id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: Some(channel_id),
+                turn_id: "panic-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        started_rx.await.unwrap();
+        abort_handle.abort();
+        let join_error = pool.join_set.join_next().await.unwrap().unwrap_err();
+
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut typing_channels = HashMap::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+
+        recover_panicked_agent(
+            &mut pool,
+            &mut queue,
+            &config,
+            join_error,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut typing_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+        );
+
+        let panic = observer
+            .snapshot()
+            .into_iter()
+            .find(|event| event.kind == "agent_panic")
+            .expect("panic recovery emits an observer event");
+        assert_eq!(
+            panic.channel_id.as_deref(),
+            Some(channel_id.to_string().as_str())
+        );
+        assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
     }
 
     #[tokio::test]
@@ -4237,7 +5299,10 @@ mod error_outcome_emission_tests {
     #[tokio::test]
     async fn hard_timeout_emits_exactly_one_feed_event() {
         assert_eq!(
-            turn_errors_emitted_for(PromptOutcome::Timeout(TimeoutKind::Hard)).await,
+            turn_errors_emitted_for(PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false
+            }))
+            .await,
             1
         );
     }
@@ -4265,6 +5330,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -4285,6 +5351,7 @@ mod error_outcome_emission_tests {
             let result = PromptResult {
                 agent,
                 source: PromptSource::Channel(Uuid::new_v4()),
+                turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: None,
             };
@@ -4309,7 +5376,13 @@ mod error_outcome_emission_tests {
             );
         };
         check_label(PromptOutcome::Timeout(TimeoutKind::Idle), "idle_timeout").await;
-        check_label(PromptOutcome::Timeout(TimeoutKind::Hard), "hard_timeout").await;
+        check_label(
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false,
+            }),
+            "hard_timeout",
+        )
+        .await;
         check_label(
             PromptOutcome::CancelDrainTimeout(std::time::Duration::from_secs(5)),
             "cancel_drain_timeout",
@@ -4348,6 +5421,7 @@ mod error_outcome_emission_tests {
                 crate::pool::TaskMeta {
                     agent_index: 0,
                     channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -4367,6 +5441,7 @@ mod error_outcome_emission_tests {
             let result = PromptResult {
                 agent,
                 source: PromptSource::Channel(channel_id),
+                turn_id: "test-turn-id".to_string(),
                 outcome,
                 batch: Some(batch),
             };
@@ -4389,15 +5464,23 @@ mod error_outcome_emission_tests {
             )
         };
 
-        // Hard timeout: batch must NOT be requeued (dead-lettered immediately).
+        // Hard timeout (not recently active): dead-lettered immediately.
         let hard_batch = make_batch();
-        let (hard_channels, hard_events) =
-            run(PromptOutcome::Timeout(TimeoutKind::Hard), hard_batch).await;
+        let (hard_channels, hard_events) = run(
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: false,
+            }),
+            hard_batch,
+        )
+        .await;
         assert_eq!(
             hard_channels, 0,
-            "hard-cap timeout must not requeue the batch"
+            "hard-cap timeout (not recently active) must not requeue the batch"
         );
-        assert_eq!(hard_events, 0, "hard-cap timeout must drop all events");
+        assert_eq!(
+            hard_events, 0,
+            "hard-cap timeout (not recently active) must drop all events"
+        );
 
         // Idle timeout: batch IS requeued (first attempt, not yet dead-lettered).
         let idle_batch = make_batch();
@@ -4410,6 +5493,277 @@ mod error_outcome_emission_tests {
         assert_eq!(
             idle_events, 1,
             "idle timeout must preserve the event for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_timeout_recently_active_requeues_batch() {
+        let channel_id = Uuid::new_v4();
+        let make_batch = || {
+            let keys = Keys::generate();
+            let event = EventBuilder::new(Kind::Custom(9), "test")
+                .sign_with_keys(&keys)
+                .unwrap();
+            FlushBatch {
+                channel_id,
+                events: vec![BatchEvent {
+                    event,
+                    prompt_tag: "test".into(),
+                    received_at: std::time::Instant::now(),
+                }],
+                cancelled_events: vec![],
+                cancel_reason: None,
+            }
+        };
+
+        let run = |outcome: PromptOutcome, batch: FlushBatch| async move {
+            let channel_id = batch.channel_id;
+            let agent = dummy_agent(0).await;
+            let mut pool = AgentPool::from_slots(vec![None]);
+            let task_id = pool.join_set.spawn(async {}).id();
+            pool.task_map_mut().insert(
+                task_id,
+                crate::pool::TaskMeta {
+                    agent_index: 0,
+                    channel_id: None,
+                    turn_id: "test-turn-id".to_string(),
+                    recoverable_batch: None,
+                    control_tx: None,
+                    steer_tx: None,
+                },
+            );
+            let mut queue = EventQueue::new(config::DedupMode::Queue);
+            let config = test_config();
+            let mut heartbeat_in_flight = false;
+            let removed_channels = HashSet::new();
+            let mut crash_history = vec![SlotCircuit {
+                crash_times: Vec::new(),
+                open_until: None,
+                respawn_in_flight: false,
+            }];
+            let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+            let mut respawn_tasks = tokio::task::JoinSet::new();
+            let result = PromptResult {
+                agent,
+                source: PromptSource::Channel(channel_id),
+                turn_id: "test-turn-id".to_string(),
+                outcome,
+                batch: Some(batch),
+            };
+            handle_prompt_result(
+                &mut pool,
+                &mut queue,
+                &config,
+                result,
+                &mut heartbeat_in_flight,
+                &removed_channels,
+                &mut crash_history,
+                &respawn_tx,
+                &mut respawn_tasks,
+                None,
+                None,
+            );
+            (
+                queue.pending_channels(),
+                queue.queued_event_count(&channel_id),
+            )
+        };
+
+        let batch = make_batch();
+        let (channels, events) = run(
+            PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            batch,
+        )
+        .await;
+        assert_eq!(
+            channels, 1,
+            "hard-cap timeout with recent activity must requeue the batch"
+        );
+        assert_eq!(
+            events, 1,
+            "hard-cap timeout with recent activity must preserve the event"
+        );
+    }
+
+    /// The hard-timeout `death_message` must report what actually happened to
+    /// the batch, not just the `recently_active` eligibility flag: a
+    /// recently-active batch within its retry budget is requeued, so the
+    /// observer payload must say so.
+    #[tokio::test]
+    async fn hard_timeout_recently_active_requeue_success_reports_requeued_for_retry() {
+        let channel_id = Uuid::new_v4();
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: EventBuilder::new(Kind::Custom(9), "test")
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        let events = observer.snapshot();
+        let turn_error = events
+            .iter()
+            .find(|e| e.kind == "turn_error")
+            .expect("exactly one turn_error event must be emitted");
+        assert_eq!(
+            turn_error.payload["error"].as_str().unwrap(),
+            format!(
+                "Agent turn exceeded the maximum duration ({}s) — requeued for retry (recently active)",
+                config.max_turn_duration_secs
+            ),
+        );
+        assert_eq!(
+            queue.pending_channels(),
+            1,
+            "batch must be requeued, not dead-lettered, while within the retry budget"
+        );
+    }
+
+    /// Same recently-active hard timeout, but the channel has already
+    /// exhausted its retry budget ([`crate::queue::MAX_RETRIES`] prior
+    /// attempts) — `queue.requeue()` dead-letters instead of requeueing, and
+    /// the observer payload must report that fate, not the requeue wording
+    /// above.
+    #[tokio::test]
+    async fn hard_timeout_recently_active_budget_exhausted_reports_dead_lettered() {
+        let channel_id = Uuid::new_v4();
+        let mut queue = EventQueue::new(config::DedupMode::Queue);
+        // Simulate MAX_RETRIES prior failed attempts on this channel so the
+        // upcoming requeue() call in handle_prompt_result crosses the
+        // dead-letter threshold.
+        queue.set_retry_count_for_test(channel_id, crate::queue::MAX_RETRIES);
+
+        let agent = dummy_agent(0).await;
+        let mut pool = AgentPool::from_slots(vec![None]);
+        let task_id = pool.join_set.spawn(async {}).id();
+        pool.task_map_mut().insert(
+            task_id,
+            crate::pool::TaskMeta {
+                agent_index: 0,
+                channel_id: None,
+                turn_id: "test-turn-id".to_string(),
+                recoverable_batch: None,
+                control_tx: None,
+                steer_tx: None,
+            },
+        );
+        let config = test_config();
+        let mut heartbeat_in_flight = false;
+        let removed_channels = HashSet::new();
+        let mut crash_history = vec![SlotCircuit {
+            crash_times: Vec::new(),
+            open_until: None,
+            respawn_in_flight: false,
+        }];
+        let (respawn_tx, _respawn_rx) = mpsc::channel(8);
+        let mut respawn_tasks = tokio::task::JoinSet::new();
+        let observer = ObserverHandle::in_process();
+        let batch = FlushBatch {
+            channel_id,
+            events: vec![BatchEvent {
+                event: EventBuilder::new(Kind::Custom(9), "final-attempt")
+                    .sign_with_keys(&Keys::generate())
+                    .unwrap(),
+                prompt_tag: "test".into(),
+                received_at: std::time::Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let result = PromptResult {
+            agent,
+            source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
+            outcome: PromptOutcome::Timeout(TimeoutKind::Hard {
+                recently_active: true,
+            }),
+            batch: Some(batch),
+        };
+        handle_prompt_result(
+            &mut pool,
+            &mut queue,
+            &config,
+            result,
+            &mut heartbeat_in_flight,
+            &removed_channels,
+            &mut crash_history,
+            &respawn_tx,
+            &mut respawn_tasks,
+            Some(observer.clone()),
+            None,
+        );
+
+        let events = observer.snapshot();
+        let turn_error = events
+            .iter()
+            .find(|e| e.kind == "turn_error")
+            .expect("exactly one turn_error event must be emitted");
+        assert_eq!(
+            turn_error.payload["error"].as_str().unwrap(),
+            format!(
+                "Agent turn exceeded the maximum duration ({}s) — dead-lettered (retry budget exhausted)",
+                config.max_turn_duration_secs
+            ),
+        );
+        assert_eq!(
+            queue.queued_event_count(&channel_id),
+            0,
+            "batch with an exhausted retry budget must be dead-lettered, not requeued"
         );
     }
 
@@ -4458,6 +5812,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -4489,6 +5844,7 @@ mod error_outcome_emission_tests {
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(channel_id),
+            turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             batch: Some(batch),
         };
@@ -4595,6 +5951,7 @@ mod error_outcome_emission_tests {
             crate::pool::TaskMeta {
                 agent_index: 0,
                 channel_id: None,
+                turn_id: "test-turn-id".to_string(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -4616,6 +5973,7 @@ mod error_outcome_emission_tests {
         let result = PromptResult {
             agent,
             source: PromptSource::Channel(Uuid::new_v4()),
+            turn_id: "test-turn-id".to_string(),
             outcome: PromptOutcome::CancelDrainTimeout(grace),
             // Explicit Stop already dropped the batch upstream in
             // `classify_control_cancel_failure` — `handle_prompt_result`
@@ -4705,6 +6063,7 @@ mod observer_payload_trim_tests {
             channel_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
+            started_at: None,
             payload,
         }
     }

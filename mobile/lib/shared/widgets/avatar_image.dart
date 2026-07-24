@@ -4,6 +4,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../relay/relay.dart';
+
 /// A circular avatar that supports both remote URLs and inline image data.
 ///
 /// Flutter's [NetworkImage] only loads network URLs, while desktop browsers also
@@ -97,8 +99,8 @@ class _AvatarImageContentState extends State<AvatarImageContent> {
         fit: widget.fit,
         errorBuilder: (_, _, _) => centeredFallback,
       ),
-      _NetworkAvatarSource(:final url) => Image.network(
-        url,
+      _NetworkAvatarSource(:final url) => MediaImage(
+        url: url,
         fit: widget.fit,
         errorBuilder: (_, _, _) => centeredFallback,
       ),

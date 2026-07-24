@@ -1105,6 +1105,12 @@ mod tests {
         (dir, original_path)
     }
 
+    #[cfg(unix)]
+    fn leaked_adapter_commands(bin: &std::path::Path) -> &'static [&'static str] {
+        let command = Box::leak(bin.display().to_string().into_boxed_str());
+        Box::leak(vec![command as &'static str].into_boxed_slice())
+    }
+
     /// Restore PATH and clear the resolve cache after a PATH-mutating test.
     #[cfg(unix)]
     fn restore_path(original: &str) {
@@ -1121,8 +1127,13 @@ mod tests {
 
         let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\nexit 1\n");
         let exe = present_binary_str();
-        // underlying_cli = running test binary (always present, never probed)
-        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
+        // Use the fixture's absolute adapter path here. Bare `codex-acp`
+        // intentionally prefers Buzz's managed npm shim when it exists, which
+        // would make this version-gate regression test depend on machine state.
+        let rt = make_codex_runtime(
+            leaked_adapter_commands(&dir.path().join("codex-acp")),
+            Some(exe),
+        );
         let reqs = cli_login::requirements(
             &[exe, "--buzz-probe-must-not-run-xyz"],
             "run `codex login`",
@@ -1159,7 +1170,10 @@ mod tests {
 
         let (dir, orig) = setup_temp_codex_acp("#!/bin/sh\necho 'not a version string'\nexit 0\n");
         let exe = present_binary_str();
-        let rt = make_codex_runtime(&["codex-acp"], Some(exe));
+        let rt = make_codex_runtime(
+            leaked_adapter_commands(&dir.path().join("codex-acp")),
+            Some(exe),
+        );
         let reqs = cli_login::requirements(
             &[exe, "--buzz-probe-must-not-run-xyz"],
             "run `codex login`",

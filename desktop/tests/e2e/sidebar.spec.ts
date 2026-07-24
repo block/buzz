@@ -22,6 +22,14 @@ async function storedSidebarWidth(page: Page) {
   );
 }
 
+async function loadTheme(page: Page, theme: string) {
+  await page.addInitScript((selectedTheme) => {
+    window.localStorage.setItem("buzz-theme", selectedTheme);
+  }, theme);
+  await installMockBridge(page);
+  await page.goto("/");
+}
+
 // Regression guard for the "Leave channel" lockup: with two bundled copies of
 // @radix-ui/react-dismissable-layer, opening a modal AlertDialog from a modal
 // Radix ContextMenu left `pointer-events: none` stuck on <body> after the
@@ -57,6 +65,60 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.up();
 }
 
+test("automatically shows relay join requirements near the relay URL", async ({
+  page,
+}) => {
+  await page.route(
+    "https://policy.example.com/api/join-policy",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          policy: {
+            terms_markdown: "# Terms",
+            privacy_markdown: "# Privacy",
+            age_attestation_required: true,
+            version: "policy-v1",
+          },
+        }),
+      });
+    },
+  );
+  await page.goto("/");
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByText("Add Community", { exact: true }).click();
+  await page.getByLabel("Relay URL").fill("wss://policy.example.com");
+
+  const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
+  const agreementConfirmation = page.getByLabel(
+    "I agree to the Buzz Terms of Service and Privacy Policy.",
+  );
+  await expect(ageConfirmation).toBeVisible();
+  await expect(agreementConfirmation).toBeVisible();
+  await expect(
+    page.getByText("Review this relay's join policy below."),
+  ).toHaveCount(0);
+  await expect(page.getByText(/By continuing, you agree/)).toHaveCount(0);
+
+  const addCommunityButton = page.getByRole("button", {
+    name: "Add Community",
+  });
+  await expect(addCommunityButton).toBeDisabled();
+  await ageConfirmation.check();
+  await expect(ageConfirmation.locator("svg path")).toBeVisible();
+  await expect(addCommunityButton).toBeDisabled();
+  await agreementConfirmation.check();
+  await expect(addCommunityButton).toBeEnabled();
+
+  const consentBox = await agreementConfirmation.boundingBox();
+  const reposInput = await page.locator("#ws-repos-dir").boundingBox();
+  const addButtonBox = await addCommunityButton.boundingBox();
+  expect(consentBox?.y).toBeGreaterThan(reposInput?.y ?? Number.MAX_VALUE);
+  expect(consentBox?.y).toBeLessThan(addButtonBox?.y ?? 0);
+});
+
 test("leaving a channel from the context menu never freezes the app", async ({
   page,
 }) => {
@@ -80,116 +142,169 @@ test("leaving a channel from the context menu never freezes the app", async ({
   await expectAppClickable(page);
 });
 
-test("fades the pinned sidebar chrome edges", async ({ page }) => {
+test("channel context menu only shows owner actions to the owner", async ({
+  page,
+}) => {
   await page.goto("/");
 
-  const pinnedHeader = page.getByTestId("sidebar-pinned-header");
-  const footer = page.locator(
-    '[data-testid="app-sidebar"] [data-sidebar="footer"]',
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Delete channel" }),
+  ).toBeVisible();
+  const lifecycleOrder = (
+    await page.getByRole("menuitem").allTextContents()
+  ).filter((label) =>
+    ["Leave channel", "Archive channel", "Delete channel"].includes(label),
   );
-  const channelContent = page.getByTestId("sidebar-channel-content");
-  await expect(pinnedHeader).toBeVisible();
-  await expect(footer).toBeVisible();
-  await expect(channelContent).toBeVisible();
+  expect(lifecycleOrder).toEqual([
+    "Leave channel",
+    "Archive channel",
+    "Delete channel",
+  ]);
+  await page.keyboard.press("Escape");
 
-  const fadeStyles = await page.evaluate(() => {
-    const header = document.querySelector<HTMLElement>(
-      '[data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"]',
-    );
-    const footerElement = document.querySelector<HTMLElement>(
+  await page.getByTestId("channel-random").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Leave channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Loading channel actions..." }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("menuitem", { name: "Delete channel" }),
+  ).toHaveCount(0);
+});
+
+test("channel context menu explains when owner actions are loading", async ({
+  page,
+}) => {
+  await installMockBridge(page, { channelMembersReadDelayMs: 500 });
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await expect(
+    page.getByRole("menuitem", { name: "Loading channel actions..." }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Archive channel" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("menuitem", { name: "Loading channel actions..." }),
+  ).toHaveCount(0);
+});
+
+test("channel owner can archive from the context menu", async ({ page }) => {
+  await page.goto("/");
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Archive channel" }).click();
+
+  await expect(page.getByTestId("stream-list")).not.toContainText("general");
+});
+
+test("channel owner can delete from the context menu", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+
+  await page.getByTestId("channel-general").click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete channel" }).click();
+  await expect(
+    page.getByTestId("channel-delete-confirmation-dialog"),
+  ).toBeVisible();
+  await page.getByTestId("channel-delete-confirm").click();
+
+  await expect(page.getByTestId("home-inbox-list")).toBeVisible();
+  await expect(page.getByTestId("stream-list")).not.toContainText("general");
+});
+
+for (const theme of ["buzz", "github-light", "catppuccin-mocha"]) {
+  test(`uses the continuous sidebar surface in ${theme}`, async ({ page }) => {
+    await loadTheme(page, theme);
+
+    const pinnedHeader = page.getByTestId("sidebar-pinned-header");
+    const footer = page.locator(
       '[data-testid="app-sidebar"] [data-sidebar="footer"]',
     );
-    const channelElement = document.querySelector<HTMLElement>(
-      '[data-testid="sidebar-channel-content"]',
-    );
+    const channelContent = page.getByTestId("sidebar-channel-content");
+    await expect(pinnedHeader).toBeVisible();
+    await expect(footer).toBeVisible();
+    await expect(channelContent).toBeVisible();
 
-    if (!header || !footerElement || !channelElement) {
-      throw new Error("Expected sidebar chrome elements to be rendered");
-    }
+    const chromeStyles = await page.evaluate(() => {
+      const header = document.querySelector<HTMLElement>(
+        '[data-testid="app-sidebar"] [data-testid="sidebar-pinned-header"]',
+      );
+      const footerElement = document.querySelector<HTMLElement>(
+        '[data-testid="app-sidebar"] [data-sidebar="footer"]',
+      );
+      const channelElement = document.querySelector<HTMLElement>(
+        '[data-testid="sidebar-channel-content"]',
+      );
 
-    const headerBefore = getComputedStyle(header, "::before");
-    const headerStyle = getComputedStyle(header);
-    const sidebarElement = header.closest<HTMLElement>(
-      '[data-sidebar="sidebar"]',
-    );
-    const sidebarStyle = sidebarElement
-      ? getComputedStyle(sidebarElement)
-      : null;
-    const footerStyle = getComputedStyle(footerElement);
-    const footerBefore = getComputedStyle(footerElement, "::before");
-    const channelBefore = getComputedStyle(channelElement, "::before");
-    const channelAfter = getComputedStyle(channelElement, "::after");
-    const headerRect = header.getBoundingClientRect();
-    const footerRect = footerElement.getBoundingClientRect();
+      if (!header || !footerElement || !channelElement) {
+        throw new Error("Expected sidebar chrome elements to be rendered");
+      }
 
-    return {
-      channelAfterBackground: channelAfter.backgroundImage,
-      channelBeforeBackground: channelBefore.backgroundImage,
-      footerBackgroundColor: footerStyle.backgroundColor,
-      footerBackdropFilter: footerBefore.backdropFilter,
-      footerBackground: footerBefore.backgroundImage,
-      footerBoxShadow: footerStyle.boxShadow,
-      footerFadeBoxShadow: footerBefore.boxShadow,
-      footerFadeHeight: Number.parseFloat(footerBefore.height),
-      footerHeight: footerRect.height,
-      footerPointerEvents: footerBefore.pointerEvents,
-      footerPosition: footerBefore.position,
-      footerTopPx: Number.parseFloat(footerBefore.top),
-      footerZIndex: footerBefore.zIndex,
-      headerBackground: headerBefore.backgroundImage,
-      headerBackdropFilter: headerBefore.backdropFilter,
-      headerBackgroundColor: headerStyle.backgroundColor,
-      headerBottomPx: Number.parseFloat(headerBefore.bottom),
-      headerBoxShadow: headerStyle.boxShadow,
-      headerFadeBoxShadow: headerBefore.boxShadow,
-      headerFadeHeight: Number.parseFloat(headerBefore.height),
-      headerHeight: headerRect.height,
-      headerPointerEvents: headerBefore.pointerEvents,
-      headerPosition: headerBefore.position,
-      headerZIndex: headerBefore.zIndex,
-      sidebarBackgroundColor: sidebarStyle?.backgroundColor ?? null,
-    };
+      const headerBefore = getComputedStyle(header, "::before");
+      const headerStyle = getComputedStyle(header);
+      const footerStyle = getComputedStyle(footerElement);
+      const footerBefore = getComputedStyle(footerElement, "::before");
+      const channelBefore = getComputedStyle(channelElement, "::before");
+      const channelAfter = getComputedStyle(channelElement, "::after");
+
+      return {
+        channelAfterBackground: channelAfter.backgroundImage,
+        channelBeforeBackground: channelBefore.backgroundImage,
+        footerBackground: footerStyle.backgroundImage,
+        footerBackgroundColor: footerStyle.backgroundColor,
+        footerBeforeBackground: footerBefore.backgroundImage,
+        footerBeforeContent: footerBefore.content,
+        footerBoxShadow: footerStyle.boxShadow,
+        footerIsolation: footerStyle.isolation,
+        footerMarginTop: Number.parseFloat(footerStyle.marginTop),
+        footerZIndex: footerStyle.zIndex,
+        headerBackground: headerStyle.backgroundImage,
+        headerBackgroundColor: headerStyle.backgroundColor,
+        headerBeforeBackground: headerBefore.backgroundImage,
+        headerBeforeContent: headerBefore.content,
+        headerBoxShadow: headerStyle.boxShadow,
+        headerIsolation: headerStyle.isolation,
+        headerMarginBottom: Number.parseFloat(headerStyle.marginBottom),
+        headerZIndex: headerStyle.zIndex,
+      };
+    });
+
+    expect(chromeStyles.headerBackground).toBe("none");
+    expect(chromeStyles.headerBackgroundColor).toBe("rgba(0, 0, 0, 0)");
+    expect(chromeStyles.headerBeforeBackground).toBe("none");
+    expect(chromeStyles.headerBeforeContent).toBe("none");
+    expect(chromeStyles.headerBoxShadow).toBe("none");
+    expect(chromeStyles.headerIsolation).toBe("auto");
+    expect(chromeStyles.headerMarginBottom).toBe(0);
+    expect(chromeStyles.headerZIndex).toBe("auto");
+    expect(chromeStyles.footerBackground).toBe("none");
+    expect(chromeStyles.footerBackgroundColor).toBe("rgba(0, 0, 0, 0)");
+    expect(chromeStyles.footerBeforeBackground).toBe("none");
+    expect(chromeStyles.footerBeforeContent).toBe("none");
+    expect(chromeStyles.footerBoxShadow).toBe("none");
+    expect(chromeStyles.footerIsolation).toBe("auto");
+    expect(chromeStyles.footerMarginTop).toBe(0);
+    expect(chromeStyles.footerZIndex).toBe("auto");
+    expect(chromeStyles.channelBeforeBackground).toBe("none");
+    expect(chromeStyles.channelAfterBackground).toBe("none");
   });
-
-  expect(fadeStyles.headerBackground).toContain("gradient");
-  expect(fadeStyles.headerBackgroundColor).toBe(
-    fadeStyles.sidebarBackgroundColor,
-  );
-  expect(fadeStyles.headerBackground).toContain("rgba");
-  expect(fadeStyles.headerBackground).toContain("0) 100%");
-  expect(fadeStyles.headerBackdropFilter).toBe("none");
-  expect(fadeStyles.headerBottomPx).toBeLessThan(0);
-  expect(fadeStyles.headerBoxShadow).toBe("none");
-  expect(fadeStyles.headerFadeBoxShadow).toBe("none");
-  expect(fadeStyles.headerFadeHeight).toBeLessThanOrEqual(10);
-  expect(fadeStyles.headerPointerEvents).toBe("none");
-  expect(fadeStyles.headerPosition).toBe("absolute");
-  expect(fadeStyles.headerZIndex).toBe("5");
-  expect(fadeStyles.footerBackground).toContain("gradient");
-  expect(fadeStyles.footerBackgroundColor).toBe(
-    fadeStyles.sidebarBackgroundColor,
-  );
-  expect(fadeStyles.footerBackground).toContain("rgba");
-  expect(fadeStyles.footerBackground).toContain("0) 100%");
-  expect(fadeStyles.footerBackdropFilter).toBe("none");
-  expect(fadeStyles.footerBoxShadow).toBe("none");
-  expect(fadeStyles.footerFadeBoxShadow).toBe("none");
-  expect(fadeStyles.footerFadeHeight).toBeLessThanOrEqual(10);
-  expect(fadeStyles.footerPointerEvents).toBe("none");
-  expect(fadeStyles.footerPosition).toBe("absolute");
-  expect(fadeStyles.footerTopPx).toBeLessThan(0);
-  expect(fadeStyles.footerZIndex).toBe("5");
-  expect(fadeStyles.channelBeforeBackground).toBe("none");
-  expect(fadeStyles.channelAfterBackground).toBe("none");
-});
+}
 
 test("aligns the sidebar search with the channel title outside the Buzz theme", async ({
   page,
 }) => {
-  await page.addInitScript(() => {
-    window.localStorage.setItem("buzz-theme", "github-light");
-  });
-  await page.goto("/");
+  await loadTheme(page, "github-light");
   await page.getByTestId("channel-general").click();
 
   const root = page.locator("html");
@@ -211,6 +326,16 @@ test("aligns the sidebar search with the channel title outside the Buzz theme", 
   const searchCenter = searchBox.y + searchBox.height / 2;
   const channelTitleCenter = channelTitleBox.y + channelTitleBox.height / 2;
   expect(Math.abs(searchCenter - channelTitleCenter)).toBeLessThanOrEqual(2);
+});
+
+test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {
+  await page.goto("/");
+  const rail = page.getByRole("button", { name: "Resize sidebar" });
+  await rail.click();
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await expect(rail).toBeHidden();
 });
 
 test("resizes, persists, and snaps to the default sidebar width", async ({

@@ -57,6 +57,9 @@ diffy = "0.5"
 # Hex encoding — SHA-256 hash output for Blossom uploads
 hex = { workspace = true }
 
+# Byte buffers returned by authenticated media downloads
+bytes = "1"
+
 # MIME type detection via magic bytes — file upload validation
 infer = "0.19"
 
@@ -66,5 +69,25 @@ url = { workspace = true }
 # Persona pack parsing, validation, and resolution
 buzz-persona = { path = "../buzz-persona" }
 
+# Platform app-data dir resolution — locates the desktop app's
+# channel-templates.json store for `channels create --template`
+dirs = "6"
+
 # WebSocket client — ephemeral event publish (kind:20001 is WS-only on the relay)
 buzz-ws-client = { path = "../buzz-ws-client" }
+
+# Explicit rustls dep with ring provider — required to install the process-level
+# CryptoProvider at startup. Without this the standalone `buzz` binary panics when
+# a multi-package release build (buzz-acp + buzz-dev-mcp + buzz-cli in one cargo
+# invocation) unifies both ring and aws-lc-rs features, leaving rustls unable to
+# auto-select a provider. See crates/buzz-acp/Cargo.toml for the same dependency.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# Random number generation — full jitter for exponential backoff in with_retry
+rand = { workspace = true }
+
+[dev-dependencies]
+# Scratch files for channel-templates.json fixtures in tests
+tempfile = "3"
+# Minimal HTTP test server for retry/policy integration tests
+axum = { workspace = true }

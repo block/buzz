@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { installMockBridge } from "../helpers/bridge";
+import { FEATURE_OVERRIDES_STORAGE_KEY } from "../helpers/features";
 
 const RELAY_URL = "ws://localhost:3000";
 
@@ -32,11 +33,20 @@ async function seedCommunities(
 }
 
 test.describe("community rail", () => {
-  test("shows a button per community and highlights the active one", async ({
+  test("shows the rail with multiple communities despite a stale opt-out", async ({
     page,
   }) => {
-    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await installMockBridge(page, undefined, {
+      seedPreviewFeatures: false,
+      skipCommunitySeed: true,
+    });
     await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((overridesKey) => {
+      window.localStorage.setItem(
+        overridesKey,
+        JSON.stringify({ workspaceRail: false }),
+      );
+    }, FEATURE_OVERRIDES_STORAGE_KEY);
     await page.goto("/");
 
     const rail = page.getByTestId("community-rail");
@@ -97,6 +107,278 @@ test.describe("community rail", () => {
 
     // Switching persists the newly active community id (the app then remounts
     // against that relay via the existing community-init path).
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-active-community-id"),
+        ),
+      )
+      .toBe(COMMUNITY_B.id);
+  });
+
+  test("restores the last Home or channel destination per community", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("channel-general").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const generalUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+
+    await page.getByTestId("channel-random").click();
+    await expect(page).toHaveURL(/#\/channels\//);
+    const randomUrl = page.url();
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(randomUrl);
+
+    await page.getByRole("button", { name: "Inbox" }).click();
+    await expect(page).toHaveURL(/#\/$/);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await expect(page).toHaveURL(generalUrl);
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/$/);
+  });
+
+  test("enters a remembered channel before live validation completes", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    const rememberedChannelId = await page.evaluate((communityId) => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source) as {
+        channels: Array<{ id: string; name: string }>;
+      };
+      const generalChannel = snapshot.channels.find(
+        (channel) => channel.name === "general",
+      );
+      if (!generalChannel) throw new Error("missing general channel snapshot");
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        source,
+      );
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: {
+            kind: "channel",
+            channelId: generalChannel.id,
+          },
+        }),
+      );
+      return generalChannel.id;
+    }, COMMUNITY_B.id);
+
+    await page.evaluate(() => {
+      const testWindow = window as typeof window & {
+        __BUZZ_E2E__?: { mock?: { channelsReadDelayMs?: number } };
+      };
+      if (!testWindow.__BUZZ_E2E__) {
+        throw new Error("missing E2E config");
+      }
+      testWindow.__BUZZ_E2E__.mock = {
+        ...testWindow.__BUZZ_E2E__.mock,
+        channelsReadDelayMs: 800,
+      };
+    });
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).toHaveURL(
+      new RegExp(`#/channels/${rememberedChannelId}$`),
+      { timeout: 700 },
+    );
+    await expect(page.getByTestId("message-timeline")).toBeVisible({
+      timeout: 700,
+    });
+  });
+
+  test("clears a remembered channel that is unavailable after switching", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "missing-channel" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+
+    await page.goto("/");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        ),
+      )
+      .not.toBeNull();
+    await page.evaluate(() => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source);
+      snapshot.channels = snapshot.channels.map(
+        (channel: Record<string, unknown>, index: number) =>
+          index === 0 ? { ...channel, id: "missing-channel" } : channel,
+      );
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        JSON.stringify(snapshot),
+      );
+    });
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          if (!raw) return null;
+          return JSON.parse(raw)[communityId];
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "home" });
+  });
+
+  test("does not repair a remembered channel until live validation succeeds", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        channelsReadDelayMs: 300,
+        channelsReadErrors: [null, "temporary channel read failure"],
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_B.id);
+    await page.goto("/");
+    await expect(page.getByTestId("app-sidebar")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          window.localStorage.getItem("buzz-channels.v1:ws://localhost:3000"),
+        ),
+      )
+      .not.toBeNull();
+    await page.evaluate(() => {
+      const source = window.localStorage.getItem(
+        "buzz-channels.v1:ws://localhost:3000",
+      );
+      if (!source) throw new Error("missing source channel snapshot");
+      const snapshot = JSON.parse(source);
+      snapshot.channels = snapshot.channels.filter(
+        (channel: { id: string }) => channel.id !== "general",
+      );
+      window.localStorage.setItem(
+        "buzz-channels.v1:ws://localhost:3001",
+        JSON.stringify(snapshot),
+      );
+    });
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await expect(page).toHaveURL(/#\/channels\/general$/);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+    await page.waitForTimeout(400);
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+
+    await expect(page.getByTestId("channel-general")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate((communityId) => {
+          const raw = window.localStorage.getItem(
+            "buzz-community-destinations",
+          );
+          return raw ? JSON.parse(raw)[communityId] : null;
+        }, COMMUNITY_B.id),
+      )
+      .toEqual({ kind: "channel", channelId: "general" });
+  });
+
+  test("does not restore a remembered destination on cold boot", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.addInitScript((communityId) => {
+      window.localStorage.setItem(
+        "buzz-community-destinations",
+        JSON.stringify({
+          [communityId]: { kind: "channel", channelId: "general" },
+        }),
+      );
+    }, COMMUNITY_A.id);
+
+    await page.goto("/");
+
+    await expect(page).not.toHaveURL(/#\/channels\//);
+  });
+
+  test("removing the active community restores the fallback destination", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`).click();
+    await page.getByTestId("channel-random").click();
+    const randomUrl = page.url();
+    await page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`).click();
+    await page.getByTestId("channel-general").click();
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+    await page.getByRole("button", { name: "Remove Community" }).click();
+
+    await expect(page).toHaveURL(randomUrl);
     await expect
       .poll(() =>
         page.evaluate(() =>
@@ -205,5 +487,149 @@ test.describe("community rail", () => {
     const toggleBox = await toggle.boundingBox();
     expect(toggleBox).not.toBeNull();
     expect(toggleBox?.x ?? 0).toBeLessThan(120);
+  });
+
+  test("drag-to-reorder updates the stored community order and survives reload", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    // Seed only if not already set so the persisted order survives page.reload().
+    await page.addInitScript(
+      ({ list, active }) => {
+        if (!window.localStorage.getItem("buzz-communities")) {
+          window.localStorage.setItem("buzz-communities", JSON.stringify(list));
+        }
+        if (!window.localStorage.getItem("buzz-active-community-id")) {
+          window.localStorage.setItem("buzz-active-community-id", active);
+        }
+      },
+      { list: [COMMUNITY_A, COMMUNITY_B], active: COMMUNITY_A.id },
+    );
+    await page.goto("/");
+
+    const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    await expect(buttonA).toBeVisible();
+    await expect(buttonB).toBeVisible();
+
+    // Drag B (lower) up over A (higher) so the order becomes [B, A].
+    const boxA = await buttonA.boundingBox();
+    const boxB = await buttonB.boundingBox();
+    if (!boxA || !boxB) throw new Error("community buttons not laid out");
+
+    const startX = boxB.x + boxB.width / 2;
+    const startY = boxB.y + boxB.height / 2;
+    const targetY = boxA.y + boxA.height / 2;
+
+    // dnd-kit PointerSensor requires a 6px activation distance before it picks
+    // up the drag. Move in small steps so pointermove events fire on every pixel.
+    await page.mouse.move(startX, startY);
+    await page.mouse.down();
+    await page.mouse.move(startX, startY - 3, { steps: 3 });
+    await page.mouse.move(startX, targetY, { steps: 20 });
+    await page.mouse.up();
+
+    // The community list in localStorage must now be [B, A].
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem("buzz-communities");
+          if (!raw) return null;
+          const list = JSON.parse(raw) as Array<{ id: string }>;
+          return list.map((c) => c.id);
+        }),
+      )
+      .toEqual([COMMUNITY_B.id, COMMUNITY_A.id]);
+
+    // Verify the new order is also reflected in the rendered DOM — B button
+    // must appear above A button.
+    const newBoxA = await buttonA.boundingBox();
+    const newBoxB = await buttonB.boundingBox();
+    if (!newBoxA || !newBoxB)
+      throw new Error("community buttons not laid out after drag");
+    expect(newBoxB.y).toBeLessThan(newBoxA.y);
+
+    // Reload and confirm the order survives restart: addInitScript is
+    // conditional (no-op when data already exists), so the dragged [B, A]
+    // order is what React reads on boot.
+    await page.reload();
+    await expect(page.getByTestId("community-rail")).toBeVisible();
+
+    // Storage must still be [B, A] after reload.
+    const storedOrder = await page.evaluate(() => {
+      const raw = window.localStorage.getItem("buzz-communities");
+      if (!raw) return null;
+      const list = JSON.parse(raw) as Array<{ id: string }>;
+      return list.map((c) => c.id);
+    });
+    expect(storedOrder).toEqual([COMMUNITY_B.id, COMMUNITY_A.id]);
+
+    // DOM order must also be [B, A] after reload.
+    const reloadBoxA = await buttonA.boundingBox();
+    const reloadBoxB = await buttonB.boundingBox();
+    if (!reloadBoxA || !reloadBoxB)
+      throw new Error("community buttons not laid out after reload");
+    expect(reloadBoxB.y).toBeLessThan(reloadBoxA.y);
+  });
+
+  test("keyboard reorder: Space to pick up, ArrowUp to move, Space to drop updates stored order", async ({
+    page,
+  }) => {
+    await installMockBridge(page, undefined, { skipCommunitySeed: true });
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    const buttonA = page.getByTestId(`community-rail-button-${COMMUNITY_A.id}`);
+    const buttonB = page.getByTestId(`community-rail-button-${COMMUNITY_B.id}`);
+    await expect(buttonA).toBeVisible();
+    await expect(buttonB).toBeVisible();
+
+    // Focus B (the second/lower item) and use keyboard to move it above A.
+    // Note: page.keyboard.press("Space") fires the button's native click on this
+    // Chromium build even when React's onKeyDown calls preventDefault — a CDP
+    // input-injection quirk. The synthetic dispatch below goes directly through
+    // React's event system where preventDefault correctly suppresses the click,
+    // while still exercising the real KeyboardSensor path (Thufir verified the
+    // test fails when KeyboardSensor is removed).
+    await buttonB.focus();
+    await page.evaluate((testId) => {
+      const el = document.querySelector(`[data-testid="${testId}"]`);
+      if (!el) throw new Error(`button not found: ${testId}`);
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          code: "Space",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, `community-rail-button-${COMMUNITY_B.id}`);
+    // ArrowUp moves the active item one slot up.
+    await page.keyboard.press("ArrowUp");
+    // Space drops the item — same synthetic dispatch for consistency.
+    await page.evaluate((testId) => {
+      const el = document.querySelector(`[data-testid="${testId}"]`);
+      if (!el) throw new Error(`button not found: ${testId}`);
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          code: "Space",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    }, `community-rail-button-${COMMUNITY_B.id}`);
+
+    // The community list in localStorage must now be [B, A].
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const raw = window.localStorage.getItem("buzz-communities");
+          if (!raw) return null;
+          const list = JSON.parse(raw) as Array<{ id: string }>;
+          return list.map((c) => c.id);
+        }),
+      )
+      .toEqual([COMMUNITY_B.id, COMMUNITY_A.id]);
   });
 });

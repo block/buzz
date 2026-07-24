@@ -58,6 +58,9 @@ test.describe("signout screenshots", () => {
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toBeVisible({ timeout: 5_000 });
     await expect(dialog.getByText("Sign out and wipe all data?")).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Delete My Data" }),
+    ).toBeVisible();
 
     // Settle animations before capture.
     await page.evaluate(() =>

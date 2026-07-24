@@ -7,7 +7,7 @@ import {
   type PersonaDropdownOption,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 
 type PersonaModelComboboxProps = {
   disabled?: boolean;

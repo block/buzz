@@ -7,7 +7,12 @@
  */
 import * as React from "react";
 import { Input } from "@/shared/ui/input";
+import { cn } from "@/shared/lib/cn";
 import type { EnvVarsValue } from "./EnvVarsEditor";
+import {
+  AgentDropdownSelect,
+  type AgentDropdownOption,
+} from "./agentConfigControls";
 import {
   BUZZ_AGENT_MAX_CONTEXT_TOKENS,
   BUZZ_AGENT_MAX_OUTPUT_TOKENS,
@@ -21,7 +26,7 @@ import {
  * Shared effort-select dropdown for the `BUZZ_AGENT_THINKING_EFFORT` env var.
  *
  * Used by both `BuzzAgentModelTuningFields` (per-agent/persona dialogs) and
- * `GlobalAgentConfigSettingsCard` (global defaults settings card) to ensure a
+ * `AgentDefaultsSettingsCard` (global defaults settings card) to ensure a
  * single rendering surface for this control.
  *
  * The caller is responsible for the auto-clear `useEffect` that resets the
@@ -32,21 +37,35 @@ import {
  */
 export function EffortSelectField({
   currentEffort,
+  disabled = false,
+  emptyOptionLabel,
   effortDefault,
   effortValid,
+  fieldClassName,
   htmlFor,
   inheritedEffort,
   inheritFallbackLabel,
   label,
+  labelClassName,
   onChange,
+  placeholderClassName,
+  selectClassName,
+  showUnavailableOptions = true,
   testId,
+  useCustomSelect = false,
 }: {
   /** Current effort value from env vars ("" = inherit). */
   currentEffort: string;
+  /** Disable the dropdown. */
+  disabled?: boolean;
+  /** Optional replacement label for the empty/inherit option. */
+  emptyOptionLabel?: string;
   /** Semantic default for this provider/model combination, or null for manual-budget. */
   effortDefault: string | null;
   /** Valid effort values for this provider/model. */
   effortValid: ReadonlyArray<string>;
+  /** Optional class override for the field wrapper. */
+  fieldClassName?: string;
   /** `htmlFor` attribute for the label element. */
   htmlFor: string;
   /** Inherited effort from a higher-precedence layer (shown in the Inherit option label). */
@@ -60,47 +79,92 @@ export function EffortSelectField({
    * Per-agent callers (BuzzAgentModelTuningFields) pass `"Inherit (agent default)"`
    * to preserve the label that appeared before this component was extracted.
    *
-   * The global-defaults card (GlobalAgentConfigSettingsCard) passes
+   * The global-defaults card (AgentDefaultsSettingsCard) passes
    * `"Default (<effort>)"` when a semantic default exists and nothing is baked
    * in — so OSS users see "Default (medium)" rather than bare "Inherit".
    */
   inheritFallbackLabel?: string;
   /** Label text for the dropdown. */
   label: string;
+  /** Optional class override for the label. */
+  labelClassName?: string;
   /** Called when the user selects a new value. */
   onChange: (value: string) => void;
+  /** Optional class override for placeholder text. */
+  placeholderClassName?: string;
+  /** Optional class override for the select/trigger. */
+  selectClassName?: string;
+  /** When false, hide effort values that are not valid for the provider/model. */
+  showUnavailableOptions?: boolean;
   /** data-testid attribute for the select element. */
   testId: string;
+  /** Render the polished app dropdown instead of the native select. */
+  useCustomSelect?: boolean;
 }) {
+  const inheritLabel = inheritedEffort
+    ? `Inherit (${inheritedEffort})`
+    : effortDefault === null
+      ? "Inherit (default)"
+      : (inheritFallbackLabel ?? "Inherit");
+  const effortOptions: AgentDropdownOption[] = [
+    { label: emptyOptionLabel ?? inheritLabel, value: "" },
+    ...BUZZ_AGENT_THINKING_EFFORT_VALUES.flatMap((v) => {
+      const isValid = (effortValid as readonly string[]).includes(v);
+      if (!showUnavailableOptions && !isValid) return [];
+      const isDefault = v === effortDefault;
+      return [
+        {
+          disabled: !isValid,
+          label: isDefault ? `${v} (default)` : v,
+          value: v,
+        },
+      ];
+    }),
+  ];
+
   return (
-    <div className="space-y-1.5">
-      <label className="text-sm font-medium" htmlFor={htmlFor}>
+    <div className={cn("space-y-1.5", fieldClassName)}>
+      <label
+        className={cn("text-sm font-medium", labelClassName)}
+        htmlFor={htmlFor}
+      >
         {label}
       </label>
-      <select
-        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs"
-        data-testid={testId}
-        id={htmlFor}
-        onChange={(event) => onChange(event.target.value)}
-        value={currentEffort}
-      >
-        <option value="">
-          {inheritedEffort
-            ? `Inherit (${inheritedEffort})`
-            : effortDefault === null
-              ? "Inherit (default)"
-              : (inheritFallbackLabel ?? "Inherit")}
-        </option>
-        {BUZZ_AGENT_THINKING_EFFORT_VALUES.map((v) => {
-          const isValid = (effortValid as readonly string[]).includes(v);
-          const isDefault = v === effortDefault;
-          return (
-            <option disabled={!isValid} key={v} value={v}>
-              {isDefault ? `${v} (default)` : v}
+      {useCustomSelect ? (
+        <AgentDropdownSelect
+          className={selectClassName}
+          disabled={disabled}
+          id={htmlFor}
+          onValueChange={onChange}
+          options={effortOptions}
+          placeholderClassName={placeholderClassName}
+          placeholderValue={emptyOptionLabel ? "" : undefined}
+          testId={testId}
+          value={currentEffort}
+        />
+      ) : (
+        <select
+          className={cn(
+            "flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-xs disabled:cursor-not-allowed disabled:opacity-60",
+            selectClassName,
+          )}
+          data-testid={testId}
+          disabled={disabled}
+          id={htmlFor}
+          onChange={(event) => onChange(event.target.value)}
+          value={currentEffort}
+        >
+          {effortOptions.map((option) => (
+            <option
+              disabled={option.disabled}
+              key={option.value}
+              value={option.value}
+            >
+              {option.label}
             </option>
-          );
-        })}
-      </select>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

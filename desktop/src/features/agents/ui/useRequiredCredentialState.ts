@@ -10,7 +10,7 @@ import {
   isGloballySatisfiedCredentialKey,
   requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
-} from "./personaDialogPickers";
+} from "./agentConfigOptions";
 import { hasMissingRequiredEnvKey } from "./personaRuntimeModel";
 
 /** Derived required-credential state for the Edit Agent dialog's Advanced section. */
@@ -21,8 +21,6 @@ export interface RequiredCredentialState {
   fileSatisfiedEnvKeys: string[];
   /** Whether any required env key is still missing (blocks Save). */
   requiredEnvKeyMissing: boolean;
-  /** True once all async satisfaction sources (baked, file config) have resolved. */
-  settled: boolean;
 }
 
 /**
@@ -35,7 +33,8 @@ export interface RequiredCredentialState {
  * actually be saved.
  *
  * The caller owns the visibility policy: top-level API-key fields are already
- * visible, while non-secret Advanced-only keys can open that section.
+ * visible, while non-secret keys remain available under user-controlled
+ * Advanced disclosure.
  *
  * `globalProvider` is used as the fallback when the per-agent provider is
  * empty — without it, a global-provider-only config produces no required keys
@@ -78,13 +77,12 @@ export function useRequiredCredentialState(params: {
     ? provider.trim() || globalProvider.trim()
     : "";
 
-  const { data: runtimeFileConfig, isLoading: fileConfigLoading } =
-    useRuntimeFileConfigQuery(prospectiveRuntimeId, { enabled: open });
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    prospectiveRuntimeId,
+    { enabled: open },
+  );
 
-  const { data: bakedEnvKeys, isLoading: bakedLoading } =
-    useBakedBuildEnvKeysQuery({ enabled: open });
-
-  const settled = !fileConfigLoading && !bakedLoading;
+  const { data: bakedEnvKeys } = useBakedBuildEnvKeysQuery({ enabled: open });
 
   // All required keys for this runtime + provider combination.
   const allRequiredKeys = React.useMemo(
@@ -137,6 +135,5 @@ export function useRequiredCredentialState(params: {
     requiredEnvKeys,
     fileSatisfiedEnvKeys,
     requiredEnvKeyMissing,
-    settled,
   };
 }

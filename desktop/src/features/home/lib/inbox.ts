@@ -60,6 +60,9 @@ export type InboxTypeLabel = {
 export type InboxReply = {
   authorLabel: string;
   authorPubkey: string;
+  isAgent?: boolean;
+  ownerLabel?: string | null;
+  ownerPubkey?: string | null;
   avatarUrl: string | null;
   content: string;
   createdAt: number;
@@ -72,9 +75,9 @@ export type InboxReply = {
   reactions?: TimelineReaction[];
   rootId?: string | null;
   /**
-   * Raw event signer, NOT the tag-attributed display author
-   * (`authorPubkey`). The config-nudge trust gate authenticates against
-   * this field so `actor`/`p`-tag spoofing can't enable the card.
+   * Raw event signer, not a relay-delegated display author (`authorPubkey`).
+   * The config-nudge trust gate authenticates against this field because only
+   * the signing agent may enable the card.
    */
   signerPubkey?: string;
   tags?: string[][];
