@@ -26,6 +26,7 @@ import {
   mentionHighlightKey,
 } from "./mentionHighlightExtension";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
+import { EmoticonAutoReplace } from "./emoticonAutoReplace";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
@@ -454,6 +455,7 @@ export function useRichTextEditor({
         SpoilerMark,
         MentionHighlightExtension,
         customEmojiWiring.extension,
+        EmoticonAutoReplace,
         Placeholder.configure({
           placeholder: () => placeholderRef.current ?? "Write a message…",
         }),
