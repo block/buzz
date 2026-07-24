@@ -101,7 +101,7 @@ mod tests {
         assert!(goose
             .cli_install_commands_windows
             .iter()
-            .any(|command| command.contains("CONFIGURE='false'")));
+            .any(|command| command.contains("\\$env:CONFIGURE='false'")));
 
         let claude = known_acp_runtime_exact("claude").unwrap();
         assert_eq!(
