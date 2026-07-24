@@ -1,5 +1,11 @@
 import { Extension } from "@tiptap/core";
-import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
+import type { Node as PMNode } from "@tiptap/pm/model";
+import {
+  Plugin,
+  PluginKey,
+  TextSelection,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 
 export const mentionHighlightKey = new PluginKey("mentionHighlight");
@@ -10,6 +16,13 @@ export const mentionHighlightKey = new PluginKey("mentionHighlight");
  *
  * Accepts `names` (display names) and `channelNames` storage options.
  * On every doc update the plugin scans text nodes and decorates matches.
+ *
+ * Agent mentions are still plain text (decorations, not atom nodes), but the
+ * composer hides the leading `@` (width:0). Clicks that look like "start of
+ * the chip" often land *inside* the name; typing then mutates the display
+ * name and drops the decoration — the persistent auto-tag regression (#2707).
+ * This extension snaps an empty caret out of the interior of agent mentions
+ * and rewrites text input so it lands after the chip instead.
  */
 export const MentionHighlightExtension = Extension.create({
   name: "mentionHighlight",
@@ -80,15 +93,106 @@ export const MentionHighlightExtension = Extension.create({
             return oldDecorations.map(tr.mapping, tr.doc);
           },
         },
+        appendTransaction(_transactions, _oldState, newState) {
+          if (!newState.selection.empty) return null;
+          const agentNames = extension.storage.agentNames as string[];
+          if (agentNames.length === 0) return null;
+          const pos = newState.selection.from;
+          const snapped = snapCaretOutOfAgentMention(
+            newState.doc,
+            pos,
+            agentNames,
+          );
+          if (snapped === pos) return null;
+          return newState.tr.setSelection(
+            TextSelection.create(newState.doc, snapped),
+          );
+        },
         props: {
           decorations(state) {
             return this.getState(state) ?? DecorationSet.empty;
+          },
+          // Typing must not land inside an agent chip: once the name mutates
+          // the decoration dies and persistent auto-tag appears "broken".
+          handleTextInput(view, from, to, text) {
+            const agentNames = extension.storage.agentNames as string[];
+            if (agentNames.length === 0) return false;
+            const snappedFrom = snapCaretOutOfAgentMention(
+              view.state.doc,
+              from,
+              agentNames,
+            );
+            const snappedTo =
+              from === to
+                ? snappedFrom
+                : snapCaretOutOfAgentMention(view.state.doc, to, agentNames);
+            if (snappedFrom === from && snappedTo === to) return false;
+            // Empty caret (or a selection wholly interior to the chip): insert
+            // after the chip instead of corrupting the display name.
+            const insertAt = Math.max(snappedFrom, snappedTo);
+            const tr = view.state.tr.insertText(text, insertAt);
+            tr.setSelection(
+              TextSelection.create(tr.doc, insertAt + text.length),
+            );
+            view.dispatch(tr);
+            return true;
           },
         },
       }),
     ];
   },
 });
+
+/**
+ * Document-absolute ranges of agent `@Name` mentions.
+ * Exported for testing.
+ */
+export function findAgentMentionRanges(
+  doc: PMNode,
+  agentNames: string[],
+): { from: number; to: number }[] {
+  if (agentNames.length === 0) return [];
+  const patterns = buildHighlightPatterns(agentNames, []);
+  if (patterns.length === 0) return [];
+  const ranges: { from: number; to: number }[] = [];
+  doc.descendants((node, pos) => {
+    if (!node.isText || !node.text) return;
+    for (const match of findHighlightMatches(node.text, patterns)) {
+      ranges.push({ from: pos + match.from, to: pos + match.to });
+    }
+  });
+  return ranges;
+}
+
+/**
+ * If `pos` lies strictly inside an agent mention, snap it just after the
+ * mention, consuming a single trailing space when present (the space
+ * autocomplete / persistent hydration always inserts after `@Name`).
+ *
+ * Edge positions stay put:
+ * - `from` (before `@`) so Backspace still works as expected
+ * - `to` (right after the name) so the user can type after a chip without a
+ *   trailing space yet
+ */
+export function snapCaretOutOfAgentMention(
+  doc: PMNode,
+  pos: number,
+  agentNames: string[],
+): number {
+  if (agentNames.length === 0) return pos;
+  for (const { from, to } of findAgentMentionRanges(doc, agentNames)) {
+    if (pos > from && pos < to) {
+      let snapped = to;
+      // Prefer the trailing space that insertResolvedMention always adds.
+      if (snapped < doc.content.size) {
+        const next = doc.textBetween(snapped, snapped + 1, "\n", "\0");
+        if (next === " ") snapped += 1;
+      }
+      return snapped;
+    }
+  }
+  return pos;
+}
 
 /**
  * Build highlight patterns for @Name and #channel-name matching.
