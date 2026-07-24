@@ -649,3 +649,47 @@ fn mint_rejects_out_of_range_input_parallelism() {
         "input-branch error must not blame the definition: {err}"
     );
 }
+
+/// Regression test for issue #2631: the default parallelism must be 1 so that
+/// desktop agents do not eagerly spawn large ACP pools on startup, consuming
+/// double-digit GiB of RAM and creating idle Codex sessions.
+#[test]
+fn default_agent_parallelism_is_one() {
+    assert_eq!(
+        super::DEFAULT_AGENT_PARALLELISM,
+        1,
+        "default parallelism must be 1 to avoid eagerly spawning large ACP pools; \
+         see issue #2631"
+    );
+}
+
+/// Records created before explicit parallelism was stored must deserialize to
+/// the safe default of 1, not the old default of 24.
+#[test]
+fn managed_agent_record_without_parallelism_defaults_to_one() {
+    let record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "legacy-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "goose",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }"#,
+    )
+    .expect("legacy record without parallelism field should deserialize");
+    assert_eq!(
+        record.parallelism, 1,
+        "legacy records must default to parallelism 1, not the old value of 24"
+    );
+}
