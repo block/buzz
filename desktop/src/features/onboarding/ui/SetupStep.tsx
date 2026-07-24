@@ -384,10 +384,10 @@ function runtimeDetailText(runtime: AcpRuntimeCatalogEntry): string {
   if (runtime.availability === "adapter_outdated") {
     return "ACP adapter detected but outdated — reinstall required.";
   }
-  if (runtime.availability === "cli_missing") {
-    return "CLI not detected; the desktop app alone isn’t enough.";
-  }
-  if (runtime.availability === "not_installed") {
+  if (
+    runtime.availability === "cli_missing" ||
+    runtime.availability === "not_installed"
+  ) {
     return "CLI not detected; the desktop app alone isn’t enough.";
   }
   return "";

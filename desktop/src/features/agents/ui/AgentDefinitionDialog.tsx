@@ -627,17 +627,16 @@ export function AgentDefinitionDialog({
           ? `${selectedRuntime.label} CLI is installed but the ACP adapter is missing.`
           : selectedRuntime.availability === "adapter_outdated"
             ? `${selectedRuntime.label} ACP adapter is outdated — reinstall to continue.`
-            : selectedRuntime.availability === "cli_missing"
+            : selectedRuntime.requiresExternalCli
               ? `${selectedRuntime.label} CLI is missing. ${selectedRuntime.installHint}`
-              : selectedRuntime.id === "buzz-agent"
-                ? `${selectedRuntime.label} is not installed.`
-                : `${selectedRuntime.label} CLI is missing. ${selectedRuntime.installHint}`}{" "}
+              : `${selectedRuntime.label} is not installed.`}{" "}
         Visit Settings &gt; Agents to set it up.
       </p>
     ) : null;
   const advancedFieldsTransition = shouldReduceMotion
     ? { duration: 0 }
     : ADVANCED_FIELDS_MOTION_TRANSITION;
+
   React.useEffect(() => {
     if (
       !open ||
@@ -662,6 +661,7 @@ export function AgentDefinitionDialog({
     effectiveProvider,
     runtime,
   ]);
+
   const selection: RuntimeModelProviderSelection = {
     provider,
     model,

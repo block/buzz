@@ -57,7 +57,7 @@ function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
   return runtime.availability === "adapter_missing" ||
     runtime.availability === "adapter_outdated"
     ? "Adapter install guide"
-    : "CLI install guide";
+    : "CLI setup guide";
 }
 
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
