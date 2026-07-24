@@ -373,6 +373,42 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
 }
 
 #[test]
+fn rejects_reused_rag_admission_secret_values() {
+    let (config, manifest, activation, _readiness, mut probe) = fixture();
+    let shared = "r".repeat(256);
+    probe.expected_token = shared.clone();
+    assert_eq!(
+        verify_rag_service(
+            &config,
+            &shared,
+            &shared,
+            &manifest,
+            &activation,
+            &probe,
+            "2026-07-24T04:30:00Z",
+        ),
+        Err(RagError::AuthenticationFailed),
+    );
+
+    let bearer = format!("{}a", "r".repeat(255));
+    let attestation = format!("{}b", "r".repeat(255));
+    probe.expected_token = bearer.clone();
+    assert!(
+        verify_rag_service(
+            &config,
+            &bearer,
+            &attestation,
+            &manifest,
+            &activation,
+            &probe,
+            "2026-07-24T04:30:00Z",
+        )
+        .is_ok(),
+        "maximum-length secrets that differ only in the final byte remain independent",
+    );
+}
+
+#[test]
 fn fail_soft_status_is_redacted_and_never_carries_admission() {
     let status = fail_soft_readiness(RagError::AuthenticationFailed);
     assert_eq!(status.status, RagServiceStatus::Unavailable);

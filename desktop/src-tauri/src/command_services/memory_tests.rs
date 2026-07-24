@@ -195,6 +195,41 @@ mod tests {
     }
 
     #[test]
+    fn trusted_config_rejects_reused_local_admission_secret_values() {
+        let directory = tempdir();
+        let path = write_config(directory.path(), 8006);
+        let mut reused = credentials();
+        let shared = "s".repeat(1024);
+        reused
+            .values
+            .insert("memory.local.read".to_string(), shared.clone());
+        reused
+            .values
+            .insert("memory.local.attestation".to_string(), shared);
+
+        assert_eq!(
+            load_trusted_config(&path, &reused)
+                .err()
+                .expect("equal bearer and attestation values must fail closed"),
+            MemoryError::CredentialsUnavailable,
+        );
+
+        let mut distinct = credentials();
+        distinct.values.insert(
+            "memory.local.read".to_string(),
+            format!("{}a", "s".repeat(1023)),
+        );
+        distinct.values.insert(
+            "memory.local.attestation".to_string(),
+            format!("{}b", "s".repeat(1023)),
+        );
+        assert!(
+            load_trusted_config(&path, &distinct).is_ok(),
+            "maximum-length secrets that differ only in the final byte remain independent",
+        );
+    }
+
+    #[test]
     fn legacy_replication_cli_path_is_rejected_as_an_unknown_config_field() {
         let directory = tempdir();
         let path = directory.path().join("memory.json");

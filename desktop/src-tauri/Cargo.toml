@@ -102,6 +102,7 @@ mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.
 mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-events", optional = true }
 base64 = "0.22"
 sha2 = "0.11"
+subtle = "2.6"
 tar = "0.4"
 bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }

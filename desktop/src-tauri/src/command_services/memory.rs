@@ -1,3 +1,4 @@
+use crate::command_services::policy::admission_secrets_are_independent;
 use crate::command_services::ssh::{
     start_tunnel_with_reservation, validate_host_target, PinnedHostEvidence, ProtectedFile,
     ReservedLoopbackPort, SshError, SshTunnel, SshTunnelConfig,
@@ -364,6 +365,9 @@ fn load_trusted_config(
         remote_read: load_secret(credentials, &config.credential_keys.remote_read)?,
         remote_replicate: load_secret(credentials, &config.credential_keys.remote_replicate)?,
     };
+    if !admission_secrets_are_independent(&secrets.local_read, &secrets.local_attestation) {
+        return Err(MemoryError::CredentialsUnavailable);
+    }
     Ok(TrustedMemoryConfig { config, secrets })
 }
 

@@ -1,8 +1,8 @@
 use super::{
-    catalog_tools, probe_authenticated_mcp, tool_set, valid_bearer_token,
-    validate_service_endpoint, AdmissionError, KnowledgeServiceKind, ServiceAdmissionPolicy,
-    VerifiedService, MEMORY_CATALOG_TOOLS, MEMORY_READ_ONLY_TOOLS, MEMORY_WORKFLOW_WRITE_TOOLS,
-    RAG_CATALOG_TOOLS,
+    admission_secrets_are_independent, catalog_tools, probe_authenticated_mcp, tool_set,
+    valid_bearer_token, validate_service_endpoint, AdmissionError, KnowledgeServiceKind,
+    ServiceAdmissionPolicy, VerifiedService, MEMORY_CATALOG_TOOLS, MEMORY_READ_ONLY_TOOLS,
+    MEMORY_WORKFLOW_WRITE_TOOLS, RAG_CATALOG_TOOLS,
 };
 use crate::command_services::ssh::ProtectedFile;
 use crate::secret_store::SecretStore;
@@ -348,6 +348,9 @@ pub(crate) fn admit_memory_for_catalog(
         .load(&config.credential_keys.local_attestation)
         .map_err(|_| AdmissionError::AuthenticationUnavailable)?
         .ok_or(AdmissionError::AuthenticationUnavailable)?;
+    if !admission_secrets_are_independent(&bearer_token, &attestation_secret) {
+        return Err(AdmissionError::AuthenticationUnavailable);
+    }
     let endpoint = format!("http://127.0.0.1:{}/mcp", config.local_port);
     let attestation = probe_authenticated_mcp(
         &endpoint,

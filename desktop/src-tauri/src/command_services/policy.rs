@@ -2,10 +2,11 @@ use hmac::{Hmac, KeyInit, Mac};
 use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Map, Value};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::time::Duration;
+use subtle::ConstantTimeEq;
 use url::Url;
 
 const MAXIMUM_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
@@ -472,6 +473,15 @@ fn verify_service_attestation(
 
 fn valid_attestation_secret(value: &str) -> bool {
     (32..=1024).contains(&value.len()) && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+pub(crate) fn admission_secrets_are_independent(
+    bearer_token: &str,
+    attestation_secret: &str,
+) -> bool {
+    let bearer_digest: [u8; 32] = Sha256::digest(bearer_token.as_bytes()).into();
+    let attestation_digest: [u8; 32] = Sha256::digest(attestation_secret.as_bytes()).into();
+    !bool::from(bearer_digest.ct_eq(&attestation_digest))
 }
 
 fn decode_attestation_mac(value: &str) -> Result<Vec<u8>, AdmissionError> {

@@ -1,7 +1,7 @@
 use crate::command_services::policy::{
-    cache_verified_service, clear_cached_service, probe_authenticated_mcp,
-    validate_rag_literal_loopback_mcp_endpoint, AdmissionError, KnowledgeServiceKind,
-    ServiceAdmissionPolicy, VerifiedService, RAG_CATALOG_TOOLS,
+    admission_secrets_are_independent, cache_verified_service, clear_cached_service,
+    probe_authenticated_mcp, validate_rag_literal_loopback_mcp_endpoint, AdmissionError,
+    KnowledgeServiceKind, ServiceAdmissionPolicy, VerifiedService, RAG_CATALOG_TOOLS,
 };
 use crate::command_services::ssh::ProtectedFile;
 use crate::secret_store::SecretStore;
@@ -265,6 +265,7 @@ fn verify_rag_service(
         || bearer_token
             .bytes()
             .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || !admission_secrets_are_independent(bearer_token, attestation_secret)
     {
         return Err(RagError::AuthenticationFailed);
     }
@@ -603,6 +604,9 @@ fn query_rag_readiness(
         .load(&config.attestation_credential_key)
         .map_err(|_| RagError::AuthenticationFailed)?
         .ok_or(RagError::AuthenticationFailed)?;
+    if !admission_secrets_are_independent(&bearer_token, &attestation_secret) {
+        return Err(RagError::AuthenticationFailed);
+    }
     let attestation = HttpMcpProbe.attest(&config, &bearer_token, &attestation_secret)?;
     let readiness = exact_object(
         &attestation.snapshot_status,
