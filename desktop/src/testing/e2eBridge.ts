@@ -97,6 +97,7 @@ type MockRelayAgentSeed = {
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];
+  memberChannelNames?: string[];
   status?: PresenceStatus;
 };
 
@@ -2050,6 +2051,38 @@ function resetMockRelayAgents(config?: E2eConfig) {
       respond_to: seed.respondTo ?? "owner-only",
       respond_to_allowlist: seed.respondToAllowlist ?? [],
     });
+
+    if (!seed.memberChannelNames?.length) {
+      continue;
+    }
+    applyMockDisplayName(seed.pubkey, seed.name);
+    mockAgentPubkeys.add(seed.pubkey);
+    mockProfiles.set(seed.pubkey, {
+      pubkey: seed.pubkey,
+      display_name: seed.name,
+      avatar_url: null,
+      about: null,
+      nip05_handle: null,
+      owner_pubkey: null,
+      is_agent: true,
+      has_profile_event: true,
+    });
+    for (const channel of mockChannels) {
+      if (
+        !seed.memberChannelNames?.includes(channel.name) ||
+        channel.members.some((member) => member.pubkey === seed.pubkey)
+      ) {
+        continue;
+      }
+      channel.members.push({
+        pubkey: seed.pubkey,
+        role: "bot",
+        is_agent: true,
+        joined_at: new Date().toISOString(),
+        display_name: seed.name,
+      });
+      syncMockChannel(channel);
+    }
   }
 }
 

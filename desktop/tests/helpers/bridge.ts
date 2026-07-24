@@ -80,6 +80,8 @@ type MockRelayAgentSeed = {
   respondToAllowlist?: string[];
   channelNames?: string[];
   channelIds?: string[];
+  /** Also seed this relay-owned agent as a bot member of the named channels. */
+  memberChannelNames?: string[];
   status?: "online" | "away" | "offline";
 };
 
