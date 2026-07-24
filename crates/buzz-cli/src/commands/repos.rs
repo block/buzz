@@ -256,28 +256,34 @@ pub async fn cmd_get_repo(
 pub async fn cmd_list_repos(
     client: &BuzzClient,
     owner: Option<&str>,
+    all: bool,
     limit: Option<u32>,
 ) -> Result<(), CliError> {
-    // Default to self if no owner specified.
-    let pubkey = match owner {
-        Some(pk) => {
-            crate::validate::validate_hex64(pk)?;
-            pk.to_string()
-        }
-        None => client.keys().public_key().to_hex(),
-    };
+    let mut filter = serde_json::json!({ "kinds": [30617] });
 
-    let mut filter = serde_json::json!({
-        "kinds": [30617],
-        "authors": [pubkey]
-    });
-
-    if let Some(n) = limit {
-        filter["limit"] = serde_json::json!(n);
+    if !all {
+        // Default to self if no owner specified.
+        let pubkey = match owner {
+            Some(pk) => {
+                crate::validate::validate_hex64(pk)?;
+                pk.to_string()
+            }
+            None => client.keys().public_key().to_hex(),
+        };
+        filter["authors"] = serde_json::json!([pubkey]);
+    } else if let Some(pk) = owner {
+        // --all with --owner: list all repos by that specific owner
+        crate::validate::validate_hex64(pk)?;
+        filter["authors"] = serde_json::json!([pk]);
     }
 
-    let resp = client.query(&filter).await?;
-    println!("{resp}");
+    let events = match limit {
+        Some(limit) => client.query_paginated(filter, limit).await?,
+        None => client.query_all(filter).await?,
+    };
+    let output = serde_json::to_string(&events)
+        .map_err(|error| CliError::Other(format!("failed to serialize relay response: {error}")))?;
+    println!("{output}");
     Ok(())
 }
 
@@ -369,7 +375,9 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             .await
         }
         ReposCmd::Get { id, owner } => cmd_get_repo(client, &id, owner.as_deref()).await,
-        ReposCmd::List { owner, limit } => cmd_list_repos(client, owner.as_deref(), limit).await,
+        ReposCmd::List { owner, all, limit } => {
+            cmd_list_repos(client, owner.as_deref(), all, limit).await
+        }
         ReposCmd::Protect(command) => match command {
             ReposProtectCmd::List { id } => cmd_protect_list(client, &id).await,
             ReposProtectCmd::Set {

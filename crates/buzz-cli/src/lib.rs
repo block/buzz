@@ -1128,6 +1128,9 @@ pub enum ReposCmd {
         /// Owner pubkey (64-char hex). Omit for your repos.
         #[arg(long)]
         owner: Option<String>,
+        /// List repos from all owners, not just self
+        #[arg(long)]
+        all: bool,
         /// Maximum number of results
         #[arg(long)]
         limit: Option<u32>,
