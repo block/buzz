@@ -26,6 +26,8 @@ dependencies:
   highlight: ^0.7.0
   intl: ^0.20.2
   uuid: ^4.5.1
+  file_selector: ^1.1.0
+  camera: ^0.12.0+2
   image_picker: ^1.1.2
   video_player: ^2.10.1
   package_info_plus: ^10.0.0

@@ -170,7 +170,10 @@ Widget _buildComposeBar({
             ),
       home: Scaffold(
         body: SafeArea(
-          child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          ),
         ),
       ),
     ),
@@ -299,14 +302,14 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
       await tester.pumpAndSettle();
 
@@ -370,6 +373,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final insertionConfiguration = textField.contentInsertionConfiguration;
       expect(insertionConfiguration, isNotNull);
@@ -400,7 +404,7 @@ void main() {
       );
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -450,6 +454,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -513,6 +518,7 @@ void main() {
         );
         await tester.pump();
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -581,6 +587,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -631,6 +638,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       textField.contentInsertionConfiguration!.onContentInserted(
         const KeyboardInsertedContent(
@@ -669,6 +677,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -712,6 +721,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
@@ -767,9 +777,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       final attachmentFinder = find.byKey(
@@ -824,9 +833,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -866,9 +874,8 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Photo'));
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Photos'));
         await tester.pumpAndSettle();
 
         expect(
@@ -916,9 +923,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
@@ -981,12 +987,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -1082,12 +1089,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
 
       expect(didSend, isFalse);
@@ -1142,9 +1150,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
@@ -1216,8 +1223,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
+        await _openAttachmentMenu(tester);
         await tester.tap(find.text('Video'));
         // Pump enough frames for the async file read + upload to complete.
         // Can't use pumpAndSettle here — the upload spinner's animation
@@ -1229,7 +1235,7 @@ void main() {
         // Video attachment should show a video icon (not a broken image).
         expect(find.byIcon(LucideIcons.video), findsOneWidget);
 
-        await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
         await tester.pumpAndSettle();
 
@@ -1454,13 +1460,25 @@ AgentDirectoryEntry _testAgent(String pubkey) {
   );
 }
 
+Future<void> _expandComposer(WidgetTester tester) async {
+  if (find.byType(TextField).evaluate().isNotEmpty) return;
+  await tester.tap(find.text('Message\u2026'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openAttachmentMenu(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Add attachment').hitTestable());
+  await tester.pumpAndSettle();
+}
+
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
+  await _expandComposer(tester);
   await tester.enterText(find.byType(TextField), '@hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-  await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+  await tester.tap(find.byIcon(LucideIcons.arrowUp));
   await tester.pumpAndSettle();
 }
 
