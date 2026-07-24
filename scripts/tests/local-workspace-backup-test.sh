@@ -100,8 +100,42 @@ if [[ "$*" == *"compose --profile command-memory stop memory"* ]]; then
   exit 0
 fi
 if [[ "$*" == *"compose --profile command-memory up -d --wait"* ]]; then
+  if [[ "${MOCK_MEMORY_WAIT_FAIL_ONCE_FILE:-}" != "" &&
+    ! -e "$MOCK_MEMORY_WAIT_FAIL_ONCE_FILE" ]]; then
+    : >"$MOCK_MEMORY_WAIT_FAIL_ONCE_FILE"
+    exit 45
+  fi
   : >"$MOCK_MEMORY_RUNNING_FILE"
   exit 0
+fi
+if [[ "$*" == *"/restore-memory-vault.sh"* &&
+  "${MOCK_MEMORY_VOLUME_DIR:-}" != "" ]]; then
+  for argument in "$@"; do
+    case "$argument" in
+      *:/backup:ro)
+        backup_mount="${argument%:/backup:ro}"
+        ;;
+    esac
+  done
+  case "$*" in
+    *" /target prepare"*)
+      action=prepare
+      ;;
+    *" /target rollback"*)
+      action=rollback
+      ;;
+    *" /target finalize"*)
+      action=finalize
+      ;;
+    *)
+      exit 46
+      ;;
+  esac
+  /bin/sh "$MOCK_MEMORY_RESTORE_HELPER" \
+    "${backup_mount:?}/memory-vault.tar.gz" \
+    "$MOCK_MEMORY_VOLUME_DIR" \
+    "$action"
+  exit
 fi
 if [[ "${MOCK_DOCKER_HANG_ON:-}" != "" && "$*" == *"$MOCK_DOCKER_HANG_ON"* ]]; then
   trap '' TERM
@@ -178,6 +212,10 @@ export MOCK_ACTIVE_WORKTREE="$repo_root"
 export MOCK_MAIN_WORKTREE="$test_tmp/main-checkout"
 export MOCK_SIBLING_WORKTREE="$test_tmp/sibling-worktree"
 export MOCK_MEMORY_RUNNING_FILE="$test_tmp/memory-running"
+export MOCK_MEMORY_RESTORE_HELPER="$memory_restore_helper"
+export MOCK_MEMORY_VOLUME_DIR="$test_tmp/mock-memory-volume"
+mkdir -p "$MOCK_MEMORY_VOLUME_DIR/current"
+printf 'old-memory' >"$MOCK_MEMORY_VOLUME_DIR/current/revisions.jsonl"
 : >"$MOCK_MEMORY_RUNNING_FILE"
 export BUZZ_MEMORY_BACKUP_KEY_FILE="$test_tmp/memory-backup.key"
 printf 'test-only-memory-backup-passphrase-32-bytes\n' \
@@ -333,6 +371,13 @@ assert_contains "$MOCK_LOG" \
 assert_contains "$MOCK_LOG" "mc mirror" "restore mirrors MinIO objects"
 assert_contains "$MOCK_LOG" "buzz-memory-vault:/target" \
   "restore replaces the canonical Memory vault"
+assert_contains "$MOCK_LOG" "/target prepare" \
+  "restore prepares a staged Memory vault without finalizing the old vault"
+assert_contains "$MOCK_LOG" \
+  "compose --profile command-memory up -d --wait --wait-timeout" \
+  "restore proves exact bounded Memory health before finalization"
+assert_contains "$MOCK_LOG" "/target finalize" \
+  "restore finalizes the old vault only after Memory readiness"
 assert_contains "$memory_restore_helper" 'mv "${stage}" "${current}"' \
   "restore swaps a validated staging directory into place"
 assert_contains "$memory_restore_helper" 'mv "${old}" "${current}"' \
@@ -357,6 +402,19 @@ for failure_point in after_extract after_old_rename; do
   [[ "$(cat "$failure_target/current/revisions.jsonl")" == "old-memory" ]] ||
     fail "old Memory vault must survive ${failure_point} failure"
 done
+for crash_point in crash_after_old_rename crash_after_new_install; do
+  crash_target="$test_tmp/memory-target-${crash_point}"
+  mkdir -p "$crash_target/current"
+  printf 'old-memory' >"$crash_target/current/revisions.jsonl"
+  assert_fails \
+    "Memory restore leaves recoverable ${crash_point} residue" \
+    env BUZZ_TEST_MEMORY_RESTORE_FAILURE="$crash_point" \
+    /bin/sh "$memory_restore_helper" "$memory_archive" "$crash_target" prepare
+  /bin/sh "$memory_restore_helper" "$memory_archive" "$crash_target" prepare
+  /bin/sh "$memory_restore_helper" "$memory_archive" "$crash_target" rollback
+  [[ "$(cat "$crash_target/current/revisions.jsonl")" == "old-memory" ]] ||
+    fail "next restore entry must recover old Memory after ${crash_point}"
+done
 invalid_archive="$test_tmp/invalid-memory-restore.tar.gz"
 printf 'not-a-tar' >"$invalid_archive"
 invalid_target="$test_tmp/memory-target-invalid"
@@ -380,6 +438,25 @@ assert_fails "Memory restore rejects archive symlinks before extraction" \
   fail "old Memory vault must survive malicious archive rejection"
 assert_contains "$MOCK_LOG" "migrate" "restore runs migrations"
 assert_contains "$MOCK_LOG" "ready" "restore verifies readiness"
+
+printf 'old-memory' >"$MOCK_MEMORY_VOLUME_DIR/current/revisions.jsonl"
+: >"$MOCK_LOG"
+memory_wait_failed_once="$test_tmp/memory-wait-failed-once"
+export MOCK_MEMORY_WAIT_FAIL_ONCE_FILE="$memory_wait_failed_once"
+assert_fails \
+  "unhealthy restored Memory rolls back and proves the old vault healthy" \
+  "$restore_script" "$backup_dir" --confirm
+unset MOCK_MEMORY_WAIT_FAIL_ONCE_FILE
+[[ "$(cat "$MOCK_MEMORY_VOLUME_DIR/current/revisions.jsonl")" == "old-memory" ]] ||
+  fail "failed restored Memory readiness must restore the old vault"
+[[ -e "$MOCK_MEMORY_RUNNING_FILE" ]] ||
+  fail "rollback must restart and prove the old Memory vault healthy"
+assert_contains "$MOCK_LOG" "/target rollback" \
+  "failed new Memory readiness invokes atomic vault rollback"
+[[ "$(grep -Fc \
+  "compose --profile command-memory up -d --wait --wait-timeout" \
+  "$MOCK_LOG")" -eq 2 ]] ||
+  fail "restore must run bounded readiness for both new and rolled-back Memory"
 
 : >"$MOCK_LOG"
 export MOCK_DOCKER_FAIL_ON="pg_dump"

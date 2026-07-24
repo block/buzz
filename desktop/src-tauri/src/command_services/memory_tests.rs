@@ -12,8 +12,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    static TEST_SYNC_STATE: Mutex<()> = Mutex::new(());
-
     #[derive(Default)]
     struct FakeCredentials {
         values: HashMap<String, String>,
@@ -58,7 +56,6 @@ mod tests {
                 "search_events",
                 "record_event"
             ],
-            "replicate_cli_path": directory.join("memory-mcp-replicate"),
             "credential_keys": {
                 "local_read": "memory.local.read",
                 "local_replicate": "memory.local.replicate",
@@ -82,9 +79,7 @@ mod tests {
         }
     }
 
-    fn write_config(directory: &Path, local_port: u16) -> (std::path::PathBuf, std::path::PathBuf) {
-        let cli = directory.join("memory-mcp-replicate");
-        protected_file(&cli, b"#!/bin/sh\nexit 0\n", true);
+    fn write_config(directory: &Path, local_port: u16) -> std::path::PathBuf {
         let key = base64::engine::general_purpose::STANDARD.encode(b"config fake key blob");
         protected_file(
             &directory.join("known_hosts"),
@@ -100,7 +95,7 @@ mod tests {
                 .as_slice(),
             false,
         );
-        (path, cli)
+        path
     }
 
     fn fake_readiness_server(
@@ -143,7 +138,7 @@ mod tests {
     #[test]
     fn trusted_config_rejects_unknown_fields_collisions_and_invalid_tools() {
         let directory = tempdir();
-        let (path, _) = write_config(directory.path(), 8006);
+        let path = write_config(directory.path(), 8006);
         let mut value = config_json(directory.path(), 8006);
         value
             .as_object_mut()
@@ -197,6 +192,59 @@ mod tests {
     }
 
     #[test]
+    fn legacy_replication_cli_path_is_rejected_as_an_unknown_config_field() {
+        let directory = tempdir();
+        let path = directory.path().join("memory.json");
+        let mut legacy = config_json(directory.path(), 8006);
+        legacy.as_object_mut().expect("config object").insert(
+            "replicate_cli_path".to_string(),
+            json!(directory.path().join("memory-mcp-replicate")),
+        );
+        protected_file(
+            &path,
+            serde_json::to_vec(&legacy)
+                .expect("serialize legacy config")
+                .as_slice(),
+            false,
+        );
+
+        assert_eq!(
+            load_trusted_config(&path, &credentials())
+                .err()
+                .expect("legacy subprocess configuration must fail closed"),
+            MemoryError::InvalidConfig
+        );
+    }
+
+    #[test]
+    fn production_memory_replication_contains_no_subprocess_or_token_environment_boundary() {
+        let memory = include_str!("memory.rs");
+        let replication = include_str!("memory_replication.rs");
+        let source = format!("{memory}\n{replication}");
+
+        for forbidden in [
+            "Command::new",
+            ".spawn()",
+            "MEMORY_LOCAL_READ_TOKEN",
+            "MEMORY_LOCAL_REPLICATE_TOKEN",
+            "MEMORY_REMOTE_READ_TOKEN",
+            "MEMORY_REMOTE_REPLICATE_TOKEN",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "production replication must not contain {forbidden}"
+            );
+        }
+        let pull = memory
+            .find("replicate_direction(\"pull\"")
+            .expect("pull direction");
+        let push = memory
+            .find("replicate_direction(\"push\"")
+            .expect("push direction");
+        assert!(pull < push, "sync must complete pull before push");
+    }
+
+    #[test]
     fn readiness_is_authenticated_loopback_only_and_checks_stable_node_identity() {
         let response = json!({
             "status": "ready",
@@ -211,7 +259,7 @@ mod tests {
         });
         let (port, server) = fake_readiness_server(response, "local-read-token");
         let directory = tempdir();
-        let (path, _) = write_config(directory.path(), port);
+        let path = write_config(directory.path(), port);
         let trusted = load_trusted_config(&path, &credentials()).expect("load trusted config");
 
         let readiness = query_readiness(&trusted, Duration::from_secs(2))
@@ -243,7 +291,7 @@ mod tests {
         });
         let (port, server) = fake_readiness_server(response, "local-read-token");
         let directory = tempdir();
-        let (path, _) = write_config(directory.path(), port);
+        let path = write_config(directory.path(), port);
         let trusted = load_trusted_config(&path, &credentials()).expect("load trusted config");
 
         let error =
@@ -251,114 +299,6 @@ mod tests {
 
         server.join().expect("join fake server");
         assert_eq!(error, MemoryError::NodeIdentityMismatch);
-    }
-
-    #[test]
-    fn replication_cli_is_direct_bounded_redacted_and_exactly_parsed() {
-        let _state = TEST_SYNC_STATE.lock().expect("lock sync test state");
-        std::env::set_var("BUZZ_MEMORY_INHERITED_SENTINEL", "must-clear");
-        let directory = tempdir();
-        let log_path = directory.path().join("replicate-log");
-        let fake_cli = directory.path().join("fake-replicate");
-        let fixture = format!(
-            r#"#!/bin/sh
-set -eu
-operation="$1"
-shift
-printf '%s\n' "$operation" "$@" > '{}'
-test -z "${{BUZZ_MEMORY_INHERITED_SENTINEL+x}}"
-test "$MEMORY_LOCAL_READ_TOKEN" = 'local-read-token'
-test "$MEMORY_LOCAL_REPLICATE_TOKEN" = 'local-replicate-token'
-test "$MEMORY_REMOTE_READ_TOKEN" = 'remote-read-token'
-test "$MEMORY_REMOTE_REPLICATE_TOKEN" = 'remote-replicate-token'
-if [ "$operation" = pull ]; then
-  printf '%s\n' '{{"status":"ok","operation":"pull","source_node_id":"node:home-command","target_node_id":"node:macbook-command","from_cursor":2,"to_cursor":5,"accepted":3,"duplicates":0,"conflicts":1,"objects":3,"tombstones":1,"pages":1,"target_conflict_count":2,"last_success":"2026-07-24T00:00:00+00:00"}}'
-else
-  printf '%s\n' '{{"status":"ok","operation":"push","source_node_id":"node:macbook-command","target_node_id":"node:home-command","from_cursor":4,"to_cursor":6,"accepted":2,"duplicates":0,"conflicts":0,"objects":2,"tombstones":0,"pages":1,"target_conflict_count":1,"last_success":"2026-07-24T00:00:01+00:00"}}'
-fi
-"#,
-            log_path.display()
-        );
-        protected_file(&fake_cli, fixture.as_bytes(), true);
-        let trusted = TrustedMemoryConfig {
-            config: serde_json::from_value(config_json(directory.path(), 8006))
-                .expect("decode fixture config"),
-            secrets: MemorySecrets::fixture(
-                "local-read-token",
-                "local-replicate-token",
-                "remote-read-token",
-                "remote-replicate-token",
-            ),
-        };
-
-        let result =
-            run_replication_cli(&fake_cli, "pull", &trusted, 49152, Duration::from_secs(2))
-                .expect("valid fake replication");
-
-        std::env::remove_var("BUZZ_MEMORY_INHERITED_SENTINEL");
-        assert_eq!(result.source_node_id, "node:home-command");
-        assert_eq!(result.target_node_id, "node:macbook-command");
-        assert_eq!(result.to_cursor, 5);
-        assert_eq!(result.conflicts, 1);
-        let log = fs::read_to_string(log_path).expect("read replicate log");
-        assert!(log.contains("--local-url"));
-        assert!(log.contains("http://127.0.0.1:8006"));
-        assert!(log.contains("--remote-url"));
-        assert!(log.contains("http://127.0.0.1:49152"));
-        assert!(!format!("{result:?}").contains("token"));
-    }
-
-    #[test]
-    fn replication_timeout_kills_and_reaps_the_cli() {
-        let _state = TEST_SYNC_STATE.lock().expect("lock sync test state");
-        let directory = tempdir();
-        let fake_cli = directory.path().join("hung-replicate");
-        protected_file(&fake_cli, b"#!/bin/sh\nexec /bin/sleep 30\n", true);
-        let trusted = TrustedMemoryConfig {
-            config: serde_json::from_value(config_json(directory.path(), 8006))
-                .expect("decode fixture config"),
-            secrets: MemorySecrets::fixture("a", "b", "c", "d"),
-        };
-        let started = Instant::now();
-
-        let error = run_replication_cli(
-            &fake_cli,
-            "pull",
-            &trusted,
-            49153,
-            Duration::from_millis(100),
-        )
-        .expect_err("hung CLI must time out");
-
-        assert_eq!(error, MemoryError::Timeout);
-        assert!(started.elapsed() < Duration::from_secs(2));
-    }
-
-    #[test]
-    fn shutdown_cancellation_kills_and_reaps_an_active_cli_without_waiting_for_deadline() {
-        let _state = TEST_SYNC_STATE.lock().expect("lock sync test state");
-        SYNC_CANCELLED.store(false, Ordering::SeqCst);
-        let directory = tempdir();
-        let fake_cli = directory.path().join("hung-replicate-cancel");
-        protected_file(&fake_cli, b"#!/bin/sh\nexec /bin/sleep 30\n", true);
-        let trusted = TrustedMemoryConfig {
-            config: serde_json::from_value(config_json(directory.path(), 8006))
-                .expect("decode fixture config"),
-            secrets: MemorySecrets::fixture("a", "b", "c", "d"),
-        };
-        let canceller = std::thread::spawn(|| {
-            std::thread::sleep(Duration::from_millis(75));
-            cancel_active_memory_sync();
-        });
-        let started = Instant::now();
-        let error =
-            run_replication_cli(&fake_cli, "pull", &trusted, 49154, Duration::from_secs(30))
-                .expect_err("shutdown cancellation must interrupt CLI");
-        canceller.join().expect("join canceller");
-        SYNC_CANCELLED.store(false, Ordering::SeqCst);
-
-        assert_eq!(error, MemoryError::Cancelled);
-        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[test]
@@ -455,22 +395,5 @@ fi
         .expect_err("unreaped tunnel cannot report sync success");
 
         assert_eq!(error, MemoryError::Teardown);
-    }
-
-    #[test]
-    fn verified_cli_descriptor_defeats_after_validation_path_replacement() {
-        let directory = tempdir();
-        let cli_path = directory.path().join("memory-mcp-replicate");
-        protected_file(&cli_path, b"#!/bin/sh\nprintf '%s\\n' verified\n", true);
-        let executable =
-            ProtectedExecutable::open(&cli_path).expect("open verified executable descriptor");
-        fs::rename(&cli_path, directory.path().join("original")).expect("move verified inode away");
-        protected_file(&cli_path, b"#!/bin/sh\nprintf '%s\\n' swapped\n", true);
-
-        let output = executable
-            .spawn_for_test()
-            .expect("verified descriptor must execute original inode");
-
-        assert_eq!(output, "verified\n");
     }
 }

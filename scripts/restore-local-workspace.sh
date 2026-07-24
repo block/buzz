@@ -252,16 +252,48 @@ local_workspace_run_bounded \
       mc mirror --overwrite --remove /backup destination/buzz-media >/dev/null
     '
 
-local_workspace_run_bounded \
-  "Memory vault restore" \
-  "${memory_timeout_seconds}" \
-  docker compose run --rm -T --no-deps \
-    --entrypoint /bin/sh \
-    --volume "buzz-memory-vault:/target" \
-    --volume "${runtime_tmp}:/backup:ro" \
-    --volume "${script_dir}/lib/restore-memory-vault.sh:/restore-memory-vault.sh:ro" \
-    minio-init -eu -c \
-    '/bin/sh /restore-memory-vault.sh /backup/memory-vault.tar.gz /target'
+run_memory_vault_action() {
+  local action="$1"
+  local description="$2"
+  case "${action}" in
+    prepare | rollback | finalize) ;;
+    *) local_workspace_die "invalid internal Memory restore action" ;;
+  esac
+  local_workspace_run_bounded \
+    "${description}" \
+    "${memory_timeout_seconds}" \
+    docker compose run --rm -T --no-deps \
+      --entrypoint /bin/sh \
+      --volume "buzz-memory-vault:/target" \
+      --volume "${runtime_tmp}:/backup:ro" \
+      --volume "${script_dir}/lib/restore-memory-vault.sh:/restore-memory-vault.sh:ro" \
+      minio-init -eu -c \
+      "/bin/sh /restore-memory-vault.sh /backup/memory-vault.tar.gz /target ${action}"
+}
+
+start_memory_and_wait() {
+  local_workspace_run_bounded \
+    "$1" \
+    "${memory_timeout_seconds}" \
+    docker compose --profile command-memory up -d --wait \
+      --wait-timeout "${memory_timeout_seconds}" memory
+}
+
+run_memory_vault_action prepare "Memory vault restore preparation"
+if ! start_memory_and_wait "restored Memory readiness"; then
+  local_workspace_run_bounded \
+    "unhealthy restored Memory shutdown" \
+    "${memory_timeout_seconds}" \
+    docker compose --profile command-memory stop memory
+  run_memory_vault_action rollback "Memory vault rollback"
+  if ! start_memory_and_wait "rolled-back Memory readiness"; then
+    local_workspace_die \
+      "restored Memory was unhealthy and the rolled-back vault did not become ready"
+  fi
+  local_workspace_die \
+    "restored Memory was unhealthy; the prior vault was restored and verified"
+fi
+run_memory_vault_action finalize "Memory vault restore finalization"
 
 # Migrations need the normal local credential, but every known writer remains
 # stopped until migrations and readiness both succeed.

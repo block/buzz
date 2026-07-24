@@ -3,13 +3,53 @@ set -eu
 
 archive="${1:?encrypted Memory archive must be decrypted before restore}"
 target="${2:?Memory volume mount is required}"
+action="${3:-prepare}"
 stage="${target}/.buzz-restore-stage"
 old="${target}/.buzz-restore-old"
 current="${target}/current"
 listing="${target}/.buzz-restore-listing"
 verbose_listing="${target}/.buzz-restore-verbose"
 
-rm -rf "${stage}" "${old}" "${listing}" "${verbose_listing}"
+cleanup_ephemeral() {
+  rm -rf "${stage}" "${listing}" "${verbose_listing}"
+}
+
+recover_old() {
+  if [ -d "${old}" ]; then
+    if [ -e "${current}" ]; then
+      rm -rf "${stage}"
+      mv "${current}" "${stage}"
+    fi
+    mv "${old}" "${current}"
+    rm -rf "${stage}"
+  fi
+}
+
+case "${action}" in
+  rollback)
+    recover_old
+    cleanup_ephemeral
+    exit 0
+    ;;
+  finalize)
+    test -d "${current}"
+    test -d "${old}"
+    rm -rf "${old}"
+    cleanup_ephemeral
+    exit 0
+    ;;
+  prepare)
+    ;;
+  *)
+    exit 64
+    ;;
+esac
+
+# A prior process may have been killed after moving the old vault aside or
+# after installing the unverified new vault. The old directory is always the
+# last-known-good state, so recover it before beginning another attempt.
+recover_old
+cleanup_ephemeral
 tar -tzf "${archive}" >"${listing}"
 entry_count="$(wc -l <"${listing}" | tr -d ' ')"
 test "${entry_count}" -gt 0
@@ -37,10 +77,10 @@ fi
 
 rollback() {
   status=$?
-  if [ "${status}" -ne 0 ] && [ -d "${old}" ] && [ ! -e "${current}" ]; then
-    mv "${old}" "${current}"
+  if [ "${status}" -ne 0 ] && [ -d "${old}" ]; then
+    recover_old
   fi
-  rm -rf "${stage}" "${listing}" "${verbose_listing}"
+  cleanup_ephemeral
   exit "${status}"
 }
 trap rollback EXIT HUP INT TERM
@@ -51,7 +91,12 @@ fi
 if [ "${BUZZ_TEST_MEMORY_RESTORE_FAILURE:-}" = "after_old_rename" ]; then
   exit 72
 fi
+if [ "${BUZZ_TEST_MEMORY_RESTORE_FAILURE:-}" = "crash_after_old_rename" ]; then
+  kill -KILL $$
+fi
 mv "${stage}" "${current}"
-rm -rf "${old}"
+if [ "${BUZZ_TEST_MEMORY_RESTORE_FAILURE:-}" = "crash_after_new_install" ]; then
+  kill -KILL $$
+fi
 rm -f "${listing}" "${verbose_listing}"
 trap - EXIT HUP INT TERM

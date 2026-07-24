@@ -4,16 +4,15 @@ use crate::command_services::ssh::{
 };
 use crate::secret_store::SecretStore;
 use base64::Engine;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -25,11 +24,7 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(3);
 const TUNNEL_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
 const REPLICATION_TIMEOUT: Duration = Duration::from_secs(90);
 const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
-const MAXIMUM_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const MAXIMUM_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
-const MAXIMUM_STDERR_BYTES: usize = 64 * 1024;
-const PAGE_SIZE: &str = "50";
-const CLI_REQUEST_TIMEOUT_SECONDS: &str = "30";
 const EXACT_MEMORY_TOOLS: &[&str] = &[
     "get_entity",
     "get_wiki_page",
@@ -46,6 +41,10 @@ const EXACT_MEMORY_TOOLS: &[&str] = &[
 static SYNC_GATE: LazyLock<Arc<SyncGate>> = LazyLock::new(|| Arc::new(SyncGate::default()));
 static SYNC_CANCELLED: AtomicBool = AtomicBool::new(false);
 
+#[path = "memory_replication.rs"]
+mod replication;
+use replication::replicate_direction;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum MemoryError {
     NotConfigured,
@@ -58,9 +57,7 @@ pub(crate) enum MemoryError {
     NodeIdentityMismatch,
     SshPinInvalid,
     SshUnavailable,
-    Spawn,
     Timeout,
-    Exit,
     Teardown,
     Busy,
     Task,
@@ -80,9 +77,7 @@ impl MemoryError {
             Self::NodeIdentityMismatch => "node_identity_mismatch",
             Self::SshPinInvalid => "ssh_pin_invalid",
             Self::SshUnavailable => "ssh_unavailable",
-            Self::Spawn => "spawn_failed",
             Self::Timeout => "timeout",
-            Self::Exit => "operation_failed",
             Self::Teardown => "teardown_failed",
             Self::Busy => "sync_already_running",
             Self::Task => "task_failed",
@@ -129,7 +124,6 @@ struct MemoryConfig {
     home_node_id: String,
     sync_interval_minutes: u32,
     tool_allowlist: Vec<String>,
-    replicate_cli_path: PathBuf,
     credential_keys: CredentialKeys,
 }
 
@@ -140,87 +134,9 @@ struct MemorySecrets {
     remote_replicate: String,
 }
 
-#[cfg(test)]
-impl MemorySecrets {
-    fn fixture(
-        local_read: &str,
-        local_replicate: &str,
-        remote_read: &str,
-        remote_replicate: &str,
-    ) -> Self {
-        Self {
-            local_read: local_read.to_string(),
-            local_replicate: local_replicate.to_string(),
-            remote_read: remote_read.to_string(),
-            remote_replicate: remote_replicate.to_string(),
-        }
-    }
-}
-
 struct TrustedMemoryConfig {
     config: MemoryConfig,
     secrets: MemorySecrets,
-}
-
-struct ProtectedExecutable {
-    file: ProtectedFile,
-    original_path: PathBuf,
-}
-
-impl ProtectedExecutable {
-    fn open(path: &Path) -> Result<Self, MemoryError> {
-        let file = ProtectedFile::open(path, MAXIMUM_EXECUTABLE_BYTES)
-            .map_err(|_| MemoryError::InvalidConfig)?;
-        if file.mode() & 0o111 == 0 || file.mode() & 0o022 != 0 {
-            return Err(MemoryError::InvalidConfig);
-        }
-        Ok(Self {
-            file,
-            original_path: path.to_path_buf(),
-        })
-    }
-
-    fn command(&self) -> Result<(Command, bool), MemoryError> {
-        let prefix = self
-            .file
-            .read_prefix(64)
-            .map_err(|_| MemoryError::InvalidConfig)?;
-        if prefix.starts_with(b"#!/bin/sh\n") {
-            let mut command = Command::new("/bin/sh");
-            command.args(["-s", "--"]).stdin(Stdio::from(
-                self.file
-                    .try_clone_file()
-                    .map_err(|_| MemoryError::InvalidConfig)?,
-            ));
-            Ok((command, true))
-        } else {
-            Ok((Command::new(&self.original_path), false))
-        }
-    }
-
-    fn revalidate_binary(&self) -> Result<(), MemoryError> {
-        if self.file.matches_path(&self.original_path) {
-            Ok(())
-        } else {
-            Err(MemoryError::InvalidConfig)
-        }
-    }
-
-    #[cfg(test)]
-    fn spawn_for_test(&self) -> Result<String, MemoryError> {
-        let (mut command, stdin_bound) = self.command()?;
-        if !stdin_bound {
-            self.revalidate_binary()?;
-        }
-        let output = command
-            .env_clear()
-            .output()
-            .map_err(|_| MemoryError::Spawn)?;
-        if !output.status.success() {
-            return Err(MemoryError::Exit);
-        }
-        String::from_utf8(output.stdout).map_err(|_| MemoryError::InvalidResponse)
-    }
 }
 
 #[derive(Default)]
@@ -433,7 +349,6 @@ fn load_trusted_config(
     let config: MemoryConfig =
         serde_json::from_slice(&bytes).map_err(|_| MemoryError::InvalidConfig)?;
     validate_config(&config)?;
-    let _replicate_cli = ProtectedExecutable::open(&config.replicate_cli_path)?;
     let secrets = MemorySecrets {
         local_read: load_secret(credentials, &config.credential_keys.local_read)?,
         local_replicate: load_secret(credentials, &config.credential_keys.local_replicate)?,
@@ -627,7 +542,7 @@ fn run_after_remote_preflight<T>(
     operation()
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(
     deny_unknown_fields,
     rename_all(deserialize = "snake_case", serialize = "camelCase")
@@ -647,189 +562,6 @@ struct ReplicationResult {
     pages: u64,
     target_conflict_count: u64,
     last_success: String,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PipeError {
-    Read,
-    Limit,
-    Task,
-}
-
-fn read_bounded<R: Read>(reader: R, maximum: usize) -> Result<Vec<u8>, PipeError> {
-    let mut bytes = Vec::with_capacity(maximum.min(8192));
-    reader
-        .take((maximum + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| PipeError::Read)?;
-    if bytes.len() > maximum {
-        return Err(PipeError::Limit);
-    }
-    Ok(bytes)
-}
-
-fn receive_pipe(
-    receiver: &Receiver<Result<Vec<u8>, PipeError>>,
-    cached: &mut Option<Vec<u8>>,
-) -> Result<(), PipeError> {
-    if cached.is_some() {
-        return Ok(());
-    }
-    match receiver.try_recv() {
-        Ok(Ok(bytes)) => {
-            *cached = Some(bytes);
-            Ok(())
-        }
-        Ok(Err(error)) => Err(error),
-        Err(TryRecvError::Empty) => Ok(()),
-        Err(TryRecvError::Disconnected) => Err(PipeError::Task),
-    }
-}
-
-fn terminate(child: &mut Child) -> Result<(), MemoryError> {
-    match child.try_wait() {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => {
-            child.kill().map_err(|_| MemoryError::Teardown)?;
-            child.wait().map_err(|_| MemoryError::Teardown)?;
-            Ok(())
-        }
-        Err(_) => Err(MemoryError::Teardown),
-    }
-}
-
-fn run_replication_cli(
-    binary: &Path,
-    operation: &str,
-    trusted: &TrustedMemoryConfig,
-    tunnel_port: u16,
-    timeout: Duration,
-) -> Result<ReplicationResult, MemoryError> {
-    if !matches!(operation, "pull" | "push")
-        || tunnel_port == 0
-        || timeout.is_zero()
-        || timeout > Duration::from_secs(300)
-    {
-        return Err(MemoryError::InvalidConfig);
-    }
-    let executable = ProtectedExecutable::open(binary)?;
-    let local_url = format!("http://127.0.0.1:{}", trusted.config.local_port);
-    let remote_url = format!("http://127.0.0.1:{tunnel_port}");
-    let (mut command, stdin_bound) = executable.command()?;
-    command
-        .env_clear()
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .env("PATH", "/usr/bin:/bin")
-        .env("MEMORY_LOCAL_READ_TOKEN", &trusted.secrets.local_read)
-        .env(
-            "MEMORY_LOCAL_REPLICATE_TOKEN",
-            &trusted.secrets.local_replicate,
-        )
-        .env("MEMORY_REMOTE_READ_TOKEN", &trusted.secrets.remote_read)
-        .env(
-            "MEMORY_REMOTE_REPLICATE_TOKEN",
-            &trusted.secrets.remote_replicate,
-        )
-        .args([
-            operation,
-            "--local-url",
-            local_url.as_str(),
-            "--remote-url",
-            remote_url.as_str(),
-            "--page-size",
-            PAGE_SIZE,
-            "--timeout",
-            CLI_REQUEST_TIMEOUT_SECONDS,
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if !stdin_bound {
-        command.stdin(Stdio::null());
-        executable.revalidate_binary()?;
-    }
-    let mut child = command.spawn().map_err(|_| MemoryError::Spawn)?;
-    let stdout = child.stdout.take().ok_or(MemoryError::Spawn)?;
-    let stderr = child.stderr.take().ok_or(MemoryError::Spawn)?;
-    let (stdout_sender, stdout_receiver) = mpsc::sync_channel(1);
-    let stdout_thread = std::thread::spawn(move || {
-        let _ = stdout_sender.send(read_bounded(stdout, MAXIMUM_RESPONSE_BYTES));
-    });
-    let (stderr_sender, stderr_receiver) = mpsc::sync_channel(1);
-    let stderr_thread = std::thread::spawn(move || {
-        let _ = stderr_sender.send(read_bounded(stderr, MAXIMUM_STDERR_BYTES));
-    });
-    let started = Instant::now();
-    let mut stdout_bytes = None;
-    let mut stderr_bytes = None;
-    let status = loop {
-        if SYNC_CANCELLED.load(Ordering::SeqCst) {
-            break terminate(&mut child).and(Err(MemoryError::Cancelled));
-        }
-        if receive_pipe(&stdout_receiver, &mut stdout_bytes).is_err()
-            || receive_pipe(&stderr_receiver, &mut stderr_bytes).is_err()
-        {
-            break terminate(&mut child).and(Err(MemoryError::ResponseTooLarge));
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if started.elapsed() < timeout => {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            Ok(None) => break terminate(&mut child).and(Err(MemoryError::Timeout)),
-            Err(_) => break terminate(&mut child).and(Err(MemoryError::Teardown)),
-        }
-    };
-    stdout_thread.join().map_err(|_| MemoryError::Task)?;
-    stderr_thread.join().map_err(|_| MemoryError::Task)?;
-    let status = status?;
-    if stdout_bytes.is_none() {
-        stdout_bytes = Some(
-            stdout_receiver
-                .recv()
-                .map_err(|_| MemoryError::Task)?
-                .map_err(|_| MemoryError::ResponseTooLarge)?,
-        );
-    }
-    if stderr_bytes.is_none() {
-        stderr_bytes = Some(
-            stderr_receiver
-                .recv()
-                .map_err(|_| MemoryError::Task)?
-                .map_err(|_| MemoryError::ResponseTooLarge)?,
-        );
-    }
-    let _redacted_stderr = stderr_bytes.ok_or(MemoryError::Task)?;
-    if !status.success() {
-        return Err(MemoryError::Exit);
-    }
-    let stdout = stdout_bytes.ok_or(MemoryError::Task)?;
-    if stdout.is_empty() || stdout.len() > MAXIMUM_RESPONSE_BYTES {
-        return Err(MemoryError::InvalidResponse);
-    }
-    let result: ReplicationResult =
-        serde_json::from_slice(&stdout).map_err(|_| MemoryError::InvalidResponse)?;
-    let (source, target) = if operation == "pull" {
-        (
-            trusted.config.home_node_id.as_str(),
-            trusted.config.local_node_id.as_str(),
-        )
-    } else {
-        (
-            trusted.config.local_node_id.as_str(),
-            trusted.config.home_node_id.as_str(),
-        )
-    };
-    if result.status != "ok"
-        || result.operation != operation
-        || result.source_node_id != source
-        || result.target_node_id != target
-        || result.to_cursor < result.from_cursor
-        || DateTime::parse_from_rfc3339(&result.last_success).is_err()
-    {
-        return Err(MemoryError::NodeIdentityMismatch);
-    }
-    Ok(result)
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -908,20 +640,8 @@ fn sync_memory_blocking(trusted: &TrustedMemoryConfig) -> Result<MemorySyncRespo
     let operation = run_after_remote_preflight(
         || wait_for_remote_readiness(&mut tunnel, trusted, TUNNEL_STARTUP_TIMEOUT),
         || {
-            let pull = run_replication_cli(
-                &trusted.config.replicate_cli_path,
-                "pull",
-                trusted,
-                tunnel_port,
-                REPLICATION_TIMEOUT,
-            )?;
-            let push = run_replication_cli(
-                &trusted.config.replicate_cli_path,
-                "push",
-                trusted,
-                tunnel_port,
-                REPLICATION_TIMEOUT,
-            )?;
+            let pull = replicate_direction("pull", trusted, tunnel_port, REPLICATION_TIMEOUT)?;
+            let push = replicate_direction("push", trusted, tunnel_port, REPLICATION_TIMEOUT)?;
             let last_success = push.last_success.clone();
             Ok(MemorySyncResponse {
                 status: "ok".to_string(),

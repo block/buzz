@@ -75,7 +75,7 @@ pub(super) struct ProtectedFile {
     file: File,
     stat: Stat,
     maximum: u64,
-    ancestors: Vec<(File, Stat)>,
+    _ancestors: Vec<(File, Stat)>,
 }
 
 impl ProtectedFile {
@@ -145,7 +145,7 @@ impl ProtectedFile {
             file,
             stat,
             maximum,
-            ancestors,
+            _ancestors: ancestors,
         })
     }
 
@@ -178,66 +178,12 @@ impl ProtectedFile {
         Ok(bytes)
     }
 
-    pub(super) fn read_prefix(&self, maximum: usize) -> Result<Vec<u8>, SshError> {
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|_| SshError::UnprotectedFile)?;
-        file.seek(std::io::SeekFrom::Start(0))
-            .map_err(|_| SshError::UnprotectedFile)?;
-        let mut bytes = Vec::new();
-        (&mut file)
-            .take(maximum as u64)
-            .read_to_end(&mut bytes)
-            .map_err(|_| SshError::UnprotectedFile)?;
-        file.seek(std::io::SeekFrom::Start(0))
-            .map_err(|_| SshError::UnprotectedFile)?;
-        if self.ancestors.iter().any(|(file, stat)| {
-            fstat(file)
-                .ok()
-                .is_none_or(|value| !same_directory(stat, &value))
-        }) || fstat(&self.file)
-            .ok()
-            .is_none_or(|value| !same_inode(&self.stat, &value))
-        {
-            return Err(SshError::UnprotectedFile);
-        }
-        Ok(bytes)
-    }
-
     pub(super) fn descriptor_path(&self) -> PathBuf {
         #[cfg(target_os = "linux")]
         let prefix = "/proc/self/fd";
         #[cfg(not(target_os = "linux"))]
         let prefix = "/dev/fd";
         PathBuf::from(prefix).join(self.file.as_raw_fd().to_string())
-    }
-
-    pub(super) fn mode(&self) -> u32 {
-        self.stat.st_mode.into()
-    }
-
-    pub(super) fn try_clone_file(&self) -> Result<File, SshError> {
-        let mut file = self
-            .file
-            .try_clone()
-            .map_err(|_| SshError::UnprotectedFile)?;
-        file.seek(std::io::SeekFrom::Start(0))
-            .map_err(|_| SshError::UnprotectedFile)?;
-        Ok(file)
-    }
-
-    pub(super) fn matches_path(&self, path: &Path) -> bool {
-        if self.ancestors.iter().any(|(file, stat)| {
-            fstat(file)
-                .map(|observed| !same_directory(stat, &observed))
-                .unwrap_or(true)
-        }) {
-            return false;
-        }
-        Self::open(path, self.maximum)
-            .ok()
-            .is_some_and(|candidate| same_inode(&self.stat, &candidate.stat))
     }
 }
 
@@ -259,13 +205,6 @@ fn same_inode(expected: &Stat, observed: &Stat) -> bool {
         && expected.st_uid == observed.st_uid
         && expected.st_mode == observed.st_mode
         && expected.st_size == observed.st_size
-}
-
-fn same_directory(expected: &Stat, observed: &Stat) -> bool {
-    expected.st_dev == observed.st_dev
-        && expected.st_ino == observed.st_ino
-        && expected.st_uid == observed.st_uid
-        && expected.st_mode == observed.st_mode
 }
 
 pub(super) fn sha256_fingerprint(key_blob: &[u8]) -> String {
