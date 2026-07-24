@@ -100,6 +100,11 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
     const unlisten = listen<TranscriptPayload>(
       "dictation-transcript",
       (event) => {
+        // DEBUG(dictation-yeah): temporary event trace (console.warn lands in
+        // the vite dev log).
+        console.warn(
+          `[dictation] ${event.payload.final ? "FINAL" : "partial"} ${JSON.stringify(event.payload.text)} owns=${ownsRef.current} discard=${discardTimerRef.current !== null} stream=${JSON.stringify(streamRef.current)}`,
+        );
         // Straggler from a session this composer already replaced.
         if (discardTimerRef.current !== null) return;
         if (!ownsRef.current) return;
@@ -120,6 +125,10 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
             end <= doc.content.size &&
             doc.textBetween(stream.anchor, end) === stream.partialText;
           if (!intact) {
+            // DEBUG(dictation-yeah): temporary event trace.
+            console.warn(
+              `[dictation] stream NOT intact: expected ${JSON.stringify(stream.partialText)} at ${stream.anchor}, doc has ${JSON.stringify(end <= doc.content.size ? doc.textBetween(stream.anchor, end) : "<out of range>")}`,
+            );
             // The user edited around the stream (possible between key release
             // and the trailing final) — resume at the end of the doc.
             stream = { anchor: Selection.atEnd(doc).from, partialText: "" };
@@ -162,6 +171,10 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
     // The flush marker: every transcript of the stopped session is in the
     // doc now (the Rust live channel is strictly ordered).
     const unlistenFlushed = listen("dictation-flushed", () => {
+      // DEBUG(dictation-yeah): temporary event trace.
+      console.warn(
+        `[dictation] FLUSHED owns=${ownsRef.current} discard=${discardTimerRef.current !== null} session=${sessionRef.current !== null} submitPending=${submitTimerRef.current !== null}`,
+      );
       // Marker of the session this composer replaced — stop discarding, the
       // current session's transcripts follow it.
       if (discardTimerRef.current !== null) {
@@ -183,6 +196,8 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
       if (submitTimerRef.current !== null) {
         window.clearTimeout(submitTimerRef.current);
         submitTimerRef.current = null;
+        // DEBUG(dictation-yeah): temporary event trace.
+        console.warn("[dictation] submit (marker)");
         onSubmitRef.current?.();
       }
     });
@@ -204,6 +219,8 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
   }, []);
 
   const stop = React.useCallback(() => {
+    // DEBUG(dictation-yeah): temporary event trace.
+    console.warn("[dictation] stop()");
     genRef.current += 1;
     teardownSession();
     setStatus("idle");
@@ -225,6 +242,10 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
 
   const start = React.useCallback(async (): Promise<void> => {
     if (sessionRef.current) return;
+    // DEBUG(dictation-yeah): temporary event trace.
+    console.warn(
+      `[dictation] start() pendingSubmit=${submitTimerRef.current !== null} prevUndrained=${ownershipTimerRef.current !== null}`,
+    );
     const gen = ++genRef.current;
     // A stream left over from a previous session (final never arrived, or the
     // doc changed) must not swallow this session's first phrase.
@@ -330,6 +351,8 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
     submitTimerRef.current = window.setTimeout(() => {
       submitTimerRef.current = null;
       ownsRef.current = false;
+      // DEBUG(dictation-yeah): temporary event trace.
+      console.warn("[dictation] submit (3s cap — marker never arrived)");
       onSubmitRef.current?.();
     }, FLUSH_MARKER_TIMEOUT_MS);
   }, []);

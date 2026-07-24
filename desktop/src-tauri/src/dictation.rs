@@ -108,6 +108,11 @@ pub fn start_dictation(
         *guard = None;
     }
 
+    // DEBUG(dictation-yeah): temporary event trace.
+    eprintln!(
+        "buzz-desktop: dictation start — model={model_id} rebuild={}",
+        guard.is_none()
+    );
     if guard.is_none() {
         let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<LiveEvent>(64);
         // In live mode all transcripts arrive on live_rx; the pipeline's own
@@ -127,11 +132,20 @@ pub fn start_dictation(
             while let Some(event) = live_rx.recv().await {
                 let result = match event {
                     LiveEvent::Transcript { text, is_final } => {
+                        // DEBUG(dictation-yeah): temporary event trace.
+                        eprintln!(
+                            "buzz-desktop: dictation {} {text:?}",
+                            if is_final { "FINAL  " } else { "partial" }
+                        );
                         app.emit("dictation-transcript", TranscriptEvent { text, is_final })
                     }
                     // Stop-flush drained: no more transcripts for the stopped
                     // session. The frontend gates Enter-to-send on this.
-                    LiveEvent::Flushed => app.emit("dictation-flushed", ()),
+                    LiveEvent::Flushed => {
+                        // DEBUG(dictation-yeah): temporary event trace.
+                        eprintln!("buzz-desktop: dictation FLUSHED");
+                        app.emit("dictation-flushed", ())
+                    }
                 };
                 if let Err(e) = result {
                     eprintln!("buzz-desktop: dictation event emit failed: {e}");
@@ -152,6 +166,8 @@ pub fn stop_dictation(state: tauri::State<'_, DictationState>) {
     if !state.active.swap(false, Ordering::AcqRel) {
         return;
     }
+    // DEBUG(dictation-yeah): temporary event trace.
+    eprintln!("buzz-desktop: dictation stop — pushing flush silence + sentinel");
     if let Ok(guard) = state.pipeline.lock() {
         if let Some((_, ref pipeline)) = *guard {
             let _ = pipeline.push_audio(vec![0u8; FLUSH_SILENCE_BYTES]);

@@ -174,7 +174,11 @@ impl SttPipeline {
             ));
         }
         // Drop audio if the pipeline can't keep up — better than blocking the UI.
-        let _ = self.audio_tx.try_send(pcm_bytes);
+        if self.audio_tx.try_send(pcm_bytes).is_err() {
+            // DEBUG(dictation-yeah): temporary — audio drops splice the phrase
+            // buffer and corrupt later decodes; log to confirm/rule out.
+            eprintln!("buzz-desktop: STT audio queue full — batch dropped");
+        }
         Ok(())
     }
 }
@@ -396,6 +400,9 @@ fn stt_worker(
     // Live mode: most recent partial decode of the current phrase that ended
     // with terminal punctuation — see prefer_punctuated.
     let mut punct_partial: Option<String> = None;
+    // Live mode: best (most words) partial decode of the current phrase —
+    // the collapse guard, see decode_collapsed.
+    let mut best_partial: Option<String> = None;
     // Timestamp when TTS last stopped — used for the 200 ms cooldown.
     let mut tts_stopped_at: Option<std::time::Instant> = None;
 
@@ -431,6 +438,7 @@ fn stt_worker(
                     &text_tx,
                     live_tx.as_ref(),
                     punct_partial.take(),
+                    best_partial.take(),
                 );
                 speech_buf.clear();
                 silence_frames = 0;
@@ -492,6 +500,7 @@ fn stt_worker(
                     &mut decode_hold_until,
                     &mut onset_buf,
                     &mut punct_partial,
+                    &mut best_partial,
                 );
             }
         }
@@ -559,6 +568,7 @@ fn process_16k_samples(
     decode_hold_until: &mut std::time::Instant,
     onset_buf: &mut Vec<f32>,
     punct_partial: &mut Option<String>,
+    best_partial: &mut Option<String>,
 ) {
     leftover.extend_from_slice(samples);
 
@@ -654,7 +664,14 @@ fn process_16k_samples(
             // OOM guard: flush and reset if the buffer exceeds 30 s of audio.
             if speech_buf.len() >= MAX_SPEECH_SAMPLES {
                 let t0 = std::time::Instant::now();
-                flush_to_stt(speech_buf, recognizer, text_tx, live_tx, punct_partial.take());
+                flush_to_stt(
+                    speech_buf,
+                    recognizer,
+                    text_tx,
+                    live_tx,
+                    punct_partial.take(),
+                    best_partial.take(),
+                );
                 *decode_hold_until = std::time::Instant::now() + t0.elapsed() * 2;
                 speech_buf.clear();
                 *silence_frames = 0;
@@ -679,7 +696,14 @@ fn process_16k_samples(
                 // End of utterance — transcribe. Flush decodes join the same
                 // wall-clock hold as partials (see PARTIAL_DECODE_STEP).
                 let t0 = std::time::Instant::now();
-                flush_to_stt(speech_buf, recognizer, text_tx, live_tx, punct_partial.take());
+                flush_to_stt(
+                    speech_buf,
+                    recognizer,
+                    text_tx,
+                    live_tx,
+                    punct_partial.take(),
+                    best_partial.take(),
+                );
                 *decode_hold_until = std::time::Instant::now() + t0.elapsed() * 2;
                 speech_buf.clear();
                 *silence_frames = 0;
@@ -707,10 +731,20 @@ fn process_16k_samples(
                 // 2× wall-clock hold (see PARTIAL_DECODE_STEP); 1× measured
                 // at ~100% duty on a 35 s ramble — no headroom.
                 *decode_hold_until = std::time::Instant::now() + t0.elapsed() * 2;
-                if !text.is_empty() {
+                // Collapse guard (see decode_collapsed): a re-decode of the
+                // same growing phrase that lost words is a collapse, not a
+                // revision — suppress it so it neither replaces the shown
+                // partial nor poisons the best-partial baseline.
+                let collapsed = best_partial
+                    .as_deref()
+                    .is_some_and(|best| decode_collapsed(&text, best));
+                if collapsed {
+                    eprintln!("buzz-desktop: STT partial collapsed ({text:?}) — suppressed");
+                } else if !text.is_empty() {
                     if text.ends_with(['.', '?', '!', ',']) {
                         *punct_partial = Some(text.clone());
                     }
+                    *best_partial = Some(text.clone());
                     let event = LiveEvent::Transcript {
                         text,
                         is_final: false,
@@ -778,6 +812,39 @@ fn prefer_punctuated(final_text: String, punct_hint: Option<&str>) -> String {
     final_text
 }
 
+/// True when a re-decode of the same phrase lost words against the best
+/// decode seen so far — a collapse, not a revision. Every decode of a phrase
+/// sees a superset of the audio any earlier one saw (partials decode a
+/// growing buffer; the final decodes all of it), so word count can honestly
+/// grow or hold but not shrink. The v3 transducer occasionally collapses a
+/// re-decode to empty or a junk word ("Yeah") on audio whose earlier decodes
+/// were fine; trusting it deletes the sentence the user watched appear.
+/// ponytail: a rare legitimate word-merge revision ("any better"→"anybody")
+/// trips this and keeps the earlier decode — words the user already saw,
+/// far cheaper than losing real speech.
+fn decode_collapsed(new_text: &str, best: &str) -> bool {
+    let words = |s: &str| norm_words(s).split_whitespace().count();
+    words(new_text) < words(best)
+}
+
+#[cfg(test)]
+mod decode_collapsed_tests {
+    use super::decode_collapsed;
+
+    #[test]
+    fn collapse_detection() {
+        let best = "caused by some other things";
+        assert!(decode_collapsed("", best));
+        assert!(decode_collapsed("Yeah.", best));
+        assert!(decode_collapsed("Cause personal things.", best));
+        // Honest revisions and growth keep the new decode.
+        assert!(!decode_collapsed("Caused by some other things.", best));
+        assert!(!decode_collapsed("caused by some other things too", best));
+        // No baseline words → nothing to protect.
+        assert!(!decode_collapsed("", ""));
+    }
+}
+
 /// The tokio channel's `blocking_send` is safe to call from sync contexts.
 fn flush_to_stt(
     speech_buf: &[f32],
@@ -785,12 +852,24 @@ fn flush_to_stt(
     text_tx: &tokio_mpsc::Sender<String>,
     live_tx: Option<&tokio_mpsc::Sender<LiveEvent>>,
     punct_hint: Option<String>,
+    best_partial: Option<String>,
 ) {
-    let text = prefer_punctuated(decode_speech(speech_buf, recognizer), punct_hint.as_deref());
+    let mut text = prefer_punctuated(decode_speech(speech_buf, recognizer), punct_hint.as_deref());
+    // Collapse guard — see decode_collapsed. A collapsed final would replace
+    // the sentence on screen with nothing (or junk); keep the best partial
+    // the user was looking at instead.
+    if let Some(best) = best_partial {
+        if decode_collapsed(&text, &best) {
+            eprintln!("buzz-desktop: STT final collapsed ({text:?}) — keeping best partial");
+            text = best;
+        }
+    }
     // In live mode finals ride the same channel as partials so the receiver
     // never sees a stale partial after its final — and an EMPTY final is still
     // sent so the frontend clears the partial shown for a phrase that decoded
     // to nothing (noise); skipping it strands that partial on screen.
+    // (With the collapse guard above, "empty" here means no partial was ever
+    // shown either — a phrase the guard let through.)
     let send_err = match live_tx {
         Some(tx) => tx
             .blocking_send(LiveEvent::Transcript {
@@ -905,7 +984,7 @@ mod prefer_punctuated_tests {
 
 #[cfg(test)]
 mod silence_experiment {
-    use super::{decode_speech, prefer_punctuated};
+    use super::{decode_speech, prefer_punctuated, process_16k_samples};
 
     /// Manual experiment: does Parakeet v3 (0.6B transducer) produce stable
     /// punctuation under noisy pauses where the 110M CTC model flickers?
@@ -1160,6 +1239,151 @@ mod silence_experiment {
                 "  NOISY-SPEECH+ZEROED-TAIL: {:?}",
                 decode_speech(&noisy, &recognizer)
             );
+        }
+    }
+
+    /// Manual experiment: reproduce chl's "captured it, then deleted it and
+    /// wrote Yeah" report (2026-07-24, Enhanced/v3 model) at the worker level.
+    /// Drives `process_16k_samples` exactly like the live worker — real VAD,
+    /// onset debounce, silence flush, partial cadence — over composed audio:
+    /// room noise, the spoken sentence (noise overlaid), a post-speech tail,
+    /// then the 1 s stop-flush zeros. A frontend simulator applies the events
+    /// the way useDictation.ts does and prints what the composer would show.
+    /// Run: cargo test v3_live_worker_sim -- --ignored --nocapture
+    /// Setup: say -v Samantha "just testing to see if this is working any
+    ///   better" -o /tmp/dict_better.wav --data-format=LEF32@16000
+    #[test]
+    #[ignore]
+    fn v3_live_worker_sim() {
+        use std::sync::atomic::AtomicBool;
+        use std::sync::Arc;
+
+        let recognizer = v3_recognizer(super::LIVE_STT_NUM_THREADS);
+        let speech = read_wav_16k("/tmp/dict_better.wav");
+
+        let noise = |len: usize, amp: f32, seed: u32| {
+            let mut state = seed;
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (state as f32 / u32::MAX as f32 - 0.5) * 2.0 * amp
+                })
+                .collect::<Vec<f32>>()
+        };
+        let overlay = |samples: &[f32], amp: f32| {
+            let mut state = 0x1234_5678u32;
+            samples
+                .iter()
+                .map(|s| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    s + (state as f32 / u32::MAX as f32 - 0.5) * 2.0 * amp
+                })
+                .collect::<Vec<f32>>()
+        };
+
+        // (label, pre-speech, post-speech tail before the stop flush)
+        let scenarios: Vec<(&str, Vec<f32>, Vec<f32>)> = vec![
+            (
+                "release right after speaking",
+                noise(16 * 500, 0.01, 0xA1),
+                noise(16 * 400, 0.01, 0xB2),
+            ),
+            (
+                "pause >608ms then breath then release",
+                noise(16 * 500, 0.01, 0xA1),
+                [
+                    noise(16 * 900, 0.01, 0xB2),
+                    noise(16 * 250, 0.08, 0xC3), // breath/exhale burst
+                    noise(16 * 300, 0.01, 0xD4),
+                ]
+                .concat(),
+            ),
+            (
+                "louder room noise",
+                noise(16 * 500, 0.03, 0xA1),
+                noise(16 * 700, 0.03, 0xB2),
+            ),
+        ];
+
+        for (label, pre, tail) in scenarios {
+            println!("=== scenario: {label} ===");
+            let mut audio = pre;
+            audio.extend(overlay(&speech, 0.01));
+            audio.extend(tail);
+            audio.extend(std::iter::repeat_n(0.0f32, 16_000)); // stop-flush 1s zeros
+
+            let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<super::LiveEvent>(1024);
+            let (text_tx, _text_rx) = tokio::sync::mpsc::channel::<String>(64);
+            let tts_active = Arc::new(AtomicBool::new(false));
+
+            let mut vad = earshot::Detector::new(earshot::DefaultPredictor::new());
+            let mut leftover = Vec::new();
+            let mut speech_buf = Vec::new();
+            let mut silence_frames = 0usize;
+            let mut in_speech = false;
+            let mut barge_in_frames = 0usize;
+            let mut tts_stopped_at = None;
+            let mut last_partial_len = 0usize;
+            let mut decode_hold_until = std::time::Instant::now();
+            let mut onset_buf = Vec::new();
+            let mut punct_partial: Option<String> = None;
+            let mut best_partial: Option<String> = None;
+
+            for chunk in audio.chunks(320) {
+                process_16k_samples(
+                    chunk,
+                    &mut leftover,
+                    &mut vad,
+                    &mut speech_buf,
+                    &mut silence_frames,
+                    &mut in_speech,
+                    &mut barge_in_frames,
+                    &recognizer,
+                    &text_tx,
+                    &tts_active,
+                    None,
+                    &mut tts_stopped_at,
+                    None,
+                    Some(&live_tx),
+                    &mut last_partial_len,
+                    &mut decode_hold_until,
+                    &mut onset_buf,
+                    &mut punct_partial,
+                    &mut best_partial,
+                );
+            }
+            drop(live_tx);
+
+            // Frontend simulator — the transcriptDiff mechanics reduce to this.
+            let mut committed = String::new();
+            let mut partial = String::new();
+            while let Ok(event) = live_rx.try_recv() {
+                match event {
+                    super::LiveEvent::Transcript { text, is_final } => {
+                        let trimmed = text.trim();
+                        println!(
+                            "  {} {trimmed:?}",
+                            if is_final { "FINAL  " } else { "partial" }
+                        );
+                        if is_final {
+                            if !trimmed.is_empty() {
+                                committed.push_str(trimmed);
+                                committed.push(' ');
+                            } else if !partial.is_empty() {
+                                println!("  !!! empty final wiped shown partial {partial:?}");
+                            }
+                            partial.clear();
+                        } else if !trimmed.is_empty() {
+                            if trimmed.len() + 10 < partial.len() {
+                                println!("  !!! partial shrank {partial:?} -> {trimmed:?}");
+                            }
+                            partial = trimmed.to_string();
+                        }
+                    }
+                    super::LiveEvent::Flushed => println!("  FLUSHED"),
+                }
+            }
+            println!("  composer: {:?}", format!("{committed}{partial}"));
         }
     }
 
