@@ -16,7 +16,6 @@ import { AgentSnapshotImportDialog } from "./AgentSnapshotImportDialog";
 import { TeamSnapshotExportDialog } from "./TeamSnapshotExportDialog";
 import { TeamSnapshotImportDialog } from "./TeamSnapshotImportDialog";
 import { TeamShareDialog } from "./TeamShareDialog";
-import { RelayDirectorySection } from "./RelayDirectorySection";
 import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
@@ -226,17 +225,6 @@ export function AgentsView() {
               }}
               personas={personas.libraryPersonas}
               teams={teamActions.teams}
-            />
-
-            <RelayDirectorySection
-              error={
-                agents.relayAgentsQuery.error instanceof Error
-                  ? agents.relayAgentsQuery.error
-                  : null
-              }
-              isLoading={agents.relayAgentsQuery.isLoading}
-              managedPubkeys={agents.managedPubkeys}
-              relayAgents={agents.relayAgentsQuery.data ?? []}
             />
           </div>
         </div>
