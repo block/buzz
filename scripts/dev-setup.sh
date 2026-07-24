@@ -113,7 +113,6 @@ fail_if_local_redis_blocks_compose
 log "Starting services and waiting for health..."
 if ! "${REPO_ROOT}/bin/just" _ensure-services; then
   error "Required local services failed to start or become ready."
-  docker ps --all --filter 'label=com.buzz.env=dev' >&2 || true
   exit 1
 fi
 success "Required local services are ready; optional service states are shown above"

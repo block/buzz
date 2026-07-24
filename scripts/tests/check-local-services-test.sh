@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 checker="${repo_root}/scripts/check-local-services.sh"
 compose_file="${repo_root}/docker-compose.yml"
+justfile="${repo_root}/Justfile"
+dev_setup="${repo_root}/scripts/dev-setup.sh"
 test_tmp=$(mktemp -d)
 
 cleanup() {
@@ -213,6 +215,22 @@ while IFS= read -r process_pid; do
   fi
 done <"${test_tmp}/bounded-inspect-process-pids"
 rm -f "${test_tmp}/bounded-inspect-process-pids"
+
+ensure_services_block=$(
+  sed -n '/^_ensure-services:/,/^# Apply database migrations/p' "${justfile}"
+)
+if grep -Eq 'docker (compose )?ps' <<<"${ensure_services_block}"; then
+  echo "_ensure-services runs an unbounded Docker status fallback" >&2
+  exit 1
+fi
+
+dev_setup_failure_block=$(
+  sed -n '/if ! .*_ensure-services; then/,/^fi$/p' "${dev_setup}"
+)
+if grep -Eq 'docker (compose )?ps' <<<"${dev_setup_failure_block}"; then
+  echo "dev-setup runs a redundant unbounded Docker status fallback" >&2
+  exit 1
+fi
 
 keycloak_block=$(
   sed -n '/^  keycloak:/,/^  minio:/p' "${compose_file}"

@@ -165,7 +165,6 @@ _ensure-services:
     set -euo pipefail
     if ! ./scripts/check-local-services.sh --start; then
         echo "Error: required local services did not become ready." >&2
-        docker ps --all --filter 'label=com.buzz.env=dev' >&2 || true
         exit 1
     fi
 
