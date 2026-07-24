@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
+  resolveProvisioningRuntimeForDefinition,
   resolveStartRuntimeForDefinition,
+  shouldPinSelectedRuntimeForDefinition,
 } from "./instanceInputForDefinition.ts";
 
 // ── Phase 1B.3.5: the single definition→instance mapping ────────────────────
@@ -74,6 +76,9 @@ test("row 4: create input never contains definition env vars", async () => {
 });
 
 test("row 2: harnessOverride follows the backend-aligned formula", async () => {
+  assert.equal(shouldPinSelectedRuntimeForDefinition(undefined, "goose"), true);
+  assert.equal(shouldPinSelectedRuntimeForDefinition("claude", "goose"), false);
+
   const match = await buildInstanceInputForDefinition(
     persona({ runtime: "goose" }),
     gooseRuntime,
@@ -95,6 +100,33 @@ test("row 2: harnessOverride follows the backend-aligned formula", async () => {
     false,
     "picked != configured → false (definition stays authoritative)",
   );
+});
+
+test("provisioning pins a visible fallback for a runtime-less definition", () => {
+  const resolved = resolveProvisioningRuntimeForDefinition(
+    null,
+    [buzzAgentRuntime, gooseRuntime],
+    null,
+    ["buzz-agent"],
+  );
+  assert.equal(resolved.runtime, gooseRuntime);
+  assert.equal(resolved.harnessOverride, true);
+});
+
+test("provisioning uses product ordering and leaves unavailable configured fallbacks unpinned", () => {
+  const ordered = resolveProvisioningRuntimeForDefinition(null, [
+    gooseRuntime,
+    claudeRuntime,
+    buzzAgentRuntime,
+  ]);
+  assert.equal(ordered.runtime, buzzAgentRuntime);
+  assert.equal(ordered.harnessOverride, true);
+
+  const unavailable = resolveProvisioningRuntimeForDefinition("missing", [
+    gooseRuntime,
+  ]);
+  assert.equal(unavailable.runtime, gooseRuntime);
+  assert.equal(unavailable.harnessOverride, false);
 });
 
 test("row 3: plain avatar URLs pass through; base64 data URIs upload via the injectable", async () => {
@@ -318,6 +350,28 @@ test("item-13: goose-only available — persona with no runtime resolves goose",
     [gooseRuntime, claudeRuntime],
   );
   assert.equal(runtime.id, "goose");
+  assert.deepEqual(warnings, []);
+});
+
+test("runtime-less starts exclude disabled runtimes at the shared resolver", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: undefined }),
+    [gooseRuntime, buzzAgentRuntime],
+    "buzz-agent",
+    ["buzz-agent"],
+  );
+  assert.equal(runtime.id, "goose");
+  assert.deepEqual(warnings, []);
+});
+
+test("explicit definitions can still start on a hidden runtime", () => {
+  const { runtime, warnings } = resolveStartRuntimeForDefinition(
+    persona({ runtime: "buzz-agent" }),
+    [gooseRuntime, buzzAgentRuntime],
+    null,
+    ["buzz-agent"],
+  );
+  assert.equal(runtime.id, "buzz-agent");
   assert.deepEqual(warnings, []);
 });
 

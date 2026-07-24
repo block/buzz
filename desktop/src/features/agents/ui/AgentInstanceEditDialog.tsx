@@ -14,11 +14,9 @@ import {
 } from "@/features/agents/hooks";
 import { isManagedAgentActive } from "@/features/agents/lib/managedAgentControlActions";
 import type {
-  ManagedAgent,
   RespondToMode,
   UpdateManagedAgentInput,
 } from "@/shared/api/types";
-import type { EditAgentFocusTarget } from "@/features/agents/openEditAgentEvent";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -28,12 +26,15 @@ import { setManagedAgentAutoRestart } from "@/shared/api/tauriManagedAgents";
 import { EditAgentAdvancedFields } from "./EditAgentAdvancedFields";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  formatCurrentRuntimeOptionLabel,
   formatRuntimeOptionLabel,
   getDefaultLlmModelLabel,
   getDefaultPersonaRuntime,
+  getPersonaHiddenProviderIds,
   getPersonaProviderOptions,
+  getRelayMeshRuntime,
+  getProviderApiKeyEnvVar,
   isMissingRequiredDropdownField,
   NO_RUNTIME_DROPDOWN_VALUE,
   PERSONA_FIELD_CONTROL_CLASS,
@@ -76,18 +77,15 @@ import {
   getBakedModelInheritLabel,
   getBakedProviderInheritLabel,
 } from "./bakedEnvHelpers";
-import { getProviderApiKeyEnvVar } from "./agentConfigOptions";
 import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentAiDefaultsNotice } from "./AgentAiDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
+import { useSelectableAcpRuntimes } from "../lib/runtimeVisibilityPreference";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
-
-const ADVANCED_FIELDS_MOTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
+import { ADVANCED_FIELDS_MOTION_TRANSITION } from "./agentAdvancedFieldsMotion";
+import type { AgentInstanceEditDialogProps } from "./AgentInstanceEditDialog.types";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -96,22 +94,13 @@ export function AgentInstanceEditDialog({
   onEditLinkedPersona,
   onOpenChange,
   onUpdated,
-}: {
-  agent: ManagedAgent;
-  /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
-  initialFocus?: EditAgentFocusTarget;
-  open: boolean;
-  /** Present only when the linked definition is editable (non-built-in,
-   * resolved). Caller closes this dialog and enters definition-edit. */
-  onEditLinkedPersona?: () => void;
-  onOpenChange: (open: boolean) => void;
-  onUpdated?: (agent: ManagedAgent) => void;
-}) {
+}: AgentInstanceEditDialogProps) {
   const updateMutation = useUpdateManagedAgentMutation();
   const startMutation = useStartManagedAgentMutation();
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimes);
 
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
@@ -216,8 +205,8 @@ export function AgentInstanceEditDialog({
 
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimes),
-    [runtimes],
+    () => sortPersonaRuntimes(selectableRuntimes),
+    [selectableRuntimes],
   );
 
   const selectedRuntime = React.useMemo(
@@ -241,12 +230,12 @@ export function AgentInstanceEditDialog({
       !options.some((o) => o.value === selectedRuntimeId)
     ) {
       options.push({
-        label: `${selectedRuntimeId} (current)`,
+        label: formatCurrentRuntimeOptionLabel(runtimes, selectedRuntimeId),
         value: selectedRuntimeId,
       });
     }
     return options;
-  }, [sortedRuntimes, selectedRuntimeId]);
+  }, [runtimes, sortedRuntimes, selectedRuntimeId]);
 
   // Resolve the dialog-opening command as the catalog loads. Edit-state runtime
   // ids mutate during selection changes and cannot identify the original state.
@@ -366,7 +355,11 @@ export function AgentInstanceEditDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ inheritedEnvVars, open });
+  } = useAgentDialogDefaults({
+    configScope: "existing",
+    inheritedEnvVars,
+    open,
+  });
 
   // Runtime/provider-required credential state, derived from the PROSPECTIVE
   // post-submit runtime — see the hook for the inherit-transition rationale.
@@ -536,14 +529,17 @@ export function AgentInstanceEditDialog({
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    if (nextProvider === "relay-mesh" && selectedRuntimeId !== "buzz-agent") {
-      handleRuntimeDropdownChange("buzz-agent");
+    const relayMeshRuntime =
+      nextProvider === "relay-mesh"
+        ? getRelayMeshRuntime(selectableRuntimes, selectedRuntime)
+        : null;
+    const nextRuntimeId =
+      relayMeshRuntime?.id ?? selectedRuntime?.id ?? selectedRuntimeId;
+    if (nextRuntimeId !== selectedRuntimeId) {
+      handleRuntimeDropdownChange(nextRuntimeId);
     }
     const nextSelection = selectionOnProviderDropdownChange(selection, {
-      runtime:
-        nextProvider === "relay-mesh"
-          ? "buzz-agent"
-          : (selectedRuntime?.id ?? selectedRuntimeId),
+      runtime: nextRuntimeId,
       nextValue,
       clearModelWhenApiKeyMissing: false,
     });
@@ -778,13 +774,12 @@ export function AgentInstanceEditDialog({
 
   // Provider field derived state
   const trimmedProvider = provider.trim();
-  const hideProviderIds = React.useMemo(
-    () =>
-      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const hideProviderIds = getPersonaHiddenProviderIds({
+    bakedEnvKeys: bakedEnvKeys ?? [],
+    selectableRuntimes,
+    currentRuntime: selectedRuntime,
+    preserveCurrentRuntime: true,
+  });
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     selectedRuntime?.id ?? "",

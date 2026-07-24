@@ -12,7 +12,7 @@ import {
   useStopManagedAgentMutation,
   useDeleteManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { useImplicitGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useChannelsQuery } from "@/features/channels/hooks";
 import { usePresenceQuery } from "@/features/presence/hooks";
 import type {
@@ -36,7 +36,7 @@ import {
 } from "../lib/instanceInputForDefinition";
 
 export function useManagedAgentActions() {
-  const { globalConfig } = useGlobalAgentConfig();
+  const { globalConfig } = useImplicitGlobalAgentConfig();
   const relayAgentsQuery = useRelayAgentsQuery();
   const managedAgentsQuery = useManagedAgentsQuery();
   const [shouldLoadChannels, setShouldLoadChannels] = React.useState(false);

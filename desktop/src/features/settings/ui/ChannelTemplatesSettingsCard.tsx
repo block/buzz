@@ -17,6 +17,10 @@ import {
   useTeamsQuery,
 } from "@/features/agents/hooks";
 import {
+  runtimesForAcpConfigurationPicker,
+  useDisabledAcpRuntimeIds,
+} from "@/features/agents/lib/runtimeVisibilityPreference";
+import {
   useChannelTemplatesQuery,
   useCreateChannelTemplateMutation,
   useDeleteChannelTemplateMutation,
@@ -292,6 +296,7 @@ function TemplateFormDialog({
   const teamsQuery = useTeamsQuery();
   const providersQuery = useAvailableAcpRuntimes();
   const runtimes = providersQuery.data ?? [];
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
 
   const [name, setName] = React.useState("");
   const [description, setDescription] = React.useState("");
@@ -559,6 +564,7 @@ function TemplateFormDialog({
             personaRuntimes={personaRuntimes}
             providers={runtimes}
             providersLoading={providersQuery.isLoading}
+            disabledRuntimeIds={disabledRuntimeIds}
             selectedPersonaIds={selectedPersonaIds}
             selectedTeamIds={selectedTeamIds}
             teamRuntimes={teamRuntimes}
@@ -638,6 +644,7 @@ function TemplateTeamSelector({
 }
 
 function RuntimeAssignments({
+  disabledRuntimeIds,
   isPending,
   onPersonaRuntimeChange,
   onTeamRuntimeChange,
@@ -650,6 +657,7 @@ function RuntimeAssignments({
   teamRuntimes,
   teams,
 }: {
+  disabledRuntimeIds: readonly string[];
   isPending: boolean;
   onPersonaRuntimeChange: (personaId: string, runtimeId: string) => void;
   onTeamRuntimeChange: (teamId: string, runtimeId: string) => void;
@@ -697,6 +705,7 @@ function RuntimeAssignments({
               onChange={(runtimeId) =>
                 onPersonaRuntimeChange(persona.id, runtimeId)
               }
+              disabledRuntimeIds={disabledRuntimeIds}
               providers={providers}
               value={personaRuntimes[persona.id] ?? ""}
             />
@@ -708,6 +717,7 @@ function RuntimeAssignments({
               icon="team"
               label={team.name}
               onChange={(runtimeId) => onTeamRuntimeChange(team.id, runtimeId)}
+              disabledRuntimeIds={disabledRuntimeIds}
               providers={providers}
               value={teamRuntimes[team.id] ?? ""}
             />
@@ -721,6 +731,7 @@ function RuntimeAssignments({
 function RuntimeRow({
   avatarUrl,
   disabled,
+  disabledRuntimeIds,
   icon,
   label,
   onChange,
@@ -729,12 +740,24 @@ function RuntimeRow({
 }: {
   avatarUrl?: string | null | undefined;
   disabled: boolean;
+  disabledRuntimeIds: readonly string[];
   icon?: "team";
   label: string;
   onChange: (runtimeId: string) => void;
   providers: AcpRuntime[];
   value: string;
 }) {
+  const runtimeOptions = runtimesForAcpConfigurationPicker(
+    providers,
+    disabledRuntimeIds,
+    value,
+  );
+  const selectableRuntimeIds = new Set(
+    runtimesForAcpConfigurationPicker(providers, disabledRuntimeIds).map(
+      (runtime) => runtime.id,
+    ),
+  );
+
   return (
     <div className="flex items-center gap-2">
       <div className="flex min-w-0 flex-1 items-center gap-2">
@@ -756,9 +779,12 @@ function RuntimeRow({
         value={value}
       >
         <option value="">Default</option>
-        {providers.map((runtime) => (
+        {runtimeOptions.map((runtime) => (
           <option key={runtime.id} value={runtime.id}>
             {runtime.label}
+            {value === runtime.id && !selectableRuntimeIds.has(runtime.id)
+              ? " (current)"
+              : ""}
           </option>
         ))}
       </select>

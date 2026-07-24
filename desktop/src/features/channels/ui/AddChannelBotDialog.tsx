@@ -8,7 +8,8 @@ import {
   type CreateChannelManagedAgentResult,
 } from "@/features/agents/hooks";
 import { getActivePersonas } from "@/features/agents/lib/catalog";
-import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { resolveProvisioningRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
+import { canResolveAllPersonaRuntimes } from "@/features/agents/lib/resolvePersonaRuntime";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
@@ -135,26 +136,33 @@ export function AddChannelBotDialog({
   }
 
   async function handleSubmit() {
-    if (providers.length === 0 || selectedPersonas.length === 0) return;
+    if (
+      providers.length === 0 ||
+      selectedPersonas.length === 0 ||
+      !selectedPersonasResolvable
+    ) {
+      return;
+    }
 
-    const inputs = selectedPersonas.map((persona) => {
-      const resolved = resolvePersonaRuntime(
+    const inputs = selectedPersonas.flatMap((persona) => {
+      const resolved = resolveProvisioningRuntimeForDefinition(
         persona.runtime,
         providers,
-        providers[0] ?? null,
-        false,
       );
-      return {
-        runtime: resolved.runtime ?? providers[0],
-        name: persona.displayName,
-        personaId: persona.id,
-        harnessOverride: false,
-        systemPrompt: persona.systemPrompt,
-        avatarUrl: persona.avatarUrl ?? undefined,
-        model: persona.model ?? undefined,
-        role: "bot" as const,
-        backend: { type: "local" as const },
-      };
+      if (!resolved.runtime) return [];
+      return [
+        {
+          runtime: resolved.runtime,
+          name: persona.displayName,
+          personaId: persona.id,
+          harnessOverride: resolved.harnessOverride,
+          systemPrompt: persona.systemPrompt,
+          avatarUrl: persona.avatarUrl ?? undefined,
+          model: persona.model ?? undefined,
+          role: "bot" as const,
+          backend: { type: "local" as const },
+        },
+      ];
     });
 
     setSubmissionNotice(null);
@@ -189,9 +197,15 @@ export function AddChannelBotDialog({
     }
   }
 
+  const selectedPersonasResolvable = canResolveAllPersonaRuntimes(
+    selectedPersonas,
+    providers,
+    providers[0] ?? null,
+  );
   const canSubmit =
     providers.length > 0 &&
     selectedPersonas.length > 0 &&
+    selectedPersonasResolvable &&
     !providersLoading &&
     !createBotsMutation.isPending;
   const addButtonLabel = createBotsMutation.isPending

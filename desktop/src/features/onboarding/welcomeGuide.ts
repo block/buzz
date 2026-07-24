@@ -1,7 +1,12 @@
+import { commandsMatch } from "@/features/agents/agentReuse";
 import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
 } from "@/features/agents/lib/instanceInputForDefinition";
+import {
+  filterEnabledAcpRuntimes,
+  getDisabledAcpRuntimeIdsSnapshot,
+} from "@/features/agents/lib/runtimeVisibilityPreference";
 import {
   addChannelMembers,
   createManagedAgent,
@@ -14,6 +19,7 @@ import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
 import type {
   AcpRuntime,
+  AcpRuntimeCatalogEntry,
   AgentPersona,
   CreateManagedAgentInput,
   ManagedAgent,
@@ -232,8 +238,28 @@ export async function buildWelcomeStarterCreateInput(
 export function welcomeStarterRuntimeUpdate(
   existing: ManagedAgent,
   desired: CreateManagedAgentInput,
+  visibility?: {
+    runtimes: readonly AcpRuntimeCatalogEntry[];
+    disabledRuntimeIds: readonly string[];
+  },
 ) {
   if (!desired.agentCommand) return null;
+
+  const existingRuntime = visibility?.runtimes.find(
+    (runtime) =>
+      (runtime.command
+        ? commandsMatch(existing.agentCommand, runtime.command)
+        : false) || commandsMatch(existing.agentCommand, runtime.id),
+  );
+  if (
+    existingRuntime &&
+    filterEnabledAcpRuntimes(
+      [existingRuntime],
+      visibility?.disabledRuntimeIds ?? [],
+    ).length === 0
+  ) {
+    return null;
+  }
 
   const desiredArgs = desired.agentArgs ?? [];
   const desiredModel = desired.model ?? null;
@@ -282,6 +308,7 @@ async function provisionWelcomeTeam(
   const runtimes = runtimeCatalog.filter(
     (runtime): runtime is AcpRuntime => runtime.availability === "available",
   );
+  const disabledRuntimeIds = getDisabledAcpRuntimeIdsSnapshot();
 
   const agents: ManagedAgent[] = [];
   for (const starter of WELCOME_TEAM_STARTERS) {
@@ -302,7 +329,10 @@ async function provisionWelcomeTeam(
       relayUrl,
     );
     if (existing) {
-      const runtimeUpdate = welcomeStarterRuntimeUpdate(existing, desired);
+      const runtimeUpdate = welcomeStarterRuntimeUpdate(existing, desired, {
+        runtimes: runtimeCatalog,
+        disabledRuntimeIds,
+      });
       agents.push(
         runtimeUpdate
           ? (await updateManagedAgent(runtimeUpdate)).agent

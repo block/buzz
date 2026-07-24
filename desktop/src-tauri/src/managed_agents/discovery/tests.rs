@@ -420,21 +420,6 @@ fn create_time_override_none_when_persona_runtime_not_installed() {
 }
 
 #[test]
-fn create_time_override_some_when_user_deliberately_overrides_installed_runtime() {
-    // Case 2 + deliberate override: the persona's `claude` runtime IS
-    // available, but the user explicitly picked `codex` in a deploy dialog's
-    // runtime selector ("overriding persona preferences"), so the frontend
-    // sends `codex-acp` with `harness_override` true. This is a real pin and
-    // MUST be preserved — returning `None` would silently swallow the
-    // deliberate override and inherit `claude` on spawn.
-    let personas = vec![persona_with_runtime("p1", Some("claude"))];
-    assert_eq!(
-        create_time_agent_command_override(Some("p1"), &personas, Some("codex-acp"), true),
-        Some("codex-acp".to_string())
-    );
-}
-
-#[test]
 fn create_time_override_none_when_persona_runtime_installed() {
     // Case 2: the persona's runtime is available, so `resolvePersonaRuntime`
     // sends the persona's own command with no override. Inherits — no pin.
@@ -610,6 +595,7 @@ fn apply_agent_command_update_concrete_pin_keeps_materialized_runtime() {
 // ── probe_codex_acp_major_version ─────────────────────────────────────────────
 
 mod managed_path_resolution;
+mod provisioning_overrides;
 
 #[cfg(unix)]
 #[test]

@@ -1,4 +1,8 @@
 import type { AcpRuntime, AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import {
+  filterEnabledAcpRuntimes,
+  getDisabledAcpRuntimeIdsSnapshot,
+} from "./runtimeVisibilityPreference";
 
 /**
  * Select the best default runtime from a catalog, using the same preference
@@ -55,18 +59,31 @@ export type ResolvePersonaRuntimeResult = {
  *    fall back to `defaultRuntime` and emit a warning.
  * 4. If there is no `defaultRuntime` either → return `null` with an error
  *    warning so the UI can block deployment.
+ *
+ * Hidden runtimes remain eligible when explicitly pinned by a persona. They
+ * are removed only from the implicit fallback set, at this shared boundary,
+ * so every provisioning surface observes the device visibility preference.
  */
 export function resolvePersonaRuntime(
   personaRuntimeId: string | undefined | null,
   runtimes: readonly AcpRuntime[],
   defaultRuntime: AcpRuntime | null,
   forceOverride?: boolean,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
 ): ResolvePersonaRuntimeResult {
+  const implicitDefaultRuntime = forceOverride
+    ? defaultRuntime
+    : resolveVisibleDefaultRuntime(
+        runtimes,
+        defaultRuntime,
+        disabledRuntimeIds,
+      );
+
   // Case 1: Persona has no runtime preference — use the default.
   if (!personaRuntimeId) {
     return {
-      runtime: defaultRuntime,
-      warnings: defaultRuntime
+      runtime: implicitDefaultRuntime,
+      warnings: implicitDefaultRuntime
         ? []
         : [
             "No agent runtimes are available. Install a runtime (e.g. Goose) to deploy agents.",
@@ -78,28 +95,35 @@ export function resolvePersonaRuntime(
   // Case 2: Persona's preferred runtime is available.
   const matched = runtimes.find((p) => p.id === personaRuntimeId);
   if (matched) {
-    if (forceOverride && defaultRuntime && matched.id !== defaultRuntime.id) {
+    if (
+      forceOverride &&
+      implicitDefaultRuntime &&
+      matched.id !== implicitDefaultRuntime.id
+    ) {
       return {
-        runtime: defaultRuntime,
+        runtime: implicitDefaultRuntime,
         warnings: [
-          `Runtime override: using ${defaultRuntime.label} instead of ${matched.label}.`,
+          `Runtime override: using ${implicitDefaultRuntime.label} instead of ${matched.label}.`,
         ],
         isOverridden: true,
       };
     }
     return {
-      runtime: forceOverride && defaultRuntime ? defaultRuntime : matched,
+      runtime:
+        forceOverride && implicitDefaultRuntime
+          ? implicitDefaultRuntime
+          : matched,
       warnings: [],
       isOverridden: false,
     };
   }
 
   // Case 3 & 4: Persona's runtime is not available — fall back.
-  if (defaultRuntime) {
+  if (implicitDefaultRuntime) {
     return {
-      runtime: defaultRuntime,
+      runtime: implicitDefaultRuntime,
       warnings: [
-        `This agent is configured for runtime "${personaRuntimeId}" but it is not available. Using ${defaultRuntime.label} instead.`,
+        `This agent is configured for runtime "${personaRuntimeId}" but it is not available. Using ${implicitDefaultRuntime.label} instead.`,
       ],
       isOverridden: true,
     };
@@ -112,6 +136,20 @@ export function resolvePersonaRuntime(
     ],
     isOverridden: false,
   };
+}
+
+function resolveVisibleDefaultRuntime(
+  runtimes: readonly AcpRuntime[],
+  defaultRuntime: AcpRuntime | null,
+  disabledRuntimeIds: readonly string[],
+): AcpRuntime | null {
+  if (!defaultRuntime) return null;
+
+  const visibleRuntimes = filterEnabledAcpRuntimes(
+    runtimes,
+    disabledRuntimeIds,
+  );
+  return getDefaultPersonaRuntime(visibleRuntimes, defaultRuntime.id);
 }
 
 /**
@@ -141,4 +179,23 @@ export function collectRuntimeWarnings(
     warnings.push(...w);
   }
   return warnings;
+}
+
+/** Whether every definition can resolve with the supplied optional fallback. */
+export function canResolveAllPersonaRuntimes(
+  personas: readonly { runtime: string | null }[],
+  runtimes: readonly AcpRuntime[],
+  fallbackRuntime: AcpRuntime | null,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
+): boolean {
+  return personas.every(
+    (persona) =>
+      resolvePersonaRuntime(
+        persona.runtime,
+        runtimes,
+        fallbackRuntime,
+        false,
+        disabledRuntimeIds,
+      ).runtime !== null,
+  );
 }

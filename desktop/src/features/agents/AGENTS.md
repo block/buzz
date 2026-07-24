@@ -79,7 +79,34 @@ with a TypeScript lookup table or an id comparison in a component.
    harnesses always keep the field. Gate: `defaults hides model when optional
    harness has empty discovery` (and the failed-discovery counterpart) in
    `onboarding-agent-defaults.spec.ts`.
-9. **The defaults modal is progressively disclosed.** An unset global config
+9. **Runtime enablement is a device-local menu preference, not a capability or
+   lifecycle fact.** Settings persists disabled runtime IDs through
+   `lib/runtimeVisibilityPreference.ts`; harness dropdowns filter those IDs
+   from new choices while the raw Rust catalog remains authoritative for
+   installation, capabilities, and existing agent configuration. Turning a
+   runtime off must not uninstall it, stop it, or invalidate an existing
+   agent that already uses it. If the disabled runtime was the saved global
+   default, consumers immediately ignore that preference and the defaults
+   editor persists its visible fallback on the next save. Its dependent
+   provider/model defaults are also ignored for new implicit fallback agents,
+   without changing the persisted configuration used by existing agents.
+   Create-mode dialogs use the implicit masked config; existing definition and
+   instance edit dialogs use the raw persisted config.
+   `resolvePersonaRuntime` is the shared visibility boundary for every
+   runtime-less deployment or provisioning path. Definition-to-instance starts
+   use the stricter `resolveStartRuntimeForDefinition` wrapper; call one of
+   these shared resolvers instead of duplicating default selection in a start
+   surface. Persona-backed provisioning uses
+   `resolveProvisioningRuntimeForDefinition` so the resolved runtime and
+   backend pinning bit cannot drift apart. Team deploys use the same
+   visible-runtime set only for members that need an implicit fallback, so a
+   fully pinned team remains deployable even when every installed runtime is
+   hidden. Definitions already pinned to a hidden runtime remain runnable.
+   Welcome Team reconciliation skips runtime updates for existing agents on a
+   hidden runtime. Provider pickers use `getPersonaHiddenProviderIds` as the
+   shared relay-mesh visibility policy, deriving support from each runtime's
+   catalog-provided `providerEnvVar` rather than its ID.
+10. **The defaults modal is progressively disclosed.** An unset global config
    starts on the Buzz Agent-first deployment fallback and carries that visible
    harness into the next saved edit. The `progressive-defaults` disclosure
    preset therefore begins at Provider for Buzz Agent, then reveals Model,

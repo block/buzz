@@ -10,6 +10,10 @@ import {
   type ResolvePersonaRuntimeResult,
 } from "./resolvePersonaRuntime";
 import {
+  getDisabledAcpRuntimeIdsSnapshot,
+  runtimesForImplicitAcpSelection,
+} from "./runtimeVisibilityPreference";
+import {
   resolveManagedAgentAvatarUrl,
   type UploadMediaBytes,
 } from "../ui/managedAgentAvatar";
@@ -46,13 +50,22 @@ export function resolveStartRuntimeForDefinition(
   persona: AgentPersona,
   runtimes: readonly AcpRuntime[],
   preferredRuntimeId?: string | null,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
 ): { runtime: AcpRuntime; warnings: string[] } {
+  const selectableRuntimes = runtimesForImplicitAcpSelection(
+    runtimes,
+    disabledRuntimeIds,
+    persona.runtime,
+  );
   // Use the buzz-agent-first preference (buzz-agent → goose → first available)
   // so a freshly installed goose never beats the bundled buzz-agent sidecar
   // for runtime-less personas (item 13 regression guard).
-  const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
+  const defaultRuntime = getDefaultPersonaRuntime(
+    selectableRuntimes,
+    preferredRuntimeId,
+  );
   const { runtime, warnings, isOverridden }: ResolvePersonaRuntimeResult =
-    resolvePersonaRuntime(persona.runtime, runtimes, defaultRuntime);
+    resolvePersonaRuntime(persona.runtime, selectableRuntimes, defaultRuntime);
 
   if (!runtime) {
     throw new Error("No available runtime found for this agent.");
@@ -87,6 +100,45 @@ export type BackendIntent = {
   id: string;
   config: Record<string, unknown>;
 };
+
+/** Keep every definition-start surface aligned on runtime pinning semantics. */
+export function shouldPinSelectedRuntimeForDefinition(
+  definitionRuntimeId: string | null | undefined,
+  selectedRuntimeId: string,
+): boolean {
+  return (
+    !definitionRuntimeId || definitionRuntimeId.trim() === selectedRuntimeId
+  );
+}
+
+/**
+ * Resolve the runtime and backend pinning bit together so persona-backed
+ * provisioning cannot discard a visible implicit fallback during handoff.
+ */
+export function resolveProvisioningRuntimeForDefinition(
+  definitionRuntimeId: string | null | undefined,
+  runtimes: readonly AcpRuntime[],
+  preferredRuntimeId?: string | null,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
+): ResolvePersonaRuntimeResult & { harnessOverride: boolean } {
+  const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
+  const resolved = resolvePersonaRuntime(
+    definitionRuntimeId,
+    runtimes,
+    defaultRuntime,
+    false,
+    disabledRuntimeIds,
+  );
+  return {
+    ...resolved,
+    harnessOverride:
+      resolved.runtime !== null &&
+      shouldPinSelectedRuntimeForDefinition(
+        definitionRuntimeId,
+        resolved.runtime.id,
+      ),
+  };
+}
 
 /**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
@@ -145,7 +197,10 @@ export async function buildInstanceInputForDefinition(
     agentCommand: runtime.command,
     agentArgs: runtime.defaultArgs,
     mcpCommand: runtime.mcpCommand ?? "",
-    harnessOverride: !persona.runtime || persona.runtime === runtime.id,
+    harnessOverride: shouldPinSelectedRuntimeForDefinition(
+      persona.runtime,
+      runtime.id,
+    ),
     model: persona.model ?? undefined,
     provider: persona.provider ?? undefined,
     spawnAfterCreate: true,

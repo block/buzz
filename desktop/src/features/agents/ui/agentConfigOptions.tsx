@@ -14,14 +14,54 @@ export { getDefaultPersonaRuntime } from "../lib/resolvePersonaRuntime";
  * offering it for new selections would create a regression path.
  * OSS builds pass an empty `Set` so v1 remains visible.
  *
- * All three dialog sites that show a provider picker import this constant —
- * `AgentDefinitionDialog`, `AgentInstanceEditDialog`, and
- * `AgentDefaultsSettingsCard` — making it the single source of truth for
- * which provider ids to suppress on Block builds.
+ * Provider pickers consume this directly or through
+ * `getPersonaHiddenProviderIds`, keeping one source of truth for Block builds.
  */
 export const BLOCK_BUILD_HIDDEN_PROVIDER_IDS: ReadonlySet<string> = new Set([
   "databricks",
 ]);
+
+type RuntimeProviderCapability = Pick<
+  AcpRuntimeCatalogEntry,
+  "id" | "providerEnvVar"
+>;
+
+export function runtimeSupportsRelayMesh(
+  runtime: RuntimeProviderCapability | null | undefined,
+): boolean {
+  return runtime?.providerEnvVar === "BUZZ_AGENT_PROVIDER";
+}
+
+export function getRelayMeshRuntime<T extends RuntimeProviderCapability>(
+  selectableRuntimes: readonly T[],
+  currentRuntime?: T | null,
+): T | null {
+  if (runtimeSupportsRelayMesh(currentRuntime)) {
+    return currentRuntime ?? null;
+  }
+  return selectableRuntimes.find(runtimeSupportsRelayMesh) ?? null;
+}
+
+export function getPersonaHiddenProviderIds({
+  bakedEnvKeys,
+  selectableRuntimes,
+  currentRuntime,
+  preserveCurrentRuntime,
+}: {
+  bakedEnvKeys: readonly string[];
+  selectableRuntimes: readonly RuntimeProviderCapability[];
+  currentRuntime?: RuntimeProviderCapability | null;
+  preserveCurrentRuntime: boolean;
+}): ReadonlySet<string> {
+  const hidden = bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")
+    ? new Set(BLOCK_BUILD_HIDDEN_PROVIDER_IDS)
+    : new Set<string>();
+  const relayMeshSelectable =
+    selectableRuntimes.some(runtimeSupportsRelayMesh) ||
+    (preserveCurrentRuntime && runtimeSupportsRelayMesh(currentRuntime));
+  if (!relayMeshSelectable) hidden.add("relay-mesh");
+  return hidden;
+}
 
 export const PERSONA_FIELD_SHELL_CLASS =
   "rounded-xl border border-input bg-muted/40 transition-colors duration-150 ease-out hover:border-muted-foreground/40 focus-within:border-muted-foreground/50";
@@ -196,6 +236,29 @@ export function resetConfigForHarnessChange(
         ? config.provider
         : null,
   };
+}
+
+/**
+ * Align a missing, stale, or hidden saved preference with the shown fallback.
+ * A missing preference adopts the current context without clearing its draft;
+ * switching away from a saved harness clears values that are not portable.
+ */
+export function reconcilePreferredRuntimeFallback(
+  config: GlobalAgentConfig,
+  fallbackRuntimeId: string | null,
+): GlobalAgentConfig {
+  if (!fallbackRuntimeId || config.preferred_runtime === fallbackRuntimeId) {
+    return config;
+  }
+
+  if (!config.preferred_runtime) {
+    return {
+      ...config,
+      preferred_runtime: fallbackRuntimeId,
+    };
+  }
+
+  return resetConfigForHarnessChange(config, fallbackRuntimeId);
 }
 
 function effectiveModelProviderForOptions(
@@ -424,6 +487,18 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
             ? " (not installed)"
             : "";
   return `${runtime.label}${suffix}`;
+}
+
+export function formatCurrentRuntimeOptionLabel(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+  runtimeId: string,
+) {
+  const trimmedRuntimeId = runtimeId.trim();
+  const runtime = runtimes.find(
+    (candidate) => candidate.id === trimmedRuntimeId,
+  );
+  const label = runtime ? formatRuntimeOptionLabel(runtime) : trimmedRuntimeId;
+  return `${label} (current)`;
 }
 
 function runtimeAvailabilitySortRank(

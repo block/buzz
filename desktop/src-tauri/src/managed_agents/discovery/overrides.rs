@@ -113,10 +113,10 @@ pub fn apply_agent_command_update(
 /// `resolvePersonaRuntime` (frontend), which produces a divergent command in two
 /// distinct cases that the backend MUST tell apart:
 ///
-/// - DELIBERATE OVERRIDE (`harness_override` true): the user explicitly picked a
-///   runtime command in UI that exposes a runtime selector. This is a real pin
-///   and is preserved when it differs from the command inheritance would spawn,
-///   including installed aliases such as `claude-code-acp`.
+/// - PINNED SELECTION (`harness_override` true): the frontend selected a runtime
+///   that must survive persona inheritance. This includes explicit user choices,
+///   installed aliases such as `claude-code-acp`, and visible implicit fallbacks
+///   for runtime-less personas.
 /// - MISSING-RUNTIME FALLBACK (`harness_override` false): the persona's runtime
 ///   isn't installed locally, so `resolvePersonaRuntime` substitutes a fallback
 ///   default. This is NOT a pin — baking it would freeze the agent on the fallback
@@ -125,7 +125,7 @@ pub fn apply_agent_command_update(
 ///   so the persona stays authoritative.
 ///
 /// `isOverridden` from `resolvePersonaRuntime` cannot distinguish these — it is
-/// `true` for BOTH — so the caller must thread the explicit user-intent bit.
+/// `true` for BOTH — so the caller must thread the pinning decision.
 ///
 /// Persona-less creates (`persona_id` is `None`, e.g. the standalone
 /// CreateAgentDialog) have no persona to inherit, so the picked command is always a

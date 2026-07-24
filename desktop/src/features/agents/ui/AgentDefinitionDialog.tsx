@@ -2,11 +2,6 @@ import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import type {
-  AcpRuntimeCatalogEntry,
-  CreatePersonaInput,
-  UpdatePersonaInput,
-} from "@/shared/api/types";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 import { ChooserDialogContent } from "@/shared/ui/chooser-dialog-content";
@@ -34,13 +29,15 @@ import {
 import {
   AUTO_MODEL_DROPDOWN_VALUE,
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
+  formatCurrentRuntimeOptionLabel,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
+  getPersonaHiddenProviderIds,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  getRelayMeshRuntime,
   getRuntimePersonaModelOptions,
   NO_RUNTIME_DROPDOWN_VALUE,
   runtimeSupportsLlmProviderSelection,
@@ -67,7 +64,7 @@ import {
   usePersonaModelDiscovery,
 } from "./usePersonaModelDiscovery";
 import { useBakedBuildEnvKeysQuery, useRuntimeFileConfigQuery } from "../hooks";
-import { useAgentDialogDefaults } from "./useAgentDialogDefaults";
+import { useDefinitionAgentDialogDefaults } from "./useAgentDialogDefaults";
 import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { AgentHarnessField } from "./AgentHarnessField";
 import {
@@ -82,31 +79,12 @@ import {
 } from "./agentAiConfigurationPolicy";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { buildRuntimeModelProviderPayload } from "./agentDefinitionSubmitPayload";
-
-type AgentDefinitionDialogProps = {
-  open: boolean;
-  title: string;
-  description: string;
-  submitLabel: string;
-  initialValues: CreatePersonaInput | UpdatePersonaInput | null;
-  error: Error | null;
-  isPending: boolean;
-  runtimes: AcpRuntimeCatalogEntry[];
-  runtimesLoading?: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSubmit: (
-    input: CreatePersonaInput | UpdatePersonaInput,
-  ) => Promise<unknown>;
-  /** Rendered below the form fields in create mode only ("Where to run"). */
-  createRunSection?: React.ReactNode;
-  /** Extra create-mode submit gate (e.g. incomplete provider config). */
-  createSubmitBlocked?: boolean;
-};
-
-const ADVANCED_FIELDS_MOTION_TRANSITION = {
-  duration: 0.18,
-  ease: [0.23, 1, 0.32, 1],
-} as const;
+import {
+  useSelectableAcpRuntimes,
+  visibleAcpRuntimeSeedForCreate,
+} from "../lib/runtimeVisibilityPreference";
+import type { AgentDefinitionDialogProps } from "./AgentDefinitionDialog.types";
+import { ADVANCED_FIELDS_MOTION_TRANSITION } from "./agentAdvancedFieldsMotion";
 
 export function AgentDefinitionDialog({
   open,
@@ -141,18 +119,11 @@ export function AgentDefinitionDialog({
   const [behaviorDraft, setBehaviorDraft] = React.useState(
     emptyPersonaBehaviorDraft,
   );
-  // The seed the draft is diffed against at submit: an untouched quad
-  // submits no behavior group, keeping unrelated edits hash-quiet.
+  // Untouched behavior fields submit no group, keeping edits hash-quiet.
   const behaviorSeedRef = React.useRef(emptyPersonaBehaviorDraft);
-  // Tracks when the runtime was auto-seeded by the default-runtime effect in
-  // edit mode (i.e. the user never explicitly chose a runtime). Used to omit
-  // the seeded runtime from the submit payload for builtin definitions whose
-  // canonical runtime is null — the sync would revert it anyway.
+  // Lets edit-mode builtin definitions omit an untouched auto-seeded runtime.
   const isRuntimeAutoSeededRef = React.useRef(false);
-  // Guards the seeding effect so it fires at most once per dialog-open.
-  // Without this, clearing runtime back to "" via "No preference" would re-
-  // trigger the effect (the `runtime` dep would pass the length guard) and
-  // snap the dropdown back to the default — an edit-mode regression.
+  // Prevent "No preference" from snapping back to the default.
   const hasSeededForOpenRef = React.useRef(false);
   const [showAdvancedFields, setShowAdvancedFields] = React.useState(false);
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
@@ -164,10 +135,11 @@ export function AgentDefinitionDialog({
       model: inheritedModelDefault,
     },
     inheritedEnvVars: inheritedEnvVarsForAdvanced,
-  } = useAgentDialogDefaults({ open });
-  const defaultRuntime = React.useMemo(
-    () => getDefaultPersonaRuntime(runtimes, globalConfig.preferred_runtime),
-    [globalConfig.preferred_runtime, runtimes],
+  } = useDefinitionAgentDialogDefaults(initialValues, open);
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimes);
+  const defaultRuntime = getDefaultPersonaRuntime(
+    selectableRuntimes,
+    globalConfig.preferred_runtime,
   );
   const isCreateMode = Boolean(initialValues && !("id" in initialValues));
   const shouldReduceMotion = useReducedMotion();
@@ -216,6 +188,38 @@ export function AgentDefinitionDialog({
   }, [initialValues, open]);
 
   React.useEffect(() => {
+    if (!open || !initialValues || "id" in initialValues || runtimesLoading) {
+      return;
+    }
+    const seededRuntime = initialValues.runtime?.trim() ?? "";
+    const nextRuntime = visibleAcpRuntimeSeedForCreate(
+      seededRuntime,
+      selectableRuntimes,
+      defaultRuntime?.id,
+    );
+    if (
+      !seededRuntime ||
+      runtime.trim() !== seededRuntime ||
+      nextRuntime === seededRuntime
+    ) {
+      return;
+    }
+    setRuntime(nextRuntime);
+    setModel("");
+    setProvider("");
+    setAiConfigurationMode("defaults");
+    setIsCustomModelEditing(false);
+    setIsCustomProviderEditing(false);
+  }, [
+    defaultRuntime?.id,
+    initialValues,
+    open,
+    runtime,
+    runtimesLoading,
+    selectableRuntimes,
+  ]);
+
+  React.useEffect(() => {
     if (
       !open ||
       !initialValues ||
@@ -231,10 +235,7 @@ export function AgentDefinitionDialog({
     setRuntime(defaultRuntime.id);
     hasSeededForOpenRef.current = true;
     if ("id" in initialValues) {
-      // Edit mode: record that this runtime was auto-seeded so the submit path
-      // can omit it from the payload for builtin definitions (canonical runtime
-      // null; sync would revert the value anyway). Explicit user changes via
-      // the dropdown clear this flag.
+      // Builtin definitions omit this untouched inferred runtime on submit.
       isRuntimeAutoSeededRef.current = true;
     }
   }, [defaultRuntime, initialValues, open, runtime, runtimesLoading]);
@@ -296,16 +297,14 @@ export function AgentDefinitionDialog({
       behaviorSeedRef.current = emptyPersonaBehaviorDraft;
       setShowAdvancedFields(false);
       setIsAvatarUploadPending(false);
-      // isRuntimeAutoSeededRef and hasSeededForOpenRef are NOT reset here — the
-      // [initialValues, open] effect resets both when the dialog re-opens.
+      // The open-seeding effect resets both refs on the next open.
     }
 
     onOpenChange(next);
   }
 
   async function handleSubmit() {
-    // D1: the same localModeSatisfied gate as canSubmit prevents form-submit
-    // (Enter) from bypassing a missing credential.
+    // Keep Enter submission on the same credential gate as the button.
     if (!initialValues || !localModeSatisfied || !canSubmit) return;
 
     const {
@@ -372,11 +371,7 @@ export function AgentDefinitionDialog({
     (runtime.trim().length > 0 && runtimeCanChooseLlmProvider) ||
     blankRuntimeModelProviderEditable;
   const trimmedProvider = provider.trim();
-  // Required credential env keys for this runtime + provider combination.
-  // Used to show required markers on the LLM provider label and amber
-  // locked rows in the env vars editor.
-  // File-layer config for the selected runtime (e.g. goose config.yaml).
-  // Used to silence requirements already satisfied there.
+  // File config satisfies credentials before the readiness gate renders them.
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(runtime, {
     enabled: open,
   });
@@ -457,12 +452,6 @@ export function AgentDefinitionDialog({
   const modelFieldVisible =
     runtime.trim().length > 0 || blankRuntimeModelProviderEditable;
   const isExplicitModelRequired = aiConfigurationMode === "custom";
-  // Gate the provider requirement on the field's actual visibility, not the raw
-  // runtime capability. Codex/Claude hide the provider picker (they drive their
-  // own provider), so Customize must not require a provider there. But a
-  // runtime-less legacy/builtin definition still exposes the picker via
-  // blankRuntimeModelProviderEditable, so it must keep requiring a provider —
-  // otherwise Save could persist `provider: undefined` despite the visible field.
   const customAiPairSatisfied = agentAiConfigurationModeSatisfied(
     aiConfigurationMode,
     { provider, model },
@@ -471,8 +460,7 @@ export function AgentDefinitionDialog({
   const selectedRuntimeIsAvailable =
     runtime.trim().length === 0 ||
     selectedRuntime?.availability === "available";
-  // Gate model/provider validity through missingNormalizedFields — single
-  // source of truth with the readiness gate so display and Save can't drift.
+  // Keep model/provider validity aligned with the readiness gate.
   const canSubmit =
     canSubmitPersonaDialog({ displayName, isPending }) &&
     (!isCreateMode || runtime.trim().length > 0) &&
@@ -527,17 +515,12 @@ export function AgentDefinitionDialog({
     modelFieldVisible,
     provider: effectiveProvider,
   });
-  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
-  // migration rewrites any persisted Databricks v1 values → v2. Hide the v1
-  // option there so it is not offered for new selections. OSS builds have no
-  // baked provider, so v1 remains visible.
-  const hideProviderIds = React.useMemo(
-    () =>
-      (bakedEnvKeys ?? []).includes("BUZZ_AGENT_PROVIDER")
-        ? BLOCK_BUILD_HIDDEN_PROVIDER_IDS
-        : new Set<string>(),
-    [bakedEnvKeys],
-  );
+  const hideProviderIds = getPersonaHiddenProviderIds({
+    bakedEnvKeys: bakedEnvKeys ?? [],
+    selectableRuntimes,
+    currentRuntime: selectedRuntime,
+    preserveCurrentRuntime: !isCreateMode,
+  });
   const providerOptions = getPersonaProviderOptions(
     trimmedProvider,
     runtime,
@@ -553,8 +536,8 @@ export function AgentDefinitionDialog({
     llmProviderFieldVisible && isCustomProviderEditing;
   const runtimeDropdownValue = runtime.trim() || NO_RUNTIME_DROPDOWN_VALUE;
   const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimes),
-    [runtimes],
+    () => sortPersonaRuntimes(selectableRuntimes),
+    [selectableRuntimes],
   );
   const blankRuntimeOptionLabel = runtimesLoading
     ? "Loading harnesses..."
@@ -582,11 +565,12 @@ export function AgentDefinitionDialog({
     })),
   ];
   if (
+    !isCreateMode &&
     runtime.trim().length > 0 &&
     !runtimeDropdownOptions.some((option) => option.value === runtime)
   ) {
     runtimeDropdownOptions.push({
-      label: `${runtime.trim()} (current)`,
+      label: formatCurrentRuntimeOptionLabel(runtimes, runtime),
       value: runtime.trim(),
     });
   }
@@ -699,11 +683,16 @@ export function AgentDefinitionDialog({
   function handleProviderDropdownChange(nextValue: string) {
     const nextProvider =
       nextValue === AUTO_PROVIDER_DROPDOWN_VALUE ? "" : nextValue;
-    if (nextProvider === "relay-mesh" && runtime !== "buzz-agent") {
-      handleRuntimeDropdownChange("buzz-agent");
+    const relayMeshRuntime =
+      nextProvider === "relay-mesh"
+        ? getRelayMeshRuntime(selectableRuntimes, selectedRuntime)
+        : null;
+    const nextRuntime = relayMeshRuntime?.id ?? runtime;
+    if (nextRuntime !== runtime) {
+      handleRuntimeDropdownChange(nextRuntime);
     }
     const nextSelection = selectionOnProviderDropdownChange(selection, {
-      runtime: nextProvider === "relay-mesh" ? "buzz-agent" : runtime,
+      runtime: nextRuntime,
       nextValue,
       clearModelWhenApiKeyMissing: true,
     });

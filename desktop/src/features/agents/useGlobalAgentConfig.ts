@@ -9,8 +9,14 @@
  * On fetch error the query falls back to EMPTY_CONFIG (safe — the absence of
  * a global config is never an error state for callers).
  */
+import * as React from "react";
+
 import { useQuery } from "@tanstack/react-query";
 
+import {
+  maskDisabledAcpRuntimePreference,
+  useDisabledAcpRuntimeIds,
+} from "@/features/agents/lib/runtimeVisibilityPreference";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
 import type { GlobalAgentConfig } from "@/shared/api/types";
 
@@ -40,5 +46,29 @@ export function useGlobalAgentConfig(): {
   return {
     globalConfig: data ?? EMPTY_CONFIG,
     isLoading: isPending,
+  };
+}
+
+/**
+ * Load global defaults for a new implicit runtime choice.
+ *
+ * Existing agent edit surfaces must use useGlobalAgentConfig so a hidden
+ * harness can still inherit its persisted provider and model. Start paths use
+ * this hook to ignore a hidden preferred harness and its dependent defaults.
+ */
+export function useImplicitGlobalAgentConfig(): {
+  globalConfig: GlobalAgentConfig;
+  isLoading: boolean;
+} {
+  const { globalConfig, isLoading } = useGlobalAgentConfig();
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
+  const implicitGlobalConfig = React.useMemo(
+    () => maskDisabledAcpRuntimePreference(globalConfig, disabledRuntimeIds),
+    [disabledRuntimeIds, globalConfig],
+  );
+
+  return {
+    globalConfig: implicitGlobalConfig,
+    isLoading,
   };
 }

@@ -206,9 +206,7 @@ test.describe("Doctor panel state screenshots", () => {
     });
     await page.keyboard.press("Escape");
     await expect(page.getByTestId("doctor-runtime-toggle-goose")).toBeChecked();
-    await expect(
-      page.getByTestId("doctor-runtime-toggle-goose"),
-    ).toBeDisabled();
+    await expect(page.getByTestId("doctor-runtime-toggle-goose")).toBeEnabled();
     await expect(page.getByTestId("doctor-runtime-codex")).not.toContainText(
       "Not installed",
     );
@@ -218,6 +216,76 @@ test.describe("Doctor panel state screenshots", () => {
     await runtimeList.screenshot({
       path: `${SHOTS}/00-runtime-card-layout.png`,
     });
+  });
+
+  test("available runtimes can be hidden from agent harness menus", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      acpRuntimesCatalog: [
+        GOOSE_AVAILABLE,
+        CLAUDE_AVAILABLE_LOGGED_IN,
+        BUZZ_AGENT_AVAILABLE,
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: "anthropic",
+        model: "claude-opus",
+        preferred_runtime: "goose",
+      },
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+
+    const gooseToggle = page.getByTestId("doctor-runtime-toggle-goose");
+    await expect(gooseToggle).toBeChecked();
+    await expect(gooseToggle).toBeEnabled();
+    await gooseToggle.click();
+    await expect(gooseToggle).not.toBeChecked();
+
+    const defaultHarness = page.getByTestId("global-agent-default-harness");
+    await expect(defaultHarness).toHaveText("Buzz Agent");
+    const provider = page.getByTestId("global-agent-provider");
+    await provider.click();
+    await page.getByTestId("global-agent-provider-option-relay-mesh").click();
+    await page.getByRole("button", { name: "Save defaults" }).click();
+    const savedConfig = await page.evaluate(async () =>
+      (
+        window as typeof window & {
+          __BUZZ_E2E_INVOKE_MOCK_COMMAND__?: (
+            command: string,
+            payload: unknown,
+          ) => Promise<unknown>;
+        }
+      ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
+    );
+    expect(savedConfig).toMatchObject({
+      provider: "relay-mesh",
+      preferred_runtime: "buzz-agent",
+    });
+
+    await page.getByRole("button", { name: "Back to app" }).click();
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+    await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
+
+    const harnessDropdown = page.locator("#persona-runtime");
+    await expect(harnessDropdown).toContainText("Buzz Agent");
+    await harnessDropdown.press("Enter");
+    await expect(
+      page.getByRole("menuitemradio", { name: /^Goose/ }),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("menuitemradio", { name: /^Buzz Agent/ }),
+    ).toBeVisible();
+
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await openSettings(page, "agents");
+    await expect(
+      page.getByTestId("doctor-runtime-toggle-goose"),
+    ).not.toBeChecked();
   });
 
   /** 01 — a ready runtime stays compact without redundant status copy. */
@@ -484,7 +552,7 @@ test.describe("Doctor panel state screenshots", () => {
       timeout: 10_000,
     });
     await expect(toggle).toBeChecked();
-    await expect(toggle).toBeDisabled();
+    await expect(toggle).toBeEnabled();
 
     await row.scrollIntoViewIfNeeded();
     await waitForAnimations(page);

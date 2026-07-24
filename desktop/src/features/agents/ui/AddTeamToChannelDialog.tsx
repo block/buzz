@@ -5,13 +5,16 @@ import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentsMutation,
 } from "@/features/agents/hooks";
-import { useGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
+import { useImplicitGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import type { CreateChannelManagedAgentsResult } from "@/features/agents/channelAgents";
 import {
   emptyResolvedTeamPersonas,
   resolveTeamPersonas,
 } from "@/features/agents/lib/teamPersonas";
+import { shouldPinSelectedRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
+import { useSelectableAcpRuntimes } from "@/features/agents/lib/runtimeVisibilityPreference";
 import {
+  canResolveAllPersonaRuntimes,
   collectRuntimeWarnings,
   getDefaultPersonaRuntime,
   resolvePersonaRuntime,
@@ -51,7 +54,7 @@ export function AddTeamToChannelDialog({
   onOpenChange,
   onDeployed,
 }: AddTeamToChannelDialogProps) {
-  const { globalConfig } = useGlobalAgentConfig();
+  const { globalConfig } = useImplicitGlobalAgentConfig();
   const channelsQuery = useChannelsQuery();
   const providersQuery = useAvailableAcpRuntimes();
   const [channelId, setChannelId] = React.useState("");
@@ -68,11 +71,12 @@ export function AddTeamToChannelDialog({
     [channelsQuery.data],
   );
 
-  const runtimes = providersQuery.data ?? [];
+  const runtimes = providersQuery.data;
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimes);
   // Use the buzz-agent-first preference so the team-deploy fallback mirrors the
   // single-agent start path (buzz-agent → goose → first available).
   const defaultProvider = getDefaultPersonaRuntime(
-    runtimes,
+    selectableRuntimes,
     globalConfig.preferred_runtime,
   );
 
@@ -83,6 +87,11 @@ export function AddTeamToChannelDialog({
   );
   const resolved = teamPersonaResolution.resolvedPersonas;
   const missingPersonaCount = teamPersonaResolution.missingPersonaCount;
+  const canResolveTeamRuntimes = canResolveAllPersonaRuntimes(
+    resolved,
+    runtimes,
+    defaultProvider,
+  );
 
   // Surface warnings when a persona's preferred runtime is unavailable.
   // This dialog has no runtime selector, so the fallback is always
@@ -118,7 +127,7 @@ export function AddTeamToChannelDialog({
     channels.find((channel) => channel.id === channelId) ?? null;
 
   async function handleDeploy() {
-    if (!team || !selectedChannel || !defaultProvider) {
+    if (!team || !selectedChannel || !canResolveTeamRuntimes) {
       return;
     }
 
@@ -133,18 +142,24 @@ export function AddTeamToChannelDialog({
           runtimes,
           defaultProvider,
         );
-        const runtimeToUse = personaRuntime ?? defaultProvider;
+        if (!personaRuntime) {
+          throw new Error("No runtime is available for this team member.");
+        }
         return {
           runtime: {
-            id: runtimeToUse.id,
-            label: runtimeToUse.label,
-            command: runtimeToUse.command,
-            defaultArgs: runtimeToUse.defaultArgs,
-            mcpCommand: runtimeToUse.mcpCommand,
+            id: personaRuntime.id,
+            label: personaRuntime.label,
+            command: personaRuntime.command,
+            defaultArgs: personaRuntime.defaultArgs,
+            mcpCommand: personaRuntime.mcpCommand,
           },
           name: persona.displayName,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
+          harnessOverride: shouldPinSelectedRuntimeForDefinition(
+            persona.runtime,
+            personaRuntime.id,
+          ),
           model: persona.model ?? undefined,
           personaId: persona.id,
           teamId: team.id,
@@ -255,10 +270,11 @@ export function AddTeamToChannelDialog({
               </p>
             ) : null}
 
-            {!defaultProvider && !providersQuery.isLoading ? (
+            {!canResolveTeamRuntimes && !providersQuery.isLoading ? (
               <p className="rounded-2xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
-                No ACP runtimes found. Make sure an agent runtime (e.g. Goose)
-                is installed.
+                {runtimes.length === 0
+                  ? "No ACP runtimes found. Make sure an agent runtime (e.g. Goose) is installed."
+                  : "No enabled fallback runtime is available. Turn on a harness to deploy runtime-less team members."}
               </p>
             ) : null}
 
@@ -300,7 +316,7 @@ export function AddTeamToChannelDialog({
               disabled={
                 !team ||
                 !selectedChannel ||
-                !defaultProvider ||
+                !canResolveTeamRuntimes ||
                 resolved.length === 0 ||
                 missingPersonaCount > 0 ||
                 channelsQuery.isLoading ||

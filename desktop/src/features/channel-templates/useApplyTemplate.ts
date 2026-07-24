@@ -9,7 +9,7 @@ import {
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
-import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { resolveProvisioningRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
 import { useChannelTemplatesQuery } from "@/features/channel-templates/hooks";
@@ -72,11 +72,6 @@ export function useApplyTemplate() {
     const runtimes = acpRuntimesQuery.data ?? [];
     if (runtimes.length === 0) return; // No runtimes — skip silently
 
-    // Resolve default provider: user's last-used preference, or first available
-    const defaultProvider =
-      runtimes.find((p) => p.id === lastRuntimeId) ?? runtimes[0] ?? null;
-    if (!defaultProvider) return;
-
     const seenPersonaIds = new Set<string>();
     const inputs: CreateChannelManagedAgentInput[] = [];
 
@@ -86,15 +81,18 @@ export function useApplyTemplate() {
       if (!persona) continue;
       if (seenPersonaIds.has(persona.id)) continue;
       seenPersonaIds.add(persona.id);
-      const resolved = resolvePersonaRuntime(
-        entry.runtime ?? persona.runtime,
+      const requestedRuntimeId = entry.runtime ?? persona.runtime;
+      const resolved = resolveProvisioningRuntimeForDefinition(
+        requestedRuntimeId,
         runtimes,
-        defaultProvider,
+        lastRuntimeId,
       );
+      if (!resolved.runtime) continue;
       inputs.push({
-        runtime: resolved.runtime ?? defaultProvider,
+        runtime: resolved.runtime,
         name: persona.displayName,
         personaId: persona.id,
+        harnessOverride: resolved.harnessOverride,
         systemPrompt: persona.systemPrompt,
         avatarUrl: persona.avatarUrl ?? undefined,
         model: entry.model ?? persona.model ?? undefined,
@@ -111,15 +109,18 @@ export function useApplyTemplate() {
       for (const persona of resolvedPersonas) {
         if (seenPersonaIds.has(persona.id)) continue;
         seenPersonaIds.add(persona.id);
-        const resolved = resolvePersonaRuntime(
-          teamEntry.runtime ?? persona.runtime,
+        const requestedRuntimeId = teamEntry.runtime ?? persona.runtime;
+        const resolved = resolveProvisioningRuntimeForDefinition(
+          requestedRuntimeId,
           runtimes,
-          defaultProvider,
+          lastRuntimeId,
         );
+        if (!resolved.runtime) continue;
         inputs.push({
-          runtime: resolved.runtime ?? defaultProvider,
+          runtime: resolved.runtime,
           name: persona.displayName,
           personaId: persona.id,
+          harnessOverride: resolved.harnessOverride,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
           model: teamEntry.model ?? persona.model ?? undefined,

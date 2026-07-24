@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatCurrentRuntimeOptionLabel,
   getDefaultPersonaRuntime,
+  getPersonaHiddenProviderIds,
   getPersonaModelOptions,
   getPersonaProviderOptions,
+  reconcilePreferredRuntimeFallback,
   resetConfigForHarnessChange,
   runtimeSupportsLlmProviderSelection,
 } from "./agentConfigOptions.tsx";
@@ -12,16 +15,44 @@ import { formatModelDiscoveryErrorStatus } from "./personaModelDiscoveryStatus.t
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-function makeRuntime(id, availability = "available") {
+function makeRuntime(
+  id,
+  availability = "available",
+  providerEnvVar = id === "buzz-agent"
+    ? "BUZZ_AGENT_PROVIDER"
+    : id === "goose"
+      ? "GOOSE_PROVIDER"
+      : null,
+) {
   return {
     id,
     label: id,
     command: id,
     defaultArgs: [],
     mcpCommand: null,
+    providerEnvVar,
     availability,
   };
 }
+
+test("formatCurrentRuntimeOptionLabel uses the catalog display label", () => {
+  const runtime = {
+    ...makeRuntime("goose"),
+    label: "Goose",
+  };
+
+  assert.equal(
+    formatCurrentRuntimeOptionLabel([runtime], "goose"),
+    "Goose (current)",
+  );
+});
+
+test("formatCurrentRuntimeOptionLabel falls back to an unknown runtime id", () => {
+  assert.equal(
+    formatCurrentRuntimeOptionLabel([], " custom-runtime "),
+    "custom-runtime (current)",
+  );
+});
 
 // ── getPersonaProviderOptions — hideProviderIds ───────────────────────────────
 
@@ -72,6 +103,58 @@ test("getPersonaProviderOptions appends (current) tail for an unknown saved prov
   const tail = options.at(-1);
   assert.equal(tail?.id, "my-custom-llm");
   assert.equal(tail?.label, "my-custom-llm (current)");
+});
+
+test("hidden Buzz Agent suppresses shared compute for new selections", () => {
+  const hidden = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [makeRuntime("goose")],
+    currentRuntime: makeRuntime("goose"),
+    preserveCurrentRuntime: false,
+  });
+  const ids = getPersonaProviderOptions("", "goose", "", hidden).map(
+    (option) => option.id,
+  );
+  assert.ok(!ids.includes("relay-mesh"));
+});
+
+test("an existing hidden Buzz Agent keeps its shared compute provider", () => {
+  const hidden = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [makeRuntime("goose")],
+    currentRuntime: makeRuntime("buzz-agent"),
+    preserveCurrentRuntime: true,
+  });
+  const ids = getPersonaProviderOptions("", "buzz-agent", "", hidden).map(
+    (option) => option.id,
+  );
+  assert.ok(ids.includes("relay-mesh"));
+});
+
+test("shared compute visibility follows runtime catalog metadata instead of runtime ids", () => {
+  const hidden = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [
+      makeRuntime("future-shared-compute", "available", "BUZZ_AGENT_PROVIDER"),
+    ],
+    preserveCurrentRuntime: false,
+  });
+  const ids = getPersonaProviderOptions(
+    "",
+    "future-shared-compute",
+    "",
+    hidden,
+  ).map((option) => option.id);
+  assert.ok(ids.includes("relay-mesh"));
+
+  const renamedCapability = getPersonaHiddenProviderIds({
+    bakedEnvKeys: [],
+    selectableRuntimes: [
+      makeRuntime("buzz-agent", "available", "GOOSE_PROVIDER"),
+    ],
+    preserveCurrentRuntime: false,
+  });
+  assert.ok(renamedCapability.has("relay-mesh"));
 });
 
 // ── getDefaultPersonaRuntime — buzz-agent first ───────────────────────────────
@@ -187,6 +270,37 @@ test("resetConfigForHarnessChange does not carry relay mesh to Goose", () => {
   };
 
   assert.equal(resetConfigForHarnessChange(config, "goose").provider, null);
+});
+
+test("reconcilePreferredRuntimeFallback updates a hidden saved default", () => {
+  const config = {
+    env_vars: { BUZZ_AGENT_THINKING_EFFORT: "high", SHARED: "kept" },
+    provider: "anthropic",
+    model: "claude-opus",
+    preferred_runtime: "goose",
+  };
+
+  assert.deepEqual(reconcilePreferredRuntimeFallback(config, "buzz-agent"), {
+    env_vars: { SHARED: "kept" },
+    provider: "anthropic",
+    model: null,
+    preferred_runtime: "buzz-agent",
+  });
+  assert.equal(reconcilePreferredRuntimeFallback(config, "goose"), config);
+});
+
+test("reconcilePreferredRuntimeFallback persists an unsaved displayed fallback", () => {
+  const config = {
+    env_vars: { SHARED: "kept" },
+    provider: "relay-mesh",
+    model: "auto",
+    preferred_runtime: null,
+  };
+
+  assert.deepEqual(reconcilePreferredRuntimeFallback(config, "buzz-agent"), {
+    ...config,
+    preferred_runtime: "buzz-agent",
+  });
 });
 
 // ── getPersonaModelOptions — codex/claude do not use global provider ──────────

@@ -9,6 +9,10 @@ import {
   useGitBashPrerequisiteQuery,
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
+import {
+  setAcpRuntimeEnabled,
+  useAcpRuntimeEnabled,
+} from "@/features/agents/lib/runtimeVisibilityPreference";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
@@ -160,7 +164,9 @@ function RuntimeActions({
 }) {
   const isAvailable = runtime.availability === "available";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
-  const isOn = isAvailable || installSuccess;
+  const isEnabled = useAcpRuntimeEnabled(runtime.id);
+  const isInstalled = isAvailable || installSuccess;
+  const isOn = isInstalled && isEnabled;
   const isWorking = isInstalling || isConnecting;
 
   return (
@@ -182,13 +188,13 @@ function RuntimeActions({
         </div>
       ) : (
         <Switch
-          aria-label={`${runtime.label} availability`}
+          aria-label={`${runtime.label} enabled`}
           checked={isOn}
-          className="disabled:cursor-default disabled:opacity-100"
           data-testid={`doctor-runtime-toggle-${runtime.id}`}
-          disabled={isAvailable || installSuccess || !canInstall}
+          disabled={!isInstalled && !canInstall}
           onCheckedChange={(checked) => {
-            if (checked) {
+            setAcpRuntimeEnabled(runtime.id, checked);
+            if (checked && !isInstalled) {
               onInstall();
             }
           }}
@@ -540,7 +546,7 @@ export function DoctorSettingsPanel() {
       <SectionHeader
         className="items-center"
         title="Agent runtimes"
-        description="Choose which agent tools Buzz can use on this device."
+        description="Choose which harnesses appear when configuring agents. Turning one off does not uninstall it or affect existing agents."
         action={
           <Button
             disabled={isRefreshing}

@@ -27,6 +27,7 @@ import {
 import {
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
+  reconcilePreferredRuntimeFallback,
   PERSONA_FIELD_CONTROL_CLASS,
   PERSONA_FIELD_SHELL_CLASS,
   resetConfigForHarnessChange,
@@ -39,6 +40,7 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
+import { useSelectableAcpRuntimes } from "@/features/agents/lib/runtimeVisibilityPreference";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -135,9 +137,10 @@ export function AgentDefaultsEditor({
   }, []);
 
   const runtimesQuery = useAcpRuntimesQuery();
+  const selectableRuntimes = useSelectableAcpRuntimes(runtimesQuery.data ?? []);
   const sortedRuntimes = React.useMemo(
-    () => sortPersonaRuntimes(runtimesQuery.data ?? []),
-    [runtimesQuery.data],
+    () => sortPersonaRuntimes(selectableRuntimes),
+    [selectableRuntimes],
   );
   // An unset preferred runtime uses the same Buzz Agent-first fallback as
   // deployment. The rendered draft below carries that fallback forward so the
@@ -152,15 +155,13 @@ export function AgentDefaultsEditor({
       sortedRuntimes[0]
     );
   }, [config.preferred_runtime, sortedRuntimes]);
-  const renderedConfig = React.useMemo(
-    () =>
-      config.preferred_runtime || !selectedRuntime
-        ? config
-        : { ...config, preferred_runtime: selectedRuntime.id },
-    [config, selectedRuntime],
-  );
   const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
     selectedRuntime?.id ?? "",
+  );
+  const effectiveConfig = React.useMemo(
+    () =>
+      reconcilePreferredRuntimeFallback(config, selectedRuntime?.id ?? null),
+    [config, selectedRuntime],
   );
   const harnessOptions = React.useMemo(
     () =>
@@ -185,7 +186,7 @@ export function AgentDefaultsEditor({
   }
 
   function handleHarnessChange(runtimeId: string) {
-    handleConfigChange(resetConfigForHarnessChange(config, runtimeId));
+    handleConfigChange(resetConfigForHarnessChange(effectiveConfig, runtimeId));
     setConfigIsValid(false);
     setIsCustomModelEditing(false);
     setIsCustomProvider(false);
@@ -194,7 +195,11 @@ export function AgentDefaultsEditor({
   async function handleSave() {
     // Snapshot the config being submitted so we can detect edits that arrive
     // during the IPC round-trip and avoid clobbering the user's newer input.
-    const submittedConfig = config;
+    const draftAtSubmit = configRef.current;
+    const submittedConfig = reconcilePreferredRuntimeFallback(
+      draftAtSubmit,
+      selectedRuntime?.id ?? null,
+    );
     onSavingChange?.(true);
     setSaveState("saving");
     setSaveError(null);
@@ -204,7 +209,7 @@ export function AgentDefaultsEditor({
       // IPC window. If the user edited, keep their newer value and leave dirty=true
       // so they can save again. setDirty(false) runs inside the updater so both
       // state updates batch into the same render (React 18 automatic batching).
-      const savedCurrentDraft = configRef.current === submittedConfig;
+      const savedCurrentDraft = configRef.current === draftAtSubmit;
       setConfig((current) => {
         if (!savedCurrentDraft) {
           // Mid-flight edit detected — do not overwrite newer user input.
@@ -240,7 +245,7 @@ export function AgentDefaultsEditor({
     <AgentConfigFields
       bakedEnv={bakedEnv}
       selectedRuntime={selectedRuntime}
-      config={renderedConfig}
+      config={effectiveConfig}
       disclosure={flatLayout ? "progressive-defaults" : "full"}
       isCustomModelEditing={isCustomModelEditing}
       isCustomProvider={isCustomProvider}

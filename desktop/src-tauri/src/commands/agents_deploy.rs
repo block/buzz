@@ -31,14 +31,16 @@ pub(crate) fn resolve_deploy_model_provider<'a>(
         .persona_id
         .as_deref()
         .and_then(|pid| personas.iter().find(|p| p.id == pid));
+    let (global_model, global_provider) =
+        crate::managed_agents::global_model_provider_for_record(record, personas, global);
     let model = live_persona
         .and_then(|p| p.model.as_deref())
         .or(record.model.as_deref())
-        .or(global.model.as_deref());
+        .or(global_model);
     let provider = live_persona
         .and_then(|p| p.provider.as_deref())
         .or(record.provider.as_deref())
-        .or(global.provider.as_deref());
+        .or(global_provider);
     (model, provider)
 }
 

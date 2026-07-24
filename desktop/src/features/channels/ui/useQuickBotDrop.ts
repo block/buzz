@@ -4,7 +4,7 @@ import {
   useAvailableAcpRuntimes,
   useCreateChannelManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { resolveProvisioningRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
 import type { AgentPersona } from "@/shared/api/types";
 
 type QuickBotDropState = {
@@ -24,7 +24,6 @@ export function useQuickBotDrop(channelId: string | null) {
   });
 
   const providers = providersQuery.data ?? [];
-  const defaultProvider = providers[0] ?? null;
 
   const addBot = React.useCallback(
     async (persona: AgentPersona, instanceName: string) => {
@@ -33,11 +32,8 @@ export function useQuickBotDrop(channelId: string | null) {
       setState({ pending: true, error: null });
 
       try {
-        const { runtime } = resolvePersonaRuntime(
-          persona.runtime,
-          providers,
-          defaultProvider,
-        );
+        const { harnessOverride, runtime } =
+          resolveProvisioningRuntimeForDefinition(persona.runtime, providers);
 
         if (!runtime) {
           setState({
@@ -54,6 +50,7 @@ export function useQuickBotDrop(channelId: string | null) {
           avatarUrl: persona.avatarUrl ?? undefined,
           personaId: persona.id,
           model: persona.model ?? undefined,
+          harnessOverride,
         });
 
         setState({ pending: false, error: null });
@@ -64,7 +61,7 @@ export function useQuickBotDrop(channelId: string | null) {
         });
       }
     },
-    [channelId, createMutation, defaultProvider, providers, state.pending],
+    [channelId, createMutation, providers, state.pending],
   );
 
   return { ...state, addBot };
