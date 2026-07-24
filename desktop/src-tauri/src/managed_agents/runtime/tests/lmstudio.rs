@@ -1,4 +1,6 @@
-use super::super::{apply_runtime_security_env, runtime_metadata_env_vars};
+use super::super::{
+    apply_runtime_security_env, runtime_inherited_env_keys_to_remove, runtime_metadata_env_vars,
+};
 
 #[test]
 fn runtime_metadata_env_vars_injects_model_and_provider() {
@@ -114,4 +116,23 @@ fn lmstudio_security_env_is_force_written_after_user_layers() {
     );
     assert!(!env.contains_key("LM_STUDIO_FALLBACK_PROVIDER"));
     assert!(!env.contains_key("LM_STUDIO_API_TOKEN"));
+}
+
+#[test]
+fn lmstudio_spawn_removes_all_ambient_catalog_owned_keys_before_projection() {
+    let runtime = crate::managed_agents::known_acp_runtime_exact("buzz-lmstudio-agent")
+        .expect("LM Studio runtime");
+
+    assert_eq!(
+        runtime_inherited_env_keys_to_remove(Some(runtime)),
+        &[
+            "BUZZ_AGENT_CLASSIFICATION",
+            "BUZZ_AGENT_PROVIDER",
+            "LM_STUDIO_MODEL",
+            "LM_STUDIO_BASE_URL",
+            "LM_STUDIO_MCP_INTEGRATIONS",
+            "LM_STUDIO_FALLBACK_PROVIDER",
+            "LM_STUDIO_API_TOKEN",
+        ]
+    );
 }

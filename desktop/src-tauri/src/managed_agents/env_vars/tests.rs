@@ -185,7 +185,6 @@ fn reserved_keys_include_relay_url() {
 fn reserved_keys_include_lmstudio_security_policy() {
     for key in [
         "BUZZ_AGENT_CLASSIFICATION",
-        "BUZZ_AGENT_PROVIDER",
         "LM_STUDIO_BASE_URL",
         "LM_STUDIO_MCP_INTEGRATIONS",
         "LM_STUDIO_FALLBACK_PROVIDER",
@@ -199,6 +198,11 @@ fn reserved_keys_include_lmstudio_security_policy() {
             "{key} must be stripped from saved user configuration"
         );
     }
+    assert!(
+        !is_reserved_env_key("BUZZ_AGENT_PROVIDER"),
+        "the shared provider key remains configurable for non-native runtimes; \
+         the LM Studio projection force-overwrites it after user layers"
+    );
 }
 
 // ── validate_user_env_keys ─────────────────────────────────────────

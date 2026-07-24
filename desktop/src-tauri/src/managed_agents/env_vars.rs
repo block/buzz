@@ -87,7 +87,6 @@ pub(crate) const RESERVED_ENV_KEYS: &[&str] = &[
     // downgrade classification, redirect egress, enable a fallback, broaden
     // MCP integrations, or inject credentials.
     "BUZZ_AGENT_CLASSIFICATION",
-    "BUZZ_AGENT_PROVIDER",
     "LM_STUDIO_MODEL",
     "LM_STUDIO_BASE_URL",
     "LM_STUDIO_MCP_INTEGRATIONS",

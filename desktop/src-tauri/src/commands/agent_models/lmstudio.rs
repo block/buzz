@@ -8,6 +8,18 @@ use crate::managed_agents::{
     known_acp_runtime, resolve_command, AgentModelInfo, AgentModelsResponse,
 };
 
+const MAX_LMSTUDIO_MODELS: usize = 256;
+const MAX_LMSTUDIO_MODEL_ID_BYTES: usize = 256;
+const MAX_LMSTUDIO_DISPLAY_NAME_BYTES: usize = 512;
+const MAX_LMSTUDIO_DESCRIPTION_BYTES: usize = 4_096;
+const MAX_LMSTUDIO_LOADED_INSTANCES: usize = 32;
+const MAX_LMSTUDIO_CONTEXT_LENGTH: u64 = 16_777_216;
+const MAX_LMSTUDIO_CAPABILITIES_BYTES: usize = 16_384;
+const MAX_LMSTUDIO_CAPABILITIES_DEPTH: usize = 8;
+const MAX_LMSTUDIO_CAPABILITIES_NODES: usize = 256;
+const MAX_LMSTUDIO_CAPABILITY_STRING_BYTES: usize = 1_024;
+const MAX_LMSTUDIO_CAPABILITY_KEY_BYTES: usize = 128;
+
 #[derive(Debug, Deserialize)]
 struct LmStudioModelListResponse {
     models: Vec<LmStudioModelListItem>,
@@ -40,35 +52,146 @@ pub(super) fn normalize_lmstudio_models(
 ) -> Result<Vec<AgentModelInfo>, String> {
     let response = serde_json::from_value::<LmStudioModelListResponse>(value)
         .map_err(|error| format!("LM Studio models response parse failed: {error}"))?;
+    if response.models.len() > MAX_LMSTUDIO_MODELS {
+        return Err("LM Studio model catalog exceeds the maximum model count".to_string());
+    }
     let mut seen = HashSet::new();
-    let models = response
-        .models
-        .into_iter()
-        .filter(|model| model.model_type == "llm")
-        .filter(|model| !model.key.trim().is_empty())
-        .filter(|model| seen.insert(model.key.clone()))
-        .map(|model| {
-            let loaded_instance_ids = model
-                .loaded_instances
-                .into_iter()
-                .map(|instance| instance.id)
-                .filter(|id| !id.trim().is_empty())
-                .collect::<Vec<_>>();
-            AgentModelInfo {
-                id: model.key,
-                name: model.display_name,
-                description: model.description,
-                is_loaded: !loaded_instance_ids.is_empty(),
-                loaded_instance_ids,
-                max_context_length: model.max_context_length,
-                capabilities: model.capabilities,
-            }
-        })
-        .collect::<Vec<_>>();
-    if models.is_empty() {
-        return Err("LM Studio returned no installed LLM models".to_string());
+    let mut models = Vec::new();
+    for model in response.models {
+        if model.model_type != "llm" {
+            continue;
+        }
+        validate_catalog_identifier(
+            &model.key,
+            MAX_LMSTUDIO_MODEL_ID_BYTES,
+            "LM Studio model catalog contains an invalid model identifier",
+        )?;
+        validate_optional_catalog_text(
+            model.display_name.as_deref(),
+            MAX_LMSTUDIO_DISPLAY_NAME_BYTES,
+            "LM Studio model catalog contains an oversized display name",
+        )?;
+        validate_optional_catalog_text(
+            model.description.as_deref(),
+            MAX_LMSTUDIO_DESCRIPTION_BYTES,
+            "LM Studio model catalog contains an oversized description",
+        )?;
+        if model.loaded_instances.len() > MAX_LMSTUDIO_LOADED_INSTANCES {
+            return Err("LM Studio model catalog contains too many loaded instances".to_string());
+        }
+        let mut loaded_instance_ids = Vec::with_capacity(model.loaded_instances.len());
+        for instance in model.loaded_instances {
+            validate_catalog_identifier(
+                &instance.id,
+                MAX_LMSTUDIO_MODEL_ID_BYTES,
+                "LM Studio model catalog contains an invalid loaded instance identifier",
+            )?;
+            loaded_instance_ids.push(instance.id);
+        }
+        if model
+            .max_context_length
+            .is_some_and(|length| length == 0 || length > MAX_LMSTUDIO_CONTEXT_LENGTH)
+        {
+            return Err("LM Studio model catalog contains an invalid context length".to_string());
+        }
+        if let Some(capabilities) = model.capabilities.as_ref() {
+            validate_capabilities(capabilities)?;
+        }
+        if !seen.insert(model.key.clone()) {
+            continue;
+        }
+        models.push(AgentModelInfo {
+            id: model.key,
+            name: model.display_name,
+            description: model.description,
+            is_loaded: !loaded_instance_ids.is_empty(),
+            loaded_instance_ids,
+            max_context_length: model.max_context_length,
+            capabilities: model.capabilities,
+        });
     }
     Ok(models)
+}
+
+fn validate_catalog_identifier(
+    value: &str,
+    max_bytes: usize,
+    diagnostic: &str,
+) -> Result<(), String> {
+    if value.trim().is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(diagnostic.to_string());
+    }
+    Ok(())
+}
+
+fn validate_optional_catalog_text(
+    value: Option<&str>,
+    max_bytes: usize,
+    oversized_diagnostic: &str,
+) -> Result<(), String> {
+    if let Some(value) = value {
+        if value.len() > max_bytes {
+            return Err(oversized_diagnostic.to_string());
+        }
+        if value.chars().any(char::is_control) {
+            return Err("LM Studio model catalog contains invalid text metadata".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn validate_capabilities(value: &serde_json::Value) -> Result<(), String> {
+    if !value.is_object() {
+        return Err("LM Studio model catalog contains invalid capabilities metadata".to_string());
+    }
+    if serde_json::to_vec(value)
+        .map_err(|_| "LM Studio model catalog contains invalid capabilities metadata".to_string())?
+        .len()
+        > MAX_LMSTUDIO_CAPABILITIES_BYTES
+    {
+        return Err("LM Studio model catalog contains oversized capabilities metadata".to_string());
+    }
+
+    fn walk(value: &serde_json::Value, depth: usize, nodes: &mut usize) -> Result<(), String> {
+        *nodes += 1;
+        if depth > MAX_LMSTUDIO_CAPABILITIES_DEPTH || *nodes > MAX_LMSTUDIO_CAPABILITIES_NODES {
+            return Err(
+                "LM Studio model catalog contains overly complex capabilities metadata".to_string(),
+            );
+        }
+        match value {
+            serde_json::Value::Object(entries) => {
+                for (key, child) in entries {
+                    if key.len() > MAX_LMSTUDIO_CAPABILITY_KEY_BYTES
+                        || key.chars().any(char::is_control)
+                    {
+                        return Err(
+                            "LM Studio model catalog contains invalid capabilities metadata"
+                                .to_string(),
+                        );
+                    }
+                    walk(child, depth + 1, nodes)?;
+                }
+            }
+            serde_json::Value::Array(entries) => {
+                for child in entries {
+                    walk(child, depth + 1, nodes)?;
+                }
+            }
+            serde_json::Value::String(text)
+                if text.len() > MAX_LMSTUDIO_CAPABILITY_STRING_BYTES
+                    || text.chars().any(char::is_control) =>
+            {
+                return Err(
+                    "LM Studio model catalog contains invalid capabilities metadata".to_string(),
+                );
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    walk(value, 1, &mut 0)
 }
 
 fn lmstudio_runtime_token(runtime: &crate::managed_agents::KnownAcpRuntime) -> Option<String> {
@@ -82,6 +205,7 @@ fn lmstudio_runtime_token(runtime: &crate::managed_agents::KnownAcpRuntime) -> O
 fn lmstudio_native_client(
     runtime: &crate::managed_agents::KnownAcpRuntime,
     env: &BTreeMap<String, String>,
+    token: Option<&str>,
 ) -> Result<buzz_agent_pkg::LmStudioNativeClient, String> {
     let base_url_key = runtime
         .base_url_env_var
@@ -91,13 +215,12 @@ fn lmstudio_native_client(
     let integrations = runtime
         .integrations_env_var
         .and_then(|key| env_value(env, key));
-    let token = lmstudio_runtime_token(runtime);
     let config = buzz_agent_pkg::egress::LmStudioRuntimeConfig::parse_with_token(
         Some("OFFICIAL"),
         &base_url,
         None,
         integrations.as_deref(),
-        token.as_deref(),
+        token,
     )?;
     buzz_agent_pkg::LmStudioNativeClient::new(config, std::time::Duration::from_secs(10))
         .map_err(|error| error.to_string())
@@ -116,7 +239,8 @@ pub(super) async fn discover_lmstudio_native_models(
     {
         return Ok(None);
     }
-    let client = lmstudio_native_client(runtime, env)?;
+    let token = lmstudio_runtime_token(runtime);
+    let client = lmstudio_native_client(runtime, env, token.as_deref())?;
     let models = normalize_lmstudio_models(
         client
             .discover_models()
@@ -183,7 +307,7 @@ pub(super) fn lmstudio_readiness_from_models(
     app_installed: bool,
     configured_model: Option<String>,
     models: Vec<AgentModelInfo>,
-    token_present: bool,
+    authentication_enforced: bool,
 ) -> LmStudioReadiness {
     if !app_installed {
         return LmStudioReadiness {
@@ -206,7 +330,7 @@ pub(super) fn lmstudio_readiness_from_models(
             detail: "LM Studio is reachable, but no LLM model is loaded.".to_string(),
             configured_model,
             loaded_models,
-            security_warnings: if token_present {
+            security_warnings: if authentication_enforced {
                 Vec::new()
             } else {
                 vec!["LM Studio API authentication is not enabled.".to_string()]
@@ -223,7 +347,7 @@ pub(super) fn lmstudio_readiness_from_models(
             detail: "The configured LM Studio model is not currently loaded.".to_string(),
             configured_model,
             loaded_models,
-            security_warnings: if token_present {
+            security_warnings: if authentication_enforced {
                 Vec::new()
             } else {
                 vec!["LM Studio API authentication is not enabled.".to_string()]
@@ -231,7 +355,7 @@ pub(super) fn lmstudio_readiness_from_models(
             bind_exposure: "unknown",
         };
     }
-    let security_warnings = if token_present {
+    let security_warnings = if authentication_enforced {
         Vec::new()
     } else {
         vec!["LM Studio API authentication is not enabled.".to_string()]
@@ -248,6 +372,78 @@ pub(super) fn lmstudio_readiness_from_models(
         security_warnings,
         bind_exposure: "unknown",
     }
+}
+
+fn lmstudio_unreachable(configured_model: Option<String>) -> LmStudioReadiness {
+    LmStudioReadiness {
+        status: LmStudioReadinessState::ApiUnreachable,
+        detail: "The native LM Studio API is unreachable on the configured loopback endpoint."
+            .to_string(),
+        configured_model,
+        loaded_models: Vec::new(),
+        security_warnings: Vec::new(),
+        bind_exposure: "unknown",
+    }
+}
+
+fn lmstudio_auth_required(configured_model: Option<String>) -> LmStudioReadiness {
+    LmStudioReadiness {
+        status: LmStudioReadinessState::AuthRequired,
+        detail: "LM Studio requires authentication; add its token to the macOS Keychain."
+            .to_string(),
+        configured_model,
+        loaded_models: Vec::new(),
+        security_warnings: Vec::new(),
+        bind_exposure: "unknown",
+    }
+}
+
+async fn probe_lmstudio_readiness(
+    runtime: &crate::managed_agents::KnownAcpRuntime,
+    env: &BTreeMap<String, String>,
+    configured_model: Option<String>,
+    token: Option<String>,
+) -> LmStudioReadiness {
+    let tokenless_client = match lmstudio_native_client(runtime, env, None) {
+        Ok(client) => client,
+        Err(_) => return lmstudio_unreachable(configured_model),
+    };
+
+    let (value, authentication_enforced) = match tokenless_client.discover_models().await {
+        Ok(value) => (value, false),
+        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
+            let Some(token) = token.as_deref() else {
+                return lmstudio_auth_required(configured_model);
+            };
+            let authenticated_client = match lmstudio_native_client(runtime, env, Some(token)) {
+                Ok(client) => client,
+                Err(_) => return lmstudio_unreachable(configured_model),
+            };
+            match authenticated_client.discover_models().await {
+                Ok(value) => (value, true),
+                Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
+                    return lmstudio_auth_required(configured_model);
+                }
+                Err(_) => return lmstudio_unreachable(configured_model),
+            }
+        }
+        Err(_) => return lmstudio_unreachable(configured_model),
+    };
+
+    let models = match normalize_lmstudio_models(value) {
+        Ok(models) => models,
+        Err(error) => {
+            return LmStudioReadiness {
+                status: LmStudioReadinessState::ApiUnreachable,
+                detail: error,
+                configured_model,
+                loaded_models: Vec::new(),
+                security_warnings: Vec::new(),
+                bind_exposure: "unknown",
+            };
+        }
+    };
+    lmstudio_readiness_from_models(true, configured_model, models, authentication_enforced)
 }
 
 /// Read-only health probe for the Command Console's distinct LM Studio source.
@@ -269,63 +465,220 @@ pub async fn get_lmstudio_readiness(app: AppHandle) -> Result<LmStudioReadiness,
     }
     let mut env = BTreeMap::new();
     crate::managed_agents::apply_runtime_security_env(&mut env, Some(runtime));
-    let token_present = lmstudio_runtime_token(runtime).is_some();
-    let client = match lmstudio_native_client(runtime, &env) {
-        Ok(client) => client,
-        Err(error) => {
-            return Ok(LmStudioReadiness {
-                status: LmStudioReadinessState::ApiUnreachable,
-                detail: error,
-                configured_model,
-                loaded_models: Vec::new(),
-                security_warnings: Vec::new(),
-                bind_exposure: "unknown",
-            });
-        }
-    };
-    let value = match client.discover_models().await {
-        Ok(value) => value,
-        Err(buzz_agent_pkg::AgentError::LlmAuth(_)) => {
-            return Ok(LmStudioReadiness {
-                status: LmStudioReadinessState::AuthRequired,
-                detail: "LM Studio requires authentication; add its token to the macOS Keychain."
-                    .to_string(),
-                configured_model,
-                loaded_models: Vec::new(),
-                security_warnings: Vec::new(),
-                bind_exposure: "unknown",
-            });
-        }
-        Err(_) => {
-            return Ok(LmStudioReadiness {
-                status: LmStudioReadinessState::ApiUnreachable,
-                detail:
-                    "The native LM Studio API is unreachable on the configured loopback endpoint."
-                        .to_string(),
-                configured_model,
-                loaded_models: Vec::new(),
-                security_warnings: Vec::new(),
-                bind_exposure: "unknown",
-            });
-        }
-    };
-    let models = match normalize_lmstudio_models(value) {
-        Ok(models) => models,
-        Err(error) => {
-            return Ok(LmStudioReadiness {
-                status: LmStudioReadinessState::ApiUnreachable,
-                detail: error,
-                configured_model,
-                loaded_models: Vec::new(),
-                security_warnings: Vec::new(),
-                bind_exposure: "unknown",
-            });
-        }
-    };
-    Ok(lmstudio_readiness_from_models(
-        true,
-        configured_model,
-        models,
-        token_present,
-    ))
+    let token = lmstudio_runtime_token(runtime);
+    Ok(probe_lmstudio_readiness(runtime, &env, configured_model, token).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::{http::HeaderMap, routing::get, Json, Router};
+
+    use super::*;
+
+    async fn spawn_models_server(router: Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind LM Studio test server");
+        let address = listener.local_addr().expect("LM Studio test address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{address}")
+    }
+
+    fn loaded_catalog() -> serde_json::Value {
+        serde_json::json!({
+            "models": [{
+                "type": "llm",
+                "key": "qwen/test",
+                "loaded_instances": [{"id": "qwen/test"}]
+            }]
+        })
+    }
+
+    fn runtime_env(base_url: String) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("LM_STUDIO_BASE_URL".to_string(), base_url),
+            ("LM_STUDIO_MCP_INTEGRATIONS".to_string(), "[]".to_string()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn readiness_warns_when_server_accepts_unauthenticated_probe_despite_stored_token() {
+        let observed = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let route_observed = observed.clone();
+        let router = Router::new().route(
+            "/api/v1/models",
+            get(move |headers: HeaderMap| {
+                let route_observed = route_observed.clone();
+                async move {
+                    route_observed.lock().expect("observed headers lock").push(
+                        headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                    );
+                    Json(loaded_catalog())
+                }
+            }),
+        );
+        let base_url = spawn_models_server(router).await;
+        let runtime = known_acp_runtime("buzz-lmstudio-agent").expect("LM Studio runtime");
+
+        let readiness = probe_lmstudio_readiness(
+            runtime,
+            &runtime_env(base_url),
+            Some("qwen/test".to_string()),
+            Some("stored-secret".to_string()),
+        )
+        .await;
+
+        assert_eq!(readiness.status, LmStudioReadinessState::Ready);
+        assert_eq!(
+            readiness.security_warnings,
+            ["LM Studio API authentication is not enabled."]
+        );
+        assert_eq!(
+            *observed.lock().expect("observed headers lock"),
+            vec![None],
+            "the tokenless probe must run first and a successful probe must not send the token"
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_reports_auth_required_when_tokenless_probe_is_rejected() {
+        let router = Router::new().route(
+            "/api/v1/models",
+            get(|| async {
+                (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "auth required"})),
+                )
+            }),
+        );
+        let base_url = spawn_models_server(router).await;
+        let runtime = known_acp_runtime("buzz-lmstudio-agent").expect("LM Studio runtime");
+
+        let readiness = probe_lmstudio_readiness(runtime, &runtime_env(base_url), None, None).await;
+
+        assert_eq!(readiness.status, LmStudioReadinessState::AuthRequired);
+    }
+
+    #[tokio::test]
+    async fn readiness_maps_a_valid_empty_catalog_to_no_loaded_model() {
+        let router = Router::new().route(
+            "/api/v1/models",
+            get(|| async { Json(serde_json::json!({"models": []})) }),
+        );
+        let base_url = spawn_models_server(router).await;
+        let runtime = known_acp_runtime("buzz-lmstudio-agent").expect("LM Studio runtime");
+
+        let readiness = probe_lmstudio_readiness(runtime, &runtime_env(base_url), None, None).await;
+
+        assert_eq!(readiness.status, LmStudioReadinessState::NoLoadedModel);
+    }
+
+    #[tokio::test]
+    async fn readiness_uses_bearer_catalog_only_after_auth_enforcement_is_observed() {
+        let observed = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
+        let route_observed = observed.clone();
+        let router = Router::new().route(
+            "/api/v1/models",
+            get(move |headers: HeaderMap| {
+                let route_observed = route_observed.clone();
+                async move {
+                    let authorization = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    route_observed
+                        .lock()
+                        .expect("observed headers lock")
+                        .push(authorization.clone());
+                    if authorization.as_deref() == Some("Bearer stored-secret") {
+                        (axum::http::StatusCode::OK, Json(loaded_catalog()))
+                    } else {
+                        (
+                            axum::http::StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({"error": "auth required"})),
+                        )
+                    }
+                }
+            }),
+        );
+        let base_url = spawn_models_server(router).await;
+        let runtime = known_acp_runtime("buzz-lmstudio-agent").expect("LM Studio runtime");
+
+        let readiness = probe_lmstudio_readiness(
+            runtime,
+            &runtime_env(base_url),
+            Some("qwen/test".to_string()),
+            Some("stored-secret".to_string()),
+        )
+        .await;
+
+        assert_eq!(readiness.status, LmStudioReadinessState::Ready);
+        assert!(readiness.security_warnings.is_empty());
+        assert_eq!(
+            *observed.lock().expect("observed headers lock"),
+            vec![None, Some("Bearer stored-secret".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_discovery_returns_successful_empty_and_distinguishes_invalid_schema() {
+        let empty_router = Router::new().route(
+            "/api/v1/models",
+            get(|| async { Json(serde_json::json!({"models": []})) }),
+        );
+        let empty_base_url = spawn_models_server(empty_router).await;
+        let response = discover_lmstudio_native_models(
+            "buzz-lmstudio-agent",
+            &runtime_env(empty_base_url),
+            None,
+        )
+        .await
+        .expect("valid empty discovery")
+        .expect("native discovery response");
+        assert!(response.models.is_empty());
+        assert!(response.selected_model.is_none());
+        assert!(response.agent_default_model.is_none());
+
+        let malformed_router = Router::new().route(
+            "/api/v1/models",
+            get(|| async { Json(serde_json::json!({"models": "not-an-array"})) }),
+        );
+        let malformed_base_url = spawn_models_server(malformed_router).await;
+        let malformed = discover_lmstudio_native_models(
+            "buzz-lmstudio-agent",
+            &runtime_env(malformed_base_url),
+            None,
+        )
+        .await
+        .expect_err("malformed native schema");
+        assert!(
+            malformed.contains("models response parse failed"),
+            "{malformed}"
+        );
+
+        let unused_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("reserve unused port");
+        let unused_address = unused_listener.local_addr().expect("unused address");
+        drop(unused_listener);
+        let transport = discover_lmstudio_native_models(
+            "buzz-lmstudio-agent",
+            &runtime_env(format!("http://{unused_address}")),
+            None,
+        )
+        .await
+        .expect_err("closed endpoint must be a transport failure");
+        assert!(
+            !transport.contains("models response parse failed"),
+            "{transport}"
+        );
+        assert_ne!(malformed, transport);
+    }
 }

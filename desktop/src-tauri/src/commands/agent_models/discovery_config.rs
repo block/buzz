@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 
 use crate::managed_agents::{
-    apply_runtime_security_env, known_acp_runtime, merged_user_env, runtime_metadata_env_vars,
-    ManagedAgentRecord,
+    known_acp_runtime, record_agent_command, resolve_effective_agent_env,
+    resolve_effective_model_provider, AgentDefinition, GlobalAgentConfig, ManagedAgentRecord,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -31,27 +31,16 @@ pub(crate) struct DiscoverAgentModelsInput {
 
 pub(super) fn saved_agent_model_discovery_config(
     record: &ManagedAgentRecord,
-    agent_command: &str,
+    personas: &[AgentDefinition],
+    global: &GlobalAgentConfig,
 ) -> SavedAgentModelDiscoveryConfig {
-    let mut derived_env = BTreeMap::new();
-    if let Some(meta) = known_acp_runtime(agent_command) {
-        for (key, value) in runtime_metadata_env_vars(
-            meta.model_env_var,
-            meta.provider_env_var,
-            meta.provider_locked,
-            meta.locked_provider_id,
-            record.model.as_deref(),
-            record.provider.as_deref(),
-        ) {
-            derived_env.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    let mut env = merged_user_env(&derived_env, &record.env_vars);
-    apply_runtime_security_env(&mut env, known_acp_runtime(agent_command));
+    let agent_command = record_agent_command(record, personas);
+    let runtime = known_acp_runtime(&agent_command);
+    let effective = resolve_effective_agent_env(record, personas, runtime, global);
+    let (model, provider) = resolve_effective_model_provider(record, personas, global);
     SavedAgentModelDiscoveryConfig {
-        model: record.model.clone(),
-        provider: record.provider.clone(),
-        env,
+        model: model.map(str::to_string),
+        provider: provider.map(str::to_string),
+        env: effective.env,
     }
 }

@@ -70,6 +70,7 @@ pub async fn get_agent_models(
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
+        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
         let effective_command = crate::managed_agents::record_agent_command(record, &personas);
 
         let args = normalize_agent_args(&effective_command, record.agent_args.clone());
@@ -78,11 +79,11 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| effective_command.clone());
 
-        // ModelPicker can persist a selected model but not rewrite the saved
-        // provider/env snapshot, and runtime spawn reads that same snapshot.
-        // Discover models against the record snapshot so an out-of-date persona
-        // cannot offer models for a provider this agent will not launch with.
-        let discovery = saved_agent_model_discovery_config(record, &effective_command);
+        // Discovery uses the same live agent → persona → global projection as
+        // readiness and spawn, including the post-user-layer native security
+        // projection. A saved record therefore cannot become stale when its
+        // linked persona or global fallback changes.
+        let discovery = saved_agent_model_discovery_config(record, &personas, &global);
 
         (
             resolved,

@@ -252,6 +252,10 @@ impl AgentReadiness {
 /// * **claude**: a successful `claude auth status` probe.
 /// * **codex**: a successful `codex login status` probe (checks the codex
 ///   credential store — NOT `OPENAI_API_KEY`).
+/// * **buzz-lmstudio-agent**: a catalog-selected model is required. Ambient,
+///   global-env, persona-env, and agent-env `LM_STUDIO_MODEL` values are
+///   filtered; only the structured agent → persona → global model projection
+///   satisfies this requirement.
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -282,6 +286,19 @@ fn collect_missing_requirements(
 
     match rt.id {
         "buzz-agent" => buzz_agent_requirements(effective),
+        "buzz-lmstudio-agent" => {
+            if effective
+                .env
+                .get("LM_STUDIO_MODEL")
+                .is_some_and(|model| !model.trim().is_empty())
+            {
+                Vec::new()
+            } else {
+                vec![Requirement::NormalizedField {
+                    field: "model".to_string(),
+                }]
+            }
+        }
         "goose" => {
             // Read the file config once at the call site so the inner fn is
             // pure and unit-testable by injection.
@@ -489,8 +506,11 @@ fn goose_requirements(
     missing
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+#[path = "readiness/lmstudio_tests.rs"]
+mod lmstudio_tests;
 
+// ── Tests ─────────────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;

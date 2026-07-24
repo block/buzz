@@ -2,6 +2,31 @@ use std::collections::BTreeMap;
 
 use crate::managed_agents::{KnownAcpRuntime, NativeModelDiscovery};
 
+const LMSTUDIO_CATALOG_OWNED_ENV_KEYS: &[&str] = &[
+    "BUZZ_AGENT_CLASSIFICATION",
+    "BUZZ_AGENT_PROVIDER",
+    "LM_STUDIO_MODEL",
+    "LM_STUDIO_BASE_URL",
+    "LM_STUDIO_MCP_INTEGRATIONS",
+    "LM_STUDIO_FALLBACK_PROVIDER",
+    "LM_STUDIO_API_TOKEN",
+];
+
+/// Environment keys that must be explicitly removed from the inherited
+/// desktop process environment before the trusted runtime projection is
+/// applied to a child process.
+pub(crate) fn runtime_inherited_env_keys_to_remove(
+    runtime: Option<&KnownAcpRuntime>,
+) -> &'static [&'static str] {
+    if runtime.is_some_and(|runtime| {
+        runtime.native_model_discovery == Some(NativeModelDiscovery::LmStudioV1)
+    }) {
+        LMSTUDIO_CATALOG_OWNED_ENV_KEYS
+    } else {
+        &[]
+    }
+}
+
 /// Replaces all LM Studio-native security policy keys with catalog-owned
 /// values after every user-configurable environment layer.
 ///
@@ -13,22 +38,19 @@ pub(crate) fn apply_runtime_security_env(
     env: &mut BTreeMap<String, String>,
     runtime: Option<&KnownAcpRuntime>,
 ) {
-    for key in [
-        "BUZZ_AGENT_CLASSIFICATION",
-        "BUZZ_AGENT_PROVIDER",
-        "LM_STUDIO_BASE_URL",
-        "LM_STUDIO_MCP_INTEGRATIONS",
-        "LM_STUDIO_FALLBACK_PROVIDER",
-        "LM_STUDIO_API_TOKEN",
-    ] {
-        env.remove(key);
-    }
-
     let Some(runtime) = runtime else {
         return;
     };
     if runtime.native_model_discovery != Some(NativeModelDiscovery::LmStudioV1) {
         return;
+    }
+
+    for key in LMSTUDIO_CATALOG_OWNED_ENV_KEYS
+        .iter()
+        .copied()
+        .filter(|key| *key != "LM_STUDIO_MODEL")
+    {
+        env.remove(key);
     }
 
     if let Some(key) = runtime.classification_env_var {

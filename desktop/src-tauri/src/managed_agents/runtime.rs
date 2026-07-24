@@ -21,7 +21,7 @@ pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
 mod lmstudio;
-pub(crate) use lmstudio::apply_runtime_security_env;
+pub(crate) use lmstudio::{apply_runtime_security_env, runtime_inherited_env_keys_to_remove};
 
 mod env;
 pub(crate) use env::runtime_metadata_env_vars;
@@ -1906,6 +1906,9 @@ pub fn spawn_agent_child(
     // BUZZ_BUILD_BUZZ_AGENT_* at compile time; OSS builds bake nothing).
     // Written FIRST so that record/persona metadata env vars below override them.
     build_buzz_agent_provider_defaults(&mut command);
+    for key in runtime_inherited_env_keys_to_remove(runtime_meta) {
+        command.env_remove(key);
+    }
     if let Some(meta) = runtime_meta {
         for (key, value) in runtime_metadata_env_vars(
             meta.model_env_var,

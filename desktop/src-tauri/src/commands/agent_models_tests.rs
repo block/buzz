@@ -163,9 +163,8 @@ fn redaction_env_records_value_used_for_request() {
     );
 }
 
-#[test]
-fn saved_agent_model_discovery_uses_record_snapshot() {
-    let record: crate::managed_agents::ManagedAgentRecord = serde_json::from_str(
+fn saved_discovery_record() -> crate::managed_agents::ManagedAgentRecord {
+    serde_json::from_str(
         r#"{
             "pubkey": "abcd1234",
             "name": "test-agent",
@@ -191,25 +190,95 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
             "last_error": null
         }"#,
     )
-    .expect("sample managed agent record");
+    .expect("sample managed agent record")
+}
 
-    let config = saved_agent_model_discovery_config(&record, "goose");
+fn saved_discovery_persona(
+    runtime: &str,
+    model: Option<&str>,
+) -> crate::managed_agents::AgentDefinition {
+    serde_json::from_value(serde_json::json!({
+        "id": "live-persona",
+        "display_name": "Live Persona",
+        "system_prompt": "",
+        "runtime": runtime,
+        "model": model,
+        "provider": "ignored-for-locked-runtime",
+        "env_vars": {
+            "SAFE_PERSONA_SETTING": "live",
+            "LM_STUDIO_API_TOKEN": "must-not-leak"
+        },
+        "created_at": "",
+        "updated_at": ""
+    }))
+    .expect("sample persona")
+}
 
-    assert_eq!(config.model.as_deref(), Some("record-model"));
-    assert_eq!(config.provider.as_deref(), Some("databricks"));
+#[test]
+fn saved_agent_model_discovery_uses_live_persona_then_global_projection() {
+    let mut record = saved_discovery_record();
+    record.persona_id = Some("live-persona".to_string());
+    record.agent_command_override = None;
+    record.model = None;
+    record.provider = None;
+    let persona = saved_discovery_persona("buzz-lmstudio-agent", Some("persona-current"));
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("global-current".to_string()),
+        provider: Some("global-provider".to_string()),
+        ..Default::default()
+    };
+
+    let config = saved_agent_model_discovery_config(&record, &[persona], &global);
+
+    assert_eq!(config.model.as_deref(), Some("persona-current"));
     assert_eq!(
-        config.env.get("GOOSE_MODEL").map(String::as_str),
-        Some("record-model")
+        config.provider.as_deref(),
+        Some("ignored-for-locked-runtime")
     );
     assert_eq!(
-        config.env.get("GOOSE_PROVIDER").map(String::as_str),
-        Some("databricks")
+        config.env.get("LM_STUDIO_MODEL").map(String::as_str),
+        Some("persona-current")
     );
     assert_eq!(
-        config.env.get("OPENAI_API_KEY").map(String::as_str),
-        Some("record-key")
+        config.env.get("BUZZ_AGENT_PROVIDER").map(String::as_str),
+        Some("lmstudio-native")
     );
-    assert!(!config.env.contains_key("BUZZ_PRIVATE_KEY"));
+    assert_eq!(
+        config.env.get("SAFE_PERSONA_SETTING").map(String::as_str),
+        Some("live")
+    );
+    assert!(!config.env.contains_key("LM_STUDIO_API_TOKEN"));
+}
+
+#[test]
+fn saved_agent_model_discovery_reflects_global_edit_and_agent_override() {
+    let mut record = saved_discovery_record();
+    record.persona_id = Some("live-persona".to_string());
+    record.agent_command_override = None;
+    record.model = None;
+    record.provider = None;
+    let persona = saved_discovery_persona("buzz-lmstudio-agent", None);
+    let mut global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("global-before".to_string()),
+        ..Default::default()
+    };
+
+    global.model = Some("global-after".to_string());
+    let inherited =
+        saved_agent_model_discovery_config(&record, std::slice::from_ref(&persona), &global);
+    assert_eq!(inherited.model.as_deref(), Some("global-after"));
+    assert_eq!(
+        inherited.env.get("LM_STUDIO_MODEL").map(String::as_str),
+        Some("global-after")
+    );
+
+    record.model = Some("agent-override".to_string());
+    let overridden = saved_agent_model_discovery_config(&record, &[persona], &global);
+    assert_eq!(overridden.model.as_deref(), Some("agent-override"));
+    assert_eq!(
+        overridden.env.get("LM_STUDIO_MODEL").map(String::as_str),
+        Some("agent-override")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -257,6 +326,223 @@ fn lmstudio_models_filter_non_llm_and_preserve_loaded_facts() {
             .and_then(serde_json::Value::as_bool),
         Some(true)
     );
+}
+
+#[test]
+fn lmstudio_empty_and_non_llm_catalogs_are_successful_empty_discovery() {
+    let empty = super::normalize_lmstudio_models(serde_json::json!({"models": []}))
+        .expect("an empty native catalog is a valid response");
+    assert!(empty.is_empty());
+
+    let non_llm = super::normalize_lmstudio_models(serde_json::json!({
+        "models": [{
+            "type": "embedding",
+            "key": "nomic/embed",
+            "loaded_instances": []
+        }]
+    }))
+    .expect("a catalog with no LLM entries is still a valid response");
+    assert!(non_llm.is_empty());
+}
+
+#[test]
+fn lmstudio_catalog_rejects_model_count_over_limit() {
+    let at_limit = (0..256)
+        .map(|index| {
+            serde_json::json!({
+                "type": "llm",
+                "key": format!("model-{index}"),
+                "loaded_instances": []
+            })
+        })
+        .collect::<Vec<_>>();
+    let normalized = super::normalize_lmstudio_models(serde_json::json!({"models": at_limit}))
+        .expect("boundary catalog");
+    assert_eq!(normalized.len(), 256);
+    assert_eq!(
+        normalized.first().map(|model| model.id.as_str()),
+        Some("model-0")
+    );
+    assert_eq!(
+        normalized.last().map(|model| model.id.as_str()),
+        Some("model-255")
+    );
+
+    let one_past = (0..257)
+        .map(|index| {
+            serde_json::json!({
+                "type": "llm",
+                "key": format!("model-{index}"),
+                "loaded_instances": []
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        super::normalize_lmstudio_models(serde_json::json!({"models": one_past}))
+            .expect_err("oversized catalog must be rejected"),
+        "LM Studio model catalog exceeds the maximum model count"
+    );
+}
+
+#[test]
+fn lmstudio_catalog_rejects_control_identifiers_and_oversized_metadata() {
+    let control = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe\nforged",
+            "loaded_instances": []
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(control)
+            .expect_err("control-bearing identifiers must be rejected"),
+        "LM Studio model catalog contains an invalid model identifier"
+    );
+
+    let oversized_description = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe",
+            "description": "x".repeat(4097),
+            "loaded_instances": []
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(oversized_description)
+            .expect_err("oversized descriptions must be rejected"),
+        "LM Studio model catalog contains an oversized description"
+    );
+}
+
+#[test]
+fn lmstudio_catalog_bounds_nested_capabilities_and_context_length() {
+    let boundary = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "m".repeat(256),
+            "display_name": "n".repeat(512),
+            "description": "d".repeat(4096),
+            "loaded_instances": (0..32)
+                .map(|index| serde_json::json!({"id": format!("instance-{index}")}))
+                .collect::<Vec<_>>(),
+            "max_context_length": 16777216_u64,
+            "capabilities": {"nested":{"level":{"enabled":true}}}
+        }]
+    });
+    let normalized = super::normalize_lmstudio_models(boundary).expect("metadata boundary values");
+    assert_eq!(normalized[0].loaded_instance_ids.len(), 32);
+    assert_eq!(normalized[0].max_context_length, Some(16_777_216));
+
+    let too_long_id = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "m".repeat(257),
+            "loaded_instances": []
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(too_long_id)
+            .expect_err("one-past model identifier must fail"),
+        "LM Studio model catalog contains an invalid model identifier"
+    );
+
+    let too_many_instances = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe",
+            "loaded_instances": (0..33)
+                .map(|index| serde_json::json!({"id": format!("instance-{index}")}))
+                .collect::<Vec<_>>()
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(too_many_instances)
+            .expect_err("one-past loaded instance count must fail"),
+        "LM Studio model catalog contains too many loaded instances"
+    );
+
+    let too_large_context = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe",
+            "loaded_instances": [],
+            "max_context_length": 16777217_u64
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(too_large_context)
+            .expect_err("unreasonable context length must be rejected"),
+        "LM Studio model catalog contains an invalid context length"
+    );
+
+    let too_deep = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe",
+            "loaded_instances": [],
+            "capabilities": {"a":{"b":{"c":{"d":{"e":{"f":{"g":{"h":{"i":true}}}}}}}}}
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(too_deep)
+            .expect_err("overly nested capabilities must fail"),
+        "LM Studio model catalog contains overly complex capabilities metadata"
+    );
+
+    let oversized_capabilities = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe",
+            "loaded_instances": [],
+            "capabilities": (0..17)
+                .map(|index| (format!("field_{index}"), serde_json::json!("x".repeat(1000))))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(oversized_capabilities)
+            .expect_err("oversized capabilities must fail"),
+        "LM Studio model catalog contains oversized capabilities metadata"
+    );
+
+    let invalid_shape = serde_json::json!({
+        "models": [{
+            "type": "llm",
+            "key": "safe",
+            "loaded_instances": [],
+            "capabilities": ["unexpected", "top-level", "array"]
+        }]
+    });
+    assert_eq!(
+        super::normalize_lmstudio_models(invalid_shape)
+            .expect_err("capabilities must be a bounded object"),
+        "LM Studio model catalog contains invalid capabilities metadata"
+    );
+}
+
+#[test]
+fn lmstudio_catalog_duplicate_handling_is_deterministic_first_wins() {
+    let value = serde_json::json!({
+        "models": [
+            {
+                "type": "llm",
+                "key": "duplicate",
+                "display_name": "First",
+                "loaded_instances": []
+            },
+            {
+                "type": "llm",
+                "key": "duplicate",
+                "display_name": "Second",
+                "loaded_instances": [{"id": "second"}]
+            }
+        ]
+    });
+
+    let models = super::normalize_lmstudio_models(value).expect("duplicate catalog");
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].name.as_deref(), Some("First"));
+    assert!(!models[0].is_loaded);
 }
 
 #[test]
