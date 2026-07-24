@@ -8,15 +8,19 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_MEMBER_ADDED_NOTIFICATION, KIND_STREAM_MESSAGE};
 use buzz_core::tenant::CommunityId;
 use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::handlers::event::dispatch_persistent_event;
+use crate::handlers::side_effects::{
+    emit_group_discovery_events, emit_membership_notification, emit_system_message,
+    publish_dm_visibility_snapshot,
+};
 use crate::state::AppState;
 
 /// Resolves `@Name` mentions in workflow message text to the pubkeys of the
@@ -346,6 +350,214 @@ impl ActionSink for RelayActionSink {
                 .map_err(|e| ActionSinkError::Database(e.to_string()))?;
 
             // 5. Post-persist side effects (fan-out, search, audit)
+            //    Only if actually inserted (idempotency guard).
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    kind_u32,
+                    &author_pubkey_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn send_dm(
+        &self,
+        community_id: CommunityId,
+        recipient_pubkey: &str,
+        text: &str,
+        author_pubkey: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        let recipient_pubkey = recipient_pubkey.to_owned();
+        let text = text.to_owned();
+        let author_pubkey = author_pubkey.to_owned();
+
+        Box::pin(async move {
+            // 0. Upgrade weak reference — fails only during shutdown.
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // Same tenancy rule as send_message: the run carries its owning
+            // community; never re-derive it from the deployment default.
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // 1. Validate content is not empty/whitespace-only
+            if text.trim().is_empty() {
+                return Err(ActionSinkError::EmptyContent);
+            }
+
+            // 2. Parse and validate pubkeys
+            let author_pubkey = nostr::PublicKey::from_hex(&author_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid author pubkey: {e}"))
+            })?;
+            let recipient_pubkey = nostr::PublicKey::from_hex(&recipient_pubkey).map_err(|e| {
+                ActionSinkError::InvalidInput(format!("invalid recipient pubkey: {e}"))
+            })?;
+            if recipient_pubkey == author_pubkey {
+                return Err(ActionSinkError::InvalidInput(
+                    "SendDm: recipient is the workflow owner".into(),
+                ));
+            }
+            let author_bytes = author_pubkey.to_bytes().to_vec();
+            let recipient_bytes = recipient_pubkey.to_bytes().to_vec();
+            let author_pubkey_hex = author_pubkey.to_hex();
+            let recipient_pubkey_hex = recipient_pubkey.to_hex();
+
+            // 3. Find or create the owner↔recipient DM channel — the same
+            //    idempotent open path as the kind:41010 command handler
+            //    (`handle_dm_open`), whose post-open side effects are mirrored
+            //    below.
+            let (channel, was_created) = state
+                .db
+                .open_dm(
+                    tenant.community(),
+                    &[recipient_bytes.as_slice()],
+                    &author_bytes,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            if was_created {
+                metrics::counter!(
+                    "buzz_channels_created_total",
+                    "community" => tenant.host().to_owned(),
+                    "type" => "dm"
+                )
+                .increment(1);
+
+                for pk in [&author_bytes, &recipient_bytes] {
+                    state.invalidate_membership(&tenant, channel.id, pk);
+                }
+
+                if let Err(e) = emit_system_message(
+                    &tenant,
+                    &state,
+                    channel.id,
+                    serde_json::json!({
+                        "type": "dm_created",
+                        "actor": author_pubkey_hex,
+                        "participants": [author_pubkey_hex, recipient_pubkey_hex],
+                    }),
+                )
+                .await
+                {
+                    warn!("workflow DM open: system message failed: {e}");
+                }
+
+                if let Err(e) = emit_group_discovery_events(&tenant, &state, channel.id).await {
+                    warn!(channel = %channel.id, "workflow DM open: discovery emission failed: {e}");
+                }
+
+                for participant in [&author_bytes, &recipient_bytes] {
+                    if let Err(e) = emit_membership_notification(
+                        &tenant,
+                        &state,
+                        channel.id,
+                        participant,
+                        &author_bytes,
+                        KIND_MEMBER_ADDED_NOTIFICATION,
+                    )
+                    .await
+                    {
+                        warn!("workflow DM open: membership notification failed: {e}");
+                    }
+                }
+            } else {
+                // Re-open cleared the owner's hidden_at; refresh their NIP-DV
+                // snapshot so the DM reappears in the sidebar.
+                if let Err(e) = publish_dm_visibility_snapshot(&tenant, &state, &author_bytes).await
+                {
+                    warn!("workflow DM re-open: visibility snapshot failed: {e}");
+                }
+            }
+
+            // 4. Build kind:9 Nostr event
+            //    - Signed by relay keypair (event.pubkey = relay pubkey)
+            //    - `p` tag attributes the message to the workflow owner
+            //    - `p` tag addresses the recipient (agent wake and push
+            //      delivery are `p`-tag gated)
+            //    - `h` tag scopes to the DM channel
+            //    - `buzz:workflow` tag prevents recursive workflow triggering
+            let channel_id_canonical = channel.id.to_string();
+            let tags = vec![
+                Tag::parse(["p", &author_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["p", &recipient_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("recipient p tag: {e}")))?,
+                Tag::parse(["h", &channel_id_canonical])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+
+            let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
+            let event = EventBuilder::new(kind, &text)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            let event_id_bytes = event.id.as_bytes().to_vec();
+            let kind_u32 = KIND_STREAM_MESSAGE;
+
+            let event_created_at = {
+                let ts = event.created_at.as_secs() as i64;
+                chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+            };
+
+            // Deliberately no message body in the log — DMs are private.
+            info!(
+                event_id = %event_id_hex,
+                channel_id = %channel_id_canonical,
+                author = %author_pubkey,
+                recipient = %recipient_pubkey,
+                "Workflow SendDm: posting kind {kind_u32} event"
+            );
+
+            // 5. Persist event with thread metadata (matches send_message).
+            //    Workflow DMs are always top-level: depth=0, no parent/root.
+            let thread_meta = Some(buzz_db::event::ThreadMetadataParams {
+                event_id: &event_id_bytes,
+                event_created_at,
+                channel_id: channel.id,
+                parent_event_id: None,
+                parent_event_created_at: None,
+                root_event_id: None,
+                root_event_created_at: None,
+                depth: 0,
+                broadcast: false,
+            });
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    Some(channel.id),
+                    thread_meta,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            // 6. Post-persist side effects (fan-out, search, audit)
             //    Only if actually inserted (idempotency guard).
             if was_inserted {
                 let _ = dispatch_persistent_event(
@@ -707,5 +919,113 @@ mod integration_tests {
             p_tag_targets.contains(&agent_hex.as_str()),
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_dm_opens_channel_and_p_tags_recipient() {
+        let state = test_state().await;
+
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let recipient = nostr::Keys::generate();
+        let recipient_hex = recipient.public_key().to_hex();
+
+        let host = format!("wf-dm-{}.example", uuid::Uuid::new_v4().simple());
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+
+        let sink = RelayActionSink::new(&state);
+        let event_id_hex = sink
+            .send_dm(community, &recipient_hex, "workflow says hi", &owner_hex)
+            .await
+            .expect("send_dm");
+
+        // The emitted event must land in a channel_type='dm' channel whose
+        // participant set is exactly {owner, recipient}.
+        let id_bytes = nostr::EventId::from_hex(&event_id_hex)
+            .expect("event id")
+            .as_bytes()
+            .to_vec();
+        let stored = state
+            .db
+            .get_event_by_id(community, &id_bytes)
+            .await
+            .expect("query event")
+            .expect("event persisted");
+
+        let h_tag_channel = stored
+            .event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("h"))
+            .and_then(|t| t.as_slice().get(1).cloned())
+            .expect("h tag present");
+        let channel_id = uuid::Uuid::parse_str(&h_tag_channel).expect("h tag is a channel UUID");
+        let channel = state
+            .db
+            .get_channel(community, channel_id)
+            .await
+            .expect("dm channel exists");
+        assert_eq!(channel.channel_type, "dm");
+        assert_eq!(channel.visibility, "private");
+
+        let p_tag_targets: Vec<&str> = stored
+            .event
+            .tags
+            .iter()
+            .filter(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
+            .filter_map(|t| t.as_slice().get(1).map(|s| s.as_str()))
+            .collect();
+        assert!(
+            p_tag_targets.contains(&owner_hex.as_str()),
+            "owner must be attributed via p tag; got {p_tag_targets:?}"
+        );
+        assert!(
+            p_tag_targets.contains(&recipient_hex.as_str()),
+            "recipient must be p-tagged (wake/push are p-tag gated); got {p_tag_targets:?}"
+        );
+
+        // A second DM to the same recipient must reuse the same channel
+        // (open_dm is idempotent on the participant set).
+        let second_event_id = sink
+            .send_dm(community, &recipient_hex, "again", &owner_hex)
+            .await
+            .expect("second send_dm");
+        let second_id_bytes = nostr::EventId::from_hex(&second_event_id)
+            .expect("event id")
+            .as_bytes()
+            .to_vec();
+        let second_stored = state
+            .db
+            .get_event_by_id(community, &second_id_bytes)
+            .await
+            .expect("query second event")
+            .expect("second event persisted");
+        let second_channel = second_stored
+            .event
+            .tags
+            .iter()
+            .find(|t| t.as_slice().first().map(|s| s.as_str()) == Some("h"))
+            .and_then(|t| t.as_slice().get(1).cloned())
+            .expect("h tag present");
+        assert_eq!(
+            second_channel, h_tag_channel,
+            "repeat DMs must reuse the same DM channel"
+        );
+
+        // Self-DM is rejected — the participant set would collapse to one.
+        let err = sink
+            .send_dm(community, &owner_hex, "hi me", &owner_hex)
+            .await
+            .expect_err("self-DM must be rejected");
+        assert!(matches!(err, ActionSinkError::InvalidInput(_)));
     }
 }
