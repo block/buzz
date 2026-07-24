@@ -785,7 +785,13 @@ function MessageComposerImpl({
   // extension (fires before ProseMirror's splitBlock). This wrapper only
   // handles autocomplete arrow/enter keys and Escape for edit mode.
   // ── Dictation (hold ⌃Space or mic button → speech-to-text) ─────────
-  const dictation = useDictation(richText.editor);
+  // Enter while dictating stops the session and sends once the trailing
+  // phrase has been flushed into the doc.
+  const dictationSubmit = React.useCallback(
+    () => submitMessageRef.current(),
+    [],
+  );
+  const dictation = useDictation(richText.editor, dictationSubmit);
 
   const handleEditorKeyDown = React.useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {

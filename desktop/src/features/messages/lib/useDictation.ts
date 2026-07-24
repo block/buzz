@@ -25,6 +25,11 @@ const OWNERSHIP_DECAY_MS = 15_000;
  *  space as normal — only key-repeats during the hold are suppressed. */
 const SPACE_HOLD_MS = 1500;
 
+/** Enter during dictation sends the message — but the trailing phrase is
+ *  still being flushed/decoded when the key lands, so the submit waits for
+ *  that final. This caps the wait if the final never arrives. */
+const SUBMIT_FLUSH_TIMEOUT_MS = 3000;
+
 type Session = { handle: AudioWorkletHandle; stream: MediaStream };
 
 /** Payload of the Rust `dictation-transcript` event. Partials re-decode the
@@ -50,13 +55,14 @@ type StreamState = { anchor: number; partialText: string };
  *
  * Triggers: hold plain Space for SPACE_HOLD_MS (quick tap still types a
  * space), hold ⌃Space (instant start), or the toolbar mic button (click
- * toggle).
+ * toggle). Enter while dictation is live stops it and calls `onSubmit` once
+ * the trailing phrase has been flushed into the doc (send-by-voice).
  *
  * Multiple composers may mount this hook — only the one that started the
  * session inserts the transcript (ownsRef), and Rust rejects a second
  * concurrent session.
  */
-export function useDictation(editor: Editor | null) {
+export function useDictation(editor: Editor | null, onSubmit?: () => void) {
   const [status, setStatus] = React.useState<DictationStatus>("idle");
   const sessionRef = React.useRef<Session | null>(null);
   const streamRef = React.useRef<StreamState | null>(null);
@@ -70,6 +76,10 @@ export function useDictation(editor: Editor | null) {
   const spaceTimerRef = React.useRef<number | null>(null);
   const editorRef = React.useRef(editor);
   editorRef.current = editor;
+  const onSubmitRef = React.useRef(onSubmit);
+  onSubmitRef.current = onSubmit;
+  // Non-null while an Enter-triggered submit waits for the trailing final.
+  const submitTimerRef = React.useRef<number | null>(null);
 
   // Stream transcripts from the Rust pipeline into the editor: each partial
   // replaces the previous partial of the same phrase in place, and the final
@@ -138,6 +148,13 @@ export function useDictation(editor: Editor | null) {
         editor.view.dom.style.caretColor = event.payload.final
           ? ""
           : "transparent";
+        // Enter-to-send was waiting for this final — it's in the doc now.
+        if (event.payload.final && submitTimerRef.current !== null) {
+          window.clearTimeout(submitTimerRef.current);
+          submitTimerRef.current = null;
+          ownsRef.current = false; // a stray later final must not land in the sent composer
+          onSubmitRef.current?.();
+        }
       },
     );
     return () => {
@@ -182,6 +199,12 @@ export function useDictation(editor: Editor | null) {
     // A stream left over from a previous session (final never arrived, or the
     // doc changed) must not swallow this session's first phrase.
     streamRef.current = null;
+    // Restarting dictation supersedes an Enter-to-send still waiting on its
+    // trailing final — don't fire a send under the new session.
+    if (submitTimerRef.current !== null) {
+      window.clearTimeout(submitTimerRef.current);
+      submitTimerRef.current = null;
+    }
     setStatus("starting");
     // Tracks whether the Rust session was started, so cleanup on a later
     // failure never kills a session owned by another composer.
@@ -234,6 +257,9 @@ export function useDictation(editor: Editor | null) {
       if (spaceTimerRef.current !== null) {
         window.clearTimeout(spaceTimerRef.current);
       }
+      if (submitTimerRef.current !== null) {
+        window.clearTimeout(submitTimerRef.current);
+      }
     };
   }, [teardownSession]);
 
@@ -242,6 +268,29 @@ export function useDictation(editor: Editor | null) {
       toast.error(error.message || "Could not start dictation");
     });
   }, [start]);
+
+  /** Submit now if the doc is settled, else once the trailing final lands.
+   *  A visible partial means a phrase is in flight and its final is coming
+   *  (stop() pushes flush silence); with nothing showing there is usually
+   *  nothing to wait for. */
+  // ponytail: "no partial showing" can also mean speech too fresh to have
+  // decoded yet (<~600 ms) — that tail is dropped. Thread a session-scoped
+  // flush ack through the Rust event if it ever bites.
+  const submitAfterFlush = React.useCallback(() => {
+    if (!streamRef.current?.partialText) {
+      ownsRef.current = false;
+      onSubmitRef.current?.();
+      return;
+    }
+    if (submitTimerRef.current !== null) {
+      window.clearTimeout(submitTimerRef.current);
+    }
+    submitTimerRef.current = window.setTimeout(() => {
+      submitTimerRef.current = null;
+      ownsRef.current = false;
+      onSubmitRef.current?.();
+    }, SUBMIT_FLUSH_TIMEOUT_MS);
+  }, []);
 
   /** Mic button click — start when idle, stop otherwise. */
   const statusRef = React.useRef(status);
@@ -275,6 +324,30 @@ export function useDictation(editor: Editor | null) {
     // composer mid-hold, leaked repeats would click focused buttons, scroll
     // the page, or type spaces into the stream.
     const onKeyDownCapture = (event: KeyboardEvent) => {
+      // Enter while dictation is live: stop and send. Capture phase so it
+      // beats the editor's submitOnEnter, which would send immediately —
+      // before the trailing phrase has been flushed into the doc.
+      if (
+        event.key === "Enter" &&
+        !event.shiftKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        !event.ctrlKey &&
+        onSubmitRef.current &&
+        (keyHeldRef.current ||
+          statusRef.current !== "idle" ||
+          // A send is already queued behind the trailing final — swallow
+          // repeat Enters so submitOnEnter can't double-send.
+          submitTimerRef.current !== null)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.repeat) return;
+        keyHeldRef.current = false;
+        stop();
+        submitAfterFlush();
+        return;
+      }
       if (
         event.code === "Space" &&
         event.repeat &&
@@ -292,7 +365,7 @@ export function useDictation(editor: Editor | null) {
       window.removeEventListener("keyup", onKeyUp);
       window.removeEventListener("blur", release);
     };
-  }, [stop]);
+  }, [stop, submitAfterFlush]);
 
   /** Returns true when the event was consumed. Handles both triggers:
    *  ⌃Space (instant) and plain Space held for SPACE_HOLD_MS. */

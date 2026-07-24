@@ -109,7 +109,7 @@ export function VoiceSettingsCard() {
     <section className="min-w-0" data-testid="settings-voice">
       <SettingsSectionHeader
         title="Voice & dictation"
-        description="Dictate messages in the composer: hold Space (or press ⌃Space) to talk, release to stop. Speech-to-text runs entirely on this device — audio never leaves your machine."
+        description="Dictate messages in the composer: hold Space (or press ⌃Space) to talk, release to stop, press Enter to send. Speech-to-text runs entirely on this device. Audio never leaves your machine."
       />
 
       <h2 className="mb-2 text-lg font-semibold tracking-tight">

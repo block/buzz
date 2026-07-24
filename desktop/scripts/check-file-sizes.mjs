@@ -530,11 +530,12 @@ const overrides = new Map([
   // ownerPubkey) feeding the newly-added-mentions diff. Diff logic itself
   // lives in threading.ts (diffAddedMentionPubkeys); this is the minimal
   // composer-side wiring. Queued to split with the rest of this list.
-  // +9: dictation wiring — useDictation hook instantiation, ⌃Space handoff in
-  // handleEditorKeyDown, and two toolbar props. All session/keyboard logic
-  // lives in lib/useDictation.ts; this is the minimal composer-side wiring.
-  // Queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1123],
+  // +15: dictation wiring — useDictation hook instantiation, ⌃Space handoff in
+  // handleEditorKeyDown, the Enter-to-send submit callback, and two toolbar
+  // props. All session/keyboard logic lives in lib/useDictation.ts; this is
+  // the minimal composer-side wiring. Queued to split with the rest of this
+  // list.
+  ["src/features/messages/ui/MessageComposer.tsx", 1129],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing
