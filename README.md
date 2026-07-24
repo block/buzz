@@ -165,7 +165,7 @@ If you'd rather point buzz at a different bash-compatible shell, set `BUZZ_SHELL
 
 Architecture
 
-```
+```mermaid
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                             Clients                                     │
 │  Human client         AI agent              CLI / scripts               │
