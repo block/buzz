@@ -25,13 +25,6 @@ import {
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
   if (status === "Closed") return "text-destructive";
@@ -242,7 +235,7 @@ function IssueDetail({
                     <AuthorIdentity
                       profiles={profiles}
                       pubkey={item.author}
-                      role={compactDate(item.createdAt)}
+                      role={relativeTime(item.createdAt)}
                     />
                   </div>
                   <Markdown
@@ -325,13 +318,13 @@ function IssueMetaRail({
           <div className="flex items-center justify-between gap-3">
             <dt>Created</dt>
             <dd className="font-medium text-foreground">
-              {compactDate(issue.createdAt)}
+              {relativeTime(issue.createdAt)}
             </dd>
           </div>
           <div className="flex items-center justify-between gap-3">
             <dt>Updated</dt>
             <dd className="font-medium text-foreground">
-              {compactDate(issue.updatedAt)}
+              {relativeTime(issue.updatedAt)}
             </dd>
           </div>
         </dl>

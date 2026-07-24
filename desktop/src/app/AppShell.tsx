@@ -68,6 +68,7 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
@@ -844,6 +845,7 @@ export function AppShell() {
                             addCommunityDialog.onOpenChange
                           }
                           onNewMessage={handleOpenNewDm}
+                          onBackgroundClick={requestFocusedThreadClose}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}

@@ -1306,6 +1306,8 @@ pub struct GitPullRequestMeta {
     pub euc: Option<String>,
     /// Additional pubkeys to `p`-tag besides the repo owner.
     pub recipients: Vec<String>,
+    /// NIP-29 channel where the pull request originated (`h` tag).
+    pub channel_id: Option<String>,
     /// PR subject line (`subject` tag) — required, used as the header.
     pub subject: String,
     /// Labels (`t` tags).
@@ -1365,6 +1367,11 @@ pub fn build_git_pull_request(
         tags.push(tag(&["t", label])?);
     }
     tags.push(tag(&["c", &meta.commit])?);
+    if let Some(ref channel_id) = meta.channel_id {
+        let channel_id = Uuid::parse_str(channel_id)
+            .map_err(|e| SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}")))?;
+        tags.push(tag(&["h", &channel_id.to_string()])?);
+    }
     let mut clone_tag = vec!["clone"];
     clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
     tags.push(tag(&clone_tag)?);
@@ -3410,6 +3417,7 @@ mod tests {
             clone_urls: vec!["https://example.com/repo.git".to_string()],
             branch_name: Some("feat/x".to_string()),
             labels: vec!["enhancement".to_string()],
+            channel_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
             ..Default::default()
         };
         let ev = sign(build_git_pull_request(&pr_repo(), "PR body", &meta).unwrap());
@@ -3420,6 +3428,7 @@ mod tests {
         assert!(has_tag(&ev, "subject", "Add feature X"));
         assert!(has_tag(&ev, "c", &"c".repeat(40)));
         assert!(has_tag(&ev, "t", "enhancement"));
+        assert!(has_tag(&ev, "h", "11111111-1111-4111-8111-111111111111"));
         assert!(has_tag(&ev, "branch-name", "feat/x"));
         assert_eq!(
             full_clone_tag(&ev),
@@ -3476,6 +3485,34 @@ mod tests {
         };
         let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_pr_rejects_invalid_channel_id() {
+        for channel_id in ["not-a-uuid", " 11111111-1111-4111-8111-111111111111 "] {
+            let meta = GitPullRequestMeta {
+                subject: "s".to_string(),
+                commit: "c".repeat(40),
+                clone_urls: vec!["https://example.com/repo.git".to_string()],
+                channel_id: Some(channel_id.to_string()),
+                ..Default::default()
+            };
+            let err = build_git_pull_request(&pr_repo(), "body", &meta).unwrap_err();
+            assert!(matches!(err, SdkError::InvalidInput(_)));
+        }
+    }
+
+    #[test]
+    fn git_pr_canonicalizes_channel_id() {
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            channel_id: Some("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE".to_string()),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "body", &meta).unwrap());
+        assert!(has_tag(&ev, "h", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
     }
 
     #[test]

@@ -281,20 +281,56 @@ function RuntimeHeader({
 }
 
 function RuntimeRow({
-  installError,
-  isInstalling,
-  onInstall,
+  resetEpoch,
   runtime,
 }: {
-  installError: string | null;
-  isInstalling: boolean;
-  onInstall: () => void;
+  resetEpoch: number;
   runtime: AcpRuntimeCatalogEntry;
 }) {
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
   const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
+  // Each row owns its mutation instance so concurrent installs each track
+  // their own isPending / result state independently.
+  const installMutation = useInstallAcpRuntimeMutation();
+  const [installResult, setInstallResult] = React.useState<{
+    success: boolean;
+    error: string | null;
+  } | null>(null);
+  // Clear stale install results when the parent triggers a catalog refresh
+  // (Check again) — the runtime may now be healthy and stale failure state
+  // would linger because keyed rows don't remount on refetch.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: resetEpoch is an intentional trigger only; its value is not consumed in the effect body
+  React.useEffect(() => {
+    setInstallResult(null);
+  }, [resetEpoch]);
+  const isInstalling = installMutation.isPending;
+  const installError = installResult?.error ?? null;
+  const installSuccess = installResult?.success ?? false;
+
+  function handleInstall() {
+    setInstallResult(null);
+    installMutation.mutate(runtime.id, {
+      onSuccess: (result) => {
+        if (result.success) {
+          setInstallResult({ success: true, error: null });
+        } else {
+          setInstallResult({
+            success: false,
+            error: getInstallErrorMessage(result.steps),
+          });
+        }
+      },
+      onError: (error) => {
+        setInstallResult({
+          success: false,
+          error: error instanceof Error ? error.message : "Install failed.",
+        });
+      },
+    });
+  }
+
   const canConnectAccount =
     runtime.availability === "available" &&
     runtime.authStatus.status === "logged_out";
@@ -351,7 +387,7 @@ function RuntimeRow({
               setIsUpdateWarningOpen(true);
               return;
             }
-            onInstall();
+            handleInstall();
           }}
           runtime={runtime}
         />
@@ -385,7 +421,10 @@ function RuntimeRow({
         ) : null}
 
         {installError ? (
-          <p className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive">
+          <p
+            className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
+            data-testid={`doctor-runtime-install-error-${runtime.id}`}
+          >
             {installError}
           </p>
         ) : null}
@@ -423,7 +462,7 @@ function RuntimeRow({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={onInstall}
+              onClick={handleInstall}
               data-testid={`doctor-runtime-confirm-update-${runtime.id}`}
             >
               Update
@@ -504,54 +543,9 @@ export function DoctorSettingsPanel() {
     [runtimesQuery.data],
   );
   const isRefreshing = runtimesQuery.isFetching;
-  const installMutation = useInstallAcpRuntimeMutation();
-  const [installErrors, setInstallErrors] = React.useState<
-    Record<string, string | null>
-  >({});
-  // Per-runtime installing state: tracks which runtime IDs have an in-flight
-  // install so concurrent installs each show their own spinner correctly.
-  const [installingIds, setInstallingIds] = React.useState<Set<string>>(
-    new Set(),
-  );
-
-  function handleInstall(runtimeId: string) {
-    // Clear any previous result for this runtime before retrying.
-    setInstallErrors((prev) => ({
-      ...prev,
-      [runtimeId]: null,
-    }));
-    setInstallingIds((prev) => new Set(prev).add(runtimeId));
-
-    installMutation.mutate(runtimeId, {
-      onSuccess: (result) => {
-        if (result.success) {
-          setInstallErrors((prev) => ({
-            ...prev,
-            [runtimeId]: null,
-          }));
-        } else {
-          setInstallErrors((prev) => ({
-            ...prev,
-            [runtimeId]: getInstallErrorMessage(result.steps),
-          }));
-        }
-      },
-      onError: (error) => {
-        setInstallErrors((prev) => ({
-          ...prev,
-          [runtimeId]:
-            error instanceof Error ? error.message : "Install failed.",
-        }));
-      },
-      onSettled: () => {
-        setInstallingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(runtimeId);
-          return next;
-        });
-      },
-    });
-  }
+  // Incremented each time the user clicks "Check again" so RuntimeRow
+  // useEffect clears stale install results from before the refresh.
+  const [resetEpoch, setResetEpoch] = React.useState(0);
 
   return (
     <section
@@ -566,7 +560,7 @@ export function DoctorSettingsPanel() {
           <Button
             disabled={isRefreshing}
             onClick={() => {
-              setInstallErrors({});
+              setResetEpoch((e) => e + 1);
               void runtimesQuery.refetch();
               void gitBashQuery.refetch();
             }}
@@ -606,10 +600,8 @@ export function DoctorSettingsPanel() {
             <div className="space-y-3" data-testid="doctor-runtime-list">
               {runtimes.map((runtime) => (
                 <RuntimeRow
-                  installError={installErrors[runtime.id] ?? null}
-                  isInstalling={installingIds.has(runtime.id)}
                   key={runtime.id}
-                  onInstall={() => handleInstall(runtime.id)}
+                  resetEpoch={resetEpoch}
                   runtime={runtime}
                 />
               ))}

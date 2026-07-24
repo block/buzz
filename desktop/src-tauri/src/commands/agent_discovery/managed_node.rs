@@ -43,11 +43,27 @@ const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtif
     sha256: "4786d00c4d259d3ff0b2328307f764ef3ced65f2d6e9502d433e68d66238509d",
 });
 
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+    platform: "win-x64",
+    filename: "node-v24.11.0-win-x64.zip",
+    sha256: "1054540bce22b54ec7e50ebc078ec5d090700a77657607a58f6a64df21f49fdd",
+});
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+    platform: "win-arm64",
+    filename: "node-v24.11.0-win-arm64.zip",
+    sha256: "12d3b1aa9696b7411e115a4fa2aef57f95560b5ee16bb62cd69843e535ec72be",
+});
+
 #[cfg(not(any(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "aarch64")
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64")
 )))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = None;
 
@@ -180,7 +196,12 @@ fn install_managed_node_runtime(
     extract_managed_node_archive(&archive_path, &temp_dir, artifact.filename)?;
     let _ = std::fs::remove_file(&archive_path);
 
-    let extracted_dir = temp_dir.join(artifact.filename.trim_end_matches(".tar.gz"));
+    let extracted_dir = temp_dir.join(
+        artifact
+            .filename
+            .trim_end_matches(".tar.gz")
+            .trim_end_matches(".zip"),
+    );
     let source_dir = if extracted_dir.is_dir() {
         extracted_dir
     } else {
@@ -277,22 +298,106 @@ fn extract_managed_node_archive(
     dest_dir: &std::path::Path,
     filename: &str,
 ) -> Result<(), String> {
-    if !filename.ends_with(".tar.gz") {
-        return Err(format!("unsupported managed Node.js archive: {filename}"));
-    }
-    let file =
-        std::fs::File::open(archive_path).map_err(|e| format!("open Node.js archive: {e}"))?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    validate_managed_node_archive_entries(&mut archive)?;
+    if filename.ends_with(".tar.gz") {
+        let file =
+            std::fs::File::open(archive_path).map_err(|e| format!("open Node.js archive: {e}"))?;
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        validate_managed_node_archive_entries(&mut archive)?;
 
-    let file = std::fs::File::open(archive_path)
-        .map_err(|e| format!("open Node.js archive for extraction: {e}"))?;
-    let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-    archive
-        .unpack(dest_dir)
-        .map_err(|e| format!("extract Node.js archive: {e}"))
+        let file = std::fs::File::open(archive_path)
+            .map_err(|e| format!("open Node.js archive for extraction: {e}"))?;
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(dest_dir)
+            .map_err(|e| format!("extract Node.js archive: {e}"))
+    } else if filename.ends_with(".zip") {
+        let file =
+            std::fs::File::open(archive_path).map_err(|e| format!("open Node.js archive: {e}"))?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(|e| format!("read Node.js zip archive: {e}"))?;
+        validate_managed_node_zip_entries(&archive)?;
+        extract_managed_node_zip(&mut archive, dest_dir)
+    } else {
+        Err(format!("unsupported managed Node.js archive: {filename}"))
+    }
+}
+
+/// Validate ZIP entry names using platform-neutral string logic.
+///
+/// `std::path::Path` is intentionally avoided: its `is_absolute()` and
+/// `Component` parsing use BUILD-HOST grammar, so `/etc/passwd` is not
+/// `is_absolute()` on Windows (no drive prefix), causing the check to lie on
+/// the platform this guard exists to protect.  Instead we apply pure string
+/// rules that produce identical results on every host:
+///
+/// - Unix-rooted: starts with `/`
+/// - Windows-rooted: starts with `\`, has a drive prefix (`X:`), or is UNC
+///   (`\\` / `//`)
+/// - Traversal: any component that is `..` when split on EITHER `/` or `\`
+fn validate_managed_node_zip_entries(
+    archive: &zip::ZipArchive<std::fs::File>,
+) -> Result<(), String> {
+    for i in 0..archive.len() {
+        let name = archive
+            .name_for_index(i)
+            .ok_or_else(|| format!("Node.js zip entry {i}: missing name"))?;
+
+        // Absolute-path checks (platform-neutral).
+        if name.starts_with('/') || name.starts_with('\\') {
+            return Err(format!("Node.js zip contains absolute path: {name}"));
+        }
+        // Drive prefix: one ASCII letter followed by ':'
+        if name.len() >= 2 && name.as_bytes()[1] == b':' && name.as_bytes()[0].is_ascii_alphabetic()
+        {
+            return Err(format!("Node.js zip contains absolute path: {name}"));
+        }
+        // UNC prefix: // or \\ (covered by starts_with checks above for \\,
+        // and // is caught by starts_with('/') then a second '/' — belt + suspenders).
+        // (Already caught by the starts_with checks above; explicit for clarity.)
+
+        // Traversal: split on both separators and check each component.
+        let has_traversal = name.split(['/', '\\']).any(|component| component == "..");
+        if has_traversal {
+            return Err(format!("Node.js zip contains path traversal: {name}"));
+        }
+    }
+    Ok(())
+}
+
+fn extract_managed_node_zip(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    dest_dir: &std::path::Path,
+) -> Result<(), String> {
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Node.js zip entry {i}: {e}"))?;
+        let outpath = match entry.enclosed_name() {
+            Some(p) => dest_dir.join(p),
+            None => {
+                return Err(format!(
+                    "Node.js zip contains unsafe path: {}",
+                    entry.name()
+                ))
+            }
+        };
+        if entry.is_dir() {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| format!("create dir in Node.js zip: {e}"))?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create parent dir in Node.js zip: {e}"))?;
+            }
+            let mut out = std::fs::File::create(&outpath)
+                .map_err(|e| format!("create file in Node.js zip: {e}"))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("extract file in Node.js zip: {e}"))?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_managed_node_archive_entries<R: std::io::Read>(
@@ -325,15 +430,36 @@ fn validate_managed_node_archive_entries<R: std::io::Read>(
 }
 
 fn verify_node_tree(dir: &std::path::Path) -> Result<(), String> {
-    let node = dir.join("bin").join("node");
-    let npm = dir.join("bin").join("npm");
-    if !node.is_file() {
-        return Err("Node.js archive missing bin/node".to_string());
+    #[cfg(windows)]
+    {
+        // Windows zip layout: node.exe + npm.cmd + npm (POSIX sh shim) at archive root
+        let node = dir.join("node.exe");
+        let npm_cmd = dir.join("npm.cmd");
+        let npm = dir.join("npm");
+        if !node.is_file() {
+            return Err("Node.js archive missing node.exe".to_string());
+        }
+        if !npm_cmd.is_file() {
+            return Err("Node.js archive missing npm.cmd".to_string());
+        }
+        if !npm.is_file() {
+            return Err("Node.js archive missing npm".to_string());
+        }
+        Ok(())
     }
-    if !npm.is_file() {
-        return Err("Node.js archive missing bin/npm".to_string());
+    #[cfg(not(windows))]
+    {
+        // Unix tarball layout: bin/node + bin/npm
+        let node = dir.join("bin").join("node");
+        let npm = dir.join("bin").join("npm");
+        if !node.is_file() {
+            return Err("Node.js archive missing bin/node".to_string());
+        }
+        if !npm.is_file() {
+            return Err("Node.js archive missing bin/npm".to_string());
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 // ── managed npm adapter installs ──────────────────────────────────────────────
@@ -465,5 +591,158 @@ mod tests {
             shell_quote(std::path::Path::new("/tmp/Buzz's Node")),
             "'/tmp/Buzz'\\''s Node'"
         );
+    }
+
+    // ── zip validation tests ──────────────────────────────────────────────────
+
+    /// Build an in-memory zip archive with the supplied entry names and return
+    /// a temporary file containing it (zip::ZipArchive requires Seek).
+    fn make_zip_with_entries(entry_names: &[&str]) -> tempfile::NamedTempFile {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default();
+            for name in entry_names {
+                writer.start_file(*name, opts).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        std::io::Write::write_all(&mut tmp, &buf).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn test_validate_zip_accepts_normal_entries() {
+        let tmp = make_zip_with_entries(&[
+            "node-v24.11.0-win-x64/node.exe",
+            "node-v24.11.0-win-x64/npm.cmd",
+            "node-v24.11.0-win-x64/npm",
+        ]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        assert!(validate_managed_node_zip_entries(&archive).is_ok());
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_absolute_path() {
+        let tmp = make_zip_with_entries(&["/etc/passwd"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("absolute path"),
+            "expected 'absolute path' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_path_traversal() {
+        let tmp = make_zip_with_entries(&["../../../etc/passwd"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("path traversal"),
+            "expected 'path traversal' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_backslash_rooted() {
+        // Windows-style absolute path using backslash — must reject on every host.
+        let tmp = make_zip_with_entries(&["\\Windows\\system32\\evil.dll"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("absolute path"),
+            "expected 'absolute path' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_drive_prefix() {
+        // Windows drive-letter absolute path — must reject on every host.
+        let tmp = make_zip_with_entries(&["C:\\evil\\payload.exe"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("absolute path"),
+            "expected 'absolute path' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_backslash_traversal() {
+        // Path traversal using Windows separator — must reject on every host.
+        let tmp = make_zip_with_entries(&["node-v24.11.0-win-x64\\..\\..\\evil"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("path traversal"),
+            "expected 'path traversal' in: {err}"
+        );
+    }
+
+    // ── verify_node_tree layout tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_verify_node_tree_unix_layout_passes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("node"), b"").unwrap();
+        std::fs::write(bin.join("npm"), b"").unwrap();
+        // On non-Windows the unix branch is active — this must pass.
+        #[cfg(not(windows))]
+        assert!(verify_node_tree(tmp.path()).is_ok());
+        // On Windows the windows branch is active — unix layout must fail.
+        #[cfg(windows)]
+        assert!(verify_node_tree(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_verify_node_tree_unix_layout_missing_npm_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("node"), b"").unwrap();
+        // npm intentionally absent
+        #[cfg(not(windows))]
+        {
+            let err = verify_node_tree(tmp.path()).unwrap_err();
+            assert!(err.contains("bin/npm"), "err: {err}");
+        }
+    }
+
+    #[test]
+    fn test_verify_node_tree_windows_layout_passes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("node.exe"), b"").unwrap();
+        std::fs::write(tmp.path().join("npm.cmd"), b"").unwrap();
+        std::fs::write(tmp.path().join("npm"), b"").unwrap();
+        // On Windows the windows branch is active — this must pass.
+        #[cfg(windows)]
+        assert!(verify_node_tree(tmp.path()).is_ok());
+        // On non-Windows the unix branch is active — windows-layout root files
+        // don't satisfy bin/node + bin/npm, so this must fail.
+        #[cfg(not(windows))]
+        assert!(verify_node_tree(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn test_verify_node_tree_windows_layout_missing_npm_shim_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("node.exe"), b"").unwrap();
+        std::fs::write(tmp.path().join("npm.cmd"), b"").unwrap();
+        // npm POSIX shim intentionally absent
+        #[cfg(windows)]
+        {
+            let err = verify_node_tree(tmp.path()).unwrap_err();
+            assert!(err.contains("npm"), "err: {err}");
+        }
     }
 }

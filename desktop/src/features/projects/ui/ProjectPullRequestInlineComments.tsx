@@ -5,6 +5,7 @@ import type {
   ProjectPullRequestComment,
   ProjectPullRequestCommentAnchor,
 } from "@/features/projects/projectPullRequests.mjs";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { normalizePubkey, truncatePubkey } from "@/shared/lib/pubkey";
 import { Markdown } from "@/shared/ui/markdown";
@@ -21,22 +22,17 @@ function commentAuthor(
   );
 }
 
-function commentDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    day: "numeric",
-    month: "short",
-  });
-}
-
 export function ProjectPullRequestInlineCommentThread({
   activeAnchor,
   comments,
+  canRequestChanges,
   isSending,
   onCancel,
   onSubmit,
   profiles,
 }: {
   activeAnchor: ProjectPullRequestCommentAnchor | null;
+  canRequestChanges: boolean;
   comments: ProjectPullRequestComment[];
   isSending: boolean;
   onCancel: () => void;
@@ -44,6 +40,7 @@ export function ProjectPullRequestInlineCommentThread({
     content: string,
     mentionPubkeys: string[],
     mediaTags?: string[][],
+    decision?: "request-changes",
   ) => Promise<unknown>;
   profiles?: UserProfileLookup;
 }) {
@@ -68,7 +65,7 @@ export function ProjectPullRequestInlineCommentThread({
                   {commentAuthor(comment.author, profiles)}
                 </span>
                 <span className="shrink-0 text-muted-foreground">
-                  {commentDate(comment.createdAt)}
+                  {relativeTime(comment.createdAt)}
                 </span>
               </div>
               <Markdown
@@ -96,9 +93,21 @@ export function ProjectPullRequestInlineCommentThread({
           }
           isSending={isSending}
           onCancel={onCancel}
+          onSecondarySubmit={
+            canRequestChanges
+              ? (content, mentionPubkeys, mediaTags) =>
+                  onSubmit(
+                    content,
+                    mentionPubkeys,
+                    mediaTags,
+                    "request-changes",
+                  )
+              : undefined
+          }
           onSubmit={onSubmit}
           placeholder="Leave a comment on this line…"
           profiles={profiles}
+          secondarySubmitLabel="Request changes"
         />
       ) : null}
     </div>
