@@ -1,5 +1,10 @@
 use crate::managed_agents::known_acp_runtime;
 
+#[test]
+fn manual_start_defers_agent_pool_initialization() {
+    assert!(super::manual_start_uses_lazy_pool());
+}
+
 // ── buffer_contains_identifier tests ────────────────────────────────────
 
 #[test]
