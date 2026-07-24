@@ -3304,7 +3304,7 @@ fn handle_prompt_result(
                 e,
                 acp::AcpError::Io(_)
                     | acp::AcpError::WriteTimeout(_)
-                    | acp::AcpError::Timeout(_)
+                    | acp::AcpError::Timeout { .. }
                     | acp::AcpError::Protocol(_)
             );
             let error_code = match &e {

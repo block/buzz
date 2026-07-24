@@ -976,7 +976,7 @@ async fn apply_model_switch(
         // so the caller can respawn the agent instead of reusing a poisoned one.
         Ok(Err(e @ AcpError::Io(_)))
         | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Timeout { .. }))
         | Ok(Err(e @ AcpError::Protocol(_)))
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
@@ -999,7 +999,10 @@ async fn apply_model_switch(
                 target: "pool::model",
                 "model set via {method_label} timed out ({MODEL_SWITCH_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(MODEL_SWITCH_TIMEOUT));
+            return Err(AcpError::Timeout {
+                method: method_label,
+                timeout: MODEL_SWITCH_TIMEOUT,
+            });
         }
     }
     Ok(())
@@ -1052,7 +1055,7 @@ async fn apply_permission_mode(
         // so the caller can respawn the agent.
         Ok(Err(e @ AcpError::Io(_)))
         | Ok(Err(e @ AcpError::WriteTimeout(_)))
-        | Ok(Err(e @ AcpError::Timeout(_)))
+        | Ok(Err(e @ AcpError::Timeout { .. }))
         | Ok(Err(e @ AcpError::Protocol(_)))
         | Ok(Err(e @ AcpError::AgentExited)) => {
             tracing::error!(
@@ -1074,7 +1077,10 @@ async fn apply_permission_mode(
                 target: "pool::permission",
                 "permission mode set timed out ({PERMISSION_MODE_TIMEOUT:?}) — treating as fatal"
             );
-            return Err(AcpError::Timeout(PERMISSION_MODE_TIMEOUT));
+            return Err(AcpError::Timeout {
+                method: "session/set_config_option".to_string(),
+                timeout: PERMISSION_MODE_TIMEOUT,
+            });
         }
     }
     Ok(())
