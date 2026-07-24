@@ -302,7 +302,9 @@ fn scan_path_for_command(
 ) -> Option<PathBuf> {
     let needs_exe = name.extension().is_none();
     std::env::split_paths(path_env).find_map(|dir| {
-        if system_root.is_some_and(|root| is_under_dir(&dir, root)) {
+        // System32 bash and %LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe are
+        // WSL app-execution aliases, not Git Bash (#2685).
+        if system_root.is_some_and(|root| is_under_dir(&dir, root)) || is_windows_apps_dir(&dir) {
             return None;
         }
         let candidate = dir.join(name);
@@ -317,6 +319,19 @@ fn scan_path_for_command(
             }
         }
         None
+    })
+}
+
+/// Windows exposes `bash.exe` app-execution aliases under WindowsApps that
+/// launch WSL rather than Git Bash. Skip those PATH entries so discovery does
+/// not boot `wsl.exe` on every unresolved command probe.
+#[cfg(windows)]
+fn is_windows_apps_dir(dir: &Path) -> bool {
+    dir.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case("WindowsApps")
     })
 }
 
@@ -497,6 +512,37 @@ mod tests {
 
         assert_eq!(
             resolve_git_bash("", None, None, None, None, Some(program_files_x86), None,),
+            Some(bash)
+        );
+    }
+
+    #[test]
+    fn test_windows_apps_bash_alias_is_not_treated_as_git_bash() {
+        let temp = tempdir().expect("tempdir");
+        let windows_apps = temp.path().join("Microsoft").join("WindowsApps");
+        let alias = windows_apps.join("bash.exe");
+        let git = temp.path().join("Git").join("cmd").join("git.exe");
+        let bash = temp.path().join("Git").join("bin").join("bash.exe");
+        std::fs::create_dir_all(&windows_apps).expect("mkdir WindowsApps");
+        std::fs::create_dir_all(git.parent().expect("git parent")).expect("mkdir git");
+        std::fs::create_dir_all(bash.parent().expect("bash parent")).expect("mkdir bash");
+        std::fs::write(alias, []).expect("alias");
+        std::fs::write(&git, []).expect("git");
+        std::fs::write(&bash, []).expect("bash");
+
+        let path =
+            std::env::join_paths([windows_apps, git.parent().expect("cmd dir").to_path_buf()])
+                .expect("PATH");
+        assert_eq!(
+            resolve_git_bash_no_registry(
+                path.to_str().expect("utf8"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ),
             Some(bash)
         );
     }
