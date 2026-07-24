@@ -23,3 +23,6 @@ hex = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }
