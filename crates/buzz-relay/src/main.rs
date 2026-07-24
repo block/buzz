@@ -478,13 +478,29 @@ async fn main() -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
+        // Per-operation and whole-probe time bounds. Without them a backend
+        // connection that stalls without erroring hangs the probe — and the
+        // probe gates startup, so the relay never comes up (observed against
+        // MinIO: two transport drops, then silence).
+        let op_timeout_secs: u64 = std::env::var("BUZZ_GIT_PROBE_OP_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(30);
+        let deadline_secs: u64 = std::env::var("BUZZ_GIT_PROBE_DEADLINE_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
         let cfg = buzz_relay::api::git::store::ProbeConfig {
             race_width,
             race_rounds,
+            op_timeout: std::time::Duration::from_secs(op_timeout_secs),
+            deadline: std::time::Duration::from_secs(deadline_secs),
         };
         tracing::info!(
             race_width,
             race_rounds,
+            op_timeout_secs,
+            deadline_secs,
             "running git object-store conformance probe (A3 gate)"
         );
         let report = state
