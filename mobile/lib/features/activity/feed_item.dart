@@ -41,6 +41,17 @@ class FeedItem {
     category: json['category'] as String,
   );
 
+  /// The message whose thread directly contains this item, when this event is
+  /// a reply. For nested replies this is the direct parent, not the outer root.
+  String? get threadHeadId {
+    for (final tag in tags) {
+      if (tag.length >= 4 && tag[0] == 'e' && tag[3] == 'reply') {
+        return tag[1];
+      }
+    }
+    return null;
+  }
+
   /// Human-readable headline based on event kind and category.
   String get headline {
     switch (kind) {

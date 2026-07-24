@@ -8,6 +8,7 @@ import 'package:buzz/features/activity/activity_page.dart';
 import 'package:buzz/features/activity/activity_provider.dart';
 import 'package:buzz/features/activity/feed_item.dart';
 import 'package:buzz/features/channels/channel.dart';
+import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
@@ -216,6 +217,46 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Nothing needs your action'), findsOneWidget);
+  });
+
+  testWidgets('opens a thread mention at the referenced message', (
+    tester,
+  ) async {
+    final threadMention = FeedItem(
+      id: 'reply-event',
+      kind: 9,
+      pubkey: 'alice_pk',
+      content: 'Reply in a thread',
+      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      channelId: 'ch1',
+      channelName: 'general',
+      tags: const [
+        ['e', 'thread-root', '', 'root'],
+        ['e', 'parent-reply', '', 'reply'],
+      ],
+      category: 'mention',
+    );
+    final feed = HomeFeedResponse(
+      mentions: [threadMention],
+      needsAction: const [],
+      activity: const [],
+      agentActivity: const [],
+    );
+
+    await tester.pumpWidget(
+      buildTestable(overrides: defaultOverrides(feed: feed)),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('activity-item-reply-event')));
+    await tester.pumpAndSettle();
+
+    final page = tester.widget<ChannelDetailPage>(
+      find.byType(ChannelDetailPage),
+    );
+    expect(page.channel.id, 'ch1');
+    expect(page.initialThreadRootId, 'parent-reply');
+    expect(page.initialMessageId, 'reply-event');
   });
 
   testWidgets('shows headline for known event kinds', (tester) async {

@@ -140,7 +140,11 @@ class ActivityPage extends HookConsumerWidget {
     if (channel == null) return;
     Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (_) => ChannelDetailPage(channel: channel),
+        builder: (_) => ChannelDetailPage(
+          channel: channel,
+          initialMessageId: item.id,
+          initialThreadRootId: item.threadHeadId,
+        ),
       ),
     );
   }
@@ -159,6 +163,7 @@ class _FeedItemTile extends ConsumerWidget {
     final authorLabel = profile?.label ?? _shortPubkey(item.pubkey);
 
     return InkWell(
+      key: ValueKey('activity-item-${item.id}'),
       onTap: item.channelId != null ? onTap : null,
       child: Padding(
         padding: const EdgeInsets.symmetric(
