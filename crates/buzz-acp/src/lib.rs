@@ -4105,7 +4105,7 @@ fn build_mcp_servers(config: &Config) -> Vec<McpServer> {
             .unwrap_or("mcp")
             .to_string(),
         command: config.mcp_command.clone(),
-        args: vec![],
+        args: config.mcp_args.clone(),
         env: {
             let mut env = vec![
                 EnvVar {
@@ -4906,6 +4906,7 @@ mod build_mcp_servers_tests {
             agent_command: "goose".into(),
             agent_args: vec!["acp".into()],
             mcp_command: "test-mcp-server".into(),
+            mcp_args: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
@@ -5035,6 +5036,40 @@ mod build_mcp_servers_tests {
             "Path::new(\".\").file_stem() is None — should fall back to \"mcp\""
         );
     }
+
+    #[test]
+    fn mcp_args_default_to_empty() {
+        let mut config = test_config();
+        config.mcp_command = "/opt/bin/my-mcp-server".into();
+        config.mcp_args = vec![];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert!(
+            servers[0].args.is_empty(),
+            "an MCP command with no args should spawn with no args"
+        );
+    }
+
+    #[test]
+    fn mcp_args_are_passed_to_the_server() {
+        let mut config = test_config();
+        config.mcp_command = "npx".into();
+        config.mcp_args = vec!["-y".into(), "some-mcp-server".into()];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].command, "npx");
+        assert_eq!(servers[0].args, vec!["-y", "some-mcp-server"]);
+    }
+
+    #[test]
+    fn mcp_args_do_not_affect_the_derived_server_name() {
+        // The name still comes from the command's file stem, not the args.
+        let mut config = test_config();
+        config.mcp_command = "/opt/bin/my-mcp-server".into();
+        config.mcp_args = vec!["--port".into(), "8080".into()];
+        let servers = build_mcp_servers(&config);
+        assert_eq!(servers[0].name, "my-mcp-server");
+    }
 }
 
 #[cfg(test)]
@@ -5072,6 +5107,7 @@ mod error_outcome_emission_tests {
             agent_command: "true".into(),
             agent_args: vec![],
             mcp_command: "test-mcp-server".into(),
+            mcp_args: vec![],
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
             agents: 1,
