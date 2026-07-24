@@ -324,6 +324,18 @@ fn extract_managed_node_archive(
     }
 }
 
+/// Validate ZIP entry names using platform-neutral string logic.
+///
+/// `std::path::Path` is intentionally avoided: its `is_absolute()` and
+/// `Component` parsing use BUILD-HOST grammar, so `/etc/passwd` is not
+/// `is_absolute()` on Windows (no drive prefix), causing the check to lie on
+/// the platform this guard exists to protect.  Instead we apply pure string
+/// rules that produce identical results on every host:
+///
+/// - Unix-rooted: starts with `/`
+/// - Windows-rooted: starts with `\`, has a drive prefix (`X:`), or is UNC
+///   (`\\` / `//`)
+/// - Traversal: any component that is `..` when split on EITHER `/` or `\`
 fn validate_managed_node_zip_entries(
     archive: &zip::ZipArchive<std::fs::File>,
 ) -> Result<(), String> {
@@ -331,14 +343,23 @@ fn validate_managed_node_zip_entries(
         let name = archive
             .name_for_index(i)
             .ok_or_else(|| format!("Node.js zip entry {i}: missing name"))?;
-        let path = std::path::Path::new(name);
-        if path.is_absolute() {
+
+        // Absolute-path checks (platform-neutral).
+        if name.starts_with('/') || name.starts_with('\\') {
             return Err(format!("Node.js zip contains absolute path: {name}"));
         }
-        if path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+        // Drive prefix: one ASCII letter followed by ':'
+        if name.len() >= 2 && name.as_bytes()[1] == b':' && name.as_bytes()[0].is_ascii_alphabetic()
         {
+            return Err(format!("Node.js zip contains absolute path: {name}"));
+        }
+        // UNC prefix: // or \\ (covered by starts_with checks above for \\,
+        // and // is caught by starts_with('/') then a second '/' — belt + suspenders).
+        // (Already caught by the starts_with checks above; explicit for clarity.)
+
+        // Traversal: split on both separators and check each component.
+        let has_traversal = name.split(['/', '\\']).any(|component| component == "..");
+        if has_traversal {
             return Err(format!("Node.js zip contains path traversal: {name}"));
         }
     }
@@ -618,6 +639,45 @@ mod tests {
     #[test]
     fn test_validate_zip_rejects_path_traversal() {
         let tmp = make_zip_with_entries(&["../../../etc/passwd"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("path traversal"),
+            "expected 'path traversal' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_backslash_rooted() {
+        // Windows-style absolute path using backslash — must reject on every host.
+        let tmp = make_zip_with_entries(&["\\Windows\\system32\\evil.dll"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("absolute path"),
+            "expected 'absolute path' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_drive_prefix() {
+        // Windows drive-letter absolute path — must reject on every host.
+        let tmp = make_zip_with_entries(&["C:\\evil\\payload.exe"]);
+        let file = std::fs::File::open(tmp.path()).unwrap();
+        let archive = zip::ZipArchive::new(file).unwrap();
+        let err = validate_managed_node_zip_entries(&archive).unwrap_err();
+        assert!(
+            err.contains("absolute path"),
+            "expected 'absolute path' in: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_zip_rejects_backslash_traversal() {
+        // Path traversal using Windows separator — must reject on every host.
+        let tmp = make_zip_with_entries(&["node-v24.11.0-win-x64\\..\\..\\evil"]);
         let file = std::fs::File::open(tmp.path()).unwrap();
         let archive = zip::ZipArchive::new(file).unwrap();
         let err = validate_managed_node_zip_entries(&archive).unwrap_err();
