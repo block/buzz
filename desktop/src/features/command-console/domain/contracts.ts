@@ -17,9 +17,7 @@ import {
   required,
 } from "./validation";
 import type { JsonValue, UnknownRecord } from "./validation";
-
 export const COMMAND_CONTRACT_VERSION = 1 as const;
-
 export type { JsonPrimitive, JsonValue } from "./validation";
 
 type ContractBase = {
@@ -143,6 +141,7 @@ export type EgressDecision = {
 /** Auditable provider/model selection and its execution boundaries. */
 export type ModelRoute = ContractBase & {
   readonly kind: "model-route";
+  readonly selectedEndpoint: string;
   readonly selectedProvider: string;
   readonly selectedModel: string;
   readonly permittedTools: readonly string[];
@@ -638,6 +637,7 @@ export function createModelRoute(
       kind: "model-route",
       version: COMMAND_CONTRACT_VERSION,
       classification: resolveClassification(input.classification),
+      selectedEndpoint: input.selectedEndpoint,
       selectedProvider: input.selectedProvider,
       selectedModel: input.selectedModel,
       permittedTools: input.permittedTools,
@@ -656,6 +656,7 @@ export function parseModelRoute(value: unknown): ModelRoute | null {
       "kind",
       "version",
       "classification",
+      "selectedEndpoint",
       "selectedProvider",
       "selectedModel",
       "permittedTools",
@@ -665,6 +666,7 @@ export function parseModelRoute(value: unknown): ModelRoute | null {
     value.kind !== "model-route" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
     !isClassification(value.classification) ||
+    !isText(value.selectedEndpoint) ||
     !isText(value.selectedProvider) ||
     !isText(value.selectedModel)
   )
@@ -680,6 +682,7 @@ export function parseModelRoute(value: unknown): ModelRoute | null {
     kind: value.kind,
     version: value.version,
     classification: value.classification,
+    selectedEndpoint: value.selectedEndpoint,
     selectedProvider: value.selectedProvider,
     selectedModel: value.selectedModel,
     permittedTools,

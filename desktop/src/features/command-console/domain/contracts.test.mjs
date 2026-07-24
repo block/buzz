@@ -136,6 +136,7 @@ function fixtures() {
     generationAuditId: "audit-brief-1",
   });
   const modelRoute = createModelRoute({
+    selectedEndpoint: "http://127.0.0.1:1234",
     selectedProvider: "lm-studio",
     selectedModel: "local-command-model",
     permittedTools: ["knowledge-retrieval"],
@@ -259,6 +260,7 @@ test("every approved contract preserves all required fields through JSON", () =>
     "kind",
     "version",
     "classification",
+    "selectedEndpoint",
     "selectedProvider",
     "selectedModel",
     "permittedTools",
