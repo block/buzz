@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useMemo } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { RelayEvent } from "@/shared/api/types";
@@ -30,8 +31,18 @@ function buildBindingMap(events: RelayEvent[]): Map<string, string> {
   return map;
 }
 
-export function useImportIdentityBindings() {
-  return useQuery({
+const EMPTY_PUBKEYS: string[] = [];
+
+/**
+ * Returns the binding map plus the deduped list of bound pubkeys — the latter
+ * so callers can add those people to their profile batch fetch and render
+ * imported history under the right avatar. Both are stable across renders.
+ */
+export function useImportIdentityBindings(): {
+  bindings: Map<string, string> | undefined;
+  boundPubkeys: string[];
+} {
+  const query = useQuery({
     queryKey: importIdentityBindingsQueryKey,
     queryFn: async () => {
       const events = await relayClient.fetchEvents({
@@ -43,4 +54,10 @@ export function useImportIdentityBindings() {
     // Bindings change rarely (only when an operator attributes an import).
     staleTime: 5 * 60_000,
   });
+  const bindings = query.data;
+  const boundPubkeys = useMemo(
+    () => (bindings ? [...bindings.values()] : EMPTY_PUBKEYS),
+    [bindings],
+  );
+  return { bindings, boundPubkeys };
 }
