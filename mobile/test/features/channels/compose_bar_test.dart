@@ -41,16 +41,58 @@ final _pngBytes = Uint8List.fromList([
 ]);
 
 final _gifBytes = Uint8List.fromList([
-  0x47,
-  0x49,
-  0x46,
-  0x38,
-  0x39,
-  0x61,
+  ...ascii.encode('GIF89a'),
+  0x02,
+  0x00,
+  0x02,
+  0x00,
+  0x80,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0xff,
+  0xff,
+  0xff,
+  0x21,
+  0xfe,
+  0x05,
+  ...ascii.encode('hello'),
+  0x00,
+  0x21,
+  0xff,
+  0x0b,
+  ...ascii.encode('NETSCAPE2.0'),
+  0x03,
   0x01,
   0x00,
+  0x00,
+  0x00,
+  0x21,
+  0xf9,
+  0x04,
+  0x00,
+  0x0a,
+  0x00,
+  0x00,
+  0x00,
+  0x2c,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0x02,
+  0x00,
+  0x02,
+  0x00,
+  0x00,
+  0x02,
+  0x02,
+  0x44,
   0x01,
   0x00,
+  0x3b,
 ]);
 
 final _apngBytes = Uint8List.fromList([
@@ -62,44 +104,24 @@ final _apngBytes = Uint8List.fromList([
   0x0a,
   0x1a,
   0x0a,
-  0x00,
-  0x00,
-  0x00,
-  0x08,
-  0x61,
-  0x63,
-  0x54,
-  0x4c,
-  0x00,
-  0x00,
-  0x00,
-  0x02,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x49,
-  0x45,
-  0x4e,
-  0x44,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
+  ..._testPngChunk('acTL', [0, 0, 0, 2, 0, 0, 0, 0]),
+  ..._testPngChunk('IEND', const []),
 ]);
+
+List<int> _testPngChunk(String type, List<int> payload) {
+  return [
+    payload.length >> 24 & 0xff,
+    payload.length >> 16 & 0xff,
+    payload.length >> 8 & 0xff,
+    payload.length & 0xff,
+    ...ascii.encode(type),
+    ...payload,
+    0,
+    0,
+    0,
+    0,
+  ];
+}
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
 
@@ -858,12 +880,25 @@ void main() {
       });
     }
 
-    testWidgets('shows a clean error when a GIF is picked', (tester) async {
+    testWidgets('adds a sanitized GIF attachment', (tester) async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nsec,
+        httpClient: http_testing.MockClient((request) async {
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/animated.gif',
+              'sha256':
+                  '4444444444444444444444444444444444444444444444444444444444444444',
+              'size': request.bodyBytes.length,
+              'type': 'image/gif',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
             XFile.fromData(_gifBytes, name: 'animated.gif'),
@@ -887,7 +922,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('GIF uploads are not supported on mobile yet'),
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/animated.gif',
+          ),
+        ),
         findsOneWidget,
       );
     });
@@ -1067,14 +1106,25 @@ void main() {
       expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
     });
 
-    testWidgets('shows a clean error when an animated PNG is picked', (
-      tester,
-    ) async {
+    testWidgets('adds a sanitized animated PNG attachment', (tester) async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nsec,
+        httpClient: http_testing.MockClient((request) async {
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/animated.png',
+              'sha256':
+                  '5555555555555555555555555555555555555555555555555555555555555555',
+              'size': request.bodyBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
             XFile.fromData(_apngBytes, name: 'animated.png'),
@@ -1098,7 +1148,11 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('Animated PNG uploads are not supported on mobile'),
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/animated.png',
+          ),
+        ),
         findsOneWidget,
       );
     });

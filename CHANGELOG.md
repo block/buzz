@@ -1,5 +1,55 @@
 # Changelog
 
+## v0.4.24
+
+- fix(desktop): suppress Windows console flashes and reject WSL bash alias ([#2587](https://github.com/block/buzz/pull/2587)) ([`5afa16157`](https://github.com/block/buzz/commit/5afa16157a63c71f2cd8a80aa7276de28ce1c54c))
+- fix(desktop): fix Windows PATH clobber and .cmd shim EINVAL ([#2563](https://github.com/block/buzz/pull/2563)) ([`cca16635d`](https://github.com/block/buzz/commit/cca16635d69dc8bea5406013095d25f3b0e287d3))
+- Gate default relay auto-connect behind release flag ([#2589](https://github.com/block/buzz/pull/2589)) ([`e67303f60`](https://github.com/block/buzz/commit/e67303f60334d6cd4224216080bd4b851fc5ee4d))
+- fix(desktop): fast-track relay restart reconnects ([#2579](https://github.com/block/buzz/pull/2579)) ([`f3f7688c3`](https://github.com/block/buzz/commit/f3f7688c3a4ecb0405ca8b26e0b6ee815e0f11e6))
+- fix(sharing): preserve agent/team snapshot tEXt chunks through media sanitization ([#2438](https://github.com/block/buzz/pull/2438)) ([`b096b0a15`](https://github.com/block/buzz/commit/b096b0a15af4c4566365c5b1efe7f39b700222ed))
+- test(desktop): live relay kill/restart reconnect gate ([#2583](https://github.com/block/buzz/pull/2583)) ([`6a56c8bda`](https://github.com/block/buzz/commit/6a56c8bdac6d115a0d6d48b24a2a04dc46b336c5))
+- fix(desktop): retry failed initial relay dials ([#2564](https://github.com/block/buzz/pull/2564)) ([`9ec52cfed`](https://github.com/block/buzz/commit/9ec52cfedf579d2ccb2021c216abd4c821a15165))
+- Refine channel lifecycle settings ([#2427](https://github.com/block/buzz/pull/2427)) ([`daeaf7c33`](https://github.com/block/buzz/commit/daeaf7c33d5415199a33cbc3dab00244fad5c219))
+- Fix avatar upload lifecycle edge cases ([#2277](https://github.com/block/buzz/pull/2277)) ([`80244f823`](https://github.com/block/buzz/commit/80244f82318c85f931d1055e419456945c5eca99))
+- fix(observer): eager archive hydration on panel open + 200-frame pages ([#2574](https://github.com/block/buzz/pull/2574)) ([`8cb05028b`](https://github.com/block/buzz/commit/8cb05028be84829501a4f87f8db4ee7034fb786f))
+- chore: Omit the Model control when an optional-model harness has nothing to select ([#2262](https://github.com/block/buzz/pull/2262)) ([`9cf953904`](https://github.com/block/buzz/commit/9cf9539040aee9774cf8d12b651348a2806c05c0))
+- fix(media): sanitize animated image uploads ([#2524](https://github.com/block/buzz/pull/2524)) ([`8f8f5fa5a`](https://github.com/block/buzz/commit/8f8f5fa5a4b2463cdc6c2a527acb7086150cdaae))
+- fix(desktop): populate team instructions when opening the edit team dialog ([#2565](https://github.com/block/buzz/pull/2565)) ([`55c921124`](https://github.com/block/buzz/commit/55c9211241fcfb92a36ed5d6935cb4d2b3ae0702))
+- feat(desktop): add drag-to-reorder for community rail ([#2549](https://github.com/block/buzz/pull/2549)) ([`1e68c6c05`](https://github.com/block/buzz/commit/1e68c6c05021ef2fc93ed0a02a84009ce94cdda5))
+- fix(channels): strip leading hash prefixes from names ([#2250](https://github.com/block/buzz/pull/2250)) ([`d0ab3fdb0`](https://github.com/block/buzz/commit/d0ab3fdb054e0cfedbf21e4c5143ad6c671c10cc))
+- fix(desktop): allow skipping harness setup onboarding ([#2360](https://github.com/block/buzz/pull/2360)) ([`06e3d82b0`](https://github.com/block/buzz/commit/06e3d82b04ab326a36694264ffb4b9dd94ec5661))
+
+
+## v0.4.23
+
+- fix(desktop): strip GIF metadata extensions before upload ([#2425](https://github.com/block/buzz/pull/2425)) ([`47d7eb698`](https://github.com/block/buzz/commit/47d7eb6982900920bcdbe7a2f5013baca37daeeb))
+- feat(desktop): gate sign-out behind key backup + typed confirmation ([#2424](https://github.com/block/buzz/pull/2424)) ([`fd967c6ea`](https://github.com/block/buzz/commit/fd967c6ea46d7454fe1adf79aacd2fc6385c4585))
+- feat(desktop+acp): spawn a harness per (agent, community) pair at GUI startup — warm sockets, lazy LLM pool ([#2122](https://github.com/block/buzz/pull/2122)) ([`61cc738ee`](https://github.com/block/buzz/commit/61cc738ee8991e92563136de4b77e54cb9756420))
+- Show team count separately in channel template rows ([#2404](https://github.com/block/buzz/pull/2404)) ([`6d04d279a`](https://github.com/block/buzz/commit/6d04d279ae60eaa774276b9e28e94df855fd93b3))
+- fix(onboarding): skip community profile setup for existing relay members ([#2300](https://github.com/block/buzz/pull/2300)) ([`25f631870`](https://github.com/block/buzz/commit/25f631870eb66ea696dfe325c6c5da2ca1cff4b1))
+- Unify sidebar chrome across themes ([#2380](https://github.com/block/buzz/pull/2380)) ([`f8fd055b9`](https://github.com/block/buzz/commit/f8fd055b9fc259046ba5e3091982f79f3205af80))
+- fix(desktop): refresh cached channel member names ([#2258](https://github.com/block/buzz/pull/2258)) ([`5a3b8176a`](https://github.com/block/buzz/commit/5a3b8176aac5f4bced452ac8920477c5e059b828))
+
+
+## v0.4.22
+
+- Keep avatar preview visible during upload ([#2237](https://github.com/block/buzz/pull/2237)) ([`f609fcee0`](https://github.com/block/buzz/commit/f609fcee02cd3de9cde2aa4f94fc054d1865a58a))
+- fix(desktop): keep machine onboarding for unrecognized identities after reset ([#2244](https://github.com/block/buzz/pull/2244)) ([`fd55ab662`](https://github.com/block/buzz/commit/fd55ab662450a81a9ce49397f0e42aec0e4cb765))
+- fix(managed-agents): stale harness pin shadows runtime edits; add Restart quick action ([#2252](https://github.com/block/buzz/pull/2252)) ([`ec0e450f1`](https://github.com/block/buzz/commit/ec0e450f1d1587c254d8f29e60c6af4f0ed2419d))
+- fix(desktop): surface model discovery failures in agent config UI ([#2246](https://github.com/block/buzz/pull/2246)) ([`083f6d625`](https://github.com/block/buzz/commit/083f6d62570b6027b58b0721dc103c762d84fdab))
+- Hide bundled harnesses from onboarding ([#2233](https://github.com/block/buzz/pull/2233)) ([`50f441216`](https://github.com/block/buzz/commit/50f44121671343e1327323ad164ae86566531242))
+- Restore npub copy option for private community joins ([#2232](https://github.com/block/buzz/pull/2232)) ([`9cd13f3d5`](https://github.com/block/buzz/commit/9cd13f3d5aa27d841679780d9074df15d85943ce))
+- fix(desktop): align onboarding runtime auth ([#2229](https://github.com/block/buzz/pull/2229)) ([`c1de3e7c0`](https://github.com/block/buzz/commit/c1de3e7c0eab936f2a4aa27c74a5fba74c752062))
+- fix(desktop): survive degraded networks with rate-limit-aware relay client ([#2197](https://github.com/block/buzz/pull/2197)) ([`258cc9206`](https://github.com/block/buzz/commit/258cc92064e219145690323c0dc00a0bdf9c3cf0))
+- feat(desktop): browse immutable repository tags ([#2231](https://github.com/block/buzz/pull/2231)) ([`c11b7b611`](https://github.com/block/buzz/commit/c11b7b611e63ce127469118391cde6d55e7b5a97))
+- Update built-in agent avatars ([#2215](https://github.com/block/buzz/pull/2215)) ([`396ce6473`](https://github.com/block/buzz/commit/396ce6473ea009066b326def29a6ef3e72ac5089))
+- fix(mesh): dedupe models + retry throttled startup channel discovery ([#2063](https://github.com/block/buzz/pull/2063)) ([`97b8b22ee`](https://github.com/block/buzz/commit/97b8b22ee976c4b13127d616e383baa64173ac62))
+- fix(desktop): keep project branches after reload ([#2214](https://github.com/block/buzz/pull/2214)) ([`001184395`](https://github.com/block/buzz/commit/001184395eacba07017b514a133aed8010ca4c73))
+- fix(git): make project branch workflows reliable ([#2213](https://github.com/block/buzz/pull/2213)) ([`166f27be4`](https://github.com/block/buzz/commit/166f27be4bc1abf2d465493bf2137353045399dc))
+- feat(desktop): manage project branches ([#2212](https://github.com/block/buzz/pull/2212)) ([`b2c38c775`](https://github.com/block/buzz/commit/b2c38c775b996edfa730302a0dbeed622d3702db))
+- feat(cli): manage repository protection rules ([#2193](https://github.com/block/buzz/pull/2193)) ([`f94324598`](https://github.com/block/buzz/commit/f94324598d84b2db9a05a3fa1f855970c4c5b575))
+
+
 ## v0.4.21
 
 - fix(desktop): clarify data deletion action ([#2208](https://github.com/block/buzz/pull/2208)) ([`e315c498`](https://github.com/block/buzz/commit/e315c4982f5ab05d05be5935a765c3047bdc076d))

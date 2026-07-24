@@ -3,6 +3,7 @@ import {
   normalizeRelayUrl,
 } from "@/features/communities/communityStorage";
 import { setLocalStorageItemWithRecovery } from "@/shared/lib/localStorageQuota";
+import type { Profile } from "@/shared/api/types";
 
 const STORAGE_KEY = "buzz-community-onboarding-transaction.v1";
 
@@ -225,6 +226,90 @@ export function markCommunityOnboardingComplete(
   // The legacy gate is identity-scoped. Marking it here prevents the old profile
   // flow from reopening after the first community transaction completes.
   storage.setItem(`buzz-onboarding-complete.v1:${pubkey}`, "true");
+}
+
+/**
+ * Returns true when a relay-profile check result means the user should skip
+ * community onboarding entirely and land directly in the app.
+ *
+ * A profile fetch error is represented as `null` and always returns false so
+ * that the fallback (show the profile step) applies — the skip must never
+ * block or strand onboarding.
+ */
+export function shouldSkipCommunityOnboarding(
+  profile: Profile | null,
+): boolean {
+  return profile !== null && profile.hasProfileEvent === true;
+}
+
+/**
+ * Outcome of a profile-check attempt during the connecting → profile
+ * transition. Produced by `resolveProfileCheckAction`.
+ *
+ * - `{ action: "skip", profile }` — kind:0 exists; mark complete and enter
+ *   the app. The resolved `Profile` is included so callers have the pubkey
+ *   for `markCommunityOnboardingComplete` without a second fetch.
+ * - `{ action: "show-profile" }` — no kind:0, or the fetch failed / timed
+ *   out; show the profile setup step.
+ */
+export type ProfileCheckAction =
+  | { action: "skip"; profile: Profile }
+  | { action: "show-profile" };
+
+/**
+ * Returns true when a live transaction snapshot still represents the
+ * same connecting request that launched the profile check.
+ *
+ * Extracted as a pure predicate so the stale-result guard in App.tsx can
+ * be unit-tested without mounting a component.
+ */
+export function isTransactionStillConnecting(
+  live: CommunityOnboardingTransaction | null | undefined,
+  transactionId: string,
+): boolean {
+  return live?.id === transactionId && live.stage === "connecting";
+}
+
+/**
+ * Runs a bounded profile fetch and returns the action to take at the
+ * `connecting → profile` transition.
+ *
+ * Accepts `fetchProfile`, `timeoutMs`, and `scheduleTimeout` as parameters so
+ * callers (and tests) can supply controlled implementations. `scheduleTimeout`
+ * must return a cancellation handle (like `window.setTimeout`) so the timer
+ * can be cleared when the fetch settles before the deadline.
+ *
+ * Any fetch error or timeout → `{ action: "show-profile" }` (never strands
+ * onboarding).
+ */
+export async function resolveProfileCheckAction(
+  fetchProfile: () => Promise<Profile>,
+  timeoutMs: number,
+  scheduleTimeout: (
+    fn: () => void,
+    ms: number,
+  ) => ReturnType<typeof setTimeout> = (fn, ms) => window.setTimeout(fn, ms),
+): Promise<ProfileCheckAction> {
+  let timerId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const profile = await Promise.race([
+      fetchProfile(),
+      new Promise<never>(
+        (_, reject) =>
+          (timerId = scheduleTimeout(
+            () => reject(new Error("profile-check-timeout")),
+            timeoutMs,
+          )),
+      ),
+    ]);
+    return shouldSkipCommunityOnboarding(profile)
+      ? { action: "skip", profile }
+      : { action: "show-profile" };
+  } catch {
+    return { action: "show-profile" };
+  } finally {
+    if (timerId !== undefined) clearTimeout(timerId);
+  }
 }
 
 import * as React from "react";

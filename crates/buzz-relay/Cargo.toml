@@ -78,6 +78,7 @@ metrics         = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 metrics-util    = { workspace = true }
 pulldown-cmark = { version = "0.13.4", default-features = false, features = ["html"] }
+async-compression = { version = "0.4.42", features = ["tokio", "gzip"] }
 
 [features]
 dev = ["buzz-auth/dev"]
@@ -89,3 +90,5 @@ buzz-core = { workspace = true, features = ["test-utils"] }
 buzz-auth = { workspace = true, features = ["dev"] }
 reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
+futures = "0.3"
+flate2 = "1.1.9"

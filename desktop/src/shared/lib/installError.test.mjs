@@ -67,3 +67,47 @@ test("getInstallErrorMessage: failed step with empty stderr falls back to stdout
   ]);
   assert.match(message, /some stdout output/);
 });
+
+test("getInstallErrorMessage: hint and step detail are separated by double newline for whitespace-pre-line rendering", () => {
+  const hint = "Git Bash is required. Install it from git-scm.com.";
+  const message = getInstallErrorMessage([
+    {
+      step: "shell",
+      command: "bash -l -c 'npm install'",
+      success: false,
+      stdout: "",
+      stderr: "bash: command not found",
+      exitCode: 127,
+      hint,
+    },
+  ]);
+  assert.ok(
+    message.includes("\n\n"),
+    "hint and step detail should be separated by a blank line",
+  );
+  assert.ok(message.startsWith(hint));
+});
+
+test("getInstallErrorMessage: only reports the last (failing) step when multiple steps present", () => {
+  const message = getInstallErrorMessage([
+    {
+      step: "node",
+      command: "node --version",
+      success: true,
+      stdout: "v20.0.0",
+      stderr: "",
+      exitCode: 0,
+    },
+    {
+      step: "adapter",
+      command: "npm install -g @agentclientprotocol/claude-code-acp",
+      success: false,
+      stdout: "",
+      stderr: "npm ERR! code E404",
+      exitCode: 1,
+    },
+  ]);
+  assert.match(message, /Step "adapter" failed:/);
+  assert.match(message, /npm ERR! code E404/);
+  assert.doesNotMatch(message, /Step "node"/);
+});

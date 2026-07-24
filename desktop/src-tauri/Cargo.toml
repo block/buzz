@@ -2,7 +2,7 @@
 
 [package]
 name = "buzz-desktop"
-version = "0.4.21"
+version = "0.4.24"
 description = "Buzz desktop app"
 authors = ["you"]
 edition = "2021"
@@ -90,14 +90,14 @@ buzz_persona_pkg = { package = "buzz-persona", path = "../../crates/buzz-persona
 buzz_sdk_pkg = { package = "buzz-sdk", path = "../../crates/buzz-sdk" }
 buzz_agent_pkg = { package = "buzz-agent", path = "../../crates/buzz-agent" }
 iroh = { version = "1.0.2", optional = true }
-mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
-mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
+mesh-llm-sdk = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "c441ea7f328692b18b7f49ad819c7b1a603cbdcb", package = "mesh-llm-sdk", default-features = false, features = ["client", "serving"], optional = true }
+mesh-llm-host-runtime = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "c441ea7f328692b18b7f49ad819c7b1a603cbdcb", package = "mesh-llm-host-runtime", default-features = false, features = ["dynamic-native-runtime"], optional = true }
 # Model catalog + hardware survey for the Share-compute model picker (same
 # diagnose pattern as mesh-console). Lib name of mesh-llm-client is mesh_client.
-mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-client", optional = true }
-mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-node", optional = true }
-mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-system", optional = true }
-mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", tag = "v0.73.1", package = "mesh-llm-events", optional = true }
+mesh-llm-client = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "c441ea7f328692b18b7f49ad819c7b1a603cbdcb", package = "mesh-llm-client", optional = true }
+mesh-llm-node = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "c441ea7f328692b18b7f49ad819c7b1a603cbdcb", package = "mesh-llm-node", optional = true }
+mesh-llm-system = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "c441ea7f328692b18b7f49ad819c7b1a603cbdcb", package = "mesh-llm-system", optional = true }
+mesh-llm-events = { git = "https://github.com/Mesh-LLM/mesh-llm.git", rev = "c441ea7f328692b18b7f49ad819c7b1a603cbdcb", package = "mesh-llm-events", optional = true }
 base64 = "0.22"
 sha2 = "0.11"
 tar = "0.4"
@@ -126,3 +126,6 @@ strip-ansi-escapes = "0.2"
 # `test-util` enables tokio's paused-clock (`start_paused`) so the relay
 # admission gate tests can assert exact wait durations without real sleeps.
 tokio = { version = "1", features = ["test-util"] }
+# The relay's media validation, so the snapshot-sharing tests can prove the
+# full export → sanitize → relay-accept → import contract end to end.
+buzz_media_pkg = { package = "buzz-media", path = "../../crates/buzz-media" }

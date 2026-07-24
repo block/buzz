@@ -2,134 +2,69 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  getDefaultModelConfigRuntimeId,
-  getPreferredRuntimeIdForSelection,
-  runtimeCanAdvanceOnboarding,
-  runtimeCanBeSelected,
-  runtimeSelectionNeedsDefaultModelConfig,
-  runtimeSelectionNeedsDefaultsStep,
+  getReadyOnboardingRuntimes,
+  getVisibleOnboardingRuntimes,
+  runtimeIsReadyForOnboarding,
+  runtimeIsVisibleInOnboarding,
 } from "./onboardingRuntimeSelection.ts";
 
 function runtime(id, availability, status) {
   return { id, availability, authStatus: { status } };
 }
 
-test("known onboarding harnesses can be selected regardless of setup state", () => {
-  for (const id of ["claude", "codex"]) {
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "logged_in")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "not_applicable")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "logged_out")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "config_invalid")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "unknown")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "not_installed", "logged_out")),
-      true,
-    );
-  }
-
-  for (const id of ["buzz-agent", "goose"]) {
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "available", "not_applicable")),
-      true,
-    );
-    assert.equal(
-      runtimeCanBeSelected(runtime(id, "not_installed", "not_applicable")),
-      true,
-    );
-  }
+test("only Claude Code and Codex are visible in onboarding", () => {
+  assert.equal(runtimeIsVisibleInOnboarding("claude"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("goose"), false);
+  assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), false);
+  assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
 });
 
-test("unknown runtimes are not onboarding choices", () => {
-  assert.equal(
-    runtimeCanBeSelected(runtime("custom", "available", "logged_in")),
-    false,
+test("visible onboarding runtimes use the product order", () => {
+  const runtimes = [
+    runtime("buzz-agent", "available", "not_applicable"),
+    runtime("codex", "available", "logged_in"),
+    runtime("goose", "available", "not_applicable"),
+    runtime("claude", "available", "logged_in"),
+  ];
+
+  assert.deepEqual(
+    getVisibleOnboardingRuntimes(runtimes).map(({ id }) => id),
+    ["claude", "codex"],
   );
 });
 
-test("selected runtimes can advance only after setup is complete", () => {
+test("readiness requires an available and authenticated runtime", () => {
   assert.equal(
-    runtimeCanAdvanceOnboarding(runtime("claude", "available", "logged_in")),
+    runtimeIsReadyForOnboarding(runtime("claude", "available", "logged_in")),
     true,
   );
   assert.equal(
-    runtimeCanAdvanceOnboarding(
-      runtime("buzz-agent", "available", "not_applicable"),
+    runtimeIsReadyForOnboarding(
+      runtime("codex", "available", "not_applicable"),
     ),
     true,
   );
   assert.equal(
-    runtimeCanAdvanceOnboarding(runtime("claude", "available", "logged_out")),
+    runtimeIsReadyForOnboarding(runtime("claude", "available", "logged_out")),
     false,
   );
   assert.equal(
-    runtimeCanAdvanceOnboarding(runtime("codex", "not_installed", "unknown")),
-    false,
-  );
-  assert.equal(
-    runtimeCanAdvanceOnboarding(
-      runtime("claude", "adapter_missing", "unknown"),
-    ),
+    runtimeIsReadyForOnboarding(runtime("codex", "not_installed", "logged_in")),
     false,
   );
 });
 
-test("provider-backed selections drive the default model config step", () => {
-  assert.equal(
-    runtimeSelectionNeedsDefaultModelConfig(["claude", "codex"]),
-    false,
-  );
-  assert.equal(
-    runtimeSelectionNeedsDefaultModelConfig(["claude", "goose"]),
-    true,
-  );
-  assert.equal(
-    getDefaultModelConfigRuntimeId(["claude", "codex", "goose", "buzz-agent"]),
-    "buzz-agent",
-  );
-});
+test("ready onboarding runtimes exclude hidden ready harnesses", () => {
+  const runtimes = [
+    runtime("goose", "available", "not_applicable"),
+    runtime("codex", "available", "logged_out"),
+    runtime("buzz-agent", "available", "not_applicable"),
+    runtime("claude", "available", "logged_in"),
+  ];
 
-test("onboarding display order drives the preferred runtime", () => {
-  assert.equal(
-    getPreferredRuntimeIdForSelection([
-      "buzz-agent",
-      "goose",
-      "codex",
-      "claude",
-    ]),
-    "claude",
+  assert.deepEqual(
+    getReadyOnboardingRuntimes(runtimes).map(({ id }) => id),
+    ["claude"],
   );
-  assert.equal(
-    getPreferredRuntimeIdForSelection(["buzz-agent", "goose", "codex"]),
-    "codex",
-  );
-  assert.equal(
-    getPreferredRuntimeIdForSelection(["buzz-agent", "goose"]),
-    "goose",
-  );
-  assert.equal(getPreferredRuntimeIdForSelection(["buzz-agent"]), "buzz-agent");
-  assert.equal(getPreferredRuntimeIdForSelection(["custom"]), "custom");
-  assert.equal(getPreferredRuntimeIdForSelection([]), null);
-});
-
-test("any harness selection drives the defaults step", () => {
-  assert.equal(runtimeSelectionNeedsDefaultsStep([]), false);
-  assert.equal(runtimeSelectionNeedsDefaultsStep(["claude"]), true);
-  assert.equal(runtimeSelectionNeedsDefaultsStep(["codex"]), true);
-  assert.equal(runtimeSelectionNeedsDefaultsStep(["claude", "codex"]), true);
-  assert.equal(runtimeSelectionNeedsDefaultsStep(["goose"]), true);
 });

@@ -3,7 +3,10 @@ import { getVersion } from "@tauri-apps/api/app";
 import { AlertCircle, ArrowLeft, LoaderCircle, RefreshCw } from "lucide-react";
 
 import { useMyRelayMembershipLookupQuery } from "@/features/community-members/hooks";
-import { shouldWarnMissingMembershipSnapshot } from "@/shared/api/relayMembers";
+import {
+  canEditCommunityProfile,
+  shouldWarnMissingMembershipSnapshot,
+} from "@/shared/api/relayMembers";
 import { getFeature } from "@/shared/features/manifest";
 import {
   resolveEnabled,
@@ -126,8 +129,6 @@ export function SettingsView({
   const myMembershipQuery = useMyRelayMembershipLookupQuery();
   const featureState = useFeatureSnapshot();
   const visibleSections = React.useMemo(() => {
-    const membership = myMembershipQuery.data?.membership;
-
     return settingsSections.filter((s) => {
       // Feature gate check. Manifest is preview-only — if the gate id is in
       // the manifest, it's preview and needs an opt-in; if it's not, it's
@@ -138,12 +139,10 @@ export function SettingsView({
           return false;
         }
       }
-      // Community members requires admin/owner role
+      // Closed relays require a discovered admin/owner role. Open relays have
+      // no NIP-43 snapshot, so expose only the relay-authorized profile editor.
       if (s.value === "community-members") {
-        return (
-          membership != null &&
-          (membership.role === "owner" || membership.role === "admin")
-        );
+        return canEditCommunityProfile(myMembershipQuery.data);
       }
       return true;
     });

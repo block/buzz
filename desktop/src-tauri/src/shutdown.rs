@@ -3,7 +3,7 @@ use tauri::Manager;
 use crate::app_state::AppState;
 use crate::managed_agents::{
     self, kill_stale_tracked_processes, load_managed_agents, save_managed_agents,
-    sync_managed_agent_processes, BackendKind, ManagedAgentProcess,
+    sync_managed_agent_processes, BackendKind,
 };
 use crate::{prevent_sleep, util};
 
@@ -121,7 +121,7 @@ pub(crate) fn shutdown_mesh_runtime(app: &tauri::AppHandle) {
 pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _restore_transition = state
-        .managed_agent_restore_transition
+        .managed_agent_runtime_transition
         .lock()
         .map_err(|error| error.to_string())?;
     let _store_guard = state
@@ -149,26 +149,30 @@ pub(crate) fn shutdown_managed_agents(app: &tauri::AppHandle) -> Result<(), Stri
     struct AgentToStop {
         idx: usize,
         pid: u32,
-        runtime: Option<ManagedAgentProcess>,
+        runtime: Option<managed_agents::ManagedAgentPairRuntime>,
     }
 
     let mut to_stop: Vec<AgentToStop> = Vec::new();
-    for (idx, record) in records.iter_mut().enumerate() {
+    for (idx, record) in records.iter().enumerate() {
         if record.backend != BackendKind::Local {
             continue;
         }
-        if record.runtime_pid.is_none() && !runtimes.contains_key(&record.pubkey) {
-            continue;
+        // Drain every tracked pair for this record, not just the first — an
+        // agent can run one harness per community, and each pair gets the
+        // graceful SIGTERM → 2s wait → SIGKILL fan-out with a stop log
+        // marker, instead of falling through to the orphan sweep's 200ms
+        // grace below.
+        for key in managed_agents::managed_agent_runtime_keys(&runtimes, &record.pubkey) {
+            let runtime = runtimes.remove(&key);
+            let Some(pid) = runtime
+                .as_ref()
+                .map(|rt| rt.child.id())
+                .or(record.runtime_pid)
+            else {
+                continue;
+            };
+            to_stop.push(AgentToStop { idx, pid, runtime });
         }
-        let runtime = runtimes.remove(&record.pubkey);
-        let Some(pid) = runtime
-            .as_ref()
-            .map(|rt| rt.child.id())
-            .or(record.runtime_pid)
-        else {
-            continue;
-        };
-        to_stop.push(AgentToStop { idx, pid, runtime });
     }
 
     if !to_stop.is_empty() {

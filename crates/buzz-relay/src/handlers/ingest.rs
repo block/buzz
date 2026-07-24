@@ -91,6 +91,11 @@ impl IngestAuth {
         }
     }
 
+    /// Pubkey used for principal-scoped accounting and policy lookups.
+    pub fn principal_pubkey_bytes(&self) -> Vec<u8> {
+        self.pubkey().to_bytes().to_vec()
+    }
+
     /// Permission scopes for this auth context.
     pub fn scopes(&self) -> &[Scope] {
         match self {
@@ -139,6 +144,22 @@ fn emit_product_feedback_success(
         },
         state_for_request(tenant, auth.pubkey()),
     );
+}
+
+/// Increment the rejection counter with a bounded reason and transport label.
+///
+/// Shared by the WS `EVENT` handler and the HTTP `POST /events` handler so
+/// both transports feed the same series — `transport` distinguishes them so
+/// existing WS-only dashboards aren't silently diluted by HTTP volume.
+/// `reason` is one of a small closed set ("auth", "invalid", "scope",
+/// "error") — bounded, no cardinality risk.
+pub fn reject_with_transport(transport: &'static str, reason: &'static str) {
+    metrics::counter!(
+        "buzz_events_rejected_total",
+        "transport" => transport,
+        "reason" => reason
+    )
+    .increment(1);
 }
 
 /// Successful ingestion result.
@@ -1299,6 +1320,36 @@ fn validate_event_reminder(event: &Event) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Resolve the `author_type` metric label (`"agent"` / `"human"`) for an
+/// event author, from `users.agent_owner_pubkey IS NOT NULL` via a
+/// per-community cache. Metric-labeling only — never used for authorization.
+/// Unknown pubkeys and lookup errors count as "human" (the label must not
+/// add a failure path to ingest).
+async fn author_type_label(
+    state: &Arc<AppState>,
+    tenant: &TenantContext,
+    author_pubkey_bytes: Vec<u8>,
+) -> &'static str {
+    let key = (tenant.community(), author_pubkey_bytes);
+    let cached = state.author_type_cache.get(&key);
+    let is_agent = match cached {
+        Some(v) => v,
+        None => {
+            let v = match state.db.get_agent_channel_policy(key.0, &key.1).await {
+                Ok(Some((_, owner))) => owner.is_some(),
+                Ok(None) | Err(_) => false,
+            };
+            state.author_type_cache.insert(key, v);
+            v
+        }
+    };
+    if is_agent {
+        "agent"
+    } else {
+        "human"
+    }
+}
+
 /// Ingest a signed Nostr event through the full validation pipeline.
 ///
 /// Shared by WebSocket and HTTP transports. The caller constructs [`IngestAuth`]
@@ -1319,6 +1370,14 @@ pub async fn ingest_event(
     event: Event,
     auth: IngestAuth,
 ) -> Result<IngestResult, IngestError> {
+    // Captured before `event` moves into the inner fn: the stored-events
+    // counter below is emitted at this shared seam so WebSocket and HTTP
+    // transports are counted identically.
+    let kind_label = super::event::bounded_kind_label(event_kind_u32(&event));
+    // Classify the authenticated principal, not the event envelope signer:
+    // NIP-59 gift wraps deliberately use an unrelated ephemeral pubkey.
+    let author_pubkey_bytes = auth.principal_pubkey_bytes();
+
     let abstract_state = state_for_request(tenant, auth.pubkey());
     let (_guard, tracer) = EmitGuard::arm(
         state.tracer.clone(),
@@ -1327,6 +1386,22 @@ pub async fn ingest_event(
     );
 
     let result = ingest_event_inner(state, &tracer, tenant, event, auth).await;
+
+    // Fleet-wide stored counter: kind + author_type only, no community tag
+    // (see the cardinality rationale on buzz_events_received_total —
+    // author_type is a 2-value label so it merely doubles the kind series).
+    // Emitted here rather than per-transport so HTTP bridge ingests count too.
+    if let Ok(r) = &result {
+        if r.accepted {
+            let author_type = author_type_label(state, tenant, author_pubkey_bytes).await;
+            metrics::counter!(
+                "buzz_events_stored_total",
+                "kind" => kind_label,
+                "author_type" => author_type
+            )
+            .increment(1);
+        }
+    }
 
     // Map terminal error variants onto the closed SanitizedReason
     // alphabet (spec line 778). The inner fn's success path emits
@@ -1964,7 +2039,11 @@ async fn ingest_event_inner(
         });
         if create_name
             .as_ref()
-            .map(|n| n.trim().is_empty())
+            .map(|n| {
+                buzz_core::channel::canonical_channel_name(n)
+                    .trim()
+                    .is_empty()
+            })
             .unwrap_or(true)
         {
             return Err(IngestError::Rejected(
@@ -2007,6 +2086,7 @@ async fn ingest_event_inner(
 
         if let Some(client_uuid) = channel_id {
             let name = create_name.unwrap_or_default();
+            let name = buzz_core::channel::canonical_channel_name(&name);
 
             let description = event.tags.iter().find_map(|t| {
                 if t.kind().to_string() == "about" {
@@ -2024,7 +2104,7 @@ async fn ingest_event_inner(
                 .create_channel_with_id(
                     tenant.community(),
                     client_uuid,
-                    &name,
+                    name,
                     channel_type,
                     visibility,
                     description.as_deref(),
@@ -2857,6 +2937,24 @@ mod tests {
     }
 
     #[test]
+    fn accounting_uses_authenticated_principal_pubkey() {
+        let principal = nostr::Keys::generate();
+        let envelope_signer = nostr::Keys::generate();
+        let auth = IngestAuth::Nip42 {
+            pubkey: principal.public_key(),
+            scopes: vec![],
+            channel_ids: None,
+            conn_id: Uuid::new_v4(),
+        };
+
+        assert_ne!(principal.public_key(), envelope_signer.public_key());
+        assert_eq!(
+            auth.principal_pubkey_bytes(),
+            principal.public_key().to_bytes().to_vec()
+        );
+    }
+
+    #[test]
     fn ingest_auth_is_http_returns_true_for_http_variant() {
         use crate::handlers::ingest::{HttpAuthMethod, IngestAuth};
         let keys = nostr::Keys::generate();
@@ -3534,5 +3632,55 @@ mod tests {
         let err = validate_agent_turn_metric_envelope(&ev).unwrap_err();
         // error comes from validate_engram_nip44_content with label replaced
         assert!(err.contains("agent-turn-metric"), "got: {err}");
+    }
+
+    /// The HTTP bridge's `submit_event` 400 arm and the WS `EVENT` handler's
+    /// reject path must land on the same counter, distinguished only by the
+    /// `transport` label — this is what lets a dashboard tell "server got
+    /// hammered with bad HTTP requests" apart from "a WS client is
+    /// misbehaving" without losing the combined total.
+    #[test]
+    fn reject_with_transport_labels_http_and_ws_as_separate_series() {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+
+        metrics::with_local_recorder(&recorder, || {
+            reject_with_transport("http", "invalid");
+            reject_with_transport("ws", "invalid");
+            reject_with_transport("http", "invalid");
+        });
+
+        let counts: std::collections::HashMap<(String, String), u64> = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .filter(|(key, ..)| key.key().name() == "buzz_events_rejected_total")
+            .map(|(key, _, _, value)| {
+                let metrics_util::debugging::DebugValue::Counter(n) = value else {
+                    panic!("buzz_events_rejected_total must be a counter");
+                };
+                let labels: Vec<_> = key.key().labels().collect();
+                let transport = labels
+                    .iter()
+                    .find(|l| l.key() == "transport")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                let reason = labels
+                    .iter()
+                    .find(|l| l.key() == "reason")
+                    .map(|l| l.value().to_owned())
+                    .unwrap_or_default();
+                ((transport, reason), n)
+            })
+            .collect();
+
+        assert_eq!(
+            counts.get(&("http".to_owned(), "invalid".to_owned())),
+            Some(&2)
+        );
+        assert_eq!(
+            counts.get(&("ws".to_owned(), "invalid".to_owned())),
+            Some(&1)
+        );
     }
 }
