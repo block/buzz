@@ -248,7 +248,7 @@ test.describe("Doctor panel state screenshots", () => {
     await expect(defaultHarness).toHaveText("Buzz Agent");
     const provider = page.getByTestId("global-agent-provider");
     await provider.click();
-    await page.getByTestId("global-agent-provider-option-openai").click();
+    await page.getByTestId("global-agent-provider-option-relay-mesh").click();
     await page.getByRole("button", { name: "Save defaults" }).click();
     const savedConfig = await page.evaluate(async () =>
       (
@@ -261,7 +261,7 @@ test.describe("Doctor panel state screenshots", () => {
       ).__BUZZ_E2E_INVOKE_MOCK_COMMAND__?.("get_global_agent_config", null),
     );
     expect(savedConfig).toMatchObject({
-      provider: "openai",
+      provider: "relay-mesh",
       preferred_runtime: "buzz-agent",
     });
 
@@ -269,6 +269,7 @@ test.describe("Doctor panel state screenshots", () => {
     await page.getByTestId("open-agents-view").click();
     await page.getByTestId("new-agent-card").click();
     await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
 
     const harnessDropdown = page.locator("#persona-runtime");
     await expect(harnessDropdown).toContainText("Buzz Agent");
