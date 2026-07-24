@@ -24,8 +24,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
-use buzz_core::tenant::{relay_url_authority, TenantContext};
-use buzz_db::{Db, DbConfig};
+use buzz_core::tenant::{normalize_host, relay_url_authority, TenantContext};
+use buzz_db::{AddHostAliasResult, Db, DbConfig};
 use buzz_pubsub::{EventTopic, PubSubManager};
 use clap::{Parser, Subcommand};
 use nostr::{EventBuilder, Keys, Kind, Tag};
@@ -93,6 +93,43 @@ enum Command {
         #[arg(long)]
         relay_key: Option<String>,
     },
+    /// Manage this deployment's community (the one resolved from RELAY_URL).
+    Community {
+        #[command(subcommand)]
+        command: CommunityCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommunityCommand {
+    /// Manage host aliases — additional hostnames that resolve to this
+    /// deployment's community without changing its canonical
+    /// `communities.host` (e.g. an in-cluster Service DNS name that has no
+    /// Host-header route to the community's external host).
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum AliasCommand {
+    /// Add a host alias mapping to this deployment's community.
+    ///
+    /// Fails if the host is already some community's primary host, or
+    /// already aliased to a different community.
+    Add {
+        /// Additional hostname that should resolve to this community, e.g.
+        /// `relay.example.svc.cluster.local:3000`.
+        host: String,
+    },
+    /// Remove a host alias from this deployment's community.
+    Remove {
+        /// Alias hostname to remove.
+        host: String,
+    },
+    /// List host aliases for this deployment's community.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -152,6 +189,24 @@ async fn run(cli: Cli) -> Result<i32> {
             reconcile_channels(relay_key).await?;
             Ok(0)
         }
+        Command::Community {
+            command:
+                CommunityCommand::Alias {
+                    command: AliasCommand::Add { host },
+                },
+        } => cmd_alias_add(host).await,
+        Command::Community {
+            command:
+                CommunityCommand::Alias {
+                    command: AliasCommand::Remove { host },
+                },
+        } => cmd_alias_remove(host).await,
+        Command::Community {
+            command:
+                CommunityCommand::Alias {
+                    command: AliasCommand::List,
+                },
+        } => cmd_alias_list().await,
     }
 }
 
@@ -280,6 +335,83 @@ async fn cmd_list_members() -> Result<i32> {
             m.role,
             added_by,
             m.created_at.format("%Y-%m-%dT%H:%M:%SZ")
+        );
+    }
+
+    Ok(0)
+}
+
+async fn cmd_alias_add(host_arg: String) -> Result<i32> {
+    let host = normalize_host(&host_arg);
+    if host.is_empty() {
+        eprintln!("error: host must not be empty");
+        return Ok(1);
+    }
+
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+
+    match db
+        .add_community_host_alias(&host, tenant.community())
+        .await?
+    {
+        AddHostAliasResult::Added(alias) => {
+            println!(
+                "added alias {} -> community {}",
+                alias.host,
+                tenant.community()
+            );
+            Ok(0)
+        }
+        AddHostAliasResult::AlreadyAliased(existing) if existing == tenant.community() => {
+            println!("alias already exists: {host} (no change)");
+            Ok(0)
+        }
+        AddHostAliasResult::AlreadyAliased(other) => {
+            eprintln!("error: host '{host}' is already aliased to a different community ({other})");
+            Ok(2)
+        }
+        AddHostAliasResult::PrimaryHostCollision => {
+            eprintln!("error: host '{host}' is already a community's primary host");
+            Ok(3)
+        }
+    }
+}
+
+async fn cmd_alias_remove(host_arg: String) -> Result<i32> {
+    let host = normalize_host(&host_arg);
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+
+    if db
+        .remove_community_host_alias(&host, tenant.community())
+        .await?
+    {
+        println!("removed alias {host}");
+        Ok(0)
+    } else {
+        eprintln!("error: no alias '{host}' found for this community");
+        Ok(2)
+    }
+}
+
+async fn cmd_alias_list() -> Result<i32> {
+    let db = connect_db().await?;
+    let tenant = resolve_admin_tenant(&db).await?;
+    let aliases = db.list_community_host_aliases(tenant.community()).await?;
+
+    if aliases.is_empty() {
+        println!("(no host aliases)");
+        return Ok(0);
+    }
+
+    println!("{:<48} created_at", "host");
+    println!("{}", "-".repeat(70));
+    for alias in &aliases {
+        println!(
+            "{:<48} {}",
+            alias.host,
+            alias.created_at.format("%Y-%m-%dT%H:%M:%SZ")
         );
     }
 
@@ -419,7 +551,7 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
 
 async fn connect_db() -> Result<Db> {
     let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
     let db = Db::new(&DbConfig {
         database_url: db_url,
         ..DbConfig::default()
@@ -432,10 +564,14 @@ async fn connect_db() -> Result<Db> {
 ///
 /// `buzz-admin` runs inside the relay container (`compose exec relay
 /// buzz-admin …`), so it shares the relay's `RELAY_URL` and resolves the same
-/// single community against the durable `communities` host map. This is
-/// deliberately NOT a default tenant: an unmapped host fails closed with an
-/// error, mirroring the relay's own `bind_community` row-zero seam. The CLI is
-/// single-community per invocation — there is no cross-community sweep.
+/// single community the relay's own `HostResolver` would (`communities.host`,
+/// falling back to `community_host_aliases`) — including when `RELAY_URL`
+/// itself is only reachable as an alias, e.g. running `buzz-admin` from an
+/// in-cluster host that has no primary `communities.host` row of its own.
+/// This is deliberately NOT a default tenant: an unmapped host fails closed
+/// with an error, mirroring the relay's own `bind_community` row-zero seam.
+/// The CLI is single-community per invocation — there is no cross-community
+/// sweep.
 async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     let relay_url =
         std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string());
@@ -447,14 +583,17 @@ async fn resolve_admin_tenant(db: &Db) -> Result<TenantContext> {
     // — and `wss://relay.example:8443` would resolve `relay.example`. Sharing
     // the helper keeps buzz-admin byte-identical to the community startup seeds.
     let host = relay_url_authority(&relay_url);
-    let record = db.lookup_community_by_host(&host).await?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "RELAY_URL host '{host}' is not mapped to a community.\n\
+    let record = db
+        .lookup_community_by_host_or_alias(&host)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "RELAY_URL host '{host}' is not mapped to a community.\n\
              buzz-admin operates on the configured relay's community; ensure the \
              relay has started and seeded its community (or set RELAY_URL to a \
-             mapped host)."
-        )
-    })?;
+             mapped host or alias)."
+            )
+        })?;
     Ok(TenantContext::resolved(record.id, record.host))
 }
 

@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum ConstraintKind {
@@ -347,6 +347,7 @@ mod tests {
             "push_gateway_delivery_auth_replays",
             "push_gateway_delivery_request_replays",
             "product_feedback",
+            "community_host_aliases",
         ] {
             if normalized[insert_pos..].contains(&format!("'{value}'")) {
                 globals.insert(value.to_owned());
@@ -560,7 +561,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,6 +880,18 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
+
+        // Host aliases: additional hostnames resolving to an existing
+        // community, guarded both directions against collision with a
+        // primary communities.host.
+        assert_eq!(migrations[24].version, 25);
+        let host_aliases = migrations[24].sql.as_str();
+        assert!(host_aliases.contains("CREATE TABLE community_host_aliases"));
+        assert!(host_aliases
+            .contains("CREATE UNIQUE INDEX idx_community_host_aliases_host ON community_host_aliases (lower(host))"));
+        assert!(host_aliases.contains("trg_community_host_aliases_no_primary_collision"));
+        assert!(host_aliases.contains("trg_communities_no_alias_collision"));
+        assert!(host_aliases.contains("'community_host_aliases'"));
     }
 
     #[test]

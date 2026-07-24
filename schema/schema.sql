@@ -61,6 +61,65 @@ CREATE TABLE communities (
 
 CREATE UNIQUE INDEX idx_communities_host ON communities (lower(host));
 
+-- ── Community host aliases ───────────────────────────────────────────────────────
+-- Additional hostnames that resolve to an existing community without
+-- touching `communities.host`. `resolve_host` checks `communities.host`
+-- first and falls back here (crates/buzz-relay/src/tenant.rs); an alias can
+-- never shadow a primary host and never rewrites `TenantContext::host()`.
+--
+-- Motivating case: in-cluster clients reach the relay through a
+-- cluster-local Service DNS name that the mesh routes by Host header,
+-- distinct from the community's externally-facing host.
+--
+-- Like `communities`, this table is OPERATOR-GLOBAL: host lookup must be
+-- globally unique across all communities, so its unique index cannot lead
+-- with `community_id`. Listed in the lint allowlist below.
+
+CREATE TABLE community_host_aliases (
+    host            VARCHAR(255) NOT NULL,
+    community_id    UUID NOT NULL REFERENCES communities(id),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_community_host_aliases_host ON community_host_aliases (lower(host));
+CREATE INDEX idx_community_host_aliases_community_id ON community_host_aliases (community_id);
+
+-- Guard both directions so an alias can never collide with a primary
+-- communities.host, regardless of insertion order. Both triggers take a
+-- pg_advisory_xact_lock keyed only on lower(host) (not the table) before
+-- their EXISTS read, so a concurrent community-create and alias-add for the
+-- same host serialize instead of both passing against each other's
+-- not-yet-committed row (see migration 0025).
+CREATE FUNCTION community_host_aliases_no_primary_collision() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('buzz_host_claim:' || lower(NEW.host), 0));
+    IF EXISTS (SELECT 1 FROM communities WHERE lower(host) = lower(NEW.host)) THEN
+        RAISE EXCEPTION 'host % is already a community primary host', NEW.host
+            USING ERRCODE = 'unique_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_community_host_aliases_no_primary_collision
+    BEFORE INSERT OR UPDATE ON community_host_aliases
+    FOR EACH ROW EXECUTE FUNCTION community_host_aliases_no_primary_collision();
+
+CREATE FUNCTION communities_no_alias_collision() RETURNS TRIGGER AS $$
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended('buzz_host_claim:' || lower(NEW.host), 0));
+    IF EXISTS (SELECT 1 FROM community_host_aliases WHERE lower(host) = lower(NEW.host)) THEN
+        RAISE EXCEPTION 'host % is already a community host alias', NEW.host
+            USING ERRCODE = 'unique_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_communities_no_alias_collision
+    BEFORE INSERT OR UPDATE ON communities
+    FOR EACH ROW EXECUTE FUNCTION communities_no_alias_collision();
+
 -- ── Channels ──────────────────────────────────────────────────────────────────
 -- Conformance: "Channels and channel membership". `community_id` immutable.
 -- Channel UUIDs stay valid wire identifiers, but they are NOT globally unique:
@@ -744,7 +803,8 @@ CREATE TABLE _operator_global_tables (
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('communities',           'the tenant registry itself; id IS the community key'),
     ('rate_limit_violations', 'deployment abuse/health; never tenant-observable; community_id is an attribution label only'),
-    ('_operator_global_tables', 'the registry table itself');
+    ('_operator_global_tables', 'the registry table itself'),
+    ('community_host_aliases', 'host alias map spans communities by design; global host uniqueness is enforced against communities.host via trigger, mirroring the communities registry itself');
 -- NIP-PL effective lease state and durable wake outbox. Every key is led by
 -- community_id: client-provided origin is confirmation only, never routing.
 CREATE TABLE push_leases (

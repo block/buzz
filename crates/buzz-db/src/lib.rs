@@ -266,6 +266,31 @@ pub struct CommunityRecord {
     pub host: String,
 }
 
+/// Host alias row returned by [`Db::list_community_host_aliases`] and
+/// [`Db::add_community_host_alias`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommunityHostAlias {
+    /// Normalized alias hostname.
+    pub host: String,
+    /// Community the alias resolves to.
+    pub community_id: CommunityId,
+    /// When the alias was created.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Result of attempting to add a host alias via [`Db::add_community_host_alias`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddHostAliasResult {
+    /// The alias was newly created.
+    Added(CommunityHostAlias),
+    /// The host is already an alias — for the same community (no-op) or a
+    /// different one (caller must decide whether that's an error).
+    AlreadyAliased(CommunityId),
+    /// The host is already some community's primary `communities.host`; an
+    /// alias would create an ambiguous fallback the resolver never reaches.
+    PrimaryHostCollision,
+}
+
 /// Community row returned by idempotent community ensure/create operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnsuredCommunityRecord {
@@ -710,6 +735,171 @@ impl Db {
         .transpose()
     }
 
+    /// Returns the community mapped to a normalized request host, checking
+    /// the primary `communities.host` map first and falling back to
+    /// `community_host_aliases`.
+    ///
+    /// This is the fallback-aware sibling of [`lookup_community_by_host`];
+    /// [`crate::HostResolver`]'s `Db` impl (in `buzz-relay`) calls this one so
+    /// an in-cluster/alias host resolves the same community as the primary
+    /// host, without ever taking priority over it. Archived communities fail
+    /// closed via both paths, matching `lookup_community_by_host`.
+    ///
+    /// [`lookup_community_by_host`]: Self::lookup_community_by_host
+    pub async fn lookup_community_by_host_or_alias(
+        &self,
+        normalized_host: &str,
+    ) -> Result<Option<CommunityRecord>> {
+        if let Some(record) = self.lookup_community_by_host(normalized_host).await? {
+            return Ok(Some(record));
+        }
+
+        let row = sqlx::query(
+            r#"
+            SELECT c.id, c.host
+            FROM community_host_aliases a
+            JOIN communities c ON c.id = a.community_id
+            WHERE lower(a.host) = lower($1)
+              AND c.archived_at IS NULL
+            "#,
+        )
+        .bind(normalized_host)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        row.map(|row| {
+            Ok(CommunityRecord {
+                id: CommunityId::from_uuid(row.try_get("id")?),
+                host: row.try_get("host")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Returns whether `normalized_host` is reserved as a host alias for any
+    /// community, regardless of that community's archived state.
+    ///
+    /// Operator-plane counterpart to [`lookup_community_by_host_for_management`]:
+    /// a host stays reserved as an alias even if the community it points to is
+    /// archived (the alias-collision trigger from migration 0025 checks
+    /// `communities` unconditionally too), so an availability check that only
+    /// consulted the fallback-aware, archived-filtering
+    /// [`lookup_community_by_host_or_alias`] would report an alias-reserved
+    /// host as available and let a create attempt fail on the trigger instead
+    /// of the normal "host taken" response.
+    ///
+    /// [`lookup_community_by_host_for_management`]: Self::lookup_community_by_host_for_management
+    /// [`lookup_community_by_host_or_alias`]: Self::lookup_community_by_host_or_alias
+    pub async fn community_host_alias_exists(&self, normalized_host: &str) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM community_host_aliases WHERE lower(host) = lower($1))",
+        )
+        .bind(normalized_host)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
+    /// Adds a host alias resolving to `community_id`.
+    ///
+    /// Checks upfront for a collision with any community's primary host so
+    /// the common case returns a typed [`AddHostAliasResult`] instead of a
+    /// raw constraint-violation error; migration 0025's trigger is the
+    /// belt-and-suspenders guard against the same race at the database level.
+    pub async fn add_community_host_alias(
+        &self,
+        normalized_host: &str,
+        community_id: CommunityId,
+    ) -> Result<AddHostAliasResult> {
+        if self
+            .lookup_community_by_host_for_management(normalized_host)
+            .await?
+            .is_some()
+        {
+            return Ok(AddHostAliasResult::PrimaryHostCollision);
+        }
+
+        let row = sqlx::query(
+            r#"
+            INSERT INTO community_host_aliases (host, community_id)
+            VALUES ($1, $2)
+            ON CONFLICT (lower(host)) DO NOTHING
+            RETURNING host, community_id, created_at
+            "#,
+        )
+        .bind(normalized_host)
+        .bind(community_id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            return Ok(AddHostAliasResult::Added(CommunityHostAlias {
+                host: row.try_get("host")?,
+                community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                created_at: row.try_get("created_at")?,
+            }));
+        }
+
+        let existing_community_id: Uuid = sqlx::query_scalar(
+            "SELECT community_id FROM community_host_aliases WHERE lower(host) = lower($1)",
+        )
+        .bind(normalized_host)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(AddHostAliasResult::AlreadyAliased(CommunityId::from_uuid(
+            existing_community_id,
+        )))
+    }
+
+    /// Removes a host alias, scoped to `community_id` so a caller can only
+    /// remove aliases belonging to the community it resolved to (mirrors the
+    /// scoping on [`remove_relay_member`](Self::remove_relay_member)).
+    ///
+    /// Returns `true` if a row was removed, `false` if no alias with that
+    /// host existed for this community.
+    pub async fn remove_community_host_alias(
+        &self,
+        normalized_host: &str,
+        community_id: CommunityId,
+    ) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM community_host_aliases WHERE lower(host) = lower($1) AND community_id = $2",
+        )
+        .bind(normalized_host)
+        .bind(community_id.as_uuid())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Lists host aliases for `community_id`, oldest first.
+    pub async fn list_community_host_aliases(
+        &self,
+        community_id: CommunityId,
+    ) -> Result<Vec<CommunityHostAlias>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT host, community_id, created_at
+            FROM community_host_aliases
+            WHERE community_id = $1
+            ORDER BY created_at ASC
+            "#,
+        )
+        .bind(community_id.as_uuid())
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(CommunityHostAlias {
+                    host: row.try_get("host")?,
+                    community_id: CommunityId::from_uuid(row.try_get("community_id")?),
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
     /// Lists communities where `owner_pubkey` currently holds the `owner` role.
     ///
     /// This is an operator-plane helper, not a tenant-scoped data-plane read:
@@ -827,6 +1017,14 @@ impl Db {
     /// This is the startup/config seeding path for N=1 deployments. Migrations
     /// create the schema only; deployment-specific hosts are not hardcoded into
     /// schema history.
+    ///
+    /// A host already reserved in `community_host_aliases` never gets a
+    /// `communities.host` row of its own, so `ON CONFLICT (lower(host))`
+    /// can't catch that case — migration 0025's `communities_no_alias_collision`
+    /// trigger rejects the `INSERT` instead, raising `23505`. That's caught
+    /// below and surfaced as [`DbError::HostAliasCollision`] so callers (the
+    /// operator provisioning API's legacy convergence path in particular) get
+    /// a distinguishable, mappable error instead of a raw database error.
     pub async fn ensure_configured_community(
         &self,
         normalized_host: &str,
@@ -841,7 +1039,15 @@ impl Db {
         )
         .bind(normalized_host)
         .fetch_one(&self.pool)
-        .await?;
+        .await;
+
+        let row = match row {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505") => {
+                return Err(DbError::HostAliasCollision(normalized_host.to_string()));
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         let id: Uuid = row.try_get("id")?;
         let host: String = row.try_get("host")?;
@@ -859,6 +1065,16 @@ impl Db {
     /// Holds a per-owner advisory lock while enforcing the ownership limit.
     /// Identical create retries return the original record; host collisions and
     /// limit failures remain distinguishable to the operator API.
+    ///
+    /// A host already reserved in `community_host_aliases` collides too:
+    /// `ON CONFLICT (lower(host))` only catches conflicts against
+    /// `communities`' own unique index, so an alias collision instead trips
+    /// migration 0025's `communities_no_alias_collision` trigger, which
+    /// raises a `23505` (`unique_violation`) from the `BEFORE INSERT` and
+    /// never reaches `ON CONFLICT`. That's caught below and folded into the
+    /// same [`CreateCommunityWithOwnerResult::HostExists`] outcome, so
+    /// callers see one "host taken" case regardless of which table claimed
+    /// it first.
     pub async fn create_community_with_owner(
         &self,
         normalized_host: &str,
@@ -884,7 +1100,16 @@ impl Db {
         )
         .bind(normalized_host)
         .fetch_optional(&mut *tx)
-        .await?;
+        .await;
+
+        let row = match row {
+            Ok(row) => row,
+            Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505") => {
+                tx.rollback().await?;
+                return Ok(CreateCommunityWithOwnerResult::HostExists);
+            }
+            Err(err) => return Err(err.into()),
+        };
 
         let (id, host) = if let Some(row) = row {
             let id: Uuid = row.try_get("id")?;
@@ -3929,7 +4154,7 @@ mod tests {
     use sqlx::{Acquire, PgPool};
     use uuid::Uuid;
 
-    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz";
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
 
     async fn setup_db() -> Db {
         let database_url =
@@ -4721,6 +4946,157 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires Postgres"]
+    async fn alias_resolves_to_same_community_as_primary_host() {
+        let db = setup_db().await;
+        let host = format!("alias-primary-{}.example", Uuid::new_v4().simple());
+        let alias_host = format!("alias-clusterlocal-{}.example", Uuid::new_v4().simple());
+        let owner = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        let created = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+
+        let added = db
+            .add_community_host_alias(&alias_host, created.id)
+            .await
+            .expect("add alias");
+        assert!(matches!(added, AddHostAliasResult::Added(_)));
+
+        let resolved = db
+            .lookup_community_by_host_or_alias(&alias_host)
+            .await
+            .expect("resolve alias")
+            .expect("alias resolves to a community");
+        assert_eq!(resolved.id, created.id);
+
+        // Case-insensitive, same as the primary-host index.
+        let resolved_upper = db
+            .lookup_community_by_host_or_alias(&alias_host.to_ascii_uppercase())
+            .await
+            .expect("resolve upper-case alias")
+            .expect("alias resolves regardless of case");
+        assert_eq!(resolved_upper.id, created.id);
+
+        // A primary host must still resolve through the same fallback-aware
+        // lookup (the fallback must never shadow it).
+        let resolved_primary = db
+            .lookup_community_by_host_or_alias(&host)
+            .await
+            .expect("resolve primary host")
+            .expect("primary host still resolves");
+        assert_eq!(resolved_primary.id, created.id);
+
+        let listed = db
+            .list_community_host_aliases(created.id)
+            .await
+            .expect("list aliases");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].host, alias_host);
+
+        assert!(
+            db.remove_community_host_alias(&alias_host, created.id)
+                .await
+                .expect("remove alias"),
+            "remove reports the row was deleted"
+        );
+        assert!(
+            db.lookup_community_by_host_or_alias(&alias_host)
+                .await
+                .expect("resolve after removal")
+                .is_none(),
+            "removed alias must not resolve"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unknown_host_fails_closed_even_with_aliases_present() {
+        let db = setup_db().await;
+        let host = format!("unknown-fence-{}.example", Uuid::new_v4().simple());
+        let owner = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let alias_host = format!("unknown-fence-alias-{}.example", Uuid::new_v4().simple());
+
+        let created = db
+            .create_community_with_owner(&host, owner)
+            .await
+            .expect("create community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+        db.add_community_host_alias(&alias_host, created.id)
+            .await
+            .expect("add alias");
+
+        let unmapped = format!("totally-unmapped-{}.example", Uuid::new_v4().simple());
+        assert!(
+            db.lookup_community_by_host_or_alias(&unmapped)
+                .await
+                .expect("lookup unmapped host")
+                .is_none(),
+            "a host that is neither a primary host nor an alias must fail closed"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn alias_colliding_with_a_primary_host_is_rejected() {
+        let db = setup_db().await;
+        let host_a = format!("collision-a-{}.example", Uuid::new_v4().simple());
+        let host_b = format!("collision-b-{}.example", Uuid::new_v4().simple());
+        let owner_a = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let owner_b = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+        let created_a = db
+            .create_community_with_owner(&host_a, owner_a)
+            .await
+            .expect("create community A");
+        let CreateCommunityWithOwnerResult::Created(created_a) = created_a else {
+            panic!("expected new community A");
+        };
+        let created_b = db
+            .create_community_with_owner(&host_b, owner_b)
+            .await
+            .expect("create community B");
+        let CreateCommunityWithOwnerResult::Created(created_b) = created_b else {
+            panic!("expected new community B");
+        };
+
+        // The typed application-level guard rejects it...
+        let result = db
+            .add_community_host_alias(&host_b, created_a.id)
+            .await
+            .expect("add alias attempt");
+        assert_eq!(result, AddHostAliasResult::PrimaryHostCollision);
+
+        // ...and the database trigger is the belt-and-suspenders guard
+        // against the same collision if the application check is bypassed
+        // (e.g. a direct INSERT, as a misbehaving caller might attempt).
+        let trigger_result =
+            sqlx::query("INSERT INTO community_host_aliases (host, community_id) VALUES ($1, $2)")
+                .bind(&host_b)
+                .bind(created_a.id.as_uuid())
+                .execute(&db.pool)
+                .await;
+        assert!(
+            trigger_result.is_err(),
+            "the database trigger must reject an alias colliding with a primary host"
+        );
+
+        // Community B's own host must still resolve to community B, not A.
+        let resolved = db
+            .lookup_community_by_host_or_alias(&host_b)
+            .await
+            .expect("resolve host B")
+            .expect("host B still resolves");
+        assert_eq!(resolved.id, created_b.id);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
     async fn create_community_with_owner_is_atomic_and_create_only() {
         let db = setup_db().await;
         let host = format!("create-only-{}.example", Uuid::new_v4().simple());
@@ -4780,6 +5156,48 @@ mod tests {
             post_rotation_retry,
             CreateCommunityWithOwnerResult::HostExists
         );
+    }
+
+    /// A host already reserved via `community_host_aliases` never has a
+    /// `communities.host` row of its own, so `ON CONFLICT (lower(host))`
+    /// can't catch the collision — it's the `communities_no_alias_collision`
+    /// trigger that rejects the `INSERT`. That must still surface as the
+    /// typed `HostExists` outcome, not a raw database error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn create_community_with_owner_treats_alias_reserved_host_as_host_exists() {
+        let db = setup_db().await;
+        let owner_host = format!("alias-owner-{}.example", Uuid::new_v4().simple());
+        let owner = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+        let created = db
+            .create_community_with_owner(&owner_host, owner)
+            .await
+            .expect("create owning community");
+        let CreateCommunityWithOwnerResult::Created(created) = created else {
+            panic!("expected new community");
+        };
+
+        let alias_host = format!("alias-target-{}.example", Uuid::new_v4().simple());
+        db.add_community_host_alias(&alias_host, created.id)
+            .await
+            .expect("add alias");
+
+        let other = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        let collision = db
+            .create_community_with_owner(&alias_host, other)
+            .await
+            .expect("collision result should not be a raw DB error");
+        assert_eq!(collision, CreateCommunityWithOwnerResult::HostExists);
+
+        // The failed create must not have poisoned the pool connection or
+        // left the alias's owning community mutated.
+        let aliases = db
+            .list_community_host_aliases(created.id)
+            .await
+            .expect("list aliases after collision");
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].host, alias_host);
     }
 
     #[tokio::test]
@@ -4924,6 +5342,36 @@ mod tests {
         assert!(!second.created, "second ensure should report existed");
         assert_eq!(second.id, first.id);
         assert_eq!(second.host, host);
+    }
+
+    /// The legacy convergence path (used by the operator API's `create_only:
+    /// false` mode and by startup seeding) must also translate an
+    /// alias-reserved host into a distinguishable error rather than letting
+    /// migration 0025's trigger raise a raw database error.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn ensure_configured_community_rejects_alias_reserved_host() {
+        let db = setup_db().await;
+        let owner_host = format!("ensure-alias-owner-{}.example", Uuid::new_v4().simple());
+
+        let owner = db
+            .ensure_configured_community(&owner_host)
+            .await
+            .expect("create owning community");
+
+        let alias_host = format!("ensure-alias-target-{}.example", Uuid::new_v4().simple());
+        db.add_community_host_alias(&alias_host, owner.id)
+            .await
+            .expect("add alias");
+
+        let err = db
+            .ensure_configured_community(&alias_host)
+            .await
+            .expect_err("alias-reserved host must not silently become a primary host");
+        assert!(
+            matches!(err, DbError::HostAliasCollision(ref h) if h == &alias_host),
+            "expected HostAliasCollision, got {err:?}"
+        );
     }
 
     #[tokio::test]
