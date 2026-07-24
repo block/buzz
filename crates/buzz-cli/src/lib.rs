@@ -203,6 +203,9 @@ enum Cmd {
     /// Read the activity feed
     #[command(subcommand)]
     Feed(FeedCmd),
+    /// Import history from an external workspace (Slack export)
+    #[command(subcommand)]
+    Import(ImportCmd),
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
@@ -916,6 +919,87 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+/// Subcommands for `buzz import`.
+#[derive(Subcommand)]
+pub enum ImportCmd {
+    /// Import a Slack workspace export directory (see docs/slack-import.md)
+    #[command(
+        after_help = "History is signed by the CLI identity (bot mode) and tagged with the \
+original author (import_author) and timestamp. No private key is ever \
+generated for or distributed to anyone.\n\n\
+Attributing history to a real person takes TWO signatures: an owner/admin \
+attestation (Slack id → that person's PUBLIC key) via --identity-map here or \
+`buzz import bind`, AND the person's own consent via `buzz import claim`, run \
+by them with their key. An attestation alone does not attribute history, so an \
+admin cannot make someone appear to author messages they never wrote.\n\n\
+Re-running resumes from the state file — completed writes are skipped.\n\n\
+Examples:\n  \
+buzz import slack --export-dir ./export --dry-run\n  \
+buzz import slack --export-dir ./export\n  \
+buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1def"
+    )]
+    Slack {
+        /// Path to the unzipped Slack export directory
+        #[arg(long)]
+        export_dir: String,
+        /// Slack workspace id (team id, e.g. T0266FRGM). Namespaces identity
+        /// bindings and channel UUIDs so ids never collide across workspaces.
+        #[arg(long)]
+        team_id: String,
+        /// State file path (default: <export-dir>/buzz-import-state.json)
+        #[arg(long)]
+        state: Option<String>,
+        /// Only import these channel names (comma-separated)
+        #[arg(long)]
+        channels: Option<String>,
+        /// Parse and report what would be imported without writing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Skip importing reactions
+        #[arg(long, default_value_t = false)]
+        skip_reactions: bool,
+        /// Owner/admin-signed identity bindings: SLACKID=npub-or-hex, comma-separated.
+        /// Public keys only — never an nsec.
+        #[arg(long)]
+        identity_map: Option<String>,
+    },
+    /// Attest that a Slack id maps to a person's public key (owner/admin half)
+    #[command(
+        after_help = "The owner/admin half of a two-party identity binding. The pubkey is \
+PUBLIC (npub or hex) — never an nsec. Requires the CLI identity to be a \
+community owner or admin. History is attributed only once the person also runs \
+`buzz import claim` with their own key.\n\nExample:\n  \
+buzz import bind --slack-id U060976D0QN --pubkey npub1abc..."
+    )]
+    Bind {
+        /// Slack workspace id (team id, e.g. T0266FRGM)
+        #[arg(long)]
+        team_id: String,
+        /// Slack user id (e.g. U060976D0QN)
+        #[arg(long)]
+        slack_id: String,
+        /// The person's PUBLIC key: npub1… or 64-char hex
+        #[arg(long)]
+        pubkey: String,
+    },
+    /// Consent to being attributed a Slack id — the subject half of a binding
+    #[command(
+        after_help = "The subject half of a two-party identity binding. Run this yourself, \
+with your own key: it self-signs your consent that the Slack id is you. It \
+attributes history only once a community owner/admin has published the \
+matching `buzz import bind` attestation for your pubkey.\n\nExample:\n  \
+buzz import claim --slack-id U060976D0QN"
+    )]
+    Claim {
+        /// Slack workspace id (team id, e.g. T0266FRGM)
+        #[arg(long)]
+        team_id: String,
+        /// Your Slack user id (e.g. U060976D0QN)
+        #[arg(long)]
+        slack_id: String,
     },
 }
 
@@ -1775,6 +1859,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
+        Cmd::Import(sub) => commands::import::dispatch(sub, &client).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
@@ -1809,6 +1894,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "import",
             "issues",
             "media",
             "mem",
@@ -1928,6 +2014,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "import"), vec!["bind", "claim", "slack"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -1998,6 +2085,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("import", 3),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),

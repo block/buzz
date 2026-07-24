@@ -179,6 +179,10 @@ pub struct Db {
     /// route here (see [`Db::read`]); locks, transactions, and anything
     /// consistency-critical stays on `pool`.
     pub(crate) read_pool: Option<PgPool>,
+    /// The commit-time floor armed on the writer pool (from
+    /// [`DbConfig::created_at_floor_secs`]); the fence probe must subtract
+    /// the same value — the two uses must never diverge.
+    pub(crate) created_at_floor_secs: i64,
     /// Freshness fence gating cursor-page routing to the replica.
     ///
     /// Starts closed; a background probe ([`replica_fence::run_probe`])
@@ -238,6 +242,12 @@ pub struct DbConfig {
     pub max_lifetime_secs: u64,
     /// Seconds a connection may sit idle before being closed.
     pub idle_timeout_secs: u64,
+    /// Seconds of `created_at` history the commit-time floor guard tolerates
+    /// (migration 0021). Must exceed the relay's accepted past drift by
+    /// enough slack that a legitimately accepted event still commits within
+    /// the floor. Defaults to [`replica_fence::CREATED_AT_FLOOR_SECS`];
+    /// raised together with `BUZZ_MAX_PAST_DRIFT_SECS` for history imports.
+    pub created_at_floor_secs: i64,
 }
 
 impl Default for DbConfig {
@@ -253,6 +263,7 @@ impl Default for DbConfig {
             acquire_timeout_secs: 3,
             max_lifetime_secs: 1800,
             idle_timeout_secs: 600,
+            created_at_floor_secs: replica_fence::CREATED_AT_FLOOR_SECS,
         }
     }
 }
@@ -367,6 +378,7 @@ impl Db {
             pool,
             max_connections: config.max_connections,
             read_pool,
+            created_at_floor_secs: config.created_at_floor_secs,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         })
     }
@@ -385,11 +397,12 @@ impl Db {
             .max_lifetime(Duration::from_secs(config.max_lifetime_secs))
             .idle_timeout(Duration::from_secs(config.idle_timeout_secs));
         if arm_floor_guard {
-            options = options.after_connect(|conn, _meta| {
+            let floor_secs = config.created_at_floor_secs;
+            options = options.after_connect(move |conn, _meta| {
                 Box::pin(async move {
                     // `SET` cannot take bind parameters; `set_config` can.
                     sqlx::query("SELECT set_config('buzz.created_at_floor', $1, false)")
-                        .bind(replica_fence::CREATED_AT_FLOOR_SECS.to_string())
+                        .bind(floor_secs.to_string())
                         .execute(conn)
                         .await?;
                     Ok(())
@@ -405,6 +418,7 @@ impl Db {
             max_connections: pool.options().get_max_connections(),
             pool,
             read_pool: None,
+            created_at_floor_secs: replica_fence::CREATED_AT_FLOOR_SECS,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         }
     }
@@ -421,6 +435,7 @@ impl Db {
             max_connections: pool.options().get_max_connections(),
             pool,
             read_pool: Some(read_pool),
+            created_at_floor_secs: replica_fence::CREATED_AT_FLOOR_SECS,
             fence: std::sync::Arc::new(replica_fence::ReplicaFence::new()),
         }
     }
@@ -451,11 +466,12 @@ impl Db {
             return Ok(false);
         };
         replica_fence::verify_floor_guard_catalog(&self.pool).await?;
-        replica_fence::verify_floor_guard_behavior(&self.pool).await?;
+        replica_fence::verify_floor_guard_behavior(&self.pool, self.created_at_floor_secs).await?;
         tokio::spawn(replica_fence::run_probe(
             self.pool.clone(),
             read_pool.clone(),
             std::sync::Arc::clone(&self.fence),
+            self.created_at_floor_secs,
         ));
         Ok(true)
     }
@@ -1383,14 +1399,46 @@ impl Db {
         channel_id: Option<Uuid>,
         thread_meta: Option<event::ThreadMetadataParams<'_>>,
     ) -> Result<(StoredEvent, bool)> {
+        self.insert_event_with_thread_metadata_opts(
+            community_id,
+            event,
+            channel_id,
+            thread_meta,
+            false,
+        )
+        .await
+    }
+
+    /// [`Self::insert_event_with_thread_metadata`] with a `backfill` switch.
+    ///
+    /// `backfill: true` disarms the commit-time `created_at` floor guard for
+    /// this insert's transaction (authorized history imports) and brackets
+    /// the write with the replica fence's backfill guard so a floor-exempt
+    /// commit can never be claimed covered by a stale handshake sample.
+    pub async fn insert_event_with_thread_metadata_opts(
+        &self,
+        community_id: CommunityId,
+        event: &nostr::Event,
+        channel_id: Option<Uuid>,
+        thread_meta: Option<event::ThreadMetadataParams<'_>>,
+        backfill: bool,
+    ) -> Result<(StoredEvent, bool)> {
+        if backfill {
+            self.fence.backfill_begin();
+        }
         let result = event::insert_event_with_thread_metadata(
             &self.pool,
             community_id,
             event,
             channel_id,
             thread_meta,
+            backfill,
         )
-        .await?;
+        .await;
+        if backfill {
+            self.fence.backfill_end();
+        }
+        let result = result?;
         if result.1 {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
                 tracing::warn!(event_id = %event.id, "Failed to insert mentions: {e}");
@@ -1400,6 +1448,10 @@ impl Db {
     }
 
     /// Atomically insert a kind:7 reaction event and its reaction row.
+    ///
+    /// `backfill: true` disarms the floor guard for this transaction and
+    /// brackets the write with the fence's backfill guard (see
+    /// [`Self::insert_event_with_thread_metadata_opts`]).
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_reaction_event_with_thread_metadata(
         &self,
@@ -1410,7 +1462,11 @@ impl Db {
         target_event_id: &[u8],
         actor_pubkey: &[u8],
         emoji: &str,
+        backfill: bool,
     ) -> Result<event::ReactionEventInsertOutcome> {
+        if backfill {
+            self.fence.backfill_begin();
+        }
         let outcome = event::insert_reaction_event_with_thread_metadata(
             &self.pool,
             community_id,
@@ -1420,8 +1476,13 @@ impl Db {
             target_event_id,
             actor_pubkey,
             emoji,
+            backfill,
         )
-        .await?;
+        .await;
+        if backfill {
+            self.fence.backfill_end();
+        }
+        let outcome = outcome?;
         if let event::ReactionEventInsertOutcome::Inserted {
             was_inserted: true, ..
         } = &outcome
@@ -5315,6 +5376,7 @@ mod tests {
                 depth: 0,
                 broadcast: true,
             }),
+            false,
         )
         .await
         .expect("insert top-level event");
@@ -5347,6 +5409,7 @@ mod tests {
                 depth: 1,
                 broadcast: false,
             }),
+            false,
         )
         .await
         .expect("insert reply");
@@ -5911,6 +5974,7 @@ mod tests {
                 depth: 0,
                 broadcast: true,
             }),
+            false,
         )
         .await
         .expect_err("armed pool must reject below-floor thread-metadata inserts");

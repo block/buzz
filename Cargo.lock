@@ -1019,6 +1019,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-migrate"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "buzz-core",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "clap",
+ "hex",
+ "hmac 0.13.0",
+ "nostr",
+ "rand 0.10.1",
+ "reqwest 0.13.4",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "buzz-pair-relay"
 version = "0.1.0"
 dependencies = [
@@ -9585,6 +9613,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

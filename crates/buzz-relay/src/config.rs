@@ -99,6 +99,16 @@ pub struct Config {
     /// TCP port for the Prometheus metrics exporter (`GET /metrics`).
     pub metrics_port: u16,
 
+    /// Maximum accepted age of an event's `created_at` in seconds
+    /// (`BUZZ_MAX_PAST_DRIFT_SECS`, default 900 = 15 minutes).
+    ///
+    /// Future drift stays fixed at 15 minutes — a future timestamp is always
+    /// a clock error or a forgery. Past drift is operator-tunable so a
+    /// community owner can open a window for history imports (e.g.
+    /// `buzz import slack`, which replays messages with their original
+    /// timestamps), then restore the default once the import completes.
+    pub max_past_drift_secs: i64,
+
     /// When true, NIP-42 pubkey-only authentication (no API token) is
     /// restricted to pubkeys in the `pubkey_allowlist` table. Users with valid
     /// API tokens bypass the allowlist entirely.
@@ -616,6 +626,12 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(9102);
 
+        let max_past_drift_secs = std::env::var("BUZZ_MAX_PAST_DRIFT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v >= 0)
+            .unwrap_or(900);
+
         let media = buzz_media::MediaConfig {
             s3_endpoint: std::env::var("BUZZ_S3_ENDPOINT")
                 .unwrap_or_else(|_| "http://localhost:9000".to_string()),
@@ -889,6 +905,7 @@ impl Config {
             uds_path,
             health_port,
             metrics_port,
+            max_past_drift_secs,
             pubkey_allowlist_enabled,
             require_relay_membership,
             huddle_audio_available,

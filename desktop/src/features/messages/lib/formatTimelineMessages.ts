@@ -75,6 +75,41 @@ function getDeletionTargets(tags: string[][]) {
 }
 
 /**
+ * The original author of an imported (bot-signed) message, from its
+ * `["import", <source>]` and `["import_author", <foreign id>, <display name>]`
+ * provenance tags. Returns `null` for natively authored messages.
+ *
+ * `bindingKey` is `<source>:<foreign id>` (e.g. `slack:T0266FRGM:U060`), the exact key
+ * an owner-signed identity binding uses, so callers can look up the bound
+ * pubkey without knowing the source scheme.
+ */
+export function getImportAuthor(
+  tags: string[][],
+): { foreignId: string; displayName: string; bindingKey: string } | null {
+  const tag = tags.find((t) => t[0] === "import_author");
+  if (!tag) return null;
+  const foreignId = typeof tag[1] === "string" ? tag[1] : "";
+  if (!foreignId) return null;
+  const displayName = typeof tag[2] === "string" && tag[2] ? tag[2] : foreignId;
+  const source = tags.find((t) => t[0] === "import")?.[1]?.trim() || "import";
+  return { foreignId, displayName, bindingKey: `${source}:${foreignId}` };
+}
+
+/**
+ * Strip a leading `**<name>**: ` attribution prefix from an imported body.
+ * Only strips when the message is imported and the prefix matches the import
+ * author's name, so native `**bold**:` content is never touched.
+ */
+export function stripImportAuthorPrefix(
+  body: string,
+  importAuthor: { displayName: string } | null,
+): string {
+  if (!importAuthor) return body;
+  const prefix = `**${importAuthor.displayName}**: `;
+  return body.startsWith(prefix) ? body.slice(prefix.length) : body;
+}
+
+/**
  * Count the *visible top-level rows* a raw event window would render in the
  * main channel timeline — the same unit `buildMainTimelineEntries` produces.
  *
@@ -196,6 +231,13 @@ export function formatTimelineMessages(
   relaySelfPubkey?: string | null,
   /** Profiles for verified agent owners, fetched in one batch by the surface. */
   ownerProfiles?: UserProfileLookup,
+  /**
+   * Owner/admin-signed import identity bindings: foreign id (e.g.
+   * `slack:T0266FRGM:U060…`) → bound Buzz pubkey (lowercase hex). Lets imported history
+   * render under the real person's profile. Absent → imported rows still show
+   * the name from their `import_author` tag, just without the bound avatar.
+   */
+  importIdentityBindings?: Map<string, string>,
 ): TimelineMessage[] {
   const currentPubkeyLower = currentPubkey?.toLowerCase();
   const roleByPubkey = new Map<string, string>();
@@ -429,24 +471,42 @@ export function formatTimelineMessages(
     const authorProfile = profiles?.[authorPubkey.toLowerCase()];
     const isAgent = role === "bot" || authorProfile?.isAgent === true;
     const ownerPubkey = isAgent ? (authorProfile?.ownerPubkey ?? null) : null;
+
+    // Imported (bot-signed) history: attribute to the original person. The
+    // display name always comes from the `import_author` tag; when an
+    // owner-signed binding maps that foreign id to a Buzz pubkey, prefer that
+    // person's profile name/avatar so the row renders as truly theirs.
+    const importAuthor = getImportAuthor(event.tags);
+    const boundPubkey = importAuthor
+      ? importIdentityBindings?.get(importAuthor.bindingKey)?.toLowerCase()
+      : undefined;
+    const boundProfile = boundPubkey ? profiles?.[boundPubkey] : undefined;
+    const displayAuthor = importAuthor
+      ? boundProfile?.displayName?.trim() || importAuthor.displayName
+      : author;
+    const displayAvatarUrl = importAuthor
+      ? (boundProfile?.avatarUrl ?? null)
+      : getAuthorAvatarUrl({
+          authorPubkey,
+          currentPubkey,
+          currentUserAvatarUrl,
+          profiles,
+        });
+
     return {
       id: event.id,
       renderKey: event.localKey ?? event.id,
       createdAt: event.created_at,
-      pubkey: authorPubkey,
+      pubkey: boundPubkey ?? authorPubkey,
       signerPubkey: normalizePubkey(event.pubkey),
-      author,
+      author: displayAuthor,
+      imported: importAuthor !== null,
       isAgent,
       ownerPubkey,
       ownerLabel: isAgent
         ? formatOwnerLabel(ownerPubkey, currentPubkey, ownerProfiles)
         : null,
-      avatarUrl: getAuthorAvatarUrl({
-        authorPubkey,
-        currentPubkey,
-        currentUserAvatarUrl,
-        profiles,
-      }),
+      avatarUrl: displayAvatarUrl,
       role,
       personaDisplayName:
         role === "bot"
@@ -457,7 +517,13 @@ export function formatTimelineMessages(
           ? respondToLookup?.get(authorPubkey.toLowerCase())
           : undefined,
       time: formatTime(event.created_at),
-      body: edit ? edit.content : event.content,
+      // Imported bodies carry a `**Name**: ` prefix for search and for clients
+      // that don't render `import_author`; strip it here since the row header
+      // already shows the author.
+      body: stripImportAuthorPrefix(
+        edit ? edit.content : event.content,
+        importAuthor,
+      ),
       parentId: thread.parentId,
       rootId: thread.rootId,
       depth: getDepth(event),

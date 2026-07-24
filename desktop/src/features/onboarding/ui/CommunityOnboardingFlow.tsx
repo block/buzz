@@ -144,9 +144,13 @@ function LoadingDots({ label }: { label: string }) {
 export function CommunityOnboardingFlow({
   onCancel,
   onConnect,
+  onSlackAuth,
+  onSlackAuthRetry,
 }: {
   onCancel: () => void;
   onConnect: () => void;
+  onSlackAuth: () => void;
+  onSlackAuthRetry: () => void;
 }) {
   const { transaction, update, clear } = useCommunityOnboarding();
   const queryClient = useQueryClient();
@@ -200,6 +204,10 @@ export function CommunityOnboardingFlow({
   React.useEffect(() => {
     if (transaction?.stage === "connecting") onConnect();
   }, [onConnect, transaction?.stage]);
+
+  React.useEffect(() => {
+    if (transaction?.stage === "slack-auth") onSlackAuth();
+  }, [onSlackAuth, transaction?.stage]);
 
   // "Entering" curtain: the app is mounting on the Welcome route underneath.
   // Fade out when Welcome reports its first settled render — or after a
@@ -462,8 +470,35 @@ export function CommunityOnboardingFlow({
           )}
           data-testid="community-onboarding-body"
         >
-          {transaction.stage === "claiming" ||
-          transaction.stage === "connecting" ? (
+          {transaction.stage === "slack-auth" ? (
+            <>
+              <Users className="mx-auto h-10 w-10" />
+              <h1 className="mt-5 text-title font-normal">
+                Join {transaction.communityName} with Slack
+              </h1>
+              <p className="mt-3 text-sm text-foreground/80">
+                {transaction.error ??
+                  "Continue in your browser to sign in with Slack. Buzz will return here and connect your imported history automatically."}
+              </p>
+              <div className="mt-6 flex justify-center gap-3">
+                <Button
+                  className="rounded-full px-6"
+                  data-testid="slack-auth-reopen"
+                  onClick={onSlackAuthRetry}
+                >
+                  {transaction.error ? "Try again" : "Reopen browser"}
+                </Button>
+                <Button
+                  className="rounded-full bg-foreground/10 px-5 hover:bg-foreground/15"
+                  onClick={onCancel}
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </>
+          ) : transaction.stage === "claiming" ||
+            transaction.stage === "connecting" ? (
             <>
               <Users className="mx-auto h-10 w-10" />
               <h1 className="mt-5 text-title font-normal">

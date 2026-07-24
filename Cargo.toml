@@ -18,6 +18,7 @@ members = [
     "crates/buzz-workflow",
     "crates/buzz-media",
     "crates/buzz-cli",
+    "crates/buzz-migrate",
     "crates/buzz-pairing-cli",
     "crates/buzz-sdk",
     "crates/buzz-persona",
@@ -86,7 +87,7 @@ thiserror = "2"
 anyhow    = "1"
 
 # Utilities
-uuid    = { version = "1", features = ["v4", "serde"] }
+uuid    = { version = "1", features = ["v4", "v5", "serde"] }
 chrono  = { version = "0.4", features = ["serde"] }
 
 # HTTP client (webhook delivery)
@@ -96,6 +97,7 @@ reqwest = { version = "0.13", features = ["json", "rustls"], default-features = 
 sha2      = "0.11"
 hex       = "0.4"
 hmac      = "0.13"
+ring      = "0.17"
 
 # Randomness
 rand = "0.10"

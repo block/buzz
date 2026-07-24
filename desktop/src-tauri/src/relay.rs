@@ -693,6 +693,14 @@ mod tests {
         use crate::relay_admission::MAX_HINT_SECONDS;
         use std::io::{Read as _, Write as _};
 
+        // relay_error_message arms the process-wide rate-limit gate via
+        // activate_rate_limit — serialize with the relay_admission gate
+        // tests and clear the armed window afterwards, or this test's 300s
+        // expiry bleeds into whichever gate test runs next (flaky
+        // hint_zero_uses_default under parallel test threads).
+        let _serial = crate::relay_admission::tests::TEST_SERIAL.lock().await;
+        crate::relay_admission::reset_rate_limit_gate();
+
         // Use a std::net listener on a std::thread — the same pattern as the
         // relay_admission loopback tests. This avoids two races that cause CI
         // failures with tokio::net + into_std():
@@ -740,6 +748,8 @@ mod tests {
             !msg.contains(&oversized.to_string()),
             "raw oversized hint must not appear in the message string"
         );
+
+        crate::relay_admission::reset_rate_limit_gate();
     }
 
     // ── effective_agent_relay_url: legacy pin ignored ─────────────────────────

@@ -21,7 +21,8 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_IMPORT_IDENTITY_BINDING, KIND_IMPORT_IDENTITY_CLAIM,
+    KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
     KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
@@ -300,8 +301,103 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
+        // Import identity binding — scope gets the caller in the door; the
+        // owner/admin role check that actually authorizes it runs in
+        // `validate_import_identity_binding` before storage.
+        KIND_IMPORT_IDENTITY_BINDING => Ok(Scope::AdminUsers),
+        // Import identity claim — the subject's self-signed consent. Any
+        // authenticated member may publish one, but only for themselves: the
+        // relay's signer==author rule means the claim's author IS the consent.
+        KIND_IMPORT_IDENTITY_CLAIM => Ok(Scope::MessagesWrite),
         _ => Err("restricted: unknown event kind"),
     }
+}
+
+/// Whether the event carries an `import` provenance tag (history import).
+fn has_import_tag(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("import"))
+}
+
+/// Validate the shape of a `KIND_IMPORT_IDENTITY_BINDING` event before storage.
+///
+/// Requires a non-empty `d` tag (the `<source>:<foreign id>` key, e.g.
+/// `slack:T0266FRGM:U060976D0QN`) and exactly one `p` tag holding a 64-char hex
+/// pubkey (the bound Buzz identity). Authorization (owner/admin) is checked by the
+/// caller; this only enforces that the stored event is well-formed so clients
+/// can trust its shape.
+fn validate_import_identity_binding(event: &Event) -> Result<(), IngestError> {
+    let d_tag = event.tags.iter().find_map(|t| {
+        let parts = t.as_slice();
+        (parts.first().map(|s| s.as_str()) == Some("d"))
+            .then(|| parts.get(1).map(|s| s.as_str()).unwrap_or(""))
+    });
+    match d_tag {
+        Some(d) if !d.is_empty() => {}
+        _ => {
+            return Err(IngestError::Rejected(
+                "invalid: identity binding requires a non-empty d tag \
+                 (e.g. slack:T0266FRGM:U123)"
+                    .into(),
+            ))
+        }
+    }
+
+    let p_tags: Vec<&str> = event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let parts = t.as_slice();
+            (parts.first().map(|s| s.as_str()) == Some("p"))
+                .then(|| parts.get(1).map(|s| s.as_str()))
+                .flatten()
+        })
+        .collect();
+    match p_tags.as_slice() {
+        [pubkey] if pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit()) => Ok(()),
+        [_] => Err(IngestError::Rejected(
+            "invalid: identity binding p tag must be a 64-char hex pubkey".into(),
+        )),
+        _ => Err(IngestError::Rejected(
+            "invalid: identity binding requires exactly one p tag (the bound pubkey)".into(),
+        )),
+    }
+}
+
+/// Validate the shape of a `KIND_IMPORT_IDENTITY_CLAIM` event before storage.
+///
+/// Requires a non-empty `d` tag (the `<source>:<foreign id>` key matching the
+/// attestation) and **no** `p` tag: a claim's consent is its own signature, so
+/// the signer's author pubkey is the bound identity. Rejecting a `p` tag keeps
+/// the wire form unambiguous — a claim can never appear to speak for a pubkey
+/// other than its signer. No role check: any member may claim on their own
+/// behalf (the caller enforces signer==author).
+fn validate_import_identity_claim(event: &Event) -> Result<(), IngestError> {
+    let has_nonempty_d = event.tags.iter().any(|t| {
+        let parts = t.as_slice();
+        parts.first().map(|s| s.as_str()) == Some("d")
+            && parts.get(1).is_some_and(|s| !s.is_empty())
+    });
+    if !has_nonempty_d {
+        return Err(IngestError::Rejected(
+            "invalid: identity claim requires a non-empty d tag \
+             (e.g. slack:T0266FRGM:U123)"
+                .into(),
+        ));
+    }
+    if event
+        .tags
+        .iter()
+        .any(|t| t.as_slice().first().map(|s| s.as_str()) == Some("p"))
+    {
+        return Err(IngestError::Rejected(
+            "invalid: identity claim must not carry a p tag — the signer is the bound identity"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
@@ -1477,10 +1573,62 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+    // Whether the authenticated caller is a community owner/admin. Looked up
+    // once and reused for the import carve-out and the identity-binding gate.
+    let caller_is_community_admin = matches!(
+        state
+            .db
+            .get_relay_member(tenant.community(), &auth.pubkey().to_hex())
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .as_ref()
+            .map(|m| m.role.as_str()),
+        Some("owner") | Some("admin")
+    );
+
+    // Authorized-import carve-out: an event carrying an `import` provenance
+    // tag, submitted by an authenticated community owner/admin, may be
+    // backdated past the drift envelope so history replays with its original
+    // timestamps. The trust model matches BUZZ_MAX_PAST_DRIFT_SECS (trust the
+    // operator), scoped per event instead of relay-wide, with no restart.
+    // Note: the event is still signed by the submitter (bot mode) — the
+    // pubkey==submitter check below is NOT waived; attribution to real people
+    // is carried by `import_author` tags plus a two-party binding (an
+    // owner/admin KIND_IMPORT_IDENTITY_BINDING attestation AND the subject's
+    // own KIND_IMPORT_IDENTITY_CLAIM), never by third-party signatures.
+    let import_exempt = has_import_tag(&event) && caller_is_community_admin;
+
+    // Identity bindings are owner/admin-only: this is what stops a member from
+    // claiming someone else's imported history (`d = slack:<id>` → their own
+    // pubkey). Reject before storage if the caller is not owner/admin.
+    if kind_u32 == KIND_IMPORT_IDENTITY_BINDING {
+        if !caller_is_community_admin {
+            return Err(IngestError::AuthFailed(
+                "restricted: identity bindings require a community owner or admin".into(),
+            ));
+        }
+        validate_import_identity_binding(&event)?;
+    }
+
+    // Identity claims are the subject's own consent: no role gate (the
+    // signer==author check below guarantees a claim only ever speaks for its
+    // signer), just a shape check. A binding attributes history only when an
+    // owner/admin attestation and a matching subject claim agree — neither
+    // half alone does anything.
+    if kind_u32 == KIND_IMPORT_IDENTITY_CLAIM {
+        validate_import_identity_claim(&event)?;
+    }
+
+    // Future drift is a fixed bound — a future timestamp is always a clock
+    // error or a forgery. Past drift is operator-tunable
+    // (BUZZ_MAX_PAST_DRIFT_SECS, default 900) so history imports can replay
+    // events with their original timestamps.
+    const MAX_FUTURE_DRIFT_SECS: i64 = 900; // +15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if event_ts - now > MAX_FUTURE_DRIFT_SECS
+        || (!import_exempt && now - event_ts > state.config.max_past_drift_secs)
+    {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -1495,6 +1643,10 @@ async fn ingest_event_inner(
         )));
     }
 
+    // Every stored event must be signed by the authenticated submitter (only
+    // NIP-59 gift wraps, which deliberately use an ephemeral pubkey, are
+    // exempt). Imports are bot-signed, so this holds for them too — there is
+    // no third-party-signature path into the relay.
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
     if event.pubkey != *auth.pubkey() && !is_gift_wrap {
         return Err(IngestError::AuthFailed(
@@ -2303,6 +2455,7 @@ async fn ingest_event_inner(
                 &target_id,
                 &actor_bytes,
                 emoji,
+                import_exempt,
             )
             .await
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
@@ -2391,11 +2544,12 @@ async fn ingest_event_inner(
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
             .db
-            .insert_event_with_thread_metadata(
+            .insert_event_with_thread_metadata_opts(
                 tenant.community(),
                 &event,
                 channel_id,
                 thread_params,
+                import_exempt,
             )
             .await
         {
@@ -2646,6 +2800,101 @@ mod tests {
             required_scope_for_kind(KIND_LONG_FORM, &dummy).unwrap(),
             Scope::MessagesWrite,
         );
+    }
+
+    #[test]
+    fn identity_binding_shape_validation() {
+        use buzz_core::kind::KIND_IMPORT_IDENTITY_BINDING;
+        let pk = "8f3904246ba9d9cc7e821e7752e123d435234d17c2513d85785f4a0b1ca07e56";
+        let keys = nostr::Keys::generate();
+        let build = |tags: Vec<nostr::Tag>| {
+            EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_BINDING as u16), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .expect("sign binding")
+        };
+        let tag = |parts: &[&str]| nostr::Tag::parse(parts.iter().copied()).expect("tag");
+
+        // Well-formed: d = slack:<id>, one 64-hex p tag.
+        let ok = build(vec![tag(&["d", "slack:U1"]), tag(&["p", pk])]);
+        assert!(validate_import_identity_binding(&ok).is_ok());
+
+        // Missing d tag.
+        let no_d = build(vec![tag(&["p", pk])]);
+        assert!(validate_import_identity_binding(&no_d).is_err());
+
+        // Empty d tag.
+        let empty_d = build(vec![tag(&["d", ""]), tag(&["p", pk])]);
+        assert!(validate_import_identity_binding(&empty_d).is_err());
+
+        // Missing p tag.
+        let no_p = build(vec![tag(&["d", "slack:U1"])]);
+        assert!(validate_import_identity_binding(&no_p).is_err());
+
+        // Non-hex / wrong-length p tag.
+        let bad_p = build(vec![tag(&["d", "slack:U1"]), tag(&["p", "notapubkey"])]);
+        assert!(validate_import_identity_binding(&bad_p).is_err());
+
+        // Two p tags — ambiguous, rejected.
+        let two_p = build(vec![
+            tag(&["d", "slack:U1"]),
+            tag(&["p", pk]),
+            tag(&["p", pk]),
+        ]);
+        assert!(validate_import_identity_binding(&two_p).is_err());
+    }
+
+    #[test]
+    fn identity_claim_shape_validation() {
+        use buzz_core::kind::KIND_IMPORT_IDENTITY_CLAIM;
+        let pk = "8f3904246ba9d9cc7e821e7752e123d435234d17c2513d85785f4a0b1ca07e56";
+        let keys = nostr::Keys::generate();
+        let build = |tags: Vec<nostr::Tag>| {
+            EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_CLAIM as u16), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .expect("sign claim")
+        };
+        let tag = |parts: &[&str]| nostr::Tag::parse(parts.iter().copied()).expect("tag");
+
+        // Well-formed: non-empty d, no p tag.
+        let ok = build(vec![tag(&["d", "slack:U1"])]);
+        assert!(validate_import_identity_claim(&ok).is_ok());
+
+        // Missing / empty d tag.
+        assert!(validate_import_identity_claim(&build(vec![])).is_err());
+        assert!(validate_import_identity_claim(&build(vec![tag(&["d", ""])])).is_err());
+
+        // A p tag is rejected: a claim must never appear to speak for another
+        // pubkey — the signer is the bound identity.
+        let with_p = build(vec![tag(&["d", "slack:U1"]), tag(&["p", pk])]);
+        assert!(validate_import_identity_claim(&with_p).is_err());
+    }
+
+    #[test]
+    fn identity_claim_uses_members_write_scope() {
+        use buzz_core::kind::KIND_IMPORT_IDENTITY_CLAIM;
+        let dummy = make_dummy_event();
+        // Any member may claim on their own behalf — no admin scope, unlike the
+        // owner/admin-only attestation (KIND_IMPORT_IDENTITY_BINDING).
+        assert_eq!(
+            required_scope_for_kind(KIND_IMPORT_IDENTITY_CLAIM, &dummy).unwrap(),
+            Scope::MessagesWrite,
+        );
+    }
+
+    #[test]
+    fn import_tag_detection() {
+        let keys = nostr::Keys::generate();
+        let with = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .tags(vec![nostr::Tag::parse(["import", "slack"]).expect("tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert!(has_import_tag(&with));
+        let without = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert!(!has_import_tag(&without));
     }
 
     #[test]
