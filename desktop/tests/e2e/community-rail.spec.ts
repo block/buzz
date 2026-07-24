@@ -60,6 +60,10 @@ test.describe("community rail", () => {
     // The active community is marked via aria-current.
     await expect(buttonA).toHaveAttribute("aria-current", "true");
     await expect(buttonB).not.toHaveAttribute("aria-current", "true");
+    await expect(buttonA.locator(":scope > span").first()).toHaveCSS(
+      "opacity",
+      "1",
+    );
 
     // The add-community affordance lives at the bottom of the rail.
     await expect(page.getByTestId("community-rail-add")).toBeVisible();
@@ -95,6 +99,180 @@ test.describe("community rail", () => {
         ),
       )
       .toBe(COMMUNITY_B.id);
+  });
+
+  test("lets community admins open invite controls from the rail", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "admin",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+    const railMenu = page.getByTestId(`community-rail-menu-${COMMUNITY_A.id}`);
+    await expect(railMenu.getByRole("separator")).toHaveCount(1);
+    await expect(railMenu.getByRole("menuitem")).toHaveText([
+      "Mark all as read",
+      "Copy community URL",
+      "Invite to community",
+      "Community settings",
+    ]);
+    await page.getByRole("menuitem", { name: "Invite to community" }).click();
+
+    await expect(page).toHaveURL(/#\/settings\?section=community-members$/);
+    await expect(page.getByTestId("settings-community-members")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Invites", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toHaveCount(0);
+    await expect(
+      page.getByTestId("community-invite-dialog-trigger"),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
+      0,
+    );
+    await page.getByTestId("community-invite-dialog-trigger").click();
+    await expect(page.getByTestId("community-invite-email-field")).toHaveCount(
+      0,
+    );
+    await expect(page.getByTestId("copy-invite-link")).toBeVisible();
+  });
+
+  test("hides rail invite controls from community members", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "member",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page
+      .getByTestId(`community-rail-button-${COMMUNITY_A.id}`)
+      .click({ button: "right" });
+
+    await expect(
+      page.getByRole("menuitem", { name: "Invite to community" }),
+    ).toHaveCount(0);
+  });
+
+  test("shows active community actions instead of another switcher in the profile menu", async ({
+    page,
+  }) => {
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "admin",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    const communityTrigger = page.getByTestId("community-switcher");
+    const feedback = page.getByTestId("profile-popover-send-feedback");
+    const settings = page.getByTestId("profile-popover-settings");
+    const communityBox = await communityTrigger.boundingBox();
+    const feedbackBox = await feedback.boundingBox();
+    const settingsBox = await settings.boundingBox();
+    expect(communityBox).not.toBeNull();
+    expect(feedbackBox).not.toBeNull();
+    expect(settingsBox).not.toBeNull();
+    expect(communityBox?.y).toBeLessThan(feedbackBox?.y ?? 0);
+    expect(feedbackBox?.y).toBeLessThan(settingsBox?.y ?? 0);
+
+    await page.getByTestId("community-switcher").click();
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await expect(menu).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).not.toBeFocused();
+    await expect(
+      menu.getByRole("menuitem", { name: "Invite to community" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Community settings" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toBeVisible();
+    await expect(menu.getByRole("separator")).toHaveCount(1);
+    await expect(menu.getByRole("menuitem", { name: "Alpha" })).toHaveCount(0);
+    await expect(menu.getByRole("menuitem", { name: "Bravo" })).toHaveCount(0);
+
+    await menu.getByRole("menuitem", { name: "Invite to community" }).click();
+    await expect(page).toHaveURL(/#\/settings\?section=community-members$/);
+  });
+
+  test("keeps profile community actions available to members without invite access", async ({
+    page,
+  }) => {
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"], {
+        origin: "http://127.0.0.1:4173",
+      });
+    await installMockBridge(
+      page,
+      {
+        relayRequiresMembership: true,
+        relayRole: "member",
+      },
+      { skipCommunitySeed: true },
+    );
+    await seedCommunities(page, [COMMUNITY_A, COMMUNITY_B], COMMUNITY_A.id);
+    await page.goto("/");
+
+    await page.getByTestId("sidebar-profile-avatar-button").click();
+    await page.getByTestId("community-switcher").click();
+
+    const menu = page.getByRole("menu", { name: "Community actions" });
+    await expect(
+      menu.getByRole("menuitem", { name: "Invite to community" }),
+    ).toHaveCount(0);
+    await expect(
+      menu.getByRole("menuitem", { name: "Copy community URL" }),
+    ).toBeVisible();
+    await expect(
+      menu.getByRole("menuitem", { name: "Add a community" }),
+    ).toBeVisible();
+
+    await menu.getByRole("menuitem", { name: "Copy community URL" }).click();
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          return (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).findLast(
+            (entry) => entry.command === "copy_text_to_clipboard",
+          )?.payload;
+        }),
+      )
+      .toEqual({ text: COMMUNITY_A.relayUrl });
+
+    await page.getByTestId("community-switcher").click();
+    await menu.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
   });
 
   test("switches the active community on click", async ({ page }) => {

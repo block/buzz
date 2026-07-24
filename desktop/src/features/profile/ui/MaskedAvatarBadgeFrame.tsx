@@ -46,8 +46,10 @@ type MaskedAvatarBadgeFrameProps = {
   children: React.ReactNode;
   className?: string;
   clipTestId?: string;
+  cornerRadius?: number;
   curve?: AvatarBadgeCurve;
   cutout?: AvatarBadgeCircle;
+  maskMode?: "clip-path" | "radial";
   maskTransition?: React.ComponentProps<typeof motion.path>["transition"];
   size: number;
 };
@@ -177,9 +179,14 @@ function getRoundedAvatarMaskGeometry(
   size: number,
   cutout: AvatarBadgeCircle,
   curve?: AvatarBadgeCurve,
+  avatarOverride?: AvatarBadgeCircle,
 ): RoundedAvatarMaskGeometry {
   const resolvedCurve = { ...DEFAULT_AVATAR_BADGE_CURVE, ...curve };
-  const avatar = { cx: size / 2, cy: size / 2, r: size / 2 };
+  const avatar = avatarOverride ?? {
+    cx: size / 2,
+    cy: size / 2,
+    r: size / 2,
+  };
   const [firstIntersection, secondIntersection] = getCircleIntersections(
     avatar,
     cutout,
@@ -382,21 +389,129 @@ function getRoundedAvatarMaskPolygon(
   return `polygon(${points.map((point) => toPolygonPoint(point, size)).join(", ")})`;
 }
 
+function getRoundedSquareMaskPolygon(
+  size: number,
+  cornerRadius: number,
+  cutout: AvatarBadgeCircle,
+  curve?: AvatarBadgeCurve,
+) {
+  const radius = Math.min(Math.max(cornerRadius, 0), size / 2);
+  const bottomRightCorner = {
+    cx: size - radius,
+    cy: size - radius,
+    r: radius,
+  };
+  const {
+    avatar: resolvedCorner,
+    avatarLower,
+    avatarUpper,
+    cutout: resolvedCutout,
+    cutoutLower,
+    cutoutUpper,
+    lowerHandleLength,
+    upperHandleLength,
+  } = getRoundedAvatarMaskGeometry(size, cutout, curve, bottomRightCorner);
+  const upperCutoutTangent = getTangent(
+    getAngle(resolvedCutout, cutoutUpper),
+    1,
+  );
+  const upperAvatarTangent = getTangent(
+    getAngle(resolvedCorner, avatarUpper),
+    -1,
+  );
+  const lowerAvatarTangent = getTangent(
+    getAngle(resolvedCorner, avatarLower),
+    -1,
+  );
+  const lowerCutoutTangent = getTangent(
+    getAngle(resolvedCutout, cutoutLower),
+    1,
+  );
+  const topRightCorner = { cx: size - radius, cy: radius, r: radius };
+  const topLeftCorner = { cx: radius, cy: radius, r: radius };
+  const bottomLeftCorner = { cx: radius, cy: size - radius, r: radius };
+  const outerPoints = [
+    ...sampleArc(
+      resolvedCorner,
+      getAngle(resolvedCorner, avatarUpper),
+      0,
+      -1,
+      false,
+      8,
+    ),
+    { x: size, y: radius },
+    ...sampleArc(topRightCorner, 0, -Math.PI / 2, -1, false, 16),
+    { x: radius, y: 0 },
+    ...sampleArc(topLeftCorner, -Math.PI / 2, -Math.PI, -1, false, 16),
+    { x: 0, y: size - radius },
+    ...sampleArc(bottomLeftCorner, Math.PI, Math.PI / 2, -1, false, 16),
+    { x: size - radius, y: size },
+    ...sampleArc(
+      resolvedCorner,
+      Math.PI / 2,
+      getAngle(resolvedCorner, avatarLower),
+      -1,
+      false,
+      8,
+    ),
+  ];
+  const points = [
+    cutoutUpper,
+    ...sampleCubic(
+      cutoutUpper,
+      getControlPoint(cutoutUpper, upperCutoutTangent, upperHandleLength),
+      getControlPoint(avatarUpper, upperAvatarTangent, -upperHandleLength),
+      avatarUpper,
+      12,
+    ),
+    ...outerPoints,
+    ...sampleCubic(
+      avatarLower,
+      getControlPoint(avatarLower, lowerAvatarTangent, lowerHandleLength),
+      getControlPoint(cutoutLower, lowerCutoutTangent, -lowerHandleLength),
+      cutoutLower,
+      12,
+    ),
+    ...sampleArc(
+      resolvedCutout,
+      getAngle(resolvedCutout, cutoutLower),
+      getAngle(resolvedCutout, cutoutUpper),
+      1,
+      true,
+      48,
+    ),
+  ];
+
+  return `polygon(${points.map((point) => toPolygonPoint(point, size)).join(", ")})`;
+}
+
 export function MaskedAvatarBadgeFrame({
   badge,
   badgeBox,
   children,
   className,
   clipTestId,
+  cornerRadius,
   curve,
   cutout,
+  maskMode = "clip-path",
   maskTransition,
   size,
 }: MaskedAvatarBadgeFrameProps) {
   const shouldMask = Boolean(badge && badgeBox && cutout);
   const maskPolygon = cutout
-    ? getRoundedAvatarMaskPolygon(size, cutout, curve)
+    ? cornerRadius === undefined
+      ? getRoundedAvatarMaskPolygon(size, cutout, curve)
+      : getRoundedSquareMaskPolygon(size, cornerRadius, cutout, curve)
     : undefined;
+  const radialMask =
+    maskMode === "radial" && cutout
+      ? `radial-gradient(circle ${toRem(cutout.r)} at ${toRem(
+          cutout.cx,
+        )} ${toRem(
+          cutout.cy,
+        )}, transparent calc(100% - 0.03125rem), black 100%)`
+      : undefined;
   const sizeStyle = { height: toRem(size), width: toRem(size) };
   const badgeMotionTarget =
     badgeBox && cutout
@@ -417,13 +532,17 @@ export function MaskedAvatarBadgeFrame({
   return (
     <div className={cn("relative shrink-0", className)} style={sizeStyle}>
       <motion.div
-        animate={maskTransition ? { clipPath: maskPolygon } : undefined}
+        animate={
+          maskTransition && !radialMask ? { clipPath: maskPolygon } : undefined
+        }
         className="h-full w-full"
         data-testid={clipTestId}
         initial={false}
         style={{
-          WebkitClipPath: maskPolygon,
-          clipPath: maskPolygon,
+          WebkitClipPath: radialMask ? undefined : maskPolygon,
+          WebkitMaskImage: radialMask,
+          clipPath: radialMask ? undefined : maskPolygon,
+          maskImage: radialMask,
         }}
         transition={maskTransition}
       >

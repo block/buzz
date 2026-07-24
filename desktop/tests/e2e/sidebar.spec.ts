@@ -65,7 +65,42 @@ async function dragSidebarRail(page: Page, deltaX: number) {
   await page.mouse.up();
 }
 
-test("automatically shows relay join requirements near the relay URL", async ({
+test("add community starts with create and join choices", async ({ page }) => {
+  await installMockBridge(page, {});
+  await page.goto("/");
+
+  await page.getByTestId("sidebar-profile-card").click();
+  await page.getByText("Add a community", { exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Add community" }),
+  ).toBeVisible();
+  await expect(page.getByTestId("add-community-create")).toContainText(
+    "Create a new community",
+  );
+  await expect(page.getByTestId("add-community-join")).toContainText(
+    "Join an existing community",
+  );
+  await expect(page.getByLabel("API Token")).toHaveCount(0);
+  await expect(page.getByLabel("Repos Directory")).toHaveCount(0);
+
+  await page.getByTestId("add-community-join").click();
+  await expect(
+    page.getByRole("heading", { name: "Join an existing community" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Community URL or invite link")).toBeVisible();
+  await page.getByTestId("add-community-back").click();
+
+  await page.getByTestId("add-community-create").click();
+  await expect(
+    page.getByRole("heading", { name: "Create a new community" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Continue to Builderlab" }).click();
+  await page.getByRole("button", { name: "Connect and continue" }).click();
+  await expect(page.getByLabel("Community address")).toBeVisible();
+});
+
+test("automatically shows community join requirements near the community URL", async ({
   page,
 }) => {
   await page.route(
@@ -88,8 +123,11 @@ test("automatically shows relay join requirements near the relay URL", async ({
   await page.goto("/");
 
   await page.getByTestId("sidebar-profile-card").click();
-  await page.getByText("Add Community", { exact: true }).click();
-  await page.getByLabel("Relay URL").fill("wss://policy.example.com");
+  await page.getByText("Add a community", { exact: true }).click();
+  await page.getByTestId("add-community-join").click();
+  await page
+    .getByLabel("Community URL or invite link")
+    .fill("https://policy.example.com/invite/community-code");
 
   const ageConfirmation = page.getByLabel("I am 18 years of age or older.");
   const agreementConfirmation = page.getByLabel(
@@ -102,21 +140,22 @@ test("automatically shows relay join requirements near the relay URL", async ({
   ).toHaveCount(0);
   await expect(page.getByText(/By continuing, you agree/)).toHaveCount(0);
 
-  const addCommunityButton = page.getByRole("button", {
-    name: "Add Community",
-  });
-  await expect(addCommunityButton).toBeDisabled();
+  const joinCommunityButton = page.getByTestId("invite-redeem-submit");
+  await expect(joinCommunityButton).toBeDisabled();
   await ageConfirmation.check();
   await expect(ageConfirmation.locator("svg path")).toBeVisible();
-  await expect(addCommunityButton).toBeDisabled();
+  await expect(joinCommunityButton).toBeDisabled();
   await agreementConfirmation.check();
-  await expect(addCommunityButton).toBeEnabled();
+  await expect(joinCommunityButton).toBeEnabled();
+  await expect(joinCommunityButton).toHaveText("Accept and join");
 
   const consentBox = await agreementConfirmation.boundingBox();
-  const reposInput = await page.locator("#ws-repos-dir").boundingBox();
-  const addButtonBox = await addCommunityButton.boundingBox();
-  expect(consentBox?.y).toBeGreaterThan(reposInput?.y ?? Number.MAX_VALUE);
-  expect(consentBox?.y).toBeLessThan(addButtonBox?.y ?? 0);
+  const communityInput = await page
+    .getByLabel("Community URL or invite link")
+    .boundingBox();
+  const joinButtonBox = await joinCommunityButton.boundingBox();
+  expect(consentBox?.y).toBeGreaterThan(communityInput?.y ?? Number.MAX_VALUE);
+  expect(consentBox?.y).toBeLessThan(joinButtonBox?.y ?? 0);
 });
 
 test("leaving a channel from the context menu never freezes the app", async ({
