@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   LocalRunCancelledError,
   LocalRunScheduler,
+  MAX_LOCAL_RUN_TASK_ID_BYTES,
 } from "./localRunScheduler.ts";
 
 function deferred() {
@@ -177,6 +178,30 @@ test("returns typed task IDs and rejects duplicate live IDs", async () => {
   assert.equal(await first.result, "result");
   const reused = scheduler.enqueue("same-id", () => "reused");
   assert.equal(await reused.result, "reused");
+});
+
+test("requires trimmed control-free task IDs within a 256-byte UTF-8 cap", async () => {
+  assert.equal(MAX_LOCAL_RUN_TASK_ID_BYTES, 256);
+  const scheduler = new LocalRunScheduler();
+
+  for (const taskId of [
+    "",
+    " ",
+    " leading",
+    "trailing ",
+    "line\nbreak",
+    "nul\u0000byte",
+    "delete\u007fbyte",
+    "a".repeat(257),
+    `${"é".repeat(128)}a`,
+  ]) {
+    assert.throws(() => scheduler.enqueue(taskId, () => taskId), TypeError);
+  }
+
+  const ascii = scheduler.enqueue("a".repeat(256), () => "ascii");
+  assert.equal(await ascii.result, "ascii");
+  const multibyte = scheduler.enqueue("é".repeat(128), () => "multibyte");
+  assert.equal(await multibyte.result, "multibyte");
 });
 
 test("does not produce unhandled rejections when cancelled work later rejects", async () => {

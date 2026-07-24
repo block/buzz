@@ -23,7 +23,8 @@ const MAX_ARRAY_ITEMS = 64;
 const MAX_VALUE_DEPTH = 16;
 const MAX_VALUE_NODES = 4_096;
 const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
-const LOOPBACK_ENDPOINT = /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})$/;
+const LOOPBACK_ENDPOINT =
+  /^http:\/\/(?:127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})(\/)?$/;
 const UTF8_ENCODER = new TextEncoder();
 
 type JsonBudgetFrame = {
@@ -44,6 +45,141 @@ function hasControlCharacters(value: string): boolean {
     if (code <= 31 || code === 127) return true;
   }
   return false;
+}
+
+class BoundedJsonMemberScanner {
+  readonly #source: string;
+  #index = 0;
+  #nodes = 0;
+
+  constructor(source: string) {
+    this.#source = source;
+  }
+
+  scan(): boolean {
+    if (!this.#parseValue(0)) return false;
+    this.#skipWhitespace();
+    return this.#index === this.#source.length;
+  }
+
+  #parseValue(depth: number): boolean {
+    if (depth > MAX_VALUE_DEPTH || this.#nodes >= MAX_VALUE_NODES) return false;
+    this.#nodes += 1;
+    this.#skipWhitespace();
+    const token = this.#source[this.#index];
+    if (token === "{") return this.#parseObject(depth);
+    if (token === "[") return this.#parseArray(depth);
+    if (token === '"') return this.#parseString() !== null;
+    return this.#parseScalar();
+  }
+
+  #parseObject(depth: number): boolean {
+    this.#index += 1;
+    this.#skipWhitespace();
+    if (this.#source[this.#index] === "}") {
+      this.#index += 1;
+      return true;
+    }
+
+    const keys = new Set<string>();
+    while (keys.size < MAX_ARRAY_ITEMS) {
+      const key = this.#parseString();
+      if (key === null || keys.has(key)) return false;
+      keys.add(key);
+      this.#skipWhitespace();
+      if (this.#source[this.#index] !== ":") return false;
+      this.#index += 1;
+      if (!this.#parseValue(depth + 1)) return false;
+      this.#skipWhitespace();
+      const separator = this.#source[this.#index];
+      this.#index += 1;
+      if (separator === "}") return true;
+      if (separator !== ",") return false;
+      this.#skipWhitespace();
+    }
+    return false;
+  }
+
+  #parseArray(depth: number): boolean {
+    this.#index += 1;
+    this.#skipWhitespace();
+    if (this.#source[this.#index] === "]") {
+      this.#index += 1;
+      return true;
+    }
+
+    let itemCount = 0;
+    while (itemCount < MAX_ARRAY_ITEMS) {
+      if (!this.#parseValue(depth + 1)) return false;
+      itemCount += 1;
+      this.#skipWhitespace();
+      const separator = this.#source[this.#index];
+      this.#index += 1;
+      if (separator === "]") return true;
+      if (separator !== ",") return false;
+      this.#skipWhitespace();
+    }
+    return false;
+  }
+
+  #parseString(): string | null {
+    if (this.#source[this.#index] !== '"') return null;
+    const start = this.#index;
+    this.#index += 1;
+    while (this.#index < this.#source.length) {
+      const token = this.#source[this.#index];
+      if (token === "\\") {
+        this.#index += 2;
+        continue;
+      }
+      this.#index += 1;
+      if (token !== '"') continue;
+      try {
+        const parsed = JSON.parse(this.#source.slice(start, this.#index));
+        return typeof parsed === "string" ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  #parseScalar(): boolean {
+    const start = this.#index;
+    while (this.#index < this.#source.length) {
+      const token = this.#source[this.#index];
+      if (
+        token === "," ||
+        token === "]" ||
+        token === "}" ||
+        this.#isWhitespace(token)
+      ) {
+        break;
+      }
+      this.#index += 1;
+    }
+    if (start === this.#index) return false;
+    try {
+      const parsed = JSON.parse(this.#source.slice(start, this.#index));
+      return (
+        parsed === null ||
+        typeof parsed === "boolean" ||
+        (typeof parsed === "number" && Number.isFinite(parsed))
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  #skipWhitespace(): void {
+    while (this.#isWhitespace(this.#source[this.#index])) {
+      this.#index += 1;
+    }
+  }
+
+  #isWhitespace(token: string | undefined): boolean {
+    return token === " " || token === "\n" || token === "\r" || token === "\t";
+  }
 }
 
 function isBoundedSafeJson(root: unknown): boolean {
@@ -120,6 +256,7 @@ export function parseNativeAdviserContribution(
 
   let candidate: unknown;
   try {
+    if (!new BoundedJsonMemberScanner(terminalMessages[0]).scan()) return null;
     candidate = JSON.parse(terminalMessages[0]);
   } catch {
     return null;
@@ -154,11 +291,12 @@ export type LmStudioNativeModelRouteInput = {
   readonly rustEgressDecision: EgressDecision;
 };
 
-function isLiteralLoopbackEndpoint(endpoint: string): boolean {
+function canonicalLiteralLoopbackEndpoint(endpoint: string): string | null {
   const match = LOOPBACK_ENDPOINT.exec(endpoint);
-  if (!match) return false;
+  if (!match) return null;
   const port = Number(match[1]);
-  return Number.isSafeInteger(port) && port >= 1 && port <= 65_535;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return null;
+  return match[2] === "/" ? endpoint.slice(0, -1) : endpoint;
 }
 
 function isBoundedUniqueTextList(values: readonly string[]): boolean {
@@ -187,8 +325,9 @@ function isBoundedUniqueTextList(values: readonly string[]): boolean {
 export function buildLmStudioNativeModelRoute(
   input: LmStudioNativeModelRouteInput,
 ): ModelRoute {
+  const selectedEndpoint = canonicalLiteralLoopbackEndpoint(input.endpoint);
   if (
-    !isLiteralLoopbackEndpoint(input.endpoint) ||
+    selectedEndpoint === null ||
     input.model.trim().length === 0 ||
     input.model.length > MAX_VALUE_STRING_LENGTH ||
     hasControlCharacters(input.model) ||
@@ -201,7 +340,7 @@ export function buildLmStudioNativeModelRoute(
   }
   return createModelRoute({
     classification: "OFFICIAL",
-    selectedEndpoint: input.endpoint,
+    selectedEndpoint,
     selectedProvider: "lmstudio-native",
     selectedModel: input.model,
     permittedTools: input.permittedTools,

@@ -6,6 +6,31 @@ export class LocalRunCancelledError extends Error {
   }
 }
 
+/** Maximum UTF-8 size of a local-run task identity retained by the scheduler. */
+export const MAX_LOCAL_RUN_TASK_ID_BYTES = 256;
+
+const TASK_ID_UTF8_ENCODER = new TextEncoder();
+
+function hasControlCharacters(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 31 || code === 127) return true;
+  }
+  return false;
+}
+
+function isValidTaskId(taskId: unknown): taskId is string {
+  return (
+    typeof taskId === "string" &&
+    taskId.length > 0 &&
+    taskId.length <= MAX_LOCAL_RUN_TASK_ID_BYTES &&
+    taskId === taskId.trim() &&
+    !hasControlCharacters(taskId) &&
+    TASK_ID_UTF8_ENCODER.encode(taskId).byteLength <=
+      MAX_LOCAL_RUN_TASK_ID_BYTES
+  );
+}
+
 export type LocalRunTask<T> = (signal: AbortSignal) => PromiseLike<T> | T;
 
 export type ScheduledLocalRun<T> = {
@@ -52,8 +77,10 @@ export class LocalRunScheduler {
   }
 
   enqueue<T>(taskId: string, task: LocalRunTask<T>): ScheduledLocalRun<T> {
-    if (taskId.trim().length === 0 || typeof task !== "function") {
-      throw new TypeError("A local run requires a non-empty task ID and task.");
+    if (!isValidTaskId(taskId) || typeof task !== "function") {
+      throw new TypeError(
+        `A local run requires a trimmed, control-free task ID of at most ${MAX_LOCAL_RUN_TASK_ID_BYTES} UTF-8 bytes and a task.`,
+      );
     }
     if (this.#liveTaskIds.has(taskId)) {
       throw new Error(`Local run "${taskId}" is already queued or running.`);
