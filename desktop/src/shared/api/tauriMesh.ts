@@ -52,6 +52,27 @@ export async function meshNodeStatus(): Promise<MeshNodeStatus> {
   return await invokeTauri<MeshNodeStatus>("mesh_node_status");
 }
 
+/**
+ * Host-side usage of the compute this machine is sharing. The
+ * local/remote/endpoint attempt split distinguishes this machine's own agents
+ * (local) from another member consuming this machine's compute (remote/endpoint).
+ */
+export type MeshServingUsage = {
+  inflight: number;
+  peakInflight: number;
+  requestsServed: number;
+  tokensServed: number;
+  tokensPerSecond: number;
+  localAttempts: number;
+  remoteAttempts: number;
+  endpointAttempts: number;
+  peers: number;
+};
+
+export async function meshServingUsage(): Promise<MeshServingUsage> {
+  return await invokeTauri<MeshServingUsage>("mesh_serving_usage");
+}
+
 export async function meshInstalledModels(): Promise<MeshModelOption[]> {
   return await invokeTauri<MeshModelOption[]>("mesh_installed_models");
 }

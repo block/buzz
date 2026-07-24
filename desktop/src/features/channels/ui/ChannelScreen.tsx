@@ -32,6 +32,7 @@ import { pickWelcomeGuideAgent } from "@/features/onboarding/welcomeGuide";
 import { useWelcomeKickoffEntrance } from "@/features/onboarding/useWelcomeKickoffEntrance";
 import { useWelcomeKickoffStagePresence } from "@/features/onboarding/useWelcomeKickoffStagePresence";
 import { useWelcomeAgentCreate } from "@/features/channels/useWelcomeAgentCreate";
+import { useCommunities } from "@/features/communities/useCommunities";
 import {
   mergeMessages,
   useChannelMessagesQuery,
@@ -95,6 +96,7 @@ export function ChannelScreen({
   targetMessageId,
 }: ChannelScreenProps) {
   const { goHome } = useAppNavigation();
+  const { activeCommunity } = useCommunities();
   const {
     markChannelRead,
     markChannelUnread,
@@ -787,7 +789,6 @@ export function ChannelScreen({
       isSinglePanelView,
     ],
   );
-
   return (
     <AgentSessionProvider onOpenAgentSession={handleOpenAgentSession}>
       <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
@@ -963,13 +964,13 @@ export function ChannelScreen({
             <ChannelScreenEmptyState />
           )}
         </div>
-
         <MembersSidebar
           channel={activeChannel}
           currentPubkey={currentPubkey}
           open={isMembersSidebarOpen}
           onOpenChange={setIsMembersSidebarOpen}
           onViewActivity={handleOpenAgentSession}
+          relayUrl={activeCommunity?.relayUrl}
         />
       </ProfilePanelProvider>
     </AgentSessionProvider>

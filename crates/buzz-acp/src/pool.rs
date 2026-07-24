@@ -427,6 +427,58 @@ pub enum PromptOutcome {
 ///
 /// Built once from `Config` at startup. Avoids cloning the full config
 /// into every task.
+/// Shared channel-metadata resolver for startup-known and dynamically joined channels.
+///
+/// Successful lazy lookups are cached for every consumer (author gate, prompt
+/// context, canvas, and setup mode). Unknown metadata is never cached as a
+/// non-DM: callers can fail closed and a later event retries resolution.
+#[derive(Debug, Clone)]
+pub struct ChannelInfoResolver {
+    cache: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<Uuid, PromptChannelInfo>>>,
+    rest_client: RestClient,
+}
+
+impl ChannelInfoResolver {
+    pub fn new(
+        startup: std::collections::HashMap<Uuid, ChannelInfo>,
+        rest_client: RestClient,
+    ) -> Self {
+        let cache = startup
+            .into_iter()
+            .filter_map(|(id, info)| {
+                (info.channel_type != "unknown").then_some((
+                    id,
+                    PromptChannelInfo {
+                        name: info.name,
+                        channel_type: info.channel_type,
+                    },
+                ))
+            })
+            .collect();
+        Self {
+            cache: std::sync::Arc::new(std::sync::RwLock::new(cache)),
+            rest_client,
+        }
+    }
+
+    pub async fn resolve(&self, channel_id: Uuid) -> Option<PromptChannelInfo> {
+        if let Some(info) = self
+            .cache
+            .read()
+            .ok()
+            .and_then(|cache| cache.get(&channel_id).cloned())
+        {
+            return Some(info);
+        }
+
+        let info = fetch_channel_info(channel_id, &self.rest_client).await?;
+        if let Ok(mut cache) = self.cache.write() {
+            cache.insert(channel_id, info.clone());
+        }
+        Some(info)
+    }
+}
+
 pub struct PromptContext {
     pub mcp_servers: Vec<McpServer>,
     pub initial_message: Option<String>,
@@ -450,8 +502,8 @@ pub struct PromptContext {
     pub cwd: String,
     /// REST client for pre-prompt context fetches (thread/DM history).
     pub rest_client: RestClient,
-    /// Channel metadata from discovery (name, type). Read-only after startup.
-    pub channel_info: std::collections::HashMap<Uuid, ChannelInfo>,
+    /// Shared channel metadata for startup-known and dynamically joined channels.
+    pub channel_info: ChannelInfoResolver,
     /// Max messages to include in thread/DM context. 0 = disabled.
     pub context_message_limit: u32,
     /// Max turns per session before proactive rotation. 0 = disabled.
@@ -473,6 +525,10 @@ pub struct PromptContext {
     /// Harness identity string for NIP-AM `harness` field. Derived from the
     /// configured `agent_command` at startup (e.g. `"goose"`, `"buzz-agent"`).
     pub harness_name: String,
+    /// Relay URL this harness is connected to. Rides in observer payloads that
+    /// the desktop keys per (agent, relay) pair, e.g. `session_config_captured`,
+    /// mirroring the `managed_agent_runtime_lifecycle` frames.
+    pub relay_url: String,
 }
 
 impl AgentPool {
@@ -855,6 +911,9 @@ async fn create_session_and_apply_model(
             "modes": resp.raw.get("modes").cloned().unwrap_or(serde_json::Value::Null),
             "models": resp.raw.get("models").cloned().unwrap_or(serde_json::Value::Null),
             "modelOverridden": agent.model_overridden && switch_succeeded,
+            // Pair identity for the desktop session-config cache, which is
+            // keyed by (agent, relay) like the lifecycle frames.
+            "relayUrl": ctx.relay_url,
         }),
     );
 
@@ -1373,13 +1432,12 @@ pub async fn run_prompt_task(
         if is_new_channel_session && !agent.state.canvas_sections.contains_key(cid) {
             // Resolve DM status: prefer the startup cache, lazy-fetch as fallback.
             // Unknown → treat as DM (fail-closed).
-            let is_dm = match ctx.channel_info.get(cid) {
-                Some(ci) => ci.channel_type == "dm",
-                None => fetch_channel_info(*cid, &ctx.rest_client)
-                    .await
-                    .map(|ci| ci.channel_type == "dm")
-                    .unwrap_or(true),
-            };
+            let is_dm = ctx
+                .channel_info
+                .resolve(*cid)
+                .await
+                .map(|ci| ci.channel_type == "dm")
+                .unwrap_or(true);
             if !is_dm {
                 if let Some(section) = fetch_canvas_section(*cid, &ctx.rest_client).await {
                     pending_canvas = Some((*cid, section));
@@ -1683,13 +1741,7 @@ pub async fn run_prompt_task(
     } else if let Some(ref b) = batch {
         // Build prompt from batch with context enrichment.
         // Try startup cache first; lazy-fetch via REST for dynamic channels.
-        let channel_info = match ctx.channel_info.get(&b.channel_id) {
-            Some(ci) => Some(PromptChannelInfo {
-                name: ci.name.clone(),
-                channel_type: ci.channel_type.clone(),
-            }),
-            None => fetch_channel_info(b.channel_id, &ctx.rest_client).await,
-        };
+        let channel_info = ctx.channel_info.resolve(b.channel_id).await;
 
         let conversation_context = if ctx.context_message_limit > 0 {
             fetch_conversation_context(b, &channel_info, &ctx).await
@@ -2182,7 +2234,10 @@ where
 /// Uses `CONTEXT_FETCH_TIMEOUT` with one retry on failure. Returns `None` on
 /// persistent failure (graceful degradation — prompt will lack channel name and
 /// DM detection).
-async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<PromptChannelInfo> {
+pub(crate) async fn fetch_channel_info(
+    channel_id: Uuid,
+    rest: &RestClient,
+) -> Option<PromptChannelInfo> {
     use nostr::{Alphabet, SingleLetterTag};
 
     let d_tag = SingleLetterTag::lowercase(Alphabet::D);
@@ -2204,25 +2259,14 @@ async fn fetch_channel_info(channel_id: Uuid, rest: &RestClient) -> Option<Promp
                 let ev = events.first()?;
                 let tags = ev.get("tags")?.as_array()?;
                 let mut name = None;
-                let mut is_hidden = false;
-                let mut is_private = false;
                 for tag in tags {
                     if let Some(arr) = tag.as_array() {
-                        match arr.first().and_then(|v| v.as_str()) {
-                            Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                            Some("hidden") => is_hidden = true,
-                            Some("private") => is_private = true,
-                            _ => {}
+                        if arr.first().and_then(|v| v.as_str()) == Some("name") {
+                            name = arr.get(1).and_then(|v| v.as_str());
                         }
                     }
                 }
-                let channel_type = if is_hidden {
-                    "dm".to_string()
-                } else if is_private {
-                    "private".to_string()
-                } else {
-                    "stream".to_string()
-                };
+                let channel_type = crate::relay::channel_type_from_tags(tags);
                 Some(PromptChannelInfo {
                     name: name.unwrap_or("unknown").to_string(),
                     channel_type,
@@ -5246,7 +5290,15 @@ mod tests {
                 keys: agent_keys.clone(),
                 auth_tag_json: None,
             },
-            channel_info: std::collections::HashMap::new(),
+            channel_info: ChannelInfoResolver::new(
+                std::collections::HashMap::new(),
+                RestClient {
+                    http: reqwest::Client::new(),
+                    base_url: "http://127.0.0.1:0".to_string(),
+                    keys: agent_keys.clone(),
+                    auth_tag_json: None,
+                },
+            ),
             context_message_limit: 0,
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
@@ -5254,6 +5306,7 @@ mod tests {
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
+            relay_url: "ws://127.0.0.1:3000".to_string(),
         }
     }
 

@@ -38,6 +38,15 @@ export type RelayMembershipLookup = {
   membership: RelayMember | null;
 };
 
+export function canEditCommunityProfile(
+  lookup: RelayMembershipLookup | undefined,
+): boolean {
+  const role = lookup?.membership?.role;
+  return (
+    lookup?.membershipRequired === false || role === "owner" || role === "admin"
+  );
+}
+
 export function shouldWarnMissingMembershipSnapshot(
   lookup: RelayMembershipLookup | undefined,
 ): boolean {

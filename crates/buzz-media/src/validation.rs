@@ -571,6 +571,24 @@ fn validate_jpeg_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     Err(MediaError::InvalidImage)
 }
 
+/// tEXt keywords that carry Buzz snapshot manifests (`.agent.png` /
+/// `.team.png`). These are deliberate product payloads — agent/team sharing
+/// embeds a manifest in a single tEXt chunk — so they are exempt from the
+/// metadata ban. Exactly one snapshot chunk is permitted per file; every
+/// other textual/metadata chunk remains forbidden.
+const PNG_SNAPSHOT_KEYWORDS: [&[u8]; 2] = [b"buzz_agent_snapshot", b"buzz_team_snapshot"];
+
+/// Returns true when a raw tEXt chunk payload is a Buzz snapshot manifest:
+/// the payload must start with an allowlisted keyword followed by the
+/// keyword/text NUL separator.
+fn is_snapshot_text_chunk(payload: &[u8]) -> bool {
+    PNG_SNAPSHOT_KEYWORDS.iter().any(|keyword| {
+        payload.len() > keyword.len()
+            && &payload[..keyword.len()] == *keyword
+            && payload[keyword.len()] == 0
+    })
+}
+
 fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     const SIG: &[u8] = b"\x89PNG\r\n\x1a\n";
     if !bytes.starts_with(SIG) {
@@ -578,6 +596,7 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
     }
     let mut i = SIG.len();
     let mut saw_iend = false;
+    let mut saw_snapshot_chunk = false;
     while i < bytes.len() {
         if i + 12 > bytes.len() {
             return Err(MediaError::InvalidImage);
@@ -589,7 +608,19 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
             .and_then(|v| v.checked_add(len))
             .filter(|&v| v <= bytes.len())
             .ok_or(MediaError::InvalidImage)?;
-        if matches!(&kind, b"eXIf" | b"tEXt" | b"zTXt" | b"iTXt" | b"iCCP") {
+        if &kind == b"tEXt" {
+            // Buzz agent/team snapshot manifests ride in a single tEXt chunk
+            // with an allowlisted keyword. Anything else — other keywords, or
+            // a second snapshot chunk — is a forbidden metadata channel.
+            let payload = &bytes[i + 8..end - 4];
+            if saw_snapshot_chunk || !is_snapshot_text_chunk(payload) {
+                return Err(MediaError::MetadataForbidden);
+            }
+            saw_snapshot_chunk = true;
+            i = end;
+            continue;
+        }
+        if matches!(&kind, b"eXIf" | b"zTXt" | b"iTXt" | b"iCCP") {
             return Err(MediaError::MetadataForbidden);
         }
         // Unknown ancillary chunks are private metadata channels. Keep only
@@ -626,6 +657,40 @@ fn validate_png_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
 }
 
 fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
+    fn validate_frame_payload(payload: &[u8]) -> Result<(), MediaError> {
+        const FRAME_HEADER_LEN: usize = 16;
+        if payload.len() < FRAME_HEADER_LEN {
+            return Err(MediaError::InvalidImage);
+        }
+
+        let mut i = FRAME_HEADER_LEN;
+        let mut saw_alpha = false;
+        let mut saw_image = false;
+        while i < payload.len() {
+            if i + 8 > payload.len() {
+                return Err(MediaError::InvalidImage);
+            }
+            let kind: [u8; 4] = payload[i..i + 4].try_into().unwrap();
+            let len = u32::from_le_bytes(payload[i + 4..i + 8].try_into().unwrap()) as usize;
+            let padded = len.checked_add(len & 1).ok_or(MediaError::InvalidImage)?;
+            i = i
+                .checked_add(8)
+                .and_then(|start| start.checked_add(padded))
+                .filter(|&end| end <= payload.len())
+                .ok_or(MediaError::InvalidImage)?;
+
+            match &kind {
+                b"ALPH" if !saw_alpha && !saw_image => saw_alpha = true,
+                b"VP8 " if !saw_image => saw_image = true,
+                b"VP8L" if !saw_alpha && !saw_image => saw_image = true,
+                b"ALPH" | b"VP8 " | b"VP8L" => return Err(MediaError::InvalidImage),
+                _ => return Err(MediaError::MetadataForbidden),
+            }
+        }
+
+        saw_image.then_some(()).ok_or(MediaError::InvalidImage)
+    }
+
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
         return Err(MediaError::InvalidImage);
     }
@@ -659,6 +724,8 @@ fn validate_webp_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
             if flags & (0x20 | 0x08 | 0x04) != 0 {
                 return Err(MediaError::MetadataForbidden);
             }
+        } else if &kind == b"ANMF" {
+            validate_frame_payload(&bytes[payload_start..payload_start + len])?;
         }
     }
     Ok(())
@@ -740,7 +807,13 @@ fn validate_gif_metadata_free(bytes: &[u8]) -> Result<(), MediaError> {
                             return Err(MediaError::MetadataForbidden);
                         }
                         i += 12;
-                        skip_sub_blocks(bytes, &mut i)?;
+                        if bytes.get(i) != Some(&3)
+                            || bytes.get(i + 1) != Some(&1)
+                            || bytes.get(i + 4) != Some(&0)
+                        {
+                            return Err(MediaError::MetadataForbidden);
+                        }
+                        i += 5;
                     }
                     _ => return Err(MediaError::MetadataForbidden),
                 }
@@ -1231,6 +1304,67 @@ mod tests {
     }
 
     #[test]
+    fn test_png_snapshot_text_chunks_are_allowed() {
+        // Agent/team snapshot manifests ride in an allowlisted tEXt chunk;
+        // the relay must accept exactly one such chunk per file.
+        let config = test_config();
+        for keyword in [b"buzz_agent_snapshot".as_slice(), b"buzz_team_snapshot"] {
+            let mut payload = keyword.to_vec();
+            payload.push(0);
+            payload.extend_from_slice(b"eyJmb3JtYXQiOiJidXp6In0=");
+            let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+            png.extend_from_slice(&png_chunk(b"tEXt", &payload));
+            png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+            assert_eq!(
+                validate_content(&png, &config).unwrap_or_else(|error| panic!(
+                    "rejected snapshot tEXt keyword {}: {error}",
+                    String::from_utf8_lossy(keyword)
+                )),
+                "image/png"
+            );
+        }
+    }
+
+    #[test]
+    fn test_png_snapshot_text_chunk_rejected_when_duplicated_or_spoofed() {
+        let config = test_config();
+
+        // Two snapshot chunks: the second is a covert channel.
+        let mut payload = b"buzz_agent_snapshot".to_vec();
+        payload.push(0);
+        payload.extend_from_slice(b"data");
+        let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+        png.extend_from_slice(&png_chunk(b"tEXt", &payload));
+        png.extend_from_slice(&png_chunk(b"tEXt", &payload));
+        png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+        assert!(matches!(
+            validate_content(&png, &config),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        // Keyword prefix without the NUL separator, and near-miss keywords,
+        // stay forbidden.
+        for payload in [
+            b"buzz_agent_snapshotX\0data".as_slice(),
+            b"buzz_agent_snapshot_extra\0data",
+            b"buzz_agent_snapshot", // no separator at all
+            b"Comment\0GPS=37.7,-122.4",
+        ] {
+            let mut png = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
+            png.extend_from_slice(&png_chunk(b"tEXt", payload));
+            png.extend_from_slice(&TINY_PNG[TINY_PNG.len() - 12..]);
+            assert!(
+                matches!(
+                    validate_content(&png, &config),
+                    Err(MediaError::MetadataForbidden)
+                ),
+                "accepted non-snapshot tEXt payload {:?}",
+                String::from_utf8_lossy(payload)
+            );
+        }
+    }
+
+    #[test]
     fn test_rejects_jpeg_app_metadata_comments_and_trailing_payload() {
         let config = test_config();
         for marker in [0xe1, 0xec, 0xed, 0xef, 0xfe] {
@@ -1296,6 +1430,30 @@ mod tests {
                 Err(MediaError::MetadataForbidden)
             ));
         }
+        let mut frame = vec![0; 16];
+        frame.extend_from_slice(b"VP8 ");
+        frame.extend_from_slice(&3u32.to_le_bytes());
+        frame.extend_from_slice(&[1, 2, 3, 0]);
+        let clean_frame = frame.clone();
+        frame.extend_from_slice(b"JUNK");
+        frame.extend_from_slice(&8u32.to_le_bytes());
+        frame.extend_from_slice(b"location");
+        let nested_metadata = webp(&[
+            (b"VP8X", &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (b"ANIM", &[0; 6]),
+            (b"ANMF", &frame),
+        ]);
+        assert!(matches!(
+            validate_webp_metadata_free(&nested_metadata),
+            Err(MediaError::MetadataForbidden)
+        ));
+        let canonical_animation = webp(&[
+            (b"VP8X", &[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+            (b"ANIM", &[0; 6]),
+            (b"ANMF", &clean_frame),
+        ]);
+        assert!(validate_webp_metadata_free(&canonical_animation).is_ok());
+
         let mut trailing = webp(&[(b"VP8 ", b"pixels")]);
         trailing.extend_from_slice(b"hidden");
         assert!(matches!(
@@ -1327,6 +1485,23 @@ mod tests {
             validate_gif_metadata_free(&trailing),
             Err(MediaError::MetadataForbidden)
         ));
+
+        let mut hidden_in_loop = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+        hidden_in_loop.extend_from_slice(&[0x21, 0xff, 11]);
+        hidden_in_loop.extend_from_slice(b"NETSCAPE2.0");
+        hidden_in_loop.extend_from_slice(&[3, 1, 0, 0, 8]);
+        hidden_in_loop.extend_from_slice(b"location");
+        hidden_in_loop.extend_from_slice(&[0, 0x3b]);
+        assert!(matches!(
+            validate_gif_metadata_free(&hidden_in_loop),
+            Err(MediaError::MetadataForbidden)
+        ));
+
+        let mut canonical_loop = TINY_GIF[..TINY_GIF.len() - 1].to_vec();
+        canonical_loop.extend_from_slice(&[0x21, 0xff, 11]);
+        canonical_loop.extend_from_slice(b"NETSCAPE2.0");
+        canonical_loop.extend_from_slice(&[3, 1, 0, 0, 0, 0x3b]);
+        assert!(validate_gif_metadata_free(&canonical_loop).is_ok());
     }
 
     #[test]

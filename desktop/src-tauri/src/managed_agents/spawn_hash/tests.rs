@@ -178,11 +178,15 @@ fn persona_prompt_edit_changes_hash() {
 }
 
 #[test]
-fn workspace_relay_change_trips_hash_for_blank_record_relay() {
-    // A blank record relay spawns against the active workspace relay, so a
-    // workspace relay change means a restart would change what runs.
-    let mut rec = record();
-    rec.relay_url = String::new();
+fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
+    // The legacy per-record relay pin is ignored (#2122): every record spawns
+    // against the active workspace relay, so a workspace relay change means a
+    // restart would change what runs — pinned records included.
+    let rec = record();
+    assert!(
+        !rec.relay_url.is_empty(),
+        "fixture should carry a legacy pin"
+    );
     assert_ne!(
         spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
         spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
@@ -190,13 +194,16 @@ fn workspace_relay_change_trips_hash_for_blank_record_relay() {
 }
 
 #[test]
-fn workspace_relay_change_ignored_for_pinned_record_relay() {
-    // An explicit per-agent relay pins the agent regardless of workspace, so
-    // a workspace relay change must NOT badge a pinned agent.
-    let rec = record();
+fn stored_record_relay_does_not_affect_hash() {
+    // Editing the (ignored) stored pin must not badge a restart: what a
+    // restart would run is identical either way.
+    let mut a = record();
+    let mut b = record();
+    a.relay_url = String::new();
+    b.relay_url = "wss://legacy-pin.example".into();
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
-        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
+        spawn_config_hash(&a, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&b, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 

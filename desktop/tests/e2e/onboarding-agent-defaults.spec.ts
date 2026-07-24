@@ -431,6 +431,76 @@ test("defaults renders only fields supported by the selected harness", async ({
   ).toHaveCount(0);
 });
 
+test("defaults hides model when optional harness has empty discovery", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+      discoverAgentModels: {
+        models: [],
+        supportsSwitching: false,
+      },
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+  // Confirmed successful empty catalog — omit the Model control; harness
+  // default applies and Finish stays available.
+  await expect(page.getByTestId("global-agent-model")).toHaveCount(0);
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
+});
+
+test("defaults keeps model control when optional harness discovery fails", async ({
+  page,
+}) => {
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+      ],
+      discoverAgentModelsError: "CLI discovery timed out",
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+  await expect(page.getByTestId("global-agent-default-harness")).toHaveText(
+    "Claude Code",
+  );
+  // Failed discovery must not look like successful empty: keep the control
+  // and surface #2246 failure UI (status line bypasses onboarding-essential).
+  await expect(page.getByTestId("global-agent-model")).toBeVisible();
+  await expect(page.getByText(/Could not load live models/i)).toBeVisible();
+  await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
+});
+
 test("defaults Back returns to harness setup", async ({ page }) => {
   await installMockBridge(
     page,

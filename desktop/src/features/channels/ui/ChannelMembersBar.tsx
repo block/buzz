@@ -202,7 +202,7 @@ export function ChannelMembersBar({
               type="button"
               variant="outline"
             >
-              <Settings2 />
+              <EllipsisVertical />
             </Button>
           </TooltipTrigger>
           <TooltipContent>Channel settings</TooltipContent>

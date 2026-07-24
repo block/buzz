@@ -125,7 +125,10 @@ async function verifyPresentation(
 
 export function beginAvatarPresentation(remoteUrl: string, image: Blob): void {
   const existing = presentations.get(remoteUrl);
-  if (existing) releaseLocalPreview(existing);
+  if (existing) {
+    toast.dismiss(toastId(remoteUrl));
+    releaseLocalPreview(existing);
+  }
 
   const localPreviewUrl = URL.createObjectURL(image);
   const entry: AvatarPresentationEntry = {
@@ -137,6 +140,27 @@ export function beginAvatarPresentation(remoteUrl: string, image: Blob): void {
   presentations.set(remoteUrl, entry);
   emitChange();
   void verifyPresentation(entry);
+}
+
+export function disposeAvatarPresentation(remoteUrl: string): void {
+  const entry = presentations.get(remoteUrl);
+  if (!entry) return;
+
+  entry.generation = nextGeneration++;
+  toast.dismiss(toastId(remoteUrl));
+  releaseLocalPreview(entry);
+  presentations.delete(remoteUrl);
+  emitChange();
+}
+
+export function resetAvatarPresentations(): void {
+  for (const entry of presentations.values()) {
+    entry.generation = nextGeneration++;
+    toast.dismiss(toastId(entry.remoteUrl));
+    releaseLocalPreview(entry);
+  }
+  presentations.clear();
+  emitChange();
 }
 
 export function retryAvatarPresentation(remoteUrl: string): void {
@@ -170,5 +194,18 @@ export function useAvatarPresentation(
     subscribeAvatarPresentations,
     () => getAvatarPresentation(remoteUrl),
     () => null,
+  );
+}
+
+export function useAvatarSelection(
+  avatarUrl: string,
+  onUrlChange: (avatarUrl: string) => void,
+): (avatarUrl: string) => void {
+  return React.useCallback(
+    (nextAvatarUrl: string) => {
+      if (avatarUrl !== nextAvatarUrl) disposeAvatarPresentation(avatarUrl);
+      onUrlChange(nextAvatarUrl);
+    },
+    [avatarUrl, onUrlChange],
   );
 }

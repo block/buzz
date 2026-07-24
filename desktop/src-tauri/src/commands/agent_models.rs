@@ -47,7 +47,7 @@ pub async fn get_agent_models(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         let record = records
@@ -792,7 +792,7 @@ pub async fn update_managed_agent(
         let (_, exited_pubkeys) =
             sync_managed_agent_processes(&mut records, &mut runtimes, &current_instance_id(&app));
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &input.pubkey)?;

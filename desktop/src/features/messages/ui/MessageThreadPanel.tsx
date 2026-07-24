@@ -526,6 +526,7 @@ export function MessageThreadPanel({
       data-buzz-conversation-scroll
       data-testid="message-thread-body"
       onScroll={onScroll}
+      tabIndex={-1}
       ref={threadBodyRef}
     >
       <div

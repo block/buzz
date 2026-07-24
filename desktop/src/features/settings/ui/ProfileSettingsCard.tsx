@@ -13,17 +13,7 @@ import {
   useUpdateProfileMutation,
 } from "@/features/profile/hooks";
 import { NsecMaskedDisplay } from "@/features/onboarding/ui/NsecMaskedDisplay";
-import { getNsec, signOut } from "@/shared/api/tauriIdentity";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/shared/ui/alert-dialog";
+import { getNsec } from "@/shared/api/tauriIdentity";
 import { MaskedAvatarBadgeFrame } from "@/features/profile/ui/MaskedAvatarBadgeFrame";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
@@ -31,11 +21,11 @@ import {
   parseEmojiAvatarDataUrl,
 } from "@/features/profile/ui/ProfileAvatarEditor";
 import { cn } from "@/shared/lib/cn";
-import { Button } from "@/shared/ui/button";
 import { Input } from "@/shared/ui/input";
 import { Spinner } from "@/shared/ui/spinner";
 import { Textarea } from "@/shared/ui/textarea";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { SignOutSection } from "./SignOutSection";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
 
 type ProfileSettingsCardProps = {
@@ -262,8 +252,6 @@ export function ProfileSettingsCard({
   const [shouldRenderAvatarEditor, setShouldRenderAvatarEditor] =
     React.useState(false);
   const [avatarSquishKey, setAvatarSquishKey] = React.useState(0);
-  const [isSignOutOpen, setIsSignOutOpen] = React.useState(false);
-  const [isSignOutPending, setIsSignOutPending] = React.useState(false);
   const displayNameInputRef = React.useRef<HTMLInputElement>(null);
   const aboutTextareaRef = React.useRef<HTMLTextAreaElement>(null);
   const sectionRef = React.useRef<HTMLElement>(null);
@@ -956,88 +944,7 @@ export function ProfileSettingsCard({
         </div>
       </div>
 
-      <div
-        className="mt-8 border-t border-border/60 pb-6 pt-5"
-        data-testid="settings-signout"
-      >
-        <div className="flex items-center justify-between gap-4 px-1">
-          <div className="min-w-0 space-y-1">
-            <h2 className="text-lg font-semibold tracking-tight">Sign out</h2>
-            <p className="text-sm text-muted-foreground">
-              Removes your identity key and all local app data from this device.
-              Back up your private key (nsec) first — this cannot be undone.
-            </p>
-          </div>
-          <Button
-            className="shrink-0"
-            data-testid="signout-open-dialog"
-            disabled={isSignOutPending}
-            onClick={() => setIsSignOutOpen(true)}
-            type="button"
-            variant="destructive"
-          >
-            {isSignOutPending ? (
-              <Spinner aria-label="Signing out" className="h-4 w-4 border-2" />
-            ) : null}
-            {isSignOutPending ? "Signing out…" : "Sign Out"}
-          </Button>
-        </div>
-        <AlertDialog
-          onOpenChange={(open) => {
-            if (!open && !isSignOutPending) setIsSignOutOpen(false);
-          }}
-          open={isSignOutOpen}
-        >
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>Sign out and wipe all data?</AlertDialogTitle>
-              <AlertDialogDescription>
-                This will delete your identity key, all agent settings, and
-                cached data from this device, then relaunch Buzz into first-run
-                setup. Make sure you have your private key (nsec) backed up
-                before continuing — this cannot be undone.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel disabled={isSignOutPending}>
-                Cancel
-              </AlertDialogCancel>
-              <AlertDialogAction
-                className="bg-destructive text-destructive-foreground shadow-xs hover:bg-destructive/90"
-                data-testid="signout-confirm"
-                disabled={isSignOutPending}
-                onClick={() => {
-                  setIsSignOutPending(true);
-                  // Keep the pending state if signOut() resolves before restart.
-                  signOut()
-                    .then(() => {
-                      // Clear web storage for this origin on the success path
-                      // only. This covers dev builds where the Rust webview wipe
-                      // targets the .app-bundle WebKit dir (missing in `tauri
-                      // dev`), preventing stale community config from vouching
-                      // for the fresh key on next boot. In production the Rust
-                      // wipe already handles this; the clear here is redundant
-                      // but harmless. The restart may race this clear — that is
-                      // acceptable; Fix A (pubkey-scoped heuristic) is the
-                      // correctness gate.
-                      window.localStorage.clear();
-                      window.sessionStorage.clear();
-                    })
-                    .catch((err: unknown) => {
-                      setIsSignOutPending(false);
-                      setIsSignOutOpen(false);
-                      toast.error(
-                        err instanceof Error ? err.message : "Sign out failed.",
-                      );
-                    });
-                }}
-              >
-                {isSignOutPending ? "Signing out…" : "Delete My Data"}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </div>
+      <SignOutSection />
     </section>
   );
 }
