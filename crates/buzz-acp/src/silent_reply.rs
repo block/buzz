@@ -13,6 +13,10 @@ use crate::queue::FlushBatch;
 
 /// True when this batch was admitted as an `@mention` of a stream message —
 /// the path that is expected to produce a visible channel reply.
+///
+/// `SubscribeMode::All` batches use `prompt_tag: "all"` and intentionally get
+/// no protection here: every event fires a turn in that mode, so a zero-publish
+/// outcome is not anomalous the way a missed mention reply is.
 pub(crate) fn batch_expects_channel_reply(batch: &FlushBatch) -> bool {
     batch.events.iter().any(|be| {
         be.prompt_tag == "@mention"

@@ -13,13 +13,16 @@ mod setup_mode;
 mod silent_reply;
 mod usage;
 
+/// Grace window before posting a silent-reply notice so a late ws echo can land (#2459).
+const SILENT_REPLY_GRACE: Duration = Duration::from_secs(3);
+
 pub use usage::TurnUsage;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use acp::{AcpClient, EnvVar, McpServer};
+use acp::{AcpClient, EnvVar, McpServer, StopReason};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
@@ -1580,6 +1583,9 @@ async fn tokio_main() -> Result<()> {
     //      withheld event in `EventQueue::withheld_native_steer` until
     //      `IN_FLIGHT_DEADLINE_SECS` expires.
     let (steer_ack_tx, mut steer_ack_rx) = mpsc::unbounded_channel::<SteerAckEvent>();
+    // Deferred silent-reply checks: Ok mention turns wait a grace window so a
+    // late ws echo can clear the "couldn't publish" notice (#2459).
+    let (silent_reply_tx, mut silent_reply_rx) = mpsc::unbounded_channel::<FlushBatch>();
 
     // ── Step 7: Shutdown signal ───────────────────────────────────────────────
     let (shutdown_tx, mut shutdown_rx) = watch::channel(());
@@ -1654,6 +1660,7 @@ async fn tokio_main() -> Result<()> {
         Result(Box<PromptResult>),
         Panic(tokio::task::JoinError),
         SteerAck(SteerAckEvent),
+        SilentReplyDue(FlushBatch),
         Wake(u32, Result<AgentPool, String>),
     }
 
@@ -1796,6 +1803,9 @@ async fn tokio_main() -> Result<()> {
                 // locked semantics (Eva + Max + Perci).
                 Some(ack_event) = steer_ack_rx.recv() => {
                     Some(PoolEvent::SteerAck(ack_event))
+                }
+                Some(batch) = silent_reply_rx.recv() => {
+                    Some(PoolEvent::SilentReplyDue(batch))
                 }
                 Some((attempt, result)) = wake_rx.recv(), if config.lazy_pool && !pool_ready => {
                     Some(PoolEvent::Wake(attempt, result))
@@ -1977,10 +1987,15 @@ async fn tokio_main() -> Result<()> {
                                 continue;
                             }
 
+                            // Count self-authored stream replies for silent-reply
+                            // detection regardless of ignore_self (#2459): under
+                            // --no-ignore-self the counter must still increment.
+                            if buzz_event.event.pubkey.to_hex() == pubkey_hex
+                                && silent_reply::is_agent_reply_kind(kind_u32)
+                            {
+                                queue.note_self_publish(buzz_event.channel_id);
+                            }
                             if config.ignore_self && buzz_event.event.pubkey.to_hex() == pubkey_hex {
-                                if silent_reply::is_agent_reply_kind(kind_u32) {
-                                    queue.note_self_publish(buzz_event.channel_id);
-                                }
                                 tracing::debug!(channel_id = %buzz_event.channel_id, "dropping self-authored event");
                                 continue;
                             }
@@ -2316,6 +2331,7 @@ async fn tokio_main() -> Result<()> {
                     &mut respawn_tasks,
                     observer.clone(),
                     Some(&ctx.rest_client),
+                    Some(&silent_reply_tx),
                 ) == LoopAction::Exit
                 {
                     break;
@@ -2480,6 +2496,24 @@ async fn tokio_main() -> Result<()> {
                 // task has already returned.
                 for (channel_id, thread_tags) in dispatch_pending(&mut pool, &mut queue, &ctx) {
                     typing_channels.insert(channel_id, thread_tags);
+                }
+            }
+            Some(PoolEvent::SilentReplyDue(batch)) => {
+                let Some(publishes) = queue.take_silent_reply_watch(batch.channel_id) else {
+                    // Already consumed (e.g. a later Ok on the same channel
+                    // re-armed / raced); nothing to do.
+                    continue;
+                };
+                if let Some(content) = silent_reply::silent_reply_loss_notice(
+                    &PromptOutcome::Ok(StopReason::EndTurn),
+                    Some(&batch),
+                    publishes,
+                ) {
+                    tracing::warn!(
+                        channel_id = %batch.channel_id,
+                        "mention turn completed Ok with no agent channel publish — posting failure notice"
+                    );
+                    spawn_failure_notice(Some(&ctx.rest_client), &batch, content);
                 }
             }
             Some(PoolEvent::Wake(attempt, result)) => {
@@ -2963,6 +2997,7 @@ fn handle_prompt_result(
     respawn_tasks: &mut tokio::task::JoinSet<()>,
     observer: Option<observer::ObserverHandle>,
     rest_client: Option<&relay::RestClient>,
+    silent_reply_tx: Option<&mpsc::UnboundedSender<FlushBatch>>,
 ) -> LoopAction {
     let before = pool.task_map().len();
     let agent_index = result.agent.index;
@@ -2991,15 +3026,37 @@ fn handle_prompt_result(
             if matches!(result.outcome, PromptOutcome::Ok(_)) {
                 // Ok turns keep the batch only for silent-reply detection —
                 // never requeue a successful turn (#2459).
-                let publishes = queue.take_self_publishes(batch.channel_id);
-                if let Some(content) =
-                    silent_reply::silent_reply_loss_notice(&result.outcome, Some(&batch), publishes)
-                {
-                    tracing::warn!(
-                        channel_id = %batch.channel_id,
-                        "mention turn completed Ok with no agent channel publish — posting failure notice"
-                    );
-                    spawn_failure_notice(rest_client, &batch, content);
+                if silent_reply::batch_expects_channel_reply(&batch) {
+                    // Defer the notice: the reply echo arrives on the ws path
+                    // and is not ordered vs pool completion. Arm a watch so
+                    // counts survive mark_complete, then re-check after a
+                    // short grace window.
+                    queue.arm_silent_reply_watch(batch.channel_id);
+                    if let Some(tx) = silent_reply_tx {
+                        let tx = tx.clone();
+                        let batch_for_check = batch.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(SILENT_REPLY_GRACE).await;
+                            let _ = tx.send(batch_for_check);
+                        });
+                    } else {
+                        // Tests / callers without a deferred channel: decide now.
+                        let publishes =
+                            queue.take_silent_reply_watch(batch.channel_id).unwrap_or(0);
+                        if let Some(content) = silent_reply::silent_reply_loss_notice(
+                            &result.outcome,
+                            Some(&batch),
+                            publishes,
+                        ) {
+                            tracing::warn!(
+                                channel_id = %batch.channel_id,
+                                "mention turn completed Ok with no agent channel publish — posting failure notice"
+                            );
+                            spawn_failure_notice(rest_client, &batch, content);
+                        }
+                    }
+                } else {
+                    let _ = queue.take_self_publishes(batch.channel_id);
                 }
             } else if matches!(
                 result.outcome,
@@ -4928,6 +4985,7 @@ mod error_outcome_emission_tests {
             &mut respawn_tasks,
             Some(observer.clone()),
             None,
+            None,
         );
 
         let turn_errors: Vec<_> = observer
@@ -5093,6 +5151,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 Some(observer.clone()),
                 None,
+                None,
             );
             let events = observer.snapshot();
             let turn_error = events.iter().find(|e| e.kind == "turn_error").unwrap();
@@ -5181,6 +5240,7 @@ mod error_outcome_emission_tests {
                 &mut crash_history,
                 &respawn_tx,
                 &mut respawn_tasks,
+                None,
                 None,
                 None,
             );
@@ -5288,6 +5348,7 @@ mod error_outcome_emission_tests {
                 &mut respawn_tasks,
                 None,
                 None,
+                None,
             );
             (
                 queue.pending_channels(),
@@ -5378,6 +5439,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -5471,6 +5533,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -5586,6 +5649,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
@@ -5718,6 +5782,7 @@ mod error_outcome_emission_tests {
             &respawn_tx,
             &mut respawn_tasks,
             Some(observer.clone()),
+            None,
             None,
         );
 
