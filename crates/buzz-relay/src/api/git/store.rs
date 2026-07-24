@@ -25,6 +25,7 @@
 #![allow(dead_code)] // wired in by the push path in a follow-up commit
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use s3::creds::Credentials;
@@ -109,6 +110,20 @@ pub struct ProbeConfig {
     pub race_width: usize,
     /// How many rounds to run each race phase.
     pub race_rounds: usize,
+    /// Ceiling on any single store operation inside the probe. The shared
+    /// `rust-s3` bucket client carries no request timeout, so a backend
+    /// connection that is accepted but never answered would otherwise pend
+    /// forever — and `join_all` in the race phases waits for *every* racer,
+    /// so one stalled socket hangs the probe (and, because the probe gates
+    /// startup, the whole relay). On elapse a racer is classified as a
+    /// transport drop (its outcome is unknown — same drop-and-floor rule as
+    /// `S3Error::{Reqwest, Http, Io}`); a sequential-phase operation fails
+    /// the probe with a diagnosable reason instead.
+    pub op_timeout: Duration,
+    /// Hard ceiling on the whole probe run — bounds worst-case startup
+    /// delay no matter how the backend misbehaves. On elapse the probe
+    /// fails closed with phase `deadline` rather than hanging.
+    pub deadline: Duration,
 }
 
 impl Default for ProbeConfig {
@@ -116,6 +131,8 @@ impl Default for ProbeConfig {
         Self {
             race_width: 32,
             race_rounds: 3,
+            op_timeout: Duration::from_secs(30),
+            deadline: Duration::from_secs(300),
         }
     }
 }
@@ -149,7 +166,8 @@ pub struct ProbeReport {
 #[derive(Debug, thiserror::Error)]
 #[error("conformance probe failed in phase '{phase}' (round {round}, key {key}): {reason}")]
 pub struct ProbeFailure {
-    /// One of `sequential`, `if_match_race`, `if_none_match_race`, `etag_consistency`.
+    /// One of `config`, `sequential`, `if_match_race`, `if_none_match_race`,
+    /// `etag_consistency`, or `deadline` (whole-probe time budget exceeded).
     pub phase: &'static str,
     /// Round index (0-based) when this phase ran multiple rounds.
     pub round: usize,
@@ -568,7 +586,53 @@ impl GitStore {
     /// 4. **`etag_consistency`** — round-trip an ETag from `get_pointer` into
     ///    `put_pointer(IfMatch(...))` and assert `Won`. Tests that the token
     ///    is opaque and stable between read and CAS.
+    ///
+    /// Every operation is bounded by `cfg.op_timeout` and the whole run by
+    /// `cfg.deadline`, so a backend that accepts connections but never
+    /// answers produces a diagnosable `ProbeFailure` instead of hanging
+    /// relay startup indefinitely (the shared bucket client carries no
+    /// request timeout of its own).
     pub async fn run_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        let deadline = cfg.deadline;
+        match tokio::time::timeout(deadline, self.conformance_probe_inner(cfg)).await {
+            Ok(result) => result,
+            Err(_) => Err(ProbeFailure {
+                phase: "deadline",
+                round: 0,
+                key: String::new(),
+                reason: format!(
+                    "probe did not complete within {deadline:?} — a backend connection \
+                     stalled without erroring; investigate the object store or set \
+                     BUZZ_GIT_CONFORMANCE_PROBE=false to skip the gate"
+                ),
+            }
+            .into()),
+        }
+    }
+
+    /// Bound a single fail-closed probe operation. Elapse means the backend
+    /// held the connection open without answering — a diagnosable probe
+    /// failure, not a hang.
+    async fn probe_op<T>(
+        op_timeout: Duration,
+        phase: &'static str,
+        round: usize,
+        key: &str,
+        fut: impl std::future::Future<Output = Result<T, StoreError>>,
+    ) -> Result<T, StoreError> {
+        match tokio::time::timeout(op_timeout, fut).await {
+            Ok(result) => result,
+            Err(_) => Err(ProbeFailure {
+                phase,
+                round,
+                key: key.to_owned(),
+                reason: format!("no response within {op_timeout:?} (stalled backend connection)"),
+            }
+            .into()),
+        }
+    }
+
+    async fn conformance_probe_inner(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
         use std::sync::Arc;
         if cfg.race_width < 2 || cfg.race_rounds == 0 {
             return Err(ProbeFailure {
@@ -591,16 +655,32 @@ impl GitStore {
         // -- Phase 1: sequential --------------------------------------------------
         for round in 0..cfg.race_rounds {
             let body = format!("probe-sequential-{nonce}-{round}").into_bytes();
-            let key = self.put_pack(&body).await?;
-            let got = self
-                .get_verified(&key, &Self::digest_hex(&body))
-                .await
-                .map_err(|e| ProbeFailure {
+            let key = Self::probe_op(
+                cfg.op_timeout,
+                "sequential",
+                round,
+                "",
+                self.put_pack(&body),
+            )
+            .await?;
+            let got = Self::probe_op(
+                cfg.op_timeout,
+                "sequential",
+                round,
+                &key,
+                self.get_verified(&key, &Self::digest_hex(&body)),
+            )
+            .await
+            .map_err(|e| match e {
+                probe @ StoreError::Probe(_) => probe,
+                other => ProbeFailure {
                     phase: "sequential",
                     round,
                     key: key.clone(),
-                    reason: format!("read-after-write failed: {e}"),
-                })?;
+                    reason: format!("read-after-write failed: {other}"),
+                }
+                .into(),
+            })?;
             if got[..] != body[..] {
                 return Err(ProbeFailure {
                     phase: "sequential",
@@ -615,10 +695,17 @@ impl GitStore {
         // -- Phase 2: if_match_race -----------------------------------------------
         // Seed the pointer with a known value, then race N IfMatch updates.
         let seed = b"probe-pointer-seed".to_vec();
-        let _ = self.bucket.delete_object(&pointer_key).await; // ignore 404
-        let seed_outcome = self
-            .put_pointer(&pointer_key, &seed, Precond::IfNoneMatchStar)
-            .await?;
+        // Ignore 404s; also bound the delete so a stalled connection can't
+        // pend the probe before the race even starts.
+        let _ = tokio::time::timeout(cfg.op_timeout, self.bucket.delete_object(&pointer_key)).await;
+        let seed_outcome = Self::probe_op(
+            cfg.op_timeout,
+            "if_match_race",
+            0,
+            &pointer_key,
+            self.put_pointer(&pointer_key, &seed, Precond::IfNoneMatchStar),
+        )
+        .await?;
         let mut etag = match seed_outcome {
             CasOutcome::Won(e) => e,
             CasOutcome::LostRace => {
@@ -639,7 +726,19 @@ impl GitStore {
                 let pkey = pointer_key.clone();
                 let et = etag.clone();
                 let body = format!("round={round},racer={i},nonce={nonce}").into_bytes();
-                tasks.push(async move { me.put_pointer(&pkey, &body, Precond::IfMatch(et)).await });
+                let op_timeout = cfg.op_timeout;
+                // `None` = no response within `op_timeout` — the racer's
+                // outcome is unknown, exactly like a socket/send failure.
+                // Without this bound, one stalled connection pends forever
+                // and `join_all` (and startup) hangs with it.
+                tasks.push(async move {
+                    tokio::time::timeout(
+                        op_timeout,
+                        me.put_pointer(&pkey, &body, Precond::IfMatch(et)),
+                    )
+                    .await
+                    .ok()
+                });
             }
             let outcomes = futures_util::future::join_all(tasks).await;
             // Drop-and-floor classification. A `Reqwest`/`Http`/`Io` error
@@ -659,17 +758,27 @@ impl GitStore {
             let mut new_etag: Option<ETag> = None;
             for (i, outcome) in outcomes.into_iter().enumerate() {
                 match outcome {
-                    Ok(CasOutcome::Won(e)) => {
+                    None => {
+                        transport_drops += 1;
+                        tracing::warn!(
+                            phase = "if_match_race",
+                            round,
+                            racer = i,
+                            timeout = ?cfg.op_timeout,
+                            "transport drop (timeout: no response from backend)"
+                        );
+                    }
+                    Some(Ok(CasOutcome::Won(e))) => {
                         classified += 1;
                         winners += 1;
                         new_etag = Some(e);
                     }
-                    Ok(CasOutcome::LostRace) => {
+                    Some(Ok(CasOutcome::LostRace)) => {
                         classified += 1;
                     }
-                    Err(StoreError::Backend(
+                    Some(Err(StoreError::Backend(
                         S3Error::Reqwest(_) | S3Error::Http(_) | S3Error::Io(_),
-                    )) => {
+                    ))) => {
                         transport_drops += 1;
                         tracing::warn!(
                             phase = "if_match_race",
@@ -678,7 +787,7 @@ impl GitStore {
                             "transport drop (pre-classification: socket/send failure)"
                         );
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         return Err(ProbeFailure {
                             phase: "if_match_race",
                             round,
@@ -724,15 +833,21 @@ impl GitStore {
         for round in 0..cfg.race_rounds {
             let body = format!("probe-inm-race-{nonce}-{round}").into_bytes();
             let key = Self::content_key("probe/inm-race", &body);
-            // Clean slate.
-            let _ = self.bucket.delete_object(&key).await;
+            // Clean slate — bounded like every other probe operation.
+            let _ = tokio::time::timeout(cfg.op_timeout, self.bucket.delete_object(&key)).await;
             let arc_self: Arc<&Self> = Arc::new(self);
             let mut tasks = Vec::with_capacity(cfg.race_width);
             for _ in 0..cfg.race_width {
                 let me = Arc::clone(&arc_self);
                 let k = key.clone();
                 let b = body.clone();
-                tasks.push(async move { me.put_immutable_raw(&k, &b).await });
+                let op_timeout = cfg.op_timeout;
+                // Same bound as Phase 2: `None` = timed out, outcome unknown.
+                tasks.push(async move {
+                    tokio::time::timeout(op_timeout, me.put_immutable_raw(&k, &b))
+                        .await
+                        .ok()
+                });
             }
             let results = futures_util::future::join_all(tasks).await;
             // Drop-and-floor: same classification rule as Phase 2. Drop
@@ -745,15 +860,25 @@ impl GitStore {
             let mut twelves = 0usize;
             for (i, r) in results.into_iter().enumerate() {
                 match r {
-                    Ok(200..=299) => {
+                    None => {
+                        transport_drops += 1;
+                        tracing::warn!(
+                            phase = "if_none_match_race",
+                            round,
+                            racer = i,
+                            timeout = ?cfg.op_timeout,
+                            "transport drop (timeout: no response from backend)"
+                        );
+                    }
+                    Some(Ok(200..=299)) => {
                         classified += 1;
                         twos += 1;
                     }
-                    Ok(412) => {
+                    Some(Ok(412)) => {
                         classified += 1;
                         twelves += 1;
                     }
-                    Ok(code) => {
+                    Some(Ok(code)) => {
                         return Err(ProbeFailure {
                             phase: "if_none_match_race",
                             round,
@@ -762,9 +887,9 @@ impl GitStore {
                         }
                         .into())
                     }
-                    Err(StoreError::Backend(
+                    Some(Err(StoreError::Backend(
                         S3Error::Reqwest(_) | S3Error::Http(_) | S3Error::Io(_),
-                    )) => {
+                    ))) => {
                         transport_drops += 1;
                         tracing::warn!(
                             phase = "if_none_match_race",
@@ -773,7 +898,7 @@ impl GitStore {
                             "transport drop (pre-classification: socket/send failure)"
                         );
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         return Err(ProbeFailure {
                             phase: "if_none_match_race",
                             round,
@@ -815,15 +940,24 @@ impl GitStore {
             }
             // Final bytes must equal the racers' bytes (content-addressed: any
             // winner stored the same bytes by construction).
-            let read = self
-                .get_verified(&key, &Self::digest_hex(&body))
-                .await
-                .map_err(|e| ProbeFailure {
+            let read = Self::probe_op(
+                cfg.op_timeout,
+                "if_none_match_race",
+                round,
+                &key,
+                self.get_verified(&key, &Self::digest_hex(&body)),
+            )
+            .await
+            .map_err(|e| match e {
+                probe @ StoreError::Probe(_) => probe,
+                other => ProbeFailure {
                     phase: "if_none_match_race",
                     round,
                     key: key.clone(),
-                    reason: format!("post-race verified read failed: {e}"),
-                })?;
+                    reason: format!("post-race verified read failed: {other}"),
+                }
+                .into(),
+            })?;
             if read[..] != body[..] {
                 return Err(ProbeFailure {
                     phase: "if_none_match_race",
@@ -839,19 +973,29 @@ impl GitStore {
         // GET pointer, take its ETag, CAS-update with that ETag, expect Won.
         // Proves the token round-trips opaquely between read and write.
         for round in 0..cfg.race_rounds {
-            let (et, _bytes) =
-                self.get_pointer(&pointer_key)
-                    .await?
-                    .ok_or_else(|| ProbeFailure {
-                        phase: "etag_consistency",
-                        round,
-                        key: pointer_key.clone(),
-                        reason: "pointer vanished mid-probe".into(),
-                    })?;
+            let (et, _bytes) = Self::probe_op(
+                cfg.op_timeout,
+                "etag_consistency",
+                round,
+                &pointer_key,
+                self.get_pointer(&pointer_key),
+            )
+            .await?
+            .ok_or_else(|| ProbeFailure {
+                phase: "etag_consistency",
+                round,
+                key: pointer_key.clone(),
+                reason: "pointer vanished mid-probe".into(),
+            })?;
             let body = format!("probe-etag-{round}-{nonce}").into_bytes();
-            match self
-                .put_pointer(&pointer_key, &body, Precond::IfMatch(et))
-                .await?
+            match Self::probe_op(
+                cfg.op_timeout,
+                "etag_consistency",
+                round,
+                &pointer_key,
+                self.put_pointer(&pointer_key, &body, Precond::IfMatch(et)),
+            )
+            .await?
             {
                 CasOutcome::Won(_) => {}
                 CasOutcome::LostRace => {
@@ -868,7 +1012,7 @@ impl GitStore {
 
         // Cleanup pointer (immutable probe writes accumulate by design; the
         // bucket's retention policy handles them, not the probe).
-        let _ = self.bucket.delete_object(&pointer_key).await;
+        let _ = tokio::time::timeout(cfg.op_timeout, self.bucket.delete_object(&pointer_key)).await;
 
         Ok(ProbeReport {
             race_width: cfg.race_width,
@@ -956,6 +1100,100 @@ mod tests {
             Region::Custom { ref region, .. } => assert_eq!(region, "us-west-2"),
             ref other => panic!("expected Custom region, got {other:?}"),
         }
+    }
+
+    /// A TCP listener that accepts connections and never responds — the
+    /// exact shape of the production hang this probe guards against (a
+    /// backend socket that neither answers nor errors). Held sockets stay
+    /// open until the guard task is aborted.
+    async fn spawn_tarpit() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tarpit");
+        let addr = listener.local_addr().expect("tarpit addr");
+        let guard = tokio::spawn(async move {
+            let mut held = Vec::new();
+            loop {
+                if let Ok((sock, _)) = listener.accept().await {
+                    held.push(sock); // hold open, never reply
+                }
+            }
+        });
+        (addr, guard)
+    }
+
+    fn tarpit_store(addr: std::net::SocketAddr) -> GitStore {
+        GitStore::new(
+            &format!("http://{addr}"),
+            "probe-access",
+            "probe-secret",
+            "buzz-git",
+            "us-east-1",
+        )
+        .expect("build store against tarpit")
+    }
+
+    /// Regression: a stalled backend connection must surface as a
+    /// diagnosable per-operation timeout, not hang the probe (and startup)
+    /// forever. Before `op_timeout`, this test never returned.
+    #[tokio::test]
+    async fn probe_fails_fast_when_backend_stalls() {
+        let (addr, guard) = spawn_tarpit().await;
+        let store = tarpit_store(addr);
+        let cfg = ProbeConfig {
+            race_width: 4,
+            race_rounds: 1,
+            op_timeout: Duration::from_millis(250),
+            deadline: Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let err = store
+            .run_conformance_probe(cfg)
+            .await
+            .expect_err("stalled backend must not be admitted");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "probe must fail fast, took {:?}",
+            started.elapsed()
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no response within"),
+            "expected op-timeout failure, got: {msg}"
+        );
+        guard.abort();
+    }
+
+    /// Regression: even if per-operation bounds are configured absurdly
+    /// large, the whole-probe deadline still bounds startup delay. With
+    /// `op_timeout` effectively unbounded this reproduces the production
+    /// hang; the deadline converts it into a fail-closed error.
+    #[tokio::test]
+    async fn probe_deadline_bounds_total_runtime() {
+        let (addr, guard) = spawn_tarpit().await;
+        let store = tarpit_store(addr);
+        let cfg = ProbeConfig {
+            race_width: 4,
+            race_rounds: 1,
+            op_timeout: Duration::from_secs(3600),
+            deadline: Duration::from_millis(300),
+        };
+        let started = std::time::Instant::now();
+        let err = store
+            .run_conformance_probe(cfg)
+            .await
+            .expect_err("deadline must fail the probe closed");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "deadline must fire promptly, took {:?}",
+            started.elapsed()
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not complete within") && msg.contains("deadline"),
+            "expected whole-probe deadline failure, got: {msg}"
+        );
+        guard.abort();
     }
 
     #[test]
@@ -1133,6 +1371,7 @@ mod probe {
             .run_conformance_probe(ProbeConfig {
                 race_width: 8,
                 race_rounds: 2,
+                ..ProbeConfig::default()
             })
             .await
             .expect("conformance probe");
