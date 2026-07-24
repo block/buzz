@@ -201,6 +201,9 @@ fn recomputes_manifest_and_activation_hashes_before_ready() {
         result.tool_allowlist.iter().collect::<BTreeSet<_>>(),
         config.tool_allowlist.iter().collect::<BTreeSet<_>>(),
     );
+    let binding = verified_snapshot_from_readiness(&result).expect("frozen snapshot binding");
+    assert_eq!(binding.snapshot_id(), config.expected_active_snapshot_id);
+    assert_eq!(binding.collections(), &["documents".to_string()]);
     assert_eq!(
         result.admitted.expect("admission candidate").bearer_token,
         "rag-read-token-123456",

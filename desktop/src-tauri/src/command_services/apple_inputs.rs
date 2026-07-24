@@ -1,10 +1,13 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
+
+use crate::command_services::ssh::ProtectedFile;
 
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +18,11 @@ const MAXIMUM_STDOUT_BYTES: usize = 1024 * 1024;
 const MAXIMUM_STDERR_BYTES: usize = 64 * 1024;
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 const PERMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 loads the protected brief selection")
+)]
+const MAXIMUM_BRIEF_CONFIG_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +99,10 @@ pub(crate) enum AppleInputRequest {
     ReadFiles(FilesArguments),
 }
 
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
 impl AppleInputRequest {
     fn source(&self) -> AppleInputSource {
         match self {
@@ -114,7 +126,7 @@ impl AppleInputRequest {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum AppleInputPermission {
     NotDetermined,
@@ -139,6 +151,218 @@ pub(crate) struct AppleInputResponse {
     records: Vec<AppleInputRecord>,
     truncated: bool,
     error: Option<String>,
+}
+
+impl AppleInputRequest {
+    pub(crate) fn source_name(&self) -> &'static str {
+        match self.source() {
+            AppleInputSource::Calendar => "calendar",
+            AppleInputSource::Reminders => "reminders",
+            AppleInputSource::Notes => "notes",
+            AppleInputSource::Files => "files",
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+impl AppleInputPermission {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::NotDetermined => "not_determined",
+            Self::Denied => "denied",
+            Self::Authorized => "authorized",
+            Self::Restricted => "restricted",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+impl AppleInputRecord {
+    pub(crate) fn fields(&self) -> &BTreeMap<String, String> {
+        &self.fields
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+impl AppleInputResponse {
+    pub(crate) fn source_name(&self) -> &'static str {
+        match self.source {
+            AppleInputSource::Calendar => "calendar",
+            AppleInputSource::Reminders => "reminders",
+            AppleInputSource::Notes => "notes",
+            AppleInputSource::Files => "files",
+        }
+    }
+
+    pub(crate) const fn permission(&self) -> AppleInputPermission {
+        self.permission
+    }
+
+    pub(crate) fn observed_at(&self) -> &str {
+        &self.observed_at
+    }
+
+    pub(crate) fn records(&self) -> &[AppleInputRecord] {
+        &self.records
+    }
+
+    pub(crate) const fn truncated(&self) -> bool {
+        self.truncated
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 loads the protected brief selection")
+)]
+struct RawAppleBriefSelection {
+    schema_version: u32,
+    calendar_ids: Vec<String>,
+    reminder_list_ids: Vec<String>,
+    note_folder_ids: Vec<String>,
+    file_paths: Vec<String>,
+    maximum_records_per_source: usize,
+}
+
+/// Protected, native-only allowlists for one Daily Command Brief Apple read.
+#[derive(Clone, Debug)]
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 loads the protected brief selection")
+)]
+pub(crate) struct AppleBriefSelection {
+    calendar_ids: Vec<String>,
+    reminder_list_ids: Vec<String>,
+    note_folder_ids: Vec<String>,
+    file_paths: Vec<String>,
+    maximum_records_per_source: usize,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+impl AppleBriefSelection {
+    pub(crate) fn parse(value: Value) -> Result<Self, &'static str> {
+        let raw: RawAppleBriefSelection =
+            serde_json::from_value(value).map_err(|_| "invalid_apple_brief_config")?;
+        let valid_list = |values: &[String]| {
+            !values.is_empty()
+                && values.len() <= 32
+                && values.iter().all(|value| {
+                    !value.is_empty()
+                        && value.trim() == value
+                        && value.len() <= 1024
+                        && !value.chars().any(char::is_control)
+                })
+                && values
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len()
+                    == values.len()
+        };
+        if raw.schema_version != 1
+            || !(1..=100).contains(&raw.maximum_records_per_source)
+            || !valid_list(&raw.calendar_ids)
+            || !valid_list(&raw.reminder_list_ids)
+            || !valid_list(&raw.note_folder_ids)
+            || !valid_list(&raw.file_paths)
+            || raw
+                .file_paths
+                .iter()
+                .any(|path| !Path::new(path).is_absolute())
+        {
+            return Err("invalid_apple_brief_config");
+        }
+        Ok(Self {
+            calendar_ids: raw.calendar_ids,
+            reminder_list_ids: raw.reminder_list_ids,
+            note_folder_ids: raw.note_folder_ids,
+            file_paths: raw.file_paths,
+            maximum_records_per_source: raw.maximum_records_per_source,
+        })
+    }
+
+    pub(crate) fn load_protected(path: &Path) -> Result<Self, &'static str> {
+        let bytes = ProtectedFile::open(path, MAXIMUM_BRIEF_CONFIG_BYTES)
+            .and_then(|file| file.read_all())
+            .map_err(|_| "invalid_apple_brief_config")?;
+        let value = serde_json::from_slice(&bytes).map_err(|_| "invalid_apple_brief_config")?;
+        Self::parse(value)
+    }
+
+    pub(crate) fn brief_requests(
+        &self,
+        observed_at: &str,
+    ) -> Result<Vec<AppleInputRequest>, &'static str> {
+        use chrono::{Datelike, FixedOffset, TimeZone};
+
+        let observed =
+            chrono::DateTime::parse_from_rfc3339(observed_at).map_err(|_| "invalid_brief_time")?;
+        let offset: FixedOffset = *observed.offset();
+        let start = offset
+            .with_ymd_and_hms(observed.year(), observed.month(), observed.day(), 0, 0, 0)
+            .single()
+            .ok_or("invalid_brief_time")?;
+        let end = start
+            .checked_add_signed(chrono::Duration::days(1))
+            .ok_or("invalid_brief_time")?;
+        Ok(vec![
+            AppleInputRequest::ReadCalendar(CalendarArguments {
+                calendar_ids: self.calendar_ids.clone(),
+                start: start.to_rfc3339(),
+                end: end.to_rfc3339(),
+                maximum: self.maximum_records_per_source,
+            }),
+            AppleInputRequest::ReadReminders(ReminderArguments {
+                list_ids: self.reminder_list_ids.clone(),
+                start: start.to_rfc3339(),
+                end: end.to_rfc3339(),
+                maximum: self.maximum_records_per_source,
+            }),
+            AppleInputRequest::ReadNotes(NotesArguments {
+                folder_ids: self.note_folder_ids.clone(),
+                maximum: self.maximum_records_per_source,
+            }),
+            AppleInputRequest::ReadFiles(FilesArguments {
+                paths: self.file_paths.clone(),
+            }),
+        ])
+    }
+
+    pub(crate) fn permits_record(&self, source: &str, fields: &BTreeMap<String, String>) -> bool {
+        match source {
+            "calendar" => fields
+                .get("calendar_identifier")
+                .is_some_and(|id| self.calendar_ids.contains(id)),
+            "reminders" => fields
+                .get("list_identifier")
+                .is_some_and(|id| self.reminder_list_ids.contains(id)),
+            "notes" => fields
+                .get("folder_identifier")
+                .is_some_and(|id| self.note_folder_ids.contains(id)),
+            "files" => fields
+                .get("path")
+                .is_some_and(|path| self.file_paths.contains(path)),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]

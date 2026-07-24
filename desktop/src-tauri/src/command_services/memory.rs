@@ -9,6 +9,7 @@ use chrono::Utc;
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -67,6 +68,142 @@ pub(crate) enum MemoryError {
     Busy,
     Task,
     Cancelled,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryContextError {
+    Invalid,
+    Unsafe,
+}
+
+/// One conflict-safe Memory MCP command context after conflicted fields are removed.
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+#[derive(Clone, Debug)]
+pub(crate) struct SanitizedMemoryContext {
+    entity_id: String,
+    content: Value,
+    conflicted_fields: Vec<String>,
+    event_id: String,
+    timestamp: String,
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+impl SanitizedMemoryContext {
+    pub(crate) fn entity_id(&self) -> &str {
+        &self.entity_id
+    }
+
+    pub(crate) fn content(&self) -> &Value {
+        &self.content
+    }
+
+    pub(crate) fn conflicted_fields(&self) -> &[String] {
+        &self.conflicted_fields
+    }
+
+    pub(crate) fn event_id(&self) -> &str {
+        &self.event_id
+    }
+
+    pub(crate) fn timestamp(&self) -> &str {
+        &self.timestamp
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "Phase 5 wires the local source backend")
+)]
+pub(crate) fn sanitize_command_memory_context(
+    value: &Value,
+) -> Result<SanitizedMemoryContext, MemoryContextError> {
+    let object = value.as_object().ok_or(MemoryContextError::Invalid)?;
+    if object.len() != 4
+        || ["entity_id", "content", "conflicted_fields", "citation"]
+            .iter()
+            .any(|key| !object.contains_key(*key))
+    {
+        return Err(MemoryContextError::Invalid);
+    }
+    let entity_id = object
+        .get("entity_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 4096)
+        .ok_or(MemoryContextError::Invalid)?
+        .to_string();
+    let mut content = object
+        .get("content")
+        .and_then(Value::as_object)
+        .filter(|content| content.len() <= 256)
+        .ok_or(MemoryContextError::Invalid)?
+        .clone();
+    let conflicted_fields = object
+        .get("conflicted_fields")
+        .and_then(Value::as_array)
+        .filter(|fields| fields.len() <= 64)
+        .ok_or(MemoryContextError::Invalid)?
+        .iter()
+        .map(|field| {
+            field
+                .as_str()
+                .filter(|field| {
+                    !field.is_empty()
+                        && field.len() <= 256
+                        && field.trim() == *field
+                        && !field.chars().any(char::is_control)
+                })
+                .map(str::to_string)
+                .ok_or(MemoryContextError::Invalid)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if conflicted_fields
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != conflicted_fields.len()
+    {
+        return Err(MemoryContextError::Invalid);
+    }
+    for field in &conflicted_fields {
+        content.remove(field);
+    }
+    let citation = object
+        .get("citation")
+        .and_then(Value::as_object)
+        .ok_or(MemoryContextError::Invalid)?;
+    let event_id = citation
+        .get("event_id")
+        .and_then(Value::as_str)
+        .ok_or(MemoryContextError::Invalid)?
+        .to_string();
+    let timestamp = citation
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .ok_or(MemoryContextError::Invalid)?
+        .to_string();
+
+    let mut safe = object.clone();
+    safe.insert("content".to_string(), Value::Object(content.clone()));
+    safe.insert("conflicted_fields".to_string(), Value::Array(Vec::new()));
+    crate::command_services::policy::validate_memory_context(&Value::Object(safe))
+        .map_err(|_| MemoryContextError::Unsafe)?;
+    Ok(SanitizedMemoryContext {
+        entity_id,
+        content: Value::Object(content),
+        conflicted_fields,
+        event_id,
+        timestamp,
+    })
 }
 
 impl MemoryError {
