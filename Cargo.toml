@@ -36,7 +36,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88.0"
 license = "Apache-2.0"
-repository = "https://github.com/block/sprout"
+repository = "https://github.com/block/buzz"
 
 [workspace.dependencies]
 # Runtime
