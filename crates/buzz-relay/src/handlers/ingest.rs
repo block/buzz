@@ -14,22 +14,22 @@ use buzz_core::kind::{
     event_kind_u32, is_identity_archive_request_kind, is_parameterized_replaceable,
     is_relay_admin_kind, KIND_AGENT_ENGRAM, KIND_AGENT_PROFILE, KIND_AGENT_TURN_METRIC,
     KIND_APPROVAL_DENY, KIND_APPROVAL_GRANT, KIND_AUTH, KIND_BOOKMARK_LIST, KIND_BOOKMARK_SET,
-    KIND_CANVAS, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER, KIND_DM_HIDE, KIND_DM_OPEN,
-    KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER, KIND_FOLLOW_SET, KIND_FORUM_COMMENT,
-    KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
-    KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
-    KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_CANVAS, KIND_COMMAND_BRIEF, KIND_CONTACT_LIST, KIND_DELETION, KIND_DM_ADD_MEMBER,
+    KIND_DM_HIDE, KIND_DM_OPEN, KIND_EMOJI_LIST, KIND_EMOJI_SET, KIND_EVENT_REMINDER,
+    KIND_FOLLOW_SET, KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP,
+    KIND_GIT_ISSUE, KIND_GIT_PATCH, KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST,
+    KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE, KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT,
+    KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -205,7 +205,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
             Ok(Scope::UsersWrite)
         }
         // NIP-AM: agent turn metrics are agent-authored global events (encrypted to owner).
-        KIND_AGENT_TURN_METRIC => Ok(Scope::MessagesWrite),
+        KIND_AGENT_TURN_METRIC | KIND_COMMAND_BRIEF => Ok(Scope::MessagesWrite),
         // NIP-56 reports are ordinary member writes into the mod-only queue.
         // Ingest persists them to `moderation_reports` and suppresses public
         // storage/fanout; reports are signals, never enforcement triggers.
@@ -446,6 +446,8 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             // NIP-AM: agent turn metrics are owner-scoped global events.
             // Channel identity is encrypted inside the payload — no `h` tag.
             | KIND_AGENT_TURN_METRIC
+            // NIP-CB: command briefs are owner-authored, owner-scoped globals.
+            | KIND_COMMAND_BRIEF
             // NIP-PL leases are author-owned, addressable global state.
             | super::push_lease::KIND_PUSH_LEASE
     )
@@ -1211,6 +1213,55 @@ fn validate_agent_turn_metric_envelope(event: &nostr::Event) -> Result<(), Strin
         .map_err(|e| e.replace("agent-engram", "agent-turn-metric"))?;
 
     Ok(())
+}
+
+/// Validate the exact public envelope of an owner-to-self NIP-CB event.
+fn validate_command_brief_envelope(event: &nostr::Event) -> Result<(), String> {
+    let owner = event.pubkey.to_hex();
+    let mut seen_p = false;
+    let mut seen_d = false;
+    let mut seen_status = false;
+    let mut seen_previous = false;
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.len() != 2 {
+            return Err("command-brief tags must contain exactly two values".to_string());
+        }
+        let value = parts[1].as_str();
+        match parts[0].as_str() {
+            "p" if !seen_p && value == owner => seen_p = true,
+            "d" if !seen_d && valid_command_brief_id(value) => seen_d = true,
+            "status"
+                if !seen_status
+                    && matches!(value, "completed" | "degraded" | "cancelled" | "failed") =>
+            {
+                seen_status = true;
+            }
+            "previous"
+                if !seen_previous
+                    && value.len() == 64
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) =>
+            {
+                seen_previous = true;
+            }
+            _ => return Err("command-brief public envelope is invalid".to_string()),
+        }
+    }
+    if !seen_p || !seen_d || !seen_status {
+        return Err("command-brief requires exactly one p, d, and status tag".to_string());
+    }
+    validate_engram_nip44_content(&event.content)
+        .map_err(|error| error.replace("agent-engram", "command-brief"))
+}
+
+fn valid_command_brief_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
 }
 
 /// Parse a NIP-ER `not_before` tag value into a Unix timestamp.
@@ -2015,6 +2066,11 @@ async fn ingest_event_inner(
         }
     }
 
+    if kind_u32 == KIND_COMMAND_BRIEF {
+        validate_command_brief_envelope(&event)
+            .map_err(|error| IngestError::Rejected(format!("invalid: {error}")))?;
+    }
+
     if kind_u32 == KIND_EVENT_REMINDER {
         validate_event_reminder(&event)
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
@@ -2811,6 +2867,7 @@ mod tests {
             KIND_TEAM,
             KIND_MANAGED_AGENT,
             KIND_AGENT_TURN_METRIC,
+            KIND_COMMAND_BRIEF,
         ];
         for kind in migrated {
             assert!(
@@ -2854,6 +2911,17 @@ mod tests {
             required_scope_for_kind(KIND_AGENT_TURN_METRIC, &dummy).unwrap(),
             Scope::MessagesWrite,
             "kind:44200 requires MessagesWrite scope"
+        );
+    }
+
+    #[test]
+    fn command_brief_is_regular_global_and_messages_write_scoped() {
+        let dummy = make_dummy_event();
+        assert!(is_global_only_kind(KIND_COMMAND_BRIEF));
+        assert!(!requires_h_channel_scope(KIND_COMMAND_BRIEF));
+        assert_eq!(
+            required_scope_for_kind(KIND_COMMAND_BRIEF, &dummy).unwrap(),
+            Scope::MessagesWrite
         );
     }
 
@@ -3567,6 +3635,66 @@ mod tests {
             &fake_nip44_v2(),
         );
         assert!(validate_agent_turn_metric_envelope(&ev).is_ok());
+    }
+
+    fn make_command_brief(owner: &nostr::Keys, tags: &[&[&str]]) -> nostr::Event {
+        let tags = tags
+            .iter()
+            .map(|tag| nostr::Tag::parse(tag.iter().copied()).unwrap())
+            .collect::<Vec<_>>();
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_COMMAND_BRIEF as u16),
+            fake_nip44_v2(),
+        )
+        .tags(tags)
+        .allow_self_tagging()
+        .sign_with_keys(owner)
+        .unwrap()
+    }
+
+    #[test]
+    fn command_brief_envelope_accepts_exact_owner_self_tags() {
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let event = make_command_brief(
+            &owner,
+            &[
+                &["p", &owner_hex],
+                &["d", "run-1"],
+                &["status", "completed"],
+            ],
+        );
+        assert!(validate_command_brief_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn command_brief_envelope_rejects_wrong_owner_extra_or_duplicate_tags() {
+        let owner = nostr::Keys::generate();
+        let other = nostr::Keys::generate().public_key().to_hex();
+        for tags in [
+            vec![
+                vec!["p", &other],
+                vec!["d", "run-1"],
+                vec!["status", "completed"],
+            ],
+            vec![
+                vec!["p", &owner.public_key().to_hex()],
+                vec!["d", "run-1"],
+                vec!["status", "completed"],
+                vec!["h", "channel"],
+            ],
+            vec![
+                vec!["p", &owner.public_key().to_hex()],
+                vec!["d", "run-1"],
+                vec!["d", "run-2"],
+                vec!["status", "completed"],
+            ],
+        ] {
+            let borrowed = tags.iter().map(|tag| tag.as_slice()).collect::<Vec<_>>();
+            assert!(
+                validate_command_brief_envelope(&make_command_brief(&owner, &borrowed)).is_err()
+            );
+        }
     }
 
     #[test]

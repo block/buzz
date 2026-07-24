@@ -25,8 +25,8 @@ use super::sources::{
     SourceReadError,
 };
 use super::types::{
-    AdviserContribution, AdviserId, BriefRunState, BriefSection, CommandBrief, SourceLedgerEntry,
-    SPECIALIST_ADVISERS,
+    AdviserContribution, AdviserId, BriefRunState, BriefSection, CommandBrief, PublicationState,
+    PublishedCommandBrief, SourceLedgerEntry, SPECIALIST_ADVISERS,
 };
 
 const SNAPSHOT_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -349,7 +349,7 @@ impl BriefPersistence for FakePersistence {
         &'a self,
         brief: &'a CommandBrief,
         cancellation: CancellationToken,
-    ) -> BriefFuture<'a, Result<(), BriefPersistenceError>> {
+    ) -> BriefFuture<'a, Result<PublishedCommandBrief, BriefPersistenceError>> {
         boxed(async move {
             self.tokens
                 .lock()
@@ -365,7 +365,11 @@ impl BriefPersistence for FakePersistence {
                 .lock()
                 .expect("persistence values lock")
                 .push(serde_json::to_value(brief).expect("serialize brief"));
-            Ok(())
+            Ok(PublishedCommandBrief::new(
+                brief.clone(),
+                "a".repeat(64),
+                PublicationState::Queued,
+            ))
         })
     }
 }
@@ -441,7 +445,7 @@ async fn exact_five_specialists_share_snapshot_then_tool_free_chief_builds_nine_
     assert!(snapshots.iter().all(|(_, snapshot)| snapshot == SNAPSHOT_A));
 
     let brief = orchestrator.result(&run_id).expect("completed brief");
-    let value = serde_json::to_value(&brief).expect("serialize brief");
+    let value = serde_json::to_value(brief.brief()).expect("serialize brief");
     assert_eq!(value["classification"], "OFFICIAL");
     assert_eq!(value["runId"], run_id);
     assert_eq!(value["snapshotId"], SNAPSHOT_A);
@@ -500,8 +504,13 @@ async fn failed_adviser_becomes_visible_limitation_only_degradation_without_retr
         wait_terminal(&orchestrator, &run_id).await,
         BriefRunState::Degraded
     );
-    let value =
-        serde_json::to_value(orchestrator.result(&run_id).expect("degraded brief")).expect("json");
+    let value = serde_json::to_value(
+        orchestrator
+            .result(&run_id)
+            .expect("degraded brief")
+            .brief(),
+    )
+    .expect("json");
     assert!(value["degradedSections"]
         .as_array()
         .expect("degraded")
@@ -610,7 +619,8 @@ async fn exact_trusted_source_and_specialist_limitations_are_valid_chief_subset(
         wait_terminal(&orchestrator, &run_id).await,
         BriefRunState::Degraded
     );
-    let brief = serde_json::to_value(orchestrator.result(&run_id).expect("brief")).expect("json");
+    let brief =
+        serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
     assert_eq!(
         brief["missingInformation"],
         json!([
@@ -644,7 +654,8 @@ async fn missing_information_prioritizes_failure_and_specialist_before_64_source
         wait_terminal(&orchestrator, &run_id).await,
         BriefRunState::Degraded
     );
-    let brief = serde_json::to_value(orchestrator.result(&run_id).expect("brief")).expect("json");
+    let brief =
+        serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief()).expect("json");
     let missing = brief["missingInformation"]
         .as_array()
         .expect("missing information");
@@ -689,8 +700,8 @@ async fn missing_information_boundary_is_exact_and_omission_summary_is_not_silen
             wait_terminal(&orchestrator, &run_id).await,
             BriefRunState::Degraded
         );
-        let brief =
-            serde_json::to_value(orchestrator.result(&run_id).expect("brief")).expect("json");
+        let brief = serde_json::to_value(orchestrator.result(&run_id).expect("brief").brief())
+            .expect("json");
         let missing = brief["missingInformation"]
             .as_array()
             .expect("missing information");
@@ -1042,8 +1053,8 @@ async fn production_style_provider_adopts_one_fresh_signed_snapshot_then_rejects
         wait_terminal(&first_orchestrator, &run_id).await,
         BriefRunState::Degraded
     );
-    let brief =
-        serde_json::to_value(first_orchestrator.result(&run_id).expect("brief")).expect("json");
+    let brief = serde_json::to_value(first_orchestrator.result(&run_id).expect("brief").brief())
+        .expect("json");
     assert_eq!(brief["snapshotId"], SNAPSHOT_B);
     assert_eq!(loader.loads.load(Ordering::SeqCst), 5);
 

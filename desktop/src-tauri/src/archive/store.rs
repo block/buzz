@@ -13,6 +13,12 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::time::{Duration, Instant};
 
+/// Owner-private kinds whose archive proof must come from an authenticated
+/// relay query rather than the ephemeral observer-frame path.
+pub(super) fn owner_private_kind_is_persistent(kind: u64) -> bool {
+    matches!(kind, 44_200 | 44_210)
+}
+
 // ── Schema ─────────────────────────────────────────────────────────────────
 
 pub(super) const SCHEMA: &str = "

@@ -11,6 +11,8 @@ pub mod agent_memory_canonical;
 pub mod agent_turn_metric;
 /// Channel and membership enums shared across crates.
 pub mod channel;
+/// NIP-CB: encrypted owner-only Daily Command Brief lifecycle events.
+pub mod command_brief;
 /// NIP-AE Agent Engrams — slug grammar, conversation key, d-tag derivation,
 /// body parse/serialize, envelope build/validate, head selection.
 pub mod engram;
@@ -38,6 +40,9 @@ pub mod relay;
 pub mod tenant;
 /// Schnorr signature and event ID verification.
 pub mod verification;
+
+#[cfg(test)]
+mod command_brief_tests;
 
 pub use error::VerificationError;
 pub use event::StoredEvent;

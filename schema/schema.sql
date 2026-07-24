@@ -209,7 +209,7 @@ CREATE TABLE events (
     -- never matches `@@`.
     -- Keep in sync with migrations (final state: 0001 + 0005 + 0009).
     search_tsv  TSVECTOR GENERATED ALWAYS AS (
-        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200) THEN NULL::tsvector
+        CASE WHEN kind IN (1059, 30300, 30350, 30622, 44100, 44101, 44200, 44210) THEN NULL::tsvector
              ELSE to_tsvector('simple', content)
         END
     ) STORED,

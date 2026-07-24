@@ -24,8 +24,8 @@ use super::sources::{
 };
 use super::types::{
     AdviserContribution, AdviserId, BriefRunState, BriefRunStatus, BriefSection, CitedFinding,
-    Classification, CommandBrief, MAX_AGGREGATE_DISSENT_ITEMS, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
-    SPECIALIST_ADVISERS,
+    Classification, CommandBrief, PublishedCommandBrief, MAX_AGGREGATE_DISSENT_ITEMS,
+    MAX_ARRAY_ITEMS, MAX_TEXT_BYTES, SPECIALIST_ADVISERS,
 };
 use crate::command_services::apple_inputs::AppleBriefSelection;
 
@@ -111,7 +111,7 @@ pub(crate) trait BriefPersistence: Send + Sync {
         &'a self,
         brief: &'a CommandBrief,
         cancellation: CancellationToken,
-    ) -> BriefFuture<'a, Result<(), BriefPersistenceError>>;
+    ) -> BriefFuture<'a, Result<PublishedCommandBrief, BriefPersistenceError>>;
 }
 
 /// Boundary between durable persistence and the one atomic terminal decision.
@@ -433,7 +433,7 @@ struct RunRecord {
     cancellation: CancellationToken,
     state: BriefRunState,
     history: VecDeque<BriefRunStatus>,
-    result: Option<CommandBrief>,
+    result: Option<PublishedCommandBrief>,
 }
 
 struct OrchestratorInner {
@@ -602,7 +602,7 @@ impl CommandBriefOrchestrator {
     }
 
     /// Returns the immutable validated brief only after persistence succeeds.
-    pub fn result(&self, run_id: &str) -> Option<CommandBrief> {
+    pub fn result(&self, run_id: &str) -> Option<PublishedCommandBrief> {
         self.inner.runs.lock().ok()?.get(run_id)?.result.clone()
     }
 
@@ -610,7 +610,7 @@ impl CommandBriefOrchestrator {
     pub fn status_and_result(
         &self,
         run_id: &str,
-    ) -> Option<(BriefRunStatus, Option<CommandBrief>)> {
+    ) -> Option<(BriefRunStatus, Option<PublishedCommandBrief>)> {
         let runs = self.inner.runs.lock().ok()?;
         let record = runs.get(run_id)?;
         Some((record.history.back()?.clone(), record.result.clone()))
@@ -984,13 +984,13 @@ impl CommandBriefOrchestrator {
                 &degraded,
                 None,
             );
-            match self
+            let published = match self
                 .inner
                 .persistence
                 .persist(&brief, cancellation.clone())
                 .await
             {
-                Ok(()) => {}
+                Ok(published) => published,
                 Err(BriefPersistenceError::Cancelled) => {
                     self.terminal(
                         &run_id,
@@ -1013,7 +1013,7 @@ impl CommandBriefOrchestrator {
                     );
                     return;
                 }
-            }
+            };
             self.inner.finalization_gate.wait().await;
             let terminal = if degraded.is_empty()
                 && context.limitations().is_empty()
@@ -1029,7 +1029,7 @@ impl CommandBriefOrchestrator {
                 terminal,
                 &degraded,
                 None,
-                Some(brief),
+                Some(published),
             );
             return;
         }
@@ -1064,7 +1064,7 @@ impl CommandBriefOrchestrator {
         state: BriefRunState,
         degraded: &[BriefSection],
         error: Option<&str>,
-        result: Option<CommandBrief>,
+        result: Option<PublishedCommandBrief>,
     ) {
         if let Ok(mut runs) = self.inner.runs.lock() {
             if let Some(record) = runs.get_mut(run_id) {

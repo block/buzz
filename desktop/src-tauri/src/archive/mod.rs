@@ -5,11 +5,11 @@
 //!
 //! Two access proof paths, chosen by event kind:
 //!
-//! **Persistent scopes** (`channel_h`, `referenced_e`, and `owner_p`+44200):
+//! **Persistent scopes** (`channel_h`, `referenced_e`, and owner-private kinds):
 //! the relay is the source of truth. Candidates are grouped and re-queried via
 //! a batched authed `/query`; only events the relay returns are inserted.
-//! For kind-44200 (agent turn metrics), content is decrypted at ingest and
-//! stored as plaintext JSON — fail-closed (decrypt error → drop).
+//! Owner-private content is decrypted only after the current identity proves
+//! access through the relay query and local cryptography; failures are dropped.
 //!
 //! **Ephemeral scope** (`owner_p`, kind 24200 observer frames): the relay
 //! never stores these, so `/query` cannot verify them. The relay's REQ-time
@@ -35,6 +35,7 @@ use crate::relay::{query_relay, relay_ws_url_with_override};
 
 const KIND_AGENT_OBSERVER_FRAME: u16 = 24200;
 const KIND_AGENT_TURN_METRIC: u16 = 44200;
+const KIND_COMMAND_BRIEF: u16 = 44210;
 const OBSERVER_FRAME_TELEMETRY: &str = "telemetry";
 
 // ── DB helpers ───────────────────────────────────────────────────────────────

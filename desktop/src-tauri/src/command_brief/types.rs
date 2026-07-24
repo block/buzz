@@ -779,6 +779,64 @@ impl TryFrom<Value> for CommandBrief {
     }
 }
 
+impl CommandBrief {
+    /// Return the validated run identity.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Return the validated schedule identity.
+    pub fn schedule_id(&self) -> &str {
+        &self.schedule_id
+    }
+
+    /// Return the frozen signed snapshot identity.
+    pub fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    /// Return the trusted generation timestamp.
+    pub fn generated_at(&self) -> &str {
+        &self.generated_at
+    }
+
+    /// Whether the completed result contains visible degradation.
+    pub fn is_degraded(&self) -> bool {
+        !self.degraded_sections.is_empty() || !self.missing_information.is_empty()
+    }
+}
+
+impl PublishedCommandBrief {
+    /// Construct the post-signing envelope after the event ID is fixed.
+    pub(crate) fn new(
+        brief: CommandBrief,
+        lifecycle_audit_event_id: String,
+        publication_state: PublicationState,
+    ) -> Self {
+        Self {
+            classification: Classification::Official,
+            brief,
+            lifecycle_audit_event_id,
+            publication_state,
+        }
+    }
+
+    /// Return the immutable validated final brief.
+    pub fn brief(&self) -> &CommandBrief {
+        &self.brief
+    }
+
+    /// Return the signed audit event ID.
+    pub fn lifecycle_audit_event_id(&self) -> &str {
+        &self.lifecycle_audit_event_id
+    }
+
+    /// Return the current local publication state.
+    pub const fn publication_state(&self) -> PublicationState {
+        self.publication_state
+    }
+}
+
 impl TryFrom<Value> for PublishedCommandBrief {
     type Error = ContractError;
 

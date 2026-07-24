@@ -126,7 +126,11 @@ pub const AUTHOR_ONLY_KINDS: &[u32] = &[KIND_EVENT_REMINDER, KIND_PUSH_LEASE];
 ///
 /// Used by `filter_can_match_result_gated_kinds` to force the per-event
 /// fallback path in COUNT rather than the fast SQL `count_events()`.
-pub const RESULT_GATED_KINDS: &[u32] = &[KIND_DM_VISIBILITY, KIND_AGENT_TURN_METRIC];
+pub const RESULT_GATED_KINDS: &[u32] = &[
+    KIND_DM_VISIBILITY,
+    KIND_AGENT_TURN_METRIC,
+    KIND_COMMAND_BRIEF,
+];
 
 /// Kinds whose stored events have `#p`-bound read access — readable only by
 /// subscribers whose pubkey appears in the event's `#p` tag.
@@ -153,6 +157,8 @@ pub const P_GATED_KINDS: &[u32] = &[
     // readable by any unauthenticated or non-owner party, including via `ids`
     // filters — see NIP-AM §Relay Behavior.
     KIND_AGENT_TURN_METRIC,
+    // NIP-CB: owner-authored command briefs are encrypted to self.
+    KIND_COMMAND_BRIEF,
 ];
 
 /// NIP-AP: Agent Persona (parameterized replaceable, owner-authored).
@@ -408,6 +414,13 @@ pub const KIND_MEMBER_REMOVED_NOTIFICATION: u32 = 44101;
 /// See `docs/nips/NIP-AM.md`.
 pub const KIND_AGENT_TURN_METRIC: u32 = 44200;
 
+/// NIP-CB: encrypted owner-only Daily Command Brief lifecycle record.
+///
+/// Regular stored append-only event, authored and NIP-44-v2 encrypted by the
+/// owner to self. Its exact public tags are `p`, `d`, `status`, and an optional
+/// `previous` predecessor event ID. See `docs/nips/NIP-CB.md`.
+pub const KIND_COMMAND_BRIEF: u32 = 44210;
+
 // Forum / social (45000–45999)
 // V1 used addressable range (30001–30003) — wrong.
 /// A forum post (thread root).
@@ -578,6 +591,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_MEMBER_ADDED_NOTIFICATION,
     KIND_MEMBER_REMOVED_NOTIFICATION,
     KIND_AGENT_TURN_METRIC,
+    KIND_COMMAND_BRIEF,
     KIND_WORKFLOW_DEF,
     KIND_LONG_FORM,
     KIND_USER_STATUS,
@@ -734,6 +748,11 @@ const _: () = assert!(!is_ephemeral(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(!is_parameterized_replaceable(KIND_AGENT_TURN_METRIC));
 const _: () = assert!(KIND_AGENT_TURN_METRIC <= u16::MAX as u32);
+// Compile-time: KIND_COMMAND_BRIEF is a regular stored kind.
+const _: () = assert!(!is_ephemeral(KIND_COMMAND_BRIEF));
+const _: () = assert!(!is_replaceable(KIND_COMMAND_BRIEF));
+const _: () = assert!(!is_parameterized_replaceable(KIND_COMMAND_BRIEF));
+const _: () = assert!(KIND_COMMAND_BRIEF <= u16::MAX as u32);
 // Moderation kinds fit u16 and are neither replaceable nor ephemeral:
 // 1984 is a regular event (persisted to the queue, never fanned out);
 // 9040–9044 are direct commands (executed, never stored).

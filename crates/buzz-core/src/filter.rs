@@ -22,7 +22,10 @@ pub fn filters_match(filters: &[Filter], event: &StoredEvent) -> bool {
 /// a known event id) still cannot read another user's private event.
 pub fn reader_authorized_for_event(event: &nostr::Event, reader_pubkey_hex: &str) -> bool {
     let kind = crate::kind::event_kind_u32(event);
-    if kind != crate::kind::KIND_DM_VISIBILITY && kind != crate::kind::KIND_AGENT_TURN_METRIC {
+    if kind != crate::kind::KIND_DM_VISIBILITY
+        && kind != crate::kind::KIND_AGENT_TURN_METRIC
+        && kind != crate::kind::KIND_COMMAND_BRIEF
+    {
         return true;
     }
     let p = nostr::SingleLetterTag::lowercase(nostr::Alphabet::P);
@@ -296,5 +299,31 @@ mod tests {
             !reader_authorized_for_event(&metric, &agent_keys.public_key().to_hex()),
             "the authoring agent must NOT be authorized to read its own metric event (owner-only)"
         );
+    }
+
+    #[test]
+    fn reader_authorized_for_event_gates_command_brief_by_owner_p() {
+        let owner = Keys::generate();
+        let attacker = Keys::generate();
+        let event = EventBuilder::new(
+            Kind::Custom(crate::kind::KIND_COMMAND_BRIEF as u16),
+            "ciphertext",
+        )
+        .tags([
+            Tag::public_key(owner.public_key()),
+            Tag::parse(["d", "run-1"]).expect("d"),
+            Tag::parse(["status", "completed"]).expect("status"),
+        ])
+        .allow_self_tagging()
+        .sign_with_keys(&owner)
+        .expect("sign");
+        assert!(reader_authorized_for_event(
+            &event,
+            &owner.public_key().to_hex()
+        ));
+        assert!(!reader_authorized_for_event(
+            &event,
+            &attacker.public_key().to_hex()
+        ));
     }
 }

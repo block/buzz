@@ -7,8 +7,8 @@ use tracing::{debug, warn};
 
 use buzz_core::filter::filters_match;
 use buzz_core::kind::{
-    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC, KIND_DM_VISIBILITY,
-    P_GATED_KINDS, RESULT_GATED_KINDS,
+    AUTHOR_ONLY_KINDS, KIND_AGENT_ENGRAM, KIND_AGENT_TURN_METRIC, KIND_COMMAND_BRIEF,
+    KIND_DM_VISIBILITY, P_GATED_KINDS, RESULT_GATED_KINDS,
 };
 use buzz_core::tenant::TenantContext;
 use buzz_db::EventQuery;
@@ -1062,7 +1062,7 @@ pub(crate) fn p_gated_filters_authorized(filters: &[Filter], authed_pubkey_hex: 
         let explicitly_no_ids_exemption = filter.kinds.as_ref().is_some_and(|ks| {
             ks.iter().any(|kind| {
                 let k = kind.as_u16() as u32;
-                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC
+                k == KIND_DM_VISIBILITY || k == KIND_AGENT_TURN_METRIC || k == KIND_COMMAND_BRIEF
             })
         });
         if !explicitly_no_ids_exemption && filter.ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -1541,6 +1541,39 @@ mod tests {
             p_gated_filters_authorized(&[owner_p_and_ids], authed),
             "kind:44200 with matching #p and ids must be allowed"
         );
+    }
+
+    #[test]
+    fn command_brief_requires_exact_owner_p_even_with_ids() {
+        let p_tag = SingleLetterTag::lowercase(Alphabet::P);
+        let owner = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let event_id = nostr::EventId::from_hex(
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        )
+        .unwrap();
+        let kind = nostr::Kind::Custom(buzz_core::kind::KIND_COMMAND_BRIEF as u16);
+        assert!(!p_gated_filters_authorized(
+            &[Filter::new().kind(kind).id(event_id)],
+            owner
+        ));
+        assert!(!p_gated_filters_authorized(
+            &[Filter::new()
+                .kind(kind)
+                .id(event_id)
+                .custom_tags(p_tag, [other])],
+            owner
+        ));
+        assert!(p_gated_filters_authorized(
+            &[Filter::new()
+                .kind(kind)
+                .id(event_id)
+                .custom_tags(p_tag, [owner])],
+            owner
+        ));
+        assert!(filter_can_match_result_gated_kinds(
+            &Filter::new().kind(kind)
+        ));
     }
 
     #[test]

@@ -126,11 +126,11 @@ pub(super) fn plan_archive(
 
         // owner_p scope splits by kind:
         //   kind 24200 (observer frames) → ephemeral path (relay never stores them).
-        //   kind 44200 (turn metrics)    → persistent path (relay stores, #p-gated).
+        //   kinds 44200/44210            → persistent path (relay stores, #p-gated).
         //   Any other kind under owner_p follows the same ephemeral path as 24200
         //   (conservative default for unknowns).
         let is_ephemeral = cand.matched_scope.scope_type.is_ephemeral()
-            && raw_kind != super::KIND_AGENT_TURN_METRIC as u64;
+            && !super::store::owner_private_kind_is_persistent(raw_kind);
 
         if is_ephemeral {
             ephemeral.push(Parsed {
@@ -319,6 +319,22 @@ pub(super) fn commit_archive(
             let stored_json =
                 if p.event.kind.as_u16() as u64 == super::KIND_AGENT_TURN_METRIC as u64 {
                     match buzz_core_pkg::agent_turn_metric::decrypt_agent_turn_metric(
+                        owner_keys, &p.event,
+                    ) {
+                        Ok(payload) => match serde_json::to_string(&payload) {
+                            Ok(json) => json,
+                            Err(_) => {
+                                dropped += 1;
+                                continue;
+                            }
+                        },
+                        Err(_) => {
+                            dropped += 1;
+                            continue;
+                        }
+                    }
+                } else if p.event.kind.as_u16() as u64 == super::KIND_COMMAND_BRIEF as u64 {
+                    match buzz_core_pkg::command_brief::decrypt_command_brief_event(
                         owner_keys, &p.event,
                     ) {
                         Ok(payload) => match serde_json::to_string(&payload) {
