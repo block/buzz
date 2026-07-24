@@ -1,5 +1,15 @@
 {$BUZZ_DOMAIN} {
   encode zstd gzip
 
-  reverse_proxy relay:3000
+  # Device-pairing sidecar. The desktop's NIP-43 legacy fallback resolves to
+  # wss://{$BUZZ_DOMAIN}/pair, so routing that path to buzz-pair-relay makes
+  # mobile pairing work with no extra DNS. The sidecar ignores the request path.
+  @pair path /pair /pair/*
+  handle @pair {
+    reverse_proxy pair:5000
+  }
+
+  handle {
+    reverse_proxy relay:3000
+  }
 }
