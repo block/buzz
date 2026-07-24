@@ -295,8 +295,12 @@ async fn upload_attribution(
 /// Expects:
 ///   - `Authorization: Nostr <base64(kind:24242 event)>` — Blossom auth
 ///   - `X-SHA-256: <hex>` — Required per BUD-11
-///   - `Content-Type` is advisory only; a bounded body prefix selects the
-///     streaming video path from actual bytes
+///   - `Content-Type` is advisory only. Pipeline selection is driven by a
+///     bounded body prefix, not the header. On the generic-file path the
+///     header is consulted as a *hint* — and only when magic-byte sniffing
+///     yields nothing — against a small text-family allowlist
+///     (`text/markdown`, `text/plain`, `text/csv`, `application/json`) so
+///     magic-less text formats round-trip as their declared MIME.
 ///   - Raw binary body (the file bytes)
 ///
 /// Returns a [`BlobDescriptor`] JSON on success.
@@ -387,6 +391,10 @@ pub async fn upload_blob(
                 .unwrap_or_else(|| "application/octet-stream".to_string());
             return Err(MediaError::DisallowedContentType(mime));
         } else {
+            let content_type_hint = headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_owned());
             buzz_media::process_file_upload(
                 &state.media_storage,
                 &state.config.media,
@@ -394,6 +402,7 @@ pub async fn upload_blob(
                 &auth.auth_event,
                 bytes,
                 attribution,
+                content_type_hint,
             )
             .await?
         }
