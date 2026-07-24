@@ -822,14 +822,32 @@ pub async fn emit_membership_notification(
     actor_pubkey: &[u8],
     notification_kind: u32,
 ) -> anyhow::Result<()> {
+    emit_membership_notification_with_reference(
+        tenant,
+        state,
+        channel_id,
+        target_pubkey,
+        actor_pubkey,
+        notification_kind,
+        None,
+    )
+    .await
+}
+
+async fn emit_membership_notification_with_reference(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    channel_id: Uuid,
+    target_pubkey: &[u8],
+    actor_pubkey: &[u8],
+    notification_kind: u32,
+    source_event_id: Option<&nostr::EventId>,
+) -> anyhow::Result<()> {
     let target_hex = hex::encode(target_pubkey);
     let actor_hex = hex::encode(actor_pubkey);
     let channel_id_str = channel_id.to_string();
 
-    let p_tag = Tag::parse(["p", &target_hex])
-        .map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?;
-    let h_tag = Tag::parse(["h", &channel_id_str])
-        .map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?;
+    let tags = membership_notification_tags(&target_hex, &channel_id_str, source_event_id)?;
 
     let event_type = match notification_kind {
         KIND_MEMBER_ADDED_NOTIFICATION => "member_added",
@@ -849,7 +867,7 @@ pub async fn emit_membership_notification(
     .to_string();
 
     let event = EventBuilder::new(Kind::Custom(notification_kind as u16), content)
-        .tags([p_tag, h_tag])
+        .tags(tags)
         .sign_with_keys(&state.relay_keypair)
         .map_err(|e| anyhow::anyhow!("failed to sign membership notification: {e}"))?;
 
@@ -896,6 +914,25 @@ pub async fn emit_membership_notification(
         "membership notification emitted"
     );
     Ok(())
+}
+
+fn membership_notification_tags(
+    target_hex: &str,
+    channel_id: &str,
+    source_event_id: Option<&nostr::EventId>,
+) -> anyhow::Result<Vec<Tag>> {
+    let p_tag =
+        Tag::parse(["p", target_hex]).map_err(|e| anyhow::anyhow!("failed to build p tag: {e}"))?;
+    let h_tag =
+        Tag::parse(["h", channel_id]).map_err(|e| anyhow::anyhow!("failed to build h tag: {e}"))?;
+    let mut tags = vec![p_tag, h_tag];
+    if let Some(source_event_id) = source_event_id {
+        tags.push(
+            Tag::parse(["e", &source_event_id.to_hex()])
+                .map_err(|e| anyhow::anyhow!("failed to build source event tag: {e}"))?,
+        );
+    }
+    Ok(tags)
 }
 
 /// Sign, store (replacing previous), and fan-out a single addressable discovery event.
@@ -1515,22 +1552,20 @@ async fn handle_edit_metadata(
                             // remove/re-add uses to recover. Humans self-heal via the re-emitted
                             // kind:39000 discovery, so this is intentionally agent-scoped.
                             //
-                            // Known limitation: emit_membership_notification builds a created_at=now
-                            // event with no nonce, and insert_event skips fan-out on a duplicate id.
-                            // Four sub-second toggles (archive->unarchive->archive->unarchive) on the
-                            // same channel by the same actor could collide ids and skip a fan-out.
-                            // Not reachable in practice — unarchive has a single human-driven caller;
-                            // the reaper only auto-archives — so we don't engineer around it.
+                            // Reference the triggering edit event so this notification cannot
+                            // collide with the member_added emitted when the channel was created,
+                            // even when create → archive → unarchive completes in one second.
                             for member in
                                 state.db.get_members(tenant.community(), channel_id).await?
                             {
-                                if let Err(e) = emit_membership_notification(
+                                if let Err(e) = emit_membership_notification_with_reference(
                                     tenant,
                                     state,
                                     channel_id,
                                     &member.pubkey,
                                     &actor_bytes,
                                     KIND_MEMBER_ADDED_NOTIFICATION,
+                                    Some(&event.id),
                                 )
                                 .await
                                 {
@@ -3266,6 +3301,27 @@ fn topic_for_subscription(channel_id: Option<Uuid>) -> EventTopic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn membership_notification_source_reference_distinguishes_resubscribe_event() {
+        let source_event_id = nostr::EventId::from_byte_array([7_u8; 32]);
+        let base_tags =
+            membership_notification_tags(&"11".repeat(32), &Uuid::nil().to_string(), None)
+                .expect("base notification tags");
+        let resubscribe_tags = membership_notification_tags(
+            &"11".repeat(32),
+            &Uuid::nil().to_string(),
+            Some(&source_event_id),
+        )
+        .expect("resubscribe notification tags");
+
+        assert_eq!(base_tags.len(), 2);
+        assert_eq!(resubscribe_tags.len(), 3);
+        assert!(resubscribe_tags.iter().any(|tag| {
+            tag.kind().to_string() == "e"
+                && tag.content() == Some(source_event_id.to_hex().as_str())
+        }));
+    }
 
     #[test]
     fn delete_tombstone_omits_absent_moderation_metadata() {
