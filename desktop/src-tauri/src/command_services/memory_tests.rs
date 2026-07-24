@@ -195,30 +195,40 @@ mod tests {
     }
 
     #[test]
-    fn trusted_config_rejects_reused_local_admission_secret_values() {
+    fn trusted_config_rejects_attestation_reuse_across_every_bearer_slot() {
         let directory = tempdir();
         let path = write_config(directory.path(), 8006);
-        let mut reused = credentials();
         let shared = "s".repeat(1024);
-        reused
-            .values
-            .insert("memory.local.read".to_string(), shared.clone());
-        reused
-            .values
-            .insert("memory.local.attestation".to_string(), shared);
+        for bearer_key in [
+            "memory.local.replicate",
+            "memory.remote.read",
+            "memory.remote.replicate",
+            "memory.local.read",
+        ] {
+            let mut reused = credentials();
+            reused.values.insert(bearer_key.to_string(), shared.clone());
+            reused
+                .values
+                .insert("memory.local.attestation".to_string(), shared.clone());
 
-        assert_eq!(
-            load_trusted_config(&path, &reused)
+            let error = load_trusted_config(&path, &reused)
                 .err()
-                .expect("equal bearer and attestation values must fail closed"),
-            MemoryError::CredentialsUnavailable,
-        );
+                .unwrap_or_else(|| panic!("{bearer_key} equal to attestation must fail closed"));
+            assert_eq!(error, MemoryError::CredentialsUnavailable, "{bearer_key}",);
+        }
 
         let mut distinct = credentials();
-        distinct.values.insert(
-            "memory.local.read".to_string(),
-            format!("{}a", "s".repeat(1023)),
-        );
+        let bearer = format!("{}a", "s".repeat(1023));
+        for bearer_key in [
+            "memory.local.read",
+            "memory.local.replicate",
+            "memory.remote.read",
+            "memory.remote.replicate",
+        ] {
+            distinct
+                .values
+                .insert(bearer_key.to_string(), bearer.clone());
+        }
         distinct.values.insert(
             "memory.local.attestation".to_string(),
             format!("{}b", "s".repeat(1023)),

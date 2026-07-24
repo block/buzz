@@ -365,8 +365,15 @@ fn load_trusted_config(
         remote_read: load_secret(credentials, &config.credential_keys.remote_read)?,
         remote_replicate: load_secret(credentials, &config.credential_keys.remote_replicate)?,
     };
-    if !admission_secrets_are_independent(&secrets.local_read, &secrets.local_attestation) {
-        return Err(MemoryError::CredentialsUnavailable);
+    for bearer in [
+        &secrets.local_read,
+        &secrets.local_replicate,
+        &secrets.remote_read,
+        &secrets.remote_replicate,
+    ] {
+        if !admission_secrets_are_independent(bearer, &secrets.local_attestation) {
+            return Err(MemoryError::CredentialsUnavailable);
+        }
     }
     Ok(TrustedMemoryConfig { config, secrets })
 }
