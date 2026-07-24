@@ -3560,6 +3560,16 @@ mod agent_draft_prompt_tests {
         assert!(prompt.contains("single-quoted shell strings preserve `\\n` literally"));
         assert!(prompt.contains("buzz messages send ... --content -"));
     }
+
+    #[test]
+    fn shared_base_prompt_states_session_text_is_not_delivered() {
+        let prompt = include_str!("base_prompt.md");
+        assert!(
+            prompt.contains("Session text is not delivered to the channel"),
+            "base prompt must state that session text is not a channel reply"
+        );
+        assert!(prompt.contains("buzz messages send"));
+    }
 }
 
 fn default_heartbeat_prompt() -> String {
