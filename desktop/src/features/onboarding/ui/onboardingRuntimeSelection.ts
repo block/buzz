@@ -1,6 +1,7 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
 
-export const ONBOARDING_RUNTIME_ORDER = ["claude", "codex"];
+/** First-run harness picker. Hermes is included so owner profiles can attach natively. */
+export const ONBOARDING_RUNTIME_ORDER = ["hermes", "claude", "codex"];
 
 const VISIBLE_ONBOARDING_RUNTIME_IDS = new Set<string>(
   ONBOARDING_RUNTIME_ORDER,

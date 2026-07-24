@@ -18,6 +18,8 @@ const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/e
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
+const HERMES_AVATAR_URL: &str =
+    "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/acp_registry/icon.svg";
 
 fn common_binary_paths() -> &'static [PathBuf] {
     static PATHS: OnceLock<Vec<PathBuf>> = OnceLock::new();
@@ -188,6 +190,43 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: None,
         auth_probe_args: None,
     },
+    KnownAcpRuntime {
+        id: "hermes",
+        label: "Hermes Agent",
+        commands: &["hermes", "hermes-acp"],
+        aliases: &[],
+        avatar_url: HERMES_AVATAR_URL,
+        // Hermes owns its own tools/MCP/skills from the selected profile.
+        // Do not inject Buzz MCP by default — profile policy stays authoritative.
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("hermes"),
+        cli_install_commands: &[],
+        cli_install_commands_windows: &[],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://hermes-agent.nousresearch.com/docs/user-guide/features/acp/",
+        cli_install_hint:
+            "Install Hermes Agent and ensure optional ACP support so `hermes acp --check` succeeds.",
+        adapter_install_hint:
+            "Hermes is installed but ACP support is missing. Install optional ACP deps so `hermes acp --check` succeeds.",
+        skill_dir: Some(".hermes/skills"),
+        supports_acp_model_switching: true,
+        model_env_var: None,
+        provider_env_var: None,
+        provider_locked: false,
+        default_env: &[],
+        config_file_path: Some("~/.hermes/config.yaml"),
+        config_file_format: Some("yaml"),
+        supports_acp_native_config: true,
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Configure Hermes providers in `~/.hermes` (or the selected profile home)."),
+        // ACP readiness uses hermes_readiness_probe_args so a base install
+        // without optional ACP deps is AdapterMissing, not "logged out".
+        auth_probe_args: None,
+    },
 ];
 
 /// Skill discovery directories declared by known runtimes.
@@ -342,9 +381,23 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "hermes" => Some(vec!["acp".to_string()]),
+        "hermes-acp" | "hermes_acp" => Some(Vec::new()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
+        _ => None,
+    }
+}
+
+/// Command-specific ACP readiness probe for Hermes entrypoints.
+///
+/// Official installs expose `hermes` even when optional ACP dependencies are
+/// missing. Path lookup alone is not enough; each entrypoint has its own
+/// `--check` form. Stolen/adapted from #2468 (nytemode).
+pub(crate) fn hermes_readiness_probe_args(command: &str) -> Option<&'static [&'static str]> {
+    match normalize_command_identity(command).as_str() {
+        "hermes" => Some(&["hermes", "acp", "--check"]),
+        "hermes-acp" | "hermes_acp" => Some(&["hermes-acp", "--check"]),
         _ => None,
     }
 }
@@ -1172,7 +1225,7 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
                 .underlying_cli
                 .map(|cli| find_command(cli).is_some())
                 .unwrap_or(false);
-            let (mut availability, command, binary_path) =
+            let (mut availability, mut command, mut binary_path) =
                 classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
 
             // For codex-acp: when the adapter resolves as Available, probe the
@@ -1184,6 +1237,30 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
             {
                 if let Some(path_str) = &binary_path {
                     availability = codex_adapter_availability(&PathBuf::from(path_str));
+                }
+            }
+
+            // Hermes's official installer exposes the native `hermes` binary
+            // even when the optional ACP dependencies are absent. A successful
+            // path lookup therefore is not enough to call the runtime ready.
+            // Probe the selected entrypoint with its command-specific `--check`
+            // invocation and surface a failure as AdapterMissing, not as an
+            // authentication problem. Pattern from #2468 (nytemode).
+            if runtime.id == "hermes" && availability == AcpAvailabilityStatus::Available {
+                let readiness = command
+                    .as_deref()
+                    .and_then(hermes_readiness_probe_args)
+                    .zip(binary_path.as_deref())
+                    .map(|(args, path)| {
+                        matches!(
+                            probe_auth_status(Path::new(path), args),
+                            AuthStatus::LoggedIn
+                        )
+                    });
+                if readiness == Some(false) {
+                    availability = AcpAvailabilityStatus::AdapterMissing;
+                    command = None;
+                    binary_path = None;
                 }
             }
 

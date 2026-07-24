@@ -616,7 +616,10 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        // Official Hermes entrypoint takes a subcommand: `hermes acp`.
+        "goose" | "hermes" => Some(vec!["acp".to_string()]),
+        // Direct console script already is the ACP server.
+        "hermes-acp" | "hermes_acp" => Some(Vec::new()),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1489,6 +1492,30 @@ mod tests {
         assert_eq!(
             normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn normalizes_hermes_entrypoints() {
+        assert_eq!(
+            normalize_agent_args("hermes", Vec::new()),
+            vec!["acp".to_string()]
+        );
+        assert_eq!(
+            normalize_agent_args("hermes-acp", Vec::new()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            normalize_agent_args("hermes-acp", vec!["acp".into()]),
+            Vec::<String>::new()
+        );
+        // Explicit profile selection must be preserved for multi-profile hosts.
+        assert_eq!(
+            normalize_agent_args(
+                "hermes",
+                vec!["-p".into(), "default".into(), "acp".into()]
+            ),
+            vec!["-p".to_string(), "default".to_string(), "acp".to_string()]
         );
     }
 

@@ -46,6 +46,9 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "codex-acp",
     "codex_acp",
     "goose",
+    "hermes",
+    "hermes-acp",
+    "hermes_acp",
     // buzz-dev-mcp's multicall personalities (rg, tree, buzz,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
     // invocations — not listed here.
@@ -53,11 +56,12 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "buzz_dev_mcp",
 ];
 
-/// Script interpreters that may host managed agent wrappers (e.g. npm shims).
-/// A process whose name matches here is NOT immediately claimed — it must also
-/// carry `BUZZ_MANAGED_AGENT` in its environment (checked by the caller via
-/// `process_has_buzz_marker()`). This avoids sweeping unrelated node processes.
-pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
+/// Script interpreters that may host managed agent wrappers (e.g. npm shims,
+/// Hermes console scripts under a venv Python). A process whose name matches
+/// here is NOT immediately claimed — it must also carry `BUZZ_MANAGED_AGENT`
+/// in its environment (checked by the caller via `process_has_buzz_marker()`).
+/// Exact names only: versioned prefixes like `python3.12` stay excluded.
+pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node", "python", "python3"];
 
 /// Check if a process name matches any of our known agent binaries.
 /// Uses exact match or prefix-with-separator to avoid false positives
