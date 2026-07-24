@@ -330,6 +330,12 @@ mod tests {
         assert!(is_importable(&msg(
             r#"{"type":"message","user":"U1","text":"","ts":"1.000","files":[{"name":"a.png"}]}"#
         )));
+        // A contentless bot_message thread root (null user, no text, no files)
+        // is filtered out — this is the real-export shape whose replies the
+        // importer must promote to top-level rather than defer forever.
+        assert!(!is_importable(&msg(
+            r#"{"type":"message","subtype":"bot_message","bot_id":"B1","user":null,"text":"","ts":"1.000","thread_ts":"1.000"}"#
+        )));
     }
 
     #[test]

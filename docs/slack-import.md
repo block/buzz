@@ -300,7 +300,11 @@ The per-event admin exemption above covers the practical cases today.
 ## Ordering, threads, idempotency
 
 - Channels are imported one at a time; messages within a channel are sorted
-  by Slack `ts`, so a thread root is always imported before its replies.
+  by Slack `ts`, so a thread root is always imported before its replies. If a
+  thread root is itself skipped (an empty `bot_message`, a Block Kit–only post),
+  its replies can't be `e`-tagged to it, so they are imported as ordinary
+  top-level messages instead of being dropped — their real content is preserved,
+  only the (contentless) thread linkage is lost. A warning is logged per reply.
 - A state file (default `<export-dir>/buzz-import-state.json`) records
   `slack channel id → Buzz channel UUID` and
   `"<channel>:<ts>" → Nostr event id`. Re-running the import skips
@@ -348,7 +352,9 @@ who was ever @-mentioned in Slack. Imported mentions render as plain
 - **Block Kit / attachment-only messages are dropped.** A message whose
   top-level `text` is empty (rich content lives only in `blocks`/`attachments`)
   carries no plain text to import and is skipped. Bot/app posts are skipped for
-  the same reason plus their `bot_message` subtype.
+  the same reason plus their `bot_message` subtype. Replies **to** such a skipped
+  root are not lost — they import as top-level messages (see Ordering, threads,
+  idempotency).
 - **Slack workflows are not translated** to `buzz-workflow` YAML.
 
 ## CLI reference
