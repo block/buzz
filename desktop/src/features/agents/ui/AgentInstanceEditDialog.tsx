@@ -1,9 +1,7 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-
 import { toast } from "sonner";
-
 import {
   useAcpRuntimesQuery,
   useAgentConfigSurface,
@@ -83,12 +81,13 @@ import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
-
+import { WhereToRunSection } from "./WhereToRunSection";
+import { canSubmitWhereToRun } from "./whereToRunIntent";
+import { useAgentBackendEdit } from "./useAgentBackendEdit";
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
   ease: [0.23, 1, 0.32, 1],
 } as const;
-
 export function AgentInstanceEditDialog({
   agent,
   initialFocus,
@@ -112,7 +111,6 @@ export function AgentInstanceEditDialog({
   const runtimesQuery = useAcpRuntimesQuery({ enabled: open });
   const configSurfaceQuery = useAgentConfigSurface(open ? agent.pubkey : null);
   const runtimes = runtimesQuery.data ?? [];
-
   const [name, setName] = React.useState(agent.name);
   const [aiDefaultsOpen, setAiDefaultsOpen] = React.useState(false);
   const aiDefaultsTriggerRef = React.useRef<HTMLButtonElement>(null);
@@ -139,6 +137,7 @@ export function AgentInstanceEditDialog({
   const [envVars, setEnvVars] = React.useState<EnvVarsValue>(agent.envVars);
   const [autoRestartOnConfigChange, setAutoRestartOnConfigChange] =
     React.useState(agent.autoRestartOnConfigChange);
+  const backendEdit = useAgentBackendEdit(agent.backend);
   const personasQuery = usePersonasQuery();
   const linkedPersona = React.useMemo(
     () =>
@@ -159,14 +158,11 @@ export function AgentInstanceEditDialog({
   const [isAvatarUploadPending, setIsAvatarUploadPending] =
     React.useState(false);
   const shouldReduceMotion = useReducedMotion();
-
   // Runtime selector: defaults to "custom" until the dialog opens and the
   // catalog loads. The open-effect re-derives the correct id from the catalog.
   const [selectedRuntimeId, setSelectedRuntimeId] = React.useState("custom");
-
   // Tracks whether the user has made an in-dialog runtime selection.
   const runtimeTouched = React.useRef(false);
-
   // Reset form state only when the dialog opens or when switching to a different agent.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentional — including agent fields would re-fire on every 5s poll and wipe edits
   React.useEffect(() => {
@@ -187,6 +183,7 @@ export function AgentInstanceEditDialog({
       setIsCustomProviderEditing(false);
       setEnvVars(agent.envVars);
       setAutoRestartOnConfigChange(agent.autoRestartOnConfigChange);
+      backendEdit.reset();
       setRespondTo(agent.respondTo);
       setRespondToAllowlist(agent.respondToAllowlist);
       setAvatarUrl(agent.avatarUrl ?? "");
@@ -213,7 +210,6 @@ export function AgentInstanceEditDialog({
       setSelectedRuntimeId(matched.id);
     }
   }, [open, runtimes, agent.agentCommand]);
-
   // Build the sorted runtime catalog for the dropdown.
   const sortedRuntimes = React.useMemo(
     () => sortPersonaRuntimes(runtimes),
@@ -224,7 +220,6 @@ export function AgentInstanceEditDialog({
     () => runtimes.find((r) => r.id === selectedRuntimeId),
     [runtimes, selectedRuntimeId],
   );
-
   const runtimeDropdownValue = selectedRuntimeId || NO_RUNTIME_DROPDOWN_VALUE;
 
   const runtimeDropdownOptions: PersonaDropdownOption[] = React.useMemo(() => {
@@ -590,7 +585,8 @@ export function AgentInstanceEditDialog({
     }) &&
     providerValid &&
     !updateMutation.isPending &&
-    !isAvatarUploadPending;
+    !isAvatarUploadPending &&
+    canSubmitWhereToRun(backendEdit.draft);
 
   async function handleSubmit() {
     try {
@@ -603,7 +599,6 @@ export function AgentInstanceEditDialog({
       // provider-backed inherit-transition carries the persona model (readiness
       // requires one) and a deliberate local model still wins.
       const normalizedModel = inheritedSubmission.model;
-
       // Harness pin resolution — see resolveAgentCommandUpdate for the full
       // sentinel/pin/no-op contract, including the inherit→pin transition where
       // the prefilled command equals the original but must still be pinned.
@@ -613,7 +608,6 @@ export function AgentInstanceEditDialog({
         originalAgentCommand: agent.agentCommand,
         agentCommandOverride: agent.agentCommandOverride ?? null,
       });
-
       // Classify the effective post-submit runtime's provider capability as a
       // tri-state: "capable" persists the provider, "locked" clears it (only
       // when we KNOW it's provider-locked, e.g. Claude), "unknown" OMITS it so a
@@ -626,7 +620,6 @@ export function AgentInstanceEditDialog({
         prospectiveRuntimeId,
         runtimeSupportsLlmProviderSelection(prospectiveRuntimeId),
       );
-
       // Provider + env to persist — the shared inherited-submission snapshot
       // (same values the credential gate validates), so gate ↔ record ↔ spawn
       // all agree. See resolveInheritedRuntimeSubmission.
@@ -695,6 +688,7 @@ export function AgentInstanceEditDialog({
           respondToAllowlist.join(",") !== agent.respondToAllowlist.join(",")
             ? respondToAllowlist
             : undefined,
+        backend: backendEdit.update,
       };
 
       const result = await updateMutation.mutateAsync(input);
@@ -915,6 +909,12 @@ export function AgentInstanceEditDialog({
               onAllowlistChange={setRespondToAllowlist}
               onModeChange={setRespondTo}
               variant="persona"
+            />
+
+            <WhereToRunSection
+              draft={backendEdit.draft}
+              isPending={updateMutation.isPending}
+              onDraftChange={backendEdit.setDraft}
             />
 
             {/* Provider (runtime) */}

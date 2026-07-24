@@ -57,7 +57,7 @@ pub(crate) fn resolve_deploy_model_provider<'a>(
 /// serialize `"private_key_nsec": ""` and launch the agent with no
 /// identity — the same hazard the local spawn path refuses via
 /// `spawn_key_refusal`.
-pub(super) fn build_deploy_payload(
+pub(crate) fn build_deploy_payload(
     app: &AppHandle,
     state: &AppState,
     record: &ManagedAgentRecord,

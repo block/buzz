@@ -457,7 +457,7 @@ pub(super) async fn start_local_agent_with_preflight(
 ///
 /// Returns Ok(()) on success, Err(message) on failure. Either way the record is
 /// updated and saved before returning.
-async fn deploy_to_provider(
+pub(super) async fn deploy_to_provider(
     app: &AppHandle,
     state: &AppState,
     pubkey: &str,
@@ -1320,7 +1320,7 @@ pub async fn delete_managed_agent(
 
 #[path = "agents_deploy.rs"]
 mod deploy;
-use deploy::build_deploy_payload;
+pub(super) use deploy::build_deploy_payload;
 #[cfg(test)]
 use deploy::deploy_payload_json;
 #[cfg(test)]
