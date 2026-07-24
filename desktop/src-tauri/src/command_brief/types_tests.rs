@@ -1,7 +1,8 @@
 use super::types::{
     AdviserContribution, AdviserId, BriefLifecycleRecord, BriefRunState, BriefRunStatus,
     BriefSchedule, BriefSection, CitedFinding, CommandBrief, PublishedCommandBrief,
-    ADVISORY_LIMITATION, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
+    SourceLedgerEntry, ADVISORY_LIMITATION, MAX_AGGREGATE_DISSENT_ITEMS, MAX_ARRAY_ITEMS,
+    MAX_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -358,6 +359,43 @@ fn rejects_control_characters_and_every_bounded_text_and_array_overflow() {
 }
 
 #[test]
+fn final_dissent_accepts_five_specialist_budgets_but_no_more() {
+    let mut aggregate = Vec::with_capacity(MAX_AGGREGATE_DISSENT_ITEMS);
+    let mut at_limit = brief_value();
+    for (specialist_index, contribution) in at_limit["contributions"]
+        .as_array_mut()
+        .expect("contributions")
+        .iter_mut()
+        .enumerate()
+    {
+        let dissent = (0..MAX_ARRAY_ITEMS)
+            .map(|index| format!("dissent-{specialist_index}-{index}"))
+            .collect::<Vec<_>>();
+        aggregate.extend(dissent.iter().cloned());
+        contribution["dissent"] = json!(dissent);
+    }
+    at_limit["dissent"] = json!(aggregate);
+    assert!(parse(at_limit).is_ok());
+
+    let over_limit = (0..=MAX_AGGREGATE_DISSENT_ITEMS)
+        .map(|index| format!("dissent-{index}"))
+        .collect::<Vec<_>>();
+    let mut over = brief_value();
+    over["dissent"] = json!(over_limit);
+    assert!(parse(over).is_err());
+
+    let mut specialist_over = contribution("operations");
+    specialist_over["dissent"] = json!((0..=MAX_ARRAY_ITEMS)
+        .map(|index| format!("specialist-dissent-{index}"))
+        .collect::<Vec<_>>());
+    assert!(parse_contribution(specialist_over).is_err());
+
+    let mut unsupported = brief_value();
+    unsupported["dissent"] = json!(["not preserved from a specialist"]);
+    assert!(parse(unsupported).is_err());
+}
+
+#[test]
 fn published_wrapper_adds_the_signed_event_id_only_after_validating_the_brief() {
     let published = PublishedCommandBrief::try_from(json!({
         "classification": "OFFICIAL",
@@ -425,4 +463,18 @@ fn standalone_contribution_parser_preserves_the_authoritative_contract() {
     let mut extra = contribution("operations");
     extra["prompt"] = json!("renderer override");
     assert!(parse_contribution(extra).is_err());
+}
+
+#[test]
+fn standalone_source_parser_requires_official_data_from_the_expected_snapshot() {
+    let parsed = SourceLedgerEntry::parse_for_snapshot(source(), "snapshot-1")
+        .expect("valid standalone source");
+    assert_eq!(parsed.ledger_id(), "ledger-1");
+    assert_eq!(parsed.snapshot_id(), "snapshot-1");
+
+    let mut public = source();
+    public["classification"] = json!("PUBLIC");
+    assert!(SourceLedgerEntry::parse_for_snapshot(public, "snapshot-1").is_err());
+
+    assert!(SourceLedgerEntry::parse_for_snapshot(source(), "snapshot-2").is_err());
 }

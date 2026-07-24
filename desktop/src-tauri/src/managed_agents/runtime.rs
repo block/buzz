@@ -21,10 +21,8 @@ pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
 mod lmstudio;
-pub(crate) use lmstudio::{
-    apply_runtime_security_env, runtime_inherited_env_keys_to_remove,
-    trusted_lmstudio_runtime_facts,
-};
+pub(crate) use lmstudio::trusted_lmstudio_runtime_facts;
+pub(crate) use lmstudio::{apply_runtime_security_env, runtime_inherited_env_keys_to_remove};
 
 mod env;
 pub(crate) use env::runtime_metadata_env_vars;

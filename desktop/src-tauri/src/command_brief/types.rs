@@ -80,7 +80,20 @@ pub const ADVISORY_LIMITATION: &str = "This Daily Command Brief is advisory only
 pub const MAX_TEXT_BYTES: usize = 4096;
 /// Maximum count for general contract arrays.
 pub const MAX_ARRAY_ITEMS: usize = 64;
-const MAX_LEDGER_ITEMS: usize = 256;
+/// Number of specialist contributions required by one complete brief.
+pub const SPECIALIST_COUNT: usize = 5;
+/// Exact specialist identities required by a complete brief and Chief input.
+pub const SPECIALIST_ADVISERS: [AdviserId; SPECIALIST_COUNT] = [
+    AdviserId::Operations,
+    AdviserId::Navigation,
+    AdviserId::DailyRoutine,
+    AdviserId::Reporting,
+    AdviserId::Plans,
+];
+/// Maximum final dissent retained across all five specialist contributions.
+pub const MAX_AGGREGATE_DISSENT_ITEMS: usize = SPECIALIST_COUNT * MAX_ARRAY_ITEMS;
+/// Maximum sources admitted to one frozen run ledger.
+pub const MAX_SOURCE_LEDGER_ITEMS: usize = 256;
 
 /// A validation error for untrusted Daily Command Brief wire data.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +131,73 @@ pub struct SourceLedgerEntry {
     quoted_location: QuotedLocation,
     retrieved_at: String,
     observed_at: String,
+}
+
+impl SourceLedgerEntry {
+    /// Parses one untrusted source into the same OFFICIAL, bounded source
+    /// contract used by a complete brief.
+    pub fn parse_for_snapshot(
+        value: Value,
+        expected_snapshot_id: &str,
+    ) -> Result<Self, ContractError> {
+        let raw: RawSourceLedgerEntry = serde_json::from_value(value).map_err(|_| ContractError)?;
+        parse_raw_source(raw, expected_snapshot_id)
+    }
+
+    /// Returns the stable run-ledger identity.
+    pub fn ledger_id(&self) -> &str {
+        &self.ledger_id
+    }
+
+    /// Returns the unique upstream source identity.
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    /// Returns the closed source-kind classification.
+    pub const fn source_kind(&self) -> SourceKind {
+        self.source_kind
+    }
+
+    /// Returns the trusted collection identity.
+    pub fn collection(&self) -> &str {
+        &self.collection
+    }
+
+    /// Returns the trusted document identity.
+    pub fn document_id(&self) -> &str {
+        &self.document_id
+    }
+
+    /// Returns the trusted chunk identity.
+    pub fn chunk_id(&self) -> &str {
+        &self.chunk_id
+    }
+
+    /// Returns the validated frozen snapshot identity.
+    pub fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    /// Returns the inert bounded source quote.
+    pub fn quote(&self) -> &str {
+        &self.quoted_location.quote
+    }
+
+    /// Returns the bounded source location.
+    pub fn location(&self) -> &str {
+        &self.quoted_location.location
+    }
+
+    /// Returns the validated retrieval timestamp.
+    pub fn retrieved_at(&self) -> &str {
+        &self.retrieved_at
+    }
+
+    /// Returns the validated observation timestamp.
+    pub fn observed_at(&self) -> &str {
+        &self.observed_at
+    }
 }
 
 /// A factual finding cited by stable source-ledger IDs.
@@ -437,8 +517,50 @@ fn valid_time(value: &str) -> bool {
     valid_text(value) && DateTime::parse_from_rfc3339(value).is_ok()
 }
 
+fn parse_raw_source(
+    source: RawSourceLedgerEntry,
+    expected_snapshot_id: &str,
+) -> Result<SourceLedgerEntry, ContractError> {
+    if !valid_text(&source.ledger_id)
+        || !valid_text(&source.source_id)
+        || !valid_text(&source.collection)
+        || !valid_text(&source.document_id)
+        || !valid_text(&source.chunk_id)
+        || !valid_time(&source.timestamp)
+        || !valid_text(&source.snapshot_id)
+        || source.snapshot_id != expected_snapshot_id
+        || !valid_text(&source.quoted_location.quote)
+        || !valid_text(&source.quoted_location.location)
+        || !valid_time(&source.retrieved_at)
+        || !valid_time(&source.observed_at)
+    {
+        return Err(ContractError);
+    }
+    Ok(SourceLedgerEntry {
+        classification: source.classification,
+        ledger_id: source.ledger_id,
+        source_id: source.source_id,
+        source_kind: source.source_kind,
+        collection: source.collection,
+        document_id: source.document_id,
+        chunk_id: source.chunk_id,
+        timestamp: source.timestamp,
+        snapshot_id: source.snapshot_id,
+        quoted_location: QuotedLocation {
+            quote: source.quoted_location.quote,
+            location: source.quoted_location.location,
+        },
+        retrieved_at: source.retrieved_at,
+        observed_at: source.observed_at,
+    })
+}
+
 fn valid_text_array(values: &[String]) -> bool {
-    values.len() <= MAX_ARRAY_ITEMS && values.iter().all(|value| valid_text(value))
+    valid_text_array_with_limit(values, MAX_ARRAY_ITEMS)
+}
+
+fn valid_text_array_with_limit(values: &[String], maximum_items: usize) -> bool {
+    values.len() <= maximum_items && values.iter().all(|value| valid_text(value))
 }
 
 fn unique_valid_text_array(values: &[String]) -> bool {
@@ -558,13 +680,13 @@ impl TryFrom<Value> for CommandBrief {
             || !valid_text(&raw.schedule_id)
             || !valid_text(&raw.snapshot_id)
             || raw.advisory_limitation != ADVISORY_LIMITATION
-            || raw.source_ledger.len() > MAX_LEDGER_ITEMS
-            || raw.contributions.len() != 5
+            || raw.source_ledger.len() > MAX_SOURCE_LEDGER_ITEMS
+            || raw.contributions.len() != SPECIALIST_COUNT
             || raw.degraded_sections.len() > MAX_ARRAY_ITEMS
             || raw.degraded_sections.iter().collect::<BTreeSet<_>>().len()
                 != raw.degraded_sections.len()
             || !valid_text_array(&raw.missing_information)
-            || !valid_text_array(&raw.dissent)
+            || !valid_text_array_with_limit(&raw.dissent, MAX_AGGREGATE_DISSENT_ITEMS)
         {
             return Err(ContractError);
         }
@@ -573,40 +695,13 @@ impl TryFrom<Value> for CommandBrief {
         let mut source_ids = BTreeSet::new();
         let mut source_ledger = Vec::with_capacity(raw.source_ledger.len());
         for source in raw.source_ledger {
-            if !valid_text(&source.ledger_id)
-                || !valid_text(&source.source_id)
-                || !valid_text(&source.collection)
-                || !valid_text(&source.document_id)
-                || !valid_text(&source.chunk_id)
-                || !valid_time(&source.timestamp)
-                || !valid_text(&source.snapshot_id)
-                || source.snapshot_id != raw.snapshot_id
-                || !valid_text(&source.quoted_location.quote)
-                || !valid_text(&source.quoted_location.location)
-                || !valid_time(&source.retrieved_at)
-                || !valid_time(&source.observed_at)
-                || !ledger_ids.insert(source.ledger_id.clone())
+            let source = parse_raw_source(source, &raw.snapshot_id)?;
+            if !ledger_ids.insert(source.ledger_id.clone())
                 || !source_ids.insert(source.source_id.clone())
             {
                 return Err(ContractError);
             }
-            source_ledger.push(SourceLedgerEntry {
-                classification: source.classification,
-                ledger_id: source.ledger_id,
-                source_id: source.source_id,
-                source_kind: source.source_kind,
-                collection: source.collection,
-                document_id: source.document_id,
-                chunk_id: source.chunk_id,
-                timestamp: source.timestamp,
-                snapshot_id: source.snapshot_id,
-                quoted_location: QuotedLocation {
-                    quote: source.quoted_location.quote,
-                    location: source.quoted_location.location,
-                },
-                retrieved_at: source.retrieved_at,
-                observed_at: source.observed_at,
-            });
+            source_ledger.push(source);
         }
 
         if !valid_time(&raw.source_freshness.as_of)
@@ -628,13 +723,7 @@ impl TryFrom<Value> for CommandBrief {
             return Err(ContractError);
         }
 
-        let expected_specialists = BTreeSet::from([
-            AdviserId::Operations,
-            AdviserId::Navigation,
-            AdviserId::DailyRoutine,
-            AdviserId::Reporting,
-            AdviserId::Plans,
-        ]);
+        let expected_specialists = BTreeSet::from(SPECIALIST_ADVISERS);
         let mut seen_specialists = BTreeSet::new();
         let mut contributions = Vec::with_capacity(raw.contributions.len());
         for contribution in raw.contributions {
@@ -647,6 +736,13 @@ impl TryFrom<Value> for CommandBrief {
             contributions.push(parse_raw_contribution(contribution, adviser, &ledger_ids)?);
         }
         if seen_specialists != expected_specialists {
+            return Err(ContractError);
+        }
+        if !contributions
+            .iter()
+            .flat_map(|contribution| contribution.dissent.iter())
+            .eq(raw.dissent.iter())
+        {
             return Err(ContractError);
         }
         let specialist_findings = contributions

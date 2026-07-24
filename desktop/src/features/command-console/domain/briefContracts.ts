@@ -3,7 +3,9 @@ import type { OfficialSourceReference } from "./contracts";
 
 export const MAX_TEXT_BYTES = 4096;
 export const MAX_ARRAY_ITEMS = 64;
-const MAX_LEDGER_ITEMS = 256;
+export const SPECIALIST_COUNT = 5;
+export const MAX_AGGREGATE_DISSENT_ITEMS = SPECIALIST_COUNT * MAX_ARRAY_ITEMS;
+export const MAX_SOURCE_LEDGER_ITEMS = 256;
 
 export const ADVISORY_LIMITATION =
   "This Daily Command Brief is advisory only. Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.";
@@ -187,10 +189,11 @@ function isBoundedText(value: unknown): value is string {
 function parseTextArray(
   value: unknown,
   unique = false,
+  maximumItems = MAX_ARRAY_ITEMS,
 ): readonly string[] | null {
   if (
     !Array.isArray(value) ||
-    value.length > MAX_ARRAY_ITEMS ||
+    value.length > maximumItems ||
     !value.every(isBoundedText) ||
     (unique && new Set(value).size !== value.length)
   ) {
@@ -409,7 +412,7 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
     !isBoundedText(value.snapshotId) ||
     value.advisoryLimitation !== ADVISORY_LIMITATION ||
     !Array.isArray(value.sourceLedger) ||
-    value.sourceLedger.length > MAX_LEDGER_ITEMS ||
+    value.sourceLedger.length > MAX_SOURCE_LEDGER_ITEMS ||
     !isRecord(value.sourceFreshness) ||
     !hasExactKeys(value.sourceFreshness, [
       "classification",
@@ -456,7 +459,11 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
   }
   const degradedSections = parseSectionArray(value.degradedSections, true);
   const missingInformation = parseTextArray(value.missingInformation);
-  const dissent = parseTextArray(value.dissent);
+  const dissent = parseTextArray(
+    value.dissent,
+    false,
+    MAX_AGGREGATE_DISSENT_ITEMS,
+  );
   if (
     !degradedSections ||
     !missingInformation ||
@@ -474,6 +481,14 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
     contributions.push(parsed);
   }
   if (SPECIALISTS.some((adviser) => !advisers.has(adviser))) return null;
+  const expectedDissent = contributions.flatMap((contribution) => [
+    ...contribution.dissent,
+  ]);
+  if (
+    expectedDissent.length !== dissent.length ||
+    expectedDissent.some((item, index) => item !== dissent[index])
+  )
+    return null;
   const specialistFindings = new Set(
     contributions.flatMap((contribution) =>
       contribution.findings.map((finding) =>

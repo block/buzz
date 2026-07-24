@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   ADVISORY_LIMITATION,
+  MAX_AGGREGATE_DISSENT_ITEMS,
   MAX_ARRAY_ITEMS,
   MAX_TEXT_BYTES,
   parseBriefRunState,
@@ -249,6 +250,36 @@ test("enforces text and array budgets, rejects controls, and only accepts post-s
   assert.ok(published);
   assert.equal("lifecycleAuditEventId" in published.brief, false);
   assert.equal(Object.isFrozen(published), true);
+});
+
+test("accepts the five-specialist aggregate dissent budget but no more", () => {
+  const atLimitBrief = brief();
+  const atLimit = [];
+  atLimitBrief.contributions.forEach((specialist, specialistIndex) => {
+    specialist.dissent = Array.from(
+      { length: MAX_ARRAY_ITEMS },
+      (_, index) => `dissent-${specialistIndex}-${index}`,
+    );
+    atLimit.push(...specialist.dissent);
+  });
+  atLimitBrief.dissent = atLimit;
+  assert.equal(atLimit.length, MAX_AGGREGATE_DISSENT_ITEMS);
+  assert.ok(parseCommandBrief(atLimitBrief));
+  assert.equal(
+    parseCommandBrief(brief({ dissent: [...atLimit, "one-too-many"] })),
+    null,
+  );
+
+  const specialistOver = brief();
+  specialistOver.contributions[0].dissent = Array.from(
+    { length: MAX_ARRAY_ITEMS + 1 },
+    (_, index) => `specialist-dissent-${index}`,
+  );
+  assert.equal(parseCommandBrief(specialistOver), null);
+  assert.equal(
+    parseCommandBrief(brief({ dissent: ["not preserved from a specialist"] })),
+    null,
+  );
 });
 
 test("accepts only the closed Rust run-state vocabulary", () => {

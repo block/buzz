@@ -17,7 +17,9 @@ use tokio_util::sync::CancellationToken;
 use super::personas::definition_for;
 use super::provenance::{build_evidence_prompt, ValidatedSource};
 use super::types::{
-    AdviserContribution, AdviserId, CitedFinding, Classification, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
+    AdviserContribution, AdviserId, CitedFinding, Classification, MAX_AGGREGATE_DISSENT_ITEMS,
+    MAX_ARRAY_ITEMS, MAX_SOURCE_LEDGER_ITEMS, MAX_TEXT_BYTES, SPECIALIST_ADVISERS,
+    SPECIALIST_COUNT,
 };
 use crate::command_services::policy::{
     adviser_runtime_catalog, AdmissionError, AdviserRuntimeCatalog,
@@ -158,7 +160,7 @@ impl<T> fmt::Debug for AdviserExecutionResult<T> {
 }
 
 /// Exact tool-free Chief of Staff consolidation.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChiefOfStaffConsolidation {
     classification: Classification,
@@ -166,6 +168,18 @@ pub struct ChiefOfStaffConsolidation {
     findings: Vec<CitedFinding>,
     limitations: Vec<String>,
     dissent: Vec<String>,
+}
+
+impl fmt::Debug for ChiefOfStaffConsolidation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ChiefOfStaffConsolidation")
+            .field("adviser", &self.adviser)
+            .field("finding_count", &self.findings.len())
+            .field("limitation_count", &self.limitations.len())
+            .field("dissent_count", &self.dissent.len())
+            .finish()
+    }
 }
 
 impl ChiefOfStaffConsolidation {
@@ -319,6 +333,7 @@ impl AdviserExecutor {
                 "adviser request rejected",
             ));
         }
+        validate_source_collection(&request.sources)?;
         let persona = definition_for(request.adviser);
         let evidence = build_evidence_prompt(persona, &request.sources);
         let evidence_value: Value =
@@ -535,14 +550,16 @@ type ChiefInputValidation = (
 fn build_chief_input(
     request: &ChiefOfStaffRequest,
 ) -> Result<ChiefInputValidation, AdviserExecutionError> {
-    if request.contributions.is_empty() || request.contributions.len() > 5 {
+    validate_source_collection(&request.source_ledger)?;
+    if request.contributions.len() != SPECIALIST_COUNT {
         return Err(invalid_request());
     }
+    let expected_advisers = BTreeSet::from(SPECIALIST_ADVISERS);
     let mut advisers = BTreeSet::new();
     let mut allowed_findings = BTreeSet::new();
     let mut expected_dissent = Vec::new();
     for contribution in &request.contributions {
-        if contribution.adviser() == AdviserId::ChiefOfStaff
+        if !expected_advisers.contains(&contribution.adviser())
             || !advisers.insert(contribution.adviser())
         {
             return Err(invalid_request());
@@ -552,10 +569,13 @@ fn build_chief_input(
         }
         expected_dissent.extend(contribution.dissent().iter().cloned());
     }
+    if advisers != expected_advisers || expected_dissent.len() > MAX_AGGREGATE_DISSENT_ITEMS {
+        return Err(invalid_request());
+    }
     let ledger_ids = request
         .source_ledger
         .iter()
-        .map(|source| source.ledger_id.clone())
+        .map(|source| source.ledger_id().to_string())
         .collect::<BTreeSet<_>>();
     if ledger_ids.len() != request.source_ledger.len()
         || allowed_findings.iter().any(|(_, source_ids)| {
@@ -572,18 +592,18 @@ fn build_chief_input(
         .map(|source| {
             json!({
                 "classification": "OFFICIAL",
-                "ledgerId": source.ledger_id,
-                "sourceKind": source.source_kind,
-                "sourceId": source.source_id,
-                "collection": source.collection,
-                "documentId": source.document_id,
-                "chunkId": source.chunk_id,
-                "snapshotId": source.snapshot_id,
-                "observedAt": source.observed_at,
-                "retrievedAt": source.retrieved_at,
+                "ledgerId": source.ledger_id(),
+                "sourceKind": source.source_kind(),
+                "sourceId": source.source_id(),
+                "collection": source.collection(),
+                "documentId": source.document_id(),
+                "chunkId": source.chunk_id(),
+                "snapshotId": source.snapshot_id(),
+                "observedAt": source.observed_at(),
+                "retrievedAt": source.retrieved_at(),
                 "quotedLocation": {
-                    "location": source.location,
-                    "quote": source.quote,
+                    "location": source.location(),
+                    "quote": source.quote(),
                 },
                 "untrustedEvidence": true,
             })
@@ -599,6 +619,25 @@ fn build_chief_input(
         return Err(invalid_request());
     }
     Ok((input, ledger_ids, allowed_findings, expected_dissent))
+}
+
+fn validate_source_collection(sources: &[ValidatedSource]) -> Result<(), AdviserExecutionError> {
+    if sources.len() > MAX_SOURCE_LEDGER_ITEMS {
+        return Err(invalid_request());
+    }
+    let mut ledger_ids = BTreeSet::new();
+    let mut source_ids = BTreeSet::new();
+    let mut snapshot_ids = BTreeSet::new();
+    for source in sources {
+        if !ledger_ids.insert(source.ledger_id()) || !source_ids.insert(source.source_id()) {
+            return Err(invalid_request());
+        }
+        snapshot_ids.insert(source.snapshot_id());
+    }
+    if snapshot_ids.len() > 1 {
+        return Err(invalid_request());
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -621,7 +660,7 @@ fn parse_chief_output(
     if raw.adviser != AdviserId::ChiefOfStaff
         || raw.findings.len() > MAX_ARRAY_ITEMS
         || !valid_text_array(&raw.limitations)
-        || !valid_text_array(&raw.dissent)
+        || !valid_text_array_with_limit(&raw.dissent, MAX_AGGREGATE_DISSENT_ITEMS)
         || raw.dissent != expected_dissent
     {
         return Err(invalid_output());
@@ -654,7 +693,11 @@ fn valid_identifier(value: &str, maximum_bytes: usize) -> bool {
 }
 
 fn valid_text_array(values: &[String]) -> bool {
-    values.len() <= MAX_ARRAY_ITEMS
+    valid_text_array_with_limit(values, MAX_ARRAY_ITEMS)
+}
+
+fn valid_text_array_with_limit(values: &[String], maximum_items: usize) -> bool {
+    values.len() <= maximum_items
         && values
             .iter()
             .all(|value| valid_identifier(value, MAX_TEXT_BYTES))

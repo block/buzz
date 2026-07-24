@@ -12,7 +12,10 @@ use super::lmstudio::{
     AdviserExecutionErrorCode, AdviserExecutor, ChiefOfStaffRequest, SpecialistAdviserRequest,
 };
 use super::provenance::ValidatedSource;
-use super::types::{AdviserContribution, AdviserId, SourceKind};
+use super::types::{
+    AdviserContribution, AdviserId, SourceLedgerEntry, MAX_AGGREGATE_DISSENT_ITEMS,
+    MAX_ARRAY_ITEMS, MAX_SOURCE_LEDGER_ITEMS,
+};
 use crate::command_services::policy::{
     build_adviser_runtime_catalog, KnowledgeServiceKind, VerifiedService, RAG_CATALOG_TOOLS,
 };
@@ -140,20 +143,42 @@ fn rag_service() -> VerifiedService {
     }
 }
 
+fn source_with_index(index: usize) -> ValidatedSource {
+    let ledger_id = if index == 0 {
+        "ledger-1".to_string()
+    } else {
+        format!("ledger-{index:03}")
+    };
+    SourceLedgerEntry::parse_for_snapshot(
+        json!({
+            "classification": "OFFICIAL",
+            "ledgerId": ledger_id,
+            "sourceKind": "rag",
+            "sourceId": format!("point-{index:03}"),
+            "collection": "orders",
+            "documentId": format!("document-{index:03}"),
+            "chunkId": format!("chunk-{index:03}"),
+            "timestamp": "2026-07-25T06:00:00Z",
+            "snapshotId": SNAPSHOT,
+            "observedAt": "2026-07-25T06:00:00Z",
+            "retrievedAt": "2026-07-25T06:00:00Z",
+            "quotedLocation": {
+                "location": "section 1",
+                "quote": "The machinery state is within operating limits.",
+            },
+        }),
+        SNAPSHOT,
+    )
+    .expect("official validated source")
+    .into()
+}
+
 fn source() -> ValidatedSource {
-    ValidatedSource {
-        ledger_id: "ledger-1".to_string(),
-        source_kind: SourceKind::Rag,
-        source_id: "point-1".to_string(),
-        collection: "orders".to_string(),
-        document_id: "document-1".to_string(),
-        chunk_id: "chunk-1".to_string(),
-        snapshot_id: SNAPSHOT.to_string(),
-        observed_at: "2026-07-25T06:00:00Z".to_string(),
-        retrieved_at: "2026-07-25T06:00:00Z".to_string(),
-        location: "section 1".to_string(),
-        quote: "The machinery state is within operating limits.".to_string(),
-    }
+    source_with_index(0)
+}
+
+fn sources(count: usize) -> Vec<ValidatedSource> {
+    (0..count).map(source_with_index).collect()
 }
 
 fn contribution_value(adviser: &str, section: &str, text: &str, source_ids: &[&str]) -> Value {
@@ -225,13 +250,56 @@ fn specialist_request() -> SpecialistAdviserRequest {
     SpecialistAdviserRequest::new("run-1:operations", AdviserId::Operations, vec![source()])
 }
 
-fn parse_specialist(value: Value) -> AdviserContribution {
+fn parse_specialist(value: Value, adviser: AdviserId) -> AdviserContribution {
     AdviserContribution::parse_for_adviser(
         value,
-        AdviserId::Operations,
+        adviser,
         &BTreeSet::from(["ledger-1".to_string()]),
     )
     .expect("specialist contribution")
+}
+
+fn specialist_contributions() -> Vec<AdviserContribution> {
+    [
+        (
+            AdviserId::Operations,
+            "operations",
+            "operations",
+            "Machinery is within limits.",
+        ),
+        (
+            AdviserId::Navigation,
+            "navigation",
+            "navigation",
+            "Navigation considerations are bounded.",
+        ),
+        (
+            AdviserId::DailyRoutine,
+            "daily_routine",
+            "daily_routine",
+            "Daily routine is supported.",
+        ),
+        (
+            AdviserId::Reporting,
+            "reporting",
+            "reports",
+            "Reporting is current.",
+        ),
+        (
+            AdviserId::Plans,
+            "plans",
+            "planning_30_60_90",
+            "Plans are source-backed.",
+        ),
+    ]
+    .into_iter()
+    .map(|(adviser, wire_adviser, section, text)| {
+        parse_specialist(
+            contribution_value(wire_adviser, section, text, &["ledger-1"]),
+            adviser,
+        )
+    })
+    .collect()
 }
 
 async fn executor_for(
@@ -533,12 +601,6 @@ fn non_loopback_endpoint_is_rejected_before_executor_construction() {
 
 #[tokio::test]
 async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
-    let specialist = parse_specialist(contribution_value(
-        "operations",
-        "operations",
-        "Machinery is within limits.",
-        &["ledger-1"],
-    ));
     let valid_chief = json!({
         "classification": "OFFICIAL",
         "adviser": "chief_of_staff",
@@ -547,7 +609,7 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
             "text": "Machinery is within limits.",
             "sourceIds": ["ledger-1"]
         }],
-        "limitations": ["Consolidated from one available specialist."],
+        "limitations": ["Sensitive limitation that must not enter Debug."],
         "dissent": []
     });
     let (executor, request_rx, task) = executor_for(
@@ -557,7 +619,7 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
     .await;
     let result = executor
         .run_chief_of_staff(
-            ChiefOfStaffRequest::new("run-1:chief", vec![specialist], vec![source()]),
+            ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), vec![source()]),
             CancellationToken::new(),
         )
         .await
@@ -566,6 +628,13 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
         result.contribution.findings()[0].text(),
         "Machinery is within limits."
     );
+    let debug = format!("{:?}", result.contribution);
+    assert!(debug.contains("finding_count"));
+    assert!(debug.contains("limitation_count"));
+    assert!(debug.contains("dissent_count"));
+    assert!(!debug.contains("Machinery is within limits."));
+    assert!(!debug.contains("Sensitive limitation"));
+    assert!(!debug.contains("OFFICIAL"));
     let (request, _headers) = request_rx.await.expect("captured chief request");
     assert!(request.get("integrations").is_none());
     task.await.expect("server task").expect("server result");
@@ -589,12 +658,6 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
             "limitations": [],
             "dissent": []
         });
-        let specialist = parse_specialist(contribution_value(
-            "operations",
-            "operations",
-            "Machinery is within limits.",
-            &["ledger-1"],
-        ));
         let (executor, _request_rx, task) = executor_for(
             FakeResponse::json(native_response(vec![terminal_message(chief)])),
             Duration::from_secs(2),
@@ -602,7 +665,7 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
         .await;
         let error = executor
             .run_chief_of_staff(
-                ChiefOfStaffRequest::new("run-1:chief", vec![specialist], vec![source()]),
+                ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), vec![source()]),
                 CancellationToken::new(),
             )
             .await
@@ -625,12 +688,6 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
         "limitations": [],
         "dissent": []
     });
-    let specialist = parse_specialist(contribution_value(
-        "operations",
-        "operations",
-        "Machinery is within limits.",
-        &["ledger-1"],
-    ));
     let (executor, _request_rx, task) = executor_for(
         FakeResponse::json(native_response(vec![tool, terminal_message(chief)])),
         Duration::from_secs(2),
@@ -638,11 +695,257 @@ async fn chief_of_staff_is_tool_free_and_cannot_add_findings_or_sources() {
     .await;
     let error = executor
         .run_chief_of_staff(
-            ChiefOfStaffRequest::new("run-1:chief", vec![specialist], vec![source()]),
+            ChiefOfStaffRequest::new("run-1:chief", specialist_contributions(), vec![source()]),
             CancellationToken::new(),
         )
         .await
         .expect_err("chief tool call");
     assert_eq!(error.code(), AdviserExecutionErrorCode::EvidenceRejected);
     task.await.expect("server task").expect("server result");
+}
+
+#[tokio::test]
+async fn chief_rejects_missing_duplicate_or_extra_specialists_before_transport() {
+    let valid_response = json!({
+        "classification": "OFFICIAL",
+        "adviser": "chief_of_staff",
+        "findings": [],
+        "limitations": [],
+        "dissent": []
+    });
+    let mut cases = Vec::new();
+    let mut missing = specialist_contributions();
+    missing.pop();
+    cases.push(missing);
+    let mut duplicate = specialist_contributions();
+    duplicate.pop();
+    duplicate.push(parse_specialist(
+        contribution_value("operations", "operations", "Duplicate.", &["ledger-1"]),
+        AdviserId::Operations,
+    ));
+    cases.push(duplicate);
+    let mut extra = specialist_contributions();
+    extra.push(parse_specialist(
+        contribution_value("operations", "operations", "Extra.", &["ledger-1"]),
+        AdviserId::Operations,
+    ));
+    cases.push(extra);
+
+    for contributions in cases {
+        let (executor, mut request_rx, task) = executor_for(
+            FakeResponse::json(native_response(vec![terminal_message(
+                valid_response.clone(),
+            )])),
+            Duration::from_secs(2),
+        )
+        .await;
+        let error = executor
+            .run_chief_of_staff(
+                ChiefOfStaffRequest::new("run-1:chief", contributions, vec![source()]),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("incomplete specialist set");
+        assert_eq!(error.code(), AdviserExecutionErrorCode::InvalidRequest);
+        assert!(
+            request_rx.try_recv().is_err(),
+            "transport must stay untouched"
+        );
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn chief_accepts_the_full_aggregate_dissent_sequence_without_truncation() {
+    let mut expected_dissent = Vec::with_capacity(MAX_AGGREGATE_DISSENT_ITEMS);
+    let contributions = specialist_contributions()
+        .into_iter()
+        .enumerate()
+        .map(|(specialist_index, contribution)| {
+            let adviser = contribution.adviser();
+            let section = match adviser {
+                AdviserId::Operations => "operations",
+                AdviserId::Navigation => "navigation",
+                AdviserId::DailyRoutine => "daily_routine",
+                AdviserId::Reporting => "reports",
+                AdviserId::Plans => "planning_30_60_90",
+                AdviserId::ChiefOfStaff => unreachable!(),
+            };
+            let wire_adviser = match adviser {
+                AdviserId::Operations => "operations",
+                AdviserId::Navigation => "navigation",
+                AdviserId::DailyRoutine => "daily_routine",
+                AdviserId::Reporting => "reporting",
+                AdviserId::Plans => "plans",
+                AdviserId::ChiefOfStaff => unreachable!(),
+            };
+            let dissent = (0..MAX_ARRAY_ITEMS)
+                .map(|index| format!("dissent-{specialist_index}-{index}"))
+                .collect::<Vec<_>>();
+            expected_dissent.extend(dissent.iter().cloned());
+            let mut value =
+                contribution_value(wire_adviser, section, "Source-backed.", &["ledger-1"]);
+            value["dissent"] = json!(dissent);
+            parse_specialist(value, adviser)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(expected_dissent.len(), MAX_AGGREGATE_DISSENT_ITEMS);
+
+    let chief = json!({
+        "classification": "OFFICIAL",
+        "adviser": "chief_of_staff",
+        "findings": [],
+        "limitations": [],
+        "dissent": expected_dissent,
+    });
+    let (executor, _request_rx, task) = executor_for(
+        FakeResponse::json(native_response(vec![terminal_message(chief)])),
+        Duration::from_secs(2),
+    )
+    .await;
+    let result = executor
+        .run_chief_of_staff(
+            ChiefOfStaffRequest::new("run-1:chief", contributions.clone(), vec![source()]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("aggregate dissent at the contract limit");
+    assert_eq!(
+        result.contribution.dissent().len(),
+        MAX_AGGREGATE_DISSENT_ITEMS
+    );
+    task.await.expect("server task").expect("server result");
+
+    let mut over_limit = expected_dissent;
+    over_limit.push("one-too-many".to_string());
+    let chief = json!({
+        "classification": "OFFICIAL",
+        "adviser": "chief_of_staff",
+        "findings": [],
+        "limitations": [],
+        "dissent": over_limit,
+    });
+    let (executor, _request_rx, task) = executor_for(
+        FakeResponse::json(native_response(vec![terminal_message(chief)])),
+        Duration::from_secs(2),
+    )
+    .await;
+    let error = executor
+        .run_chief_of_staff(
+            ChiefOfStaffRequest::new("run-1:chief", contributions, vec![source()]),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("aggregate dissent over the contract limit");
+    assert_eq!(error.code(), AdviserExecutionErrorCode::InvalidOutput);
+    task.await.expect("server task").expect("server result");
+}
+
+#[tokio::test]
+async fn specialist_source_collection_is_bounded_before_clone_or_transport() {
+    let contribution = contribution_value(
+        "operations",
+        "operations",
+        "Machinery is within limits.",
+        &["ledger-001"],
+    );
+    let (executor, request_rx, task) = executor_for(
+        FakeResponse::json(native_response(vec![terminal_message(
+            contribution.clone(),
+        )])),
+        Duration::from_secs(2),
+    )
+    .await;
+    executor
+        .run_specialist(
+            SpecialistAdviserRequest::new(
+                "run-1:operations",
+                AdviserId::Operations,
+                sources(MAX_SOURCE_LEDGER_ITEMS),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("source collection at limit");
+    request_rx
+        .await
+        .expect("at-limit request reached transport");
+    task.await.expect("server task").expect("server result");
+
+    let (executor, mut request_rx, task) = executor_for(
+        FakeResponse::json(native_response(vec![terminal_message(contribution)])),
+        Duration::from_secs(2),
+    )
+    .await;
+    let error = executor
+        .run_specialist(
+            SpecialistAdviserRequest::new(
+                "run-1:operations",
+                AdviserId::Operations,
+                sources(MAX_SOURCE_LEDGER_ITEMS + 1),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("source collection over limit");
+    assert_eq!(error.code(), AdviserExecutionErrorCode::InvalidRequest);
+    assert!(
+        request_rx.try_recv().is_err(),
+        "transport must stay untouched"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn chief_source_ledger_is_bounded_before_json_or_transport() {
+    let chief = json!({
+        "classification": "OFFICIAL",
+        "adviser": "chief_of_staff",
+        "findings": [],
+        "limitations": [],
+        "dissent": []
+    });
+    let (executor, request_rx, task) = executor_for(
+        FakeResponse::json(native_response(vec![terminal_message(chief.clone())])),
+        Duration::from_secs(2),
+    )
+    .await;
+    executor
+        .run_chief_of_staff(
+            ChiefOfStaffRequest::new(
+                "run-1:chief",
+                specialist_contributions(),
+                sources(MAX_SOURCE_LEDGER_ITEMS),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("source ledger at limit");
+    request_rx
+        .await
+        .expect("at-limit request reached transport");
+    task.await.expect("server task").expect("server result");
+
+    let (executor, mut request_rx, task) = executor_for(
+        FakeResponse::json(native_response(vec![terminal_message(chief)])),
+        Duration::from_secs(2),
+    )
+    .await;
+    let error = executor
+        .run_chief_of_staff(
+            ChiefOfStaffRequest::new(
+                "run-1:chief",
+                specialist_contributions(),
+                sources(MAX_SOURCE_LEDGER_ITEMS + 1),
+            ),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("source ledger over limit");
+    assert_eq!(error.code(), AdviserExecutionErrorCode::InvalidRequest);
+    assert!(
+        request_rx.try_recv().is_err(),
+        "transport must stay untouched"
+    );
+    task.abort();
 }

@@ -1,21 +1,31 @@
 use super::personas::definition_for;
 use super::provenance::{build_evidence_prompt, ValidatedSource};
-use super::types::{AdviserId, SourceKind};
+use super::types::{AdviserId, SourceKind, SourceLedgerEntry};
 
 fn source(ledger_id: &str, source_kind: SourceKind, quote: &str) -> ValidatedSource {
-    ValidatedSource {
-        ledger_id: ledger_id.to_string(),
-        source_kind,
-        source_id: format!("source-{ledger_id}"),
-        collection: "command-records".to_string(),
-        document_id: "document-1".to_string(),
-        chunk_id: format!("chunk-{ledger_id}"),
-        snapshot_id: "a".repeat(64),
-        observed_at: "2026-07-25T00:00:00Z".to_string(),
-        retrieved_at: "2026-07-25T00:00:00Z".to_string(),
-        location: "section 4".to_string(),
-        quote: quote.to_string(),
-    }
+    let snapshot = "a".repeat(64);
+    SourceLedgerEntry::parse_for_snapshot(
+        serde_json::json!({
+            "classification": "OFFICIAL",
+            "ledgerId": ledger_id,
+            "sourceKind": source_kind,
+            "sourceId": format!("source-{ledger_id}"),
+            "collection": "command-records",
+            "documentId": "document-1",
+            "chunkId": format!("chunk-{ledger_id}"),
+            "timestamp": "2026-07-25T00:00:00Z",
+            "snapshotId": snapshot,
+            "observedAt": "2026-07-25T00:00:00Z",
+            "retrievedAt": "2026-07-25T00:00:00Z",
+            "quotedLocation": {
+                "location": "section 4",
+                "quote": quote,
+            },
+        }),
+        &snapshot,
+    )
+    .expect("official validated source")
+    .into()
 }
 
 #[test]
@@ -85,8 +95,29 @@ fn total_prompt_budget_omits_deterministically_and_records_the_missing_source() 
 
 #[test]
 fn every_model_visible_envelope_has_its_own_budget() {
-    let mut oversized = source("large-location", SourceKind::Rag, "quoted evidence");
-    oversized.location = "l".repeat(8 * 1024);
+    let snapshot = "a".repeat(64);
+    let oversized: ValidatedSource = SourceLedgerEntry::parse_for_snapshot(
+        serde_json::json!({
+            "classification": "OFFICIAL",
+            "ledgerId": "large-envelope",
+            "sourceKind": "rag",
+            "sourceId": "source-large-envelope",
+            "collection": "command-records",
+            "documentId": "document-1",
+            "chunkId": "chunk-large-envelope",
+            "timestamp": "2026-07-25T00:00:00Z",
+            "snapshotId": snapshot,
+            "observedAt": "2026-07-25T00:00:00Z",
+            "retrievedAt": "2026-07-25T00:00:00Z",
+            "quotedLocation": {
+                "location": "l".repeat(4_096),
+                "quote": "q".repeat(4_096),
+            },
+        }),
+        &snapshot,
+    )
+    .expect("official validated oversized envelope")
+    .into();
 
     let rendered = build_evidence_prompt(definition_for(AdviserId::Operations), &[oversized]);
 
@@ -94,6 +125,6 @@ fn every_model_visible_envelope_has_its_own_budget() {
     assert!(rendered
         .limitations
         .iter()
-        .any(|limitation| limitation.contains("large-location")
+        .any(|limitation| limitation.contains("large-envelope")
             && limitation.contains("envelope budget")));
 }

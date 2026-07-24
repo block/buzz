@@ -3,7 +3,7 @@ use std::cmp::Ordering;
 use serde::Serialize;
 
 use super::personas::PersonaDefinition;
-use super::types::SourceKind;
+use super::types::{SourceKind, SourceLedgerEntry};
 
 /// Maximum UTF-8 bytes retained from one source quote in a model-visible envelope.
 pub const MAX_EVIDENCE_ENVELOPE_QUOTE_BYTES: usize = 4 * 1024;
@@ -15,17 +15,81 @@ pub const MAX_PROMPT_EVIDENCE_BYTES: usize = 16 * 1024;
 /// Trusted source metadata admitted by native collection before prompt rendering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ValidatedSource {
-    pub ledger_id: String,
-    pub source_kind: SourceKind,
-    pub source_id: String,
-    pub collection: String,
-    pub document_id: String,
-    pub chunk_id: String,
-    pub snapshot_id: String,
-    pub observed_at: String,
-    pub retrieved_at: String,
-    pub location: String,
-    pub quote: String,
+    ledger_id: String,
+    source_kind: SourceKind,
+    source_id: String,
+    collection: String,
+    document_id: String,
+    chunk_id: String,
+    snapshot_id: String,
+    observed_at: String,
+    retrieved_at: String,
+    location: String,
+    quote: String,
+}
+
+impl From<SourceLedgerEntry> for ValidatedSource {
+    fn from(source: SourceLedgerEntry) -> Self {
+        Self {
+            ledger_id: source.ledger_id().to_string(),
+            source_kind: source.source_kind(),
+            source_id: source.source_id().to_string(),
+            collection: source.collection().to_string(),
+            document_id: source.document_id().to_string(),
+            chunk_id: source.chunk_id().to_string(),
+            snapshot_id: source.snapshot_id().to_string(),
+            observed_at: source.observed_at().to_string(),
+            retrieved_at: source.retrieved_at().to_string(),
+            location: source.location().to_string(),
+            quote: source.quote().to_string(),
+        }
+    }
+}
+
+impl ValidatedSource {
+    pub(super) fn ledger_id(&self) -> &str {
+        &self.ledger_id
+    }
+
+    pub(super) fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    pub(super) const fn source_kind(&self) -> SourceKind {
+        self.source_kind
+    }
+
+    pub(super) fn collection(&self) -> &str {
+        &self.collection
+    }
+
+    pub(super) fn document_id(&self) -> &str {
+        &self.document_id
+    }
+
+    pub(super) fn chunk_id(&self) -> &str {
+        &self.chunk_id
+    }
+
+    pub(super) fn snapshot_id(&self) -> &str {
+        &self.snapshot_id
+    }
+
+    pub(super) fn observed_at(&self) -> &str {
+        &self.observed_at
+    }
+
+    pub(super) fn retrieved_at(&self) -> &str {
+        &self.retrieved_at
+    }
+
+    pub(super) fn location(&self) -> &str {
+        &self.location
+    }
+
+    pub(super) fn quote(&self) -> &str {
+        &self.quote
+    }
 }
 
 /// A bounded, explicitly inert representation of one source for a model prompt.
