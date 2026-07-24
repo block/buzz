@@ -81,7 +81,7 @@ _local-workspace-migrate:
     cargo run -p buzz-admin -- migrate
 
 _local-workspace-ready:
-    ./scripts/check-local-services.sh --start --require minio
+    ./scripts/check-local-services.sh --require minio
 
 # Stop all dev services (keep data)
 down:

@@ -11,9 +11,118 @@ local_workspace_repo_root() {
   cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P
 }
 
+local_workspace_require_positive_timeout() {
+  local value="$1"
+  local name="$2"
+
+  [[ "${value}" =~ ^[1-9][0-9]*$ ]] ||
+    local_workspace_die "${name} must be a positive integer" || return
+}
+
+local_workspace_run_bounded() (
+  local stage="$1"
+  local limit_seconds="$2"
+  shift 2
+
+  local_workspace_require_positive_timeout "${limit_seconds}" \
+    "timeout for ${stage}" || return
+
+  set -m
+  "$@" &
+  local command_pid=$!
+  set +m
+
+  local elapsed_ticks=0
+  local max_ticks=$((limit_seconds * 10))
+  while kill -0 "${command_pid}" 2>/dev/null; do
+    if ((elapsed_ticks >= max_ticks)); then
+      kill -TERM -- "-${command_pid}" 2>/dev/null || true
+
+      local grace_ticks=0
+      while kill -0 -- "-${command_pid}" 2>/dev/null &&
+        ((grace_ticks < 10)); do
+        sleep 0.1
+        grace_ticks=$((grace_ticks + 1))
+      done
+      if kill -0 -- "-${command_pid}" 2>/dev/null; then
+        kill -KILL -- "-${command_pid}" 2>/dev/null || true
+      fi
+
+      set +e
+      wait "${command_pid}" 2>/dev/null
+      set -e
+      printf '[local-workspace] error: %s timed out after %ss\n' \
+        "${stage}" "${limit_seconds}" >&2
+      return 124
+    fi
+    sleep 0.1
+    elapsed_ticks=$((elapsed_ticks + 1))
+  done
+
+  local command_status
+  set +e
+  wait "${command_pid}"
+  command_status=$?
+  set -e
+  if [[ ${command_status} -ne 0 ]]; then
+    printf '[local-workspace] error: %s failed (exit %s)\n' \
+      "${stage}" "${command_status}" >&2
+  fi
+  return "${command_status}"
+)
+
+local_workspace_registered_checkout_roots() {
+  local repo_root
+  local worktree_output
+  local common_dir
+  local common_dir_resolved
+  local checkout
+  local line
+
+  repo_root="$(local_workspace_repo_root)"
+  worktree_output="$(
+    cd "${repo_root}"
+    git worktree list --porcelain
+  )" || local_workspace_die "could not enumerate registered Git worktrees" ||
+    return
+
+  while IFS= read -r line; do
+    case "${line}" in
+      "worktree "*)
+        checkout="${line#worktree }"
+        [[ -d "${checkout}" ]] ||
+          local_workspace_die \
+            "registered Git worktree is unavailable: ${checkout}" || return
+        (
+          cd "${checkout}"
+          pwd -P
+        )
+        ;;
+    esac
+  done <<<"${worktree_output}"
+
+  common_dir="$(
+    cd "${repo_root}"
+    git rev-parse --git-common-dir
+  )" || local_workspace_die "could not locate the common Git directory" ||
+    return
+  case "${common_dir}" in
+    /*) ;;
+    *) common_dir="${repo_root}/${common_dir}" ;;
+  esac
+  common_dir_resolved="$(cd "${common_dir}" && pwd -P)" ||
+    local_workspace_die "common Git directory is unavailable: ${common_dir}" ||
+    return
+  (
+    cd "${common_dir_resolved}/.."
+    pwd -P
+  )
+}
+
 local_workspace_require_absolute_outside_repo() {
   local candidate="$1"
-  local repo_root
+  local checkout_roots
+  local checkout_root
   local resolved
 
   [[ "${candidate}" == /* ]] ||
@@ -21,14 +130,18 @@ local_workspace_require_absolute_outside_repo() {
   [[ -d "${candidate}" ]] ||
     local_workspace_die "directory does not exist: ${candidate}" || return
 
-  repo_root="$(local_workspace_repo_root)"
   resolved="$(cd "${candidate}" && pwd -P)"
-  case "${resolved}" in
-    "${repo_root}" | "${repo_root}/"*)
-      local_workspace_die "path must be outside the repository: ${resolved}"
-      return
-      ;;
-  esac
+  checkout_roots="$(local_workspace_registered_checkout_roots)" || return
+  while IFS= read -r checkout_root; do
+    [[ -n "${checkout_root}" ]] || continue
+    case "${resolved}" in
+      "${checkout_root}" | "${checkout_root}/"*)
+        local_workspace_die \
+          "path must be outside every registered repository checkout: ${resolved}"
+        return
+        ;;
+    esac
+  done <<<"${checkout_roots}"
   printf '%s\n' "${resolved}"
 }
 
@@ -70,8 +183,19 @@ local_workspace_validate_backup() {
   local resolved
   local expected_checksums
 
+  [[ ! -L "${backup_dir}" ]] ||
+    local_workspace_die "backup path must not be a symbolic link" || return
   resolved="$(local_workspace_require_absolute_outside_repo "${backup_dir}")" ||
     return
+
+  if find "${resolved}" -type l -print -quit | grep -q .; then
+    local_workspace_die "backup must not contain a symbolic link"
+    return
+  fi
+  if find "${resolved}" ! -type d ! -type f -print -quit | grep -q .; then
+    local_workspace_die "backup contains a non-regular filesystem object"
+    return
+  fi
 
   for required in manifest manifest.sha256 postgres.dump minio-inventory.tsv minio; do
     [[ -e "${resolved}/${required}" ]] ||
@@ -131,9 +255,13 @@ local_workspace_validate_backup() {
 
 local_workspace_capture_minio_credentials() {
   local destination="$1"
-  docker compose exec -T minio sh -eu -c \
-    'printf "%s\n%s\n" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"' \
-    >"${destination}"
+  local timeout_seconds="$2"
+  local_workspace_run_bounded \
+    "MinIO credential read" \
+    "${timeout_seconds}" \
+    docker compose exec -T minio sh -eu -c \
+      'printf "%s\n%s\n" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"' \
+      >"${destination}"
   [[ "$(wc -l <"${destination}" | tr -d ' ')" == "2" ]] ||
     local_workspace_die "could not read MinIO service credentials"
 }
