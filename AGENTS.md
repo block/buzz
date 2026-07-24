@@ -13,17 +13,19 @@ Buzz spans five repos. This one (`block/buzz`) is the OSS source for the relay, 
 | Repo | Purpose |
 |------|---------|
 | [block/buzz](https://github.com/block/buzz) | OSS source — relay, desktop app, mobile app, CLI, agent harness |
-| [squareup/sprout-releases](https://github.com/squareup/sprout-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
+| [squareup/buzz-releases](https://github.com/squareup/buzz-releases) | Buildkite pipeline producing Block-signed macOS + iOS builds with `-block` version suffix |
 | [squareup/sprout-oss](https://github.com/squareup/sprout-oss) | CI pipeline building the relay Docker image and pushing to internal ECR |
 | [squareup/block-coder-tf-stacks](https://github.com/squareup/block-coder-tf-stacks) | Terraform + ArgoCD deploying the relay to the staging Kubernetes cluster |
 | [squareup/sprout-backend-blox](https://github.com/squareup/sprout-backend-blox) | Desktop backend provider script connecting Blox workstation agents to the relay |
 
+Private pipeline repos that still use the pre-rename `sprout-*` GitHub names do so intentionally; the signed-desktop GitHub repo is `buzz-releases` (some Buildkite slugs may still say `sprout-releases`).
+
 ```
 block/buzz (source)
-  ├─► sprout-releases    (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
-  ├─► sprout-oss         (relay Docker image → ECR)
+  ├─► buzz-releases      (desktop + mobile builds → Artifactory, GitHub, Mobile Releases)
+  ├─► sprout-oss         (relay Docker image → ECR; legacy name retained)
   │     └─► block-coder-tf-stacks  (Helm chart → ArgoCD → staging cluster)
-  └─── sprout-backend-blox         (Blox compute provider for Desktop agent launch)
+  └─── sprout-backend-blox         (Blox compute provider; legacy name retained)
 ```
 
 See [RELEASING.md](RELEASING.md) for the desktop release flow and
