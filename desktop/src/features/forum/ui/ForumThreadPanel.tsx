@@ -12,7 +12,10 @@ import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import {
+  resolveGroupMentionHandles,
+  resolveMentionProps,
+} from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { Skeleton } from "@/shared/ui/skeleton";
@@ -115,6 +118,7 @@ function ReplyRow({
           channelNames={channelNames}
           className="text-sm"
           content={reply.content}
+          groupMentionHandles={resolveGroupMentionHandles(reply.tags)}
           imetaByUrl={parseImetaTags(reply.tags)}
           mentionNames={replyMentionNames}
           mentionPubkeysByName={replyMentionPubkeysByName}
@@ -258,6 +262,7 @@ export function ForumThreadPanel({
               channelNames={channelNames}
               className="text-sm"
               content={post.content}
+              groupMentionHandles={resolveGroupMentionHandles(post.tags)}
               imetaByUrl={parseImetaTags(post.tags)}
               mentionNames={postMentionNames}
               mentionPubkeysByName={postMentionPubkeysByName}

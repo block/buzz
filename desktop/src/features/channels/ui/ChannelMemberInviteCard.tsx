@@ -5,6 +5,8 @@ import { truncatePubkey } from "@/shared/lib/pubkey";
 import { PubKey } from "@/shared/ui/PubKey";
 import { useIsArchivedPredicate } from "@/features/identity-archive/hooks";
 import { useUserSearchQuery } from "@/features/profile/hooks";
+import { useGroupsQuery } from "@/features/groups/groupHooks";
+import type { UserGroup } from "@/shared/api/relayGroups";
 import type {
   AddChannelMembersResult,
   ChannelMember,
@@ -44,6 +46,7 @@ export function ChannelMemberInviteCard({
   const [selectedInvitees, setSelectedInvitees] = React.useState<
     UserSearchResult[]
   >([]);
+  const [selectedGroups, setSelectedGroups] = React.useState<UserGroup[]>([]);
   const [inviteRole, setInviteRole] =
     React.useState<Exclude<ChannelMember["role"], "owner">>("member");
   const [submissionErrors, setSubmissionErrors] = React.useState<
@@ -82,6 +85,16 @@ export function ChannelMemberInviteCard({
     () => new Set(existingMembers.map((member) => member.pubkey.toLowerCase())),
     [existingMembers],
   );
+  const selectedGroupPubkeys = React.useMemo(
+    () =>
+      new Set(
+        selectedGroups
+          .flatMap((group) => group.memberPubkeys)
+          .map((pubkey) => pubkey.toLowerCase()),
+      ),
+    [selectedGroups],
+  );
+  const groupsQuery = useGroupsQuery();
   const userSearchQuery = useUserSearchQuery(deferredInviteQuery, {
     enabled: open && deferredInviteQuery.length > 0,
     // Ask for more than we'll display so server-side ranking has room to be
@@ -95,11 +108,13 @@ export function ChannelMemberInviteCard({
         (user) =>
           !memberPubkeys.has(user.pubkey.toLowerCase()) &&
           !selectedInviteePubkeys.has(user.pubkey.toLowerCase()) &&
+          !selectedGroupPubkeys.has(user.pubkey.toLowerCase()) &&
           !isArchivedDiscovery(user.pubkey),
       ),
     [
       isArchivedDiscovery,
       memberPubkeys,
+      selectedGroupPubkeys,
       selectedInviteePubkeys,
       userSearchQuery.data,
     ],
@@ -109,11 +124,42 @@ export function ChannelMemberInviteCard({
     if (!open) {
       setInviteQuery("");
       setSelectedInvitees([]);
+      setSelectedGroups([]);
       setSubmissionErrors([]);
     }
   }, [open]);
 
-  const inviteTargets = selectedInvitees.map((invitee) => invitee.pubkey);
+  const matchingGroups = React.useMemo(() => {
+    const query = deferredInviteQuery.toLowerCase();
+    const selectedIds = new Set(selectedGroups.map((group) => group.id));
+    return (groupsQuery.data ?? []).filter((group) => {
+      if (selectedIds.has(group.id)) return false;
+      if (
+        query &&
+        !group.name.toLowerCase().includes(query) &&
+        !group.handle.toLowerCase().includes(query)
+      ) {
+        return false;
+      }
+      return group.memberPubkeys.some(
+        (pubkey) => !memberPubkeys.has(pubkey.toLowerCase()),
+      );
+    });
+  }, [deferredInviteQuery, groupsQuery.data, memberPubkeys, selectedGroups]);
+
+  const inviteTargets = React.useMemo(
+    () => [
+      ...new Set(
+        [
+          ...selectedInvitees.map((invitee) => invitee.pubkey),
+          ...selectedGroups.flatMap((group) => group.memberPubkeys),
+        ]
+          .map((pubkey) => pubkey.toLowerCase())
+          .filter((pubkey) => !memberPubkeys.has(pubkey)),
+      ),
+    ],
+    [memberPubkeys, selectedGroups, selectedInvitees],
+  );
 
   return (
     <form
@@ -130,6 +176,17 @@ export function ChannelMemberInviteCard({
           setSelectedInvitees((current) =>
             current.filter(
               (invitee) => !addedPubkeys.has(invitee.pubkey.toLowerCase()),
+            ),
+          );
+          setSelectedGroups((current) =>
+            current.filter((group) =>
+              group.memberPubkeys.some((pubkey) => {
+                const normalized = pubkey.toLowerCase();
+                return (
+                  !memberPubkeys.has(normalized) &&
+                  !addedPubkeys.has(normalized)
+                );
+              }),
             ),
           );
           setInviteQuery("");
@@ -199,6 +256,39 @@ export function ChannelMemberInviteCard({
               ))}
             </div>
           ) : null}
+          {selectedGroups.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5 border-t border-border/70 px-2.5 py-2">
+              {selectedGroups.map((group) => {
+                const count = group.memberPubkeys.filter(
+                  (pubkey) => !memberPubkeys.has(pubkey.toLowerCase()),
+                ).length;
+                return (
+                  <div
+                    className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-2xs leading-none text-primary"
+                    key={group.id}
+                  >
+                    <span className="font-medium">
+                      @{group.handle} ({count})
+                    </span>
+                    <button
+                      aria-label={`Remove @${group.handle}`}
+                      className="text-primary/70 transition-colors hover:text-primary"
+                      onClick={() =>
+                        setSelectedGroups((current) =>
+                          current.filter(
+                            (candidate) => candidate.id !== group.id,
+                          ),
+                        )
+                      }
+                      type="button"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          ) : null}
           {selectedInvitees.length > 0 ? (
             <div className="space-y-1 border-t border-border/70 px-2.5 py-2">
               {selectedInvitees.map((invitee) => (
@@ -258,6 +348,45 @@ export function ChannelMemberInviteCard({
                   No matching users.
                 </p>
               )}
+            </div>
+          ) : null}
+          {matchingGroups.length > 0 ? (
+            <div className="border-t border-border/70 px-2 py-2">
+              <p className="px-2 pb-1 text-xs font-medium text-muted-foreground">
+                Groups
+              </p>
+              <div className="max-h-36 space-y-1 overflow-y-auto">
+                {matchingGroups.map((group) => {
+                  const count = group.memberPubkeys.filter(
+                    (pubkey) => !memberPubkeys.has(pubkey.toLowerCase()),
+                  ).length;
+                  return (
+                    <button
+                      className="flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-accent"
+                      data-testid={`channel-group-search-result-${group.id}`}
+                      key={group.id}
+                      onClick={() => {
+                        setSelectedGroups((current) => [...current, group]);
+                        setInviteQuery("");
+                      }}
+                      type="button"
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate text-sm font-medium">
+                          @{group.handle}
+                        </span>
+                        <span className="block truncate text-xs text-muted-foreground">
+                          {group.name} · {count} member
+                          {count === 1 ? "" : "s"}
+                        </span>
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        Add group
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           ) : null}
         </div>

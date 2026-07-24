@@ -102,6 +102,7 @@ type AppSidebarProps = {
     | "channel"
     | "messages"
     | "agents"
+    | "groups"
     | "workflows"
     | "pulse"
     | "projects";
@@ -142,6 +143,7 @@ type AppSidebarProps = {
   onRemoveCommunity: (id: string) => void;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
+  onSelectGroups: () => void;
   onSelectProjects: () => void;
   onSelectPulse: () => void;
   onSelectWorkflows: () => void;
@@ -211,6 +213,7 @@ export function AppSidebar({
   onRemoveCommunity,
   onCreateAgent,
   onSelectAgents,
+  onSelectGroups,
   onSelectProjects,
   onSelectPulse,
   onSelectWorkflows,
@@ -606,6 +609,7 @@ export function AppSidebar({
               <AppSidebarPrimaryMenu
                 homeBadgeCount={homeBadgeCount}
                 onSelectAgents={onSelectAgents}
+                onSelectGroups={onSelectGroups}
                 onSelectHome={onSelectHome}
                 onSelectProjects={onSelectProjects}
                 onSelectPulse={onSelectPulse}

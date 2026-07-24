@@ -50,6 +50,18 @@ export type ResolvedMentionProps = {
   mentionPubkeysByName: Record<string, string> | undefined;
 };
 
+export function resolveGroupMentionHandles(
+  tags: string[][] | undefined,
+): string[] | undefined {
+  if (!tags) return undefined;
+  const handles = new Set<string>();
+  for (const tag of tags) {
+    const handle = tag[0] === "group" ? tag[2]?.trim() : undefined;
+    if (handle) handles.add(handle);
+  }
+  return handles.size > 0 ? [...handles] : undefined;
+}
+
 /**
  * Resolves mention render names and the name→pubkey map for mentioned users
  * from message `p` tags and non-notifying `mention` reference tags, in one

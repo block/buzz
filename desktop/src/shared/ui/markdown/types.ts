@@ -53,6 +53,7 @@ export type MarkdownProps = {
   className?: string;
   content: string;
   customEmoji?: CustomEmoji[];
+  groupMentionHandles?: string[];
   imetaByUrl?: ImetaLookup;
   interactive?: boolean;
   agentMentionPubkeysByName?: Record<string, string>;

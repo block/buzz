@@ -13,6 +13,7 @@ import {
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
+import { expandGroupMentions } from "@/features/messages/lib/groupMentionExpansion";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
@@ -693,24 +694,32 @@ export function useMentionSendFlow({
         const createdPersonaAgentPubkeySet = new Set(
           createdPersonaAgentPubkeys.map(normalizePubkey),
         );
-        const explicitMentionPubkeys = uniqueNormalizedPubkeys([
+        const individualMentionPubkeys = uniqueNormalizedPubkeys([
           ...mentions.extractMentionPubkeys(trimmed),
           ...createdPersonaAgentPubkeys,
         ]);
-        const explicitAgentPubkeys = explicitMentionPubkeys.filter(
+        const explicitAgentPubkeys = individualMentionPubkeys.filter(
           (pubkey) =>
             mentions.isAgentPubkey(pubkey) ||
             createdPersonaAgentPubkeySet.has(pubkey),
         );
-        const pubkeys = explicitMentionPubkeys;
+        const groupExpansion = expandGroupMentions({
+          channelMemberPubkeys: mentions.memberPubkeys,
+          groups: mentions.extractMentionGroups(trimmed),
+          individualMentionPubkeys,
+        });
+        const pubkeys = groupExpansion.mentionPubkeys;
         const { content: finalContent, mediaTags } = buildOutgoingMessage(
           trimmed,
           pendingImeta,
           spoileredAttachmentUrls,
         );
         const outgoingTags = mergeOutgoingTags(
-          mediaTags,
-          buildCustomEmojiTags(finalContent, customEmoji),
+          mergeOutgoingTags(
+            mediaTags,
+            buildCustomEmojiTags(finalContent, customEmoji),
+          ),
+          groupExpansion.markerTags,
         );
         const nonMemberPubkeys = getNonMemberMentionPubkeys(pubkeys);
         let promptNonMemberPubkeys = nonMemberPubkeys.filter(
@@ -773,6 +782,8 @@ export function useMentionSendFlow({
       getNonMemberMentionPubkeys,
       getDmThreadAgentMentionError,
       mentions.extractMentionPubkeys,
+      mentions.extractMentionGroups,
+      mentions.memberPubkeys,
       mentions.isAgentPubkey,
       mentions.isManagedAgentPubkey,
       onPrepareSendChannel,

@@ -8,6 +8,7 @@ type ViewLoadingFallbackKind =
   | "agents"
   | "channel"
   | "forum"
+  | "groups"
   | "projects"
   | "pulse"
   | "workflows";
@@ -401,6 +402,7 @@ export function ViewLoadingFallback({
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
       {shouldShowChannelHeader ? <LoadingHeaderSkeleton /> : null}
       {kind === "agents" ? <AgentsLoadingBody /> : null}
+      {kind === "groups" ? <CardListLoadingBody /> : null}
       {kind === "workflows" ? <CardListLoadingBody /> : null}
       {kind === "projects" ? <CardListLoadingBody /> : null}
       {kind === "channel" ? (

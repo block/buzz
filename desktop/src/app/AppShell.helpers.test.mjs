@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { shouldBounceForChannelNotification } from "./AppShell.helpers.ts";
+import {
+  deriveShellRoute,
+  shouldBounceForChannelNotification,
+} from "./AppShell.helpers.ts";
+
+test("deriveShellRoute selects the groups view", () => {
+  assert.deepEqual(deriveShellRoute("/groups"), {
+    selectedChannelId: null,
+    selectedView: "groups",
+  });
+});
 
 test("shouldBounceForChannelNotification_allowsTopLevelChannelMessages", () => {
   assert.equal(shouldBounceForChannelNotification([["h", "channel"]]), true);

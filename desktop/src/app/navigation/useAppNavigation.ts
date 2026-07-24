@@ -68,6 +68,17 @@ export function useAppNavigation() {
     [commitNavigation],
   );
 
+  const goGroups = React.useCallback(
+    (behavior?: NavigationBehavior) =>
+      commitNavigation(
+        {
+          to: "/groups",
+        },
+        behavior,
+      ),
+    [commitNavigation],
+  );
+
   const goPulse = React.useCallback(
     (behavior?: NavigationBehavior) =>
       commitNavigation(
@@ -298,6 +309,7 @@ export function useAppNavigation() {
     goAgents,
     goChannel,
     goForumPost,
+    goGroups,
     goHome,
     goNewMessage,
     goProject,

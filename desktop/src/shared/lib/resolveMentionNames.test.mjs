@@ -2,10 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  resolveGroupMentionHandles,
   resolveMentionNames,
   resolveMentionProps,
   resolveMentionPubkeysByName,
 } from "./resolveMentionNames.ts";
+
+test("group marker tags preserve the send-time handle", () => {
+  assert.deepEqual(
+    resolveGroupMentionHandles([
+      ["group", "group-id", "ios-team"],
+      ["group", "group-id", "ios-team"],
+      ["group", "other-id", "mobile"],
+    ]),
+    ["ios-team", "mobile"],
+  );
+});
 
 const PUBKEY = "a".repeat(64);
 const OTHER_PUBKEY = "b".repeat(64);

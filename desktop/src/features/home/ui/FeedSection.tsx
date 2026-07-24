@@ -17,7 +17,10 @@ import {
   KIND_JOB_RESULT,
   KIND_REMINDER,
 } from "@/shared/constants/kinds";
-import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
+import {
+  resolveGroupMentionHandles,
+  resolveMentionProps,
+} from "@/shared/lib/resolveMentionNames";
 import { Button } from "@/shared/ui/button";
 import { Markdown } from "@/shared/ui/markdown";
 import { UserAvatar } from "@/shared/ui/UserAvatar";
@@ -170,6 +173,7 @@ export function FeedSection({
               item.tags,
               profiles,
             );
+            const groupMentionHandles = resolveGroupMentionHandles(item.tags);
 
             return (
               <div
@@ -228,6 +232,7 @@ export function FeedSection({
                   <Markdown
                     className="max-w-none text-sm leading-snug text-muted-foreground"
                     content={feedContent(item)}
+                    groupMentionHandles={groupMentionHandles}
                     mentionNames={mentionNames}
                     mentionPubkeysByName={mentionPubkeysByName}
                   />

@@ -11,6 +11,7 @@ import { Route as remindersRouteImport } from "./routes/reminders";
 import { Route as pulseRouteImport } from "./routes/pulse";
 import { Route as projectsRouteImport } from "./routes/projects";
 import { Route as agentsRouteImport } from "./routes/agents";
+import { Route as groupsRouteImport } from "./routes/groups";
 import { Route as indexRouteImport } from "./routes/index";
 import { Route as workflowsDotworkflowIdRouteImport } from "./routes/workflows.$workflowId";
 import { Route as projectsDotprojectIdRouteImport } from "./routes/projects.$projectId";
@@ -48,6 +49,11 @@ const agentsRoute = agentsRouteImport.update({
   path: "/agents",
   getParentRoute: () => rootRouteImport,
 } as any);
+const groupsRoute = groupsRouteImport.update({
+  id: "/groups",
+  path: "/groups",
+  getParentRoute: () => rootRouteImport,
+} as any);
 const indexRoute = indexRouteImport.update({
   id: "/",
   path: "/",
@@ -83,6 +89,7 @@ const channelsDotchannelIdDotpostsDotpostIdRoute =
 export interface FileRoutesByFullPath {
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/groups": typeof groupsRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -97,6 +104,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/groups": typeof groupsRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -112,6 +120,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport;
   "/": typeof indexRoute;
   "/agents": typeof agentsRoute;
+  "/groups": typeof groupsRoute;
   "/projects": typeof projectsRoute;
   "/pulse": typeof pulseRoute;
   "/reminders": typeof remindersRoute;
@@ -128,6 +137,7 @@ export interface FileRouteTypes {
   fullPaths:
     | "/"
     | "/agents"
+    | "/groups"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -142,6 +152,7 @@ export interface FileRouteTypes {
   to:
     | "/"
     | "/agents"
+    | "/groups"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -156,6 +167,7 @@ export interface FileRouteTypes {
     | "__root__"
     | "/"
     | "/agents"
+    | "/groups"
     | "/projects"
     | "/pulse"
     | "/reminders"
@@ -171,6 +183,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   indexRoute: typeof indexRoute;
   agentsRoute: typeof agentsRoute;
+  groupsRoute: typeof groupsRoute;
   projectsRoute: typeof projectsRoute;
   pulseRoute: typeof pulseRoute;
   remindersRoute: typeof remindersRoute;
@@ -227,6 +240,13 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof agentsRouteImport;
       parentRoute: typeof rootRouteImport;
     };
+    "/groups": {
+      id: "/groups";
+      path: "/groups";
+      fullPath: "/groups";
+      preLoaderRoute: typeof groupsRouteImport;
+      parentRoute: typeof rootRouteImport;
+    };
     "/": {
       id: "/";
       path: "/";
@@ -275,6 +295,7 @@ declare module "@tanstack/react-router" {
 const rootRouteChildren: RootRouteChildren = {
   indexRoute: indexRoute,
   agentsRoute: agentsRoute,
+  groupsRoute: groupsRoute,
   projectsRoute: projectsRoute,
   pulseRoute: pulseRoute,
   remindersRoute: remindersRoute,
