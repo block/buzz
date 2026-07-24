@@ -278,23 +278,44 @@ function RuntimeHeader({
   );
 }
 
-function RuntimeRow({
-  installError,
-  installSuccess,
-  isInstalling,
-  onInstall,
-  runtime,
-}: {
-  installError: string | null;
-  installSuccess: boolean;
-  isInstalling: boolean;
-  onInstall: () => void;
-  runtime: AcpRuntimeCatalogEntry;
-}) {
+function RuntimeRow({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const [terminalLaunchMethodId, setTerminalLaunchMethodId] = React.useState<
     string | null
   >(null);
   const [isUpdateWarningOpen, setIsUpdateWarningOpen] = React.useState(false);
+  // Each row owns its mutation instance so concurrent installs each track
+  // their own isPending / result state independently.
+  const installMutation = useInstallAcpRuntimeMutation();
+  const [installResult, setInstallResult] = React.useState<{
+    success: boolean;
+    error: string | null;
+  } | null>(null);
+  const isInstalling = installMutation.isPending;
+  const installError = installResult?.error ?? null;
+  const installSuccess = installResult?.success ?? false;
+
+  function handleInstall() {
+    setInstallResult(null);
+    installMutation.mutate(runtime.id, {
+      onSuccess: (result) => {
+        if (result.success) {
+          setInstallResult({ success: true, error: null });
+        } else {
+          setInstallResult({
+            success: false,
+            error: getInstallErrorMessage(result.steps),
+          });
+        }
+      },
+      onError: (error) => {
+        setInstallResult({
+          success: false,
+          error: error instanceof Error ? error.message : "Install failed.",
+        });
+      },
+    });
+  }
+
   const canConnectAccount =
     runtime.availability === "available" &&
     runtime.authStatus.status === "logged_out";
@@ -352,7 +373,7 @@ function RuntimeRow({
               setIsUpdateWarningOpen(true);
               return;
             }
-            onInstall();
+            handleInstall();
           }}
           runtime={runtime}
         />
@@ -410,7 +431,7 @@ function RuntimeRow({
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={onInstall}
+              onClick={handleInstall}
               data-testid={`doctor-runtime-confirm-update-${runtime.id}`}
             >
               Update
@@ -491,59 +512,6 @@ export function DoctorSettingsPanel() {
     [runtimesQuery.data],
   );
   const isRefreshing = runtimesQuery.isFetching;
-  const installMutation = useInstallAcpRuntimeMutation();
-  const [installResults, setInstallResults] = React.useState<
-    Record<string, { success: boolean; error: string | null }>
-  >({});
-  // Per-runtime installing state: tracks which runtime IDs have an in-flight
-  // install so concurrent installs each show their own spinner correctly.
-  const [installingIds, setInstallingIds] = React.useState<Set<string>>(
-    new Set(),
-  );
-
-  function handleInstall(runtimeId: string) {
-    // Clear any previous result for this runtime before retrying.
-    setInstallResults((prev) => ({
-      ...prev,
-      [runtimeId]: { success: false, error: null },
-    }));
-    setInstallingIds((prev) => new Set(prev).add(runtimeId));
-
-    installMutation.mutate(runtimeId, {
-      onSuccess: (result) => {
-        if (result.success) {
-          setInstallResults((prev) => ({
-            ...prev,
-            [runtimeId]: { success: true, error: null },
-          }));
-        } else {
-          setInstallResults((prev) => ({
-            ...prev,
-            [runtimeId]: {
-              success: false,
-              error: getInstallErrorMessage(result.steps),
-            },
-          }));
-        }
-      },
-      onError: (error) => {
-        setInstallResults((prev) => ({
-          ...prev,
-          [runtimeId]: {
-            success: false,
-            error: error instanceof Error ? error.message : "Install failed.",
-          },
-        }));
-      },
-      onSettled: () => {
-        setInstallingIds((prev) => {
-          const next = new Set(prev);
-          next.delete(runtimeId);
-          return next;
-        });
-      },
-    });
-  }
 
   return (
     <section
@@ -558,7 +526,6 @@ export function DoctorSettingsPanel() {
           <Button
             disabled={isRefreshing}
             onClick={() => {
-              setInstallResults({});
               void runtimesQuery.refetch();
               void gitBashQuery.refetch();
             }}
@@ -597,14 +564,7 @@ export function DoctorSettingsPanel() {
           ) : runtimes.length > 0 ? (
             <div className="space-y-3" data-testid="doctor-runtime-list">
               {runtimes.map((runtime) => (
-                <RuntimeRow
-                  installError={installResults[runtime.id]?.error ?? null}
-                  installSuccess={installResults[runtime.id]?.success ?? false}
-                  isInstalling={installingIds.has(runtime.id)}
-                  key={runtime.id}
-                  onInstall={() => handleInstall(runtime.id)}
-                  runtime={runtime}
-                />
+                <RuntimeRow key={runtime.id} runtime={runtime} />
               ))}
             </div>
           ) : (
