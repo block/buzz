@@ -2357,12 +2357,8 @@ async fn ingest_event_inner(
         // kind:0 / kind:1) arrive with `channel_id == None` — emit
         // WriteInsertGlobal there. Never panicking after the DB write.
         let claimed = claimed_community_from_event(&event);
-        let action = reaction_write_trace_action(
-            channel_id,
-            was_inserted,
-            event.id.as_bytes(),
-            claimed,
-        );
+        let action =
+            reaction_write_trace_action(channel_id, was_inserted, event.id.as_bytes(), claimed);
         emit(tracer, action, state_for_request(tenant, auth.pubkey()));
         dispatch_persistent_event(
             tenant,
