@@ -291,6 +291,10 @@ test-unit:
         # Gateway unit and black-box HTTP tests are infra-free. Postgres-backed
         # contract/race tests run in the dedicated CI job below.
         cargo nextest run -p buzz-push-gateway
+        # buzz-admin operator-CLI unit tests: infra-free — clap argument
+        # surface, role/pubkey validation, kind:13534 timestamp bump. No lib
+        # target, so run the bin's test set (nextest default), not --lib.
+        cargo nextest run -p buzz-admin
     else
         ./scripts/run-tests.sh unit
     fi
