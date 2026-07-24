@@ -10,8 +10,9 @@ record from day one.
 buzz import slack --export-dir ./my-workspace-export            # import history
 buzz import slack --export-dir ./export --dry-run              # plan only
 buzz import slack --export-dir ./export \
-  --identity-map U060=npub1abc,U081=npub1def                    # attribute people
-buzz import bind --slack-id U060 --pubkey npub1abc              # attribute one, later
+  --identity-map U060=npub1abc,U081=npub1def                    # admin attests people
+buzz import bind --slack-id U060 --pubkey npub1abc              # admin attests one, later
+buzz import claim --slack-id U060                               # the person consents (their key)
 ```
 
 ## What gets imported
@@ -32,46 +33,67 @@ Every imported event carries provenance tags:
 - `["import_ts", "<slack ts>"]` — original microsecond-precision timestamp
   (Nostr `created_at` is seconds, so this preserves sub-second ordering data)
 
-## Attribution model — zero key custody, no impersonation
+## Attribution model — zero key custody, two-party consent
 
 Every imported event is signed by the **CLI identity** (bot mode). No
 private key is ever generated for, or distributed to, anyone. Message
 bodies keep a `**Name**: ` prefix (for search and non-Buzz clients) and the
 `import_author` tag records the original person.
 
-Real people are attributed by **owner/admin-signed identity bindings**
-(kind `30623`, `KIND_IMPORT_IDENTITY_BINDING`) mapping `slack:<user id>` to
-that person's **public key** (npub or hex):
+Attributing history to a real person takes **two signatures** — an admin
+and the person — so neither side can do it alone:
+
+1. **Attestation** (kind `30623`, `KIND_IMPORT_IDENTITY_BINDING`) — a
+   community owner/admin signs `slack:<user id> → <public key>`. The relay
+   accepts this kind only from an owner/admin.
+2. **Claim** (kind `30624`, `KIND_IMPORT_IDENTITY_CLAIM`) — the person signs
+   their own consent for the same `slack:<user id>` with their key. It has
+   no `p` tag: the signer *is* the subject, and the relay's signer==author
+   rule means you can only ever claim for yourself.
 
 ```bash
-# after people have onboarded and shared their npub (public — not a secret):
+# admin attests (npub is public — not a secret):
 buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1def
-# or one at a time, any time later:
-buzz import bind --slack-id U060 --pubkey npub1abc
+buzz import bind --slack-id U060 --pubkey npub1abc      # or one at a time, later
+
+# the person consents, run by them with their own key:
+buzz import claim --slack-id U060
 ```
 
-The Buzz client reads these bindings and renders imported history under the
-bound person's profile (name + avatar); unbound history still shows the
-`import_author` name.
+The Buzz client renders imported history under the real person's profile
+(name + avatar) **only when both exist and agree** — the attestation's
+pubkey equals the claim's signer for the same `slack:<id>`. Either half
+alone is inert; unconfirmed history still shows the `import_author` name.
 
 Why this is safe:
 
 - **Zero custody.** Only public keys (npubs) are handled. Nothing secret is
   generated or distributed, so there is no `keys.json` to leak.
-- **No account takeover.** The relay stores a binding **only when signed by
-  a community owner or admin**. A member cannot publish
-  `slack:U060 → their own pubkey` to seize someone else's history — the
-  exact migration risk this design closes.
+- **A member can't seize history.** A claim without a matching owner/admin
+  attestation attributes nothing — a member cannot map
+  `slack:U060 → their own pubkey` to grab someone else's history.
+- **An admin can't forge authorship.** An attestation without the subject's
+  own claim attributes nothing either — an admin cannot make an existing
+  member appear to have written imported messages. This is the vector a
+  single admin signature could not close.
 - **No third-party signatures.** Every stored event is signed by its
   submitter; there is no path for one key to post as another.
 - Display names remain freely editable (Slack-like); the binding ties a
   Slack id to a **pubkey**, independent of display name. Verified handles
   are a separate layer (NIP-05).
 
+**Residual trust.** A *colluding* owner/admin and a consenting pubkey can
+still attribute orphaned history to that pubkey (both sign). This is inherent
+without a Slack-side oracle to prove who really owned `slack:<id>`; the
+consenting party is publicly volunteering, and the immutable `import_author`
+provenance on every event records the original Slack identity regardless.
+What two-party consent removes is the *unilateral* admin — the realistic
+insider risk before production.
+
 How each person's own key comes to exist (no distribution): they onboard in
 Buzz via an invite link — the key is generated on their device and never
-leaves it — then share their **npub** (public) with the operator, who
-publishes the binding.
+leaves it — then share their **npub** (public) with the operator for the
+attestation, and run `buzz import claim` to consent.
 
 ## Relay requirements
 
@@ -86,7 +108,10 @@ matter for imports:
   replica fence until a fresh handshake covers the backfilled rows —
   degraded read capacity during the import, never missing rows.
   Single-instance deployments are unaffected.)
-- Identity bindings (kind `30623`): accepted **only** from an owner/admin.
+- Identity **attestations** (kind `30623`): accepted **only** from an
+  owner/admin. Identity **claims** (kind `30624`) are self-signed and
+  accepted from any member — but only for their own pubkey, and inert without
+  a matching attestation.
 
 Two optional knobs for the import window:
 
@@ -163,11 +188,14 @@ buzz import slack
   --channels <a,b,c>       import only these channel names
   --dry-run                parse and report what would be imported; no writes
   --skip-reactions         do not import reactions
-  --identity-map <MAP>     SLACKID=npub-or-hex,… owner-signed bindings (public keys only)
+  --identity-map <MAP>     SLACKID=npub-or-hex,… admin attestations (public keys only)
 
-buzz import bind
+buzz import bind           # owner/admin half: attest a Slack id → public key
   --slack-id <ID>          Slack user id (e.g. U060976D0QN)
   --pubkey <NPUB|HEX>      the person's PUBLIC key (never an nsec)
+
+buzz import claim          # subject half: consent, run by the person with their key
+  --slack-id <ID>          your Slack user id (e.g. U060976D0QN)
 ```
 
 Output follows CLI conventions: progress on stderr, a final JSON summary on

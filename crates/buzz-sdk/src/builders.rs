@@ -10,9 +10,9 @@ use buzz_core::{
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_IMPORT_IDENTITY_BINDING, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
-        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
+        KIND_IMPORT_IDENTITY_BINDING, KIND_IMPORT_IDENTITY_CLAIM, KIND_MODERATION_BAN,
+        KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+        KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -560,6 +560,25 @@ pub fn build_import_identity_binding(
         tag(&["import", "slack"])?,
     ];
     Ok(EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_BINDING as u16), "").tags(tags))
+}
+
+/// Build a subject-signed import identity claim (kind 30624).
+///
+/// The consent half of a two-party binding: the signer asserts that the
+/// foreign workspace identity keyed by `d_tag` (e.g. `slack:U060976D0QN`, via
+/// [`slack_identity_binding_d_tag`]) is them. The signer's own pubkey is the
+/// consent, so there is no `p` tag — sign this with the subject's key. It only
+/// takes effect paired with a matching owner/admin
+/// [`build_import_identity_binding`] attestation naming the same pubkey.
+/// Parameterized-replaceable on `d_tag`.
+pub fn build_import_identity_claim(d_tag: &str) -> Result<EventBuilder, SdkError> {
+    if d_tag.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "identity claim d tag must not be empty".into(),
+        ));
+    }
+    let tags = vec![tag(&["d", d_tag])?, tag(&["import", "slack"])?];
+    Ok(EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_CLAIM as u16), "").tags(tags))
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).
@@ -3814,5 +3833,61 @@ mod tests {
             .tags
             .iter()
             .any(|t| t.as_slice().first().map(String::as_str) == Some("replaced-by")));
+    }
+
+    #[test]
+    fn identity_binding_carries_d_and_p_but_no_secret() {
+        let pk = keys().public_key().to_hex();
+        let d = slack_identity_binding_d_tag("U060976D0QN");
+        assert_eq!(d, "slack:U060976D0QN");
+        let ev = sign(build_import_identity_binding(&d, &pk).unwrap());
+        assert_eq!(ev.kind.as_u16() as u32, KIND_IMPORT_IDENTITY_BINDING);
+        let get = |k: &str| {
+            ev.tags
+                .iter()
+                .find(|t| t.as_slice().first().map(String::as_str) == Some(k))
+                .and_then(|t| t.as_slice().get(1).cloned())
+        };
+        assert_eq!(get("d").as_deref(), Some(d.as_str()));
+        assert_eq!(get("p").as_deref(), Some(pk.as_str()));
+    }
+
+    #[test]
+    fn identity_binding_rejects_empty_d_and_bad_pubkey() {
+        let pk = keys().public_key().to_hex();
+        assert!(matches!(
+            build_import_identity_binding("", &pk),
+            Err(SdkError::InvalidInput(_))
+        ));
+        assert!(build_import_identity_binding("slack:U1", "not-a-pubkey").is_err());
+    }
+
+    #[test]
+    fn identity_claim_is_self_signed_with_no_p_tag() {
+        // The claim's consent is the signature itself — it must NOT name a
+        // pubkey, so nobody can craft a claim "for" someone else.
+        let d = slack_identity_binding_d_tag("U1");
+        let ev = sign(build_import_identity_claim(&d).unwrap());
+        assert_eq!(ev.kind.as_u16() as u32, KIND_IMPORT_IDENTITY_CLAIM);
+        assert_eq!(
+            ev.tags
+                .iter()
+                .find(|t| t.as_slice().first().map(String::as_str) == Some("d"))
+                .and_then(|t| t.as_slice().get(1).cloned())
+                .as_deref(),
+            Some(d.as_str())
+        );
+        assert!(!ev
+            .tags
+            .iter()
+            .any(|t| t.as_slice().first().map(String::as_str) == Some("p")));
+    }
+
+    #[test]
+    fn identity_claim_rejects_empty_d() {
+        assert!(matches!(
+            build_import_identity_claim("  "),
+            Err(SdkError::InvalidInput(_))
+        ));
     }
 }

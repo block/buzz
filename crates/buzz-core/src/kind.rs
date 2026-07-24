@@ -312,16 +312,32 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
-/// Import identity binding: an owner/admin-signed attestation that a foreign
-/// workspace identity (e.g. a Slack user id) belongs to a given Buzz pubkey.
-/// Parameterized-replaceable, `d = <source>:<foreign id>` (e.g.
-/// `slack:U060976D0QN`), with a single `["p", <pubkey hex>]` naming the bound
-/// identity. The relay accepts this kind ONLY from a community owner or admin
-/// (mirrors the kind:9030 relay-admin authorization), so a member cannot claim
-/// another person's imported history — the whole point of the binding. Clients
-/// read these to render `import_author`-tagged history under the bound pubkey's
-/// profile. It carries public keys only; no secret ever transits.
+/// Import identity binding: an owner/admin-signed **attestation** that a
+/// foreign workspace identity (e.g. a Slack user id) belongs to a given Buzz
+/// pubkey. Parameterized-replaceable, `d = <source>:<foreign id>` (e.g.
+/// `slack:U060976D0QN`), with a single `["p", <pubkey hex>]` naming the
+/// attested identity. The relay accepts this kind ONLY from a community owner
+/// or admin (mirrors the kind:9030 relay-admin authorization).
+///
+/// This is one half of a two-party binding: the attestation alone does NOT
+/// attribute history. Attribution requires a matching [`KIND_IMPORT_IDENTITY_CLAIM`]
+/// self-signed by the attested pubkey, so an admin cannot unilaterally make a
+/// member appear to author imported history. It carries public keys only; no
+/// secret ever transits.
 pub const KIND_IMPORT_IDENTITY_BINDING: u32 = 30623;
+
+/// Import identity claim: the **subject's** self-signed consent to being
+/// attributed a foreign workspace identity. Parameterized-replaceable,
+/// `d = <source>:<foreign id>` (same key as the matching
+/// [`KIND_IMPORT_IDENTITY_BINDING`] attestation). The signer's own pubkey IS
+/// the consent — there is no `p` tag — so the relay's signer==author rule means
+/// a pubkey can only ever claim on its own behalf; no special role is required.
+///
+/// A binding is *confirmed* (and history rendered under the real person) only
+/// when an owner/admin attestation and a subject claim exist for the same
+/// `d` key and the attestation's `p` equals the claim's author. Either half
+/// alone is inert.
+pub const KIND_IMPORT_IDENTITY_CLAIM: u32 = 30624;
 
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
@@ -627,6 +643,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
     KIND_IMPORT_IDENTITY_BINDING,
+    KIND_IMPORT_IDENTITY_CLAIM,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).
