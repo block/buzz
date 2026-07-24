@@ -428,6 +428,24 @@ export function ProjectsView() {
     [deleteProjectMutation],
   );
 
+  // Shared across the empty-state and populated views so the first project
+  // can be created from the empty state without duplicating the create flow.
+  const createProjectDialog = (
+    <CreateProjectDialog
+      isCreating={createProjectMutation.isPending}
+      onCreate={async (input) => {
+        const project = await createProjectMutation.mutateAsync(input);
+        toast.success(`Project "${project.name}" created.`);
+        // Land on the list that actually shows the new project — the
+        // Overview only surfaces the top few most-active repositories.
+        handleRepositoryScopeChange("all");
+        handleFilterChange("repositories");
+      }}
+      onOpenChange={setCreateProjectOpen}
+      open={createProjectOpen}
+    />
+  );
+
   if (projectsQuery.isLoading) {
     return null;
   }
@@ -448,7 +466,12 @@ export function ProjectsView() {
   }
 
   if (projects.length === 0) {
-    return <EmptyState />;
+    return (
+      <>
+        {createProjectDialog}
+        <EmptyState onCreateProject={() => setCreateProjectOpen(true)} />
+      </>
+    );
   }
 
   const repositoryItems =
@@ -599,19 +622,7 @@ export function ProjectsView() {
         className="pointer-events-none absolute right-[3px] top-0 z-50 w-1 rounded-full bg-border/80 opacity-0 transition-opacity duration-200"
         ref={scrollIndicatorRef}
       />
-      <CreateProjectDialog
-        isCreating={createProjectMutation.isPending}
-        onCreate={async (input) => {
-          const project = await createProjectMutation.mutateAsync(input);
-          toast.success(`Project "${project.name}" created.`);
-          // Land on the list that actually shows the new project — the
-          // Overview only surfaces the top few most-active repositories.
-          handleRepositoryScopeChange("all");
-          handleFilterChange("repositories");
-        }}
-        onOpenChange={setCreateProjectOpen}
-        open={createProjectOpen}
-      />
+      {createProjectDialog}
       {createPullRequestOpen ? (
         <CreatePullRequestDialog
           onCreated={async (createdProject, pullRequestId) => {
