@@ -223,7 +223,6 @@ pub async fn handle_req(
             &accessible_channels,
             token_channel_ids.is_none(),
             &conn.tenant,
-            &hex::encode(&pubkey_bytes),
             &pubkey_bytes,
             &conn,
             &state,
@@ -264,7 +263,6 @@ pub async fn handle_req(
     // per-filter limits or non-overlapping time windows.
     let mut seen_ids: HashSet<nostr::EventId> = HashSet::new();
     let mut total_sent: usize = 0;
-    let viewer_hex = hex::encode(&pubkey_bytes);
 
     // Phase 1 — pure query construction, in filter order.
     let filter_queries: Vec<(usize, Option<uuid::Uuid>, EventQuery)> = filters
@@ -292,6 +290,12 @@ pub async fn handle_req(
             let mut params =
                 filter_to_query_params(filter, per_filter_channel, conn.tenant.community());
             apply_access_scope_to_query(&mut params, per_filter_channel, &accessible_channels);
+            // Persona visibility pushdown: set reader bytes so query_events appends
+            // the SQL visibility clause before ORDER/LIMIT, preventing newer private
+            // personas from starving older shared ones off the page.
+            if filter_can_match_persona_shared_kinds(filter) {
+                params.persona_reader = Some(pubkey_bytes.clone());
+            }
             (idx, per_filter_channel, params)
         })
         .collect();
@@ -378,20 +382,10 @@ pub async fn handle_req(
             // Result-level read auth: a viewer-private snapshot (kind:30622) is
             // delivered only to its owner, even if reached via a kindless
             // `ids:[…]` subscription that skips the filter-level `#p` gate.
-            if !buzz_core::filter::reader_authorized_for_event(&stored.event, &viewer_hex) {
-                continue;
-            }
-
-            // Author-only kinds: only the event author may see these events.
-            // Mixed-kind filters still serve other kinds normally.
-            if is_author_only_event(&stored.event, &pubkey_bytes) {
-                continue;
-            }
-
-            // Persona shared-read gate: kind 30175 events are author-only by
-            // default; only events carrying ["shared","true"] are community-
-            // readable. Foreign unshared personas are silently omitted.
-            if is_unshared_persona_event(&stored.event, &pubkey_bytes) {
+            // Also enforces author-only kinds (30300/30350) and the persona
+            // shared-gate (kind:30175 without ["shared","true"]). Single call
+            // covers all three gated event classes.
+            if !event_visible_to_reader(&stored.event, &pubkey_bytes) {
                 continue;
             }
 
@@ -514,7 +508,6 @@ async fn handle_search_req(
     accessible_channels: &[uuid::Uuid],
     include_global: bool,
     tenant: &TenantContext,
-    reader_pubkey_hex: &str,
     reader_pubkey_bytes: &[u8],
     conn: &ConnectionState,
     state: &AppState,
@@ -707,18 +700,9 @@ async fn handle_search_req(
                             continue;
                         }
                     }
-                    if !buzz_core::filter::reader_authorized_for_event(
-                        &stored.event,
-                        reader_pubkey_hex,
-                    ) {
-                        continue;
-                    }
-                    if is_author_only_event(&stored.event, reader_pubkey_bytes) {
-                        continue;
-                    }
-                    // Persona shared-read gate (search lane): same semantics as
-                    // the main delivery loop — foreign unshared personas are omitted.
-                    if is_unshared_persona_event(&stored.event, reader_pubkey_bytes) {
+                    // Result-level gate: covers author-only, persona shared-gate,
+                    // and result-gated kinds in one call.
+                    if !event_visible_to_reader(&stored.event, reader_pubkey_bytes) {
                         continue;
                     }
                     // Dedup AFTER acceptance — an event that fails filter A's constraints
@@ -1218,7 +1202,7 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 /// Combined per-event result-visibility check for all gated event classes.
 ///
 /// Returns `true` if the `event` should be delivered to / counted for the
-/// reader identified by `requester_pubkey_bytes` + `requester_pubkey_hex`.
+/// reader identified by `requester_pubkey_bytes` (raw 32-byte public key).
 /// Returns `false` and the event must be silently omitted if any of the
 /// following hold:
 ///
@@ -1229,21 +1213,21 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
 /// 3. **Result-gated kinds** (kind 44200/30622 etc.): `reader_authorized_for_event`
 ///    carries the per-event ownership check.
 ///
+/// The hex representation required by `reader_authorized_for_event` is derived
+/// internally so callers cannot supply inconsistent byte/hex identities.
+///
 /// Call this from every read surface — both WS (REQ/COUNT/fan-out) and HTTP
 /// (NIP-98 `/query`, `/count`, FTS search) — instead of inlining the three
 /// individual predicates at each site.
-pub(crate) fn event_visible_to_reader(
-    event: &nostr::Event,
-    requester_pubkey_bytes: &[u8],
-    requester_pubkey_hex: &str,
-) -> bool {
+pub(crate) fn event_visible_to_reader(event: &nostr::Event, requester_pubkey_bytes: &[u8]) -> bool {
     if is_author_only_event(event, requester_pubkey_bytes) {
         return false;
     }
     if is_unshared_persona_event(event, requester_pubkey_bytes) {
         return false;
     }
-    if !buzz_core::filter::reader_authorized_for_event(event, requester_pubkey_hex) {
+    let requester_pubkey_hex = hex::encode(requester_pubkey_bytes);
+    if !buzz_core::filter::reader_authorized_for_event(event, &requester_pubkey_hex) {
         return false;
     }
     true

@@ -112,6 +112,28 @@ fn sub_id(name: &str) -> String {
     format!("e2e-persona-{name}-{}", uuid::Uuid::new_v4())
 }
 
+/// Create an open-visibility channel so a kind:9 event can be read by any relay member.
+///
+/// Uses `visibility=open` so the foreign reader does not need an explicit membership
+/// entry — the relay allows any authenticated member to read open-channel events.
+async fn create_test_channel(keys: &Keys) -> String {
+    let channel_uuid = uuid::Uuid::new_v4();
+    let channel_name = format!("persona-e2e-{channel_uuid}");
+    let event = EventBuilder::new(Kind::Custom(9007), "")
+        .tags(vec![
+            Tag::parse(["h", &channel_uuid.to_string()]).unwrap(),
+            Tag::parse(["name", &channel_name]).unwrap(),
+            Tag::parse(["channel_type", "stream"]).unwrap(),
+            Tag::parse(["visibility", "open"]).unwrap(),
+        ])
+        .sign_with_keys(keys)
+        .unwrap();
+
+    let (ok, msg) = submit_event_http(&http_client(), keys, &event).await;
+    assert!(ok, "channel creation rejected: {msg}");
+    channel_uuid.to_string()
+}
+
 /// Build a minimal persona event with the given d-tag and content.
 fn persona_event(keys: &Keys, d_tag: &str, content: &str) -> nostr::Event {
     EventBuilder::new(Kind::Custom(PERSONA_KIND), content)
@@ -794,18 +816,10 @@ async fn test_persona_count_excludes_foreign_unshared() {
     foreign.send_raw(&count_msg).await.expect("send COUNT");
 
     // The relay returns ["COUNT", sub_id, {"count": N}].
-    // BuzzTestClient::recv_event maps WsClientError::UnexpectedMessage to
-    // TestClientError::UnexpectedMessage (via the From impl in lib.rs).
+    // buzz-ws-client parses this into RelayMessage::Count.
     let result = foreign.recv_event(Duration::from_secs(5)).await;
     let count: u64 = match result {
-        Err(buzz_test_client::TestClientError::UnexpectedMessage(raw)) => {
-            // Parse ["COUNT", sub_id, {"count": N}]
-            let arr: serde_json::Value = serde_json::from_str(&raw).expect("parse COUNT response");
-            arr.get(2)
-                .and_then(|o| o.get("count"))
-                .and_then(|c| c.as_u64())
-                .expect("count field in COUNT response")
-        }
+        Ok(RelayMessage::Count { count, .. }) => count,
         Ok(RelayMessage::Closed { message, .. }) => {
             panic!("COUNT closed unexpectedly: {message}");
         }
@@ -838,10 +852,14 @@ async fn test_persona_live_fanout_shared_gate() {
 
     let d_tag = format!("gate-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    // Use strictly increasing timestamps: t0 < t1 < t2.
-    let t0: u64 = 1_700_000_000;
-    let t1: u64 = t0 + 1;
-    let t2: u64 = t1 + 1;
+    // Use strictly increasing timestamps relative to now: now-2 < now-1 < now.
+    // This satisfies the relay's timestamp-skew check while keeping NIP-33
+    // ordering deterministic (t0 < t1 < t2 so same d-tag replacements always
+    // promote the highest timestamp regardless of event-id ordering).
+    let now = nostr::Timestamp::now().as_secs();
+    let t0: u64 = now.saturating_sub(2);
+    let t1: u64 = now.saturating_sub(1);
+    let t2: u64 = now;
 
     // Foreign subscribes to all kind:30175 events BEFORE the author publishes.
     let mut foreign = BuzzTestClient::connect(&url, &foreign_keys)
@@ -1129,7 +1147,11 @@ async fn test_persona_mixed_kind_filter_does_not_leak() {
 
     let d_tag = format!("mixed-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    // Author publishes an unshared persona AND a kind:9 message.
+    // Create an open-visibility channel so the kind:9 control event is accessible
+    // to the foreign reader without an explicit membership entry.
+    let channel_id = create_test_channel(&author_keys).await;
+
+    // Author publishes an unshared persona AND a kind:9 message in the open channel.
     let mut author = BuzzTestClient::connect(&url, &author_keys)
         .await
         .expect("connect author");
@@ -1138,8 +1160,11 @@ async fn test_persona_mixed_kind_filter_does_not_leak() {
     let ok = author.send_event(ev).await.expect("send unshared");
     assert!(ok.accepted, "unshared persona rejected: {}", ok.message);
 
-    // Publish a kind:9 event so the mixed-kind filter has something to return.
+    // Publish a kind:9 event in the open channel so the mixed-kind filter has
+    // something to return and we can assert the persona gate is per-event, not
+    // a wholesale filter drop.
     let ev9 = EventBuilder::new(Kind::Custom(9), "hello from author")
+        .tags(vec![Tag::parse(["h", &channel_id]).unwrap()])
         .sign_with_keys(&author_keys)
         .unwrap();
     let msg9_id = ev9.id;
@@ -1358,4 +1383,200 @@ async fn test_persona_http_count_cross_author_gate() {
         scoped_count2, 1,
         "foreign author-scoped /count must still return 1 after wildcard query, got {scoped_count2}"
     );
+}
+
+/// Task-1 regression: WS REQ visibility-before-LIMIT gate.
+///
+/// Publishes N unshared (newer) personas followed by 1 shared (older) persona,
+/// then queries with `limit < N`.  Without the SQL-level visibility clause, the
+/// page is filled with unshared events and the shared one never appears.  With
+/// the clause, unshared events are excluded before ORDER/LIMIT so the shared
+/// event is returned.
+///
+/// Verifies at `312014d5e`: this test fails there because `query_events` did
+/// not have the `persona_reader` SQL clause and the private rows starved the
+/// shared one off the page.
+#[tokio::test]
+#[ignore]
+async fn test_persona_ws_req_shared_visible_with_newer_private_ahead() {
+    let url = relay_url();
+    let author_keys = Keys::generate();
+    let foreign_keys = Keys::generate();
+
+    // Publish N=3 private personas with the highest timestamps, then 1 shared
+    // with the lowest timestamp.  limit=2 means the first page has only 2
+    // candidates in the old (no-SQL-clause) world — both private — and the
+    // shared one is invisible.
+    let now = nostr::Timestamp::now().as_secs();
+    let shared_ts = now.saturating_sub(10);
+
+    let mut author = BuzzTestClient::connect(&url, &author_keys)
+        .await
+        .expect("connect author");
+
+    // Publish 3 private personas at t=now, now-1, now-2 (all newer than shared).
+    for i in 0..3u64 {
+        let d = format!(
+            "priv-limit-{}-{}",
+            i,
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+        let ev = persona_event_with_shared_at(&author_keys, &d, false, now.saturating_sub(i));
+        let ok = author.send_event(ev).await.expect("send private");
+        assert!(ok.accepted, "private persona {i} rejected: {}", ok.message);
+    }
+
+    // Publish 1 shared persona at a lower timestamp (older than all private ones).
+    let shared_d = format!("shared-limit-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let ev_shared = persona_event_with_shared_at(&author_keys, &shared_d, true, shared_ts);
+    let shared_id = ev_shared.id;
+    let ok = author.send_event(ev_shared).await.expect("send shared");
+    assert!(ok.accepted, "shared persona rejected: {}", ok.message);
+    author.disconnect().await.expect("disconnect author");
+
+    // Foreign queries with limit=2: private rows are excluded at SQL level,
+    // so the shared event must appear despite having a lower timestamp.
+    let mut foreign = BuzzTestClient::connect(&url, &foreign_keys)
+        .await
+        .expect("connect foreign");
+    let sid = sub_id("limit-gate");
+    let filter = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key())
+        .limit(2);
+    foreign
+        .subscribe(&sid, vec![filter])
+        .await
+        .expect("subscribe");
+    let events = foreign
+        .collect_until_eose(&sid, Duration::from_secs(5))
+        .await
+        .expect("collect");
+
+    assert!(
+        events.iter().any(|e| e.id == shared_id),
+        "shared persona must appear even when newer private personas fill the LIMIT (got {} events)",
+        events.len()
+    );
+    assert!(
+        events.iter().all(|e| {
+            e.tags
+                .iter()
+                .any(|t| t.as_slice().first().is_some_and(|v| v.as_str() == "shared"))
+        }),
+        "foreign must NOT see any unshared persona"
+    );
+
+    foreign.disconnect().await.expect("disconnect foreign");
+}
+
+/// Task-1 regression: HTTP `/query` visibility-before-LIMIT gate.
+///
+/// Same scenario as the WS variant above, over the NIP-98 HTTP bridge.
+#[tokio::test]
+#[ignore]
+async fn test_persona_http_query_shared_visible_with_newer_private_ahead() {
+    let client = http_client();
+    let author_keys = Keys::generate();
+    let foreign_pubkey_hex = Keys::generate().public_key().to_hex();
+
+    let now = nostr::Timestamp::now().as_secs();
+    let shared_ts = now.saturating_sub(10);
+
+    // Publish 3 private (newer) + 1 shared (older).
+    for i in 0..3u64 {
+        let d = format!(
+            "http-priv-limit-{}-{}",
+            i,
+            &uuid::Uuid::new_v4().to_string()[..8]
+        );
+        let ev = persona_event_with_shared_at(&author_keys, &d, false, now.saturating_sub(i));
+        let (ok, msg) = submit_event_http(&client, &author_keys, &ev).await;
+        assert!(ok, "private persona {i} rejected: {msg}");
+    }
+
+    let shared_d = format!(
+        "http-shared-limit-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+    let ev_shared = persona_event_with_shared_at(&author_keys, &shared_d, true, shared_ts);
+    let shared_id_hex = ev_shared.id.to_hex();
+    let (ok, msg) = submit_event_http(&client, &author_keys, &ev_shared).await;
+    assert!(ok, "shared persona rejected: {msg}");
+
+    // Foreign /query with limit=2: shared event must appear.
+    let filter = serde_json::json!({
+        "kinds": [PERSONA_KIND],
+        "authors": [author_keys.public_key().to_hex()],
+        "limit": 2
+    });
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", &foreign_pubkey_hex)
+        .header("Content-Type", "application/json")
+        .json(&vec![filter])
+        .send()
+        .await
+        .expect("query");
+    assert!(
+        resp.status().is_success(),
+        "query failed: {}",
+        resp.status()
+    );
+    let results: Vec<serde_json::Value> = resp.json().await.expect("parse");
+
+    let has_shared = results.iter().any(|e| {
+        e.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == shared_id_hex)
+    });
+    assert!(
+        has_shared,
+        "shared persona must appear in /query result even with newer private ones ahead (got {} events)",
+        results.len()
+    );
+}
+
+/// Task-2 wire-level: ingest must reject ["shared","true","extra"] over the wire.
+///
+/// The unit tests verify the validator directly; this test confirms the rejection
+/// propagates end-to-end through the WebSocket ingest path.
+#[tokio::test]
+#[ignore]
+async fn test_persona_ingest_rejects_three_element_shared_tag() {
+    let url = relay_url();
+    let keys = Keys::generate();
+
+    let mut client = BuzzTestClient::connect(&url, &keys).await.expect("connect");
+
+    // Build a persona event with a three-element ["shared","true","extra"] tag.
+    // nostr::Tag::parse accepts variable-length slices, so this is straightforward.
+    let ev = EventBuilder::new(Kind::Custom(PERSONA_KIND), r#"{"display_name":"x"}"#)
+        .tags(vec![
+            Tag::parse([
+                "d",
+                &format!("extra-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            ])
+            .unwrap(),
+            Tag::parse(["shared", "true", "extra"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+
+    let ok = client
+        .send_event(ev)
+        .await
+        .expect("send three-element shared tag");
+    assert!(
+        !ok.accepted,
+        "three-element [\"shared\",\"true\",\"extra\"] tag must be rejected at ingest: {}",
+        ok.message
+    );
+    assert!(
+        ok.message.contains("[\"shared\",\"true\"]") || ok.message.contains("shared"),
+        "rejection message should reference the shared tag constraint, got: {}",
+        ok.message
+    );
+
+    client.disconnect().await.expect("disconnect");
 }

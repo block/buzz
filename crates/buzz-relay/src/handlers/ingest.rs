@@ -1040,11 +1040,14 @@ fn validate_persona_envelope(event: &Event) -> Result<(), String> {
             d_tags.push(&parts[1]);
         }
         if !parts.is_empty() && parts[0].as_str() == "shared" {
-            // Value must be exactly "true"; anything else is rejected.
-            if parts.len() < 2 || parts[1].as_str() != "true" {
+            // Exact shape required: ["shared", "true"] — exactly two elements,
+            // second element exactly "true". Extra elements are rejected so that
+            // a three-element tag like ["shared","true","extra"] cannot be stored
+            // and later misread as shared by the SQL-level visibility clause.
+            if parts.len() != 2 || parts[1].as_str() != "true" {
                 return Err(format!(
-                    "persona event `shared` tag value must be exactly \"true\" (got {:?})",
-                    parts.get(1).map(|s| s.as_str()).unwrap_or("<missing>")
+                    "persona event `shared` tag must be exactly [\"shared\",\"true\"] (got {:?})",
+                    parts.iter().map(|s| s.as_str()).collect::<Vec<_>>()
                 ));
             }
             shared_count += 1;
@@ -3620,6 +3623,23 @@ mod tests {
         assert!(
             err.contains("at most one"),
             "expected 'at most one' in error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn persona_envelope_rejects_shared_three_elements() {
+        // ["shared","true","extra"] must be rejected — only exactly two elements
+        // are valid so the SQL containment check tags @> '[["shared","true"]]'
+        // cannot match a three-element stored tag.
+        let ev = make_event_with_tags(
+            KIND_PERSONA,
+            r#"{"display_name":"x"}"#,
+            &[&["d", "slug"], &["shared", "true", "extra"]],
+        );
+        let err = validate_persona_envelope(&ev).unwrap_err();
+        assert!(
+            err.contains("[\"shared\",\"true\"]"),
+            "expected exact-shape error, got: {err}"
         );
     }
 

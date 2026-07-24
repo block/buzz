@@ -224,7 +224,7 @@ Agents spawned from a persona carry [NIP-OA](NIP-OA.md) owner attestation — an
 - The relay stores persona events globally (`channel_id = NULL`); they are not channel-scoped.
 - The relay is NOT required to validate that `content` parses as valid `PersonaEventContent` JSON. Relays are dumb stores per Nostr convention; content validation is a client responsibility.
 - The relay MUST enforce that the `d` tag is non-empty (standard NIP-33 requirement for parameterized replaceable events).
-- The relay MUST enforce shared-tag shape: if a `shared` tag is present, it MUST have exactly the value `"true"` and there MUST be at most one `shared` tag. Events with `["shared","false"]`, `["shared","1"]`, or duplicate `shared` tags are rejected with `invalid:`.
+- The relay MUST enforce shared-tag shape: if a `shared` tag is present, it MUST consist of **exactly two elements** — `["shared", "true"]`. Extra elements (e.g. `["shared","true","extra"]`), wrong values (`["shared","false"]`), missing values (`["shared"]`), or duplicate `shared` tags are all rejected with `invalid:`. The two-element exact-shape constraint is required so that the relay's SQL visibility clause (`tags @> '[["shared","true"]]'`) never matches a stored malformed tag via JSONB containment supersets.
 
 ### Access control: author-only-unless-shared
 
@@ -239,11 +239,11 @@ Kind `30175` uses **shared-tag-gated read semantics** to protect system prompts 
 
 These rules are enforced at the following relay read surfaces (content and event existence are withheld on all of them):
 
-- **REQ historical delivery** — foreign requests silently omit unshared persona events, even in mixed-kind filters (`{kinds:[30175,9]}`).
+- **REQ historical delivery** — foreign requests silently omit unshared persona events, even in mixed-kind filters (`{kinds:[30175,9]}`). The visibility check is applied **before `ORDER BY … LIMIT`** at the SQL level (`persona_reader` field in `EventQuery`), so a page of newer private personas cannot starve an older shared persona off the candidate set — the catalog's primary all-author query pattern is correctly served.
 - **NIP-01 `ids` lookup** — knowing an event id does NOT grant access to an unshared persona. The result gate returns nothing.
 - **Live fan-out** — unshared personas are delivered only to the author's connections. Shared personas fan out community-wide.
 - **COUNT** — the fast SQL `count_events()` path is bypassed when the filter can match `kind:30175`. A per-event fallback applies the shared-tag check, preventing existence-leak via COUNT.
-- **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
+- **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. The SQL-level `persona_reader` clause also applies before `LIMIT`, preventing older shared personas from being starved by newer private ones on paginated catalog queries. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
 - **NIP-98 HTTP bridge `/count`** — `needs_persona_filtering` forces the per-event fallback path for any filter that can match `kind:30175`; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
 - **FTS (NIP-50 search) and `/search`** — kind `30175` is not in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared persona. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
 

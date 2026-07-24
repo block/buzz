@@ -7,12 +7,11 @@ use tracing::warn;
 
 use crate::connection::{AuthState, ConnectionState};
 use crate::handlers::req::{
-    filter_can_match_persona_shared_kinds, filter_can_match_result_gated_kinds,
-    is_author_only_event, result_gated_count_safe_for_pushdown,
+    event_visible_to_reader, filter_can_match_persona_shared_kinds,
+    filter_can_match_result_gated_kinds, result_gated_count_safe_for_pushdown,
 };
 use crate::protocol::RelayMessage;
 use crate::state::AppState;
-use buzz_core::kind::is_unshared_persona_event;
 
 /// Extract a channel UUID from a single filter's `#h` tag.
 fn extract_channel_from_filter(filter: &Filter) -> Option<uuid::Uuid> {
@@ -151,13 +150,18 @@ pub async fn handle_count(
                 continue; // Skip filters targeting inaccessible channels.
             }
             // Channel is accessible — count with pushability check.
-            let query = super::req::build_event_query_from_filter(
+            let mut query = super::req::build_event_query_from_filter(
                 filter,
                 &pubkey_bytes,
                 &state,
                 conn.tenant.community(),
             )
             .await;
+            // Persona visibility pushdown: pre-filter the fallback query_events
+            // candidate page before ORDER/LIMIT.
+            if needs_persona_filtering {
+                query.persona_reader = Some(pubkey_bytes.clone());
+            }
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
                     && authors
@@ -195,16 +199,7 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if is_author_only_event(&se.event, &pubkey_bytes) {
-                                continue;
-                            }
-                            if is_unshared_persona_event(&se.event, &pubkey_bytes) {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
-                                &se.event,
-                                &authed_pubkey_hex,
-                            ) {
+                            if !event_visible_to_reader(&se.event, &pubkey_bytes) {
                                 continue;
                             }
                             total += 1;
@@ -231,6 +226,10 @@ pub async fn handle_count(
             )
             .await;
             query.channel_ids = Some(accessible_channels.to_vec());
+            // Persona visibility pushdown for the fallback query_events path.
+            if needs_persona_filtering {
+                query.persona_reader = Some(pubkey_bytes.clone());
+            }
 
             let author_is_self = filter.authors.as_ref().is_some_and(|authors| {
                 !authors.is_empty()
@@ -269,16 +268,7 @@ pub async fn handle_count(
                             {
                                 continue;
                             }
-                            if is_author_only_event(&se.event, &pubkey_bytes) {
-                                continue;
-                            }
-                            if is_unshared_persona_event(&se.event, &pubkey_bytes) {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
-                                &se.event,
-                                &authed_pubkey_hex,
-                            ) {
+                            if !event_visible_to_reader(&se.event, &pubkey_bytes) {
                                 continue;
                             }
                             total += 1;

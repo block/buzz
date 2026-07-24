@@ -217,19 +217,24 @@ pub fn is_unshared_persona_event(event: &nostr::Event, requester_pubkey_bytes: &
 
 /// Returns `true` if the event carries exactly one `["shared", "true"]` tag.
 ///
-/// The relay guarantees at ingest that no persona event with a malformed
-/// `shared` tag (wrong value, duplicate) is stored, so a stored event either
-/// has no `shared` tag (author-only) or exactly one with value `"true"`
-/// (community-readable). This helper is safe to use at read time.
+/// Requires the tag to have exactly two elements so that a three-element shape
+/// like `["shared","true","extra"]` is NOT treated as shared. Ingest enforces
+/// the same exact shape, so a well-stored event either has no `shared` tag
+/// (author-only) or exactly one with precisely two elements and value `"true"`
+/// (community-readable). This helper fails closed on any non-exact shape
+/// independently of ingest guarantees.
 pub fn persona_event_is_shared(event: &nostr::Event) -> bool {
     let mut count = 0usize;
     for tag in event.tags.iter() {
         let parts = tag.as_slice();
-        if parts.len() >= 2 && parts[0].as_str() == "shared" {
+        if parts.len() == 2 && parts[0].as_str() == "shared" {
             if parts[1].as_str() != "true" {
                 return false;
             }
             count += 1;
+        } else if !parts.is_empty() && parts[0].as_str() == "shared" {
+            // Non-exact shape (wrong length) — fail closed: not shared.
+            return false;
         }
     }
     count == 1
@@ -891,6 +896,21 @@ mod tests {
         // Two ["shared","true"] tags → ambiguous; not considered shared.
         let ev =
             make_persona_event(&[&["d", "my-agent"], &["shared", "true"], &["shared", "true"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_three_element_tag_not_shared() {
+        // ["shared","true","extra"] — three elements — must NOT be treated as shared.
+        // The helper fails closed on any non-exact shape independently of ingest guarantees.
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared", "true", "extra"]]);
+        assert!(!persona_event_is_shared(&ev));
+    }
+
+    #[test]
+    fn persona_event_is_shared_one_element_tag_not_shared() {
+        // ["shared"] — only one element — not shared (fails the == 2 check).
+        let ev = make_persona_event(&[&["d", "my-agent"], &["shared"]]);
         assert!(!persona_event_is_shared(&ev));
     }
 
