@@ -73,6 +73,8 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         mcp_hooks: false,
         underlying_cli: Some("goose"),
         cli_install_commands: &["curl -fsSL https://github.com/aaif-goose/goose/releases/download/stable/download_cli.sh | CONFIGURE=false bash"],
+        // Goose's stable release currently publishes only the Unix installer;
+        // its official Windows instructions intentionally point at this main-branch script.
         cli_install_commands_windows: &["powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"\\$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex\""],
         adapter_install_commands: &[],
         cli_install_instructions_url: "https://goose-docs.ai/docs/getting-started/installation/",
@@ -1162,117 +1164,130 @@ struct PartialEntry {
     entry: AcpRuntimeCatalogEntry,
 }
 
+fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntry {
+    let adapter_result = runtime
+        .commands
+        .iter()
+        .find_map(|command| find_command(command).map(|path| (*command, path)));
+
+    let underlying_cli_found = runtime
+        .underlying_cli
+        .map(|cli| find_command(cli).is_some())
+        .unwrap_or(false);
+    let (mut availability, command, binary_path) =
+        classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
+
+    // For codex-acp: when the adapter resolves as Available, probe the
+    // version. An adapter with major version < 1 is treated as outdated —
+    // the CODEX_CONFIG spawn contract requires 1.x.
+    if runtime.id == "codex"
+        && availability == AcpAvailabilityStatus::Available
+        && command.as_deref() == Some("codex-acp")
+    {
+        if let Some(path_str) = &binary_path {
+            availability = codex_adapter_availability(&PathBuf::from(path_str));
+        }
+    }
+
+    // Warm the adapter-availability cache for the badge fallback.
+    // The cache is scoped to the codex runtime; other runtimes leave it
+    // unchanged. Invalidated by `clear_resolve_cache`.
+    if runtime.id == "codex" {
+        cache_adapter_availability(availability.clone());
+    }
+
+    let underlying_cli_path = runtime
+        .underlying_cli
+        .and_then(find_command)
+        .map(|p| p.display().to_string());
+
+    let default_args = command
+        .as_deref()
+        .map(|cmd| normalize_agent_args(cmd, Vec::new()))
+        .unwrap_or_default();
+
+    let can_auto_install = !runtime.cli_install_commands_for_os().is_empty()
+        || !runtime.adapter_install_commands.is_empty();
+
+    let cli_hint = runtime.cli_install_hint;
+    let adapter_hint = runtime.adapter_install_hint;
+    let install_hint = match availability {
+        AcpAvailabilityStatus::Available => cli_hint.to_string(),
+        AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
+        AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
+        AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
+        AcpAvailabilityStatus::NotInstalled => {
+            if !cli_hint.is_empty() && !adapter_hint.is_empty() {
+                format!("{cli_hint} {adapter_hint}")
+            } else if !cli_hint.is_empty() {
+                cli_hint.to_string()
+            } else {
+                adapter_hint.to_string()
+            }
+        }
+    };
+    let install_instructions_url = match availability {
+        AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::AdapterOutdated => {
+            runtime.adapter_install_instructions_url
+        }
+        AcpAvailabilityStatus::Available
+        | AcpAvailabilityStatus::CliMissing
+        | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
+    };
+
+    // node_required now means Buzz cannot provide npm for this platform.
+    // On supported desktop platforms, Buzz downloads a private Node/npm
+    // runtime into app data before running npm-backed adapter installs.
+    let node_required = matches!(
+        availability,
+        AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
+    ) && runtime_needs_npm(runtime)
+        && buzz_managed_node_bin_dir().is_none()
+        && resolve_command("npm").is_none()
+        && resolve_command("node").is_none();
+
+    PartialEntry {
+        runtime,
+        entry: AcpRuntimeCatalogEntry {
+            id: runtime.id.to_string(),
+            label: runtime.label.to_string(),
+            avatar_url: runtime.avatar_url.to_string(),
+            availability,
+            command,
+            binary_path,
+            default_args,
+            mcp_command: runtime.mcp_command.map(str::to_string),
+            model_env_var: runtime.model_env_var.map(str::to_string),
+            provider_env_var: runtime.provider_env_var.map(str::to_string),
+            thinking_env_var: runtime.thinking_env_var.map(str::to_string),
+            install_hint,
+            install_instructions_url: install_instructions_url.to_string(),
+            can_auto_install,
+            requires_external_cli: runtime.underlying_cli.is_some(),
+            underlying_cli_path,
+            node_required,
+            // Filled in by the auth-probe phase in full catalog discovery.
+            auth_status: AuthStatus::Unknown,
+            login_hint: None,
+        },
+    }
+}
+
+/// Discover one runtime's filesystem availability without running any auth probes.
+///
+/// Post-install verification only needs to know whether the requested runtime
+/// resolves, so it should not pay the cost of authenticating every catalog entry.
+pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpAvailabilityStatus> {
+    known_acp_runtime_exact(runtime_id)
+        .map(discover_acp_runtime_phase1)
+        .map(|partial| partial.entry.availability)
+}
+
 pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
     // Phase 1: build all entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
-        .map(|runtime| {
-            let adapter_result = runtime
-                .commands
-                .iter()
-                .find_map(|command| find_command(command).map(|path| (*command, path)));
-
-            let underlying_cli_found = runtime
-                .underlying_cli
-                .map(|cli| find_command(cli).is_some())
-                .unwrap_or(false);
-            let (mut availability, command, binary_path) =
-                classify_runtime(adapter_result, runtime.underlying_cli, underlying_cli_found);
-
-            // For codex-acp: when the adapter resolves as Available, probe the
-            // version. An adapter with major version < 1 is treated as outdated —
-            // the CODEX_CONFIG spawn contract requires 1.x.
-            if runtime.id == "codex"
-                && availability == AcpAvailabilityStatus::Available
-                && command.as_deref() == Some("codex-acp")
-            {
-                if let Some(path_str) = &binary_path {
-                    availability = codex_adapter_availability(&PathBuf::from(path_str));
-                }
-            }
-
-            // Warm the adapter-availability cache for the badge fallback.
-            // The cache is scoped to the codex runtime; other runtimes leave it
-            // unchanged. Invalidated by `clear_resolve_cache`.
-            if runtime.id == "codex" {
-                cache_adapter_availability(availability.clone());
-            }
-
-            let underlying_cli_path = runtime
-                .underlying_cli
-                .and_then(find_command)
-                .map(|p| p.display().to_string());
-
-            let default_args = command
-                .as_deref()
-                .map(|cmd| normalize_agent_args(cmd, Vec::new()))
-                .unwrap_or_default();
-
-            let can_auto_install = !runtime.cli_install_commands_for_os().is_empty()
-                || !runtime.adapter_install_commands.is_empty();
-
-            let cli_hint = runtime.cli_install_hint;
-            let adapter_hint = runtime.adapter_install_hint;
-            let install_hint = match availability {
-                AcpAvailabilityStatus::Available => cli_hint.to_string(),
-                AcpAvailabilityStatus::CliMissing => cli_hint.to_string(),
-                AcpAvailabilityStatus::AdapterMissing => adapter_hint.to_string(),
-                AcpAvailabilityStatus::AdapterOutdated => adapter_hint.to_string(),
-                AcpAvailabilityStatus::NotInstalled => {
-                    if !cli_hint.is_empty() && !adapter_hint.is_empty() {
-                        format!("{cli_hint} {adapter_hint}")
-                    } else if !cli_hint.is_empty() {
-                        cli_hint.to_string()
-                    } else {
-                        adapter_hint.to_string()
-                    }
-                }
-            };
-            let install_instructions_url = match availability {
-                AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::AdapterOutdated => {
-                    runtime.adapter_install_instructions_url
-                }
-                AcpAvailabilityStatus::Available
-                | AcpAvailabilityStatus::CliMissing
-                | AcpAvailabilityStatus::NotInstalled => runtime.cli_install_instructions_url,
-            };
-
-            // node_required now means Buzz cannot provide npm for this platform.
-            // On supported desktop platforms, Buzz downloads a private Node/npm
-            // runtime into app data before running npm-backed adapter installs.
-            let node_required = matches!(
-                availability,
-                AcpAvailabilityStatus::AdapterMissing | AcpAvailabilityStatus::NotInstalled
-            ) && runtime_needs_npm(runtime)
-                && buzz_managed_node_bin_dir().is_none()
-                && resolve_command("npm").is_none()
-                && resolve_command("node").is_none();
-
-            PartialEntry {
-                runtime,
-                entry: AcpRuntimeCatalogEntry {
-                    id: runtime.id.to_string(),
-                    label: runtime.label.to_string(),
-                    avatar_url: runtime.avatar_url.to_string(),
-                    availability,
-                    command,
-                    binary_path,
-                    default_args,
-                    mcp_command: runtime.mcp_command.map(str::to_string),
-                    model_env_var: runtime.model_env_var.map(str::to_string),
-                    provider_env_var: runtime.provider_env_var.map(str::to_string),
-                    thinking_env_var: runtime.thinking_env_var.map(str::to_string),
-                    install_hint,
-                    install_instructions_url: install_instructions_url.to_string(),
-                    can_auto_install,
-                    underlying_cli_path,
-                    node_required,
-                    // Filled in by the probe phase below.
-                    auth_status: AuthStatus::Unknown,
-                    login_hint: None,
-                },
-            }
-        })
+        .map(discover_acp_runtime_phase1)
         .collect();
 
     // Phase 2: run auth probes in parallel for entries that need them.

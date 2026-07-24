@@ -5,10 +5,7 @@ pub(super) fn run(runtime_id: &str, steps: &mut Vec<InstallStepResult>) {
     crate::managed_agents::refresh_login_shell_path();
     crate::managed_agents::clear_resolve_cache();
 
-    let availability = crate::managed_agents::discover_acp_runtimes()
-        .into_iter()
-        .find(|entry| entry.id == runtime_id)
-        .map(|entry| entry.availability);
+    let availability = crate::managed_agents::discover_acp_runtime_availability(runtime_id);
     if let Some(failure) = failure(runtime_id, availability) {
         steps.push(failure);
     }
@@ -23,7 +20,7 @@ fn failure(
     }
 
     let observed = availability
-        .map(|status| format!("{status:?}"))
+        .map(availability_label)
         .unwrap_or_else(|| "missing from the runtime catalog".to_string());
     Some(InstallStepResult {
         step: "verify".to_string(),
@@ -39,6 +36,17 @@ fn failure(
                 .to_string(),
         ),
     })
+}
+
+fn availability_label(status: AcpAvailabilityStatus) -> String {
+    match status {
+        AcpAvailabilityStatus::Available => "available",
+        AcpAvailabilityStatus::AdapterMissing => "ACP adapter missing",
+        AcpAvailabilityStatus::AdapterOutdated => "ACP adapter outdated",
+        AcpAvailabilityStatus::CliMissing => "CLI missing",
+        AcpAvailabilityStatus::NotInstalled => "not installed",
+    }
+    .to_string()
 }
 
 #[cfg(test)]
@@ -57,7 +65,7 @@ mod tests {
 
         assert_eq!(failure.step, "verify");
         assert!(!failure.success);
-        assert!(failure.stderr.contains("NotInstalled"));
+        assert!(failure.stderr.contains("observed: not installed"));
         assert!(failure
             .hint
             .as_deref()

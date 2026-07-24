@@ -53,6 +53,13 @@ const RUNTIME_SORT_PRIORITY: Record<string, number> = {
   goose: 1,
 };
 
+function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
+  return runtime.availability === "adapter_missing" ||
+    runtime.availability === "adapter_outdated"
+    ? "Adapter install guide"
+    : "CLI setup guide";
+}
+
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
 
@@ -131,7 +138,7 @@ function RuntimeOverflowMenu({
             onSelect={() => void openUrl(runtime.installInstructionsUrl)}
           >
             <ExternalLink className="h-4 w-4" />
-            Instructions
+            {runtimeInstallGuideLabel(runtime)}
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
