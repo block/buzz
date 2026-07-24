@@ -20,19 +20,6 @@ pub struct UserProfile {
     pub nip05_handle: Option<String>,
 }
 
-/// Lightweight user record returned from search.
-#[derive(Debug, Clone)]
-pub struct UserSearchProfile {
-    /// Raw 32-byte compressed public key.
-    pub pubkey: Vec<u8>,
-    /// Human-readable display name chosen by the user.
-    pub display_name: Option<String>,
-    /// URL of the user's avatar image.
-    pub avatar_url: Option<String>,
-    /// NIP-05 identifier (user@domain).
-    pub nip05_handle: Option<String>,
-}
-
 /// Ensure a user record exists for the given pubkey (upsert).
 /// Creates with minimal fields if not present; no-op if already exists.
 ///
@@ -204,80 +191,6 @@ pub async fn get_user_by_nip05(
             nip05_handle,
         },
     ))
-}
-
-/// Escape SQL LIKE metacharacters (`%`, `_`, `\`) so user input is treated
-/// as literal text.  Used with `ESCAPE '\'` in the query.
-///
-/// Without this, a search query of `"%"` would match every row (full table
-/// scan) and `"_"` would act as a single-character wildcard.
-fn escape_like(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
-/// Search users by display name, NIP-05 handle, or pubkey prefix.
-///
-/// Empty queries return an empty vec and do not hit the database.
-pub async fn search_users(
-    pool: &PgPool,
-    community_id: CommunityId,
-    query: &str,
-    limit: u32,
-) -> Result<Vec<UserSearchProfile>> {
-    let normalized = query.trim().to_lowercase();
-    if normalized.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let escaped = escape_like(&normalized);
-    let contains_pattern = format!("%{escaped}%");
-    let prefix_pattern = format!("{escaped}%");
-    let limit = limit.clamp(1, 500) as i64;
-
-    let rows = sqlx::query_as::<_, (Vec<u8>, Option<String>, Option<String>, Option<String>)>(
-        r#"
-        SELECT pubkey, display_name, avatar_url, nip05_handle
-        FROM users
-        WHERE community_id = $1
-          AND (LOWER(COALESCE(display_name, '')) LIKE $2 ESCAPE '\'
-           OR LOWER(COALESCE(nip05_handle, '')) LIKE $2 ESCAPE '\'
-           OR LOWER(encode(pubkey, 'hex')) LIKE $2 ESCAPE '\')
-        ORDER BY
-            CASE
-                WHEN LOWER(COALESCE(display_name, '')) = $3 THEN 0
-                WHEN LOWER(COALESCE(nip05_handle, '')) = $3 THEN 1
-                WHEN LOWER(encode(pubkey, 'hex')) = $3 THEN 2
-                WHEN LOWER(COALESCE(display_name, '')) LIKE $4 ESCAPE '\' THEN 3
-                WHEN LOWER(COALESCE(nip05_handle, '')) LIKE $4 ESCAPE '\' THEN 4
-                WHEN LOWER(encode(pubkey, 'hex')) LIKE $4 ESCAPE '\' THEN 5
-                ELSE 6
-            END,
-            COALESCE(NULLIF(display_name, ''), NULLIF(nip05_handle, ''), LOWER(encode(pubkey, 'hex')))
-        LIMIT $5
-        "#,
-    )
-    .bind(community_id.as_uuid())
-    .bind(&contains_pattern)
-    .bind(&normalized)
-    .bind(&prefix_pattern)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(
-            |(pubkey, display_name, avatar_url, nip05_handle)| UserSearchProfile {
-                pubkey,
-                display_name,
-                avatar_url,
-                nip05_handle,
-            },
-        )
-        .collect())
 }
 
 /// Set the owner pubkey for an agent user.
@@ -610,40 +523,6 @@ mod tests {
         ensure_user(&db.pool, community, &pubkey).await.unwrap();
         let result = set_channel_add_policy(&db.pool, community, &pubkey, "invalid_policy").await;
         assert!(result.is_err(), "should reject invalid policy value");
-    }
-
-    // Use the production `escape_like` function directly — no local mirror.
-    use super::escape_like;
-
-    #[test]
-    fn like_escape_percent() {
-        assert_eq!(escape_like("%"), "\\%");
-        assert_eq!(escape_like("100%match"), "100\\%match");
-    }
-
-    #[test]
-    fn like_escape_underscore() {
-        assert_eq!(escape_like("_"), "\\_");
-        assert_eq!(escape_like("a_b"), "a\\_b");
-    }
-
-    #[test]
-    fn like_escape_backslash() {
-        assert_eq!(escape_like("\\"), "\\\\");
-        assert_eq!(escape_like("a\\b"), "a\\\\b");
-    }
-
-    #[test]
-    fn like_escape_combined() {
-        // All three metacharacters in one string
-        assert_eq!(escape_like("%_\\"), "\\%\\_\\\\");
-    }
-
-    #[test]
-    fn like_escape_normal_input_unchanged() {
-        assert_eq!(escape_like("alice"), "alice");
-        assert_eq!(escape_like("bob@example.com"), "bob@example.com");
-        assert_eq!(escape_like(""), "");
     }
 
     /// A user with "owner_only" policy but no agent_owner_pubkey set should

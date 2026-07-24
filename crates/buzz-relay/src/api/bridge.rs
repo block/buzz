@@ -341,7 +341,28 @@ fn extract_search_mode(raw: &Value) -> buzz_search::SearchMode {
         .and_then(Value::as_str)
     {
         Some("prefix") => buzz_search::SearchMode::Prefix,
+        Some("contains") => buzz_search::SearchMode::Contains,
         _ => buzz_search::SearchMode::FullText,
+    }
+}
+
+/// Upgrade profile-only prefix typeahead to substring matching.
+///
+/// Shipped clients (desktop, mobile) send `search_mode: "prefix"` for their
+/// user-picker typeahead over exactly `kinds:[0]` and expect any typed
+/// fragment of a name to match — but names are single FTS lexemes, so prefix
+/// matching misses mid-name fragments ("kurs" never finds "mattkursmark").
+/// Every prefix hit is a substring hit, so mapping these queries to
+/// `Contains` fixes installed apps without a client update. Message
+/// typeahead queries other kinds and keeps true prefix matching.
+fn effective_search_mode(
+    mode: buzz_search::SearchMode,
+    kinds: Option<&[i32]>,
+) -> buzz_search::SearchMode {
+    if mode == buzz_search::SearchMode::Prefix && kinds == Some(&[0]) {
+        buzz_search::SearchMode::Contains
+    } else {
+        mode
     }
 }
 
@@ -1683,6 +1704,7 @@ async fn handle_bridge_search(
         });
         let since = filter.since.map(|s| s.as_secs() as i64);
         let until = filter.until.map(|u| u.as_secs() as i64);
+        let mode = effective_search_mode(search_mode, kinds.as_deref());
 
         let search_query = buzz_search::SearchQuery {
             community: tenant.community(),
@@ -1694,7 +1716,7 @@ async fn handle_bridge_search(
             until,
             page: search_page,
             per_page: limit,
-            mode: search_mode,
+            mode,
         };
 
         let search_result = state
@@ -2260,6 +2282,54 @@ mod tests {
         assert_eq!(
             extract_search_mode(&serde_json::json!({ "search": "pro", "searchMode": "prefix" })),
             buzz_search::SearchMode::Prefix
+        );
+    }
+
+    #[test]
+    fn profile_only_prefix_typeahead_upgrades_to_contains() {
+        use buzz_search::SearchMode;
+
+        assert_eq!(
+            effective_search_mode(SearchMode::Prefix, Some(&[0])),
+            SearchMode::Contains,
+            "user-picker typeahead from shipped clients gets substring matching"
+        );
+        assert_eq!(
+            effective_search_mode(SearchMode::Prefix, Some(&[9, 40002])),
+            SearchMode::Prefix,
+            "message typeahead keeps true prefix"
+        );
+        assert_eq!(
+            effective_search_mode(SearchMode::Prefix, Some(&[0, 9])),
+            SearchMode::Prefix,
+            "mixed-kind searches keep true prefix"
+        );
+        assert_eq!(
+            effective_search_mode(SearchMode::Prefix, None),
+            SearchMode::Prefix
+        );
+        assert_eq!(
+            effective_search_mode(SearchMode::FullText, Some(&[0])),
+            SearchMode::FullText,
+            "whole-word search is never silently widened"
+        );
+        assert_eq!(
+            effective_search_mode(SearchMode::Contains, Some(&[0])),
+            SearchMode::Contains
+        );
+    }
+
+    #[test]
+    fn bridge_search_mode_extension_accepts_contains() {
+        assert_eq!(
+            extract_search_mode(
+                &serde_json::json!({ "search": "kurs", "search_mode": "contains" })
+            ),
+            buzz_search::SearchMode::Contains
+        );
+        assert_eq!(
+            extract_search_mode(&serde_json::json!({ "search": "kurs", "searchMode": "contains" })),
+            buzz_search::SearchMode::Contains
         );
     }
 

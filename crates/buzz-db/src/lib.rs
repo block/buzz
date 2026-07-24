@@ -1833,16 +1833,6 @@ impl Db {
         user::get_user_by_nip05(&self.pool, community_id, local_part, domain).await
     }
 
-    /// Search users by display name, NIP-05 handle, or pubkey prefix.
-    pub async fn search_users(
-        &self,
-        community_id: CommunityId,
-        query: &str,
-        limit: u32,
-    ) -> Result<Vec<user::UserSearchProfile>> {
-        user::search_users(&self.pool, community_id, query, limit).await
-    }
-
     /// Atomically set agent owner — only if no owner is currently assigned.
     /// Returns Ok(true) if set, Ok(false) if an owner already exists.
     pub async fn set_agent_owner(
