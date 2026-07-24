@@ -90,10 +90,91 @@ provenance on every event records the original Slack identity regardless.
 What two-party consent removes is the *unilateral* admin — the realistic
 insider risk before production.
 
-How each person's own key comes to exist (no distribution): they onboard in
-Buzz via an invite link — the key is generated on their device and never
-leaves it — then share their **npub** (public) with the operator for the
-attestation, and run `buzz import claim` to consent.
+### Slack migration join
+
+For people coming from the imported Slack workspace, use one dedicated
+onboarding link:
+
+```text
+buzz://join-slack?relay=<percent-encoded-ws(s)-relay>&service=<percent-encoded-https-claim-service>
+```
+
+For example:
+
+```text
+buzz://join-slack?relay=wss%3A%2F%2Fbuzz.example.com&service=https%3A%2F%2Fmigrate.example.com
+```
+
+Opening it in Buzz:
+
+1. Creates or loads the person's device key and opens
+   `<service>/oidc/start` in their browser.
+2. Slack authenticates them. The claim service rejects an account from any
+   workspace other than its configured `SLACK_TEAM_ID`.
+3. The service idempotently adds that device's public key to the target
+   community and publishes the owner/admin attestation.
+4. Slack returns through the internal `buzz://import-claim` callback. Buzz
+   asks the person to confirm the link, connects to the target community, and
+   only then publishes their self-signed claim.
+5. With both signatures present, imported messages for that Slack user render
+   under the person's Buzz profile.
+
+Slack OAuth is intentionally a migration-time onboarding method. It is not a
+permanent Buzz sign-in method and does not appear in Settings. Do not
+distribute `buzz://import-claim` URLs: they are short-lived callbacks generated
+by the claim service, not an alternative invitation format. Use normal Buzz
+invite links for people who are not members of the imported Slack workspace.
+The `buzz import bind` and `buzz import claim` commands above remain
+manual fallbacks.
+
+#### Configure the claim service
+
+Create a Slack OIDC application for the workspace and register this exact
+redirect URL:
+
+```text
+https://migrate.example.com/oidc/callback
+```
+
+Run `buzz-migrate` behind HTTPS with an owner/admin Buzz key:
+
+```bash
+export BUZZ_RELAY_URL=wss://buzz.example.com
+export BUZZ_PRIVATE_KEY=<owner-or-admin-nsec-or-hex>
+export SLACK_CLIENT_ID=<slack-client-id>
+export SLACK_CLIENT_SECRET=<slack-client-secret>
+export SLACK_TEAM_ID=<slack-workspace-id>
+
+buzz-migrate \
+  --export-dir ./my-workspace-export \
+  --bind 127.0.0.1:8787 \
+  --base-url https://migrate.example.com
+```
+
+`--export-dir` supplies `users.json` for the optional email fallback; the OIDC
+path gets the verified Slack user id directly from Slack. `--base-url` must be
+the externally reachable claim-service origin; its `/oidc/callback` is the
+default OIDC redirect URI. Use `--oidc-redirect-uri` only when the registered
+redirect differs. If the relay requires a NIP-OA delegation, also set
+`BUZZ_AUTH_TAG`.
+
+The join link's `relay` must identify the same community as
+`BUZZ_RELAY_URL`. The service's `BUZZ_PRIVATE_KEY` must be an owner/admin key
+for that community.
+
+The service holds a Buzz owner/admin private key and the Slack client secret.
+Run it as trusted migration infrastructure, keep it off the public relay
+process, terminate TLS in front of it, and retire the service and migration
+link when onboarding is complete. The join link remains usable while the
+service is running; it does not expire by itself. Never run `--dev` in
+production.
+
+The email magic-link channel is an identity-attribution fallback for someone
+who is already a community member; it deliberately does **not** grant
+membership. Only a workspace-verified Slack OIDC join performs automatic
+member admission. `buzz-migrate` currently has no production email-delivery
+backend, so this channel is only useful in `--dev` or after integrating a
+mailer.
 
 ## Relay requirements
 

@@ -15,7 +15,9 @@
 //!    and read the verified `https://slack.com/user_id` claim. Because Slack
 //!    pins that id to whoever actually authenticated, binding `slack:<id> → X`
 //!    is safe — an attacker can only ever prove their *own* Slack id.
-//! 4. We publish the attestation and deep-link back into the app to self-claim.
+//! 4. We admit the verified public key as a member, publish the attestation,
+//!    and deep-link back into the app. The app connects to that community and
+//!    publishes its self-claim there.
 //!
 //! The exchange needs Slack's `client_secret`, so it runs server-side. That is
 //! the service's only Slack credential; it never touches a Buzz private key

@@ -242,15 +242,36 @@ async fn email_complete(
     }))
 }
 
-/// Register the claimant as a community member, then sign + publish the
-/// owner/admin attestation `subject → pubkey`. Shared by every channel;
-/// `channel` is only for logging.
+/// Sign and publish the owner/admin attestation `subject → pubkey`.
 ///
-/// Membership is added first so an OAuth sign-in doubles as joining the
-/// migration community. Both steps are idempotent (9030 no-ops an existing
-/// member; the 30623 attestation is parameterized-replaceable), so a retried
-/// claim never duplicates anything.
+/// This does not grant community membership. Email claims are a recovery
+/// channel for an already-admitted member; only the dedicated Slack OAuth join
+/// path below is allowed to admit a new member.
 async fn publish_attestation_for(
+    inner: &Inner,
+    subject: &str,
+    pubkey: &str,
+    channel: &str,
+) -> Result<String, ApiError> {
+    let event_id = crate::attest::publish_attestation(
+        &inner.relay_url,
+        &inner.admin,
+        subject,
+        pubkey,
+        inner.auth_tag.as_ref(),
+    )
+    .await
+    .map_err(|e| ApiError::upstream(&e.to_string()))?;
+    tracing::info!(subject, pubkey, event_id, channel, "published attestation");
+    Ok(event_id)
+}
+
+/// Admit an OAuth-verified Slack user, then attest their imported identity.
+///
+/// Both relay writes are idempotent: adding an existing member is a no-op and
+/// the attestation is parameterized-replaceable. A callback retry therefore
+/// cannot duplicate membership or attribution.
+async fn publish_join_attestation_for(
     inner: &Inner,
     subject: &str,
     pubkey: &str,
@@ -265,18 +286,7 @@ async fn publish_attestation_for(
     .await
     .map_err(|e| ApiError::upstream(&e.to_string()))?;
     tracing::info!(pubkey, member_event_id, channel, "ensured community member");
-
-    let event_id = crate::attest::publish_attestation(
-        &inner.relay_url,
-        &inner.admin,
-        subject,
-        pubkey,
-        inner.auth_tag.as_ref(),
-    )
-    .await
-    .map_err(|e| ApiError::upstream(&e.to_string()))?;
-    tracing::info!(subject, pubkey, event_id, channel, "published attestation");
-    Ok(event_id)
+    publish_attestation_for(inner, subject, pubkey, channel).await
 }
 
 // ---- OIDC channel (Sign in with Slack) --------------------------------------
@@ -345,11 +355,17 @@ async fn oidc_callback(
         .await
         .map_err(|e| ApiError::upstream(&e.to_string()))?;
 
-    publish_attestation_for(inner, &subject, &pubkey, "oidc").await?;
-    Ok(Redirect::to(&format!(
-        "buzz://import-claim?subject={}&via=oidc",
-        urlencode(&subject)
-    )))
+    publish_join_attestation_for(inner, &subject, &pubkey, "oidc").await?;
+    Ok(Redirect::to(&oidc_app_return_url(inner, &subject)))
+}
+
+fn oidc_app_return_url(inner: &Inner, subject: &str) -> String {
+    format!(
+        "buzz://import-claim?subject={}&via=oidc&relay={}&service={}",
+        urlencode(subject),
+        urlencode(&inner.relay_url),
+        urlencode(&inner.base_url),
+    )
 }
 
 #[derive(Deserialize)]
@@ -378,7 +394,7 @@ async fn oidc_dev_complete(
         return Err(ApiError::bad("sub must not be empty"));
     }
     let subject = format!("slack:{}", q.sub.trim());
-    let event_id = publish_attestation_for(inner, &subject, &pubkey, "oidc-dev").await?;
+    let event_id = publish_join_attestation_for(inner, &subject, &pubkey, "oidc-dev").await?;
     Ok(Json(CompleteResp {
         subject,
         attestation_event_id: event_id,
@@ -612,6 +628,15 @@ mod tests {
     fn urlencode_escapes_reserved() {
         assert_eq!(urlencode("slack:U060"), "slack%3AU060");
         assert_eq!(urlencode("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn oidc_return_is_bound_to_target_relay_and_service() {
+        let inner = test_inner();
+        assert_eq!(
+            oidc_app_return_url(&inner, "slack:U060"),
+            "buzz://import-claim?subject=slack%3AU060&via=oidc&relay=ws%3A%2F%2F127.0.0.1%3A1&service=http%3A%2F%2Flocalhost%3A8787"
+        );
     }
 
     #[test]

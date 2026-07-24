@@ -13,8 +13,9 @@
 //! Doing (1) by hand (`buzz import bind`) is O(N) manual work for a large team,
 //! and manual matching is exactly where account-takeover mistakes creep in.
 //! This service automates (1): it proves *which* Slack user a person is, then
-//! publishes the attestation for them — so the operator does zero per-person
-//! work and no one can seize another person's history.
+//! publishes the attestation for them. The Slack OIDC path also admits that
+//! verified public key as a community member, making the dedicated
+//! `buzz://join-slack` link the complete migration onboarding entry.
 //!
 //! # Two proof channels
 //!

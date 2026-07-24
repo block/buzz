@@ -32,18 +32,9 @@ pub struct ImportState {
     /// `"<slack channel id>:<ts>"` → Nostr event ID (hex).
     #[serde(default)]
     pub messages: HashMap<String, String>,
-    /// Reaction dedupe keys: `"<slack channel id>:<ts>:<emoji>:<signer pubkey>"`.
+    /// Reaction dedupe keys: `"<slack channel id>:<ts>:<emoji>"`.
     #[serde(default)]
     pub reactions: HashSet<String>,
-    /// Slack user IDs whose kind 0 profile has been published.
-    #[serde(default)]
-    pub profiles: HashSet<String>,
-    /// Channel-membership keys already added: `"<slack channel id>:<pubkey>"`.
-    #[serde(default)]
-    pub channel_members: HashSet<String>,
-    /// Pubkeys already added as relay members.
-    #[serde(default)]
-    pub relay_members: HashSet<String>,
 }
 
 impl ImportState {

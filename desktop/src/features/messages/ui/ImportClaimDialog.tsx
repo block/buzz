@@ -2,10 +2,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { toast } from "sonner";
 
-import { relayClient } from "@/shared/api/relayClient";
-import { signRelayEvent } from "@/shared/api/tauri";
+import { useCommunityOnboarding } from "@/features/onboarding/communityOnboarding";
+
 import { getIdentity } from "@/shared/api/tauriIdentity";
-import { KIND_IMPORT_IDENTITY_CLAIM } from "@/shared/constants/kinds";
 import {
   type ImportClaimDeepLinkPayload,
   listenForImportClaimDeepLinks,
@@ -21,8 +20,39 @@ import {
 } from "@/shared/ui/dialog";
 
 import { importIdentityBindingsQueryKey } from "../useImportIdentityBindings";
+import { publishImportIdentityClaim } from "../lib/publishImportIdentityClaim";
 
 type Phase = "confirm" | "working" | "done" | "error";
+
+function normalizedUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+function assertMatchesSlackJoin(
+  payload: ImportClaimDeepLinkPayload,
+  relayUrl: string,
+  serviceUrl: string | undefined,
+): void {
+  if (
+    payload.via !== "oidc" ||
+    !payload.relayUrl ||
+    !payload.service ||
+    normalizedUrl(payload.relayUrl) !== normalizedUrl(relayUrl) ||
+    normalizedUrl(payload.service) !== normalizedUrl(serviceUrl ?? "")
+  ) {
+    throw new Error(
+      "This Slack response doesn't match the pending community join. Restart from the original Slack join link.",
+    );
+  }
+}
 
 /**
  * Completes a zero-touch Slack→Buzz identity migration when the operator's
@@ -34,14 +64,17 @@ type Phase = "confirm" | "working" | "done" | "error";
  *   publishes the subject's self-claim (kind 30624). Only both together
  *   attribute the imported history — so a stray link can, at worst, make the
  *   user consent to an identity no attestation vouches for (inert).
- * - **oidc**: `via === "oidc"`. Slack already verified the user server-side and
- *   the attestation is published; the app only publishes the self-claim.
+ * - **oidc**: `via === "oidc"`. Slack already verified the user server-side,
+ *   admitted their public key, and published the attestation. During a
+ *   `join-slack` transaction this dialog records the verified subject; the
+ *   onboarding flow connects to the target community before self-claiming.
  *
  * Because the self-claim is a consent signature, we always show an explicit
  * confirm step naming the subject before signing anything.
  */
 export function ImportClaimDialog() {
   const queryClient = useQueryClient();
+  const communityOnboarding = useCommunityOnboarding();
   const [payload, setPayload] =
     React.useState<ImportClaimDeepLinkPayload | null>(null);
   const [phase, setPhase] = React.useState<Phase>("confirm");
@@ -80,25 +113,38 @@ export function ImportClaimDialog() {
         await completeEmailClaim(payload.service, payload.token, pubkey);
       }
 
-      // Both channels: publish the subject's self-claim (the consent half).
-      const source = payload.subject.split(":", 1)[0] || "slack";
-      const event = await signRelayEvent({
-        kind: KIND_IMPORT_IDENTITY_CLAIM,
-        content: "",
-        tags: [
-          ["d", payload.subject],
-          ["import", source],
-        ],
-      });
-      await relayClient.publishEvent(
-        event,
-        "Timed out publishing your identity claim.",
-        "Failed to publish your identity claim.",
-      );
+      // If this claim completed a Slack-migration *join* (the person is mid
+      // onboarding at the slack-auth stage), connect to that community before
+      // publishing the self-claim. Publishing here would target whichever
+      // community happened to be active before the join.
+      const tx = communityOnboarding.transaction;
+      if (tx?.stage === "slack-auth") {
+        assertMatchesSlackJoin(payload, tx.relayUrl, tx.slackService);
+        communityOnboarding.update(
+          {
+            stage: "connecting",
+            slackSubject: payload.subject,
+            error: undefined,
+          },
+          tx.id,
+        );
+        toast.success("Signed in with Slack — setting up your workspace.");
+        close();
+        return;
+      }
 
+      if (payload.via === "oidc") {
+        throw new Error(
+          "Start Slack sign-in from your team's Slack migration link.",
+        );
+      }
+
+      // Email fallback claims run inside an already-connected community.
+      await publishImportIdentityClaim(payload.subject);
       await queryClient.invalidateQueries({
         queryKey: importIdentityBindingsQueryKey,
       });
+
       setPhase("done");
       toast.success("Your imported history is now linked to your account.");
     } catch (err) {
@@ -107,7 +153,7 @@ export function ImportClaimDialog() {
       setPhase("error");
       toast.error(`Couldn't link your history: ${message}`);
     }
-  }, [payload, queryClient]);
+  }, [payload, queryClient, communityOnboarding, close]);
 
   const open = payload !== null;
 

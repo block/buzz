@@ -197,29 +197,40 @@ impl SlackExport {
         if !dir.is_dir() {
             return Ok(Vec::new());
         }
-        let mut day_files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .map_err(|e| CliError::Other(format!("cannot read {}: {e}", dir.display())))?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
-            .collect();
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|e| CliError::Other(format!("cannot read {}: {e}", dir.display())))?;
+        let mut day_files = Vec::new();
+        for entry in entries {
+            let path = entry
+                .map_err(|e| {
+                    CliError::Other(format!("cannot read an entry in {}: {e}", dir.display()))
+                })?
+                .path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                day_files.push(path);
+            }
+        }
         day_files.sort();
 
-        let mut by_ts: HashMap<String, SlackMessage> = HashMap::new();
+        let mut by_ts: HashMap<String, (SlackTimestamp, SlackMessage)> = HashMap::new();
         for file in &day_files {
             let messages: Vec<SlackMessage> = read_json(file)?;
             for msg in messages {
                 if is_importable(&msg) {
-                    by_ts.entry(msg.ts.clone()).or_insert(msg);
+                    let timestamp = parse_slack_ts(&msg.ts).ok_or_else(|| {
+                        CliError::Usage(format!(
+                            "malformed Slack ts {:?} in {}",
+                            msg.ts,
+                            file.display()
+                        ))
+                    })?;
+                    by_ts.entry(msg.ts.clone()).or_insert((timestamp, msg));
                 }
             }
         }
-        let mut messages: Vec<SlackMessage> = by_ts.into_values().collect();
-        messages.sort_by(|a, b| {
-            ts_sort_key(&a.ts)
-                .partial_cmp(&ts_sort_key(&b.ts))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        Ok(messages)
+        let mut messages: Vec<(SlackTimestamp, SlackMessage)> = by_ts.into_values().collect();
+        messages.sort_by_key(|(timestamp, _)| *timestamp);
+        Ok(messages.into_iter().map(|(_, message)| message).collect())
     }
 }
 
@@ -242,15 +253,44 @@ pub fn is_importable(msg: &SlackMessage) -> bool {
 
 /// Whole-second part of a Slack `ts` — becomes the Nostr `created_at`.
 pub fn ts_seconds(ts: &str) -> Result<u64, CliError> {
-    ts.split('.')
-        .next()
-        .and_then(|s| s.parse().ok())
+    parse_slack_ts(ts)
+        .map(|timestamp| timestamp.seconds)
         .ok_or_else(|| CliError::Other(format!("malformed Slack ts: {ts:?}")))
 }
 
-/// Full-precision sort key for chronological ordering within a channel.
-fn ts_sort_key(ts: &str) -> f64 {
-    ts.parse().unwrap_or(0.0)
+/// Exact, microsecond-resolution Slack timestamp used for chronological sort.
+///
+/// Slack exports normally use six fractional digits. Shorter fractions are
+/// accepted for compatibility with hand-written fixtures and normalized by
+/// right-padding; malformed and over-precise values are rejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct SlackTimestamp {
+    seconds: u64,
+    micros: u32,
+}
+
+fn parse_slack_ts(ts: &str) -> Option<SlackTimestamp> {
+    let (seconds, fraction) = match ts.split_once('.') {
+        Some((seconds, fraction)) => (seconds, Some(fraction)),
+        None => (ts, None),
+    };
+    if seconds.is_empty() || !seconds.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let seconds = seconds.parse().ok()?;
+    let micros = match fraction {
+        None => 0,
+        Some(fraction)
+            if !fraction.is_empty()
+                && fraction.len() <= 6
+                && fraction.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            let value: u32 = fraction.parse().ok()?;
+            value * 10_u32.pow(6 - fraction.len() as u32)
+        }
+        Some(_) => return None,
+    };
+    Some(SlackTimestamp { seconds, micros })
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, CliError> {
@@ -297,6 +337,22 @@ mod tests {
         assert_eq!(ts_seconds("1610000000.000200").expect("parses"), 1610000000);
         assert_eq!(ts_seconds("1610000000").expect("parses"), 1610000000);
         assert!(ts_seconds("not-a-ts").is_err());
+        assert!(ts_seconds("1610000000.bad").is_err());
+        assert!(ts_seconds("1610000000.").is_err());
+        assert!(ts_seconds("1610000000.0000001").is_err());
+    }
+
+    #[test]
+    fn slack_timestamps_sort_exactly() {
+        let mut timestamps = [
+            parse_slack_ts("1700000000.000010").expect("valid"),
+            parse_slack_ts("1700000000.000002").expect("valid"),
+            parse_slack_ts("1699999999.999999").expect("valid"),
+        ];
+        timestamps.sort();
+        assert_eq!(timestamps[0].seconds, 1_699_999_999);
+        assert_eq!(timestamps[1].micros, 2);
+        assert_eq!(timestamps[2].micros, 10);
     }
 
     #[test]

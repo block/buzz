@@ -328,17 +328,28 @@ type E2eConfig = {
     // Event IDs that `get_event` should report as definitively not found.
     // Causes `useDraftRootStatus` to classify as `deleted`.
     deletedEventIds?: string[];
-    // Pending community deep links (buzz://join / buzz://connect / buzz://add-community) seeded into
-    // the mocked Rust-side queue. Mirrors the real queue's semantics:
+    // Pending community deep links seeded into the mocked Rust-side queue.
+    // Mirrors the real queue's semantics:
     // `take_pending_community_deep_link` peeks the head and
     // `acknowledge_pending_community_deep_link` removes by id. Drives the
     // pending-invite gate and deep-link drain path in tests.
     pendingCommunityDeepLinks?: Array<{
       id: string;
-      kind: "connect" | "join" | "add-community";
+      kind: "connect" | "join" | "add-community" | "join-slack";
       relayUrl: string;
       code?: string | null;
       name?: string | null;
+      policyReceipt?: string | null;
+      service?: string | null;
+    }>;
+    // Pending OAuth/email migration callbacks captured before React mounts.
+    pendingImportClaimDeepLinks?: Array<{
+      requestId: string;
+      subject: string;
+      token?: string;
+      service?: string;
+      via?: string;
+      relayUrl?: string;
     }>;
     // When true, `get_identity` returns `lost: true` until `persist_current_identity`
     // or `import_identity` is called. Drives the identity-lost recovery UX in tests.
@@ -3829,6 +3840,16 @@ let mockPendingCommunityDeepLinks: Array<{
   relayUrl: string;
   code: string | null;
   name: string | null;
+  policyReceipt: string | null;
+  service: string | null;
+}> = [];
+let mockPendingImportClaimDeepLinks: Array<{
+  requestId: string;
+  subject: string;
+  token?: string;
+  service?: string;
+  via?: string;
+  relayUrl?: string;
 }> = [];
 
 function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
@@ -3838,7 +3859,12 @@ function resetMockPendingCommunityDeepLinks(config: E2eConfig | null) {
     ...pending,
     code: pending.code ?? null,
     name: pending.name ?? null,
+    policyReceipt: pending.policyReceipt ?? null,
+    service: pending.service ?? null,
   }));
+  mockPendingImportClaimDeepLinks = (
+    config?.mock?.pendingImportClaimDeepLinks ?? []
+  ).map((pending) => ({ ...pending }));
 }
 
 function recordMockUserStatus(event: RelayEvent) {
@@ -9856,6 +9882,19 @@ export function maybeInstallE2eTauriMocks() {
           return false;
         }
         mockPendingCommunityDeepLinks.splice(index, 1);
+        return true;
+      }
+      case "take_pending_import_claim_deep_link":
+        return mockPendingImportClaimDeepLinks[0] ?? null;
+      case "acknowledge_pending_import_claim_deep_link": {
+        const { requestId } = payload as { requestId: string };
+        const index = mockPendingImportClaimDeepLinks.findIndex(
+          (pending) => pending.requestId === requestId,
+        );
+        if (index === -1) {
+          return false;
+        }
+        mockPendingImportClaimDeepLinks.splice(index, 1);
         return true;
       }
       case "get_relay_http_url":
