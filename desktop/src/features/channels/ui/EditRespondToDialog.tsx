@@ -1,7 +1,13 @@
 import * as React from "react";
 
-import { useUpdateManagedAgentMutation } from "@/features/agents/hooks";
-import { CreateAgentRespondToField } from "@/features/agents/ui/RespondToField";
+import {
+  useAgentAccessOwnerOnlyQuery,
+  useUpdateManagedAgentMutation,
+} from "@/features/agents/hooks";
+import {
+  CreateAgentRespondToField,
+  INTERNAL_AGENT_ACCESS_DISABLED_REASON,
+} from "@/features/agents/ui/RespondToField";
 import type { ManagedAgent, RespondToMode } from "@/shared/api/types";
 import { Button } from "@/shared/ui/button";
 import {
@@ -24,6 +30,11 @@ export function EditRespondToDialog({
   open: boolean;
 }) {
   const updateMutation = useUpdateManagedAgentMutation();
+  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
+    enabled: open,
+  });
+  const accessLocked =
+    agentAccessOwnerOnly === true && agent?.backend.type === "local";
   const [respondTo, setRespondTo] = React.useState<RespondToMode>("owner-only");
   const [respondToAllowlist, setRespondToAllowlist] = React.useState<string[]>(
     [],
@@ -60,9 +71,12 @@ export function EditRespondToDialog({
           </DialogDescription>
         </DialogHeader>
         <CreateAgentRespondToField
-          allowlist={respondToAllowlist}
-          disabled={updateMutation.isPending}
-          mode={respondTo}
+          allowlist={accessLocked ? [] : respondToAllowlist}
+          disabled={updateMutation.isPending || accessLocked}
+          disabledReason={
+            accessLocked ? INTERNAL_AGENT_ACCESS_DISABLED_REASON : undefined
+          }
+          mode={accessLocked ? "owner-only" : respondTo}
           onAllowlistChange={setRespondToAllowlist}
           onModeChange={setRespondTo}
           ownerPubkey={currentPubkey}
@@ -82,7 +96,9 @@ export function EditRespondToDialog({
             Cancel
           </Button>
           <Button
-            disabled={!respondToValid || updateMutation.isPending}
+            disabled={
+              !respondToValid || updateMutation.isPending || accessLocked
+            }
             onClick={() => void handleSave()}
             size="sm"
             type="button"

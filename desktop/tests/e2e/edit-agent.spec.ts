@@ -78,8 +78,37 @@ async function pickDropdownOption(
   await page.getByRole("menuitemradio", { name: optionName }).click();
 }
 
+test.describe("agent definition dialog", () => {
+  test("internal build shows disabled agent access with an explanation", async ({
+    page,
+  }) => {
+    await installMockBridge(page, {
+      internalBuild: true,
+      bakedBuildEnv: BAKED_DEFAULTS,
+    });
+    await page.goto("/");
+    await page.getByTestId("open-agents-view").click();
+    await page.getByTestId("new-agent-card").click();
+    await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
+
+    await expect(dialog.getByTestId("agent-respond-to")).toBeVisible();
+    await expect(dialog.locator("#agent-respond-to")).toBeDisabled();
+    await expect(dialog.locator("#agent-respond-to")).toContainText(
+      "Only me (default)",
+    );
+    await expect(
+      dialog.getByTestId("agent-respond-to-disabled-reason"),
+    ).toHaveText(
+      "This build limits local agents to messages from you, so the access level cannot be changed.",
+    );
+  });
+});
+
 test.describe("edit agent dialog", () => {
-  test("internal build hides the managed-agent access control", async ({
+  test("internal build shows a disabled owner-only access control with an explanation", async ({
     page,
   }) => {
     await installMockBridge(page, {
@@ -98,7 +127,17 @@ test.describe("edit agent dialog", () => {
 
     await openEditDialog(page);
 
-    await expect(page.getByTestId("agent-respond-to")).toHaveCount(0);
+    const accessControl = page.getByTestId("agent-respond-to");
+    await expect(accessControl).toBeVisible();
+    await expect(page.locator("#agent-respond-to")).toBeDisabled();
+    await expect(page.locator("#agent-respond-to")).toContainText(
+      "Only me (default)",
+    );
+    await expect(
+      page.getByTestId("agent-respond-to-disabled-reason"),
+    ).toHaveText(
+      "This build limits local agents to messages from you, so the access level cannot be changed.",
+    );
   });
 
   test("OSS build keeps the managed-agent access control", async ({ page }) => {

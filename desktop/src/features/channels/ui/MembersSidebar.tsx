@@ -51,7 +51,6 @@ import {
 } from "@/shared/ui/modalSearchStyles";
 import { MembersSidebarMemberCard } from "./MembersSidebarMemberCard";
 import { useManagedAgentRuntimesQuery } from "@/features/agents/managedAgentRuntimeHooks";
-import { useAgentAccessOwnerOnlyQuery } from "@/features/agents/hooks";
 import {
   findManagedAgentRuntime,
   managedAgentPairAction,
@@ -143,9 +142,6 @@ export function MembersSidebar({
 }: MembersSidebarProps) {
   const channelId = channel?.id ?? null;
   const managedAgentRuntimesQuery = useManagedAgentRuntimesQuery({
-    enabled: open,
-  });
-  const { data: agentAccessOwnerOnly } = useAgentAccessOwnerOnlyQuery({
     enabled: open,
   });
   const queryClient = useQueryClient();
@@ -644,12 +640,7 @@ export function MembersSidebar({
           onChangeRole={(m, role) => {
             void changeRoleMutation.mutateAsync({ pubkey: m.pubkey, role });
           }}
-          onEditRespondTo={
-            memberIsBot &&
-            (!agentAccessOwnerOnly || managedAgent?.backend.type !== "local")
-              ? setEditRespondToAgent
-              : undefined
-          }
+          onEditRespondTo={memberIsBot ? setEditRespondToAgent : undefined}
           onManagedAgentAction={(agent) => {
             void handleAgentLifecycleAction(agent, managedAgentRuntime);
           }}

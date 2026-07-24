@@ -1,7 +1,10 @@
 import { Input } from "@/shared/ui/input";
 import { cn } from "@/shared/lib/cn";
 import { EnvVarsEditor, type EnvVarsValue } from "./EnvVarsEditor";
-import { CreateAgentRespondToField } from "./RespondToField";
+import {
+  CreateAgentRespondToField,
+  INTERNAL_AGENT_ACCESS_DISABLED_REASON,
+} from "./RespondToField";
 import type { PersonaBehaviorDraft } from "./personaBehaviorDraft";
 import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 import { BuzzAgentModelTuningFields } from "./buzzAgentModelTuningFields";
@@ -26,7 +29,7 @@ export function PersonaAdvancedFields({
   requiredEnvKeys = [],
   fileSatisfiedEnvKeys = [],
   hiddenEnvKeys = [],
-  hideAgentAccess = false,
+  agentAccessOwnerOnly = false,
 }: {
   behaviorDraft: PersonaBehaviorDraft;
   disabled: boolean;
@@ -47,27 +50,34 @@ export function PersonaAdvancedFields({
   requiredEnvKeys?: readonly string[];
   fileSatisfiedEnvKeys?: readonly string[];
   hiddenEnvKeys?: readonly string[];
-  hideAgentAccess?: boolean;
+  agentAccessOwnerOnly?: boolean;
 }) {
+  const respondToMode = agentAccessOwnerOnly
+    ? "owner-only"
+    : (behaviorDraft.respondTo ?? "owner-only");
+
   return (
     <div className="space-y-5 pt-2">
-      {!hideAgentAccess ? (
-        <CreateAgentRespondToField
-          allowlist={behaviorDraft.respondToAllowlist}
-          disabled={disabled}
-          mode={behaviorDraft.respondTo ?? "owner-only"}
-          onAllowlistChange={(allowlist) =>
-            onBehaviorDraftChange({
-              ...behaviorDraft,
-              respondToAllowlist: allowlist,
-            })
-          }
-          onModeChange={(mode) =>
-            onBehaviorDraftChange({ ...behaviorDraft, respondTo: mode })
-          }
-          variant="persona"
-        />
-      ) : null}
+      <CreateAgentRespondToField
+        allowlist={agentAccessOwnerOnly ? [] : behaviorDraft.respondToAllowlist}
+        disabled={disabled || agentAccessOwnerOnly}
+        disabledReason={
+          agentAccessOwnerOnly
+            ? INTERNAL_AGENT_ACCESS_DISABLED_REASON
+            : undefined
+        }
+        mode={respondToMode}
+        onAllowlistChange={(allowlist) =>
+          onBehaviorDraftChange({
+            ...behaviorDraft,
+            respondToAllowlist: allowlist,
+          })
+        }
+        onModeChange={(mode) =>
+          onBehaviorDraftChange({ ...behaviorDraft, respondTo: mode })
+        }
+        variant="persona"
+      />
 
       <div className="grid gap-5 sm:grid-cols-2">
         <div className="space-y-1.5">

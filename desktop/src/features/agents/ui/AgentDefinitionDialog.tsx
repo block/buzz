@@ -1015,7 +1015,7 @@ export function AgentDefinitionDialog({
                       hiddenEnvKeys={
                         topLevelSecretEnvVar ? [topLevelSecretEnvVar] : []
                       }
-                      hideAgentAccess={agentAccessOwnerOnly === true}
+                      agentAccessOwnerOnly={agentAccessOwnerOnly === true}
                       inheritedEnvVars={inheritedEnvVarsForAdvanced}
                       model={model}
                       modelTuningRuntimeId={runtime}

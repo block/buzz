@@ -66,7 +66,7 @@ import {
 import { AgentCreationPreview } from "./AgentCreationPreview";
 import type { EnvVarsValue } from "./EnvVarsEditor";
 import { useRequiredCredentialState } from "./useRequiredCredentialState";
-import { CreateAgentRespondToField } from "./RespondToField";
+import { InternalAgentAccessField } from "./InternalAgentAccessField";
 import { PersonaDropdownField } from "./PersonaDropdownField";
 import {
   MODEL_DISCOVERY_LOADING_VALUE,
@@ -924,16 +924,16 @@ export function AgentInstanceEditDialog({
               </div>
             </div>
 
-            {!agentAccessOwnerOnly || agent.backend.type !== "local" ? (
-              <CreateAgentRespondToField
-                allowlist={respondToAllowlist}
-                disabled={updateMutation.isPending}
-                mode={respondTo}
-                onAllowlistChange={setRespondToAllowlist}
-                onModeChange={setRespondTo}
-                variant="persona"
-              />
-            ) : null}
+            <InternalAgentAccessField
+              accessLocked={
+                agentAccessOwnerOnly === true && agent.backend.type === "local"
+              }
+              allowlist={respondToAllowlist}
+              disabled={updateMutation.isPending}
+              mode={respondTo}
+              onAllowlistChange={setRespondToAllowlist}
+              onModeChange={setRespondTo}
+            />
 
             {/* Provider (runtime) */}
             <div className="space-y-1.5">
