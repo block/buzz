@@ -72,9 +72,13 @@ pub async fn get_agent_models(
 
         // ModelPicker can persist a selected model but not rewrite the saved
         // provider/env snapshot, and runtime spawn reads that same snapshot.
-        // Discover models against the record snapshot so an out-of-date persona
-        // cannot offer models for a provider this agent will not launch with.
-        let discovery = saved_agent_model_discovery_config(record, &effective_command);
+        // Discover models against the resolver's effective model/provider —
+        // definition-authoritative for linked instances — so discovery can
+        // never query a stale provider this agent will not actually launch
+        // with.
+        let global = crate::managed_agents::load_global_agent_config(&app).unwrap_or_default();
+        let discovery =
+            saved_agent_model_discovery_config(record, &effective_command, &personas, &global);
 
         (
             resolved,
@@ -137,26 +141,37 @@ struct SavedAgentModelDiscoveryConfig {
     env: BTreeMap<String, String>,
 }
 
+/// Resolve the model/provider discovery config from the same authoritative
+/// source spawn uses (`resolve_effective_model_provider`) — linked instances
+/// read their definition, never a stale materialized `record.model`/
+/// `record.provider`, so model discovery cannot query a provider this agent
+/// will not actually launch with. Definition-less instances keep their own
+/// record values, matching spawn's `resolve_definition_less` arm.
 fn saved_agent_model_discovery_config(
     record: &crate::managed_agents::ManagedAgentRecord,
     agent_command: &str,
+    personas: &[crate::managed_agents::AgentDefinition],
+    global: &crate::managed_agents::GlobalAgentConfig,
 ) -> SavedAgentModelDiscoveryConfig {
+    let (effective_model, effective_provider) =
+        crate::managed_agents::resolve_effective_model_provider(record, personas, global);
+
     let mut derived_env = BTreeMap::new();
     if let Some(meta) = known_acp_runtime(agent_command) {
         for (key, value) in crate::managed_agents::runtime_metadata_env_vars(
             meta.model_env_var,
             meta.provider_env_var,
             meta.provider_locked,
-            record.model.as_deref(),
-            record.provider.as_deref(),
+            effective_model.as_deref(),
+            effective_provider.as_deref(),
         ) {
             derived_env.insert(key.to_string(), value.to_string());
         }
     }
 
     SavedAgentModelDiscoveryConfig {
-        model: record.model.clone(),
-        provider: record.provider.clone(),
+        model: effective_model,
+        provider: effective_provider,
         env: crate::managed_agents::merged_user_env(&derived_env, &record.env_vars),
     }
 }
@@ -767,6 +782,35 @@ async fn discover_databricks_models(
     }))
 }
 
+/// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
+/// to `record`, enforcing the linked-instance write guard: a definition-linked
+/// record's model/provider/prompt are definition-authoritative (see
+/// `effective_config::resolve_linked`), so writes to these three fields are
+/// silently dropped for a linked instance rather than persisting a byte the
+/// resolver will never read. Definition-less instances accept the patch
+/// as-is. Extracted so the guard is exercised by both `update_managed_agent`
+/// and its regression tests — a test that reimplements this check instead of
+/// calling it can go green after the real guard is deleted.
+fn apply_model_provider_prompt_update(
+    record: &mut crate::managed_agents::ManagedAgentRecord,
+    model: Option<Option<String>>,
+    provider: Option<Option<String>>,
+    system_prompt: Option<Option<String>>,
+) {
+    if record.persona_id.is_some() {
+        return;
+    }
+    if let Some(model_update) = model {
+        record.model = model_update;
+    }
+    if let Some(provider_update) = provider {
+        record.provider = provider_update;
+    }
+    if let Some(prompt_update) = system_prompt {
+        record.system_prompt = prompt_update;
+    }
+}
+
 /// Update mutable fields on an existing managed agent record.
 ///
 /// Does NOT auto-restart the agent. Runtime config changes (system prompt,
@@ -806,15 +850,12 @@ pub async fn update_managed_agent(
                 name_changed = true;
             }
         }
-        if let Some(model_update) = input.model {
-            record.model = model_update;
-        }
-        if let Some(provider_update) = input.provider {
-            record.provider = provider_update;
-        }
-        if let Some(prompt_update) = input.system_prompt {
-            record.system_prompt = prompt_update;
-        }
+        apply_model_provider_prompt_update(
+            record,
+            input.model,
+            input.provider,
+            input.system_prompt,
+        );
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }

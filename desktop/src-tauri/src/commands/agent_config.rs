@@ -39,6 +39,13 @@ pub struct RuntimeFileConfigSubset {
 
 /// Resolve the config surface with persona and global default values applied.
 ///
+/// Linked instances are definition-authoritative: the record's own
+/// system_prompt/model/provider are cleared before applying, so a stale
+/// materialized snapshot can never shadow the persona's current values or a
+/// blank-definition fallthrough to global defaults (mirrors
+/// `effective_config::resolve_linked`). Definition-less instances keep their
+/// own explicit values.
+///
 /// The pipeline: resolve the linked persona's prompt/model/provider, inject
 /// each into the record only where the record lacks its own value, let
 /// `read_config_surface` tag those injected fields `BuzzExplicit`, then re-tag
@@ -59,6 +66,22 @@ fn resolve_config_surface(
     session_cache: Option<&SessionConfigCache>,
     global: &GlobalAgentConfig,
 ) -> RuntimeConfigSurface {
+    // Linked instances are definition-authoritative (mirrors
+    // `effective_config::resolve_linked`): the record's own
+    // system_prompt/model/provider fields are, at best, a stale materialized
+    // snapshot from the last `apply_persona_snapshot` — never a legitimate
+    // live override, since `update_managed_agent` blocks writing these three
+    // fields for linked instances. Clear them before computing `had_*` below
+    // so a stale byte can never masquerade as BuzzExplicit and suppress
+    // definition/global injection. Env var overrides (set via the advanced
+    // env-vars editor) are untouched — those remain a legitimate
+    // per-instance override regardless of link status.
+    if record.persona_id.is_some() {
+        record.system_prompt = None;
+        record.model = None;
+        record.provider = None;
+    }
+
     let had_prompt =
         record.system_prompt.is_some() || record.env_vars.contains_key("BUZZ_ACP_SYSTEM_PROMPT");
     let had_model = record.model.is_some();
@@ -170,22 +193,6 @@ fn resolve_config_surface(
     }
     if inject_global_provider {
         retag_global_default(&mut surface.normalized.provider);
-    }
-
-    // Re-tag persona-snapshotted model from BuzzExplicit to PersonaDefault.
-    // Persona-created agents have record.model set at create time from the
-    // persona snapshot — had_model is true, but the model came from the persona,
-    // not an explicit user choice. Re-tag when the record model matches the
-    // persona model and no live override is active. Only applies when a persona
-    // is actually linked — non-persona agents with an explicit model keep BuzzExplicit.
-    if had_model && !model_overridden && record.persona_id.is_some() {
-        if let (Some(ref record_model), Some(ref persona_model_val)) =
-            (&record.model, &persona_model)
-        {
-            if record_model == persona_model_val {
-                retag_persona_default(&mut surface.normalized.model);
-            }
-        }
     }
 
     surface
@@ -729,11 +736,64 @@ mod tests {
         }
     }
 
-    /// A model the user set explicitly in Buzz must never be re-tagged to
-    /// `PersonaDefault`, even when the linked persona also has a model.
+    /// Definition-authoritative: a stale materialized `record.model` on a
+    /// linked instance must never outrank (or even be consulted against) the
+    /// linked persona's model. `update_managed_agent` already blocks writing
+    /// model/provider/prompt for linked instances, so a non-`None` value here
+    /// can only be leftover snapshot bytes from before a persona edit — the
+    /// panel must report the persona's current model, tagged `PersonaDefault`,
+    /// not the stale byte as `BuzzExplicit`.
     #[test]
-    fn explicit_record_model_outranks_persona_and_keeps_buzz_explicit_origin() {
+    fn linked_stale_record_model_never_outranks_persona_model() {
         let mut record = agent_record();
+        record.model = Some("stale-explicit-model".to_string());
+        let personas = vec![persona_with_model("persona-model")];
+
+        let surface = resolve_config_surface(
+            record,
+            &personas,
+            Some(goose_runtime()),
+            None,
+            &Default::default(),
+        );
+
+        let model = surface.normalized.model.as_ref().expect("model resolved");
+        assert_eq!(model.value.as_deref(), Some("persona-model"));
+        assert_eq!(model.origin, ConfigOrigin::PersonaDefault);
+    }
+
+    /// Definition-authoritative, blank-definition case: a linked instance
+    /// whose persona has no model of its own must fall through to the global
+    /// default, tagged `GlobalDefault` — mirroring
+    /// `effective_config::resolve_linked`'s `None => global` arm. A stale
+    /// materialized record model must not shadow this fallthrough either.
+    #[test]
+    fn linked_blank_definition_model_falls_through_to_global_default() {
+        let mut record = agent_record();
+        record.model = Some("stale-explicit-model".to_string());
+        let mut persona = persona_with_model("unused");
+        persona.model = None;
+        let personas = vec![persona];
+        let global = crate::managed_agents::GlobalAgentConfig {
+            model: Some("global-model".to_string()),
+            ..Default::default()
+        };
+
+        let surface =
+            resolve_config_surface(record, &personas, Some(goose_runtime()), None, &global);
+
+        let model = surface.normalized.model.as_ref().expect("model resolved");
+        assert_eq!(model.value.as_deref(), Some("global-model"));
+        assert_eq!(model.origin, ConfigOrigin::GlobalDefault);
+    }
+
+    /// A definition-less (no `persona_id`) instance's own explicit model IS
+    /// authoritative — the stale-record clearing above is scoped to linked
+    /// instances only.
+    #[test]
+    fn definition_less_explicit_record_model_keeps_buzz_explicit_origin() {
+        let mut record = agent_record();
+        record.persona_id = None;
         record.model = Some("explicit-model".to_string());
         let personas = vec![persona_with_model("persona-model")];
 
