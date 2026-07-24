@@ -8,6 +8,20 @@ export function escapeRegExp(str: string): string {
 const NEVER_MATCH = /(?!)/gi;
 
 /**
+ * CJK / Hangul / Kana code-point ranges treated as a mention terminator.
+ *
+ * Display names are effectively Latin/ASCII, so a script transition from the
+ * name straight into a CJK character (e.g. `@Fizz이렇게` with no separating
+ * space) is an unambiguous word boundary. Without these ranges the boundary
+ * lookahead only accepts whitespace/punctuation, so a mention immediately
+ * followed by Korean/Japanese/Chinese text fails to match — the p-tag is never
+ * attached and the notification never fires. Covers Hangul Jamo, Kana, Hangul
+ * Compatibility Jamo, CJK Unified Ideographs, and Hangul Syllables.
+ */
+export const CJK_BOUNDARY_RANGES =
+  "\\u1100-\\u11FF\\u3040-\\u30FF\\u3130-\\u318F\\u4E00-\\u9FFF\\uAC00-\\uD7A3";
+
+/**
  * Build a regex that matches a given prefix followed by known multi-word names
  * (longest-first to avoid partial matches). When known names are provided,
  * only those names are matched — no generic fallback.
@@ -39,7 +53,7 @@ export function buildPrefixPattern(
   }
 
   const nameAlternatives = sorted.map((name) => escapeRegExp(name)).join("|");
-  const boundary = "(?=[\\s,;.!?:)\\]}]|$)";
+  const boundary = `(?=[\\s,;.!?:)\\]}${CJK_BOUNDARY_RANGES}]|$)`;
   return new RegExp(`${escapedPrefix}(?:${nameAlternatives})${boundary}`, "gi");
 }
 
