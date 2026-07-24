@@ -96,6 +96,38 @@ export function filterEnabledAcpRuntimes<T extends { id: string }>(
 }
 
 /**
+ * Filter new configuration choices while preserving one explicitly saved
+ * runtime as a current-only option.
+ */
+export function runtimesForAcpConfigurationPicker<T extends { id: string }>(
+  runtimes: readonly T[],
+  disabledRuntimeIds: readonly string[],
+  currentRuntimeId?: string | null,
+): T[] {
+  const selectableRuntimes = filterEnabledAcpRuntimes(
+    runtimes,
+    disabledRuntimeIds,
+  );
+  const normalizedCurrentRuntimeId = normalizeRuntimeId(currentRuntimeId ?? "");
+  if (
+    !normalizedCurrentRuntimeId ||
+    selectableRuntimes.some(
+      (runtime) =>
+        normalizeRuntimeId(runtime.id) === normalizedCurrentRuntimeId,
+    )
+  ) {
+    return selectableRuntimes;
+  }
+
+  const currentRuntime = runtimes.find(
+    (runtime) => normalizeRuntimeId(runtime.id) === normalizedCurrentRuntimeId,
+  );
+  return currentRuntime
+    ? [...selectableRuntimes, currentRuntime]
+    : selectableRuntimes;
+}
+
+/**
  * Apply visibility only when the app is choosing a runtime implicitly.
  * Existing definitions pinned to a runtime remain runnable.
  */

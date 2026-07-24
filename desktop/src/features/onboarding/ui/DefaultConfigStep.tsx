@@ -10,6 +10,7 @@ import {
 } from "@/features/agents/ui/AgentConfigFields";
 import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
 import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
+import { useDisabledAcpRuntimeIds } from "@/features/agents/lib/runtimeVisibilityPreference";
 import { createSaveCoalescer } from "./saveCoalescer";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import {
@@ -126,14 +127,16 @@ function AgentDefaultsSection({
     () => new Set(effectiveReadyRuntimeIds),
     [effectiveReadyRuntimeIds],
   );
+  const disabledRuntimeIds = useDisabledAcpRuntimeIds();
   // Setup already confirmed readiness. Re-filter only for onboarding
   // visibility here; a transient auth recheck must not invalidate that handoff.
   const readyRuntimes = React.useMemo(
     () =>
-      getVisibleOnboardingRuntimes(runtimesQuery.data ?? []).filter((runtime) =>
-        readyRuntimeIdSet.has(runtime.id),
-      ),
-    [readyRuntimeIdSet, runtimesQuery.data],
+      getVisibleOnboardingRuntimes(
+        runtimesQuery.data ?? [],
+        disabledRuntimeIds,
+      ).filter((runtime) => readyRuntimeIdSet.has(runtime.id)),
+    [disabledRuntimeIds, readyRuntimeIdSet, runtimesQuery.data],
   );
   const selectedRuntime = React.useMemo(
     () =>

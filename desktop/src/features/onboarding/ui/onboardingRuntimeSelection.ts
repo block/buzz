@@ -1,4 +1,5 @@
 import type { AcpRuntimeCatalogEntry } from "@/shared/api/types";
+import { runtimesForAcpConfigurationPicker } from "@/features/agents/lib/runtimeVisibilityPreference";
 
 export const ONBOARDING_RUNTIME_ORDER = ["claude", "codex"];
 
@@ -20,8 +21,9 @@ export function runtimeIsReadyForOnboarding(runtime: AcpRuntimeCatalogEntry) {
 
 export function getVisibleOnboardingRuntimes(
   runtimes: readonly AcpRuntimeCatalogEntry[],
+  disabledRuntimeIds: readonly string[] = [],
 ) {
-  return runtimes
+  return runtimesForAcpConfigurationPicker(runtimes, disabledRuntimeIds)
     .filter((runtime) => runtimeIsVisibleInOnboarding(runtime.id))
     .sort(
       (left, right) =>

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { ACP_RUNTIME_VISIBILITY_STORAGE_KEY } from "@/features/agents/lib/runtimeVisibilityPreference";
 import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
@@ -549,6 +550,42 @@ test("defaults auto-selects the only ready visible harness", async ({
   );
   await expect(page.getByTestId("onboarding-finish")).toBeEnabled();
   await expect.poll(() => readSavedRuntime(page)).toBe("claude");
+});
+
+test("defaults exclude device-disabled ready harnesses", async ({ page }) => {
+  await page.addInitScript((storageKey) => {
+    window.localStorage.setItem(storageKey, JSON.stringify(["claude"]));
+  }, ACP_RUNTIME_VISIBILITY_STORAGE_KEY);
+  await installMockBridge(
+    page,
+    {
+      acpRuntimesCatalog: [
+        runtime("claude", "available", { status: "logged_in" }),
+        runtime("codex", "available", { status: "logged_in" }),
+      ],
+      globalAgentConfig: {
+        env_vars: {},
+        provider: null,
+        model: null,
+        preferred_runtime: null,
+      },
+    },
+    { skipCommunitySeed: true, skipOnboardingSeed: true },
+  );
+  await page.goto("/");
+  await navigateToSetupPage(page);
+  await page.getByTestId("onboarding-setup-next").click();
+  await expect(page.getByTestId("onboarding-page-config")).toBeVisible();
+
+  const harness = page.getByTestId("global-agent-default-harness");
+  await expect(harness).toHaveText("Codex");
+  await harness.click();
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-claude"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("global-agent-default-harness-option-codex"),
+  ).toBeVisible();
 });
 
 test("Finish waits for the latest rapid harness choice to persist", async ({

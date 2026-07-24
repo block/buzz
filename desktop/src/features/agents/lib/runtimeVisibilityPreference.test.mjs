@@ -8,6 +8,7 @@ import {
   nextDisabledAcpRuntimeIds,
   parseDisabledAcpRuntimeIds,
   readDisabledAcpRuntimeIds,
+  runtimesForAcpConfigurationPicker,
   runtimesForImplicitAcpSelection,
   visibleAcpRuntimeSeedForCreate,
 } from "./runtimeVisibilityPreference.ts";
@@ -53,6 +54,27 @@ test("disabled runtimes are removed from selectable catalog entries", () => {
   assert.deepEqual(
     runtimesForImplicitAcpSelection(runtimes, ["buzz-agent"], "buzz-agent"),
     runtimes,
+  );
+});
+
+test("configuration pickers hide new choices but preserve the current runtime", () => {
+  const runtimes = [
+    { id: "buzz-agent", label: "Buzz Agent" },
+    { id: "goose", label: "Goose" },
+    { id: "codex", label: "Codex" },
+  ];
+
+  assert.deepEqual(
+    runtimesForAcpConfigurationPicker(
+      runtimes,
+      ["buzz-agent", "goose"],
+      "goose",
+    ),
+    [runtimes[2], runtimes[1]],
+  );
+  assert.deepEqual(
+    runtimesForAcpConfigurationPicker(runtimes, ["buzz-agent", "goose"], null),
+    [runtimes[2]],
   );
 });
 

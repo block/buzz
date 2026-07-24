@@ -34,6 +34,18 @@ test("visible onboarding runtimes use the product order", () => {
   );
 });
 
+test("onboarding defaults exclude device-disabled harnesses", () => {
+  const runtimes = [
+    runtime("codex", "available", "logged_in"),
+    runtime("claude", "available", "logged_in"),
+  ];
+
+  assert.deepEqual(
+    getVisibleOnboardingRuntimes(runtimes, ["claude"]).map(({ id }) => id),
+    ["codex"],
+  );
+});
+
 test("readiness requires an available and authenticated runtime", () => {
   assert.equal(
     runtimeIsReadyForOnboarding(runtime("claude", "available", "logged_in")),
