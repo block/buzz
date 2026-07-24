@@ -207,20 +207,10 @@ pub struct AcpClient {
     /// be silently dropped (buzz-agent's output is its tool calls; streamed
     /// text is observability-only). Reset at the start of every turn.
     turn_message_text: String,
-    /// Whether a message publish was CONFIRMED this turn. When true the
-    /// fallback does NOT fire — the agent delivered its own reply. Confirmation
-    /// comes from the terminal `tool_call_update` outcome (successful
-    /// completion, ideally carrying the CLI's `{"accepted":true,...}` envelope
-    /// in the tool output), never from the tool call's input text alone:
-    /// intent is not delivery. Reset at the start of every turn.
+    /// Whether a `buzz messages send` (or forum-post/comment) publish tool call
+    /// was observed this turn. When true the fallback does NOT fire — the agent
+    /// delivered its own reply. Reset at the start of every turn.
     turn_sent_message: bool,
-    /// Publish *candidates* for the current turn: `toolCallId`s whose
-    /// `tool_call` input matched the publish signature, awaiting a terminal
-    /// `tool_call_update`. A candidate that completes successfully confirms
-    /// delivery; one that fails (or completes with `isError`, or whose output
-    /// lacks the publish acknowledgement) is discarded so the fallback stays
-    /// armed. Reset at the start of every turn.
-    turn_publish_candidates: std::collections::HashSet<String>,
 }
 
 /// Recursively merge `overlay` into `base`, with `overlay` winning on scalar/shape
@@ -519,7 +509,6 @@ impl AcpClient {
             goose_usage: UsageTracker::default(),
             turn_message_text: String::new(),
             turn_sent_message: false,
-            turn_publish_candidates: std::collections::HashSet::new(),
         })
     }
 
@@ -716,7 +705,6 @@ impl AcpClient {
         // Reset the content-delivery fallback trackers for this turn.
         self.turn_message_text.clear();
         self.turn_sent_message = false;
-        self.turn_publish_candidates.clear();
 
         self.last_prompt_id = Some(self.next_id);
         let id = self.next_id;
@@ -814,15 +802,14 @@ impl AcpClient {
     }
 
     /// Take the accumulated assistant `content` text for the completed turn,
-    /// if and only if a message publish was NOT confirmed this turn.
+    /// if and only if the agent did NOT publish a message itself this turn.
     ///
     /// Returns `Some(trimmed_text)` when the turn produced streamed assistant
-    /// content but no publish tool call was confirmed delivered (see
-    /// `publish_outcome_confirms_delivery`) — the caller then delivers it as
-    /// the channel reply (content-delivery fallback). Returns `None` when the
-    /// agent's own send was confirmed, when there was no content, or when the
-    /// content is only a bare acknowledgement (which the base prompt forbids
-    /// publishing). Clears the buffer either way.
+    /// content but no `buzz messages send` tool call fired — the caller then
+    /// delivers it as the channel reply (content-delivery fallback). Returns
+    /// `None` when the agent sent its own message, when there was no content,
+    /// or when the content is only a bare acknowledgement (which the base
+    /// prompt forbids publishing). Clears the buffer either way.
     pub fn take_undelivered_turn_message(&mut self) -> Option<String> {
         let text = std::mem::take(&mut self.turn_message_text);
         let sent = self.turn_sent_message;
@@ -1605,27 +1592,16 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
                 tracing::info!(target: "acp::tool", "tool_call: {title} ({kind})");
-                // Register a message-publish CANDIDATE for the content-delivery
-                // fallback. Intent is not delivery: the flag that suppresses
-                // the fallback (`turn_sent_message`) is only set when this
-                // call's terminal `tool_call_update` confirms success — a send
-                // that fails must leave the fallback armed, otherwise the
-                // feature silently drops the exact reply it exists to save.
+                // Detect a message-publish tool call so the fallback knows the
+                // agent delivered its own reply. The publish path is the
+                // dev-mcp `shell` tool running `buzz messages send` (title is
+                // the tool name, rawInput carries the command/args), so scan
+                // both title and rawInput for the CLI publish signature.
                 if tool_call_is_message_publish(update) {
-                    if let Some(id) = update.get("toolCallId").and_then(|v| v.as_str()) {
-                        self.turn_publish_candidates.insert(id.to_string());
-                        tracing::debug!(
-                            "publish candidate registered ({title}, toolCallId={id}); \
-                             awaiting terminal outcome"
-                        );
-                    }
-                    // Some agents emit `tool_call` already carrying a terminal
-                    // status (single-event shape). Handle it like an update.
-                    if let Some(confirmed) = publish_outcome_confirms_delivery(update) {
-                        if confirmed {
-                            self.turn_sent_message = true;
-                        }
-                    }
+                    self.turn_sent_message = true;
+                    // Debug-level: the model published its own reply, so the
+                    // content-delivery fallback will stay dormant this turn.
+                    tracing::debug!("agent published its own message via send tool ({title})");
                 }
                 true
             }
@@ -1636,24 +1612,6 @@ impl AcpClient {
                     .unwrap_or("?");
                 let status = update.get("status").and_then(|v| v.as_str()).unwrap_or("?");
                 tracing::info!(target: "acp::tool", "tool_call_update: {tool_id} → {status}");
-                // Resolve a pending publish candidate on its terminal outcome.
-                if self.turn_publish_candidates.contains(tool_id) {
-                    if let Some(confirmed) = publish_outcome_confirms_delivery(update) {
-                        self.turn_publish_candidates.remove(tool_id);
-                        if confirmed {
-                            self.turn_sent_message = true;
-                            tracing::debug!(
-                                "publish confirmed (toolCallId={tool_id}); \
-                                 content-delivery fallback stays dormant this turn"
-                            );
-                        } else {
-                            tracing::debug!(
-                                "publish attempt failed (toolCallId={tool_id}); \
-                                 content-delivery fallback stays armed"
-                            );
-                        }
-                    }
-                }
                 false
             }
             "plan" => {
@@ -2045,19 +2003,12 @@ pub fn model_in_catalog(
         })
 }
 
-/// Return true if a `tool_call` session update *looks like* a Buzz message
-/// publish (kind 9 / forum post / comment) from its input. This only registers
-/// a publish **candidate** — delivery is confirmed separately from the call's
-/// terminal outcome by [`publish_outcome_confirms_delivery`].
-///
-/// The publish path is the dev-mcp `shell` tool running `buzz messages send`
-/// (or `buzz social publish`), so the tool name alone is not enough — inspect
-/// `rawInput` (the command/args) for the CLI publish signature. The haystack is
-/// normalized (quotes/commas/brackets → spaces, whitespace collapsed) so both
-/// shell strings (`buzz messages send --channel …`) and argv forms
-/// (`['buzz','messages','send',…]`, e.g. Python `subprocess.run`) match.
-/// Conservative: only matches an actual send subcommand, not reads like
-/// `buzz messages get`.
+/// Return true if a `tool_call` session update represents a Buzz message
+/// publish (kind 9 / forum post / comment). The publish path is the dev-mcp
+/// `shell` tool running `buzz messages send` (or `buzz social publish`), so the
+/// tool name alone is not enough — inspect `rawInput` (the command/args) for the
+/// CLI publish signature. Conservative: only matches an actual send subcommand,
+/// not reads like `buzz messages get`.
 fn tool_call_is_message_publish(update: &serde_json::Value) -> bool {
     // Flatten title + rawInput into one lowercase haystack. rawInput is
     // arbitrary JSON (shell command string, or structured args), so serialize
@@ -2070,112 +2021,11 @@ fn tool_call_is_message_publish(update: &serde_json::Value) -> bool {
     if let Some(raw) = update.get("rawInput") {
         haystack.push_str(&raw.to_string());
     }
-    // Normalize away quoting/punctuation so argv-style invocations
-    // ('buzz','messages','send') match the same signature as shell strings.
-    let normalized: String = haystack
-        .to_ascii_lowercase()
-        .chars()
-        .map(|c| match c {
-            '\'' | '"' | '`' | ',' | '[' | ']' | '(' | ')' | '{' | '}' | ':' => ' ',
-            other => other,
-        })
-        .collect();
-    let h = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let h = haystack.to_ascii_lowercase();
     // Match the publish subcommands that actually post to a channel. Guard
     // against read subcommands (get/thread/search/list) sharing the "messages"
-    // prefix by requiring the send/publish verb. ("messages send-diff"
-    // contains "messages send", so it is covered.)
-    h.contains("messages send") || h.contains("social publish")
-}
-
-/// Classify the terminal outcome of a publish tool call.
-///
-/// Returns `None` while the call is still pending/in-progress, `Some(true)`
-/// when the outcome confirms the message was delivered, and `Some(false)` when
-/// the attempt failed (so the content-delivery fallback must stay armed —
-/// see the `tool_call`/`tool_call_update` arms in `handle_session_update`).
-///
-/// Signals, strongest first:
-/// 1. `status: "failed"` (or cancelled) → not delivered.
-/// 2. `rawOutput.isError: true` → not delivered (buzz-agent's builtin shape).
-/// 3. Visible tool output containing the CLI's response envelope:
-///    `"accepted":true` confirms, `"accepted":false` denies.
-/// 4. A reported `exit_code` in the output (dev-mcp `shell` completes the
-///    *tool* call even when the *command* failed): nonzero → not delivered.
-/// 5. Otherwise, a `completed` non-error publish attempt counts as delivered —
-///    the status-quo direction (suppressed fallback == today's behavior),
-///    chosen over risking a duplicate post when output isn't visible.
-fn publish_outcome_confirms_delivery(update: &serde_json::Value) -> Option<bool> {
-    let status = update.get("status").and_then(|v| v.as_str())?;
-    match status {
-        "failed" | "cancelled" | "canceled" | "error" => Some(false),
-        "completed" => {
-            if update
-                .get("rawOutput")
-                .and_then(|r| r.get("isError"))
-                .and_then(serde_json::Value::as_bool)
-                == Some(true)
-            {
-                return Some(false);
-            }
-            // Compact the visible output (content blocks + rawOutput) so the
-            // envelope matches regardless of pretty-printing — and strip
-            // backslashes so JSON nested inside a JSON string (rawOutput
-            // serialization escapes the quotes) matches too.
-            let compact: String = publish_output_text(update)
-                .chars()
-                .filter(|c| !c.is_whitespace() && *c != '\\')
-                .collect();
-            if compact.contains(r#""accepted":true"#) {
-                return Some(true);
-            }
-            if compact.contains(r#""accepted":false"#) {
-                return Some(false);
-            }
-            if let Some(code) = extract_reported_exit_code(&compact) {
-                return Some(code == 0);
-            }
-            Some(true)
-        }
-        // "pending" / "in_progress" / anything non-terminal.
-        _ => None,
-    }
-}
-
-/// Gather the human-visible output of a tool call update: ACP `content` text
-/// blocks plus the serialized `rawOutput`, whichever are present.
-fn publish_output_text(update: &serde_json::Value) -> String {
-    let mut out = String::new();
-    if let Some(items) = update.get("content").and_then(|c| c.as_array()) {
-        for item in items {
-            // ACP shape: {type:"content", content:{type:"text", text:…}};
-            // tolerate a flat {text:…} too.
-            if let Some(t) = item.pointer("/content/text").and_then(|v| v.as_str()) {
-                out.push_str(t);
-                out.push(' ');
-            } else if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
-                out.push_str(t);
-                out.push(' ');
-            }
-        }
-    }
-    if let Some(raw) = update.get("rawOutput") {
-        out.push_str(&raw.to_string());
-    }
-    out
-}
-
-/// Extract a `"exit_code": N` value from compacted (whitespace-free) tool
-/// output, e.g. the dev-mcp `shell` tool's result JSON. Returns `None` when no
-/// exit code is reported.
-fn extract_reported_exit_code(compact: &str) -> Option<i64> {
-    const KEY: &str = r#""exit_code":"#;
-    let idx = compact.find(KEY)?;
-    let rest = &compact[idx + KEY.len()..];
-    let end = rest
-        .find(|c: char| !(c.is_ascii_digit() || c == '-'))
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
+    // prefix by requiring the send/publish verb.
+    h.contains("messages send") || h.contains("messages send-diff") || h.contains("social publish")
 }
 
 /// Return true if `text` is a bare acknowledgement the base prompt forbids
@@ -2303,17 +2153,6 @@ mod tests {
         });
         assert!(tool_call_is_message_publish(&social));
 
-        // Python-argv publish (the pattern agents use for backtick-heavy
-        // content): serialized rawInput has no "messages send" substring, but
-        // normalization must still match it.
-        let argv = serde_json::json!({
-            "title": "shell",
-            "rawInput": {
-                "command": "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['buzz','messages','send','--channel','abc','--content',content])\nPY"
-            }
-        });
-        assert!(tool_call_is_message_publish(&argv));
-
         // A READ subcommand sharing the "messages" prefix → NOT a publish.
         let read = serde_json::json!({
             "title": "shell",
@@ -2327,88 +2166,6 @@ mod tests {
             "rawInput": { "path": "/tmp/foo" }
         });
         assert!(!tool_call_is_message_publish(&other));
-    }
-
-    #[test]
-    fn publish_outcome_classification() {
-        // Non-terminal statuses → None (candidate stays pending).
-        for status in ["pending", "in_progress"] {
-            assert_eq!(
-                publish_outcome_confirms_delivery(&serde_json::json!({ "status": status })),
-                None,
-                "{status} is not terminal"
-            );
-        }
-        // No status at all (e.g. a content-only update) → None.
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({})),
-            None
-        );
-
-        // Failure statuses → Some(false): the fallback must stay armed.
-        for status in ["failed", "cancelled", "canceled", "error"] {
-            assert_eq!(
-                publish_outcome_confirms_delivery(&serde_json::json!({ "status": status })),
-                Some(false),
-                "{status} must not confirm delivery"
-            );
-        }
-
-        // completed + rawOutput.isError → not delivered (buzz-agent shape).
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({
-                "status": "completed",
-                "rawOutput": { "isError": true }
-            })),
-            Some(false)
-        );
-
-        // completed + CLI envelope accepted:true in the content text → delivered.
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({
-                "status": "completed",
-                "content": [{ "type": "content", "content": { "type": "text",
-                    "text": "0 {\"accepted\": true, \"event_id\": \"abc\"}" } }]
-            })),
-            Some(true)
-        );
-
-        // completed + envelope accepted:false (relay rejected) → not delivered.
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({
-                "status": "completed",
-                "rawOutput": { "stdout": "{\"accepted\": false, \"message\": \"rate limited\"}" }
-            })),
-            Some(false)
-        );
-
-        // completed, no envelope, dev-mcp shell reports nonzero exit_code →
-        // the COMMAND failed even though the TOOL completed. Not delivered.
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({
-                "status": "completed",
-                "content": [{ "type": "content", "content": { "type": "text",
-                    "text": "{\"exit_code\": 3, \"stderr\": \"auth failure\"}" } }]
-            })),
-            Some(false)
-        );
-
-        // completed, exit_code 0, no envelope → delivered.
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({
-                "status": "completed",
-                "content": [{ "type": "content", "content": { "type": "text",
-                    "text": "{\"exit_code\": 0, \"stdout\": \"sent\"}" } }]
-            })),
-            Some(true)
-        );
-
-        // completed with no inspectable output at all → delivered (status-quo
-        // direction: suppressing the fallback == today's behavior).
-        assert_eq!(
-            publish_outcome_confirms_delivery(&serde_json::json!({ "status": "completed" })),
-            Some(true)
-        );
     }
 
     #[test]
@@ -2435,166 +2192,6 @@ mod tests {
                 "should NOT be bare ack: {real:?}"
             );
         }
-    }
-
-    /// Build a `session/update` notification wrapping the given update object.
-    fn session_update_msg(update: serde_json::Value) -> serde_json::Value {
-        serde_json::json!({ "params": { "update": update } })
-    }
-
-    /// Successful send: candidate registered on `tool_call`, confirmed on the
-    /// terminal completed update with the CLI envelope → fallback suppressed.
-    #[tokio::test]
-    async fn fallback_suppressed_when_send_completes_successfully() {
-        let mut client = spawn_inert_client().await;
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "Here's my full reply narration." }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "tc-1",
-            "title": "shell",
-            "status": "pending",
-            "rawInput": { "command": "buzz messages send --channel abc --content 'hi'" }
-        })));
-        // Not yet confirmed: a crash here must leave the fallback ARMED.
-        assert!(!client.turn_sent_message);
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-1",
-            "status": "completed",
-            "rawOutput": { "stdout": "{\"accepted\":true,\"event_id\":\"e1\"}" }
-        })));
-        assert!(
-            client.turn_sent_message,
-            "successful send must confirm delivery"
-        );
-        assert_eq!(
-            client.take_undelivered_turn_message(),
-            None,
-            "confirmed delivery suppresses the fallback"
-        );
-    }
-
-    /// Failed send: candidate registered, terminal update is `failed` → the
-    /// fallback stays armed and the buffered content is released for posting.
-    /// This is the false-negative path from review: intent is not delivery.
-    #[tokio::test]
-    async fn fallback_stays_armed_when_send_fails() {
-        let mut client = spawn_inert_client().await;
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "The answer is 42." }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "tc-2",
-            "title": "shell",
-            "status": "pending",
-            "rawInput": { "command": "buzz messages send --channel abc --content 'The answer is 42.'" }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-2",
-            "status": "failed",
-            "rawOutput": { "error": "relay unreachable" }
-        })));
-        assert!(
-            !client.turn_sent_message,
-            "failed send must NOT count as delivery"
-        );
-        assert_eq!(
-            client.take_undelivered_turn_message().as_deref(),
-            Some("The answer is 42."),
-            "failed send leaves the fallback armed with the buffered reply"
-        );
-    }
-
-    /// Cancelled send behaves like failure: fallback stays armed.
-    #[tokio::test]
-    async fn fallback_stays_armed_when_send_cancelled() {
-        let mut client = spawn_inert_client().await;
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "Reply that never made it out." }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "tc-3",
-            "title": "shell",
-            "status": "pending",
-            "rawInput": { "command": "buzz messages send --channel abc --content x" }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-3",
-            "status": "cancelled"
-        })));
-        assert!(!client.turn_sent_message);
-        assert!(client.take_undelivered_turn_message().is_some());
-    }
-
-    /// A failed attempt followed by a successful retry (new toolCallId)
-    /// confirms delivery — the fallback must not double-post after a retry.
-    #[tokio::test]
-    async fn fallback_suppressed_after_failed_then_successful_retry() {
-        let mut client = spawn_inert_client().await;
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "narration" }
-        })));
-        for (id, status) in [("tc-4a", "failed"), ("tc-4b", "completed")] {
-            let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-                "sessionUpdate": "tool_call",
-                "toolCallId": id,
-                "title": "shell",
-                "status": "pending",
-                "rawInput": { "command": "buzz messages send --channel abc --content x" }
-            })));
-            let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-                "sessionUpdate": "tool_call_update",
-                "toolCallId": id,
-                "status": status,
-                "rawOutput": { "stdout": "{\"accepted\":true,\"event_id\":\"e2\"}" }
-            })));
-        }
-        assert!(
-            client.turn_sent_message,
-            "retry succeeded — delivery confirmed"
-        );
-        assert_eq!(client.take_undelivered_turn_message(), None);
-    }
-
-    /// Argv-style publish (Python subprocess) is recognized as a candidate and
-    /// confirmed on success — the normalization regression from review.
-    #[tokio::test]
-    async fn fallback_suppressed_for_argv_style_publish() {
-        let mut client = spawn_inert_client().await;
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "agent_message_chunk",
-            "content": { "type": "text", "text": "long narration between tool calls" }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call",
-            "toolCallId": "tc-5",
-            "title": "shell",
-            "status": "pending",
-            "rawInput": { "command": "python3 - <<'PY'\nimport subprocess\nsubprocess.run(['buzz','messages','send','--channel','abc','--content',content])\nPY" }
-        })));
-        let _ = client.handle_session_update(&session_update_msg(serde_json::json!({
-            "sessionUpdate": "tool_call_update",
-            "toolCallId": "tc-5",
-            "status": "completed",
-            "content": [{ "type": "content", "content": { "type": "text",
-                "text": "0 {\"accepted\": true, \"event_id\": \"abc\"}" } }]
-        })));
-        assert!(client.turn_sent_message);
-        assert_eq!(
-            client.take_undelivered_turn_message(),
-            None,
-            "argv publish must not double-post the narration"
-        );
     }
 
     #[test]
