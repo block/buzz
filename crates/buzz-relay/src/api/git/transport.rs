@@ -50,6 +50,13 @@ const PACK_OPS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300
 const RECEIVE_PACK_MAX_OUTPUT_BYTES: u64 = 1024 * 1024;
 /// Maximum ref advertisement output after manifest ref-count validation.
 const INFO_REFS_MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
+/// Maximum *decoded* upload-pack request body (want/have negotiation).
+///
+/// Bounds the output of [`decode_git_request_body`] so a small gzip bomb
+/// cannot bypass the compressed-body `RequestBodyLimitLayer`. Negotiation
+/// bodies are pkt-lines of wants/haves (~50 bytes per ref); even a repo
+/// with a million refs stays far under this.
+const UPLOAD_PACK_MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 
 /// NIP-98 auth extractor for git routes.
 ///
@@ -728,7 +735,18 @@ async fn info_refs_subprocess(
 /// Only `gzip` is decoded (the sole encoding git emits). An unknown
 /// non-identity encoding is passed through unchanged rather than rejected;
 /// the subprocess surfaces any real mismatch as an in-band protocol error.
-fn decode_git_request_body(headers: &axum::http::HeaderMap, body: Body) -> Body {
+///
+/// `max_decoded_bytes` bounds the *inflated* size: the router's
+/// `RequestBodyLimitLayer` only caps compressed bytes, so without this a
+/// small gzip bomb (ratios up to ~1000:1) could feed an effectively
+/// unbounded stream to the subprocess — for receive-pack that means
+/// unbounded scratch-disk writes. Exceeding the cap errors the stream,
+/// which the stdin pumps surface as a logged early-EOF to git.
+fn decode_git_request_body(
+    headers: &axum::http::HeaderMap,
+    body: Body,
+    max_decoded_bytes: u64,
+) -> Body {
     let is_gzip = headers
         .get(header::CONTENT_ENCODING)
         .and_then(|v| v.to_str().ok())
@@ -741,11 +759,22 @@ fn decode_git_request_body(headers: &axum::http::HeaderMap, body: Body) -> Body 
     use tokio_util::io::{ReaderStream, StreamReader};
     let byte_stream = body
         .into_data_stream()
-        .map(|res| res.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
+        .map(|res| res.map_err(std::io::Error::other))
         .boxed();
     let decoder =
         async_compression::tokio::bufread::GzipDecoder::new(StreamReader::new(byte_stream));
-    Body::from_stream(ReaderStream::new(decoder))
+    let mut decoded: u64 = 0;
+    let capped = ReaderStream::new(decoder).map(move |chunk| {
+        let chunk = chunk?;
+        decoded = decoded.saturating_add(chunk.len() as u64);
+        if decoded > max_decoded_bytes {
+            return Err(std::io::Error::other(format!(
+                "gzip git request body exceeded {max_decoded_bytes} decoded bytes"
+            )));
+        }
+        Ok(chunk)
+    });
+    Body::from_stream(capped)
 }
 
 /// `POST /git/{owner}/{repo}/git-upload-pack`
@@ -762,7 +791,7 @@ pub async fn upload_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let _ = validate_repo_id(&params.owner, &params.repo)?;
-    let body = decode_git_request_body(&headers, body);
+    let body = decode_git_request_body(&headers, body, UPLOAD_PACK_MAX_DECODED_BYTES);
     let permit = acquire_git_permit(&state, "upload_pack")?;
 
     let repo = match hydrate_for_read(
@@ -834,7 +863,7 @@ pub async fn receive_pack(
     body: Body,
 ) -> Result<Response, Response> {
     let repo_name = validate_repo_id(&params.owner, &params.repo)?;
-    let body = decode_git_request_body(&headers, body);
+    let body = decode_git_request_body(&headers, body, state.config.git_max_pack_bytes);
     let pusher_hex = hex::encode(auth.pubkey.to_bytes());
     let _permit = acquire_git_permit(&state, "receive_pack")?;
 
@@ -1006,6 +1035,7 @@ async fn run_git_at(
 
     // Stream request body to git stdin.
     let mut stdin = child.stdin.take().unwrap();
+    let pump_service = service.to_string();
     let body_task = tokio::spawn(async move {
         use futures_util::StreamExt;
         let mut stream = body.into_data_stream();
@@ -1019,7 +1049,14 @@ async fn run_git_at(
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    // Body/decode errors (client abort, malformed gzip,
+                    // decoded-size cap) surface to git as early EOF; log so
+                    // there is a server-side signal, not just an opaque
+                    // client-side hangup.
+                    warn!(error = %e, service = %pump_service, "git request body stream failed");
+                    break;
+                }
             }
         }
         drop(stdin); // close stdin → EOF for git
@@ -1416,7 +1453,14 @@ fn stream_git_read(
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    // Body/decode errors (client abort, malformed gzip,
+                    // decoded-size cap) surface to git as early EOF; log so
+                    // there is a server-side signal, not just an opaque
+                    // client-side hangup.
+                    warn!(error = %e, service = %service, "git request body stream failed");
+                    break;
+                }
             }
         }
         drop(stdin); // close stdin → EOF for git
@@ -1753,7 +1797,7 @@ mod track_c_tests {
 
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
-        let decoded = decode_git_request_body(&headers, Body::from(gzipped));
+        let decoded = decode_git_request_body(&headers, Body::from(gzipped), u64::MAX);
         let bytes = axum::body::to_bytes(decoded, usize::MAX).await.unwrap();
         assert_eq!(bytes.as_ref(), plaintext);
     }
@@ -1764,9 +1808,82 @@ mod track_c_tests {
     async fn identity_request_body_is_passthrough() {
         use axum::http::HeaderMap;
         let plaintext = b"0032want cb09a769da1c01f458fa6959d4e8eded38fac8d3\n0000";
-        let decoded = decode_git_request_body(&HeaderMap::new(), Body::from(plaintext.to_vec()));
+        let decoded =
+            decode_git_request_body(&HeaderMap::new(), Body::from(plaintext.to_vec()), u64::MAX);
         let bytes = axum::body::to_bytes(decoded, usize::MAX).await.unwrap();
         assert_eq!(bytes.as_ref(), plaintext);
+    }
+
+    /// A gzip bomb is cut off at the decoded-byte cap: the router's
+    /// `RequestBodyLimitLayer` only bounds *compressed* bytes, so the
+    /// decode seam must enforce the inflated bound itself. Highly
+    /// compressible input (1 MiB of zeros → ~1 KiB gzip) must error once
+    /// the decoded stream crosses the cap.
+    #[tokio::test]
+    async fn gzip_request_body_over_decoded_cap_errors() {
+        use axum::http::HeaderMap;
+        use std::io::Write;
+
+        let plaintext = vec![0u8; 1024 * 1024]; // inflates 1 MiB from ~1 KiB wire
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plaintext).unwrap();
+        let gzipped = encoder.finish().unwrap();
+        assert!(
+            gzipped.len() < 64 * 1024,
+            "precondition: bomb is small on the wire (got {} bytes)",
+            gzipped.len()
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        let cap: u64 = 64 * 1024;
+        let decoded = decode_git_request_body(&headers, Body::from(gzipped), cap);
+        let err = axum::body::to_bytes(decoded, usize::MAX)
+            .await
+            .expect_err("decoded stream must error past the cap");
+        assert!(
+            err.to_string().contains("decoded bytes"),
+            "error should name the decoded-size cap, got: {err}"
+        );
+    }
+
+    /// The decoded cap does not truncate bodies at or under the limit —
+    /// exactly-at-cap input passes through complete.
+    #[tokio::test]
+    async fn gzip_request_body_at_decoded_cap_passes() {
+        use axum::http::HeaderMap;
+        use std::io::Write;
+
+        let plaintext = vec![7u8; 8 * 1024];
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&plaintext).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        let decoded =
+            decode_git_request_body(&headers, Body::from(gzipped), plaintext.len() as u64);
+        let bytes = axum::body::to_bytes(decoded, usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), plaintext);
+    }
+
+    /// Malformed gzip (valid header, corrupt deflate stream) surfaces as a
+    /// stream error rather than silently yielding garbage — the stdin pump
+    /// logs it and closes the subprocess's stdin early.
+    #[tokio::test]
+    async fn malformed_gzip_request_body_errors() {
+        use axum::http::HeaderMap;
+
+        // Valid 10-byte gzip header followed by garbage.
+        let mut bogus = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff];
+        bogus.extend_from_slice(b"this is not deflate data at all");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_ENCODING, "gzip".parse().unwrap());
+        let decoded = decode_git_request_body(&headers, Body::from(bogus), u64::MAX);
+        axum::body::to_bytes(decoded, usize::MAX)
+            .await
+            .expect_err("corrupt gzip must error the decoded stream");
     }
 
     fn branches_only_manifest() -> Manifest {
