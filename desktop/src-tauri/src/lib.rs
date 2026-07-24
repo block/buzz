@@ -229,6 +229,18 @@ pub fn run() {
                         });
                     }
 
+                    // Windows draws a separate native title bar that cannot be
+                    // tinted to match the app surface. Go undecorated and let
+                    // the web chrome (`AppTopChrome`) own the whole top edge,
+                    // matching the macOS Overlay style. `set_shadow` keeps the
+                    // drop shadow and rounded corners an undecorated window
+                    // otherwise loses.
+                    #[cfg(target_os = "windows")]
+                    {
+                        let _ = window.set_decorations(false);
+                        let _ = window.set_shadow(true);
+                    }
+
                     #[cfg(not(target_os = "macos"))]
                     {
                         reveal_initial_window(&window);
