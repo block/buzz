@@ -147,7 +147,7 @@ class _InlineCameraPreview extends HookConsumerWidget {
                 child: Padding(
                   padding: const EdgeInsets.all(Grid.twelve),
                   child: _CameraCaptureButton(
-                    isCapturing: isCapturing.value,
+                    isPressed: isCapturing.value,
                     onTap: capture,
                   ),
                 ),
@@ -233,41 +233,41 @@ class _CameraPlaceholder extends StatelessWidget {
 }
 
 class _CameraCaptureButton extends StatelessWidget {
-  final bool isCapturing;
+  final bool isPressed;
   final VoidCallback onTap;
 
-  const _CameraCaptureButton({required this.isCapturing, required this.onTap});
+  const _CameraCaptureButton({required this.isPressed, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
+    final duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 100);
+
     return Semantics(
       button: true,
       label: 'Take photo',
       child: GestureDetector(
-        onTap: isCapturing ? null : onTap,
-        child: Container(
-          width: 64,
-          height: 64,
-          decoration: BoxDecoration(
-            color: Colors.white.withValues(alpha: 0.24),
-            shape: BoxShape.circle,
-            border: Border.all(color: Colors.white, width: 3),
-          ),
-          padding: const EdgeInsets.all(Grid.half),
-          child: DecoratedBox(
-            decoration: const BoxDecoration(
-              color: Colors.white,
+        onTap: isPressed ? null : onTap,
+        child: AnimatedScale(
+          scale: isPressed ? 0.92 : 1,
+          duration: duration,
+          curve: Curves.easeOutCubic,
+          child: Container(
+            width: 64,
+            height: 64,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.24),
               shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 3),
             ),
-            child: isCapturing
-                ? const Padding(
-                    padding: EdgeInsets.all(Grid.twelve),
-                    child: CircularProgressIndicator(
-                      color: Colors.black,
-                      strokeWidth: 2,
-                    ),
-                  )
-                : null,
+            padding: const EdgeInsets.all(Grid.half),
+            child: const DecoratedBox(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+              ),
+            ),
           ),
         ),
       ),

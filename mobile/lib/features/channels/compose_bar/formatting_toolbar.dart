@@ -61,7 +61,7 @@ class _FormatButton extends StatelessWidget {
         onTap: onTap,
         child: Padding(
           padding: const EdgeInsets.all(Grid.xxs),
-          child: Icon(icon, size: 18, color: context.colors.onSurfaceVariant),
+          child: Icon(icon, size: 18, color: context.colors.primary),
         ),
       ),
     );

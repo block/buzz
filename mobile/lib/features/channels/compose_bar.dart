@@ -29,6 +29,7 @@ import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
 
 part 'compose_bar/helpers.dart';
+part 'compose_bar/markdown_editing_controller.dart';
 part 'compose_bar/suggestions.dart';
 part 'compose_bar/formatting_toolbar.dart';
 part 'compose_bar/attachments.dart';
@@ -42,9 +43,9 @@ const _pastedImageMimeTypes = <String>[
   'image/webp',
 ];
 
-/// Rich compose bar with @mention autocomplete, emoji picker, and a markdown
-/// formatting toolbar. Used in both channel and thread views — the caller
-/// provides an [onSend] callback that handles actual message submission.
+/// Rich compose bar with @mention autocomplete and a markdown formatting
+/// toolbar. Used in both channel and thread views — the caller provides an
+/// [onSend] callback that handles actual message submission.
 typedef ComposeBarOnSend =
     Future<void> Function(
       String content,
@@ -74,7 +75,8 @@ class ComposeBar extends HookConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final controller = useTextEditingController();
+    final controller = useMemoized(_MarkdownEditingController.new);
+    useEffect(() => controller.dispose, [controller]);
     final focusNode = useFocusNode();
     final isComposerExpanded = useState(false);
     final showAttachments = useState(false);
@@ -650,10 +652,10 @@ class ComposeBar extends HookConsumerWidget {
             child: _InlineCameraPreview(
               onClose: () => showCamera.value = false,
               onCapture: (image) async {
+                showCamera.value = false;
                 await pickAndUpload(
                   () => ref.read(mediaUploadServiceProvider).uploadImage(image),
                 );
-                if (context.mounted) showCamera.value = false;
               },
             ),
           )

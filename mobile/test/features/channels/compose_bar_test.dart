@@ -405,6 +405,108 @@ void main() {
       );
     });
 
+    testWidgets('renders markdown formatting without visible delimiters', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(
+        find.byType(TextField),
+        '**bold** _italic_ ~~strike~~ `code`',
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final textSpan = textField.controller!.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: tester.element(find.byType(TextField)).textTheme.bodyLarge,
+        withComposing: false,
+      );
+      final spans = _flattenStyledTextSpans(textSpan);
+
+      expect(textSpan.toPlainText(), '**bold** _italic_ ~~strike~~ `code`');
+      expect(
+        spans.singleWhere((span) => span.text == 'bold').style.fontWeight,
+        FontWeight.w700,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'italic').style.fontStyle,
+        FontStyle.italic,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'strike').style.decoration,
+        TextDecoration.lineThrough,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'code').style.fontFamily,
+        'GeistMono',
+      );
+      expect(
+        spans
+            .where((span) => {'**', '_', '~~', '`'}.contains(span.text))
+            .every((span) => (span.style.fontSize ?? 1) < 1),
+        isTrue,
+      );
+
+      textField.controller!.value = textField.controller!.value.copyWith(
+        composing: const TextRange(start: 2, end: 6),
+      );
+      final composingSpan = textField.controller!.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: tester.element(find.byType(TextField)).textTheme.bodyLarge,
+        withComposing: true,
+      );
+      final composingSpans = _flattenStyledTextSpans(composingSpan);
+      expect(
+        composingSpans
+            .where((span) => span.text == '**')
+            .every((span) => (span.style.fontSize ?? 1) < 1),
+        isTrue,
+      );
+      expect(
+        composingSpans
+            .singleWhere((span) => span.text == 'bold')
+            .style
+            .decoration,
+        TextDecoration.underline,
+      );
+    });
+
+    testWidgets('uses the primary color for formatting actions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+
+      final boldFinder = find.byIcon(LucideIcons.bold);
+      final boldIcon = tester.widget<Icon>(boldFinder);
+      final colors = tester.element(boldFinder).colors;
+      expect(boldIcon.color, colors.primary);
+    });
+
     testWidgets('pasted image follows the attachment preview and send path', (
       tester,
     ) async {
@@ -1562,6 +1664,26 @@ Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
   await tester.tap(find.byIcon(LucideIcons.arrowUp));
   await tester.pumpAndSettle();
+}
+
+List<({String text, TextStyle style})> _flattenStyledTextSpans(
+  InlineSpan root,
+) {
+  final result = <({String text, TextStyle style})>[];
+
+  void visit(InlineSpan span, TextStyle inheritedStyle) {
+    if (span is! TextSpan) return;
+    final effectiveStyle = inheritedStyle.merge(span.style);
+    if (span.text case final text?) {
+      result.add((text: text, style: effectiveStyle));
+    }
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      visit(child, effectiveStyle);
+    }
+  }
+
+  visit(root, const TextStyle());
+  return result;
 }
 
 Channel _makeCurrentChannel({String channelType = 'stream'}) {
