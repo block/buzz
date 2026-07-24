@@ -28,10 +28,22 @@ impl MeshEndpoint {
         bind_addr: SocketAddr,
     ) -> Result<Self, MeshError> {
         let runtime_id = runtime_id_from_public_key(secret_key.public());
-        let endpoint = Endpoint::builder(iroh::endpoint::presets::Minimal)
+        let mut builder = Endpoint::builder(iroh::endpoint::presets::Minimal)
             .secret_key(secret_key)
             .alpns(vec![ALPN.to_vec()])
-            .relay_mode(RelayMode::Disabled)
+            .relay_mode(RelayMode::Disabled);
+        // A loopback-bound socket can never transmit to a WAN address, but the
+        // portmapper still probes the gateway (UPnP/PCP/NAT-PMP) and, on
+        // networks where a mapping succeeds, advertises the external address
+        // as a `Portmapped` direct-addr candidate. Path selection can then
+        // steer the connection onto that unsendable candidate mid-stream
+        // (`sendmsg` → EADDRNOTAVAIL) and frame delivery silently stops.
+        // Loopback reachability is loopback-only by definition — skip gateway
+        // probing for loopback binds.
+        if bind_addr.ip().is_loopback() {
+            builder = builder.portmapper_config(iroh::endpoint::PortmapperConfig::Disabled);
+        }
+        let endpoint = builder
             .bind_addr(bind_addr)
             .map_err(|err| MeshError::Transport(err.to_string()))?
             .bind()
@@ -146,6 +158,26 @@ mod tests {
                 .await
                 .unwrap();
         (a, b)
+    }
+
+    /// A loopback-bound endpoint must never advertise non-loopback direct
+    /// addrs. With the portmapper enabled, a NAT-PMP/UPnP-capable gateway
+    /// hands out a WAN mapping that is advertised as a `Portmapped`
+    /// candidate; path selection can then steer onto an address the
+    /// loopback-bound socket cannot send to (`sendmsg` → EADDRNOTAVAIL) and
+    /// frame delivery stalls (#2458). Trivially green on hosts without a
+    /// portmap-capable gateway; fails pre-fix on hosts with one.
+    #[tokio::test]
+    async fn loopback_bind_advertises_only_loopback_addrs() {
+        let ep = MeshEndpoint::bind(loopback_any()).await.unwrap();
+        // The portmap probe (when enabled) completes within ~a second of bind.
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        for addr in ep.ip_addrs() {
+            assert!(
+                addr.ip().is_loopback(),
+                "non-loopback direct addr advertised from loopback bind: {addr}"
+            );
+        }
     }
 
     async fn connected_pair() -> (
