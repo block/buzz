@@ -517,13 +517,21 @@ fn runtime_metadata_env_vars_injects_model_and_provider() {
 
 #[test]
 fn runtime_metadata_env_vars_skips_provider_when_locked() {
+    // The claude runtime shape: model injectable via ANTHROPIC_MODEL (#2692),
+    // provider locked to Anthropic so no provider env is written.
     let vars = runtime_metadata_env_vars(
-        None, // claude has no model_env_var
+        Some("ANTHROPIC_MODEL"),
         None, // claude has no provider_env_var
         true, // provider_locked = true
-        Some("claude-opus-4-7"),
+        Some("claude-sonnet-5"),
         Some("anthropic"),
     );
+    assert_eq!(vars, vec![("ANTHROPIC_MODEL", "claude-sonnet-5")]);
+}
+
+#[test]
+fn runtime_metadata_env_vars_empty_without_env_channels() {
+    let vars = runtime_metadata_env_vars(None, None, true, Some("some-model"), Some("anthropic"));
     assert!(vars.is_empty());
 }
 

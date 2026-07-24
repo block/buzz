@@ -327,7 +327,7 @@ fn buzz_agent_requirements(effective: &EffectiveAgentEnv) -> Vec<Requirement> {
         Some("databricks") | Some("databricks_v2") | Some("databricks-v2") => {
             Some("DATABRICKS_MODEL")
         }
-        Some("anthropic") => Some("ANTHROPIC_MODEL"),
+        Some("anthropic") => Some(super::ANTHROPIC_MODEL_ENV_KEY),
         Some("openai") | Some("openai-compat") => Some("OPENAI_COMPAT_MODEL"),
         _ => None,
     };

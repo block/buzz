@@ -24,11 +24,18 @@ use std::collections::BTreeMap;
 ///
 /// Non-structured knobs (`GOOSE_TEMPERATURE`, `GOOSE_CONTEXT_LIMIT`) are NOT
 /// in this list — they have no structured counterpart and must be preserved.
+/// Env var the Claude CLI honors as a session model override. Single source
+/// of truth for the key — referenced by the claude runtime entry
+/// (`discovery.rs`), the derived-key list below, and the readiness
+/// provider-model mapping, so the three cannot drift apart.
+pub(crate) const ANTHROPIC_MODEL_ENV_KEY: &str = "ANTHROPIC_MODEL";
+
 pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
     "GOOSE_MODEL",
     "GOOSE_PROVIDER",
     "BUZZ_AGENT_MODEL",
     "BUZZ_AGENT_PROVIDER",
+    ANTHROPIC_MODEL_ENV_KEY,
 ];
 
 /// Returns `true` if `key` is a derived provider/model env key that should be
