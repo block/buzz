@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::time::Duration;
 use subtle::ConstantTimeEq;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 const MAXIMUM_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
@@ -101,15 +102,20 @@ impl AuthenticatedSourceService {
         dead_code,
         reason = "Task 8 installs the production command-brief source backend"
     )]
-    pub(crate) fn call(&self, tool_name: &str, arguments: Value) -> Result<Value, AdmissionError> {
+    pub(crate) fn call(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, AdmissionError> {
         call_authenticated_source_tool(
             &self.verified.endpoint,
             &self.verified.bearer_token,
             &self.attestation_secret,
             &self.verified.server_identity,
             &self.verified.active_identity,
-            tool_name,
-            arguments,
+            AuthenticatedSourceToolCall::new(tool_name, arguments),
+            cancellation,
         )
     }
 
@@ -291,10 +297,12 @@ struct McpSession<'a> {
     endpoint: &'a str,
     bearer_token: &'a str,
     session_id: Option<String>,
+    cancellation: Option<&'a CancellationToken>,
 }
 
 impl McpSession<'_> {
     fn post(&mut self, request: &Value) -> Result<Value, AdmissionError> {
+        ensure_mcp_active(self.cancellation)?;
         let mut builder = self
             .client
             .post(self.endpoint)
@@ -332,6 +340,7 @@ impl McpSession<'_> {
     }
 
     fn notify_initialized(&mut self) -> Result<(), AdmissionError> {
+        ensure_mcp_active(self.cancellation)?;
         let request = serde_json::json!({
             "jsonrpc": "2.0",
             "method": "notifications/initialized",
@@ -412,7 +421,11 @@ fn mcp_result(response: &Value) -> Result<&Map<String, Value>, AdmissionError> {
         .ok_or(AdmissionError::InvalidResponse)
 }
 
-fn verify_mcp_authentication_gate(client: &Client, endpoint: &str) -> Result<(), AdmissionError> {
+fn verify_mcp_authentication_gate(
+    client: &Client,
+    endpoint: &str,
+    cancellation: Option<&CancellationToken>,
+) -> Result<(), AdmissionError> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "buzz-auth-negative-probe",
@@ -429,6 +442,7 @@ fn verify_mcp_authentication_gate(client: &Client, endpoint: &str) -> Result<(),
         uuid::Uuid::new_v4().simple()
     );
     for authorization in [None, Some(format!("Bearer {invalid_token}"))] {
+        ensure_mcp_active(cancellation)?;
         let mut builder = client
             .post(endpoint)
             .header(ACCEPT, "application/json, text/event-stream")
@@ -453,7 +467,9 @@ fn verify_service_attestation(
     attestation_secret: &str,
     expected_service: &str,
     expected_identity: &str,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<(), AdmissionError> {
+    ensure_mcp_active(cancellation)?;
     if !valid_attestation_secret(attestation_secret)
         || !matches!(expected_service, "memory" | "rag")
         || expected_identity.is_empty()
@@ -478,6 +494,7 @@ fn verify_service_attestation(
         .json(&serde_json::json!({"nonce": nonce}))
         .send()
         .map_err(|_| AdmissionError::ServiceUnavailable)?;
+    ensure_mcp_active(cancellation)?;
     if response.status().is_redirection() || !response.status().is_success() {
         return Err(AdmissionError::AuthenticationUnavailable);
     }
@@ -536,6 +553,14 @@ fn valid_attestation_secret(value: &str) -> bool {
     (32..=1024).contains(&value.len()) && !value.bytes().any(|byte| byte.is_ascii_control())
 }
 
+fn ensure_mcp_active(cancellation: Option<&CancellationToken>) -> Result<(), AdmissionError> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
+        Err(AdmissionError::ServiceUnavailable)
+    } else {
+        Ok(())
+    }
+}
+
 pub(crate) fn admission_secrets_are_independent(
     bearer_token: &str,
     attestation_secret: &str,
@@ -588,6 +613,7 @@ pub(crate) fn probe_authenticated_mcp(
         attestation_secret,
         expected_service,
         expected_identity,
+        None,
     )?;
     let status = if let Some(status_tool) = status_tool {
         if !tools.iter().any(|tool| tool == status_tool) {
@@ -614,7 +640,9 @@ fn open_authenticated_mcp_session<'a>(
     attestation_secret: &str,
     expected_service: &str,
     expected_identity: &str,
+    cancellation: Option<&'a CancellationToken>,
 ) -> Result<(McpSession<'a>, String, Vec<String>), AdmissionError> {
+    ensure_mcp_active(cancellation)?;
     match expected_service {
         "memory" => validate_literal_loopback_mcp_endpoint(endpoint)?,
         "rag" => validate_rag_literal_loopback_mcp_endpoint(endpoint)?,
@@ -635,13 +663,15 @@ fn open_authenticated_mcp_session<'a>(
         attestation_secret,
         expected_service,
         expected_identity,
+        cancellation,
     )?;
-    verify_mcp_authentication_gate(&client, endpoint)?;
+    verify_mcp_authentication_gate(&client, endpoint, cancellation)?;
     let mut session = McpSession {
         client,
         endpoint,
         bearer_token,
         session_id: None,
+        cancellation,
     };
     let initialize = session.post(&serde_json::json!({
         "jsonrpc": "2.0",
@@ -724,6 +754,17 @@ fn call_tool_in_session(
     serde_json::from_str(text).map_err(|_| AdmissionError::InvalidResponse)
 }
 
+pub(crate) struct AuthenticatedSourceToolCall<'a> {
+    name: &'a str,
+    arguments: Value,
+}
+
+impl<'a> AuthenticatedSourceToolCall<'a> {
+    pub(crate) const fn new(name: &'a str, arguments: Value) -> Self {
+        Self { name, arguments }
+    }
+}
+
 /// Executes one exact source-read tool through the same fully authenticated
 /// MCP session gates used by readiness admission.
 pub(crate) fn call_authenticated_source_tool(
@@ -732,17 +773,18 @@ pub(crate) fn call_authenticated_source_tool(
     attestation_secret: &str,
     expected_service: &str,
     expected_identity: &str,
-    tool_name: &str,
-    arguments: Value,
+    call: AuthenticatedSourceToolCall<'_>,
+    cancellation: &CancellationToken,
 ) -> Result<Value, AdmissionError> {
-    let expected_tool_service = match tool_name {
+    ensure_mcp_active(Some(cancellation))?;
+    let expected_tool_service = match call.name {
         "command_memory_context" => "memory",
         "search_knowledge_base" | "get_snapshot_status" => "rag",
         _ => return Err(AdmissionError::UnexpectedToolCatalog),
     };
     if expected_service != expected_tool_service
-        || !arguments.is_object()
-        || serde_json::to_vec(&arguments)
+        || !call.arguments.is_object()
+        || serde_json::to_vec(&call.arguments)
             .ok()
             .is_none_or(|bytes| bytes.len() > 64 * 1024)
     {
@@ -754,11 +796,12 @@ pub(crate) fn call_authenticated_source_tool(
         attestation_secret,
         expected_service,
         expected_identity,
+        Some(cancellation),
     )?;
-    if !tools.iter().any(|tool| tool == tool_name) {
+    if !tools.iter().any(|tool| tool == call.name) {
         return Err(AdmissionError::MissingRequiredTool);
     }
-    call_tool_in_session(&mut session, tool_name, arguments)
+    call_tool_in_session(&mut session, call.name, call.arguments)
 }
 
 #[path = "policy/catalog.rs"]

@@ -325,3 +325,80 @@ async fn panic_and_task_error_do_not_poison_later_jobs() {
         .await;
     assert_eq!(healthy, Ok("healthy"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn same_key_remains_active_until_its_terminal_lifecycle_event_is_visible() {
+    for round in 0..256 {
+        let scheduler = LocalModelScheduler::new(1).expect("scheduler");
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let first_scheduler = scheduler.clone();
+        let first_barrier = Arc::clone(&barrier);
+        let first = tokio::spawn(async move {
+            first_scheduler
+                .schedule(
+                    key("terminal-order", AdviserId::Operations),
+                    CancellationToken::new(),
+                    move |_| async move {
+                        first_barrier.wait().await;
+                        Ok::<_, &'static str>(())
+                    },
+                )
+                .await
+        });
+        let (active, running_history) = loop {
+            let snapshot = scheduler.state_snapshot();
+            if snapshot.0 == 1
+                && snapshot.1.last().map(|event| event.state())
+                    == Some(SchedulerLifecycleState::Running)
+            {
+                break snapshot;
+            }
+            tokio::task::yield_now().await;
+        };
+        assert_eq!(active, 1);
+        assert_eq!(
+            running_history.last().map(|event| event.state()),
+            Some(SchedulerLifecycleState::Running)
+        );
+
+        let second_scheduler = scheduler.clone();
+        let second_barrier = Arc::clone(&barrier);
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            loop {
+                match second_scheduler
+                    .schedule(
+                        key("terminal-order", AdviserId::Operations),
+                        CancellationToken::new(),
+                        |_| async { Ok::<_, &'static str>(()) },
+                    )
+                    .await
+                {
+                    Err(SchedulerError::Duplicate) => tokio::task::yield_now().await,
+                    result => break result,
+                }
+            }
+        });
+
+        assert!(first.await.expect("first join").is_ok(), "round {round}");
+        assert!(second.await.expect("second join").is_ok(), "round {round}");
+        let (active, history) = scheduler.state_snapshot();
+        assert_eq!(active, 0);
+        let states = history
+            .into_iter()
+            .map(|event| event.state())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![
+                SchedulerLifecycleState::Queued,
+                SchedulerLifecycleState::Running,
+                SchedulerLifecycleState::Completed,
+                SchedulerLifecycleState::Queued,
+                SchedulerLifecycleState::Running,
+                SchedulerLifecycleState::Completed,
+            ],
+            "round {round}"
+        );
+    }
+}

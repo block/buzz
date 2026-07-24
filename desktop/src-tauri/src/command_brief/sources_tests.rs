@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 
 use super::sources::{
     FixedRetrievalIntent, FrozenSourceContext, ProductionSourceBackend, SourceBackend,
@@ -101,6 +102,7 @@ impl SourceBackend for FakeBackend {
         &self,
         snapshot: &VerifiedRagSnapshot,
         intent: &FixedRetrievalIntent,
+        _cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
         self.state.lock().expect("fake state").requests.push(json!({
             "kind": "rag",
@@ -121,7 +123,11 @@ impl SourceBackend for FakeBackend {
         Ok(value)
     }
 
-    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Value, SourceReadError> {
+    fn collect_memory(
+        &self,
+        intent: &FixedRetrievalIntent,
+        _cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError> {
         self.state
             .lock()
             .expect("fake state")
@@ -139,23 +145,29 @@ impl SourceBackend for FakeBackend {
         self.state.lock().expect("fake state").memory_conflict_count
     }
 
-    fn collect_apple(&self, request: &AppleInputRequest) -> AppleInputResponse {
+    fn collect_apple(
+        &self,
+        request: &AppleInputRequest,
+        _cancellation: &CancellationToken,
+    ) -> Result<AppleInputResponse, SourceCollectionError> {
         self.state
             .lock()
             .expect("fake state")
             .requests
             .push(json!({"kind": "apple", "request": request}));
-        self.state
+        Ok(self
+            .state
             .lock()
             .expect("fake state")
             .apple_results
             .pop_front()
-            .unwrap_or_else(|| apple_response("files", "authorized", Vec::new(), false, None))
+            .unwrap_or_else(|| apple_response("files", "authorized", Vec::new(), false, None)))
     }
 
     fn recheck_rag_snapshot(
         &self,
         expected: &VerifiedRagSnapshot,
+        _cancellation: &CancellationToken,
     ) -> Result<(), SourceCollectionError> {
         let observed = self
             .state
@@ -1440,6 +1452,7 @@ impl SourceToolCaller for FakeSourceToolCaller {
         _service: &AuthenticatedSourceService,
         tool_name: &str,
         arguments: Value,
+        _cancellation: &CancellationToken,
     ) -> Result<Value, AdmissionError> {
         self.calls
             .lock()
@@ -1480,11 +1493,14 @@ fn production_backend_uses_fixed_tool_arguments_and_rejects_snapshot_mismatch() 
         .retrieval_intents()[0]
         .clone();
 
-    assert!(backend.collect_rag(&snapshot, &intent).is_ok());
-    assert!(backend.collect_memory(&intent).is_ok());
+    let cancellation = CancellationToken::new();
+    assert!(backend
+        .collect_rag(&snapshot, &intent, &cancellation)
+        .is_ok());
+    assert!(backend.collect_memory(&intent, &cancellation).is_ok());
     assert_eq!(backend.memory_conflict_count(), 2);
     assert_eq!(
-        backend.recheck_rag_snapshot(&snapshot),
+        backend.recheck_rag_snapshot(&snapshot, &cancellation),
         Err(SourceCollectionError::SnapshotChanged)
     );
     let calls = caller.calls.lock().expect("calls").clone();

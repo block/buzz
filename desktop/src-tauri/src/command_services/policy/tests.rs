@@ -283,8 +283,11 @@ fn authenticated_source_tool_call_is_closed_bounded_and_reuses_mcp_gates() {
         ATTESTATION_SECRET,
         "memory",
         "node:command",
-        "command_memory_context",
-        json!({"query":"readiness","limit":10}),
+        AuthenticatedSourceToolCall::new(
+            "command_memory_context",
+            json!({"query":"readiness","limit":10}),
+        ),
+        &CancellationToken::new(),
     )
     .expect("authenticated exact tool call");
     server.join().expect("join fake MCP");
@@ -297,8 +300,8 @@ fn authenticated_source_tool_call_is_closed_bounded_and_reuses_mcp_gates() {
             ATTESTATION_SECRET,
             "memory",
             "node:command",
-            "record_event",
-            json!({}),
+            AuthenticatedSourceToolCall::new("record_event", json!({})),
+            &CancellationToken::new(),
         ),
         Err(AdmissionError::UnexpectedToolCatalog),
     );
@@ -309,8 +312,8 @@ fn authenticated_source_tool_call_is_closed_bounded_and_reuses_mcp_gates() {
             ATTESTATION_SECRET,
             "memory",
             "node:command",
-            "command_memory_context",
-            json!({}),
+            AuthenticatedSourceToolCall::new("command_memory_context", json!({})),
+            &CancellationToken::new(),
         ),
         Err(AdmissionError::EndpointNotLiteralLoopback),
     );
@@ -321,8 +324,8 @@ fn authenticated_source_tool_call_is_closed_bounded_and_reuses_mcp_gates() {
             ATTESTATION_SECRET,
             "memory",
             "node:command",
-            "command_memory_context",
-            json!({}),
+            AuthenticatedSourceToolCall::new("command_memory_context", json!({})),
+            &CancellationToken::new(),
         ),
         Err(AdmissionError::AuthenticationUnavailable),
     );
@@ -363,8 +366,11 @@ fn authenticated_source_tool_call_rejects_invalid_or_oversized_terminal_result()
             ATTESTATION_SECRET,
             "memory",
             "node:command",
-            "command_memory_context",
-            json!({"query":"readiness","limit":10}),
+            AuthenticatedSourceToolCall::new(
+                "command_memory_context",
+                json!({"query":"readiness","limit":10}),
+            ),
+            &CancellationToken::new(),
         ),
         Err(AdmissionError::InvalidResponse),
     );
@@ -386,8 +392,11 @@ fn authenticated_source_tool_call_rejects_invalid_or_oversized_terminal_result()
             ATTESTATION_SECRET,
             "memory",
             "node:command",
-            "command_memory_context",
-            json!({"query":"readiness","limit":10}),
+            AuthenticatedSourceToolCall::new(
+                "command_memory_context",
+                json!({"query":"readiness","limit":10}),
+            ),
+            &CancellationToken::new(),
         ),
         Err(AdmissionError::ResponseTooLarge),
     );
@@ -417,12 +426,43 @@ fn authenticated_source_tool_call_rejects_redirect_without_following_it() {
             ATTESTATION_SECRET,
             "memory",
             "node:command",
-            "command_memory_context",
-            json!({}),
+            AuthenticatedSourceToolCall::new("command_memory_context", json!({})),
+            &CancellationToken::new(),
         ),
         Err(AdmissionError::AuthenticationUnavailable),
     );
     server.join().expect("join redirect MCP");
+}
+
+#[test]
+fn pre_cancelled_source_tool_call_opens_no_socket() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind cancellation probe");
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking cancellation probe");
+    let endpoint = format!(
+        "http://127.0.0.1:{}/mcp",
+        listener.local_addr().expect("listener address").port()
+    );
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+
+    assert_eq!(
+        call_authenticated_source_tool(
+            &endpoint,
+            "fixture-token-123456789",
+            ATTESTATION_SECRET,
+            "memory",
+            "node:command",
+            AuthenticatedSourceToolCall::new("command_memory_context", json!({})),
+            &cancellation,
+        ),
+        Err(AdmissionError::ServiceUnavailable),
+    );
+    assert_eq!(
+        listener.accept().expect_err("no connection").kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]

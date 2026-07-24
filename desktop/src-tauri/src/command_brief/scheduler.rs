@@ -110,9 +110,14 @@ pub enum SchedulerError<E> {
 struct SchedulerInner {
     capacity: u8,
     semaphore: Arc<Semaphore>,
-    active: Mutex<BTreeSet<SchedulerJobKey>>,
-    history: Mutex<VecDeque<SchedulerLifecycleEvent>>,
+    state: Mutex<SchedulerState>,
     lifecycle_sender: broadcast::Sender<SchedulerLifecycleEvent>,
+}
+
+#[derive(Default)]
+struct SchedulerState {
+    active: BTreeSet<SchedulerJobKey>,
+    history: VecDeque<SchedulerLifecycleEvent>,
 }
 
 /// One app-owned FIFO scheduler for the single configured local model.
@@ -141,8 +146,7 @@ impl LocalModelScheduler {
             inner: Arc::new(SchedulerInner {
                 capacity: 1,
                 semaphore: Arc::new(Semaphore::new(1)),
-                active: Mutex::new(BTreeSet::new()),
-                history: Mutex::new(VecDeque::new()),
+                state: Mutex::new(SchedulerState::default()),
                 lifecycle_sender,
             }),
         }
@@ -161,8 +165,7 @@ impl LocalModelScheduler {
             inner: Arc::new(SchedulerInner {
                 capacity,
                 semaphore: Arc::new(Semaphore::new(capacity as usize)),
-                active: Mutex::new(BTreeSet::new()),
-                history: Mutex::new(VecDeque::new()),
+                state: Mutex::new(SchedulerState::default()),
                 lifecycle_sender,
             }),
         })
@@ -175,7 +178,10 @@ impl LocalModelScheduler {
 
     /// Returns the number of queued or running unique jobs.
     pub fn active_job_count(&self) -> usize {
-        self.inner.active.lock().map_or(0, |active| active.len())
+        self.inner
+            .state
+            .lock()
+            .map_or(0, |state| state.active.len())
     }
 
     /// Subscribes to metadata-only queue lifecycle changes.
@@ -186,10 +192,18 @@ impl LocalModelScheduler {
     /// Returns the bounded in-memory lifecycle history.
     pub fn lifecycle_history(&self) -> Vec<SchedulerLifecycleEvent> {
         self.inner
-            .history
+            .state
             .lock()
-            .map(|history| history.iter().cloned().collect())
+            .map(|state| state.history.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Atomically returns active-key count and lifecycle history.
+    pub fn state_snapshot(&self) -> (usize, Vec<SchedulerLifecycleEvent>) {
+        self.inner.state.lock().map_or_else(
+            |_| (0, Vec::new()),
+            |state| (state.active.len(), state.history.iter().cloned().collect()),
+        )
     }
 
     /// Queues one abort-aware unit of local-model work.
@@ -237,35 +251,38 @@ impl LocalModelScheduler {
             .catch_unwind()
             .await;
         drop(permit);
-        drop(active_guard);
 
         if cancellation.is_cancelled() {
-            self.emit(key, SchedulerLifecycleState::Cancelled);
+            self.emit_and_release(key, SchedulerLifecycleState::Cancelled);
+            drop(active_guard);
             return Err(SchedulerError::Cancelled);
         }
         match settled {
             Ok(Ok(value)) => {
-                self.emit(key, SchedulerLifecycleState::Completed);
+                self.emit_and_release(key, SchedulerLifecycleState::Completed);
+                drop(active_guard);
                 Ok(value)
             }
             Ok(Err(error)) => {
-                self.emit(key, SchedulerLifecycleState::Failed);
+                self.emit_and_release(key, SchedulerLifecycleState::Failed);
+                drop(active_guard);
                 Err(SchedulerError::Task(error))
             }
             Err(_) => {
-                self.emit(key, SchedulerLifecycleState::Failed);
+                self.emit_and_release(key, SchedulerLifecycleState::Failed);
+                drop(active_guard);
                 Err(SchedulerError::Panicked)
             }
         }
     }
 
     fn insert_active<E>(&self, key: &SchedulerJobKey) -> Result<(), SchedulerError<E>> {
-        let mut active = self
+        let mut state = self
             .inner
-            .active
+            .state
             .lock()
             .map_err(|_| SchedulerError::Unavailable)?;
-        if !active.insert(key.clone()) {
+        if !state.active.insert(key.clone()) {
             return Err(SchedulerError::Duplicate);
         }
         Ok(())
@@ -277,13 +294,29 @@ impl LocalModelScheduler {
             state,
             occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         };
-        if let Ok(mut history) = self.inner.history.lock() {
-            if history.len() == MAX_LIFECYCLE_EVENTS {
-                history.pop_front();
+        if let Ok(mut scheduler_state) = self.inner.state.lock() {
+            if scheduler_state.history.len() == MAX_LIFECYCLE_EVENTS {
+                scheduler_state.history.pop_front();
             }
-            history.push_back(event.clone());
+            scheduler_state.history.push_back(event.clone());
         }
         let _ = self.inner.lifecycle_sender.send(event);
+    }
+
+    fn emit_and_release(&self, key: SchedulerJobKey, state: SchedulerLifecycleState) {
+        let event = SchedulerLifecycleEvent {
+            key: key.clone(),
+            state,
+            occurred_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        };
+        if let Ok(mut scheduler_state) = self.inner.state.lock() {
+            if scheduler_state.history.len() == MAX_LIFECYCLE_EVENTS {
+                scheduler_state.history.pop_front();
+            }
+            scheduler_state.history.push_back(event.clone());
+            let _ = self.inner.lifecycle_sender.send(event);
+            scheduler_state.active.remove(&key);
+        }
     }
 }
 
@@ -294,8 +327,8 @@ struct ActiveJobGuard {
 
 impl Drop for ActiveJobGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = self.inner.active.lock() {
-            active.remove(&self.key);
+        if let Ok(mut state) = self.inner.state.lock() {
+            state.active.remove(&self.key);
         }
     }
 }

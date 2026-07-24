@@ -207,9 +207,12 @@ where
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
+            let collection_cancellation = cancellation.clone();
             let result = tokio::task::spawn_blocking(move || {
                 SourceCollector::new(backend, &run_id, &co_request, &observed_at, apple_selection)
-                    .and_then(|collector| collector.freeze())
+                    .and_then(|collector| {
+                        collector.freeze_with_cancellation(&collection_cancellation)
+                    })
             })
             .await
             .map_err(|_| SourceCollectionError::RagInvalid)?;
@@ -232,10 +235,126 @@ where
             if cancellation.is_cancelled() {
                 return Err(SourceCollectionError::Cancelled);
             }
-            let result =
-                tokio::task::spawn_blocking(move || backend.recheck_rag_snapshot(&snapshot))
-                    .await
-                    .map_err(|_| SourceCollectionError::RagInvalid)?;
+            let recheck_cancellation = cancellation.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                backend.recheck_rag_snapshot(&snapshot, &recheck_cancellation)
+            })
+            .await
+            .map_err(|_| SourceCollectionError::RagInvalid)?;
+            if cancellation.is_cancelled() {
+                Err(SourceCollectionError::Cancelled)
+            } else {
+                result
+            }
+        })
+    }
+}
+
+/// Loads freshly re-attested local source bindings for each collection or
+/// snapshot-consistency boundary.
+pub(crate) trait SourceBackendLoader: Send + Sync {
+    fn load<'a>(
+        &'a self,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<Arc<dyn SourceBackend + Send + Sync>, SourceCollectionError>>;
+}
+
+#[derive(Clone)]
+struct ProductionSourceBackendLoader {
+    app: tauri::AppHandle,
+}
+
+impl SourceBackendLoader for ProductionSourceBackendLoader {
+    fn load<'a>(
+        &'a self,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<Arc<dyn SourceBackend + Send + Sync>, SourceCollectionError>> {
+        let app = self.app.clone();
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let backend = ProductionSourceBackend::from_app(app).await?;
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            Ok(Arc::new(backend) as Arc<dyn SourceBackend + Send + Sync>)
+        })
+    }
+}
+
+/// Production source provider that never retains an admitted source binding
+/// across collection attempts or snapshot-consistency boundaries.
+pub(crate) struct ReloadingSourceProvider {
+    loader: Arc<dyn SourceBackendLoader>,
+    apple_selection: AppleBriefSelection,
+}
+
+impl ReloadingSourceProvider {
+    pub(crate) const fn new(
+        loader: Arc<dyn SourceBackendLoader>,
+        apple_selection: AppleBriefSelection,
+    ) -> Self {
+        Self {
+            loader,
+            apple_selection,
+        }
+    }
+}
+
+impl BriefSourceProvider for ReloadingSourceProvider {
+    fn freeze<'a>(
+        &'a self,
+        run_id: &'a str,
+        co_request: &'a str,
+        observed_at: &'a str,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<FrozenSourceContext, SourceCollectionError>> {
+        let loader = Arc::clone(&self.loader);
+        let apple_selection = self.apple_selection.clone();
+        let run_id = run_id.to_string();
+        let co_request = co_request.to_string();
+        let observed_at = observed_at.to_string();
+        Box::pin(async move {
+            let backend = loader.load(cancellation.clone()).await?;
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let collection_cancellation = cancellation.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                SourceCollector::new(backend, &run_id, &co_request, &observed_at, apple_selection)
+                    .and_then(|collector| {
+                        collector.freeze_with_cancellation(&collection_cancellation)
+                    })
+            })
+            .await
+            .map_err(|_| SourceCollectionError::RagInvalid)?;
+            if cancellation.is_cancelled() {
+                Err(SourceCollectionError::Cancelled)
+            } else {
+                result
+            }
+        })
+    }
+
+    fn recheck<'a>(
+        &'a self,
+        context: &'a FrozenSourceContext,
+        cancellation: CancellationToken,
+    ) -> BriefFuture<'a, Result<(), SourceCollectionError>> {
+        let loader = Arc::clone(&self.loader);
+        let snapshot = context.snapshot_binding().clone();
+        Box::pin(async move {
+            let backend = loader.load(cancellation.clone()).await?;
+            if cancellation.is_cancelled() {
+                return Err(SourceCollectionError::Cancelled);
+            }
+            let recheck_cancellation = cancellation.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                backend.recheck_rag_snapshot(&snapshot, &recheck_cancellation)
+            })
+            .await
+            .map_err(|_| SourceCollectionError::RagInvalid)?;
             if cancellation.is_cancelled() {
                 Err(SourceCollectionError::Cancelled)
             } else {
@@ -299,6 +418,7 @@ impl std::error::Error for OrchestratorStartError {}
 
 struct RunRecord {
     cancellation: CancellationToken,
+    state: BriefRunState,
     history: VecDeque<BriefRunStatus>,
     result: Option<CommandBrief>,
 }
@@ -358,9 +478,6 @@ impl CommandBriefOrchestrator {
         timeout: Duration,
         persistence: Arc<dyn BriefPersistence>,
     ) -> Result<Self, ProductionOrchestratorError> {
-        let backend = ProductionSourceBackend::from_app(app.clone())
-            .await
-            .map_err(|_| ProductionOrchestratorError)?;
         let config_path = app
             .path()
             .app_config_dir()
@@ -372,7 +489,10 @@ impl CommandBriefOrchestrator {
             .map_err(|_| ProductionOrchestratorError)?;
         Ok(Self::new(
             scheduler,
-            Arc::new(CollectedSourceProvider::new(backend, apple_selection)),
+            Arc::new(ReloadingSourceProvider::new(
+                Arc::new(ProductionSourceBackendLoader { app }),
+                apple_selection,
+            )),
             Arc::new(executor),
             persistence,
         ))
@@ -393,18 +513,10 @@ impl CommandBriefOrchestrator {
         {
             let mut runs = self.inner.runs.lock().map_err(|_| OrchestratorStartError)?;
             if runs.len() >= MAX_TRACKED_RUNS {
-                let removable = runs.iter().find_map(|(id, record)| {
-                    record
-                        .history
-                        .back()
-                        .and_then(|status| {
-                            let value = serde_json::to_value(status).ok()?;
-                            serde_json::from_value::<BriefRunState>(value.get("state")?.clone())
-                                .ok()
-                        })
-                        .filter(|state| is_terminal(*state))
-                        .map(|_| id.clone())
-                });
+                let removable = runs
+                    .iter()
+                    .find(|(_, record)| is_terminal(record.state))
+                    .map(|(id, _)| id.clone());
                 if let Some(removable) = removable {
                     runs.remove(&removable);
                 } else {
@@ -415,6 +527,7 @@ impl CommandBriefOrchestrator {
                 run_id.clone(),
                 RunRecord {
                     cancellation: cancellation.clone(),
+                    state: BriefRunState::Queued,
                     history: VecDeque::from([queued]),
                     result: None,
                 },
@@ -460,13 +573,27 @@ impl CommandBriefOrchestrator {
         self.inner.runs.lock().ok()?.get(run_id)?.result.clone()
     }
 
+    /// Atomically observes the latest status and its installed validated result.
+    pub fn status_and_result(
+        &self,
+        run_id: &str,
+    ) -> Option<(BriefRunStatus, Option<CommandBrief>)> {
+        let runs = self.inner.runs.lock().ok()?;
+        let record = runs.get(run_id)?;
+        Some((record.history.back()?.clone(), record.result.clone()))
+    }
+
     /// Cancels collection, queued/running model work, or persistence.
     pub fn cancel(&self, run_id: &str) -> bool {
         self.inner
             .runs
             .lock()
             .ok()
-            .and_then(|runs| runs.get(run_id).map(|record| record.cancellation.clone()))
+            .and_then(|runs| {
+                runs.get(run_id).and_then(|record| {
+                    (!is_terminal(record.state)).then(|| record.cancellation.clone())
+                })
+            })
             .is_some_and(|cancellation| {
                 cancellation.cancel();
                 true
@@ -731,7 +858,12 @@ impl CommandBriefOrchestrator {
                     return;
                 }
             };
-            let chief = match validate_chief_output(chief_value, &contributions, &ledger_ids) {
+            let chief = match validate_chief_output(
+                chief_value,
+                &contributions,
+                context.limitations(),
+                &ledger_ids,
+            ) {
                 Ok(chief) => chief,
                 Err(()) => {
                     self.terminal(
@@ -798,7 +930,6 @@ impl CommandBriefOrchestrator {
                 &context,
                 contributions,
                 chief,
-                &failed_advisers,
                 &degraded,
             ) {
                 Ok(brief) => brief,
@@ -887,6 +1018,7 @@ impl CommandBriefOrchestrator {
                 if record.history.len() == MAX_STATUS_HISTORY {
                     record.history.pop_front();
                 }
+                record.state = state;
                 record.history.push_back(status);
             }
         }
@@ -901,9 +1033,16 @@ impl CommandBriefOrchestrator {
         error: Option<&str>,
         result: Option<CommandBrief>,
     ) {
-        self.transition(run_id, schedule_id, state, degraded, error);
+        let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
+            return;
+        };
         if let Ok(mut runs) = self.inner.runs.lock() {
             if let Some(record) = runs.get_mut(run_id) {
+                if record.history.len() == MAX_STATUS_HISTORY {
+                    record.history.pop_front();
+                }
+                record.state = state;
+                record.history.push_back(status);
                 record.result = result;
             }
         }
@@ -930,12 +1069,12 @@ struct RawChiefOutput {
 
 struct ValidatedChief {
     findings: Vec<CitedFinding>,
-    limitations: Vec<String>,
 }
 
 fn validate_chief_output(
     value: Value,
     contributions: &[AdviserContribution],
+    source_limitations: &[String],
     ledger_ids: &BTreeSet<String>,
 ) -> Result<ValidatedChief, ()> {
     let raw: RawChiefOutput = serde_json::from_value(value).map_err(|_| ())?;
@@ -954,6 +1093,20 @@ fn validate_chief_output(
     if raw.dissent != expected_dissent {
         return Err(());
     }
+    let allowed_limitations = source_limitations
+        .iter()
+        .chain(
+            contributions
+                .iter()
+                .flat_map(|contribution| contribution.limitations()),
+        )
+        .collect::<BTreeSet<_>>();
+    let mut seen_limitations = BTreeSet::new();
+    if raw.limitations.iter().any(|limitation| {
+        !allowed_limitations.contains(limitation) || !seen_limitations.insert(limitation)
+    }) {
+        return Err(());
+    }
     let allowed = contributions
         .iter()
         .flat_map(|contribution| contribution.findings())
@@ -969,10 +1122,7 @@ fn validate_chief_output(
         }
         findings.push(finding);
     }
-    Ok(ValidatedChief {
-        findings,
-        limitations: raw.limitations,
-    })
+    Ok(ValidatedChief { findings })
 }
 
 fn assemble_brief(
@@ -981,7 +1131,6 @@ fn assemble_brief(
     context: &FrozenSourceContext,
     contributions: Vec<AdviserContribution>,
     chief: ValidatedChief,
-    failed_advisers: &[AdviserId],
     degraded: &[BriefSection],
 ) -> Result<CommandBrief, ()> {
     let mut sections = BTreeMap::<BriefSection, Vec<CitedFinding>>::from([
@@ -1003,12 +1152,11 @@ fn assemble_brief(
         .flat_map(|contribution| contribution.dissent().iter().cloned())
         .collect::<Vec<_>>();
     let missing_information = bounded_unique_text(
-        context
-            .limitations()
-            .iter()
-            .cloned()
-            .chain(chief.limitations)
-            .chain(failed_advisers.iter().copied().map(adviser_unavailable)),
+        context.limitations().iter().cloned().chain(
+            contributions
+                .iter()
+                .flat_map(|contribution| contribution.limitations().iter().cloned()),
+        ),
     );
     let value = json!({
         "version": 1,

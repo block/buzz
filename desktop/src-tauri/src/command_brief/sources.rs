@@ -13,6 +13,7 @@ use chrono::DateTime;
 use serde::Serialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 
 use super::personas::specialist_definitions;
 use super::provenance::ValidatedSource;
@@ -108,7 +109,7 @@ impl FixedRetrievalIntent {
 }
 
 /// Backend seam implemented by the admitted local RAG, Memory, and signed Apple services.
-pub(crate) trait SourceBackend {
+pub(crate) trait SourceBackend: Send + Sync {
     fn verify_active_rag_snapshot(&self) -> Result<VerifiedRagSnapshot, SourceCollectionError>;
 
     fn memory_conflict_count(&self) -> u64;
@@ -117,16 +118,72 @@ pub(crate) trait SourceBackend {
         &self,
         snapshot: &VerifiedRagSnapshot,
         intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError>;
 
-    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Value, SourceReadError>;
+    fn collect_memory(
+        &self,
+        intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError>;
 
-    fn collect_apple(&self, request: &AppleInputRequest) -> AppleInputResponse;
+    fn collect_apple(
+        &self,
+        request: &AppleInputRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AppleInputResponse, SourceCollectionError>;
 
     fn recheck_rag_snapshot(
         &self,
         expected: &VerifiedRagSnapshot,
+        cancellation: &CancellationToken,
     ) -> Result<(), SourceCollectionError>;
+}
+
+impl<T> SourceBackend for Arc<T>
+where
+    T: SourceBackend + ?Sized,
+{
+    fn verify_active_rag_snapshot(&self) -> Result<VerifiedRagSnapshot, SourceCollectionError> {
+        (**self).verify_active_rag_snapshot()
+    }
+
+    fn memory_conflict_count(&self) -> u64 {
+        (**self).memory_conflict_count()
+    }
+
+    fn collect_rag(
+        &self,
+        snapshot: &VerifiedRagSnapshot,
+        intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError> {
+        (**self).collect_rag(snapshot, intent, cancellation)
+    }
+
+    fn collect_memory(
+        &self,
+        intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError> {
+        (**self).collect_memory(intent, cancellation)
+    }
+
+    fn collect_apple(
+        &self,
+        request: &AppleInputRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AppleInputResponse, SourceCollectionError> {
+        (**self).collect_apple(request, cancellation)
+    }
+
+    fn recheck_rag_snapshot(
+        &self,
+        expected: &VerifiedRagSnapshot,
+        cancellation: &CancellationToken,
+    ) -> Result<(), SourceCollectionError> {
+        (**self).recheck_rag_snapshot(expected, cancellation)
+    }
 }
 
 pub(crate) trait SourceToolCaller: Send + Sync {
@@ -135,6 +192,7 @@ pub(crate) trait SourceToolCaller: Send + Sync {
         service: &AuthenticatedSourceService,
         tool_name: &str,
         arguments: Value,
+        cancellation: &CancellationToken,
     ) -> Result<Value, AdmissionError>;
 }
 
@@ -150,8 +208,9 @@ impl SourceToolCaller for AuthenticatedMcpSourceCaller {
         service: &AuthenticatedSourceService,
         tool_name: &str,
         arguments: Value,
+        cancellation: &CancellationToken,
     ) -> Result<Value, AdmissionError> {
-        service.call(tool_name, arguments)
+        service.call(tool_name, arguments, cancellation)
     }
 }
 
@@ -236,11 +295,16 @@ impl SourceBackend for ProductionSourceBackend {
         &self,
         snapshot: &VerifiedRagSnapshot,
         intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
     ) -> Result<Value, SourceReadError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceReadError::new("cancelled"));
+        }
         if snapshot != &self.snapshot || self.rag.active_identity() != snapshot.snapshot_id() {
             return Err(SourceReadError::new("rag_snapshot_mismatch"));
         }
-        self.caller
+        let result = self
+            .caller
             .call(
                 &self.rag,
                 RAG_TOOL,
@@ -249,39 +313,78 @@ impl SourceBackend for ProductionSourceBackend {
                     "collections": snapshot.logical_collections(),
                     "top_k": 8,
                 }),
+                cancellation,
             )
-            .map_err(|_| SourceReadError::new("rag_read_unavailable"))
+            .map_err(|_| SourceReadError::new("rag_read_unavailable"))?;
+        if cancellation.is_cancelled() {
+            Err(SourceReadError::new("cancelled"))
+        } else {
+            Ok(result)
+        }
     }
 
-    fn collect_memory(&self, intent: &FixedRetrievalIntent) -> Result<Value, SourceReadError> {
+    fn collect_memory(
+        &self,
+        intent: &FixedRetrievalIntent,
+        cancellation: &CancellationToken,
+    ) -> Result<Value, SourceReadError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceReadError::new("cancelled"));
+        }
         let memory = self
             .memory
             .as_ref()
             .ok_or_else(|| SourceReadError::new("memory_read_unavailable"))?;
-        self.caller
+        let result = self
+            .caller
             .call(
                 memory,
                 MEMORY_TOOL,
                 json!({"query": intent.query(), "limit": 10}),
+                cancellation,
             )
-            .map_err(|_| SourceReadError::new("memory_read_unavailable"))
+            .map_err(|_| SourceReadError::new("memory_read_unavailable"))?;
+        if cancellation.is_cancelled() {
+            Err(SourceReadError::new("cancelled"))
+        } else {
+            Ok(result)
+        }
     }
 
-    fn collect_apple(&self, request: &AppleInputRequest) -> AppleInputResponse {
-        read_apple_inputs_blocking(request.clone())
+    fn collect_apple(
+        &self,
+        request: &AppleInputRequest,
+        cancellation: &CancellationToken,
+    ) -> Result<AppleInputResponse, SourceCollectionError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceCollectionError::Cancelled);
+        }
+        let response = read_apple_inputs_blocking(request.clone());
+        if cancellation.is_cancelled() {
+            Err(SourceCollectionError::Cancelled)
+        } else {
+            Ok(response)
+        }
     }
 
     fn recheck_rag_snapshot(
         &self,
         expected: &VerifiedRagSnapshot,
+        cancellation: &CancellationToken,
     ) -> Result<(), SourceCollectionError> {
+        if cancellation.is_cancelled() {
+            return Err(SourceCollectionError::Cancelled);
+        }
         if expected != &self.snapshot {
             return Err(SourceCollectionError::SnapshotChanged);
         }
         let status = self
             .caller
-            .call(&self.rag, "get_snapshot_status", json!({}))
+            .call(&self.rag, "get_snapshot_status", json!({}), cancellation)
             .map_err(|_| SourceCollectionError::RagUnavailable)?;
+        if cancellation.is_cancelled() {
+            return Err(SourceCollectionError::Cancelled);
+        }
         let observed = status
             .get("active_snapshot_id")
             .and_then(Value::as_str)
@@ -415,7 +518,16 @@ impl<B: SourceBackend> SourceCollector<B> {
     }
 
     pub(crate) fn freeze(&self) -> Result<FrozenSourceContext, SourceCollectionError> {
+        self.freeze_with_cancellation(&CancellationToken::new())
+    }
+
+    pub(crate) fn freeze_with_cancellation(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<FrozenSourceContext, SourceCollectionError> {
+        ensure_collection_active(cancellation)?;
         let snapshot = self.backend.verify_active_rag_snapshot()?;
+        ensure_collection_active(cancellation)?;
         if snapshot.physical_collections().is_empty() || snapshot.logical_collections().is_empty() {
             return Err(SourceCollectionError::RagInvalid);
         }
@@ -423,7 +535,9 @@ impl<B: SourceBackend> SourceCollector<B> {
         let mut candidates = vec![snapshot_catalogue_source(&snapshot)?];
         let mut degraded = BTreeSet::new();
         let mut limitations = BTreeSet::new();
+        ensure_collection_active(cancellation)?;
         let memory_conflict_count = self.backend.memory_conflict_count();
+        ensure_collection_active(cancellation)?;
         if memory_conflict_count > 0 {
             degraded.insert(BriefSection::ConflictsAndGaps);
             limitations.insert(format!(
@@ -434,8 +548,11 @@ impl<B: SourceBackend> SourceCollector<B> {
         let mut rag_available = true;
         let mut memory_available = true;
         for intent in &intents {
+            ensure_collection_active(cancellation)?;
             if rag_available {
-                match self.backend.collect_rag(&snapshot, intent) {
+                let result = self.backend.collect_rag(&snapshot, intent, cancellation);
+                ensure_collection_active(cancellation)?;
+                match result {
                     Ok(value) => {
                         match extract_verified_rag_evidence(&snapshot, intent.query(), &value) {
                             Ok(records) => {
@@ -475,8 +592,11 @@ impl<B: SourceBackend> SourceCollector<B> {
                 }
             }
 
+            ensure_collection_active(cancellation)?;
             if memory_available {
-                match self.backend.collect_memory(intent) {
+                let result = self.backend.collect_memory(intent, cancellation);
+                ensure_collection_active(cancellation)?;
+                match result {
                     Ok(value) => match extract_verified_memory_evidence(&value) {
                         Ok(records) => {
                             candidates.extend(records.into_iter().map(|record| CandidateSource {
@@ -524,16 +644,20 @@ impl<B: SourceBackend> SourceCollector<B> {
             .brief_requests(&self.observed_at)
             .map_err(|_| SourceCollectionError::InvalidTime)?
         {
+            ensure_collection_active(cancellation)?;
+            let response = self.backend.collect_apple(&request, cancellation)?;
+            ensure_collection_active(cancellation)?;
             collect_apple_response(
                 &self.apple_selection,
                 &request,
-                self.backend.collect_apple(&request),
+                response,
                 &mut candidates,
                 &mut degraded,
                 &mut limitations,
             );
         }
 
+        ensure_collection_active(cancellation)?;
         let mut canonical = canonical_ledger(&self.run_id, snapshot.snapshot_id(), candidates)?;
         limitations.append(&mut canonical.limitations);
         apply_ledger_omissions(&canonical.omitted_by_kind, &mut degraded, &mut limitations);
@@ -555,7 +679,7 @@ impl<B: SourceBackend> SourceCollector<B> {
             limitations,
             retrieval_intents: intents,
         };
-        self.recheck_snapshot(&context)?;
+        self.recheck_snapshot_with_cancellation(&context, cancellation)?;
         Ok(context)
     }
 
@@ -564,7 +688,28 @@ impl<B: SourceBackend> SourceCollector<B> {
         &self,
         context: &FrozenSourceContext,
     ) -> Result<(), SourceCollectionError> {
-        self.backend.recheck_rag_snapshot(&context.snapshot)
+        self.recheck_snapshot_with_cancellation(context, &CancellationToken::new())
+    }
+
+    pub(crate) fn recheck_snapshot_with_cancellation(
+        &self,
+        context: &FrozenSourceContext,
+        cancellation: &CancellationToken,
+    ) -> Result<(), SourceCollectionError> {
+        ensure_collection_active(cancellation)?;
+        let result = self
+            .backend
+            .recheck_rag_snapshot(&context.snapshot, cancellation);
+        ensure_collection_active(cancellation)?;
+        result
+    }
+}
+
+fn ensure_collection_active(cancellation: &CancellationToken) -> Result<(), SourceCollectionError> {
+    if cancellation.is_cancelled() {
+        Err(SourceCollectionError::Cancelled)
+    } else {
+        Ok(())
     }
 }
 
