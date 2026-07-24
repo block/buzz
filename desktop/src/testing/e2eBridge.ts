@@ -10893,6 +10893,11 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:event|listen":
         // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
         return Math.floor(Math.random() * 1_000_000);
+      case "start_pairing":
+        return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
+      case "cancel_pairing":
+      case "confirm_pairing_sas":
+        return null;
       // ── NIP-IA identity archival ────────────────────────────────────────
       // These mocks drive the archive-button gate matrix in
       // tests/e2e/identity-archive.spec.ts. Defaults keep the button hidden

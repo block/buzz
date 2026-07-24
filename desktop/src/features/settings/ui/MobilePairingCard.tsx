@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { QRCodeSVG } from "qrcode.react";
 import {
   Check,
   Copy,
@@ -19,6 +18,7 @@ import {
   startPairing,
 } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
+import { StyledQrCode } from "@/shared/ui/styled-qr-code";
 import {
   Dialog,
   DialogContent,
@@ -205,35 +205,30 @@ function PairingDialog({
                 </p>
               </div>
             ) : step === "qr" && qrUri ? (
-              <div className="space-y-4">
-                <div className="flex justify-center rounded-lg border border-border/70 bg-white p-4">
-                  <QRCodeSVG
+              <div className="mx-auto grid w-fit gap-4">
+                <div
+                  className="rounded-lg border border-border/70 bg-white p-3"
+                  data-testid="mobile-pairing-qr-container"
+                >
+                  <StyledQrCode
+                    centerImageSrc="/app-icon@2x.png"
                     data-testid="mobile-pairing-qr"
-                    level="M"
                     size={240}
+                    title="Mobile pairing QR code"
                     value={qrUri}
                   />
                 </div>
 
-                <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Pairing code
-                  </p>
-                  <button
-                    className="flex w-full min-w-0 items-center gap-2 break-all rounded-lg border border-border bg-muted/50 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/70"
-                    data-testid="copy-pairing-code"
-                    onClick={handleCopy}
-                    title="Copy pairing code"
-                    type="button"
-                  >
-                    <code className="min-w-0 flex-1 break-all">{qrUri}</code>
-                    <Copy className="h-4 w-4 shrink-0" />
-                  </button>
-                </div>
-
-                <p className="text-center text-xs text-muted-foreground">
-                  Waiting for mobile device to scan...
-                </p>
+                <Button
+                  className="w-full"
+                  data-testid="copy-pairing-code"
+                  onClick={handleCopy}
+                  type="button"
+                  variant="outline"
+                >
+                  <Copy className="mr-1.5 h-4 w-4" />
+                  Copy pairing code
+                </Button>
               </div>
             ) : step === "sas" && sasCode ? (
               <div className="space-y-4">
