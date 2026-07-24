@@ -201,14 +201,21 @@ function RuntimeStatus({
   }
 
   if (isInstalling) {
+    const isUpdating =
+      runtime.availability === "available" &&
+      runtime.authStatus.status === "unknown";
     return (
       <div
-        aria-label={`Installing ${runtime.label}`}
+        aria-label={
+          isUpdating
+            ? `Updating ${runtime.label}`
+            : `Installing ${runtime.label}`
+        }
         className="flex h-5 items-center gap-2 rounded-full bg-white/60 px-2.5 font-mono text-badge font-normal uppercase text-foreground"
         role="status"
       >
         <Spinner className="h-3 w-3 border-2 text-foreground" />
-        INSTALLING
+        {isUpdating ? "UPDATING" : "INSTALLING"}
       </div>
     );
   }
@@ -555,7 +562,8 @@ function RuntimeCard({
         />
         {isAvailable &&
         runtime.authStatus.status === "unknown" &&
-        !installError ? (
+        !installError &&
+        !isInstalling ? (
           <RuntimeErrorTooltip
             className="max-w-[13rem] text-2xs leading-4 text-muted-foreground"
             detail={runtimeAuthUnknownDetail(runtime)}
