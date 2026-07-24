@@ -251,7 +251,7 @@ const REST_RETRY_BASE_DELAYS: [Duration; 3] = [
     Duration::from_millis(2000),
 ];
 
-fn unix_now_secs() -> u64 {
+pub(crate) fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()

@@ -14,7 +14,7 @@
 //! - **Queue** — all events accumulate; batched on the next flush cycle.
 
 use nostr::{Event, ToBech32};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
@@ -49,6 +49,25 @@ pub struct QueuedEvent {
     pub received_at: Instant,
     /// Tag identifying which rule (or mode) matched this event.
     pub prompt_tag: String,
+    /// Per-process monotonic admission order, stamped once at initial live
+    /// admission (or restored verbatim from the ledger on recovery) and
+    /// propagated unchanged through every transition. Never reassigned —
+    /// `recoverable_triggers()` sorts by this, not by `enqueued_at_unix`
+    /// (which is only second-resolution and routinely ties).
+    pub admission_seq: u64,
+    /// Wall-clock admission time (SystemTime, captured once at initial live
+    /// admission), for TTL filtering only. Ordering belongs to
+    /// `admission_seq`.
+    pub enqueued_at_unix: u64,
+    /// True for events re-admitted after a restart (boot import or
+    /// unresolved-record resolution). Prompt provenance only — never
+    /// consulted by cap enforcement. Default `false`.
+    pub restart_recovery: bool,
+    /// True when this event's cap class is exempt from
+    /// `MAX_PENDING_PER_CHANNEL` accounting/eviction. Persisted per record
+    /// in the ledger, assigned by the boot-time promotion rule — never set
+    /// on the live-admission path (`push()` always forces `false`).
+    pub cap_exempt: bool,
 }
 
 /// A single event inside a [`FlushBatch`].
@@ -57,6 +76,150 @@ pub struct BatchEvent {
     pub event: Event,
     pub prompt_tag: String,
     pub received_at: Instant,
+    /// See [`QueuedEvent::admission_seq`]; propagated unchanged.
+    pub admission_seq: u64,
+    /// See [`QueuedEvent::enqueued_at_unix`]; propagated unchanged.
+    pub enqueued_at_unix: u64,
+    /// See [`QueuedEvent::restart_recovery`]; propagated unchanged.
+    pub restart_recovery: bool,
+    /// See [`QueuedEvent::cap_exempt`]; propagated unchanged.
+    pub cap_exempt: bool,
+}
+
+impl QueuedEvent {
+    /// Build a `QueuedEvent` for live admission via [`EventQueue::push`].
+    /// `push()` overwrites `admission_seq`/`enqueued_at_unix` with real
+    /// values and forces `restart_recovery`/`cap_exempt` to `false` — the
+    /// placeholders here are never observed. Recovered events go through
+    /// `import_recovered`/`admit_recovered`, never this constructor.
+    pub fn new(channel_id: Uuid, event: Event, received_at: Instant, prompt_tag: String) -> Self {
+        QueuedEvent {
+            channel_id,
+            event,
+            received_at,
+            prompt_tag,
+            admission_seq: 0,
+            enqueued_at_unix: 0,
+            restart_recovery: false,
+            cap_exempt: false,
+        }
+    }
+
+    /// Test-only alias of [`Self::new`] — kept as a separate name so test
+    /// call sites read as "I only care about the four original fields"
+    /// without implying anything about live-admission stamping semantics.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        channel_id: Uuid,
+        event: Event,
+        received_at: Instant,
+        prompt_tag: String,
+    ) -> Self {
+        Self::new(channel_id, event, received_at, prompt_tag)
+    }
+
+    /// Build a `QueuedEvent` for boot recovery (`EventQueue::import_recovered`)
+    /// or unresolved-record resolution (`EventQueue::admit_recovered`),
+    /// restoring exactly the fields that must survive a restart —
+    /// `admission_seq`/`enqueued_at_unix`/`cap_exempt` verbatim from the
+    /// ledger record, `restart_recovery: true` since a recovered event is
+    /// never a live admission. `received_at` is stamped fresh (in-process
+    /// fairness only; never persisted).
+    pub fn from_recovered(
+        channel_id: Uuid,
+        event: Event,
+        prompt_tag: String,
+        admission_seq: u64,
+        enqueued_at_unix: u64,
+        cap_exempt: bool,
+    ) -> Self {
+        QueuedEvent {
+            channel_id,
+            event,
+            received_at: Instant::now(),
+            prompt_tag,
+            admission_seq,
+            enqueued_at_unix,
+            restart_recovery: true,
+            cap_exempt,
+        }
+    }
+
+    fn into_batch_event(self) -> BatchEvent {
+        BatchEvent {
+            event: self.event,
+            prompt_tag: self.prompt_tag,
+            received_at: self.received_at,
+            admission_seq: self.admission_seq,
+            enqueued_at_unix: self.enqueued_at_unix,
+            restart_recovery: self.restart_recovery,
+            cap_exempt: self.cap_exempt,
+        }
+    }
+}
+
+impl BatchEvent {
+    /// See [`QueuedEvent::for_test`] — same rationale, for `BatchEvent`
+    /// literals built directly in tests (most `FlushBatch` fixtures) in
+    /// this module and elsewhere in the crate.
+    #[cfg(test)]
+    pub(crate) fn for_test(event: Event, prompt_tag: String, received_at: Instant) -> Self {
+        BatchEvent {
+            event,
+            prompt_tag,
+            received_at,
+            admission_seq: 0,
+            enqueued_at_unix: 0,
+            restart_recovery: false,
+            cap_exempt: false,
+        }
+    }
+
+    fn into_queued_event(self, channel_id: Uuid) -> QueuedEvent {
+        QueuedEvent {
+            channel_id,
+            event: self.event,
+            prompt_tag: self.prompt_tag,
+            received_at: self.received_at,
+            admission_seq: self.admission_seq,
+            enqueued_at_unix: self.enqueued_at_unix,
+            restart_recovery: self.restart_recovery,
+            cap_exempt: self.cap_exempt,
+        }
+    }
+}
+
+/// The minimal durable identity of a queued/in-flight/cancelled/withheld
+/// event the queue still owes a turn for — what the resume ledger persists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableTrigger {
+    pub event_id: String,
+    pub prompt_tag: String,
+    pub admission_seq: u64,
+    pub enqueued_at_unix: u64,
+    pub cap_exempt: bool,
+}
+
+impl RecoverableTrigger {
+    fn from_queued(qe: &QueuedEvent) -> Self {
+        RecoverableTrigger {
+            event_id: qe.event.id.to_hex(),
+            prompt_tag: qe.prompt_tag.clone(),
+            admission_seq: qe.admission_seq,
+            enqueued_at_unix: qe.enqueued_at_unix,
+            cap_exempt: qe.cap_exempt,
+        }
+    }
+
+    fn from_batch(be: &BatchEvent) -> Self {
+        RecoverableTrigger {
+            event_id: be.event.id.to_hex(),
+            prompt_tag: be.prompt_tag.clone(),
+            admission_seq: be.admission_seq,
+            enqueued_at_unix: be.enqueued_at_unix,
+            cap_exempt: be.cap_exempt,
+        }
+    }
 }
 
 /// Why a batch's prior turn was cancelled — controls how `format_prompt`
@@ -70,6 +233,43 @@ pub enum CancelReason {
     /// and incorporate the message if relevant
     /// (`MultipleEventHandling::Steer`, the default mid-turn path).
     Steer,
+}
+
+/// Which end of a channel's queue `enforce_cap` evicts from when the
+/// counted-class count exceeds [`MAX_PENDING_PER_CHANNEL`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VictimEnd {
+    /// `push()`: evict the oldest (front) counted event to make room for a
+    /// fresh arrival — today's live-admission behavior, unchanged.
+    Front,
+    /// The four restore paths (`requeue`, `requeue_preserve_timestamps`,
+    /// `release_native_steer`, withheld-steer deadline recovery): evict the
+    /// newest (back) counted event — today's restore-path behavior,
+    /// unchanged.
+    Back,
+}
+
+/// How a completed batch's triggers should be disposed of. Applied
+/// atomically by [`EventQueue::complete_batch`] — requeue/cancel semantics
+/// and in-flight completion happen as one transition, so no public
+/// operation ever exposes an intermediate (duplicated or half-restored)
+/// recoverable state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchDisposition {
+    /// Turn completed successfully; drop the batch.
+    Success,
+    /// Requeue with exponential backoff; dead-letter on `MAX_RETRIES`
+    /// exhaustion (today's `requeue()` semantics).
+    Retry,
+    /// Requeue as a cancelled batch for merged re-prompt framing (today's
+    /// `requeue_as_cancelled()` semantics).
+    Cancelled(CancelReason),
+    /// Requeue preserving original timestamps, no backoff (today's
+    /// `requeue_preserve_timestamps()` semantics — pool exhausted).
+    PreserveTimestamps,
+    /// Channel removed mid-flight, hard-cap timeout, or a Drop-mode panic:
+    /// discard the batch without requeuing.
+    Dropped,
 }
 
 /// A batch of events to prompt the agent with.
@@ -87,6 +287,18 @@ pub struct FlushBatch {
     /// [`Steer`](CancelReason::Steer) framing if a merge somehow lacks a reason
     /// (see [`MergeFraming::for_reason`]).
     pub cancel_reason: Option<CancelReason>,
+}
+
+impl FlushBatch {
+    /// Whether any event in this batch — fresh or merged-cancelled — is a
+    /// restart-recovery replay. Gates the batch-level recovery header in
+    /// `format_prompt` (R5-F6): a mixed batch of recovered + live events
+    /// still needs per-event markers so the agent doesn't apply the
+    /// "may already be done" caveat to genuinely new work.
+    pub fn has_recovered_events(&self) -> bool {
+        self.events.iter().any(|be| be.restart_recovery)
+            || self.cancelled_events.iter().any(|be| be.restart_recovery)
+    }
 }
 
 /// Per-channel event queue with per-channel in-flight enforcement.
@@ -168,6 +380,45 @@ pub struct EventQueue {
     /// Must be strictly greater than `max_turn_duration` so a turn running to
     /// the hard cap returns via `mark_complete` before the backstop fires.
     in_flight_deadline: Duration,
+    /// Per-process monotonic counter for `QueuedEvent::admission_seq` /
+    /// `BatchEvent::admission_seq`. Stamped once per live admission in
+    /// `push()`, then propagated unchanged through every transition. On
+    /// boot, resumed past the max persisted seq via
+    /// [`Self::set_next_admission_seq`] so recovered work always sorts
+    /// before fresh post-restart admissions.
+    next_admission_seq: u64,
+    /// Recoverable-trigger mirror of `in_flight_batch_sizes` — the
+    /// `RecoverableTrigger`s for each in-flight batch (covering `events`
+    /// plus any merged `cancelled_events`), so `recoverable_triggers()` can
+    /// include in-flight work without re-deriving it from a live batch the
+    /// queue no longer holds. Populated everywhere a channel becomes
+    /// in-flight; removed at batch completion (inside `complete_batch`) and
+    /// at both deadline-expiry blocks — kept in exact sync with
+    /// `in_flight_batch_sizes`.
+    in_flight_batch_triggers: HashMap<Uuid, Vec<RecoverableTrigger>>,
+    /// Channels mutated by a public operation since the last
+    /// [`Self::take_dirty_channels`] call. Every public `&mut self` mutator
+    /// inserts every channel id it touches — including channels auto-
+    /// expired as a side effect of an operation about a *different*
+    /// channel (`flush_next` / `has_flushable_work`'s expiry loops) — so
+    /// `lib.rs` never needs a hand-maintained list of mutation seams to
+    /// sync after.
+    dirty_channels: HashSet<Uuid>,
+    /// Per-channel unresolved-record ordering barrier (R6-F1). While a
+    /// channel has an entry here, `flush_next`/`has_flushable_work` refuse
+    /// to flush any of its queued events whose `admission_seq` exceeds the
+    /// barrier's lowest held seq. Cleared by resolution (`admit_recovered`),
+    /// invalidation (`drain_channel`), or deadline expiry
+    /// (`expire_due_unresolved_barriers`).
+    unresolved_barriers: HashMap<Uuid, UnresolvedBarrier>,
+}
+
+/// A channel's active unresolved-ordering barrier: the set of admission
+/// seqs still owed a boot-fetch resolution, and the shared deadline (from
+/// boot commit) past which the hold is lifted regardless.
+struct UnresolvedBarrier {
+    seqs: BTreeSet<u64>,
+    deadline: Instant,
 }
 
 impl EventQueue {
@@ -189,6 +440,10 @@ impl EventQueue {
             cancel_reasons: HashMap::new(),
             withheld_native_steer: HashMap::new(),
             in_flight_deadline: Duration::from_secs(DEFAULT_IN_FLIGHT_DEADLINE_SECS),
+            next_admission_seq: 0,
+            in_flight_batch_triggers: HashMap::new(),
+            dirty_channels: HashSet::new(),
+            unresolved_barriers: HashMap::new(),
         }
     }
 
@@ -221,13 +476,269 @@ impl EventQueue {
         }
     }
 
+    /// Resume `admission_seq` allocation past `seq` (boot-time restore).
+    ///
+    /// Called once, before any post-boot `push()`, with the max
+    /// `admission_seq` observed across every persisted record (imported and
+    /// unresolved). Ensures fresh live admissions always sort after
+    /// recovered work and a later-resolving unresolved record keeps a
+    /// collision-free seq.
+    pub fn set_next_admission_seq(&mut self, seq: u64) {
+        if seq >= self.next_admission_seq {
+            self.next_admission_seq = seq + 1;
+        }
+    }
+
+    /// Every event this channel still owes a turn for, in total admission
+    /// order (ascending `admission_seq`): ordinary queued events, the
+    /// in-flight batch (if any), cancelled-pending-redispatch events, and
+    /// withheld-native-steer events. Empty vec = the channel owes nothing.
+    ///
+    /// This is the full mirror `lib.rs` persists to the ledger after every
+    /// dirtying operation — see [`Self::take_dirty_channels`].
+    pub fn recoverable_triggers(&self, channel_id: Uuid) -> Vec<RecoverableTrigger> {
+        let mut triggers: Vec<RecoverableTrigger> = Vec::new();
+        if let Some(q) = self.queues.get(&channel_id) {
+            triggers.extend(q.iter().map(RecoverableTrigger::from_queued));
+        }
+        if let Some(in_flight) = self.in_flight_batch_triggers.get(&channel_id) {
+            triggers.extend(in_flight.iter().cloned());
+        }
+        if let Some(cancelled) = self.cancelled_batches.get(&channel_id) {
+            triggers.extend(cancelled.iter().map(RecoverableTrigger::from_batch));
+        }
+        if let Some(withheld) = self.withheld_native_steer.get(&channel_id) {
+            triggers.extend(withheld.iter().map(RecoverableTrigger::from_queued));
+        }
+        triggers.sort_by_key(|t| t.admission_seq);
+        triggers
+    }
+
+    /// Drain and return every channel id touched by a public mutator since
+    /// the last call. `lib.rs` calls this after every public `&mut queue`
+    /// operation and ledger-syncs each returned channel — the one rule that
+    /// replaces a hand-maintained seam list (see module docs).
+    pub fn take_dirty_channels(&mut self) -> Vec<Uuid> {
+        std::mem::take(&mut self.dirty_channels)
+            .into_iter()
+            .collect()
+    }
+
+    /// Lowest currently-unresolved `admission_seq` for `channel_id`, or
+    /// `None` if the channel has no active barrier. Queue invariant: every
+    /// per-channel table (`queues`, `cancelled_batches`) is always ascending
+    /// by `admission_seq` (established by construction at every mutator —
+    /// live `push` appends the process-max seq, all restore paths
+    /// front-load strictly lower seqs than what remains, and
+    /// `import_recovered`/`admit_recovered` insert in seq order). Events at
+    /// or below this floor precede every remaining hole and flush
+    /// normally; events above it are held.
+    fn barrier_floor(&self, channel_id: Uuid) -> Option<u64> {
+        self.unresolved_barriers
+            .get(&channel_id)
+            .and_then(|b| b.seqs.iter().next().copied())
+    }
+
+    /// Splits an ascending-by-`admission_seq` vector into (flushable, held)
+    /// given an optional barrier floor: `Some(k)` keeps only entries with
+    /// `admission_seq <= k` in the flushable half; `None` keeps everything
+    /// flushable. Relative order within each half is preserved regardless
+    /// of the input's admission_seq order. Shared by `flush_next`'s
+    /// cancelled-batch fallback and cancelled-events merge so both respect
+    /// the same per-event rule the main queue drain does.
+    fn split_at_barrier_floor(
+        entries: Vec<BatchEvent>,
+        floor: Option<u64>,
+    ) -> (Vec<BatchEvent>, Vec<BatchEvent>) {
+        match floor {
+            None => (entries, Vec::new()),
+            Some(floor) => {
+                let mut flushable = Vec::with_capacity(entries.len());
+                let mut held = Vec::new();
+                for be in entries {
+                    if be.admission_seq <= floor {
+                        flushable.push(be);
+                    } else {
+                        held.push(be);
+                    }
+                }
+                (flushable, held)
+            }
+        }
+    }
+
+    /// Register `channel_id`'s unresolved ordering barrier (R6-F1) — called
+    /// once per channel at boot commit for every channel with unfetched
+    /// boot-recovery triggers. `seqs` is the channel's set of unresolved
+    /// `admission_seq`s; `deadline` is the shared recovery deadline
+    /// (measured from boot commit) at which the barrier lifts regardless of
+    /// resolution. A channel with no unresolved seqs gets no barrier.
+    pub fn set_unresolved_barrier(
+        &mut self,
+        channel_id: Uuid,
+        seqs: BTreeSet<u64>,
+        deadline: Instant,
+    ) {
+        if seqs.is_empty() {
+            return;
+        }
+        self.unresolved_barriers
+            .insert(channel_id, UnresolvedBarrier { seqs, deadline });
+    }
+
+    /// Returns `true` if `channel_id` has an active (non-expired) unresolved
+    /// barrier. Used by `admit_live_event` to suppress native steer while the
+    /// barrier is armed — a fresh live event must queue behind the hole rather
+    /// than bypassing it through the steer side-door.
+    pub fn has_active_unresolved_barrier(&self, channel_id: Uuid) -> bool {
+        self.unresolved_barriers.contains_key(&channel_id)
+    }
+
+    /// Earliest active barrier deadline across all channels, or `None` when
+    /// no barrier is armed. The main `select!`'s `tokio::time::Sleep` arm
+    /// is reset from this whenever the barrier set changes (rev 6.1).
+    pub fn next_unresolved_barrier_deadline(&self) -> Option<Instant> {
+        self.unresolved_barriers.values().map(|b| b.deadline).min()
+    }
+
+    /// Expire every barrier at or past `now`, lifting the hold on its
+    /// channel's suffix. Called by the dedicated `select!` timer arm on
+    /// fire, and opportunistically at the top of `flush_next`/
+    /// `has_flushable_work` as a cheap check on already-woken paths — the
+    /// timer arm is what makes the deadline an actual bound on a quiet
+    /// harness (rev 6.1). Returns the expired channel ids (already
+    /// inserted into `dirty_channels`) so the caller can ledger-sync them.
+    pub fn expire_due_unresolved_barriers(&mut self, now: Instant) -> Vec<Uuid> {
+        let due: Vec<Uuid> = self
+            .unresolved_barriers
+            .iter()
+            .filter(|(_, b)| now >= b.deadline)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &due {
+            self.unresolved_barriers.remove(id);
+            self.dirty_channels.insert(*id);
+        }
+        due
+    }
+
+    /// Boot-only bulk restore: re-admits a channel's complete durable
+    /// trigger set, in `admission_seq` order, bypassing cap eviction (the
+    /// durable set can legitimately exceed [`MAX_PENDING_PER_CHANNEL`] —
+    /// see module docs on cap enforcement). Each event's `cap_exempt` is
+    /// taken verbatim from the caller — this function does not compute or
+    /// apply the whole-snapshot promotion rule itself. The promotion
+    /// decision requires seeing every gated record for a channel (fetched
+    /// *and* unresolved), which only the caller (`boot_recover`) has in
+    /// scope; `events` here is just the fetched subset. Settling the class
+    /// here from a partial subset would re-derive the wrong answer (e.g. an
+    /// unfetched exempt record leaving a fetched non-exempt record as the
+    /// only entry in `events`, spuriously promoting it). A no-op for an
+    /// empty `events`.
+    pub fn import_recovered(&mut self, channel_id: Uuid, mut events: Vec<QueuedEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        events.sort_by_key(|e| e.admission_seq);
+        let queue = self.queues.entry(channel_id).or_default();
+        for mut event in events {
+            event.channel_id = channel_id;
+            queue.push_back(event);
+        }
+        self.dirty_channels.insert(channel_id);
+    }
+
+    /// Recovery-specific single-event admission for resolving an unresolved
+    /// boot-fetch record (R5-F3): bypasses `DedupMode::Drop`'s in-flight
+    /// rejection and cap accounting, and inserts `event` at its
+    /// `admission_seq` position among the channel's queued events (not the
+    /// tail) so the runtime queue matches the ledger's total order. Also
+    /// releases the resolved seq from the channel's unresolved barrier, if
+    /// any (release path 1 of 3 — see `set_unresolved_barrier`).
+    ///
+    /// Caller supplies `event` with its original `admission_seq`/
+    /// `enqueued_at_unix`/`restart_recovery`/`cap_exempt` restored from the
+    /// unresolved ledger record — this does not stamp or overwrite any of
+    /// those fields (unlike `push`).
+    pub fn admit_recovered(&mut self, channel_id: Uuid, mut event: QueuedEvent) {
+        event.channel_id = channel_id;
+        let seq = event.admission_seq;
+        let queue = self.queues.entry(channel_id).or_default();
+        let pos = queue
+            .iter()
+            .position(|qe| qe.admission_seq > seq)
+            .unwrap_or(queue.len());
+        queue.insert(pos, event);
+        if let Some(barrier) = self.unresolved_barriers.get_mut(&channel_id) {
+            barrier.seqs.remove(&seq);
+            if barrier.seqs.is_empty() {
+                self.unresolved_barriers.remove(&channel_id);
+            }
+        }
+        self.dirty_channels.insert(channel_id);
+    }
+
+    /// Evicts counted-class (`cap_exempt == false`) events from `victim_end`
+    /// while their count exceeds [`MAX_PENDING_PER_CHANNEL`]. Exempt events
+    /// are invisible to this accounting — they leave the queue only via
+    /// dispatch or dead-letter, never eviction. Shared by all five
+    /// cap-enforcement call sites (`push`, `requeue`,
+    /// `requeue_preserve_timestamps`, `release_native_steer`, withheld-steer
+    /// deadline recovery) so the policy lives in exactly one place.
+    fn enforce_cap(&mut self, channel_id: Uuid, victim_end: VictimEnd) {
+        let Some(queue) = self.queues.get_mut(&channel_id) else {
+            return;
+        };
+        loop {
+            let counted = queue.iter().filter(|qe| !qe.cap_exempt).count();
+            if counted <= MAX_PENDING_PER_CHANNEL {
+                break;
+            }
+            let victim_pos = match victim_end {
+                VictimEnd::Front => queue.iter().position(|qe| !qe.cap_exempt),
+                VictimEnd::Back => queue.iter().rposition(|qe| !qe.cap_exempt),
+            };
+            let Some(pos) = victim_pos else {
+                // Unreachable given `counted > 0` above, but never loop
+                // forever on a bookkeeping mismatch.
+                break;
+            };
+            queue.remove(pos);
+            let label = match victim_end {
+                VictimEnd::Front => "oldest",
+                VictimEnd::Back => "newest",
+            };
+            tracing::warn!(
+                channel_id = %channel_id,
+                limit = MAX_PENDING_PER_CHANNEL,
+                "queue depth cap reached — dropped {label} counted event"
+            );
+        }
+        if queue.is_empty() {
+            self.queues.remove(&channel_id);
+        }
+    }
+
     /// Push an event into the queue for its channel.
     ///
     /// In [`DedupMode::Drop`], events for any currently in-flight channel are
     /// silently discarded (debug-logged).
     ///
+    /// Stamps `admission_seq` (this process's next monotonic value) and
+    /// `enqueued_at_unix` (wall-clock now), and forces `restart_recovery` /
+    /// `cap_exempt` to `false` — `push()` is the live-admission path only;
+    /// any caller-supplied values for these four fields are overwritten.
+    /// Recovered work is admitted via `import_recovered`/`admit_recovered`,
+    /// which preserve the ledger's original values instead.
+    ///
     /// Returns `true` if the event was accepted, `false` if dropped.
-    pub fn push(&mut self, event: QueuedEvent) -> bool {
+    pub fn push(&mut self, mut event: QueuedEvent) -> bool {
+        event.admission_seq = self.next_admission_seq;
+        self.next_admission_seq += 1;
+        event.enqueued_at_unix = crate::relay::unix_now_secs();
+        event.restart_recovery = false;
+        event.cap_exempt = false;
+
         if matches!(self.dedup_mode, DedupMode::Drop)
             && self.in_flight_channels.contains(&event.channel_id)
         {
@@ -237,17 +748,11 @@ impl EventQueue {
             );
             return false;
         }
-        let queue = self.queues.entry(event.channel_id).or_default();
-        // Enforce per-channel depth cap: drop oldest to make room.
-        if queue.len() >= MAX_PENDING_PER_CHANNEL {
-            queue.pop_front();
-            tracing::warn!(
-                channel_id = %event.channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "queue depth cap reached — dropped oldest event"
-            );
-        }
+        let channel_id = event.channel_id;
+        let queue = self.queues.entry(channel_id).or_default();
         queue.push_back(event);
+        self.enforce_cap(channel_id, VictimEnd::Front);
+        self.dirty_channels.insert(channel_id);
         true
     }
 
@@ -260,6 +765,12 @@ impl EventQueue {
     pub fn flush_next(&mut self) -> Option<FlushBatch> {
         let now = Instant::now();
 
+        // Opportunistic barrier expiry — cheap check on this already-woken
+        // path. The dedicated select! timer arm is what makes the deadline
+        // an actual bound on a quiet harness (rev 6.1); this just avoids
+        // leaving an expired barrier armed until the next timer fire.
+        self.expire_due_unresolved_barriers(now);
+
         // Auto-expire any stuck in-flight entries that missed mark_complete.
         let expired: Vec<Uuid> = self
             .in_flight_deadlines
@@ -269,6 +780,7 @@ impl EventQueue {
             .collect();
         for id in expired {
             let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
+            self.in_flight_batch_triggers.remove(&id);
             tracing::error!(
                 channel_id = %id,
                 lost_events,
@@ -284,10 +796,12 @@ impl EventQueue {
             // now-hung prompt — nothing to recover), these events were never
             // delivered to the agent.
             self.recover_withheld_for_expired_channel(id);
+            self.dirty_channels.insert(id);
         }
 
         // Find the channel whose head event has the oldest received_at,
-        // excluding in-flight channels and throttled channels.
+        // excluding in-flight channels, throttled channels, and channels
+        // whose head event is held behind an active unresolved barrier.
         let channel_id = self
             .queues
             .iter()
@@ -295,31 +809,60 @@ impl EventQueue {
                 !q.is_empty()
                     && !self.in_flight_channels.contains(id)
                     && self.retry_after.get(id).is_none_or(|&t| t <= now)
+                    && q.front().unwrap().admission_seq
+                        <= self.barrier_floor(**id).unwrap_or(u64::MAX)
             })
             .min_by_key(|(_, q)| q.front().unwrap().received_at)
             .map(|(id, _)| *id);
 
         // Fallback: if no queued events are ready but a channel has cancelled
         // events waiting (e.g., explicit !cancel with no new @mention), flush
-        // those as a regular batch (re-dispatch unchanged).
+        // those as a regular batch (re-dispatch unchanged). Held-behind-the-
+        // barrier cancelled events are split out and kept for a later cycle.
         let channel_id = match channel_id {
             Some(id) => id,
             None => {
                 let cancelled_id = self
                     .cancelled_batches
-                    .keys()
-                    .find(|id| !self.in_flight_channels.contains(id))
-                    .copied();
+                    .iter()
+                    .find(|(id, batch)| {
+                        !self.in_flight_channels.contains(*id)
+                            && batch.iter().any(|be| {
+                                be.admission_seq <= self.barrier_floor(**id).unwrap_or(u64::MAX)
+                            })
+                    })
+                    .map(|(id, _)| *id);
                 match cancelled_id {
                     Some(id) => {
                         // Move cancelled events into the regular events slot.
                         // No new events to merge — re-dispatch the original batch.
-                        let cancelled = self.cancelled_batches.remove(&id).unwrap_or_default();
-                        let cancel_reason = self.cancel_reasons.remove(&id);
+                        let full = self.cancelled_batches.remove(&id).unwrap_or_default();
+                        let stored_reason = self.cancel_reasons.remove(&id);
+                        let floor = self.barrier_floor(id);
+                        let (cancelled, held) = Self::split_at_barrier_floor(full, floor);
+                        if !held.is_empty() {
+                            self.cancelled_batches.insert(id, held);
+                            if let Some(r) = stored_reason {
+                                self.cancel_reasons.insert(id, r);
+                            }
+                        }
+                        let cancel_reason = if cancelled.is_empty() {
+                            None
+                        } else {
+                            stored_reason
+                        };
                         self.in_flight_channels.insert(id);
                         self.in_flight_deadlines
                             .insert(id, now + self.in_flight_deadline);
                         self.in_flight_batch_sizes.insert(id, cancelled.len());
+                        self.in_flight_batch_triggers.insert(
+                            id,
+                            cancelled
+                                .iter()
+                                .map(RecoverableTrigger::from_batch)
+                                .collect(),
+                        );
+                        self.dirty_channels.insert(id);
                         return Some(FlushBatch {
                             channel_id: id,
                             events: cancelled,
@@ -332,16 +875,19 @@ impl EventQueue {
             }
         };
 
-        // Drain up to MAX_BATCH_EVENTS; leave any remainder in the queue.
+        // Drain up to MAX_BATCH_EVENTS, but never past the channel's
+        // unresolved barrier floor (if any) — events above it are left in
+        // the queue for a later cycle, after resolution/invalidation/expiry.
+        let floor = self.barrier_floor(channel_id).unwrap_or(u64::MAX);
         let queue = self.queues.entry(channel_id).or_default();
-        let drain_count = MAX_BATCH_EVENTS.min(queue.len());
+        let flushable_len = queue
+            .iter()
+            .take_while(|qe| qe.admission_seq <= floor)
+            .count();
+        let drain_count = MAX_BATCH_EVENTS.min(flushable_len);
         let mut events: Vec<BatchEvent> = queue
             .drain(..drain_count)
-            .map(|qe| BatchEvent {
-                event: qe.event,
-                prompt_tag: qe.prompt_tag,
-                received_at: qe.received_at,
-            })
+            .map(QueuedEvent::into_batch_event)
             .collect();
         // Relay replay delivers stored events newest-first (`ORDER BY
         // created_at DESC`), but batch consumers — `format_prompt` scope and
@@ -359,17 +905,36 @@ impl EventQueue {
             .insert(channel_id, now + self.in_flight_deadline);
         self.in_flight_batch_sizes.insert(channel_id, events.len());
 
-        // Merge any cancelled events stored by requeue_as_cancelled().
-        let cancelled_events = self
+        // Merge any cancelled events stored by requeue_as_cancelled(),
+        // splitting out any held behind the same barrier floor.
+        let cancelled_raw = self
             .cancelled_batches
             .remove(&channel_id)
             .unwrap_or_default();
+        let stored_reason = self.cancel_reasons.remove(&channel_id);
+        let (cancelled_events, held_cancelled) =
+            Self::split_at_barrier_floor(cancelled_raw, Some(floor));
+        if !held_cancelled.is_empty() {
+            self.cancelled_batches.insert(channel_id, held_cancelled);
+            if let Some(r) = stored_reason {
+                self.cancel_reasons.insert(channel_id, r);
+            }
+        }
         let cancel_reason = if cancelled_events.is_empty() {
-            self.cancel_reasons.remove(&channel_id);
             None
         } else {
-            self.cancel_reasons.remove(&channel_id)
+            stored_reason
         };
+
+        self.in_flight_batch_triggers.insert(
+            channel_id,
+            events
+                .iter()
+                .map(RecoverableTrigger::from_batch)
+                .chain(cancelled_events.iter().map(RecoverableTrigger::from_batch))
+                .collect(),
+        );
+        self.dirty_channels.insert(channel_id);
 
         Some(FlushBatch {
             channel_id,
@@ -389,7 +954,10 @@ impl EventQueue {
     /// so the backoff sequence continues on the next attempt.
     ///
     /// Also cleans up any already-expired `retry_after` entry.
-    pub fn mark_complete(&mut self, channel_id: Uuid) {
+    ///
+    /// Private: only [`Self::complete_batch`] may call this, so no public
+    /// API can observe the requeue-then-complete intermediate state (P3-F1).
+    fn mark_complete(&mut self, channel_id: Uuid) {
         self.in_flight_channels.remove(&channel_id);
         self.in_flight_deadlines.remove(&channel_id);
         self.in_flight_batch_sizes.remove(&channel_id);
@@ -426,7 +994,9 @@ impl EventQueue {
     ///
     /// Note: does NOT remove from `in_flight_channels` — caller must call
     /// `mark_complete` separately.
-    pub fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
+    ///
+    /// Private: only [`Self::complete_batch`] may call this (P3-F1).
+    fn requeue(&mut self, batch: FlushBatch) -> Option<FlushBatch> {
         let channel_id = batch.channel_id;
         let attempt = {
             let count = self.retry_counts.entry(channel_id).or_insert(0);
@@ -475,24 +1045,9 @@ impl EventQueue {
         let queue = self.queues.entry(channel_id).or_default();
         // Push to front in reverse order so original order is preserved.
         for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at, // preserve original timestamp (#46)
-            });
+            queue.push_front(be.into_queued_event(channel_id)); // preserve original timestamp (#46)
         }
-        // Enforce per-channel cap: trim oldest (back) events if requeue pushed
-        // the queue over the limit. Without this, repeated requeue+push cycles
-        // can grow the queue unboundedly.
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "requeue overflow — dropped oldest event to enforce cap"
-            );
-        }
+        self.enforce_cap(channel_id, VictimEnd::Back);
         self.retry_after.insert(channel_id, Instant::now() + delay);
         None
     }
@@ -505,27 +1060,16 @@ impl EventQueue {
     ///
     /// Does NOT set `retry_after`. Does NOT remove from `in_flight_channels` —
     /// caller must call `mark_complete` separately.
-    pub fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
+    ///
+    /// Private: only [`Self::complete_batch`] may call this (P3-F1).
+    fn requeue_preserve_timestamps(&mut self, batch: FlushBatch) {
         let channel_id = batch.channel_id;
         let queue = self.queues.entry(channel_id).or_default();
         // Push to front in reverse order so original order is preserved.
         for be in batch.events.into_iter().rev() {
-            queue.push_front(QueuedEvent {
-                channel_id,
-                event: be.event,
-                prompt_tag: be.prompt_tag,
-                received_at: be.received_at,
-            });
+            queue.push_front(be.into_queued_event(channel_id));
         }
-        // Enforce per-channel cap: trim newest (back) events if over limit.
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "requeue_preserve overflow — dropped newest event to enforce cap"
-            );
-        }
+        self.enforce_cap(channel_id, VictimEnd::Back);
     }
 
     /// Requeue a cancelled batch so its events appear as `cancelled_events`
@@ -539,12 +1083,113 @@ impl EventQueue {
     /// Unlike `requeue_preserve_timestamps`, events are NOT pushed back into
     /// the generic queue — they are stored separately and merged by
     /// `flush_next()`. No retry throttle, no backoff.
-    pub fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
+    ///
+    /// Private: only [`Self::complete_batch`] may call this (P3-F1).
+    fn requeue_as_cancelled(&mut self, batch: FlushBatch, reason: CancelReason) {
         let entry = self.cancelled_batches.entry(batch.channel_id).or_default();
         // Preserve any already-cancelled events from a prior cancel (double-cancel).
         entry.extend(batch.cancelled_events);
         entry.extend(batch.events);
         self.cancel_reasons.insert(batch.channel_id, reason);
+    }
+
+    /// Apply a batch's completion disposition and mark its channel's prompt
+    /// complete as one atomic transition (P3-F1).
+    ///
+    /// `batch` is `None` for [`BatchDisposition::Success`] (nothing to
+    /// requeue). Every nonterminal disposition restores **both** payload
+    /// vectors — `events` per the disposition's own semantics, and any
+    /// `cancelled_events` back into `cancelled_batches` with the batch's
+    /// `cancel_reason` — exactly once (R5-F1), so a mixed batch never loses
+    /// its cancelled half to a `Retry` or `PreserveTimestamps` disposition.
+    ///
+    /// Returns any dead-lettered batch (`Retry` exhaustion) for the caller's
+    /// error log, as `requeue()` did before this replaced it. Always leaves
+    /// the queue in a consistent post-transition recoverable state — no
+    /// public operation can observe an intermediate one.
+    pub fn complete_batch(
+        &mut self,
+        channel_id: Uuid,
+        batch: Option<FlushBatch>,
+        disposition: BatchDisposition,
+    ) -> Option<FlushBatch> {
+        self.in_flight_batch_triggers.remove(&channel_id);
+        let dead_letter = match (batch, disposition) {
+            (None, _) => None,
+            (Some(batch), BatchDisposition::Success) => {
+                debug_assert_eq!(batch.channel_id, channel_id);
+                None
+            }
+            (Some(batch), BatchDisposition::Dropped) => {
+                debug_assert_eq!(batch.channel_id, channel_id);
+                None
+            }
+            (Some(batch), BatchDisposition::Retry) => {
+                debug_assert_eq!(batch.channel_id, channel_id);
+                let cancelled = batch.cancelled_events.clone();
+                let cancel_reason = batch.cancel_reason;
+                let dead = self.requeue(FlushBatch {
+                    cancelled_events: vec![],
+                    ..batch
+                });
+                match dead {
+                    // Dead-lettered: restore the cancelled half onto the
+                    // returned batch so the caller's error log (and any
+                    // failure notice) names everything discarded.
+                    Some(mut dead) => {
+                        dead.cancelled_events = cancelled;
+                        dead.cancel_reason = cancel_reason;
+                        Some(dead)
+                    }
+                    // Requeued for another attempt: restore the cancelled
+                    // half into cancelled_batches, preserving merged-prompt
+                    // framing on the next flush.
+                    None => {
+                        if !cancelled.is_empty() {
+                            self.requeue_as_cancelled(
+                                FlushBatch {
+                                    channel_id,
+                                    events: vec![],
+                                    cancelled_events: cancelled,
+                                    cancel_reason: None,
+                                },
+                                cancel_reason.unwrap_or(CancelReason::Steer),
+                            );
+                        }
+                        None
+                    }
+                }
+            }
+            (Some(batch), BatchDisposition::PreserveTimestamps) => {
+                debug_assert_eq!(batch.channel_id, channel_id);
+                let cancelled = batch.cancelled_events.clone();
+                let cancel_reason = batch.cancel_reason;
+                self.requeue_preserve_timestamps(FlushBatch {
+                    cancelled_events: vec![],
+                    ..batch
+                });
+                if !cancelled.is_empty() {
+                    self.requeue_as_cancelled(
+                        FlushBatch {
+                            channel_id,
+                            events: vec![],
+                            cancelled_events: cancelled,
+                            cancel_reason: None,
+                        },
+                        cancel_reason.unwrap_or(CancelReason::Steer),
+                    );
+                }
+                None
+            }
+            (Some(batch), BatchDisposition::Cancelled(reason)) => {
+                debug_assert_eq!(batch.channel_id, channel_id);
+                self.requeue_as_cancelled(batch, reason);
+                None
+            }
+        };
+        self.mark_complete(channel_id);
+        self.dirty_channels.insert(channel_id);
+        dead_letter
     }
 
     /// Returns `true` if any channel has pending events that are not in-flight
@@ -556,6 +1201,9 @@ impl EventQueue {
     pub fn has_flushable_work(&mut self) -> bool {
         let now = Instant::now();
 
+        // Opportunistic barrier expiry — see flush_next's rationale.
+        self.expire_due_unresolved_barriers(now);
+
         // Auto-expire stuck in-flight entries (same logic as flush_next).
         let expired: Vec<Uuid> = self
             .in_flight_deadlines
@@ -565,6 +1213,7 @@ impl EventQueue {
             .collect();
         for id in expired {
             let lost_events = self.in_flight_batch_sizes.remove(&id).unwrap_or(0);
+            self.in_flight_batch_triggers.remove(&id);
             tracing::error!(
                 channel_id = %id,
                 lost_events,
@@ -578,16 +1227,20 @@ impl EventQueue {
             // goose-native steer events for the expired channel so they are
             // not permanently orphaned in the side table.
             self.recover_withheld_for_expired_channel(id);
+            self.dirty_channels.insert(id);
         }
 
         self.queues.iter().any(|(id, q)| {
             !q.is_empty()
                 && !self.in_flight_channels.contains(id)
                 && self.retry_after.get(id).is_none_or(|&t| t <= now)
-        }) || self
-            .cancelled_batches
-            .keys()
-            .any(|id| !self.in_flight_channels.contains(id))
+                && q.front().unwrap().admission_seq <= self.barrier_floor(*id).unwrap_or(u64::MAX)
+        }) || self.cancelled_batches.iter().any(|(id, batch)| {
+            !self.in_flight_channels.contains(id)
+                && batch
+                    .iter()
+                    .any(|be| be.admission_seq <= self.barrier_floor(*id).unwrap_or(u64::MAX))
+        })
     }
 
     /// Number of channels with pending events.
@@ -633,6 +1286,11 @@ impl EventQueue {
         self.cancelled_batches.remove(&channel_id);
         self.cancel_reasons.remove(&channel_id);
         self.withheld_native_steer.remove(&channel_id);
+        // Invalidation (release path 2 of 3): a removed channel's unresolved
+        // barrier — and any unresolved ledger records it guards — must not
+        // survive to resurrect discarded work if the agent is re-added later.
+        self.unresolved_barriers.remove(&channel_id);
+        self.dirty_channels.insert(channel_id);
         // Preserve in_flight_channels AND in_flight_deadlines: the in-flight
         // task will eventually complete (calling mark_complete) or the deadline
         // will expire (auto-cleaning the channel). Removing deadlines without
@@ -687,6 +1345,7 @@ impl EventQueue {
             .entry(channel_id)
             .or_default()
             .push(qe);
+        self.dirty_channels.insert(channel_id);
         true
     }
 
@@ -719,14 +1378,8 @@ impl EventQueue {
         // a flood of events arrived during the ack window.
         let queue = self.queues.entry(channel_id).or_default();
         queue.push_front(qe);
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "release_native_steer overflow — dropped newest event to enforce cap"
-            );
-        }
+        self.enforce_cap(channel_id, VictimEnd::Back);
+        self.dirty_channels.insert(channel_id);
     }
 
     /// Drop a specific event by id from both the side table and the main
@@ -748,6 +1401,7 @@ impl EventQueue {
                 self.queues.remove(&channel_id);
             }
         }
+        self.dirty_channels.insert(channel_id);
     }
 
     /// Bulk-release every withheld event for `channel_id` back to the queue
@@ -772,14 +1426,7 @@ impl EventQueue {
         for qe in entries.into_iter().rev() {
             queue.push_front(qe);
         }
-        while queue.len() > MAX_PENDING_PER_CHANNEL {
-            queue.pop_back();
-            tracing::warn!(
-                channel_id = %channel_id,
-                limit = MAX_PENDING_PER_CHANNEL,
-                "withheld-steer recovery overflow — dropped newest event to enforce cap"
-            );
-        }
+        self.enforce_cap(channel_id, VictimEnd::Back);
         tracing::warn!(
             channel_id = %channel_id,
             recovered = n,
@@ -960,6 +1607,13 @@ pub fn extract_slash_command(content: &str, known_names: &[&str]) -> Option<Stri
 /// content that is a slash command after leading mentions.
 pub fn slash_command_for_batch(batch: &FlushBatch, known_names: &[&str]) -> Option<String> {
     if batch.events.len() != 1 || !batch.cancelled_events.is_empty() {
+        return None;
+    }
+    // A recovered event must go through the wrapped-context path so the
+    // model sees the recovery header before any side effect fires — bare
+    // pass-through would re-execute a command that may have already run
+    // pre-restart.
+    if batch.events[0].restart_recovery {
         return None;
     }
     extract_slash_command(&batch.events[0].event.content, known_names)
@@ -1492,6 +2146,20 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         sections.push(format_conversation_context(ctx, args.profile_lookup));
     }
 
+    // 3b. Restart-recovery header (R5-F6). Scoped explicitly so a mixed
+    // batch (recovered backlog + fresh live event) isn't misread as "the
+    // whole batch may already be done" — only events individually marked
+    // `[restart recovery]` below carry that caveat.
+    if batch.has_recovered_events() {
+        sections.push(
+            "[Restart recovery] The app restarted while some of this work was pending; \
+             events below marked [restart recovery] may already have been answered. \
+             Re-read the thread first — skip any marked event whose reply already landed. \
+             All unmarked events are new work and must be handled regardless."
+                .to_string(),
+        );
+    }
+
     // 4. Cancelled + re-prompt framing. When a turn was cancelled to deliver
     //    new events mid-flight, the merged prompt is framed two ways depending
     //    on why it was cancelled (see [`CancelReason`]):
@@ -1506,9 +2174,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         let mut s = framing.prior_header.to_string();
         for (i, be) in batch.cancelled_events.iter().enumerate() {
             s.push_str(&format!(
-                "\n\n--- Event {} ({}) ---\n{}",
+                "\n\n--- Event {} ({}){} ---\n{}",
                 i + 1,
                 be.prompt_tag,
+                recovery_marker(be),
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             ));
         }
@@ -1520,15 +2189,17 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         let be = &batch.events[0];
         if has_cancelled {
             format!(
-                "{}\n\n--- Event 1 ({}) ---\n{}",
+                "{}\n\n--- Event 1 ({}){} ---\n{}",
                 framing.new_header_single,
                 be.prompt_tag,
+                recovery_marker(be),
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             )
         } else {
             format!(
-                "[Buzz event: {}]\n{}",
+                "[Buzz event: {}]{}\n{}",
                 be.prompt_tag,
+                recovery_marker(be),
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             )
         }
@@ -1545,9 +2216,10 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
         let mut s = header;
         for (i, be) in batch.events.iter().enumerate() {
             s.push_str(&format!(
-                "\n\n--- Event {} ({}) ---\n{}",
+                "\n\n--- Event {} ({}){} ---\n{}",
                 i + 1,
                 be.prompt_tag,
+                recovery_marker(be),
                 format_event_block(batch.channel_id, args.channel_info, be, args.profile_lookup)
             ));
         }
@@ -1561,6 +2233,18 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     }
 
     sections
+}
+
+/// Per-event provenance tag appended to an event's header line — `""` for
+/// live events, `" [restart recovery]"` for boot-recovered replays. Scoped
+/// per event (not per batch) so a mixed batch's fresh events are never
+/// mistaken for already-answered recovered ones (R5-F6).
+fn recovery_marker(be: &BatchEvent) -> &'static str {
+    if be.restart_recovery {
+        " [restart recovery]"
+    } else {
+        ""
+    }
 }
 
 /// Prompt-framing strings for a merged (cancel + re-prompt) turn, selected by
@@ -1642,22 +2326,22 @@ mod tests {
 
     /// Build a QueuedEvent for the given channel.
     fn make_queued(channel_id: Uuid, content: &str) -> QueuedEvent {
-        QueuedEvent {
+        QueuedEvent::for_test(
             channel_id,
-            event: make_event(content),
-            received_at: Instant::now(),
-            prompt_tag: "test".into(),
-        }
+            make_event(content),
+            Instant::now(),
+            "test".into(),
+        )
     }
 
     /// Build a QueuedEvent with a specific `received_at` offset from now.
     fn make_queued_at(channel_id: Uuid, content: &str, age: Duration) -> QueuedEvent {
-        QueuedEvent {
+        QueuedEvent::for_test(
             channel_id,
-            event: make_event(content),
-            received_at: Instant::now() - age,
-            prompt_tag: "test".into(),
-        }
+            make_event(content),
+            Instant::now() - age,
+            "test".into(),
+        )
     }
 
     /// Build a QueuedEvent with an explicit Nostr `created_at` timestamp.
@@ -1672,12 +2356,7 @@ mod tests {
             .tags([])
             .sign_with_keys(&keys)
             .unwrap();
-        QueuedEvent {
-            channel_id,
-            event,
-            received_at: Instant::now(),
-            prompt_tag: "test".into(),
-        }
+        QueuedEvent::for_test(channel_id, event, Instant::now(), "test".into())
     }
 
     fn pending_count(q: &EventQueue) -> usize {
@@ -1872,6 +2551,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -1892,6 +2575,145 @@ mod tests {
         assert!(!prompt.contains("--- Event 1 ---"));
     }
 
+    #[test]
+    fn test_format_prompt_recovered_single_event_gets_header_and_marker() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("original request"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: true,
+                cap_exempt: false,
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        assert!(
+            prompt.contains("[Restart recovery]"),
+            "recovered batch must carry the scoped header: {prompt}"
+        );
+        assert!(
+            prompt.contains("[Buzz event: @mention] [restart recovery]"),
+            "the single recovered event's header line must carry the marker: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_fresh_batch_has_no_recovery_header_or_marker() {
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("Hello @agent"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        assert!(!prompt.contains("[Restart recovery]"));
+        assert!(!prompt.contains("[restart recovery]"));
+    }
+
+    #[test]
+    fn test_format_prompt_mixed_batch_marks_only_recovered_event() {
+        // A recovered backlog event batched with a fresh live event: the
+        // header must appear (batch has at least one recovered event), but
+        // only the recovered event's header line carries the per-event
+        // marker — the live event must read as new, unambiguous work
+        // (R5-F6's scoped no-op rule).
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![
+                BatchEvent {
+                    event: make_event("recovered work"),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                    admission_seq: 1,
+                    enqueued_at_unix: 100,
+                    restart_recovery: true,
+                    cap_exempt: false,
+                },
+                BatchEvent {
+                    event: make_event("fresh work"),
+                    prompt_tag: "@mention".into(),
+                    received_at: Instant::now(),
+                    admission_seq: 2,
+                    enqueued_at_unix: 200,
+                    restart_recovery: false,
+                    cap_exempt: false,
+                },
+            ],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        assert!(prompt.contains("[Restart recovery]"), "{prompt}");
+        assert!(
+            prompt.contains("--- Event 1 (@mention) [restart recovery] ---"),
+            "recovered event must be marked: {prompt}"
+        );
+        assert!(
+            prompt.contains("--- Event 2 (@mention) ---"),
+            "fresh event must NOT be marked: {prompt}"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_recovered_marker_in_cancelled_section_only() {
+        // The cancelled (prior-work) half of a merge can independently carry
+        // recovery provenance even when the new event is fresh — the marker
+        // must appear in the cancelled section, not bleed into the new one.
+        let ch = Uuid::new_v4();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event: make_event("fresh follow-up"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+                admission_seq: 2,
+                enqueued_at_unix: 200,
+                restart_recovery: false,
+                cap_exempt: false,
+            }],
+            cancelled_events: vec![BatchEvent {
+                event: make_event("recovered prior task"),
+                prompt_tag: "@mention".into(),
+                received_at: Instant::now(),
+                admission_seq: 1,
+                enqueued_at_unix: 100,
+                restart_recovery: true,
+                cap_exempt: false,
+            }],
+            cancel_reason: Some(CancelReason::Steer),
+        };
+        let prompt = format_prompt(&batch, &FormatPromptArgs::default()).join("\n\n");
+
+        assert!(prompt.contains("[Restart recovery]"), "{prompt}");
+        assert!(
+            prompt.contains("--- Event 1 (@mention) [restart recovery] ---\nEvent ID:"),
+            "cancelled/prior event must be marked: {prompt}"
+        );
+        assert!(
+            prompt.contains("--- Event 1 (@mention) ---\nEvent ID:"),
+            "the new event's own header (also numbered Event 1 in its own section) must NOT be marked: {prompt}"
+        );
+    }
+
     /// Helper: build a merged (cancel + re-prompt) batch with one cancelled
     /// event and one new event, framed by `reason`.
     fn make_merged_batch(reason: Option<CancelReason>) -> FlushBatch {
@@ -1902,11 +2724,19 @@ mod tests {
                 event: make_event("the new message"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![BatchEvent {
                 event: make_event("the original task"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancel_reason: reason,
         }
@@ -2034,17 +2864,29 @@ mod tests {
                     event: make_event("new one"),
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
                 BatchEvent {
                     event: make_event("new two"),
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
             ],
             cancelled_events: vec![BatchEvent {
                 event: make_event("original"),
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancel_reason: Some(CancelReason::Steer),
         };
@@ -2090,11 +2932,19 @@ mod tests {
                 event: steering,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![BatchEvent {
                 event: original,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancel_reason: Some(CancelReason::Steer),
         };
@@ -2183,16 +3033,28 @@ mod tests {
                     event: e1,
                     prompt_tag: "tag-a".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
                 BatchEvent {
                     event: e2,
                     prompt_tag: "tag-b".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
                 BatchEvent {
                     event: e3,
                     prompt_tag: "tag-c".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
             ],
             cancelled_events: vec![],
@@ -2222,6 +3084,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2245,6 +3111,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2277,6 +3147,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2307,6 +3181,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2334,6 +3212,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2358,6 +3240,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2414,6 +3300,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2452,6 +3342,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -2681,6 +3575,10 @@ mod tests {
             event: make_event("old-msg"),
             received_at: old_time,
             prompt_tag: "test".into(),
+            admission_seq: 0,
+            enqueued_at_unix: 0,
+            restart_recovery: false,
+            cap_exempt: false,
         });
 
         let batch = q.flush_next().expect("flush");
@@ -2969,6 +3867,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3000,6 +3902,10 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3038,6 +3944,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3066,6 +3976,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3110,6 +4024,10 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3159,6 +4077,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3366,6 +4288,10 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3423,6 +4349,10 @@ mod tests {
                 event,
                 prompt_tag: "dm".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3463,6 +4393,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3487,6 +4421,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3510,6 +4448,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3876,6 +4818,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3918,6 +4864,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3952,6 +4902,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -3981,6 +4935,10 @@ mod tests {
                 event,
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4023,6 +4981,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4059,6 +5021,10 @@ mod tests {
                 event,
                 prompt_tag: "@mention".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4095,11 +5061,19 @@ mod tests {
                     event: plain,
                     prompt_tag: "test".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
                 BatchEvent {
                     event: threaded,
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
             ],
             cancelled_events: vec![],
@@ -4132,11 +5106,19 @@ mod tests {
                     event: threaded,
                     prompt_tag: "@mention".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
                 BatchEvent {
                     event: plain,
                     prompt_tag: "test".into(),
                     received_at: Instant::now(),
+                    admission_seq: 0,
+                    enqueued_at_unix: 0,
+                    restart_recovery: false,
+                    cap_exempt: false,
                 },
             ],
             cancelled_events: vec![],
@@ -4164,6 +5146,10 @@ mod tests {
                 event: make_event(content),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4241,6 +5227,10 @@ mod tests {
             event: make_event("another message"),
             prompt_tag: "test".into(),
             received_at: Instant::now(),
+            admission_seq: 0,
+            enqueued_at_unix: 0,
+            restart_recovery: false,
+            cap_exempt: false,
         });
         assert_eq!(slash_command_for_batch(&multi, &[]), None);
 
@@ -4250,6 +5240,10 @@ mod tests {
             event: make_event("interrupted"),
             prompt_tag: "test".into(),
             received_at: Instant::now(),
+            admission_seq: 0,
+            enqueued_at_unix: 0,
+            restart_recovery: false,
+            cap_exempt: false,
         });
         assert_eq!(slash_command_for_batch(&cancelled, &[]), None);
 
@@ -4257,6 +5251,18 @@ mod tests {
         assert_eq!(
             slash_command_for_batch(&make_single_batch("@Eva hello"), &[]),
             None
+        );
+
+        // Recovered single-event slash command → no pass-through (must go
+        // through the wrapped-context path so the model sees the recovery
+        // header before any side effect fires — bare pass-through would
+        // re-execute a command that may have already run pre-restart).
+        let mut recovered = make_single_batch("@Eva /init");
+        recovered.events[0].restart_recovery = true;
+        assert_eq!(
+            slash_command_for_batch(&recovered, &[]),
+            None,
+            "recovered slash command must not pass through unwrapped"
         );
     }
 
@@ -4458,6 +5464,10 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4487,6 +5497,10 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4515,6 +5529,10 @@ mod tests {
                 event: make_event("hi"),
                 prompt_tag: "test".into(),
                 received_at: Instant::now(),
+                admission_seq: 0,
+                enqueued_at_unix: 0,
+                restart_recovery: false,
+                cap_exempt: false,
             }],
             cancelled_events: vec![],
             cancel_reason: None,
@@ -4755,5 +5773,706 @@ mod tests {
             after_second >= after_first,
             "second extend must not move deadline backward (monotonic)"
         );
+    }
+
+    // ── Resume-ledger seam: recoverable_triggers / dirty_channels ─────────
+
+    #[test]
+    fn test_recoverable_triggers_gathers_all_four_tables_sorted_by_seq() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+
+        // seq 0: queued event (in-flight after flush).
+        q.push(make_queued(ch, "a"));
+        let batch = q.flush_next().expect("flush");
+        // seq 1: queued while in-flight (Queue mode allows it).
+        q.push(make_queued(ch, "b"));
+        // Cancel the in-flight batch — moves seq-0 trigger into cancelled_batches.
+        q.complete_batch(
+            ch,
+            Some(batch),
+            BatchDisposition::Cancelled(CancelReason::Steer),
+        );
+        // seq 2: withhold the queued (seq-1) event for native steer.
+        let seq1_id = q.recoverable_triggers(ch)[1].event_id.clone();
+        assert!(q.mark_native_steer_pending(ch, &seq1_id));
+        // seq 3: a fresh push lands back in queues.
+        q.push(make_queued(ch, "c"));
+
+        let triggers = q.recoverable_triggers(ch);
+        assert_eq!(triggers.len(), 3, "cancelled + withheld + fresh queued");
+        let seqs: Vec<u64> = triggers.iter().map(|t| t.admission_seq).collect();
+        let mut sorted = seqs.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            seqs, sorted,
+            "recoverable_triggers must be admission_seq-ascending"
+        );
+    }
+
+    #[test]
+    fn test_take_dirty_channels_drains_and_resets() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "a"));
+        assert_eq!(q.take_dirty_channels(), vec![ch]);
+        // Second call with no intervening mutation returns empty.
+        assert!(q.take_dirty_channels().is_empty());
+    }
+
+    #[test]
+    fn test_set_next_admission_seq_only_advances_forward() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.set_next_admission_seq(100);
+        q.push(make_queued(ch, "a"));
+        let seq = q.recoverable_triggers(ch)[0].admission_seq;
+        assert_eq!(
+            seq, 101,
+            "push after resume must land above the resumed floor"
+        );
+
+        // A lower resume request must not roll the counter backward.
+        q.set_next_admission_seq(5);
+        q.push(make_queued(ch, "b"));
+        let seq2 = q.recoverable_triggers(ch)[1].admission_seq;
+        assert_eq!(seq2, 102);
+    }
+
+    // ── import_recovered: caller-supplied class is passed through verbatim ──
+    //
+    // The whole-snapshot promotion rule (plan:136,147-149) is computed by
+    // `boot_recover` over ALL gated records (fetched + unresolved) before
+    // the fetch split — see `test_boot_recover_promotion_from_full_snapshot_
+    // unfetched_promotes` and `test_boot_recover_promotion_preserves_class_
+    // when_exempt_exists` in lib.rs. `import_recovered` only ever sees the
+    // fetched subset, so it must not re-derive promotion from that partial
+    // view; these tests pin the pass-through contract at the queue level.
+
+    #[test]
+    fn test_import_recovered_preserves_caller_supplied_exempt_bits() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut e1 = make_queued(ch, "a");
+        e1.admission_seq = 5;
+        e1.cap_exempt = true; // caller already decided: promote.
+        let mut e2 = make_queued(ch, "b");
+        e2.admission_seq = 6;
+        e2.cap_exempt = true;
+        q.import_recovered(ch, vec![e2, e1]);
+
+        let triggers = q.recoverable_triggers(ch);
+        assert_eq!(triggers.len(), 2);
+        assert!(
+            triggers.iter().all(|t| t.cap_exempt),
+            "import_recovered must not clear a caller-supplied exempt bit"
+        );
+        // Restored in admission_seq order regardless of input order.
+        assert_eq!(triggers[0].admission_seq, 5);
+        assert_eq!(triggers[1].admission_seq, 6);
+    }
+
+    #[test]
+    fn test_import_recovered_keeps_mixed_classes_when_caller_does_not_promote() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut exempt = make_queued(ch, "a");
+        exempt.admission_seq = 1;
+        exempt.cap_exempt = true;
+        let mut counted = make_queued(ch, "b");
+        counted.admission_seq = 2;
+        counted.cap_exempt = false;
+
+        q.import_recovered(ch, vec![exempt, counted]);
+
+        let triggers = q.recoverable_triggers(ch);
+        assert!(
+            triggers[0].cap_exempt,
+            "import_recovered must not touch an already-exempt record"
+        );
+        assert!(
+            !triggers[1].cap_exempt,
+            "import_recovered must not promote a record the caller left counted \
+             — this is exactly the P2-F2(b) regression: import_recovered has no \
+             business re-deriving promotion from a partial (fetched-only) view"
+        );
+    }
+
+    #[test]
+    fn test_import_recovered_empty_is_noop() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.import_recovered(ch, vec![]);
+        assert!(q.recoverable_triggers(ch).is_empty());
+        assert!(
+            q.take_dirty_channels().is_empty(),
+            "no-op must not dirty the channel"
+        );
+    }
+
+    #[test]
+    fn test_import_recovered_bypasses_cap() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let events: Vec<QueuedEvent> = (0..(MAX_PENDING_PER_CHANNEL as u64 + 50))
+            .map(|seq| {
+                let mut e = make_queued(ch, "x");
+                e.admission_seq = seq;
+                e
+            })
+            .collect();
+        q.import_recovered(ch, events);
+        assert_eq!(
+            q.recoverable_triggers(ch).len(),
+            MAX_PENDING_PER_CHANNEL + 50,
+            "import must not trim an over-cap snapshot"
+        );
+    }
+
+    // ── admit_recovered: seq-positioned insertion + barrier release ────────
+
+    #[test]
+    fn test_admit_recovered_inserts_at_seq_position_among_queued() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut low = make_queued(ch, "low");
+        low.admission_seq = 1;
+        let mut high = make_queued(ch, "high");
+        high.admission_seq = 3;
+        q.import_recovered(ch, vec![low, high]);
+
+        let mut mid = make_queued(ch, "mid");
+        mid.admission_seq = 2;
+        mid.restart_recovery = true;
+        q.admit_recovered(ch, mid);
+
+        let batch = q.flush_next().expect("flush");
+        let contents: Vec<&str> = batch
+            .events
+            .iter()
+            .map(|be| be.event.content.as_str())
+            .collect();
+        // events are sorted by created_at for the batch, not admission_seq —
+        // but all three must have flushed together in one batch.
+        assert_eq!(contents.len(), 3);
+        assert!(contents.contains(&"mid"));
+    }
+
+    #[test]
+    fn test_admit_recovered_bypasses_drop_mode_in_flight_rejection() {
+        let mut q = EventQueue::new(DedupMode::Drop);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "first"));
+        let _batch = q.flush_next().expect("flush");
+        assert!(q.is_channel_in_flight(ch));
+
+        let mut recovered = make_queued(ch, "recovered");
+        recovered.admission_seq = 999;
+        recovered.restart_recovery = true;
+        q.admit_recovered(ch, recovered);
+
+        // Ordinary push would have silently dropped this in Drop mode;
+        // admit_recovered must not.
+        assert_eq!(q.queued_event_count(&ch), 1);
+    }
+
+    #[test]
+    fn test_admit_recovered_releases_barrier_seq() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut unresolved = make_queued(ch, "a");
+        unresolved.admission_seq = 1;
+        let mut fetched = make_queued(ch, "b");
+        fetched.admission_seq = 2;
+        q.import_recovered(ch, vec![fetched]);
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        q.set_unresolved_barrier(ch, BTreeSet::from([1u64]), deadline);
+
+        // B (seq 2) is held behind unresolved A (seq 1).
+        assert!(
+            q.flush_next().is_none(),
+            "B must not flush while A is unresolved"
+        );
+
+        // Resolution admits A and releases the barrier.
+        q.admit_recovered(ch, unresolved);
+        let batch = q.flush_next().expect("A resolved — suffix flushes");
+        assert_eq!(batch.events.len(), 2);
+        assert_eq!(batch.events[0].event.content, "a");
+        assert_eq!(batch.events[1].event.content, "b");
+    }
+
+    // ── Unresolved ordering barrier: three release paths ────────────────────
+
+    #[test]
+    fn test_barrier_holds_suffix_until_resolution() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut fetched = make_queued(ch, "b");
+        fetched.admission_seq = 2;
+        q.import_recovered(ch, vec![fetched]);
+        q.set_unresolved_barrier(
+            ch,
+            BTreeSet::from([1u64]),
+            Instant::now() + Duration::from_secs(60),
+        );
+
+        assert!(
+            !q.has_flushable_work(),
+            "held suffix must not report flushable"
+        );
+        assert!(q.flush_next().is_none());
+    }
+
+    #[test]
+    fn test_barrier_holds_fresh_live_arrival_behind_the_hole() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.set_next_admission_seq(1); // fresh live pushes land above seq 1.
+        q.set_unresolved_barrier(
+            ch,
+            BTreeSet::from([1u64]),
+            Instant::now() + Duration::from_secs(60),
+        );
+
+        // Fresh live push necessarily stamps a higher seq than the hole.
+        q.push(make_queued(ch, "fresh"));
+        assert!(
+            q.flush_next().is_none(),
+            "fresh arrival behind the hole must be held"
+        );
+    }
+
+    #[test]
+    fn test_barrier_releases_on_invalidation() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut fetched = make_queued(ch, "b");
+        fetched.admission_seq = 2;
+        q.import_recovered(ch, vec![fetched]);
+        q.set_unresolved_barrier(
+            ch,
+            BTreeSet::from([1u64]),
+            Instant::now() + Duration::from_secs(60),
+        );
+
+        q.drain_channel(ch);
+        assert!(
+            q.next_unresolved_barrier_deadline().is_none(),
+            "invalidation must clear the barrier"
+        );
+    }
+
+    #[test]
+    fn test_barrier_releases_on_deadline_expiry() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let mut fetched = make_queued(ch, "b");
+        fetched.admission_seq = 2;
+        q.import_recovered(ch, vec![fetched]);
+        // Deadline already in the past — expiry should lift it immediately.
+        q.set_unresolved_barrier(
+            ch,
+            BTreeSet::from([1u64]),
+            Instant::now() - Duration::from_secs(1),
+        );
+
+        let batch = q
+            .flush_next()
+            .expect("expired barrier must release the suffix");
+        assert_eq!(batch.events[0].event.content, "b");
+        assert!(q.next_unresolved_barrier_deadline().is_none());
+    }
+
+    #[test]
+    fn test_next_unresolved_barrier_deadline_is_earliest_across_channels() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch_a = Uuid::new_v4();
+        let ch_b = Uuid::new_v4();
+        let earlier = Instant::now() + Duration::from_secs(10);
+        let later = Instant::now() + Duration::from_secs(60);
+        q.set_unresolved_barrier(ch_a, BTreeSet::from([1u64]), later);
+        q.set_unresolved_barrier(ch_b, BTreeSet::from([1u64]), earlier);
+
+        assert_eq!(q.next_unresolved_barrier_deadline(), Some(earlier));
+    }
+
+    #[test]
+    fn test_set_unresolved_barrier_noop_for_empty_seqs() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.set_unresolved_barrier(
+            ch,
+            BTreeSet::new(),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert!(q.next_unresolved_barrier_deadline().is_none());
+    }
+
+    #[test]
+    fn test_barrier_holds_cancelled_batch_fallback_behind_the_hole() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.set_next_admission_seq(0); // next push lands at seq 1, leaving seq 0 open for the barrier.
+        q.push(make_queued(ch, "first")); // admission_seq 1
+        let batch = q.flush_next().expect("flush");
+        // Cancel it — lands in cancelled_batches at admission_seq 1.
+        q.complete_batch(
+            ch,
+            Some(batch),
+            BatchDisposition::Cancelled(CancelReason::Steer),
+        );
+
+        // Barrier holds seq 0 unresolved — strictly below the cancelled
+        // event's seq 1, so the cancelled-only fallback (which respects
+        // `split_at_barrier_floor`, the same per-event rule as the main
+        // drain path) must hold it rather than re-dispatch.
+        q.set_unresolved_barrier(
+            ch,
+            BTreeSet::from([0u64]),
+            Instant::now() + Duration::from_secs(60),
+        );
+        assert!(
+            q.flush_next().is_none(),
+            "cancelled-only fallback must respect the barrier too"
+        );
+    }
+
+    // ── complete_batch disposition matrix (plan:244) ─────────────────────
+
+    #[test]
+    fn test_complete_batch_success_clears_in_flight_dirties_channel() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "a"));
+        q.take_dirty_channels();
+        let batch = q.flush_next().unwrap();
+        q.take_dirty_channels();
+
+        let dead = q.complete_batch(ch, Some(batch), BatchDisposition::Success);
+        assert!(dead.is_none(), "success never dead-letters");
+        assert!(!any_in_flight(&q));
+        assert!(
+            !q.take_dirty_channels().is_empty(),
+            "completion must dirty the channel"
+        );
+        assert!(q.recoverable_triggers(ch).is_empty());
+    }
+
+    #[test]
+    fn test_complete_batch_retry_requeues_and_dead_letters_on_max() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "a"));
+        let mut dead = None;
+        for _ in 0..=MAX_RETRIES {
+            q.retry_after
+                .insert(ch, Instant::now() - Duration::from_secs(1));
+            let batch = q.flush_next().unwrap();
+            dead = q.complete_batch(ch, Some(batch), BatchDisposition::Retry);
+        }
+        assert!(
+            dead.is_some(),
+            "after MAX_RETRIES+1 attempts, batch must be dead-lettered"
+        );
+        assert!(q.flush_next().is_none(), "dead-lettered event is gone");
+    }
+
+    #[test]
+    fn test_complete_batch_cancelled_steer_preserves_events() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "a"));
+        q.push(make_queued(ch, "b"));
+        let batch = q.flush_next().unwrap();
+        let event_count = batch.events.len();
+
+        q.complete_batch(
+            ch,
+            Some(batch),
+            BatchDisposition::Cancelled(CancelReason::Steer),
+        );
+        let triggers = q.recoverable_triggers(ch);
+        assert_eq!(
+            triggers.len(),
+            event_count,
+            "cancelled events must be preserved in recoverable set"
+        );
+    }
+
+    #[test]
+    fn test_complete_batch_dropped_removes_events() {
+        let mut q = EventQueue::new(DedupMode::Drop);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "a"));
+        let batch = q.flush_next().unwrap();
+
+        let dead = q.complete_batch(ch, Some(batch), BatchDisposition::Dropped);
+        assert!(dead.is_none());
+        assert!(q.recoverable_triggers(ch).is_empty());
+    }
+
+    #[test]
+    fn test_complete_batch_preserve_timestamps_requeues() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "a"));
+        let batch = q.flush_next().unwrap();
+        let orig_seq = batch.events[0].admission_seq;
+
+        q.complete_batch(ch, Some(batch), BatchDisposition::PreserveTimestamps);
+        let triggers = q.recoverable_triggers(ch);
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(
+            triggers[0].admission_seq, orig_seq,
+            "PreserveTimestamps must keep original admission_seq"
+        );
+    }
+
+    // ── all-public-mutator dirty census ──────────────────────────────────
+
+    #[test]
+    fn test_every_public_mutator_dirties_its_channel() {
+        let ch = Uuid::new_v4();
+
+        // push
+        let mut q = EventQueue::new(DedupMode::Queue);
+        q.push(make_queued(ch, "a"));
+        assert!(!q.take_dirty_channels().is_empty(), "push must dirty");
+
+        // flush_next
+        let batch = q.flush_next().unwrap();
+        assert!(!q.take_dirty_channels().is_empty(), "flush_next must dirty");
+
+        // complete_batch (Success)
+        q.complete_batch(ch, Some(batch), BatchDisposition::Success);
+        assert!(
+            !q.take_dirty_channels().is_empty(),
+            "complete_batch must dirty"
+        );
+
+        // import_recovered
+        let mut e = make_queued(ch, "b");
+        e.admission_seq = 10;
+        q.import_recovered(ch, vec![e]);
+        assert!(
+            !q.take_dirty_channels().is_empty(),
+            "import_recovered must dirty"
+        );
+
+        // admit_recovered
+        let mut e2 = make_queued(ch, "c");
+        e2.admission_seq = 5;
+        e2.restart_recovery = true;
+        q.admit_recovered(ch, e2);
+        assert!(
+            !q.take_dirty_channels().is_empty(),
+            "admit_recovered must dirty"
+        );
+    }
+
+    // ── enforce_cap five-path matrix ─────────────────────────────────────
+
+    #[test]
+    fn test_enforce_cap_push_evicts_from_front() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        for _ in 0..MAX_PENDING_PER_CHANNEL {
+            let mut e = make_queued(ch, "fill");
+            e.cap_exempt = false;
+            q.push(e);
+        }
+        let first_seq = q.recoverable_triggers(ch)[0].admission_seq;
+
+        let mut overflow = make_queued(ch, "overflow");
+        overflow.cap_exempt = false;
+        q.push(overflow);
+
+        let triggers = q.recoverable_triggers(ch);
+        let counted = triggers.iter().filter(|t| !t.cap_exempt).count();
+        assert!(
+            counted <= MAX_PENDING_PER_CHANNEL,
+            "push must enforce cap on counted events"
+        );
+        assert!(
+            !triggers.iter().any(|t| t.admission_seq == first_seq),
+            "oldest counted event must be evicted from front"
+        );
+    }
+
+    #[test]
+    fn test_enforce_cap_exempt_events_not_evicted() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let events: Vec<QueuedEvent> = (0..(MAX_PENDING_PER_CHANNEL as u64 + 50))
+            .map(|seq| {
+                let mut e = make_queued(ch, "exempt");
+                e.admission_seq = seq;
+                e.cap_exempt = true;
+                e
+            })
+            .collect();
+        q.import_recovered(ch, events);
+        let triggers = q.recoverable_triggers(ch);
+        assert_eq!(
+            triggers.len(),
+            MAX_PENDING_PER_CHANNEL + 50,
+            "exempt events must never be evicted"
+        );
+    }
+
+    #[test]
+    fn test_enforce_cap_sustained_live_over_exempt_backlog() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        for i in 0..(MAX_PENDING_PER_CHANNEL + 100) {
+            let mut e = make_queued(ch, "exempt-backlog");
+            e.cap_exempt = true;
+            e.admission_seq = i as u64;
+            q.import_recovered(ch, vec![e]);
+        }
+
+        for _ in 0..20 {
+            let mut live = make_queued(ch, "live");
+            live.cap_exempt = false;
+            q.push(live);
+        }
+
+        let triggers = q.recoverable_triggers(ch);
+        let exempt_count = triggers.iter().filter(|t| t.cap_exempt).count();
+        let counted_count = triggers.iter().filter(|t| !t.cap_exempt).count();
+        assert_eq!(
+            exempt_count,
+            MAX_PENDING_PER_CHANNEL + 100,
+            "exempt backlog must be fully preserved"
+        );
+        assert!(
+            counted_count <= MAX_PENDING_PER_CHANNEL,
+            "live counted events must still be cap-bounded"
+        );
+    }
+
+    // ── three-generation restart bound ───────────────────────────────────
+
+    #[test]
+    fn test_three_generation_restart_no_ratchet() {
+        let ch = Uuid::new_v4();
+
+        // Generation 1: push + recover
+        let mut q = EventQueue::new(DedupMode::Queue);
+        q.push(make_queued(ch, "gen1"));
+        let gen1_triggers = q.recoverable_triggers(ch);
+        assert_eq!(gen1_triggers.len(), 1);
+
+        // Generation 2: import gen1's triggers, push more
+        let mut q2 = EventQueue::new(DedupMode::Queue);
+        let mut e = make_queued(ch, "gen1-recovered");
+        e.admission_seq = gen1_triggers[0].admission_seq;
+        q2.import_recovered(ch, vec![e]);
+        q2.push(make_queued(ch, "gen2-fresh"));
+        let gen2_triggers = q2.recoverable_triggers(ch);
+        assert_eq!(gen2_triggers.len(), 2);
+
+        // Generation 3: import gen2's triggers
+        let mut q3 = EventQueue::new(DedupMode::Queue);
+        let events: Vec<QueuedEvent> = gen2_triggers
+            .iter()
+            .map(|t| {
+                let mut e = make_queued(ch, "gen-recovered");
+                e.admission_seq = t.admission_seq;
+                e.cap_exempt = t.cap_exempt;
+                e
+            })
+            .collect();
+        q3.import_recovered(ch, events);
+
+        let gen3_triggers = q3.recoverable_triggers(ch);
+        assert_eq!(
+            gen3_triggers.len(),
+            2,
+            "three-generation restart must not ratchet — count stays bounded"
+        );
+    }
+
+    // ── repeated cancel/restart amplification ────────────────────────────
+
+    #[test]
+    fn test_repeated_cancel_restart_no_amplification() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "original"));
+
+        for _ in 0..10 {
+            let batch = q.flush_next().unwrap();
+            q.complete_batch(
+                ch,
+                Some(batch),
+                BatchDisposition::Cancelled(CancelReason::Steer),
+            );
+        }
+
+        let counted = q
+            .recoverable_triggers(ch)
+            .iter()
+            .filter(|t| !t.cap_exempt)
+            .count();
+        assert!(
+            counted <= MAX_PENDING_PER_CHANNEL,
+            "repeated cancel+restart must not amplify beyond cap"
+        );
+    }
+
+    // ── same-second ordering ─────────────────────────────────────────────
+
+    #[test]
+    fn test_same_second_in_flight_and_queued_preserves_order() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        let e_a = make_queued(ch, "A");
+        let e_b = make_queued(ch, "B");
+        let seq_a = {
+            q.push(e_a);
+            q.recoverable_triggers(ch).last().unwrap().admission_seq
+        };
+        let seq_b = {
+            q.push(e_b);
+            q.recoverable_triggers(ch).last().unwrap().admission_seq
+        };
+
+        assert!(
+            seq_a < seq_b,
+            "same-second pushes must get monotonically increasing admission_seq"
+        );
+
+        let triggers = q.recoverable_triggers(ch);
+        let a_trigger = triggers.iter().find(|t| t.admission_seq == seq_a).unwrap();
+        let b_trigger = triggers.iter().find(|t| t.admission_seq == seq_b).unwrap();
+        assert_eq!(a_trigger.event_id.len(), 64);
+        assert_eq!(b_trigger.event_id.len(), 64);
+    }
+
+    // ── field stability across transitions ───────────────────────────────
+
+    #[test]
+    fn test_field_stability_across_push_flush_cancel_requeue() {
+        let mut q = EventQueue::new(DedupMode::Queue);
+        let ch = Uuid::new_v4();
+        q.push(make_queued(ch, "stable"));
+        let orig = q.recoverable_triggers(ch)[0].clone();
+
+        let batch = q.flush_next().unwrap();
+        q.complete_batch(
+            ch,
+            Some(batch),
+            BatchDisposition::Cancelled(CancelReason::Steer),
+        );
+
+        let after_cancel = q.recoverable_triggers(ch)[0].clone();
+        assert_eq!(orig.admission_seq, after_cancel.admission_seq);
+        assert_eq!(orig.enqueued_at_unix, after_cancel.enqueued_at_unix);
+        assert_eq!(orig.cap_exempt, after_cancel.cap_exempt);
+        assert_eq!(orig.prompt_tag, after_cancel.prompt_tag);
+        assert_eq!(orig.event_id, after_cancel.event_id);
     }
 }
