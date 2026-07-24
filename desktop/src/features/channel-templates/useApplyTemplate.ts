@@ -9,6 +9,7 @@ import {
   usePersonasQuery,
   useTeamsQuery,
 } from "@/features/agents/hooks";
+import { shouldPinSelectedRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
 import { resolveTeamPersonas } from "@/features/agents/lib/teamPersonas";
 import { useLastRuntime } from "@/features/agents/lib/useLastRuntime";
@@ -86,8 +87,9 @@ export function useApplyTemplate() {
       if (!persona) continue;
       if (seenPersonaIds.has(persona.id)) continue;
       seenPersonaIds.add(persona.id);
+      const requestedRuntimeId = entry.runtime ?? persona.runtime;
       const resolved = resolvePersonaRuntime(
-        entry.runtime ?? persona.runtime,
+        requestedRuntimeId,
         runtimes,
         defaultProvider,
       );
@@ -96,6 +98,10 @@ export function useApplyTemplate() {
         runtime: resolved.runtime,
         name: persona.displayName,
         personaId: persona.id,
+        harnessOverride: shouldPinSelectedRuntimeForDefinition(
+          requestedRuntimeId,
+          resolved.runtime.id,
+        ),
         systemPrompt: persona.systemPrompt,
         avatarUrl: persona.avatarUrl ?? undefined,
         model: entry.model ?? persona.model ?? undefined,
@@ -112,8 +118,9 @@ export function useApplyTemplate() {
       for (const persona of resolvedPersonas) {
         if (seenPersonaIds.has(persona.id)) continue;
         seenPersonaIds.add(persona.id);
+        const requestedRuntimeId = teamEntry.runtime ?? persona.runtime;
         const resolved = resolvePersonaRuntime(
-          teamEntry.runtime ?? persona.runtime,
+          requestedRuntimeId,
           runtimes,
           defaultProvider,
         );
@@ -122,6 +129,10 @@ export function useApplyTemplate() {
           runtime: resolved.runtime,
           name: persona.displayName,
           personaId: persona.id,
+          harnessOverride: shouldPinSelectedRuntimeForDefinition(
+            requestedRuntimeId,
+            resolved.runtime.id,
+          ),
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
           model: teamEntry.model ?? persona.model ?? undefined,

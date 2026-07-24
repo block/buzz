@@ -12,6 +12,7 @@ import {
   canResolveAllPersonaRuntimes,
   resolvePersonaRuntime,
 } from "@/features/agents/lib/resolvePersonaRuntime";
+import { shouldPinSelectedRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
@@ -159,7 +160,10 @@ export function AddChannelBotDialog({
           runtime: resolved.runtime,
           name: persona.displayName,
           personaId: persona.id,
-          harnessOverride: false,
+          harnessOverride: shouldPinSelectedRuntimeForDefinition(
+            persona.runtime,
+            resolved.runtime.id,
+          ),
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
           model: persona.model ?? undefined,
