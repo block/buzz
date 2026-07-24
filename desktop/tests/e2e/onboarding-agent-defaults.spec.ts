@@ -648,8 +648,34 @@ test("defaults requires a choice when multiple visible harnesses are ready", asy
 test("concurrent installs each keep their own state — one fails, one succeeds", async ({
   page,
 }) => {
-  const multilineError =
-    "npm ERR! code EACCES\nnpm ERR! syscall mkdir\nnpm ERR! path /usr/local/lib/node_modules\n\nHint: Check your npm prefix permissions and try again.";
+  // Realistic 512-head + 1024-tail shape: many short lines followed by one
+  // long unbroken Windows path.  This exercises both overflow axes:
+  //   • vertical: enough lines to exceed max-h-48 (192px at ~16px/line)
+  //   • horizontal: the long path has no spaces, so only break-words prevents
+  //     scrollWidth > clientWidth.
+  const longWindowsPath =
+    "C:\\Users\\willp\\AppData\\Roaming\\npm\\node_modules\\@agentclientprotocol\\claude-agent-acp\\dist\\bin\\claude-agent-acp.exe";
+  const multilineError = [
+    "npm ERR! code EACCES",
+    "npm ERR! syscall mkdir",
+    "npm ERR! path C:\\Users\\willp\\AppData\\Roaming\\npm",
+    "npm ERR! errno -4048",
+    "npm ERR! Error: EACCES: permission denied, mkdir 'C:\\Users\\willp\\AppData\\Roaming\\npm'",
+    "npm ERR!  { [Error: EACCES: permission denied, mkdir 'C:\\Users\\willp\\AppData\\Roaming\\npm']",
+    "npm ERR!   errno: -4048,",
+    "npm ERR!   code: 'EACCES',",
+    "npm ERR!   syscall: 'mkdir',",
+    "npm ERR!   path: 'C:\\\\Users\\\\willp\\\\AppData\\\\Roaming\\\\npm' }",
+    "npm ERR!",
+    "npm ERR! The operation was rejected by your operating system.",
+    "npm ERR! It is likely you do not have the permissions to access this file as the current user",
+    "npm ERR!",
+    `npm ERR! If you believe this might be a permissions issue, please double-check the`,
+    `npm ERR! permissions of the file and its containing directories, or try running`,
+    `npm ERR! the command again as root/Administrator.`,
+    "",
+    `Hint: Run as Administrator or change npm prefix: npm config set prefix ${longWindowsPath}`,
+  ].join("\n");
   const claudeNotInstalled = runtime("claude", "adapter_missing", {
     status: "unknown",
   });
@@ -741,10 +767,38 @@ test("concurrent installs each keep their own state — one fails, one succeeds"
 
   // The error trigger has the full aria-label (label + detail).
   await expect(claudeError).toHaveAttribute("aria-label", /npm ERR!/);
-  // Open the tooltip and verify multiline content is visible (F3 fix).
+  // Open the tooltip and verify the detail span handles overflow correctly:
+  //   • vertical overflow exists and is scrollable (max-h-48 + overflow-y-auto)
+  //   • no horizontal overflow (break-words forces the long unbroken path to wrap)
   await claudeError.focus();
   const tooltip = page.getByRole("tooltip");
   await expect(tooltip).toBeVisible({ timeout: 2_000 });
   await expect(tooltip).toContainText("npm ERR! code EACCES");
-  await expect(tooltip).toContainText("Hint: Check your npm prefix");
+  await expect(tooltip).toContainText("Hint: Run as Administrator");
+
+  // Locate the scroll container using page-level locator since Radix portals
+  // can place content outside the tooltip role element's subtree in the DOM.
+  // Use .first() because Radix keeps a hidden duplicate in the light DOM.
+  const detailSpan = page.locator("span.overflow-y-auto").first();
+  await expect(detailSpan).toBeVisible();
+
+  // Vertical: scrollHeight must exceed clientHeight (content taller than max-h-48).
+  // Scroll position must advance when set, proving scrollability.
+  const isVerticallyScrollable = await detailSpan.evaluate((el) => {
+    return el.scrollHeight > el.clientHeight;
+  });
+  expect(isVerticallyScrollable).toBe(true);
+
+  // Confirm scroll position can actually advance.
+  await detailSpan.evaluate((el) => {
+    el.scrollTop = 9999;
+  });
+  const scrolledDown = await detailSpan.evaluate((el) => el.scrollTop > 0);
+  expect(scrolledDown).toBe(true);
+
+  // Horizontal: break-words must prevent horizontal overflow.
+  const hasHorizontalOverflow = await detailSpan.evaluate((el) => {
+    return el.scrollWidth > el.clientWidth;
+  });
+  expect(hasHorizontalOverflow).toBe(false);
 });
