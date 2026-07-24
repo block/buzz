@@ -1,9 +1,9 @@
-//! `buzz-migrate serve` — the operator claim-service binary.
+//! `buzz-migrate` — the operator claim-service binary.
 //!
 //! Loads the Slack export roster, holds the operator's admin key, and serves
-//! the claim HTTP surface. It automates the owner/admin attestation half of a
-//! two-party import identity binding so a team migrates with no per-person
-//! operator work and no account-takeover. See the crate docs for the model.
+//! the claim HTTP surface. Its Slack OIDC path admits verified workspace
+//! members and automates the owner/admin attestation half of a two-party import
+//! identity binding. See the crate docs for the model.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -42,8 +42,8 @@ struct Args {
     #[arg(long, default_value = "127.0.0.1:8787")]
     bind: String,
 
-    /// Public base URL of this service, used to build magic links. Defaults to
-    /// `http://<bind>`.
+    /// Public base URL of this service, used in email and OIDC callbacks.
+    /// Defaults to `http://<bind>`.
     #[arg(long)]
     base_url: Option<String>,
 

@@ -55,6 +55,55 @@ test("non-invite onboarding starts at connection", () => {
   assert.equal(transaction.stage, "connecting");
 });
 
+test("Slack migration join persists its auth stage and service", () => {
+  const storage = createMemoryStorage();
+  const transaction = startCommunityOnboarding(
+    {
+      source: "deep-link-join-slack",
+      relayUrl: "wss://relay.example",
+      slackService: "https://migrate.example",
+    },
+    storage,
+  );
+  assert.equal(transaction.stage, "slack-auth");
+  assert.equal(transaction.slackService, "https://migrate.example");
+
+  const persisted = loadCommunityOnboardingTransaction(storage);
+  assert.equal(persisted?.id, transaction.id);
+  assert.equal(persisted?.stage, "slack-auth");
+  assert.equal(persisted?.slackService, "https://migrate.example");
+});
+
+test("reopening a Slack join restarts auth and clears a stale subject", () => {
+  const storage = createMemoryStorage();
+  const first = startCommunityOnboarding(
+    {
+      source: "deep-link-join-slack",
+      relayUrl: "wss://relay.example",
+      slackService: "https://migrate.example",
+    },
+    storage,
+  );
+  updateCommunityOnboardingTransaction(
+    first,
+    { stage: "connecting", slackSubject: "slack:U060" },
+    storage,
+  );
+
+  const reopened = startCommunityOnboarding(
+    {
+      source: "deep-link-join-slack",
+      relayUrl: "wss://relay.example",
+      slackService: "https://migrate.example",
+    },
+    storage,
+  );
+  assert.equal(reopened.id, first.id);
+  assert.equal(reopened.source, "deep-link-join-slack");
+  assert.equal(reopened.stage, "slack-auth");
+  assert.equal(reopened.slackSubject, undefined);
+});
+
 test("same-relay ingress resumes rather than replacing progress", () => {
   const storage = createMemoryStorage();
   const first = startCommunityOnboarding(
@@ -137,6 +186,22 @@ test("malformed persisted state is ignored and can be cleared", () => {
   assert.equal(loadCommunityOnboardingTransaction(storage), null);
   clearCommunityOnboardingTransaction(storage);
   assert.equal(storage.length, 0);
+});
+
+test("persisted Slack auth without its dedicated service is ignored", () => {
+  const now = new Date().toISOString();
+  const storage = createMemoryStorage({
+    "buzz-community-onboarding-transaction.v1": JSON.stringify({
+      id: "broken-slack-join",
+      source: "deep-link-join-slack",
+      stage: "slack-auth",
+      relayUrl: "wss://relay.example",
+      communityName: "Example",
+      createdAt: now,
+      updatedAt: now,
+    }),
+  });
+  assert.equal(loadCommunityOnboardingTransaction(storage), null);
 });
 
 test("completion is scoped by relay and pubkey and preserves legacy gate", () => {

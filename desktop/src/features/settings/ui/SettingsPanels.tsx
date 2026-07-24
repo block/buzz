@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   Archive,
-  ArrowRightLeft,
   BellRing,
   Bot,
   Check,
@@ -75,7 +74,6 @@ import { ExperimentalFeaturesCard } from "./ExperimentalFeaturesCard";
 import { KeyboardShortcutsCard } from "./KeyboardShortcutsCard";
 import { MeshComputeSettingsCard } from "@/features/mesh-compute/ui/MeshComputeSettingsCard";
 import { MobilePairingCard } from "./MobilePairingCard";
-import { SlackMigrationCard } from "./SlackMigrationCard";
 import { ModerationQueueCard } from "./ModerationQueueCard";
 import { NotificationSettingsCard } from "./NotificationSettingsCard";
 import { PreventSleepSettingsCard } from "./PreventSleepSettingsCard";
@@ -101,7 +99,6 @@ export type SettingsSection =
   | "moderation"
   | "custom-emoji"
   | "local-archive"
-  | "migrate"
   | "mobile"
   | "updates";
 
@@ -121,7 +118,6 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "moderation",
   "custom-emoji",
   "local-archive",
-  "migrate",
   "mobile",
   "updates",
 ];
@@ -224,11 +220,6 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "local-archive",
     label: "Local archive",
     icon: Archive,
-  },
-  {
-    value: "migrate",
-    label: "Migrate from Slack",
-    icon: ArrowRightLeft,
   },
   {
     value: "mobile",
@@ -848,8 +839,6 @@ export function renderSettingsSection(
       return <CustomEmojiSettingsCard />;
     case "local-archive":
       return <LocalArchiveSettingsCard />;
-    case "migrate":
-      return <SlackMigrationCard currentPubkey={props.currentPubkey} />;
     case "mobile":
       return <MobilePairingCard currentPubkey={props.currentPubkey} />;
     case "updates":

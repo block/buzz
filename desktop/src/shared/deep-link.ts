@@ -48,6 +48,8 @@ export type NostrBindDeepLinkPayload = {
  * `desktop/src-tauri/src/deep_link.rs`.
  */
 export type ImportClaimDeepLinkPayload = {
+  /** Native queue id used to survive cold launches without duplicate delivery. */
+  requestId?: string;
   /** `<source>:<foreign id>`, e.g. `slack:U060976D0QN`. */
   subject: string;
   /** Email channel: single-use magic-link token to redeem at `service`. */
@@ -56,6 +58,8 @@ export type ImportClaimDeepLinkPayload = {
   service?: string;
   /** OIDC channel marker (`"oidc"`); the attestation is already published. */
   via?: string;
+  /** OIDC join channel: community relay that received the attestation. */
+  relayUrl?: string;
 };
 
 /**
@@ -70,11 +74,13 @@ export type JoinDeepLinkPayload = {
 
 type PendingCommunityDeepLink = {
   id: string;
-  kind: "connect" | "join" | "add-community";
+  kind: "connect" | "join" | "add-community" | "join-slack";
   relayUrl: string;
   code: string | null;
   name: string | null;
   policyReceipt: string | null;
+  /** Claim-service base URL — only set for the `join-slack` kind. */
+  service: string | null;
 };
 
 function acceptPendingCommunityDeepLink(
@@ -88,13 +94,19 @@ function acceptPendingCommunityDeepLink(
           relayUrl: pending.relayUrl,
           name: pending.name ?? undefined,
         })
-      : deps.startCommunityOnboarding({
-          source:
-            pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
-          relayUrl: pending.relayUrl,
-          inviteCode: pending.code ?? undefined,
-          policyReceipt: pending.policyReceipt ?? undefined,
-        });
+      : pending.kind === "join-slack"
+        ? deps.startCommunityOnboarding({
+            source: "deep-link-join-slack",
+            relayUrl: pending.relayUrl,
+            slackService: pending.service ?? undefined,
+          })
+        : deps.startCommunityOnboarding({
+            source:
+              pending.kind === "join" ? "deep-link-join" : "deep-link-connect",
+            relayUrl: pending.relayUrl,
+            inviteCode: pending.code ?? undefined,
+            policyReceipt: pending.policyReceipt ?? undefined,
+          });
   return accepted
     ? invoke<boolean>("acknowledge_pending_community_deep_link", {
         id: pending.id,
@@ -155,6 +167,7 @@ export async function listenForDeepLinks(
   const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
   const connectPromise = listen<string>("deep-link-connect", drain);
   const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
+  const joinSlackPromise = listen("deep-link-join-slack", drain);
   const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
     "deep-link-add-community",
     drain,
@@ -162,6 +175,7 @@ export async function listenForDeepLinks(
   const unlistens = await Promise.all([
     connectPromise,
     joinPromise,
+    joinSlackPromise,
     addCommunityPromise,
   ]);
   drain();
@@ -195,10 +209,40 @@ export function listenForNostrBindDeepLinks(
 export function listenForImportClaimDeepLinks(
   onOpen: (payload: ImportClaimDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
+  const delivered = new Set<string>();
+  const deliver = async (payload: ImportClaimDeepLinkPayload) => {
+    if (payload.requestId) {
+      if (delivered.has(payload.requestId)) return;
+      delivered.add(payload.requestId);
+      onOpen(payload);
+      await invoke<boolean>("acknowledge_pending_import_claim_deep_link", {
+        requestId: payload.requestId,
+      });
+      return;
+    }
+    onOpen(payload);
+  };
+  const drain = async () => {
+    while (true) {
+      const pending = await invoke<ImportClaimDeepLinkPayload | null>(
+        "take_pending_import_claim_deep_link",
+      );
+      if (!pending) return;
+      await deliver(pending);
+      if (!pending.requestId) return;
+    }
+  };
   return listen<ImportClaimDeepLinkPayload>(
     "deep-link-import-claim",
     (event) => {
-      onOpen(event.payload);
+      void deliver(event.payload).catch((error: unknown) => {
+        console.warn("Failed to acknowledge import-claim deep link", error);
+      });
     },
-  );
+  ).then((unlisten) => {
+    void drain().catch((error: unknown) => {
+      console.warn("Failed to drain pending import-claim deep links", error);
+    });
+    return unlisten;
+  });
 }

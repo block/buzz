@@ -51,10 +51,36 @@ test.beforeEach(async ({ page }) => {
     .waitFor({ state: "visible", timeout: 15_000 });
 });
 
-test("OIDC import-claim: confirm dialog → publishes self-claim → done", async ({
+test("join-slack callback: connects the target relay before self-claim", async ({
   page,
 }) => {
-  await emitImportClaim(page, { subject: "slack:U060", via: "oidc" });
+  const now = new Date().toISOString();
+  await page.evaluate(
+    ({ createdAt }) => {
+      localStorage.setItem(
+        "buzz-community-onboarding-transaction.v1",
+        JSON.stringify({
+          id: "slack-join-e2e",
+          source: "deep-link-join-slack",
+          stage: "slack-auth",
+          relayUrl: "ws://localhost:3000",
+          communityName: "E2E Test",
+          slackService: "http://mock.local",
+          createdAt,
+          updatedAt: createdAt,
+        }),
+      );
+    },
+    { createdAt: now },
+  );
+  await page.reload({ waitUntil: "domcontentloaded" });
+
+  await emitImportClaim(page, {
+    subject: "slack:U060",
+    via: "oidc",
+    relayUrl: "ws://localhost:3000",
+    service: "http://mock.local",
+  });
 
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("Link your imported history")).toBeVisible();
@@ -63,18 +89,19 @@ test("OIDC import-claim: confirm dialog → publishes self-claim → done", asyn
   await page.screenshot({ path: `${SHOTS}/oidc-confirm.png` });
 
   await dialog.getByRole("button", { name: "Link my history" }).click();
-  await expect(
-    dialog.getByText(/now show under your account/i),
-  ).toBeVisible({ timeout: 10_000 });
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOTS}/oidc-done.png` });
+  await expect(dialog).toBeHidden({ timeout: 10_000 });
 
-  // The subject's self-claim (kind 30624) was signed with the right d-tag.
-  const signed = await page.evaluate(
-    () =>
-      (window as unknown as { __BUZZ_E2E_SIGNED_EVENTS__: SignedEvent[] })
-        .__BUZZ_E2E_SIGNED_EVENTS__,
-  );
+  // The target community becomes active before the deferred subject
+  // self-claim is signed and published.
+  let signed: SignedEvent[] = [];
+  await expect(async () => {
+    signed = await page.evaluate(
+      () =>
+        (window as unknown as { __BUZZ_E2E_SIGNED_EVENTS__: SignedEvent[] })
+          .__BUZZ_E2E_SIGNED_EVENTS__,
+    );
+    expect(signed.some((event) => event.kind === 30624)).toBe(true);
+  }).toPass({ timeout: 10_000 });
   const claim = signed.find((e) => e.kind === 30624);
   expect(claim, "a kind-30624 self-claim should have been signed").toBeTruthy();
   expect(claim?.tags).toContainEqual(["d", "slack:U060"]);
@@ -106,9 +133,9 @@ test("email import-claim: POSTs token + own pubkey to the service, then done", a
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByText("slack:U081")).toBeVisible();
   await dialog.getByRole("button", { name: "Link my history" }).click();
-  await expect(
-    dialog.getByText(/now show under your account/i),
-  ).toBeVisible({ timeout: 10_000 });
+  await expect(dialog.getByText(/now show under your account/i)).toBeVisible({
+    timeout: 10_000,
+  });
 
   // The app redeemed the magic-link token with the service, sending the token
   // and its OWN 64-hex pubkey (never a private key).

@@ -1,6 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
-import { QueryClientProvider } from "@tanstack/react-query";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { QueryClientProvider, useQueryClient } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import {
   type ReactNode,
@@ -21,6 +22,8 @@ import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { ImportClaimDialog } from "@/features/messages/ui/ImportClaimDialog";
+import { publishImportIdentityClaim } from "@/features/messages/lib/publishImportIdentityClaim";
+import { importIdentityBindingsQueryKey } from "@/features/messages/useImportIdentityBindings";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -296,7 +299,10 @@ function CommunityApp({
     reconnectCommunity,
   } = useCommunities();
   const communityOnboarding = useCommunityOnboarding();
+  const queryClient = useQueryClient();
   const connectingTransactionRef = useRef<string | null>(null);
+  const slackAuthTransactionRef = useRef<string | null>(null);
+  const slackClaimTransactionRef = useRef<string | null>(null);
   // Tracks the ID of the profile-check request that has been launched for the
   // current connecting transaction. Prevents the effect from launching a
   // second request if it re-runs while a fetch is in flight.
@@ -401,6 +407,40 @@ function CommunityApp({
     transitionCommunity,
   ]);
 
+  // Slack-migration join: open the operator's claim-service in the browser so
+  // the person signs in with Slack. The `buzz://import-claim` return then
+  // advances this transaction to "connecting" (see ImportClaimDialog). Guarded
+  // so the browser opens once per transaction; if the key isn't ready yet the
+  // effect re-fires when `currentPubkey` resolves.
+  const handleCommunityOnboardingSlackAuth = useCallback(async () => {
+    const transaction = communityOnboarding.transaction;
+    if (transaction?.stage !== "slack-auth" || !transaction.slackService)
+      return;
+    if (!currentPubkey) return;
+    if (slackAuthTransactionRef.current === transaction.id) return;
+    slackAuthTransactionRef.current = transaction.id;
+    const base = transaction.slackService.replace(/\/+$/, "");
+    const startUrl = `${base}/oidc/start?pubkey=${encodeURIComponent(
+      currentPubkey,
+    )}`;
+    try {
+      await openUrl(startUrl);
+    } catch (error) {
+      slackAuthTransactionRef.current = null; // allow a retry
+      communityOnboarding.update({
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [communityOnboarding, currentPubkey]);
+
+  // Reopen the Slack sign-in on demand (the browser tab was closed, or the
+  // auto-open failed): clear the once-guard, then open again.
+  const handleCommunityOnboardingSlackAuthRetry = useCallback(() => {
+    slackAuthTransactionRef.current = null;
+    communityOnboarding.update({ error: undefined });
+    void handleCommunityOnboardingSlackAuth();
+  }, [communityOnboarding, handleCommunityOnboardingSlackAuth]);
+
   const handleCommunityOnboardingCancel = useCallback(async () => {
     const transaction = communityOnboarding.transaction;
     communityOnboarding.clear();
@@ -438,6 +478,7 @@ function CommunityApp({
     if (transaction?.stage !== "connecting") {
       connectingTransactionRef.current = null;
       profileCheckTransactionRef.current = null;
+      slackClaimTransactionRef.current = null;
     }
   }, [transaction?.stage]);
   const targetIsReady =
@@ -445,9 +486,53 @@ function CommunityApp({
     community.isReady &&
     community.appliedKey === communityKey;
   useEffect(() => {
-    if (transaction?.stage !== "connecting" || !targetIsReady) return;
+    if (
+      transaction?.stage !== "connecting" ||
+      !targetIsReady ||
+      transaction.error
+    )
+      return;
     const transactionId = transaction.id;
     const relayUrl = transaction.relayUrl;
+
+    // A Slack join is admitted by the migration service before this app
+    // connects. Publish the person's consent only after the target relay is
+    // active; doing it during the OAuth callback would publish to the previous
+    // community (or fail on a first-community join).
+    if (transaction.slackSubject) {
+      if (slackClaimTransactionRef.current === transactionId) return;
+      slackClaimTransactionRef.current = transactionId;
+      const subject = transaction.slackSubject;
+      void publishImportIdentityClaim(subject)
+        .then(async () => {
+          if (
+            !isTransactionStillConnecting(transactionRef.current, transactionId)
+          )
+            return;
+          await queryClient.invalidateQueries({
+            queryKey: importIdentityBindingsQueryKey,
+          });
+          communityOnboarding.update(
+            { slackSubject: undefined, error: undefined },
+            transactionId,
+          );
+        })
+        .catch((error: unknown) => {
+          if (
+            !isTransactionStillConnecting(transactionRef.current, transactionId)
+          )
+            return;
+          slackClaimTransactionRef.current = null;
+          communityOnboarding.update(
+            {
+              error: error instanceof Error ? error.message : String(error),
+            },
+            transactionId,
+          );
+        });
+      return;
+    }
+
     if (profileCheckTransactionRef.current === transactionId) return;
     profileCheckTransactionRef.current = transactionId;
 
@@ -473,10 +558,13 @@ function CommunityApp({
     });
   }, [
     communityOnboarding,
+    queryClient,
     targetIsReady,
+    transaction?.error,
     transaction?.stage,
     transaction?.id,
     transaction?.relayUrl,
+    transaction?.slackSubject,
   ]);
   // During "entering" the transaction stays alive as a curtain: the app mounts
   // underneath (already pointed at the Welcome channel route) while the
@@ -575,6 +663,8 @@ function CommunityApp({
           <CommunityOnboardingFlow
             onCancel={handleCommunityOnboardingCancel}
             onConnect={handleCommunityOnboardingConnect}
+            onSlackAuth={handleCommunityOnboardingSlackAuth}
+            onSlackAuthRetry={handleCommunityOnboardingSlackAuthRetry}
           />
         </div>
       ) : null}
@@ -655,7 +745,8 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
   const transaction = communityOnboarding.transaction;
   const isDeepLink =
     transaction?.source === "deep-link-join" ||
-    transaction?.source === "deep-link-connect";
+    transaction?.source === "deep-link-connect" ||
+    transaction?.source === "deep-link-join-slack";
   const shouldAcknowledgeDeepLink = isDeepLink && !transaction.acknowledged;
 
   return (

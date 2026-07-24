@@ -1,12 +1,10 @@
-//! Publishing the owner/admin **attestation** (kind 30623) that a verified
-//! claim produces.
+//! Publishing the admin-signed membership and identity events produced by a
+//! verified migration claim.
 //!
-//! This is the one place the service uses the operator's admin key. It signs a
-//! single `KIND_IMPORT_IDENTITY_BINDING` event mapping the proven
-//! `subject` (`slack:<id>`) to the claimant's Buzz pubkey, then publishes it to
-//! the relay. The event is public-key-only and parameterized-replaceable, so a
-//! mistaken or superseded attestation can be overwritten (NIP-33) or revoked by
-//! the operator later — the service never mints anything irreversible.
+//! This is the one place the service uses the operator's admin key. The Slack
+//! OAuth join path first publishes an idempotent member-add event, then a
+//! `KIND_IMPORT_IDENTITY_BINDING` mapping the proven `subject` (`slack:<id>`) to
+//! the claimant's Buzz pubkey. Email recovery publishes only the binding.
 //!
 //! The attestation is only *half* of a binding: nothing is attributed until the
 //! claimant's own `KIND_IMPORT_IDENTITY_CLAIM` (self-signed) also exists. So a
