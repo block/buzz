@@ -285,7 +285,8 @@ export function DefaultConfigStep({
 
   return (
     <OnboardingSlideTransition
-      className="flex min-h-full w-full flex-col items-center"
+      // pb clears the docked footer when the step frame scrolls under it.
+      className="flex min-h-full w-full flex-col items-center pb-20"
       data-testid="onboarding-page-config"
       direction={direction}
       transitionKey={`default-config-${direction}`}

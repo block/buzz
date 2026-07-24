@@ -43,11 +43,27 @@ const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtif
     sha256: "4786d00c4d259d3ff0b2328307f764ef3ced65f2d6e9502d433e68d66238509d",
 });
 
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+    platform: "win-x64",
+    filename: "node-v24.11.0-win-x64.zip",
+    sha256: "1054540bce22b54ec7e50ebc078ec5d090700a77657607a58f6a64df21f49fdd",
+});
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = Some(ManagedNodeArtifact {
+    platform: "win-arm64",
+    filename: "node-v24.11.0-win-arm64.zip",
+    sha256: "12d3b1aa9696b7411e115a4fa2aef57f95560b5ee16bb62cd69843e535ec72be",
+});
+
 #[cfg(not(any(
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "macos", target_arch = "x86_64"),
     all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "aarch64")
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "windows", target_arch = "aarch64")
 )))]
 const MANAGED_NODE_ARTIFACT: Option<ManagedNodeArtifact> = None;
 
@@ -180,7 +196,12 @@ fn install_managed_node_runtime(
     extract_managed_node_archive(&archive_path, &temp_dir, artifact.filename)?;
     let _ = std::fs::remove_file(&archive_path);
 
-    let extracted_dir = temp_dir.join(artifact.filename.trim_end_matches(".tar.gz"));
+    let extracted_name = artifact
+        .filename
+        .strip_suffix(".tar.gz")
+        .or_else(|| artifact.filename.strip_suffix(".zip"))
+        .unwrap_or(artifact.filename);
+    let extracted_dir = temp_dir.join(extracted_name);
     let source_dir = if extracted_dir.is_dir() {
         extracted_dir
     } else {
@@ -277,9 +298,19 @@ fn extract_managed_node_archive(
     dest_dir: &std::path::Path,
     filename: &str,
 ) -> Result<(), String> {
-    if !filename.ends_with(".tar.gz") {
-        return Err(format!("unsupported managed Node.js archive: {filename}"));
+    if filename.ends_with(".tar.gz") {
+        extract_managed_node_tar_gz(archive_path, dest_dir)
+    } else if filename.ends_with(".zip") {
+        extract_managed_node_zip(archive_path, dest_dir)
+    } else {
+        Err(format!("unsupported managed Node.js archive: {filename}"))
     }
+}
+
+fn extract_managed_node_tar_gz(
+    archive_path: &std::path::Path,
+    dest_dir: &std::path::Path,
+) -> Result<(), String> {
     let file =
         std::fs::File::open(archive_path).map_err(|e| format!("open Node.js archive: {e}"))?;
     let decoder = flate2::read::GzDecoder::new(file);
@@ -293,6 +324,71 @@ fn extract_managed_node_archive(
     archive
         .unpack(dest_dir)
         .map_err(|e| format!("extract Node.js archive: {e}"))
+}
+
+fn extract_managed_node_zip(
+    archive_path: &std::path::Path,
+    dest_dir: &std::path::Path,
+) -> Result<(), String> {
+    let file =
+        std::fs::File::open(archive_path).map_err(|e| format!("open Node.js zip archive: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| format!("read Node.js zip archive: {e}"))?;
+    validate_managed_node_zip_entries(&mut archive)?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Node.js zip entry: {e}"))?;
+        let Some(rel) = entry.enclosed_name() else {
+            return Err(format!(
+                "Node.js zip contains unsafe path: {}",
+                entry.name()
+            ));
+        };
+        let out_path = dest_dir.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out_path)
+                .map_err(|e| format!("create Node.js zip dir: {e}"))?;
+            continue;
+        }
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("create Node.js zip parent: {e}"))?;
+        }
+        let mut out = std::fs::File::create(&out_path)
+            .map_err(|e| format!("create Node.js zip file: {e}"))?;
+        std::io::copy(&mut entry, &mut out)
+            .map_err(|e| format!("extract Node.js zip file: {e}"))?;
+    }
+    Ok(())
+}
+
+fn validate_managed_node_zip_entries(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+) -> Result<(), String> {
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| format!("Node.js zip entry: {e}"))?;
+        let Some(path) = entry.enclosed_name() else {
+            return Err(format!(
+                "Node.js zip contains unsafe path: {}",
+                entry.name()
+            ));
+        };
+        let path_str = path.to_string_lossy();
+        if path.is_absolute() {
+            return Err(format!("Node.js zip contains absolute path: {path_str}"));
+        }
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(format!("Node.js zip contains path traversal: {path_str}"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_managed_node_archive_entries<R: std::io::Read>(
@@ -325,13 +421,27 @@ fn validate_managed_node_archive_entries<R: std::io::Read>(
 }
 
 fn verify_node_tree(dir: &std::path::Path) -> Result<(), String> {
-    let node = dir.join("bin").join("node");
-    let npm = dir.join("bin").join("npm");
-    if !node.is_file() {
-        return Err("Node.js archive missing bin/node".to_string());
+    #[cfg(windows)]
+    {
+        let node = dir.join("node.exe");
+        let npm = dir.join("npm.cmd");
+        if !node.is_file() {
+            return Err("Node.js archive missing node.exe".to_string());
+        }
+        if !npm.is_file() {
+            return Err("Node.js archive missing npm.cmd".to_string());
+        }
     }
-    if !npm.is_file() {
-        return Err("Node.js archive missing bin/npm".to_string());
+    #[cfg(not(windows))]
+    {
+        let node = dir.join("bin").join("node");
+        let npm = dir.join("bin").join("npm");
+        if !node.is_file() {
+            return Err("Node.js archive missing bin/node".to_string());
+        }
+        if !npm.is_file() {
+            return Err("Node.js archive missing bin/npm".to_string());
+        }
     }
     Ok(())
 }
@@ -464,6 +574,24 @@ mod tests {
         assert_eq!(
             shell_quote(std::path::Path::new("/tmp/Buzz's Node")),
             "'/tmp/Buzz'\\''s Node'"
+        );
+    }
+
+    #[test]
+    fn extracted_archive_dirname_strips_known_suffixes() {
+        let zip = "node-v24.11.0-win-x64.zip";
+        assert_eq!(
+            zip.strip_suffix(".tar.gz")
+                .or_else(|| zip.strip_suffix(".zip"))
+                .unwrap_or(zip),
+            "node-v24.11.0-win-x64"
+        );
+        let tar = "node-v24.11.0-darwin-arm64.tar.gz";
+        assert_eq!(
+            tar.strip_suffix(".tar.gz")
+                .or_else(|| tar.strip_suffix(".zip"))
+                .unwrap_or(tar),
+            "node-v24.11.0-darwin-arm64"
         );
     }
 }

@@ -154,9 +154,12 @@ _ensure-sidecar-stubs:
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    # Tauri externalBin on Windows requires the `.exe` suffix (#2492).
+    EXT=""
+    case "$TARGET" in *windows*) EXT=".exe";; esac
     mkdir -p desktop/src-tauri/binaries
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        touch "desktop/src-tauri/binaries/${bin}-${TARGET}${EXT}"
     done
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
@@ -233,12 +236,14 @@ desktop-release-build target="aarch64-apple-darwin":
     #!/usr/bin/env bash
     set -euo pipefail
     TARGET={{target}}
+    EXT=""
+    case "$TARGET" in *windows*) EXT=".exe";; esac
     mkdir -p desktop/src-tauri/binaries
-    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
-    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
-    touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    touch "desktop/src-tauri/binaries/buzz-acp-$TARGET$EXT"
+    touch "desktop/src-tauri/binaries/buzz-agent-$TARGET$EXT"
+    touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET$EXT"
+    touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET$EXT"
+    touch "desktop/src-tauri/binaries/buzz-$TARGET$EXT"
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 
@@ -477,10 +482,12 @@ desktop-standalone *ARGS: _ensure-sidecar-stubs
     export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo build -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p buzz-cli -p git-credential-nostr
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    EXT=""
+    case "$TARGET" in *windows*) EXT=".exe";; esac
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
-        cp "${TARGET_DIR}/debug/${bin}" "desktop/src-tauri/binaries/${bin}-${TARGET}"
-        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}"
+        cp "${TARGET_DIR}/debug/${bin}${EXT}" "desktop/src-tauri/binaries/${bin}-${TARGET}${EXT}"
+        chmod +x "desktop/src-tauri/binaries/${bin}-${TARGET}${EXT}"
     done
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
@@ -512,9 +519,11 @@ staging *ARGS: bootstrap _ensure-sidecar-stubs
     fi
     # Replace the 0-byte sidecar stub with the real CLI binary so tauri dev picks it up.
     TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    EXT=""
+    case "$TARGET" in *windows*) EXT=".exe";; esac
     TARGET_DIR=$(cargo metadata --format-version 1 --no-deps | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).target_directory")
-    cp "${TARGET_DIR}/release/buzz" "desktop/src-tauri/binaries/buzz-${TARGET}"
-    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}"
+    cp "${TARGET_DIR}/release/buzz${EXT}" "desktop/src-tauri/binaries/buzz-${TARGET}${EXT}"
+    chmod +x "desktop/src-tauri/binaries/buzz-${TARGET}${EXT}"
     cd {{desktop_dir}}
     export BUZZ_RELAY_URL="wss://sprout-oss.stage.blox.sqprod.co"
     source ../scripts/instance-env.sh
