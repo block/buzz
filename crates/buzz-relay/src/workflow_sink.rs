@@ -296,6 +296,11 @@ impl ActionSink for RelayActionSink {
                     Tag::parse(["p", &mentioned])
                         .map_err(|e| ActionSinkError::EventBuild(format!("mention p tag: {e}")))?,
                 );
+                tags.push(
+                    Tag::parse(["mention", &mentioned]).map_err(|e| {
+                        ActionSinkError::EventBuild(format!("mention intent tag: {e}"))
+                    })?,
+                );
             }
 
             let kind = Kind::from(KIND_STREAM_MESSAGE as u16);
