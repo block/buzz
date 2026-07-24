@@ -480,15 +480,21 @@ pub async fn sync_managed_agent_profile(
 
 // ── Agent profile query ─────────────────────────────────────────────────────
 
-/// Query the relay for an agent's kind:0 profile event.
-///
-/// Queries the relay identified by `relay_url`. Callers uniformly pass the
-/// relay resolved by `effective_agent_relay_url` for every agent regardless of
-/// backend — always the active workspace relay — so the query targets the host
-/// the profile is actually published to.
-///
-/// Returns the parsed profile content (display_name, picture) if a kind:0 event
-/// exists for the given pubkey, or `None` if no profile is published.
+fn parse_agent_profile_events(events: &[nostr::Event]) -> Option<AgentProfileInfo> {
+    let event = events.first()?;
+    let content = serde_json::from_str::<serde_json::Value>(&event.content).ok()?;
+    Some(AgentProfileInfo {
+        display_name: content
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        picture: content
+            .get("picture")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
+}
+
 pub async fn query_agent_profile(
     state: &AppState,
     relay_url: &str,
@@ -499,27 +505,31 @@ pub async fn query_agent_profile(
         "kinds": [0],
         "limit": 1
     });
-
     let events = query_relay_at(state, &relay_http_base_url(relay_url), &[filter]).await?;
+    Ok(parse_agent_profile_events(&events))
+}
 
-    let Some(event) = events.first() else {
-        return Ok(None);
-    };
-
-    let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) else {
-        return Ok(None);
-    };
-
-    Ok(Some(AgentProfileInfo {
-        display_name: content
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        picture: content
-            .get("picture")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-    }))
+pub async fn query_agent_profile_with_keys(
+    state: &AppState,
+    relay_url: &str,
+    agent_pubkey: &str,
+    keys: &Keys,
+    auth_tag: Option<&str>,
+) -> Result<Option<AgentProfileInfo>, String> {
+    let filter = serde_json::json!({
+        "authors": [agent_pubkey],
+        "kinds": [0],
+        "limit": 1
+    });
+    let events = query_relay_at_with_keys(
+        state,
+        &relay_http_base_url(relay_url),
+        &[filter],
+        keys,
+        auth_tag,
+    )
+    .await?;
+    Ok(parse_agent_profile_events(&events))
 }
 
 /// Parsed fields from a kind:0 profile event.
