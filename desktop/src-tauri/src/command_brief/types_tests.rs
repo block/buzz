@@ -1,18 +1,18 @@
 use super::types::{
-    AdviserId, BriefRunState, BriefRunStatus, BriefSection, CommandBrief, PublishedCommandBrief,
-    ADVISORY_LIMITATION, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
+    AdviserId, BriefLifecycleRecord, BriefRunState, BriefRunStatus, BriefSchedule, BriefSection,
+    CommandBrief, PublishedCommandBrief, ADVISORY_LIMITATION, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
 };
 use serde_json::{json, Value};
 
 const NOW: &str = "2026-07-25T06:00:00Z";
 
 fn finding(text: &str) -> Value {
-    json!({ "text": text, "sourceIds": ["ledger-1"] })
+    json!({ "classification": "OFFICIAL", "text": text, "sourceIds": ["ledger-1"] })
 }
 
 fn sections() -> Value {
     json!({
-        "today": [finding("Today has one supported priority.")],
+        "today": [finding("A supported specialist finding.")],
         "operations": [],
         "navigation": [],
         "daily_routine": [],
@@ -26,6 +26,7 @@ fn sections() -> Value {
 
 fn source() -> Value {
     json!({
+        "classification": "OFFICIAL",
         "ledgerId": "ledger-1",
         "sourceId": "source-1",
         "sourceKind": "rag",
@@ -42,6 +43,7 @@ fn source() -> Value {
 
 fn contribution(adviser: &str) -> Value {
     json!({
+        "classification": "OFFICIAL",
         "adviser": adviser,
         "section": match adviser {
             "operations" => "operations",
@@ -72,7 +74,7 @@ fn brief_value() -> Value {
         "missingInformation": [],
         "dissent": [],
         "sourceLedger": [source()],
-        "sourceFreshness": { "asOf": NOW, "staleSourceIds": [] },
+        "sourceFreshness": { "classification": "OFFICIAL", "asOf": NOW, "staleSourceIds": [] },
         "contributions": [
             contribution("operations"),
             contribution("navigation"),
@@ -151,6 +153,7 @@ fn accepts_only_the_closed_run_state_vocabulary() {
         "failed",
     ] {
         assert!(BriefRunStatus::try_from(json!({
+            "classification": "OFFICIAL",
             "runId": "run-1",
             "scheduleId": "daily-command-brief",
             "state": state,
@@ -161,6 +164,7 @@ fn accepts_only_the_closed_run_state_vocabulary() {
         .is_ok());
     }
     assert!(BriefRunStatus::try_from(json!({
+        "classification": "OFFICIAL",
         "runId": "run-1",
         "scheduleId": "daily-command-brief",
         "state": "invented",
@@ -172,6 +176,46 @@ fn accepts_only_the_closed_run_state_vocabulary() {
 }
 
 #[test]
+fn requires_official_classification_for_schedule_and_lifecycle_wire_records() {
+    let schedule = json!({
+        "classification": "OFFICIAL",
+        "scheduleId": "daily-command-brief",
+        "enabled": true,
+        "localTime": "06:00",
+        "timezone": "Australia/Sydney",
+        "catchUpSameDay": true,
+        "concurrency": 1
+    });
+    assert!(BriefSchedule::try_from(schedule.clone()).is_ok());
+    let mut missing = schedule.clone();
+    missing
+        .as_object_mut()
+        .expect("schedule")
+        .remove("classification");
+    assert!(BriefSchedule::try_from(missing).is_err());
+    let mut public = schedule;
+    public["classification"] = json!("PUBLIC");
+    assert!(BriefSchedule::try_from(public).is_err());
+
+    let lifecycle = json!({
+        "classification": "OFFICIAL",
+        "runId": "run-1",
+        "scheduleId": "daily-command-brief",
+        "state": "completed",
+        "occurredAt": NOW,
+        "snapshotId": "snapshot-1",
+        "previousLifecycleAuditEventId": null
+    });
+    assert!(BriefLifecycleRecord::try_from(lifecycle.clone()).is_ok());
+    let mut missing = lifecycle;
+    missing
+        .as_object_mut()
+        .expect("lifecycle")
+        .remove("classification");
+    assert!(BriefLifecycleRecord::try_from(missing).is_err());
+}
+
+#[test]
 fn rejects_unsafe_nested_classification_and_extra_keys() {
     let mut unsafe_classification = brief_value();
     unsafe_classification["sourceLedger"][0]["classification"] = json!("PUBLIC");
@@ -180,6 +224,39 @@ fn rejects_unsafe_nested_classification_and_extra_keys() {
     let mut extra_key = brief_value();
     extra_key["contributions"][1]["findingType"] = json!("order");
     assert!(parse(extra_key).is_err());
+}
+
+#[test]
+fn requires_official_classification_on_every_nested_wire_object() {
+    let mut missing = brief_value();
+    missing["sourceLedger"][0]
+        .as_object_mut()
+        .expect("source record")
+        .remove("classification");
+    assert!(parse(missing).is_err(), "nested OFFICIAL must be explicit");
+
+    let mut public_source = brief_value();
+    public_source["sourceLedger"][0]["classification"] = json!("PUBLIC");
+    assert!(parse(public_source).is_err());
+
+    let mut mismatched_action = brief_value();
+    mismatched_action["contributions"][0]["proposedActions"] = json!([{
+        "classification": "PUBLIC",
+        "actionId": "action-1",
+        "text": "This must remain a proposal.",
+        "approvalState": "pending"
+    }]);
+    assert!(parse(mismatched_action).is_err());
+}
+
+#[test]
+fn final_findings_must_exactly_match_validated_specialist_provenance() {
+    let mut unsupported = brief_value();
+    unsupported["sections"]["today"][0]["text"] = json!("A new claim with a valid citation.");
+    assert!(parse(unsupported).is_err());
+
+    let consolidated = brief_value();
+    assert!(parse(consolidated).is_ok());
 }
 
 #[test]
@@ -272,6 +349,7 @@ fn rejects_control_characters_and_every_bounded_text_and_array_overflow() {
 #[test]
 fn published_wrapper_adds_the_signed_event_id_only_after_validating_the_brief() {
     let published = PublishedCommandBrief::try_from(json!({
+        "classification": "OFFICIAL",
         "brief": brief_value(),
         "lifecycleAuditEventId": "abcdef0123456789",
         "publicationState": "queued"

@@ -6,6 +6,9 @@ import {
   MAX_ARRAY_ITEMS,
   MAX_TEXT_BYTES,
   parseBriefRunState,
+  parseBriefLifecycleRecord,
+  parseBriefRunStatus,
+  parseBriefSchedule,
   parseCommandBrief,
   parsePublishedCommandBrief,
 } from "./briefContracts.ts";
@@ -13,11 +16,12 @@ import {
 const NOW = "2026-07-25T06:00:00Z";
 
 function finding(text = "A supported finding.", sourceIds = ["ledger-1"]) {
-  return { text, sourceIds };
+  return { classification: "OFFICIAL", text, sourceIds };
 }
 
 function source(overrides = {}) {
   return {
+    classification: "OFFICIAL",
     ledgerId: "ledger-1",
     sourceId: "source-1",
     sourceKind: "rag",
@@ -42,6 +46,7 @@ function contribution(adviser, overrides = {}) {
     plans: "planning_30_60_90",
   }[adviser];
   return {
+    classification: "OFFICIAL",
     adviser,
     section,
     findings: [finding()],
@@ -76,7 +81,11 @@ function brief(overrides = {}) {
     missingInformation: [],
     dissent: [],
     sourceLedger: [source()],
-    sourceFreshness: { asOf: NOW, staleSourceIds: [] },
+    sourceFreshness: {
+      classification: "OFFICIAL",
+      asOf: NOW,
+      staleSourceIds: [],
+    },
     contributions: [
       contribution("operations"),
       contribution("navigation"),
@@ -123,6 +132,35 @@ test("rejects extra keys, prototype pollution, unknown closed values, and unsafe
   Object.defineProperty(polluted, "__proto__", { value: { polluted: true } });
   assert.equal(parseCommandBrief(polluted), null);
   assert.equal({}.polluted, undefined);
+});
+
+test("requires explicit OFFICIAL classification on every nested wire object", () => {
+  const missing = brief();
+  delete missing.sourceLedger[0].classification;
+  assert.equal(parseCommandBrief(missing), null);
+
+  const publicSource = brief();
+  publicSource.sourceLedger[0].classification = "PUBLIC";
+  assert.equal(parseCommandBrief(publicSource), null);
+
+  const mismatchedAction = brief();
+  mismatchedAction.contributions[0].proposedActions = [
+    {
+      classification: "PUBLIC",
+      actionId: "action-1",
+      text: "This must remain a proposal.",
+      approvalState: "pending",
+    },
+  ];
+  assert.equal(parseCommandBrief(mismatchedAction), null);
+});
+
+test("requires final findings to exactly match specialist provenance", () => {
+  const unsupported = brief();
+  unsupported.sections.today[0].text = "A new claim with a valid citation.";
+  assert.equal(parseCommandBrief(unsupported), null);
+
+  assert.ok(parseCommandBrief(brief()));
 });
 
 test("rejects bad timestamps, duplicate IDs, missing citations, mixed snapshots, and stale IDs outside the ledger", () => {
@@ -203,6 +241,7 @@ test("enforces text and array budgets, rejects controls, and only accepts post-s
   );
 
   const published = parsePublishedCommandBrief({
+    classification: "OFFICIAL",
     brief: brief(),
     lifecycleAuditEventId: "abcdef0123456789",
     publicationState: "queued",
@@ -227,4 +266,49 @@ test("accepts only the closed Rust run-state vocabulary", () => {
     assert.equal(parseBriefRunState(state), state);
   }
   assert.equal(parseBriefRunState("invented"), null);
+});
+
+test("requires OFFICIAL classification for schedule, run, and lifecycle records", () => {
+  const schedule = {
+    classification: "OFFICIAL",
+    scheduleId: "daily-command-brief",
+    enabled: true,
+    localTime: "06:00",
+    timezone: "Australia/Sydney",
+    catchUpSameDay: true,
+    concurrency: 1,
+  };
+  assert.ok(parseBriefSchedule(schedule));
+  assert.equal(
+    parseBriefSchedule({ ...schedule, classification: "PUBLIC" }),
+    null,
+  );
+
+  const run = {
+    classification: "OFFICIAL",
+    runId: "run-1",
+    scheduleId: "daily-command-brief",
+    state: "completed",
+    updatedAt: NOW,
+    degradedSections: [],
+    error: null,
+  };
+  assert.ok(parseBriefRunStatus(run));
+  const { classification: _, ...missingRunClassification } = run;
+  assert.equal(parseBriefRunStatus(missingRunClassification), null);
+
+  const lifecycle = {
+    classification: "OFFICIAL",
+    runId: "run-1",
+    scheduleId: "daily-command-brief",
+    state: "completed",
+    occurredAt: NOW,
+    snapshotId: "snapshot-1",
+    previousLifecycleAuditEventId: null,
+  };
+  assert.ok(parseBriefLifecycleRecord(lifecycle));
+  assert.equal(
+    parseBriefLifecycleRecord({ ...lifecycle, classification: "PUBLIC" }),
+    null,
+  );
 });

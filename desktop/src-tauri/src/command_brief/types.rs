@@ -106,6 +106,7 @@ pub struct QuotedLocation {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceLedgerEntry {
+    classification: Classification,
     ledger_id: String,
     source_id: String,
     source_kind: SourceKind,
@@ -120,9 +121,10 @@ pub struct SourceLedgerEntry {
 }
 
 /// A factual finding cited by stable source-ledger IDs.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CitedFinding {
+    classification: Classification,
     text: String,
     source_ids: Vec<String>,
 }
@@ -131,6 +133,7 @@ pub struct CitedFinding {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PendingProposal {
+    classification: Classification,
     action_id: String,
     text: String,
     approval_state: PendingApprovalState,
@@ -146,6 +149,7 @@ enum PendingApprovalState {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdviserContribution {
+    classification: Classification,
     adviser: AdviserId,
     section: BriefSection,
     findings: Vec<CitedFinding>,
@@ -159,6 +163,7 @@ pub struct AdviserContribution {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceFreshness {
+    classification: Classification,
     as_of: String,
     stale_source_ids: Vec<String>,
 }
@@ -187,6 +192,7 @@ pub struct CommandBrief {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublishedCommandBrief {
+    classification: Classification,
     brief: CommandBrief,
     lifecycle_audit_event_id: String,
     publication_state: PublicationState,
@@ -196,6 +202,7 @@ pub struct PublishedCommandBrief {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefRunStatus {
+    classification: Classification,
     run_id: String,
     schedule_id: String,
     state: BriefRunState,
@@ -208,6 +215,7 @@ pub struct BriefRunStatus {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefSchedule {
+    classification: Classification,
     schedule_id: String,
     enabled: bool,
     local_time: String,
@@ -220,6 +228,7 @@ pub struct BriefSchedule {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BriefLifecycleRecord {
+    classification: Classification,
     run_id: String,
     schedule_id: String,
     state: BriefRunState,
@@ -238,6 +247,7 @@ struct RawQuotedLocation {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawSourceLedgerEntry {
+    classification: Classification,
     ledger_id: String,
     source_id: String,
     source_kind: SourceKind,
@@ -254,6 +264,7 @@ struct RawSourceLedgerEntry {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawCitedFinding {
+    classification: Classification,
     text: String,
     source_ids: Vec<String>,
 }
@@ -261,6 +272,7 @@ struct RawCitedFinding {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawPendingProposal {
+    classification: Classification,
     action_id: String,
     text: String,
     approval_state: PendingApprovalState,
@@ -269,6 +281,7 @@ struct RawPendingProposal {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawAdviserContribution {
+    classification: Classification,
     adviser: AdviserId,
     section: BriefSection,
     findings: Vec<RawCitedFinding>,
@@ -281,6 +294,7 @@ struct RawAdviserContribution {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawSourceFreshness {
+    classification: Classification,
     as_of: String,
     stale_source_ids: Vec<String>,
 }
@@ -307,6 +321,7 @@ struct RawCommandBrief {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawPublishedCommandBrief {
+    classification: Classification,
     brief: Value,
     lifecycle_audit_event_id: String,
     publication_state: PublicationState,
@@ -315,6 +330,7 @@ struct RawPublishedCommandBrief {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawBriefRunStatus {
+    classification: Classification,
     run_id: String,
     schedule_id: String,
     state: BriefRunState,
@@ -326,6 +342,7 @@ struct RawBriefRunStatus {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawBriefSchedule {
+    classification: Classification,
     schedule_id: String,
     enabled: bool,
     local_time: String,
@@ -337,6 +354,7 @@ struct RawBriefSchedule {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RawBriefLifecycleRecord {
+    classification: Classification,
     run_id: String,
     schedule_id: String,
     state: BriefRunState,
@@ -347,6 +365,7 @@ struct RawBriefLifecycleRecord {
 
 fn valid_text(value: &str) -> bool {
     !value.is_empty()
+        && value.trim() == value
         && value.len() <= MAX_TEXT_BYTES
         && !value
             .chars()
@@ -427,6 +446,7 @@ impl TryFrom<Value> for CommandBrief {
                 return Err(ContractError);
             }
             source_ledger.push(SourceLedgerEntry {
+                classification: source.classification,
                 ledger_id: source.ledger_id,
                 source_id: source.source_id,
                 source_kind: source.source_kind,
@@ -473,9 +493,12 @@ impl TryFrom<Value> for CommandBrief {
                         {
                             return Err(ContractError);
                         }
+                        let mut source_ids = finding.source_ids;
+                        source_ids.sort();
                         Ok(CitedFinding {
+                            classification: finding.classification,
                             text: finding.text,
-                            source_ids: finding.source_ids,
+                            source_ids,
                         })
                     })
                     .collect()
@@ -528,6 +551,7 @@ impl TryFrom<Value> for CommandBrief {
                         return Err(ContractError);
                     }
                     Ok(PendingProposal {
+                        classification: proposal.classification,
                         action_id: proposal.action_id,
                         text: proposal.text,
                         approval_state: proposal.approval_state,
@@ -535,6 +559,7 @@ impl TryFrom<Value> for CommandBrief {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             contributions.push(AdviserContribution {
+                classification: contribution.classification,
                 adviser: contribution.adviser,
                 section: contribution.section,
                 findings: parse_findings(contribution.findings)?,
@@ -545,6 +570,16 @@ impl TryFrom<Value> for CommandBrief {
             });
         }
         if seen_specialists != expected_specialists {
+            return Err(ContractError);
+        }
+        let specialist_findings = contributions
+            .iter()
+            .flat_map(|contribution| contribution.findings.iter())
+            .map(|finding| (finding.text.as_str(), finding.source_ids.as_slice()))
+            .collect::<BTreeSet<_>>();
+        if sections.values().flatten().any(|finding| {
+            !specialist_findings.contains(&(finding.text.as_str(), finding.source_ids.as_slice()))
+        }) {
             return Err(ContractError);
         }
 
@@ -561,6 +596,7 @@ impl TryFrom<Value> for CommandBrief {
             dissent: raw.dissent,
             source_ledger,
             source_freshness: SourceFreshness {
+                classification: raw.source_freshness.classification,
                 as_of: raw.source_freshness.as_of,
                 stale_source_ids: raw.source_freshness.stale_source_ids,
             },
@@ -580,6 +616,7 @@ impl TryFrom<Value> for PublishedCommandBrief {
             return Err(ContractError);
         }
         Ok(Self {
+            classification: raw.classification,
             brief: CommandBrief::try_from(raw.brief)?,
             lifecycle_audit_event_id: raw.lifecycle_audit_event_id,
             publication_state: raw.publication_state,
@@ -603,6 +640,7 @@ impl TryFrom<Value> for BriefRunStatus {
             return Err(ContractError);
         }
         Ok(Self {
+            classification: raw.classification,
             run_id: raw.run_id,
             schedule_id: raw.schedule_id,
             state: raw.state,
@@ -635,6 +673,7 @@ impl TryFrom<Value> for BriefSchedule {
             return Err(ContractError);
         }
         Ok(Self {
+            classification: raw.classification,
             schedule_id: raw.schedule_id,
             enabled: raw.enabled,
             local_time: raw.local_time,
@@ -663,6 +702,7 @@ impl TryFrom<Value> for BriefLifecycleRecord {
             return Err(ContractError);
         }
         Ok(Self {
+            classification: raw.classification,
             run_id: raw.run_id,
             schedule_id: raw.schedule_id,
             state: raw.state,

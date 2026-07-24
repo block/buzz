@@ -61,11 +61,13 @@ const RUN_STATES = Object.freeze([
 export type BriefRunState = (typeof RUN_STATES)[number];
 
 export type CitedFinding = {
+  readonly classification: "OFFICIAL";
   readonly text: string;
   readonly sourceIds: readonly string[];
 };
 
 export type SourceLedgerEntry = {
+  readonly classification: "OFFICIAL";
   readonly ledgerId: string;
   readonly sourceId: string;
   readonly sourceKind: (typeof SOURCE_KINDS)[number];
@@ -83,6 +85,7 @@ export type SourceLedgerEntry = {
 };
 
 export type AdviserContribution = {
+  readonly classification: "OFFICIAL";
   readonly adviser: (typeof SPECIALISTS)[number];
   readonly section: BriefSection;
   readonly findings: readonly CitedFinding[];
@@ -90,6 +93,7 @@ export type AdviserContribution = {
   readonly limitations: readonly string[];
   readonly dissent: readonly string[];
   readonly proposedActions: readonly {
+    readonly classification: "OFFICIAL";
     readonly actionId: string;
     readonly text: string;
     readonly approvalState: "pending";
@@ -109,6 +113,7 @@ export type CommandBrief = {
   readonly dissent: readonly string[];
   readonly sourceLedger: readonly SourceLedgerEntry[];
   readonly sourceFreshness: {
+    readonly classification: "OFFICIAL";
     readonly asOf: string;
     readonly staleSourceIds: readonly string[];
   };
@@ -117,12 +122,14 @@ export type CommandBrief = {
 };
 
 export type PublishedCommandBrief = {
+  readonly classification: "OFFICIAL";
   readonly brief: CommandBrief;
   readonly lifecycleAuditEventId: string;
   readonly publicationState: "queued" | "published";
 };
 
 export type BriefRunStatus = {
+  readonly classification: "OFFICIAL";
   readonly runId: string;
   readonly scheduleId: string;
   readonly state: BriefRunState;
@@ -132,6 +139,7 @@ export type BriefRunStatus = {
 };
 
 export type BriefSchedule = {
+  readonly classification: "OFFICIAL";
   readonly scheduleId: string;
   readonly enabled: boolean;
   readonly localTime: string;
@@ -141,6 +149,7 @@ export type BriefSchedule = {
 };
 
 export type BriefLifecycleRecord = {
+  readonly classification: "OFFICIAL";
   readonly runId: string;
   readonly scheduleId: string;
   readonly state: BriefRunState;
@@ -168,6 +177,7 @@ function isBoundedText(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
+    value.trim() === value &&
     new TextEncoder().encode(value).byteLength <= MAX_TEXT_BYTES &&
     !hasControlCharacter(value)
   );
@@ -194,7 +204,8 @@ function parseFinding(
 ): CitedFinding | null {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, ["text", "sourceIds"]) ||
+    !hasExactKeys(value, ["classification", "text", "sourceIds"]) ||
+    value.classification !== "OFFICIAL" ||
     !isBoundedText(value.text)
   ) {
     return null;
@@ -202,7 +213,11 @@ function parseFinding(
   const ids = parseTextArray(value.sourceIds, true);
   if (!ids || ids.length === 0 || ids.some((id) => !sourceIds.has(id)))
     return null;
-  return Object.freeze({ text: value.text, sourceIds: ids });
+  return Object.freeze({
+    classification: value.classification,
+    text: value.text,
+    sourceIds: Object.freeze([...ids].sort()),
+  });
 }
 
 function parseFindingArray(
@@ -227,6 +242,7 @@ function parseSource(
     !isRecord(value) ||
     !hasExactKeys(value, [
       "ledgerId",
+      "classification",
       "sourceId",
       "sourceKind",
       "collection",
@@ -238,6 +254,7 @@ function parseSource(
       "retrievedAt",
       "observedAt",
     ]) ||
+    value.classification !== "OFFICIAL" ||
     !isBoundedText(value.ledgerId) ||
     !isBoundedText(value.sourceId) ||
     !isOneOf(value.sourceKind, SOURCE_KINDS) ||
@@ -257,6 +274,7 @@ function parseSource(
     return null;
   }
   return Object.freeze({
+    classification: value.classification,
     ledgerId: value.ledgerId,
     sourceId: value.sourceId,
     sourceKind: value.sourceKind,
@@ -294,6 +312,7 @@ function parseContribution(
     !isRecord(value) ||
     !hasExactKeys(value, [
       "adviser",
+      "classification",
       "section",
       "findings",
       "confidence",
@@ -301,6 +320,7 @@ function parseContribution(
       "dissent",
       "proposedActions",
     ]) ||
+    value.classification !== "OFFICIAL" ||
     !isOneOf(value.adviser, SPECIALISTS) ||
     !isOneOf(value.section, BRIEF_SECTIONS) ||
     value.section !== expectedSection(value.adviser) ||
@@ -327,7 +347,13 @@ function parseContribution(
   for (const action of value.proposedActions) {
     if (
       !isRecord(action) ||
-      !hasExactKeys(action, ["actionId", "text", "approvalState"]) ||
+      !hasExactKeys(action, [
+        "classification",
+        "actionId",
+        "text",
+        "approvalState",
+      ]) ||
+      action.classification !== "OFFICIAL" ||
       !isBoundedText(action.actionId) ||
       !isBoundedText(action.text) ||
       action.approvalState !== "pending"
@@ -335,6 +361,7 @@ function parseContribution(
       return null;
     proposedActions.push(
       Object.freeze({
+        classification: action.classification,
         actionId: action.actionId,
         text: action.text,
         approvalState: "pending",
@@ -342,6 +369,7 @@ function parseContribution(
     );
   }
   return Object.freeze({
+    classification: value.classification,
     adviser: value.adviser,
     section: value.section,
     findings,
@@ -382,7 +410,12 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
     !Array.isArray(value.sourceLedger) ||
     value.sourceLedger.length > MAX_LEDGER_ITEMS ||
     !isRecord(value.sourceFreshness) ||
-    !hasExactKeys(value.sourceFreshness, ["asOf", "staleSourceIds"]) ||
+    !hasExactKeys(value.sourceFreshness, [
+      "classification",
+      "asOf",
+      "staleSourceIds",
+    ]) ||
+    value.sourceFreshness.classification !== "OFFICIAL" ||
     !isRfc3339(value.sourceFreshness.asOf)
   )
     return null;
@@ -440,6 +473,24 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
     contributions.push(parsed);
   }
   if (SPECIALISTS.some((adviser) => !advisers.has(adviser))) return null;
+  const specialistFindings = new Set(
+    contributions.flatMap((contribution) =>
+      contribution.findings.map((finding) =>
+        JSON.stringify([finding.text, finding.sourceIds]),
+      ),
+    ),
+  );
+  if (
+    Object.values(sections)
+      .flat()
+      .some(
+        (finding) =>
+          !specialistFindings.has(
+            JSON.stringify([finding.text, finding.sourceIds]),
+          ),
+      )
+  )
+    return null;
 
   return Object.freeze({
     version: value.version,
@@ -454,6 +505,7 @@ export function parseCommandBrief(value: unknown): CommandBrief | null {
     dissent,
     sourceLedger: Object.freeze(sourceLedger),
     sourceFreshness: Object.freeze({
+      classification: value.sourceFreshness.classification,
       asOf: value.sourceFreshness.asOf,
       staleSourceIds,
     }),
@@ -483,10 +535,12 @@ export function parsePublishedCommandBrief(
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
+      "classification",
       "brief",
       "lifecycleAuditEventId",
       "publicationState",
     ]) ||
+    value.classification !== "OFFICIAL" ||
     !isBoundedText(value.lifecycleAuditEventId) ||
     !isOneOf(value.publicationState, ["queued", "published"] as const)
   )
@@ -494,6 +548,7 @@ export function parsePublishedCommandBrief(
   const brief = parseCommandBrief(value.brief);
   return brief
     ? Object.freeze({
+        classification: value.classification,
         brief,
         lifecycleAuditEventId: value.lifecycleAuditEventId,
         publicationState: value.publicationState,
@@ -511,6 +566,7 @@ export function parseBriefRunStatus(value: unknown): BriefRunStatus | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
+      "classification",
       "runId",
       "scheduleId",
       "state",
@@ -518,6 +574,7 @@ export function parseBriefRunStatus(value: unknown): BriefRunStatus | null {
       "degradedSections",
       "error",
     ]) ||
+    value.classification !== "OFFICIAL" ||
     !isBoundedText(value.runId) ||
     !isBoundedText(value.scheduleId) ||
     !isOneOf(value.state, RUN_STATES) ||
@@ -528,6 +585,7 @@ export function parseBriefRunStatus(value: unknown): BriefRunStatus | null {
   const degradedSections = parseSectionArray(value.degradedSections, true);
   return degradedSections
     ? Object.freeze({
+        classification: value.classification,
         runId: value.runId,
         scheduleId: value.scheduleId,
         state: value.state,
@@ -543,6 +601,7 @@ export function parseBriefSchedule(value: unknown): BriefSchedule | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
+      "classification",
       "scheduleId",
       "enabled",
       "localTime",
@@ -550,6 +609,7 @@ export function parseBriefSchedule(value: unknown): BriefSchedule | null {
       "catchUpSameDay",
       "concurrency",
     ]) ||
+    value.classification !== "OFFICIAL" ||
     !isBoundedText(value.scheduleId) ||
     typeof value.enabled !== "boolean" ||
     typeof value.localTime !== "string" ||
@@ -562,6 +622,7 @@ export function parseBriefSchedule(value: unknown): BriefSchedule | null {
   )
     return null;
   return Object.freeze({
+    classification: value.classification,
     scheduleId: value.scheduleId,
     enabled: value.enabled,
     localTime: value.localTime,
@@ -578,6 +639,7 @@ export function parseBriefLifecycleRecord(
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
+      "classification",
       "runId",
       "scheduleId",
       "state",
@@ -585,6 +647,7 @@ export function parseBriefLifecycleRecord(
       "snapshotId",
       "previousLifecycleAuditEventId",
     ]) ||
+    value.classification !== "OFFICIAL" ||
     !isBoundedText(value.runId) ||
     !isBoundedText(value.scheduleId) ||
     !isOneOf(value.state, RUN_STATES) ||
@@ -595,6 +658,7 @@ export function parseBriefLifecycleRecord(
   )
     return null;
   return Object.freeze({
+    classification: value.classification,
     runId: value.runId,
     scheduleId: value.scheduleId,
     state: value.state,
