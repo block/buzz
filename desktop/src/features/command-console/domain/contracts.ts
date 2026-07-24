@@ -1,333 +1,466 @@
 import { isClassification, resolveClassification } from "./classification";
 import type { Classification } from "./classification";
+import {
+  cloneBoundedJson,
+  classificationIsSafe,
+  hasExactKeys,
+  isApprovalState,
+  isCount,
+  isHash,
+  isRecord,
+  isRfc3339,
+  isText,
+  parseActionDetail,
+  parseObjectArray,
+  parseQuotedLocation,
+  parseTextArray,
+  required,
+} from "./validation";
+import type { JsonValue, UnknownRecord } from "./validation";
 
 export const COMMAND_CONTRACT_VERSION = 1 as const;
 
-export type JsonPrimitive = boolean | number | string | null;
-export type JsonValue =
-  | JsonPrimitive
-  | readonly JsonValue[]
-  | { readonly [key: string]: JsonValue };
+export type { JsonPrimitive, JsonValue } from "./validation";
 
-type ClassifiedContract = {
+type ContractBase = {
   readonly version: typeof COMMAND_CONTRACT_VERSION;
   readonly classification: Classification;
 };
 
-export type SourceReference = ClassifiedContract & {
+export type QuotedLocation = {
+  readonly quote: string;
+  readonly location: string;
+};
+
+/** A quoted source chunk pinned to a collection snapshot. */
+export type SourceReference = ContractBase & {
   readonly kind: "source-reference";
-  readonly id: string;
-  readonly title: string;
-  readonly locator: string;
-  readonly capturedAt: string;
+  readonly sourceId: string;
+  readonly collection: string;
+  readonly documentId: string;
+  readonly chunkId: string;
+  readonly timestamp: string;
+  readonly snapshotId: string;
+  readonly quotedLocation: QuotedLocation;
 };
 
-export type AdviserContribution = ClassifiedContract & {
-  readonly kind: "adviser-contribution";
-  readonly id: string;
-  readonly adviser: string;
-  readonly summary: string;
-  readonly sources: readonly SourceReference[];
-  readonly producedAt: string;
-};
+export type ApprovalState = "pending" | "approved" | "rejected";
 
-export type CommandBrief = ClassifiedContract & {
-  readonly kind: "command-brief";
-  readonly id: string;
-  readonly title: string;
-  readonly summary: string;
-  readonly contributions: readonly AdviserContribution[];
-  readonly createdAt: string;
-};
-
-export type WorkspaceOperation = "create" | "update" | "delete";
-
-export type ProposedWorkspaceAction = ClassifiedContract & {
+type WorkspaceActionBase = ContractBase & {
   readonly kind: "proposed-workspace-action";
-  readonly id: string;
-  readonly operation: WorkspaceOperation;
-  readonly target: string;
+  readonly actionId: string;
   readonly rationale: string;
-  readonly proposedAt: string;
+  readonly approvalState: ApprovalState;
 };
 
-export type ModelRoute = ClassifiedContract & {
-  readonly kind: "model-route";
-  readonly id: string;
+export type TaskWorkspaceAction = WorkspaceActionBase & {
+  readonly actionType: "task";
+  readonly task: {
+    readonly title: string;
+    readonly dueAt: string;
+  };
+};
+
+export type CanvasChecklistWorkspaceAction = WorkspaceActionBase & {
+  readonly actionType: "canvas-checklist-update";
+  readonly update: {
+    readonly canvasId: string;
+    readonly checklistId: string;
+    readonly itemId: string;
+    readonly completed: boolean;
+  };
+};
+
+export type ScheduledBriefWorkspaceAction = WorkspaceActionBase & {
+  readonly actionType: "scheduled-brief";
+  readonly schedule: {
+    readonly briefId: string;
+    readonly scheduledFor: string;
+  };
+};
+
+export type DraftMessageWorkspaceAction = WorkspaceActionBase & {
+  readonly actionType: "draft-message";
+  readonly draft: {
+    readonly channelId: string;
+    readonly body: string;
+  };
+};
+
+export type RoutingWorkspaceAction = WorkspaceActionBase & {
+  readonly actionType: "routing-action";
+  readonly route: {
+    readonly adviser: string;
+    readonly destination: string;
+  };
+};
+
+/** The complete closed set of approval-gated workspace proposals. */
+export type ProposedWorkspaceAction =
+  | TaskWorkspaceAction
+  | CanvasChecklistWorkspaceAction
+  | ScheduledBriefWorkspaceAction
+  | DraftMessageWorkspaceAction
+  | RoutingWorkspaceAction;
+
+/** Structured output from one command adviser. */
+export type AdviserContribution = ContractBase & {
+  readonly kind: "adviser-contribution";
   readonly adviser: string;
-  readonly provider: string;
-  readonly model: string;
-  readonly rationale: string;
-  readonly selectedAt: string;
+  readonly findings: readonly string[];
+  readonly evidence: readonly SourceReference[];
+  readonly confidence: number;
+  readonly limitations: readonly string[];
+  readonly dissent: readonly string[];
+  readonly proposedActions: readonly ProposedWorkspaceAction[];
 };
 
-export type KnowledgeSnapshotManifest = ClassifiedContract & {
-  readonly kind: "knowledge-snapshot-manifest";
-  readonly id: string;
-  readonly createdAt: string;
-  readonly checksum: string;
-  readonly sources: readonly SourceReference[];
+export type SourceFreshness = {
+  readonly asOf: string;
+  readonly staleSourceIds: readonly string[];
 };
 
-export type MemoryRevision = ClassifiedContract & {
-  readonly kind: "memory-revision";
-  readonly id: string;
-  readonly entityId: string;
-  readonly revision: number;
-  readonly revisedAt: string;
-  readonly content: JsonValue;
-};
-
-export type ReplicatedPayload = KnowledgeSnapshotManifest | MemoryRevision;
-
-export type ReplicationEnvelope = ClassifiedContract & {
-  readonly kind: "replication-envelope";
-  readonly id: string;
-  readonly sequence: number;
-  readonly createdAt: string;
-  readonly payload: ReplicatedPayload;
-};
-
-export type SourceReferenceInput = {
-  readonly id: string;
-  readonly title: string;
-  readonly locator: string;
-  readonly capturedAt: string;
-  readonly classification?: Classification;
-};
-
-export type AdviserContributionInput = {
-  readonly id: string;
-  readonly adviser: string;
-  readonly summary: string;
-  readonly sources: readonly SourceReference[];
-  readonly producedAt: string;
-  readonly classification?: Classification;
-};
-
-export type CommandBriefInput = {
-  readonly id: string;
-  readonly title: string;
-  readonly summary: string;
+/** Consolidated command output with its generation audit identity. */
+export type CommandBrief = ContractBase & {
+  readonly kind: "command-brief";
   readonly contributions: readonly AdviserContribution[];
-  readonly createdAt: string;
-  readonly classification?: Classification;
+  readonly consolidatedPriorities: readonly string[];
+  readonly decisions: readonly string[];
+  readonly sourceFreshness: SourceFreshness;
+  readonly generationAuditId: string;
 };
 
-export type ProposedWorkspaceActionInput = {
-  readonly id: string;
-  readonly operation: WorkspaceOperation;
-  readonly target: string;
-  readonly rationale: string;
-  readonly proposedAt: string;
-  readonly classification?: Classification;
-};
-
-export type ModelRouteInput = {
-  readonly id: string;
-  readonly adviser: string;
+export type ModelFallback = {
   readonly provider: string;
   readonly model: string;
+};
+
+export type EgressDecision = {
+  readonly allowed: boolean;
   readonly rationale: string;
-  readonly selectedAt: string;
-  readonly classification?: Classification;
 };
 
-export type KnowledgeSnapshotManifestInput = {
-  readonly id: string;
+/** Auditable provider/model selection and its execution boundaries. */
+export type ModelRoute = ContractBase & {
+  readonly kind: "model-route";
+  readonly selectedProvider: string;
+  readonly selectedModel: string;
+  readonly permittedTools: readonly string[];
+  readonly fallbackChain: readonly ModelFallback[];
+  readonly egressDecision: EgressDecision;
+};
+
+export type SnapshotHashes = {
+  readonly manifest: string;
+  readonly content: string;
+};
+
+export type CollectionSnapshot = {
+  readonly collection: string;
+  readonly schemaVersion: string;
+  readonly documentCount: number;
+  readonly chunkCount: number;
+};
+
+export type RetrievalModelVersion = {
+  readonly model: string;
+  readonly version: string;
+};
+
+/** Integrity and schema manifest for one replicated knowledge snapshot. */
+export type KnowledgeSnapshotManifest = ContractBase & {
+  readonly kind: "knowledge-snapshot-manifest";
+  readonly snapshotId: string;
   readonly createdAt: string;
-  readonly checksum: string;
-  readonly sources: readonly SourceReference[];
-  readonly classification?: Classification;
+  readonly hashes: SnapshotHashes;
+  readonly collections: readonly CollectionSnapshot[];
+  readonly serviceRevision: string;
+  readonly retrievalModelVersions: readonly RetrievalModelVersion[];
 };
 
-export type MemoryRevisionInput = {
-  readonly id: string;
+export type MemoryHashes = {
+  readonly content: string;
+  readonly revision: string;
+};
+
+/** One lineage-addressed memory event, including explicit tombstones. */
+export type MemoryRevision = ContractBase & {
+  readonly kind: "memory-revision";
   readonly entityId: string;
-  readonly revision: number;
-  readonly revisedAt: string;
+  readonly eventId: string;
+  readonly parentRevisionIds: readonly string[];
+  readonly nodeId: string;
+  readonly timestamp: string;
+  readonly hashes: MemoryHashes;
+  readonly tombstone: boolean;
+  readonly cursor: string;
   readonly content: JsonValue;
-  readonly classification?: Classification;
 };
 
-export type ReplicationEnvelopeInput = {
-  readonly id: string;
-  readonly sequence: number;
-  readonly createdAt: string;
-  readonly payload: ReplicatedPayload;
-  readonly classification?: Classification;
+export type ReplicationHashes = {
+  readonly payload: string;
+  readonly envelope: string;
 };
 
-type UnknownRecord = Record<string, unknown>;
+/** Resumable replication metadata around a memory revision. */
+export type ReplicationEnvelope = ContractBase & {
+  readonly kind: "replication-envelope";
+  readonly entityId: string;
+  readonly eventId: string;
+  readonly parentRevisionIds: readonly string[];
+  readonly nodeId: string;
+  readonly timestamp: string;
+  readonly hashes: ReplicationHashes;
+  readonly tombstone: boolean;
+  readonly cursor: string;
+  readonly payload: MemoryRevision;
+};
 
-function isRecord(value: unknown): value is UnknownRecord {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const prototype = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
+type ClassifiedInput<T> = Omit<T, "kind" | "version" | "classification"> & {
+  readonly classification?: Classification;
+};
+type ProposedWorkspaceActionInput =
+  | ClassifiedInput<TaskWorkspaceAction>
+  | ClassifiedInput<CanvasChecklistWorkspaceAction>
+  | ClassifiedInput<ScheduledBriefWorkspaceAction>
+  | ClassifiedInput<DraftMessageWorkspaceAction>
+  | ClassifiedInput<RoutingWorkspaceAction>;
 
-function hasExactKeys(value: UnknownRecord, keys: readonly string[]): boolean {
-  const actualKeys = Object.keys(value);
-  return (
-    actualKeys.length === keys.length &&
-    actualKeys.every((key) => keys.includes(key))
-  );
-}
-
-function isText(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function isTimestamp(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.trim().length > 0 &&
-    Number.isFinite(Date.parse(value))
-  );
-}
-
-function isNonNegativeSafeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 0;
-}
-
-function isPositiveSafeInteger(value: unknown): value is number {
-  return Number.isSafeInteger(value) && (value as number) >= 1;
-}
-
-function isWorkspaceOperation(value: unknown): value is WorkspaceOperation {
-  return value === "create" || value === "update" || value === "delete";
-}
-
-function isJsonValue(value: unknown): value is JsonValue {
-  if (
-    value === null ||
-    typeof value === "string" ||
-    typeof value === "boolean"
-  ) {
-    return true;
-  }
-  if (typeof value === "number") return Number.isFinite(value);
-  if (Array.isArray(value)) return value.every(isJsonValue);
-  if (!isRecord(value)) return false;
-  return Object.values(value).every(isJsonValue);
-}
-
-function cloneJson(value: JsonValue): JsonValue {
-  if (Array.isArray(value)) return value.map(cloneJson);
-  if (isRecord(value)) {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, nested]) => [
-        key,
-        cloneJson(nested as JsonValue),
-      ]),
-    );
-  }
-  return value;
-}
-
-function deepFreeze<T>(value: T): T {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) {
-    return value;
-  }
-  for (const nested of Object.values(value)) {
-    deepFreeze(nested);
-  }
-  return Object.freeze(value);
-}
-
-function requiredParsed<T>(parsed: T | null, kind: string): T {
-  if (parsed === null) {
-    throw new TypeError(`Invalid ${kind} contract input.`);
-  }
-  return parsed;
-}
-
-/**
- * Creates an immutable source reference, defaulting to `OFFICIAL`.
- */
+/** Creates an immutable source reference; omitted classification is OFFICIAL. */
 export function createSourceReference(
-  input: SourceReferenceInput,
+  input: ClassifiedInput<SourceReference>,
 ): SourceReference {
-  return requiredParsed(
+  return required(
     parseSourceReference({
       kind: "source-reference",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
-      title: input.title,
-      locator: input.locator,
-      capturedAt: input.capturedAt,
       classification: resolveClassification(input.classification),
+      sourceId: input.sourceId,
+      collection: input.collection,
+      documentId: input.documentId,
+      chunkId: input.chunkId,
+      timestamp: input.timestamp,
+      snapshotId: input.snapshotId,
+      quotedLocation: input.quotedLocation,
     }),
     "source-reference",
   );
 }
 
-/**
- * Parses an exact persisted source-reference shape and returns a frozen copy.
- */
+/** Safely parses an exact persisted source reference. */
 export function parseSourceReference(value: unknown): SourceReference | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
       "kind",
       "version",
-      "id",
-      "title",
-      "locator",
-      "capturedAt",
       "classification",
+      "sourceId",
+      "collection",
+      "documentId",
+      "chunkId",
+      "timestamp",
+      "snapshotId",
+      "quotedLocation",
     ]) ||
     value.kind !== "source-reference" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isText(value.title) ||
-    !isText(value.locator) ||
-    !isTimestamp(value.capturedAt) ||
-    !isClassification(value.classification)
-  ) {
+    !isClassification(value.classification) ||
+    !isText(value.sourceId) ||
+    !isText(value.collection) ||
+    !isText(value.documentId) ||
+    !isText(value.chunkId) ||
+    !isRfc3339(value.timestamp) ||
+    !isText(value.snapshotId)
+  )
     return null;
-  }
-
-  return deepFreeze({
+  const quotedLocation = parseQuotedLocation(value.quotedLocation);
+  if (!quotedLocation) return null;
+  return Object.freeze({
     kind: value.kind,
     version: value.version,
-    id: value.id,
-    title: value.title,
-    locator: value.locator,
-    capturedAt: value.capturedAt,
     classification: value.classification,
+    sourceId: value.sourceId,
+    collection: value.collection,
+    documentId: value.documentId,
+    chunkId: value.chunkId,
+    timestamp: value.timestamp,
+    snapshotId: value.snapshotId,
+    quotedLocation,
   });
 }
 
-/**
- * Creates an immutable adviser contribution and inherits source classification.
- */
+function actionBase(value: UnknownRecord): value is UnknownRecord & {
+  kind: "proposed-workspace-action";
+  version: typeof COMMAND_CONTRACT_VERSION;
+  classification: Classification;
+  actionId: string;
+  rationale: string;
+  approvalState: ApprovalState;
+} {
+  return (
+    value.kind === "proposed-workspace-action" &&
+    value.version === COMMAND_CONTRACT_VERSION &&
+    isClassification(value.classification) &&
+    isText(value.actionId) &&
+    isText(value.rationale) &&
+    isApprovalState(value.approvalState)
+  );
+}
+
+/** Creates one of the five immutable, approval-gated proposal variants. */
+export function createProposedWorkspaceAction(
+  input: ProposedWorkspaceActionInput,
+): ProposedWorkspaceAction {
+  const common = {
+    kind: "proposed-workspace-action",
+    version: COMMAND_CONTRACT_VERSION,
+    classification: resolveClassification(input.classification),
+    actionType: input.actionType,
+    actionId: input.actionId,
+    rationale: input.rationale,
+    approvalState: input.approvalState,
+  } as const;
+  const candidate =
+    input.actionType === "task"
+      ? { ...common, task: input.task }
+      : input.actionType === "canvas-checklist-update"
+        ? { ...common, update: input.update }
+        : input.actionType === "scheduled-brief"
+          ? { ...common, schedule: input.schedule }
+          : input.actionType === "draft-message"
+            ? { ...common, draft: input.draft }
+            : { ...common, route: input.route };
+  return required(
+    parseProposedWorkspaceAction(candidate),
+    "proposed-workspace-action",
+  );
+}
+
+/** Safely parses the closed proposed-action union. */
+export function parseProposedWorkspaceAction(
+  value: unknown,
+): ProposedWorkspaceAction | null {
+  if (!isRecord(value) || !actionBase(value)) return null;
+  const common = {
+    kind: value.kind,
+    version: value.version,
+    classification: value.classification,
+    actionType: value.actionType,
+    actionId: value.actionId,
+    rationale: value.rationale,
+    approvalState: value.approvalState,
+  };
+  if (value.actionType === "task") {
+    if (!hasExactKeys(value, [...Object.keys(common), "task"])) return null;
+    const task = parseActionDetail(value.task, ["title", "dueAt"]);
+    if (!task || !isText(task.title) || !isRfc3339(task.dueAt)) return null;
+    return Object.freeze({
+      ...common,
+      actionType: value.actionType,
+      task: Object.freeze({ title: task.title, dueAt: task.dueAt }),
+    });
+  }
+  if (value.actionType === "canvas-checklist-update") {
+    if (!hasExactKeys(value, [...Object.keys(common), "update"])) return null;
+    const update = parseActionDetail(value.update, [
+      "canvasId",
+      "checklistId",
+      "itemId",
+      "completed",
+    ]);
+    if (
+      !update ||
+      !isText(update.canvasId) ||
+      !isText(update.checklistId) ||
+      !isText(update.itemId) ||
+      typeof update.completed !== "boolean"
+    )
+      return null;
+    return Object.freeze({
+      ...common,
+      actionType: value.actionType,
+      update: Object.freeze({
+        canvasId: update.canvasId,
+        checklistId: update.checklistId,
+        itemId: update.itemId,
+        completed: update.completed,
+      }),
+    });
+  }
+  if (value.actionType === "scheduled-brief") {
+    if (!hasExactKeys(value, [...Object.keys(common), "schedule"])) return null;
+    const schedule = parseActionDetail(value.schedule, [
+      "briefId",
+      "scheduledFor",
+    ]);
+    if (
+      !schedule ||
+      !isText(schedule.briefId) ||
+      !isRfc3339(schedule.scheduledFor)
+    )
+      return null;
+    return Object.freeze({
+      ...common,
+      actionType: value.actionType,
+      schedule: Object.freeze({
+        briefId: schedule.briefId,
+        scheduledFor: schedule.scheduledFor,
+      }),
+    });
+  }
+  if (value.actionType === "draft-message") {
+    if (!hasExactKeys(value, [...Object.keys(common), "draft"])) return null;
+    const draft = parseActionDetail(value.draft, ["channelId", "body"]);
+    if (!draft || !isText(draft.channelId) || !isText(draft.body)) return null;
+    return Object.freeze({
+      ...common,
+      actionType: value.actionType,
+      draft: Object.freeze({ channelId: draft.channelId, body: draft.body }),
+    });
+  }
+  if (value.actionType === "routing-action") {
+    if (!hasExactKeys(value, [...Object.keys(common), "route"])) return null;
+    const route = parseActionDetail(value.route, ["adviser", "destination"]);
+    if (!route || !isText(route.adviser) || !isText(route.destination))
+      return null;
+    return Object.freeze({
+      ...common,
+      actionType: value.actionType,
+      route: Object.freeze({
+        adviser: route.adviser,
+        destination: route.destination,
+      }),
+    });
+  }
+  return null;
+}
+
+/** Creates immutable structured adviser output with classification inheritance. */
 export function createAdviserContribution(
-  input: AdviserContributionInput,
+  input: ClassifiedInput<AdviserContribution>,
 ): AdviserContribution {
-  return requiredParsed(
+  return required(
     parseAdviserContribution({
       kind: "adviser-contribution",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
+      classification: resolveClassification(input.classification, [
+        ...input.evidence.map((item) => item.classification),
+        ...input.proposedActions.map((item) => item.classification),
+      ]),
       adviser: input.adviser,
-      summary: input.summary,
-      sources: input.sources,
-      producedAt: input.producedAt,
-      classification: resolveClassification(
-        input.classification,
-        input.sources.map((source) => source.classification),
-      ),
+      findings: input.findings,
+      evidence: input.evidence,
+      confidence: input.confidence,
+      limitations: input.limitations,
+      dissent: input.dissent,
+      proposedActions: input.proposedActions,
     }),
     "adviser-contribution",
   );
 }
 
-/**
- * Parses an exact adviser-contribution shape and rejects classification loss.
- */
+/** Safely parses exact structured adviser output. */
 export function parseAdviserContribution(
   value: unknown,
 ): AdviserContribution | null {
@@ -336,273 +469,293 @@ export function parseAdviserContribution(
     !hasExactKeys(value, [
       "kind",
       "version",
-      "id",
-      "adviser",
-      "summary",
-      "sources",
-      "producedAt",
       "classification",
+      "adviser",
+      "findings",
+      "evidence",
+      "confidence",
+      "limitations",
+      "dissent",
+      "proposedActions",
     ]) ||
     value.kind !== "adviser-contribution" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
+    !isClassification(value.classification) ||
     !isText(value.adviser) ||
-    !isText(value.summary) ||
-    !Array.isArray(value.sources) ||
-    !isTimestamp(value.producedAt) ||
-    !isClassification(value.classification)
-  ) {
+    typeof value.confidence !== "number" ||
+    !Number.isFinite(value.confidence) ||
+    value.confidence < 0 ||
+    value.confidence > 1
+  )
     return null;
-  }
-  const sources = value.sources.map(parseSourceReference);
-  if (sources.some((source) => source === null)) return null;
-  const parsedSources = sources as SourceReference[];
+  const findings = parseTextArray(value.findings);
+  const evidence = parseObjectArray(value.evidence, parseSourceReference);
+  const limitations = parseTextArray(value.limitations);
+  const dissent = parseTextArray(value.dissent);
+  const proposedActions = parseObjectArray(
+    value.proposedActions,
+    parseProposedWorkspaceAction,
+  );
   if (
-    resolveClassification(
-      value.classification,
-      parsedSources.map((source) => source.classification),
-    ) !== value.classification
-  ) {
+    !findings ||
+    !evidence ||
+    !limitations ||
+    !dissent ||
+    !proposedActions ||
+    !classificationIsSafe(value.classification, [
+      ...evidence.map((item) => item.classification),
+      ...proposedActions.map((item) => item.classification),
+    ])
+  )
     return null;
-  }
-
-  return deepFreeze({
+  return Object.freeze({
     kind: value.kind,
     version: value.version,
-    id: value.id,
-    adviser: value.adviser,
-    summary: value.summary,
-    sources: parsedSources,
-    producedAt: value.producedAt,
     classification: value.classification,
+    adviser: value.adviser,
+    findings,
+    evidence,
+    confidence: value.confidence,
+    limitations,
+    dissent,
+    proposedActions,
   });
 }
 
-/**
- * Creates an immutable command brief and inherits contribution classification.
- */
-export function createCommandBrief(input: CommandBriefInput): CommandBrief {
-  return requiredParsed(
+function parseSourceFreshness(value: unknown): SourceFreshness | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["asOf", "staleSourceIds"]) ||
+    !isRfc3339(value.asOf)
+  )
+    return null;
+  const staleSourceIds = parseTextArray(value.staleSourceIds);
+  return staleSourceIds
+    ? Object.freeze({ asOf: value.asOf, staleSourceIds })
+    : null;
+}
+
+/** Creates an immutable consolidated brief with source/audit metadata. */
+export function createCommandBrief(
+  input: ClassifiedInput<CommandBrief>,
+): CommandBrief {
+  return required(
     parseCommandBrief({
       kind: "command-brief",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
-      title: input.title,
-      summary: input.summary,
-      contributions: input.contributions,
-      createdAt: input.createdAt,
       classification: resolveClassification(
         input.classification,
-        input.contributions.map((contribution) => contribution.classification),
+        input.contributions.map((item) => item.classification),
       ),
+      contributions: input.contributions,
+      consolidatedPriorities: input.consolidatedPriorities,
+      decisions: input.decisions,
+      sourceFreshness: input.sourceFreshness,
+      generationAuditId: input.generationAuditId,
     }),
     "command-brief",
   );
 }
 
-/**
- * Parses an exact command-brief shape and rejects classification loss.
- */
+/** Safely parses an exact command brief. */
 export function parseCommandBrief(value: unknown): CommandBrief | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
       "kind",
       "version",
-      "id",
-      "title",
-      "summary",
-      "contributions",
-      "createdAt",
       "classification",
+      "contributions",
+      "consolidatedPriorities",
+      "decisions",
+      "sourceFreshness",
+      "generationAuditId",
     ]) ||
     value.kind !== "command-brief" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isText(value.title) ||
-    !isText(value.summary) ||
-    !Array.isArray(value.contributions) ||
-    !isTimestamp(value.createdAt) ||
-    !isClassification(value.classification)
-  ) {
+    !isClassification(value.classification) ||
+    !isText(value.generationAuditId)
+  )
     return null;
-  }
-  const contributions = value.contributions.map(parseAdviserContribution);
-  if (contributions.some((contribution) => contribution === null)) return null;
-  const parsedContributions = contributions as AdviserContribution[];
+  const contributions = parseObjectArray(
+    value.contributions,
+    parseAdviserContribution,
+  );
+  const consolidatedPriorities = parseTextArray(value.consolidatedPriorities);
+  const decisions = parseTextArray(value.decisions);
+  const sourceFreshness = parseSourceFreshness(value.sourceFreshness);
   if (
-    resolveClassification(
+    !contributions ||
+    !consolidatedPriorities ||
+    !decisions ||
+    !sourceFreshness ||
+    !classificationIsSafe(
       value.classification,
-      parsedContributions.map((contribution) => contribution.classification),
-    ) !== value.classification
-  ) {
+      contributions.map((item) => item.classification),
+    )
+  )
     return null;
-  }
-
-  return deepFreeze({
+  return Object.freeze({
     kind: value.kind,
     version: value.version,
-    id: value.id,
-    title: value.title,
-    summary: value.summary,
-    contributions: parsedContributions,
-    createdAt: value.createdAt,
     classification: value.classification,
+    contributions,
+    consolidatedPriorities,
+    decisions,
+    sourceFreshness,
+    generationAuditId: value.generationAuditId,
   });
 }
 
-/**
- * Creates an immutable proposal only; it does not execute workspace mutation.
- */
-export function createProposedWorkspaceAction(
-  input: ProposedWorkspaceActionInput,
-): ProposedWorkspaceAction {
-  return requiredParsed(
-    parseProposedWorkspaceAction({
-      kind: "proposed-workspace-action",
-      version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
-      operation: input.operation,
-      target: input.target,
-      rationale: input.rationale,
-      proposedAt: input.proposedAt,
-      classification: resolveClassification(input.classification),
-    }),
-    "proposed-workspace-action",
-  );
-}
-
-/**
- * Parses an exact persisted workspace-action proposal.
- */
-export function parseProposedWorkspaceAction(
-  value: unknown,
-): ProposedWorkspaceAction | null {
+function parseModelFallback(value: unknown): ModelFallback | null {
   if (
     !isRecord(value) ||
-    !hasExactKeys(value, [
-      "kind",
-      "version",
-      "id",
-      "operation",
-      "target",
-      "rationale",
-      "proposedAt",
-      "classification",
-    ]) ||
-    value.kind !== "proposed-workspace-action" ||
-    value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isWorkspaceOperation(value.operation) ||
-    !isText(value.target) ||
-    !isText(value.rationale) ||
-    !isTimestamp(value.proposedAt) ||
-    !isClassification(value.classification)
-  ) {
+    !hasExactKeys(value, ["provider", "model"]) ||
+    !isText(value.provider) ||
+    !isText(value.model)
+  )
     return null;
-  }
-
-  return deepFreeze({
-    kind: value.kind,
-    version: value.version,
-    id: value.id,
-    operation: value.operation,
-    target: value.target,
-    rationale: value.rationale,
-    proposedAt: value.proposedAt,
-    classification: value.classification,
-  });
+  return Object.freeze({ provider: value.provider, model: value.model });
 }
 
-/**
- * Creates an immutable description of a selected model route.
- */
-export function createModelRoute(input: ModelRouteInput): ModelRoute {
-  return requiredParsed(
+function parseEgressDecision(value: unknown): EgressDecision | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["allowed", "rationale"]) ||
+    typeof value.allowed !== "boolean" ||
+    !isText(value.rationale)
+  )
+    return null;
+  return Object.freeze({ allowed: value.allowed, rationale: value.rationale });
+}
+
+/** Creates an immutable, auditable model route. */
+export function createModelRoute(
+  input: ClassifiedInput<ModelRoute>,
+): ModelRoute {
+  return required(
     parseModelRoute({
       kind: "model-route",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
-      adviser: input.adviser,
-      provider: input.provider,
-      model: input.model,
-      rationale: input.rationale,
-      selectedAt: input.selectedAt,
       classification: resolveClassification(input.classification),
+      selectedProvider: input.selectedProvider,
+      selectedModel: input.selectedModel,
+      permittedTools: input.permittedTools,
+      fallbackChain: input.fallbackChain,
+      egressDecision: input.egressDecision,
     }),
     "model-route",
   );
 }
 
-/**
- * Parses an exact persisted model-route description.
- */
+/** Safely parses an exact model route. */
 export function parseModelRoute(value: unknown): ModelRoute | null {
   if (
     !isRecord(value) ||
     !hasExactKeys(value, [
       "kind",
       "version",
-      "id",
-      "adviser",
-      "provider",
-      "model",
-      "rationale",
-      "selectedAt",
       "classification",
+      "selectedProvider",
+      "selectedModel",
+      "permittedTools",
+      "fallbackChain",
+      "egressDecision",
     ]) ||
     value.kind !== "model-route" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isText(value.adviser) ||
-    !isText(value.provider) ||
-    !isText(value.model) ||
-    !isText(value.rationale) ||
-    !isTimestamp(value.selectedAt) ||
-    !isClassification(value.classification)
-  ) {
+    !isClassification(value.classification) ||
+    !isText(value.selectedProvider) ||
+    !isText(value.selectedModel)
+  )
     return null;
-  }
-
-  return deepFreeze({
+  const permittedTools = parseTextArray(value.permittedTools);
+  const fallbackChain = parseObjectArray(
+    value.fallbackChain,
+    parseModelFallback,
+  );
+  const egressDecision = parseEgressDecision(value.egressDecision);
+  if (!permittedTools || !fallbackChain || !egressDecision) return null;
+  return Object.freeze({
     kind: value.kind,
     version: value.version,
-    id: value.id,
-    adviser: value.adviser,
-    provider: value.provider,
-    model: value.model,
-    rationale: value.rationale,
-    selectedAt: value.selectedAt,
     classification: value.classification,
+    selectedProvider: value.selectedProvider,
+    selectedModel: value.selectedModel,
+    permittedTools,
+    fallbackChain,
+    egressDecision,
   });
 }
 
-/**
- * Creates an immutable knowledge manifest and inherits source classification.
- */
+function parseSnapshotHashes(value: unknown): SnapshotHashes | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["manifest", "content"]) ||
+    !isHash(value.manifest) ||
+    !isHash(value.content)
+  )
+    return null;
+  return Object.freeze({ manifest: value.manifest, content: value.content });
+}
+
+function parseCollectionSnapshot(value: unknown): CollectionSnapshot | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, [
+      "collection",
+      "schemaVersion",
+      "documentCount",
+      "chunkCount",
+    ]) ||
+    !isText(value.collection) ||
+    !isText(value.schemaVersion) ||
+    !isCount(value.documentCount) ||
+    !isCount(value.chunkCount)
+  )
+    return null;
+  return Object.freeze({
+    collection: value.collection,
+    schemaVersion: value.schemaVersion,
+    documentCount: value.documentCount,
+    chunkCount: value.chunkCount,
+  });
+}
+
+function parseRetrievalModelVersion(
+  value: unknown,
+): RetrievalModelVersion | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["model", "version"]) ||
+    !isText(value.model) ||
+    !isText(value.version)
+  )
+    return null;
+  return Object.freeze({ model: value.model, version: value.version });
+}
+
+/** Creates an immutable knowledge snapshot manifest. */
 export function createKnowledgeSnapshotManifest(
-  input: KnowledgeSnapshotManifestInput,
+  input: ClassifiedInput<KnowledgeSnapshotManifest>,
 ): KnowledgeSnapshotManifest {
-  return requiredParsed(
+  return required(
     parseKnowledgeSnapshotManifest({
       kind: "knowledge-snapshot-manifest",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
+      classification: resolveClassification(input.classification),
+      snapshotId: input.snapshotId,
       createdAt: input.createdAt,
-      checksum: input.checksum,
-      sources: input.sources,
-      classification: resolveClassification(
-        input.classification,
-        input.sources.map((source) => source.classification),
-      ),
+      hashes: input.hashes,
+      collections: input.collections,
+      serviceRevision: input.serviceRevision,
+      retrievalModelVersions: input.retrievalModelVersions,
     }),
     "knowledge-snapshot-manifest",
   );
 }
 
-/**
- * Parses an exact knowledge manifest and rejects classification loss.
- */
+/** Safely parses an exact knowledge snapshot manifest. */
 export function parseKnowledgeSnapshotManifest(
   value: unknown,
 ): KnowledgeSnapshotManifest | null {
@@ -611,179 +764,233 @@ export function parseKnowledgeSnapshotManifest(
     !hasExactKeys(value, [
       "kind",
       "version",
-      "id",
-      "createdAt",
-      "checksum",
-      "sources",
       "classification",
+      "snapshotId",
+      "createdAt",
+      "hashes",
+      "collections",
+      "serviceRevision",
+      "retrievalModelVersions",
     ]) ||
     value.kind !== "knowledge-snapshot-manifest" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isTimestamp(value.createdAt) ||
-    !isText(value.checksum) ||
-    !Array.isArray(value.sources) ||
-    !isClassification(value.classification)
-  ) {
+    !isClassification(value.classification) ||
+    !isText(value.snapshotId) ||
+    !isRfc3339(value.createdAt) ||
+    !isText(value.serviceRevision)
+  )
     return null;
-  }
-  const sources = value.sources.map(parseSourceReference);
-  if (sources.some((source) => source === null)) return null;
-  const parsedSources = sources as SourceReference[];
-  if (
-    resolveClassification(
-      value.classification,
-      parsedSources.map((source) => source.classification),
-    ) !== value.classification
-  ) {
-    return null;
-  }
-
-  return deepFreeze({
+  const hashes = parseSnapshotHashes(value.hashes);
+  const collections = parseObjectArray(
+    value.collections,
+    parseCollectionSnapshot,
+  );
+  const retrievalModelVersions = parseObjectArray(
+    value.retrievalModelVersions,
+    parseRetrievalModelVersion,
+  );
+  if (!hashes || !collections || !retrievalModelVersions) return null;
+  return Object.freeze({
     kind: value.kind,
     version: value.version,
-    id: value.id,
-    createdAt: value.createdAt,
-    checksum: value.checksum,
-    sources: parsedSources,
     classification: value.classification,
+    snapshotId: value.snapshotId,
+    createdAt: value.createdAt,
+    hashes,
+    collections,
+    serviceRevision: value.serviceRevision,
+    retrievalModelVersions,
   });
 }
 
-/**
- * Creates an immutable JSON-only memory revision.
- */
+function parseMemoryHashes(value: unknown): MemoryHashes | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["content", "revision"]) ||
+    !isHash(value.content) ||
+    !isHash(value.revision)
+  )
+    return null;
+  return Object.freeze({ content: value.content, revision: value.revision });
+}
+
+/** Creates an immutable memory revision with bounded JSON content. */
 export function createMemoryRevision(
-  input: MemoryRevisionInput,
+  input: ClassifiedInput<MemoryRevision>,
 ): MemoryRevision {
-  return requiredParsed(
+  return required(
     parseMemoryRevision({
       kind: "memory-revision",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
-      entityId: input.entityId,
-      revision: input.revision,
-      revisedAt: input.revisedAt,
-      content: input.content,
       classification: resolveClassification(input.classification),
+      entityId: input.entityId,
+      eventId: input.eventId,
+      parentRevisionIds: input.parentRevisionIds,
+      nodeId: input.nodeId,
+      timestamp: input.timestamp,
+      hashes: input.hashes,
+      tombstone: input.tombstone,
+      cursor: input.cursor,
+      content: input.content,
     }),
     "memory-revision",
   );
 }
 
-/**
- * Parses an exact persisted memory revision with JSON-only content.
- */
+/** Safely parses memory lineage and bounded JSON; never throws on bad content. */
 export function parseMemoryRevision(value: unknown): MemoryRevision | null {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, [
-      "kind",
-      "version",
-      "id",
-      "entityId",
-      "revision",
-      "revisedAt",
-      "content",
-      "classification",
-    ]) ||
-    value.kind !== "memory-revision" ||
-    value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isText(value.entityId) ||
-    !isPositiveSafeInteger(value.revision) ||
-    !isTimestamp(value.revisedAt) ||
-    !isJsonValue(value.content) ||
-    !isClassification(value.classification)
-  ) {
+  try {
+    if (
+      !isRecord(value) ||
+      !hasExactKeys(value, [
+        "kind",
+        "version",
+        "classification",
+        "entityId",
+        "eventId",
+        "parentRevisionIds",
+        "nodeId",
+        "timestamp",
+        "hashes",
+        "tombstone",
+        "cursor",
+        "content",
+      ]) ||
+      value.kind !== "memory-revision" ||
+      value.version !== COMMAND_CONTRACT_VERSION ||
+      !isClassification(value.classification) ||
+      !isText(value.entityId) ||
+      !isText(value.eventId) ||
+      !isText(value.nodeId) ||
+      !isRfc3339(value.timestamp) ||
+      typeof value.tombstone !== "boolean" ||
+      !isText(value.cursor) ||
+      value.tombstone !== (value.content === null)
+    ) {
+      return null;
+    }
+    const parentRevisionIds = parseTextArray(value.parentRevisionIds);
+    const hashes = parseMemoryHashes(value.hashes);
+    const content = cloneBoundedJson(value.content);
+    if (!parentRevisionIds || !hashes || !content.ok) return null;
+    return Object.freeze({
+      kind: value.kind,
+      version: value.version,
+      classification: value.classification,
+      entityId: value.entityId,
+      eventId: value.eventId,
+      parentRevisionIds,
+      nodeId: value.nodeId,
+      timestamp: value.timestamp,
+      hashes,
+      tombstone: value.tombstone,
+      cursor: value.cursor,
+      content: content.value,
+    });
+  } catch {
     return null;
   }
-
-  return deepFreeze({
-    kind: value.kind,
-    version: value.version,
-    id: value.id,
-    entityId: value.entityId,
-    revision: value.revision,
-    revisedAt: value.revisedAt,
-    content: cloneJson(value.content),
-    classification: value.classification,
-  });
 }
 
-function parseReplicatedPayload(value: unknown): ReplicatedPayload | null {
-  if (!isRecord(value)) return null;
-  if (value.kind === "knowledge-snapshot-manifest") {
-    return parseKnowledgeSnapshotManifest(value);
-  }
-  if (value.kind === "memory-revision") return parseMemoryRevision(value);
-  return null;
+function parseReplicationHashes(value: unknown): ReplicationHashes | null {
+  if (
+    !isRecord(value) ||
+    !hasExactKeys(value, ["payload", "envelope"]) ||
+    !isHash(value.payload) ||
+    !isHash(value.envelope)
+  )
+    return null;
+  return Object.freeze({ payload: value.payload, envelope: value.envelope });
 }
 
-/**
- * Creates an immutable replication envelope and inherits payload classification.
- */
+/** Creates an immutable resumable envelope with payload classification inheritance. */
 export function createReplicationEnvelope(
-  input: ReplicationEnvelopeInput,
+  input: ClassifiedInput<ReplicationEnvelope>,
 ): ReplicationEnvelope {
-  return requiredParsed(
+  return required(
     parseReplicationEnvelope({
       kind: "replication-envelope",
       version: COMMAND_CONTRACT_VERSION,
-      id: input.id,
-      sequence: input.sequence,
-      createdAt: input.createdAt,
-      payload: input.payload,
       classification: resolveClassification(input.classification, [
         input.payload.classification,
       ]),
+      entityId: input.entityId,
+      eventId: input.eventId,
+      parentRevisionIds: input.parentRevisionIds,
+      nodeId: input.nodeId,
+      timestamp: input.timestamp,
+      hashes: input.hashes,
+      tombstone: input.tombstone,
+      cursor: input.cursor,
+      payload: input.payload,
     }),
     "replication-envelope",
   );
 }
 
-/**
- * Parses an exact replication envelope and rejects payload downgrades.
- */
+/** Safely parses exact replication lineage and rejects inconsistent payloads. */
 export function parseReplicationEnvelope(
   value: unknown,
 ): ReplicationEnvelope | null {
-  if (
-    !isRecord(value) ||
-    !hasExactKeys(value, [
-      "kind",
-      "version",
-      "id",
-      "sequence",
-      "createdAt",
-      "payload",
-      "classification",
-    ]) ||
-    value.kind !== "replication-envelope" ||
-    value.version !== COMMAND_CONTRACT_VERSION ||
-    !isText(value.id) ||
-    !isNonNegativeSafeInteger(value.sequence) ||
-    !isTimestamp(value.createdAt) ||
-    !isClassification(value.classification)
-  ) {
+  try {
+    if (
+      !isRecord(value) ||
+      !hasExactKeys(value, [
+        "kind",
+        "version",
+        "classification",
+        "entityId",
+        "eventId",
+        "parentRevisionIds",
+        "nodeId",
+        "timestamp",
+        "hashes",
+        "tombstone",
+        "cursor",
+        "payload",
+      ]) ||
+      value.kind !== "replication-envelope" ||
+      value.version !== COMMAND_CONTRACT_VERSION ||
+      !isClassification(value.classification) ||
+      !isText(value.entityId) ||
+      !isText(value.eventId) ||
+      !isText(value.nodeId) ||
+      !isRfc3339(value.timestamp) ||
+      typeof value.tombstone !== "boolean" ||
+      !isText(value.cursor)
+    )
+      return null;
+    const parentRevisionIds = parseTextArray(value.parentRevisionIds);
+    const hashes = parseReplicationHashes(value.hashes);
+    const payload = parseMemoryRevision(value.payload);
+    if (
+      !parentRevisionIds ||
+      !hashes ||
+      !payload ||
+      value.entityId !== payload.entityId ||
+      value.nodeId !== payload.nodeId ||
+      value.tombstone !== payload.tombstone ||
+      !parentRevisionIds.includes(payload.eventId) ||
+      hashes.payload !== payload.hashes.revision ||
+      !classificationIsSafe(value.classification, [payload.classification])
+    ) {
+      return null;
+    }
+    return Object.freeze({
+      kind: value.kind,
+      version: value.version,
+      classification: value.classification,
+      entityId: value.entityId,
+      eventId: value.eventId,
+      parentRevisionIds,
+      nodeId: value.nodeId,
+      timestamp: value.timestamp,
+      hashes,
+      tombstone: value.tombstone,
+      cursor: value.cursor,
+      payload,
+    });
+  } catch {
     return null;
   }
-  const payload = parseReplicatedPayload(value.payload);
-  if (
-    payload === null ||
-    resolveClassification(value.classification, [payload.classification]) !==
-      value.classification
-  ) {
-    return null;
-  }
-
-  return deepFreeze({
-    kind: value.kind,
-    version: value.version,
-    id: value.id,
-    sequence: value.sequence,
-    createdAt: value.createdAt,
-    payload,
-    classification: value.classification,
-  });
 }

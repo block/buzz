@@ -3,43 +3,41 @@ import test from "node:test";
 
 import {
   CLASSIFICATIONS,
-  highestClassification,
   isClassification,
   resolveClassification,
 } from "./classification.ts";
 
-test("classification exposes the supported ordered security labels", () => {
-  assert.deepEqual(CLASSIFICATIONS, [
-    "OFFICIAL",
+test("classification is exactly PUBLIC or OFFICIAL", () => {
+  assert.deepEqual(CLASSIFICATIONS, ["PUBLIC", "OFFICIAL"]);
+  assert.equal(isClassification("PUBLIC"), true);
+  assert.equal(isClassification("OFFICIAL"), true);
+
+  for (const rejected of [
     "OFFICIAL: Sensitive",
     "PROTECTED",
     "SECRET",
     "TOP SECRET",
-  ]);
-
-  for (const classification of CLASSIFICATIONS) {
-    assert.equal(isClassification(classification), true);
+    "UNCLASSIFIED",
+    null,
+  ]) {
+    assert.equal(isClassification(rejected), false);
   }
-  assert.equal(isClassification("UNCLASSIFIED"), false);
-  assert.equal(isClassification(null), false);
 });
 
-test("classification resolution defaults to OFFICIAL", () => {
+test("classification defaults to OFFICIAL but preserves explicit PUBLIC", () => {
   assert.equal(resolveClassification(), "OFFICIAL");
-  assert.equal(highestClassification([]), "OFFICIAL");
+  assert.equal(resolveClassification("PUBLIC"), "PUBLIC");
+  assert.equal(resolveClassification("OFFICIAL"), "OFFICIAL");
 });
 
-test("classification resolution never silently downgrades an upstream artefact", () => {
+test("PUBLIC composites stay PUBLIC only while every nested artefact is PUBLIC", () => {
+  assert.equal(resolveClassification("PUBLIC", ["PUBLIC"]), "PUBLIC");
   assert.equal(
-    resolveClassification("OFFICIAL", ["PROTECTED", "OFFICIAL: Sensitive"]),
-    "PROTECTED",
+    resolveClassification("PUBLIC", ["PUBLIC", "OFFICIAL"]),
+    "OFFICIAL",
   );
   assert.equal(
-    resolveClassification("SECRET", ["OFFICIAL", "PROTECTED"]),
-    "SECRET",
-  );
-  assert.equal(
-    highestClassification(["OFFICIAL", "TOP SECRET", "SECRET"]),
-    "TOP SECRET",
+    resolveClassification("OFFICIAL", ["PUBLIC", "PUBLIC"]),
+    "OFFICIAL",
   );
 });
