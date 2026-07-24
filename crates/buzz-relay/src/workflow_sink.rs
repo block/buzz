@@ -102,9 +102,7 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     // member name first, this is the whole rule: no punctuation allowlist to get
     // wrong, and it is unicode-safe (em-dash, emoji all terminate a name).
     let is_left_boundary = |i: usize| {
-        i == 0
-            || chars[i - 1].is_whitespace()
-            || matches!(chars[i - 1], '(' | '*' | '_' | '|')
+        i == 0 || chars[i - 1].is_whitespace() || matches!(chars[i - 1], '(' | '*' | '_' | '|')
     };
     let extends_name = |c: char| c.is_alphanumeric() || c == '_';
 
