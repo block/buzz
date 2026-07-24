@@ -22,7 +22,11 @@ function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {
 export function getRuntimeDisplayLabel(
   runtime: AcpRuntimeCatalogEntry,
 ): string {
-  return isBuzzRuntime(runtime) ? "Buzz" : runtime.label;
+  if (isBuzzRuntime(runtime)) return "Buzz";
+  if (runtime.id.trim().toLowerCase() === "antigravity") {
+    return "Antigravity CLI";
+  }
+  return runtime.label;
 }
 
 function getRuntimeLogoUrl(runtime: AcpRuntimeCatalogEntry): string | null {
