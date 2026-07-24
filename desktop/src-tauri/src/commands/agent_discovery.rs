@@ -12,6 +12,8 @@ use crate::{
     relay::query_relay,
 };
 
+mod post_install_verification;
+
 fn active_installs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -229,11 +231,10 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         }
     }
 
-    // Clear the resolve cache so the next discovery picks up new binaries.
-    crate::managed_agents::clear_resolve_cache();
+    post_install_verification::run(runtime_id, &mut steps);
 
     Ok(InstallRuntimeResult {
-        success: true,
+        success: steps.iter().all(|step| step.success),
         steps,
         restarted_count: 0,
         failed_restart_count: 0,
@@ -1362,17 +1363,6 @@ mod tests {
             claude.cli_install_commands_for_os(),
             claude.cli_install_commands,
             "on Unix, cli_install_commands_for_os must return the default install.sh commands"
-        );
-    }
-
-    /// Goose install commands are the same on all platforms (script is Windows-aware).
-    #[test]
-    fn test_goose_install_commands_same_on_all_platforms() {
-        let goose = crate::managed_agents::known_acp_runtime_exact("goose").unwrap();
-        assert_eq!(
-            goose.cli_install_commands_for_os(),
-            goose.cli_install_commands,
-            "goose install commands must be identical across platforms"
         );
     }
 

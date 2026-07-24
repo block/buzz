@@ -15,7 +15,9 @@ Plan of record: `Buzz/Harness-Provider-Model.md` in Morgan's Obsidian vault
 declares each harness's model/provider/effort env keys and capabilities. Spawn
 applies them; `AcpRuntimeCatalogEntry` exposes them over IPC; and
 `lib/agentConfigCore.ts` projects them into field descriptors. The frontend
-never maintains a rival copy of this table.
+never maintains a rival copy of this table. Setup guidance follows the same
+rule: `requires_external_cli` is derived from `KnownAcpRuntime` and projected
+to the UI rather than inferred from a runtime ID in a component.
 
 If you need a new capability fact (a new env key, a native option, a "supports
 X" flag): add it to `KnownAcpRuntime` first, expose it on

@@ -548,6 +548,8 @@ export type AcpRuntimeCatalogEntry = {
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
+  /** True when the runtime depends on a separately installed vendor CLI. */
+  requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;

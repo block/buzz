@@ -184,6 +184,8 @@ export type RawAcpRuntimeCatalogEntry = {
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
@@ -743,6 +745,7 @@ function fromRawAcpRuntimeCatalogEntry(
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
+    requiresExternalCli: entry.requires_external_cli ?? false,
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,
