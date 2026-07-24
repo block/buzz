@@ -4,20 +4,24 @@ class _ChannelsBody extends StatelessWidget {
   final List<Channel>? channels;
   final AsyncValue<List<Channel>> channelsAsync;
   final bool showError;
-  final SessionStatus sessionStatus;
+  final SessionState sessionState;
+  final String relayHost;
   final bool showConnectionBanner;
   final String? currentPubkey;
   final Future<void> Function() onRefresh;
+  final Future<void> Function() onRetryConnection;
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelsBody({
     required this.channels,
     required this.channelsAsync,
     required this.showError,
-    required this.sessionStatus,
+    required this.sessionState,
+    required this.relayHost,
     required this.showConnectionBanner,
     required this.currentPubkey,
     required this.onRefresh,
+    required this.onRetryConnection,
     required this.onSelectChannel,
   });
 
@@ -26,6 +30,8 @@ class _ChannelsBody extends StatelessWidget {
     final barHeight = frostedAppBarHeight(context);
 
     if (channels != null) {
+      final connectionLost = sessionState.status == SessionStatus.failed;
+      final bannerVisible = connectionLost || showConnectionBanner;
       return Stack(
         children: [
           RefreshIndicator(
@@ -34,8 +40,7 @@ class _ChannelsBody extends StatelessWidget {
             child: CustomScrollView(
               slivers: [
                 SliverToBoxAdapter(child: SizedBox(height: barHeight)),
-                // Extra space for the connection banner when visible.
-                if (showConnectionBanner)
+                if (bannerVisible)
                   const SliverToBoxAdapter(
                     child: SizedBox(height: _kBannerHeight),
                   ),
@@ -51,11 +56,27 @@ class _ChannelsBody extends StatelessWidget {
             top: barHeight,
             left: 0,
             right: 0,
-            child: showConnectionBanner
-                ? _ConnectionBanner(status: sessionStatus)
+            child: connectionLost
+                ? _ConnectionLostBanner(
+                    error: sessionState.lastError,
+                    onRetry: onRetryConnection,
+                  )
+                : showConnectionBanner
+                ? _ConnectionBanner(state: sessionState)
                 : const SizedBox.shrink(),
           ),
         ],
+      );
+    }
+
+    if (sessionState.status == SessionStatus.failed) {
+      return Padding(
+        padding: EdgeInsets.only(top: barHeight),
+        child: _OfflineView(
+          error: sessionState.lastError,
+          relayHost: relayHost,
+          onRetry: onRetryConnection,
+        ),
       );
     }
 
@@ -73,9 +94,13 @@ class _ChannelsBody extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.only(top: barHeight),
       child: _ConnectionBanner(
-        status: sessionStatus == SessionStatus.connected
-            ? SessionStatus.connecting
-            : sessionStatus,
+        state: SessionState(
+          status: sessionState.status == SessionStatus.connected
+              ? SessionStatus.connecting
+              : sessionState.status,
+          reconnectAttempt: sessionState.reconnectAttempt,
+          lastError: sessionState.lastError,
+        ),
       ),
     );
   }

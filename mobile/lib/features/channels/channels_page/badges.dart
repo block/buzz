@@ -74,19 +74,24 @@ class _EphemeralBadge extends StatelessWidget {
 }
 
 class _ConnectionBanner extends StatelessWidget {
-  final SessionStatus status;
+  final SessionState state;
 
-  const _ConnectionBanner({required this.status});
+  const _ConnectionBanner({required this.state});
 
   @override
   Widget build(BuildContext context) {
-    if (status == SessionStatus.connected ||
-        status == SessionStatus.disconnected) {
+    if (state.status == SessionStatus.connected ||
+        state.status == SessionStatus.disconnected ||
+        state.status == SessionStatus.failed) {
       return const SizedBox.shrink();
     }
 
-    final isConnecting = status == SessionStatus.connecting;
-    final message = isConnecting ? 'Connecting…' : 'Reconnecting…';
+    final isConnecting = state.status == SessionStatus.connecting;
+    final message = isConnecting
+        ? 'Connecting…'
+        : state.reconnectAttempt > 0
+        ? 'Reconnecting… (attempt ${state.reconnectAttempt})'
+        : 'Reconnecting…';
 
     return Container(
       width: double.infinity,
@@ -114,6 +119,105 @@ class _ConnectionBanner extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _ConnectionLostBanner extends StatelessWidget {
+  final Object? error;
+  final VoidCallback onRetry;
+
+  const _ConnectionLostBanner({required this.error, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    final message = error is RelayAuthRejectedException
+        ? 'Authentication rejected — Retry'
+        : 'Connection lost — Retry';
+    return Material(
+      color: context.colors.surfaceContainerHighest,
+      child: InkWell(
+        onTap: onRetry,
+        child: SizedBox(
+          height: _kBannerHeight,
+          child: Center(
+            child: Text(
+              message,
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OfflineView extends StatelessWidget {
+  final Object? error;
+  final String relayHost;
+  final VoidCallback onRetry;
+
+  const _OfflineView({
+    required this.error,
+    required this.relayHost,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final authRejected = error is RelayAuthRejectedException;
+    final headline = authRejected
+        ? 'Authentication rejected by the relay'
+        : "Can't reach your workspace";
+    final body = authRejected
+        ? 'Check your workspace access or credentials, then retry.'
+        : 'Check your network or VPN (e.g. Cloudflare WARP), then retry.';
+    final detail = relayHost;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(Grid.sm),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              LucideIcons.wifiOff,
+              size: Grid.xl,
+              color: context.colors.error,
+            ),
+            const SizedBox(height: Grid.xs),
+            Text(
+              headline,
+              style: context.textTheme.titleMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              body,
+              style: context.textTheme.bodyMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              detail,
+              style: context.textTheme.bodySmall?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+              textAlign: TextAlign.center,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+            const SizedBox(height: Grid.xs),
+            FilledButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(LucideIcons.refreshCw),
+              label: const Text('Retry'),
+            ),
+          ],
+        ),
       ),
     );
   }

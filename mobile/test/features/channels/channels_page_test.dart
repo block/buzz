@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
@@ -9,6 +11,7 @@ import 'package:buzz/features/channels/read_state/read_state_provider.dart';
 import 'package:buzz/features/channels/unread_badge/observed_unread_event.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
+import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
 void main() {
@@ -154,6 +157,92 @@ void main() {
 
     expect(find.text('Could not load channels'), findsOneWidget);
     expect(find.text('Retry'), findsOneWidget);
+  });
+
+  testWidgets('shows terminal offline view without a spinner and retries', (
+    tester,
+  ) async {
+    final session = _FakeSessionNotifier(
+      SessionState(
+        status: SessionStatus.failed,
+        lastError: Exception('network unreachable'),
+      ),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _PendingNotifier()),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text("Can't reach your workspace"), findsOneWidget);
+    expect(find.textContaining('Cloudflare WARP'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    expect(session.reconnectCount, 1);
+    expect(session.state.status, SessionStatus.connecting);
+  });
+
+  testWidgets('shows relay authentication rejection copy', (tester) async {
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(() => _PendingNotifier()),
+          relaySessionProvider.overrideWith(
+            () => _FakeSessionNotifier(
+              const SessionState(
+                status: SessionStatus.failed,
+                lastError: RelayAuthRejectedException('access revoked'),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Authentication rejected by the relay'), findsOneWidget);
+    expect(
+      find.text('Check your workspace access or credentials, then retry.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Cloudflare WARP'), findsNothing);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+  });
+
+  testWidgets('shows static connection-lost banner over cached channels', (
+    tester,
+  ) async {
+    final session = _FakeSessionNotifier(
+      SessionState(status: SessionStatus.connected),
+    );
+    await tester.pumpWidget(
+      buildTestable(
+        overrides: [
+          channelsProvider.overrideWith(
+            () => _FakeNotifier([testChannels.first]),
+          ),
+          relaySessionProvider.overrideWith(() => session),
+        ],
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    session.fail(Exception('connection lost'));
+    await tester.pump();
+
+    expect(find.text('general'), findsOneWidget);
+    expect(find.text('Connection lost — Retry'), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+
+    await tester.tap(find.text('Connection lost — Retry'));
+    await tester.pump();
+    expect(session.reconnectCount, 1);
   });
 
   testWidgets('renders and clears unread dot indicator', (tester) async {
@@ -396,6 +485,31 @@ class _FakeNotifier extends ChannelsNotifier {
 class _ErrorNotifier extends ChannelsNotifier {
   @override
   Future<List<Channel>> build() => Future.error('Connection refused');
+}
+
+class _PendingNotifier extends ChannelsNotifier {
+  @override
+  Future<List<Channel>> build() => Completer<List<Channel>>().future;
+}
+
+class _FakeSessionNotifier extends RelaySessionNotifier {
+  final SessionState initialState;
+  int reconnectCount = 0;
+
+  _FakeSessionNotifier(this.initialState);
+
+  @override
+  SessionState build() => initialState;
+
+  @override
+  Future<void> reconnect() async {
+    reconnectCount++;
+    state = const SessionState(status: SessionStatus.connecting);
+  }
+
+  void fail(Object error) {
+    state = SessionState(status: SessionStatus.failed, lastError: error);
+  }
 }
 
 class _FakeProfileNotifier extends ProfileNotifier {

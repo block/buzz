@@ -184,12 +184,114 @@ void main() {
       session.debugHandleDisconnected(
         const RelayAuthRejectedException('auth-required: verification failed'),
       );
-      await Future<void>.delayed(Duration.zero);
 
-      expect(session.state.status, SessionStatus.disconnected);
+      expect(session.state.status, SessionStatus.failed);
+      expect(session.state.lastError, isA<RelayAuthRejectedException>());
       expect(auth.signOutCount, 0);
     },
   );
+
+  test('stops after five reconnect attempts with no timer running', () {
+    final session = RelaySessionNotifier();
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    for (var attempt = 1; attempt <= 5; attempt++) {
+      final error = Exception('connect failed $attempt');
+      session.debugHandleDisconnected(error);
+      expect(session.state.status, SessionStatus.reconnecting);
+      expect(session.state.reconnectAttempt, attempt);
+      expect(session.state.lastError, same(error));
+    }
+
+    final terminalError = Exception('connect failed 6');
+    session.debugHandleDisconnected(terminalError);
+    expect(session.state.status, SessionStatus.failed);
+    expect(session.state.reconnectAttempt, 6);
+    expect(session.state.lastError, same(terminalError));
+    expect(session.debugHasReconnectTimer, isFalse);
+  });
+
+  test('manual reconnect from failed resets the attempt budget', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    for (var attempt = 0; attempt < 6; attempt++) {
+      session.debugHandleDisconnected(Exception('failed'));
+    }
+    expect(session.state.status, SessionStatus.failed);
+
+    await session.reconnect();
+    expect(session.state.status, SessionStatus.connecting);
+    expect(session.state.reconnectAttempt, 0);
+    sockets.single.connectSuccessfully();
+    expect(session.state.status, SessionStatus.connected);
+  });
+
+  test('app resume from failed starts fresh with a reset budget', () async {
+    final sockets = <_ControlledRelaySocket>[];
+    final session = RelaySessionNotifier(
+      socketFactory:
+          ({
+            required wsUrl,
+            required nsec,
+            required onMessage,
+            required onConnected,
+            required onDisconnected,
+          }) {
+            final socket = _ControlledRelaySocket(
+              wsUrl: wsUrl,
+              nsec: nsec,
+              onMessage: onMessage,
+              onConnected: onConnected,
+              onDisconnected: onDisconnected,
+            );
+            sockets.add(socket);
+            return socket;
+          },
+    );
+    final container = ProviderContainer(
+      overrides: [relaySessionProvider.overrideWith(() => session)],
+    );
+    addTearDown(container.dispose);
+    container.read(relaySessionProvider);
+
+    for (var attempt = 0; attempt < 6; attempt++) {
+      session.debugHandleDisconnected(Exception('failed'));
+    }
+    session.onAppResumed();
+
+    expect(session.state.status, SessionStatus.connecting);
+    expect(session.state.reconnectAttempt, 0);
+    expect(sockets, hasLength(1));
+  });
 
   test('ignores callbacks from a socket replaced by a config change', () async {
     final sockets = <_ControlledRelaySocket>[];

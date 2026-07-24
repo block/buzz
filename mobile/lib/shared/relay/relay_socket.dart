@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
+import 'package:web_socket_channel/io.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import 'nostr_models.dart';
@@ -29,12 +30,16 @@ Exception classifyRelayAuthFailure(String message) {
   return RelayAuthRejectedException(message);
 }
 
+typedef RelayChannelFactory = WebSocketChannel Function(Uri uri);
+
 class RelaySocket {
   final String _wsUrl;
   final String? _nsec;
   final void Function(List<dynamic> message) _onMessage;
   final void Function() _onConnected;
   final void Function(Object? error) _onDisconnected;
+  final RelayChannelFactory _channelFactory;
+  final Duration _connectTimeout;
 
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
@@ -51,11 +56,21 @@ class RelaySocket {
     required void Function(List<dynamic> message) onMessage,
     required void Function() onConnected,
     required void Function(Object? error) onDisconnected,
+    RelayChannelFactory? channelFactory,
+    Duration connectTimeout = const Duration(seconds: 10),
   }) : _wsUrl = wsUrl,
        _nsec = nsec,
        _onMessage = onMessage,
        _onConnected = onConnected,
-       _onDisconnected = onDisconnected;
+       _onDisconnected = onDisconnected,
+       _channelFactory = channelFactory ?? _connectChannel,
+       _connectTimeout = connectTimeout;
+
+  static WebSocketChannel _connectChannel(Uri uri) =>
+      IOWebSocketChannel.connect(
+        uri,
+        pingInterval: const Duration(seconds: 30),
+      );
 
   /// Connect to the relay and complete NIP-42 authentication.
   Future<void> connect() async {
@@ -63,10 +78,13 @@ class RelaySocket {
     _state = SocketState.connecting;
 
     try {
-      _channel = WebSocketChannel.connect(Uri.parse(_wsUrl));
-      await _channel!.ready;
+      _channel = _channelFactory(Uri.parse(_wsUrl));
+      await _channel!.ready.timeout(_connectTimeout);
     } catch (e) {
+      final channel = _channel;
+      _channel = null;
       _state = SocketState.disconnected;
+      if (channel != null) unawaited(channel.sink.close().catchError((_) {}));
       _onDisconnected(e);
       return;
     }
@@ -84,14 +102,18 @@ class RelaySocket {
     _subscription = _channel!.stream.listen(
       _handleRawMessage,
       onError: (Object error) {
+        final awaitingAuth =
+            _authCompleter != null && !_authCompleter!.isCompleted;
         _failAuth(error);
         _resetConnection();
-        _onDisconnected(error);
+        if (!awaitingAuth) _onDisconnected(error);
       },
       onDone: () {
+        final awaitingAuth =
+            _authCompleter != null && !_authCompleter!.isCompleted;
         _failAuth(null);
         _resetConnection();
-        _onDisconnected(null);
+        if (!awaitingAuth) _onDisconnected(null);
       },
     );
 
@@ -138,6 +160,7 @@ class RelaySocket {
   }
 
   void _resetConnection() {
+    _failAuth(null);
     _state = SocketState.disconnected;
     _subscription?.cancel();
     _subscription = null;

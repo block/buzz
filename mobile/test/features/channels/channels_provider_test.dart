@@ -243,6 +243,76 @@ void main() {
   );
 
   test(
+    'fails immediately when built after the session already failed',
+    () async {
+      final error = Exception('relay unavailable');
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        initialState: SessionState(
+          status: SessionStatus.failed,
+          lastError: error,
+        ),
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      await expectLater(
+        container.read(channelsProvider.future),
+        throwsA(same(error)),
+      );
+    },
+  );
+
+  test(
+    'fails a pending initial build and fully reloads after recovery',
+    () async {
+      final error = Exception('relay unavailable');
+      final session = _FakeRelaySession(
+        memberships: [_membership(_channelA, myPk)],
+        metadata: [_meta(id: _channelA, name: 'general')],
+        initialState: const SessionState(status: SessionStatus.connecting),
+      );
+      final container = _buildContainer(session: session);
+      addTearDown(container.dispose);
+
+      final pending = container.read(channelsProvider.future);
+      await Future<void>.delayed(Duration.zero);
+      session.setStatus(SessionStatus.failed, lastError: error);
+      await expectLater(pending, throwsA(same(error)));
+
+      session.setStatus(SessionStatus.connected);
+      await Future<void>.delayed(Duration.zero);
+
+      final recovered = await container.read(channelsProvider.future);
+      expect(recovered.single.name, 'general');
+      expect(session.subscribeFilters, hasLength(1));
+    },
+  );
+
+  test('fully reloads after being built in a failed state', () async {
+    final session = _FakeRelaySession(
+      memberships: [_membership(_channelA, myPk)],
+      metadata: [_meta(id: _channelA, name: 'general')],
+      initialState: SessionState(
+        status: SessionStatus.failed,
+        lastError: Exception('relay unavailable'),
+      ),
+    );
+    final container = _buildContainer(session: session);
+    addTearDown(container.dispose);
+
+    await expectLater(container.read(channelsProvider.future), throwsException);
+
+    session.setStatus(SessionStatus.connected);
+    await Future<void>.delayed(Duration.zero);
+
+    final recovered = await container.read(channelsProvider.future);
+    expect(recovered.single.name, 'general');
+    expect(session.subscribeFilters, hasLength(1));
+  });
+
+  test(
     'keeps cached channels and live subscriptions during reconnect',
     () async {
       final session = _FakeRelaySession(
@@ -431,8 +501,10 @@ class _FakeRelaySession extends RelaySessionNotifier {
     required this.metadata,
     this.hiddenDmEvents = const [],
     this.membershipFailures = 0,
+    this.initialState = const SessionState(status: SessionStatus.connected),
   });
 
+  final SessionState initialState;
   List<NostrEvent> memberships;
   List<NostrEvent> metadata;
   final List<NostrEvent> hiddenDmEvents;
@@ -444,7 +516,7 @@ class _FakeRelaySession extends RelaySessionNotifier {
   int unsubscribeCount = 0;
 
   @override
-  SessionState build() => const SessionState(status: SessionStatus.connected);
+  SessionState build() => initialState;
 
   @override
   Future<List<NostrEvent>> fetchHistory(
@@ -492,8 +564,8 @@ class _FakeRelaySession extends RelaySessionNotifier {
     };
   }
 
-  void setStatus(SessionStatus status) {
-    state = SessionState(status: status);
+  void setStatus(SessionStatus status, {Object? lastError}) {
+    state = SessionState(status: status, lastError: lastError);
   }
 
   /// Emit a live event to all subscribers.

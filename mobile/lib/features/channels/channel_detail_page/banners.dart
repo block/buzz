@@ -55,17 +55,46 @@ class _HeaderEphemeralBadge extends StatelessWidget {
 }
 
 class _DetailConnectionBanner extends StatelessWidget {
-  final SessionStatus status;
+  final SessionState state;
+  final VoidCallback onRetry;
 
-  const _DetailConnectionBanner({required this.status});
+  const _DetailConnectionBanner({required this.state, required this.onRetry});
 
   @override
   Widget build(BuildContext context) {
-    if (status == SessionStatus.connected ||
-        status == SessionStatus.disconnected) {
+    if (state.status == SessionStatus.connected ||
+        state.status == SessionStatus.disconnected) {
       return const SizedBox.shrink();
     }
 
+    if (state.status == SessionStatus.failed) {
+      return Material(
+        color: context.colors.surfaceContainerHighest,
+        child: InkWell(
+          onTap: onRetry,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Grid.gutter,
+              vertical: Grid.quarter + 2,
+            ),
+            child: Center(
+              child: Text(
+                state.lastError is RelayAuthRejectedException
+                    ? 'Authentication rejected — Retry'
+                    : 'Connection lost — Retry',
+                style: context.textTheme.labelSmall?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final message = state.reconnectAttempt > 0
+        ? 'Reconnecting… (attempt ${state.reconnectAttempt})'
+        : 'Reconnecting…';
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(
@@ -86,7 +115,7 @@ class _DetailConnectionBanner extends StatelessWidget {
           ),
           const SizedBox(width: Grid.xxs),
           Text(
-            'Reconnecting…',
+            message,
             style: context.textTheme.labelSmall?.copyWith(
               color: context.colors.onSurfaceVariant,
             ),

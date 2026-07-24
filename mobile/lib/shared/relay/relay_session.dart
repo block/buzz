@@ -16,14 +16,19 @@ import 'relay_client.dart';
 import 'relay_provider.dart';
 import 'relay_socket.dart';
 
-enum SessionStatus { disconnected, connecting, connected, reconnecting }
+enum SessionStatus { disconnected, connecting, connected, reconnecting, failed }
 
 @immutable
 class SessionState {
   final SessionStatus status;
   final int reconnectAttempt;
+  final Object? lastError;
 
-  const SessionState({required this.status, this.reconnectAttempt = 0});
+  const SessionState({
+    required this.status,
+    this.reconnectAttempt = 0,
+    this.lastError,
+  });
 }
 
 class _HistorySubscription {
@@ -86,6 +91,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   static const _baseReconnectDelayMs = 1000;
   static const _maxReconnectDelayMs = 30000;
+  static const _maxReconnectAttempts = 5;
   static const _eventBatchMs = 16;
   static const _reconnectReplaySkewSeconds = 5;
   static const _maxRecentDeliveryKeys = 5000;
@@ -295,6 +301,9 @@ class RelaySessionNotifier extends Notifier<SessionState> {
   void debugPauseNow() => _pauseNow();
 
   @visibleForTesting
+  bool get debugHasReconnectTimer => _reconnectTimer?.isActive ?? false;
+
+  @visibleForTesting
   void debugHandleSocketMessageForTest(List<dynamic> data) =>
       _handleMessage(data);
 
@@ -307,8 +316,10 @@ class RelaySessionNotifier extends Notifier<SessionState> {
 
   /// Force a reconnect (e.g., returning from background).
   Future<void> reconnect() async {
+    _reconnectTimer?.cancel();
+    ++_connectionGeneration;
     await _socket?.disconnect();
-    _reconnectDelayMs = _baseReconnectDelayMs;
+    _resetReconnectBudget();
     final config = ref.read(relayConfigProvider);
     await _connect(config);
   }
@@ -341,7 +352,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     // Cancel any in-flight reconnect backoff timer so we reconnect immediately
     // instead of waiting for the (possibly large) exponential delay.
     _reconnectTimer?.cancel();
-    _reconnectDelayMs = _baseReconnectDelayMs;
+    _resetReconnectBudget();
     final config = ref.read(relayConfigProvider);
     _connect(config);
   }
@@ -355,6 +366,7 @@ class RelaySessionNotifier extends Notifier<SessionState> {
           ? SessionStatus.reconnecting
           : SessionStatus.connecting,
       reconnectAttempt: state.reconnectAttempt,
+      lastError: state.lastError,
     );
 
     _socket?.dispose();
@@ -389,26 +401,41 @@ class RelaySessionNotifier extends Notifier<SessionState> {
     _flushTimer = null;
     if (error is RelayAuthRejectedException) {
       _reconnectTimer?.cancel();
-      state = const SessionState(status: SessionStatus.disconnected);
+      state = SessionState(status: SessionStatus.failed, lastError: error);
       return;
     }
-    _scheduleReconnect();
+    _scheduleReconnect(error);
   }
 
-  void _scheduleReconnect() {
+  void _scheduleReconnect(Object? error) {
     if (_disposed || _paused) return;
     final attempt = state.reconnectAttempt + 1;
+    _reconnectTimer?.cancel();
+    if (attempt > _maxReconnectAttempts) {
+      _reconnectTimer = null;
+      state = SessionState(
+        status: SessionStatus.failed,
+        reconnectAttempt: attempt,
+        lastError: error,
+      );
+      return;
+    }
+
     state = SessionState(
       status: SessionStatus.reconnecting,
       reconnectAttempt: attempt,
+      lastError: error,
     );
-
-    _reconnectTimer?.cancel();
     _reconnectTimer = Timer(Duration(milliseconds: _reconnectDelayMs), () {
       _reconnectDelayMs = min(_reconnectDelayMs * 2, _maxReconnectDelayMs);
       final config = ref.read(relayConfigProvider);
       _connect(config);
     });
+  }
+
+  void _resetReconnectBudget() {
+    _reconnectDelayMs = _baseReconnectDelayMs;
+    state = SessionState(status: state.status, lastError: state.lastError);
   }
 
   /// Replay all live subscriptions after a reconnect, with a time skew to

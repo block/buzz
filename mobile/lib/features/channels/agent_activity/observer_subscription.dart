@@ -300,7 +300,8 @@ class ObserverRelayNotifier extends Notifier<ObserverRelayState> {
             : ObserverConnectionState.open,
       SessionStatus.connecting ||
       SessionStatus.reconnecting => ObserverConnectionState.connecting,
-      SessionStatus.disconnected => ObserverConnectionState.idle,
+      SessionStatus.disconnected ||
+      SessionStatus.failed => ObserverConnectionState.idle,
     };
   }
 

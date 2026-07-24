@@ -317,7 +317,8 @@ class ChannelDetailPage extends HookConsumerWidget {
                   ),
           ),
           _DetailConnectionBanner(
-            status: ref.watch(relaySessionProvider).status,
+            state: ref.watch(relaySessionProvider),
+            onRetry: () => ref.read(relaySessionProvider.notifier).reconnect(),
           ),
           if (!resolvedChannel.isForum && typingEntries.isNotEmpty)
             _TypingIndicator(entries: typingEntries),

@@ -62,9 +62,25 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     final sessionState = ref.read(relaySessionProvider);
     final waitingForInitialConnection =
         sessionState.status != SessionStatus.connected;
+    final initiallyFailed = sessionState.status == SessionStatus.failed;
+    if (initiallyFailed) connected.future.ignore();
     ref.listen(relaySessionProvider, (previous, next) {
+      if (next.status == SessionStatus.failed &&
+          waitingForInitialConnection &&
+          !_hasLoaded &&
+          !connected.isCompleted) {
+        connected.completeError(
+          next.lastError ?? Exception('Connection failed'),
+        );
+        return;
+      }
       if (next.status != SessionStatus.connected) return;
-      if (waitingForInitialConnection &&
+      if (initiallyFailed ||
+          (waitingForInitialConnection &&
+              connected.isCompleted &&
+              !_hasLoaded)) {
+        ref.invalidateSelf();
+      } else if (waitingForInitialConnection &&
           !_hasLoaded &&
           !connected.isCompleted) {
         connected.complete();
@@ -92,6 +108,9 @@ class ChannelsNotifier extends AsyncNotifier<List<Channel>> {
     if (sessionState.status != SessionStatus.connected) {
       // Keep the prior community's cache visible until the new relay connects.
       if (_hasLoaded) return state.value ?? const [];
+      if (sessionState.status == SessionStatus.failed) {
+        throw sessionState.lastError ?? Exception('Connection failed');
+      }
       await connected.future;
     }
 
