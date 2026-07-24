@@ -47,6 +47,12 @@ fn sub_id(name: &str) -> String {
     format!("e2e-user-groups-{name}-{}", Uuid::new_v4())
 }
 
+/// Unique group handle that fits the 32-char handle limit.
+fn unique_handle(prefix: &str) -> String {
+    let hex = Uuid::new_v4().simple().to_string();
+    format!("{prefix}-{}", &hex[..12])
+}
+
 async fn e2e_db_pool() -> sqlx::Pool<sqlx::Postgres> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string()); // sadscan:disable np.postgres.1
@@ -94,6 +100,15 @@ async fn seed_community_member(keys: &Keys, role: &str) {
     .execute(&pool)
     .await
     .unwrap_or_else(|error| panic!("seed relay member {role}: {error}"));
+
+    // Community admission on open relays (require_relay_membership=false, the
+    // dev default) checks the users table, so seed that row as well.
+    sqlx::query("INSERT INTO users (community_id, pubkey) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(community_id)
+        .bind(keys.public_key().to_bytes().to_vec())
+        .execute(&pool)
+        .await
+        .unwrap_or_else(|error| panic!("seed user row {role}: {error}"));
 }
 
 async fn create_channel(client: &mut BuzzTestClient, keys: &Keys, visibility: &str) -> Uuid {
@@ -196,7 +211,7 @@ async fn test_group_create_publishes_complete_snapshot() {
     let channel_id = create_channel(&mut client, &creator, "open").await;
     let member_hex = member.public_key().to_hex();
     let create = build_group_create(
-        &format!("ios-{}", Uuid::new_v4().simple()),
+        &unique_handle("ios"),
         "iOS Team",
         Some("People who build the iOS app"),
         &[&member_hex],
@@ -244,7 +259,7 @@ async fn test_duplicate_group_handle_is_rejected() {
     let mut client = BuzzTestClient::connect(&relay_url(), &creator)
         .await
         .expect("connect creator");
-    let handle = format!("duplicate-{}", Uuid::new_v4().simple());
+    let handle = unique_handle("duplicate");
 
     for expected_accepted in [true, false] {
         let event = build_group_create(&handle, "Duplicate Handle", None, &[], &[])
@@ -311,16 +326,10 @@ async fn test_group_edit_requires_creator_or_community_admin() {
     seed_community_member(&unrelated_member, "member").await;
     seed_community_member(&admin, "admin").await;
 
-    let create = build_group_create(
-        &format!("edit-{}", Uuid::new_v4().simple()),
-        "Original Name",
-        None,
-        &[],
-        &[],
-    )
-    .expect("build group create")
-    .sign_with_keys(&creator)
-    .expect("sign group create");
+    let create = build_group_create(&unique_handle("edit"), "Original Name", None, &[], &[])
+        .expect("build group create")
+        .sign_with_keys(&creator)
+        .expect("sign group create");
     let group_id = group_id_from_create(&create);
     let mut creator_client = BuzzTestClient::connect(&relay_url(), &creator)
         .await
@@ -395,7 +404,7 @@ async fn test_group_membership_updates_snapshot_and_default_channel_membership()
     let before_members = query_snapshot(&mut client, KIND_CHANNEL_MEMBERS, &channel_id_text).await;
 
     let create = build_group_create(
-        &format!("autojoin-{}", Uuid::new_v4().simple()),
+        &unique_handle("autojoin"),
         "Auto Join",
         None,
         &[],
@@ -461,16 +470,10 @@ async fn test_group_delete_publishes_tombstone_snapshot() {
     let mut client = BuzzTestClient::connect(&relay_url(), &creator)
         .await
         .expect("connect creator");
-    let create = build_group_create(
-        &format!("delete-{}", Uuid::new_v4().simple()),
-        "Delete Me",
-        None,
-        &[],
-        &[],
-    )
-    .expect("build group create")
-    .sign_with_keys(&creator)
-    .expect("sign group create");
+    let create = build_group_create(&unique_handle("delete"), "Delete Me", None, &[], &[])
+        .expect("build group create")
+        .sign_with_keys(&creator)
+        .expect("sign group create");
     let group_id = group_id_from_create(&create);
     let ok = client.send_event(create).await.expect("send group create");
     assert!(ok.accepted, "group create rejected: {}", ok.message);
@@ -510,7 +513,7 @@ async fn test_private_channel_is_rejected_as_group_default() {
         .expect("connect creator");
     let private_channel = create_channel(&mut client, &creator, "private").await;
     let create = build_group_create(
-        &format!("private-default-{}", Uuid::new_v4().simple()),
+        &unique_handle("private-default"),
         "Private Default",
         None,
         &[],
@@ -539,16 +542,10 @@ async fn test_private_channel_is_rejected_as_group_default() {
 async fn test_non_community_member_group_command_is_rejected() {
     ensure_test_community().await;
     let outsider = Keys::generate();
-    let event = build_group_create(
-        &format!("outsider-{}", Uuid::new_v4().simple()),
-        "Outsider Group",
-        None,
-        &[],
-        &[],
-    )
-    .expect("build outsider group create")
-    .sign_with_keys(&outsider)
-    .expect("sign outsider group create");
+    let event = build_group_create(&unique_handle("outsider"), "Outsider Group", None, &[], &[])
+        .expect("build outsider group create")
+        .sign_with_keys(&outsider)
+        .expect("sign outsider group create");
 
     let response = reqwest::Client::new()
         .post(format!("{}/events", relay_http_url()))
@@ -559,9 +556,16 @@ async fn test_non_community_member_group_command_is_rejected() {
         .await
         .expect("submit outsider command");
 
+    // The HTTP bridge maps relay-level rejections to 400 with an error body.
     assert_eq!(
         response.status(),
-        reqwest::StatusCode::FORBIDDEN,
+        reqwest::StatusCode::BAD_REQUEST,
         "non-community-member group command must be rejected"
+    );
+    let body: serde_json::Value = response.json().await.expect("parse rejection body");
+    let error = body["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("only community members"),
+        "rejection should cite community membership: {body}"
     );
 }
