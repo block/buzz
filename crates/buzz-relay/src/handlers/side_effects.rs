@@ -2005,6 +2005,20 @@ async fn handle_a_tag_deletion(
             tracing::debug!(d_tag, "NIP-09 deletion ignored for push lease");
         }
         buzz_core::kind::KIND_WORKFLOW_DEF => {
+            // The a-tag coordinate (`30620:<pubkey>:<d>`) names the authoring
+            // event row. Deleting only the `workflows` projection leaves that
+            // row live, so REQs for kind:30620 keep returning the deleted def
+            // (issue #717). Tombstone the event row alongside the projection.
+            // `handle_workflow_def` requires `d` = workflow UUID, so the event
+            // row's NIP-33 d-tag is always the workflow id string.
+            let def_author_bytes = match hex::decode(pubkey_hex) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "invalid pubkey hex in a-tag {pubkey_hex}: {e}"
+                    ));
+                }
+            };
             // Try UUID first (workflow_id); fall back to name-based lookup.
             if let Ok(wf_id) = uuid::Uuid::parse_str(d_tag) {
                 let channel_id = state
@@ -2018,6 +2032,9 @@ async fn handle_a_tag_deletion(
                         .invalidate_channel_workflows(tenant.community(), channel_id);
                 }
                 tracing::info!(workflow_id = %wf_id, "Workflow deleted via NIP-09 a-tag (UUID)");
+                // Unconditional: also heals rows whose projection is already
+                // gone but whose event row stayed live (pre-fix deletions).
+                tombstone_workflow_def_event(tenant, state, &def_author_bytes, d_tag).await?;
             } else {
                 // Name-based lookup
                 match state
@@ -2039,6 +2056,15 @@ async fn handle_a_tag_deletion(
                                 .invalidate_channel_workflows(tenant.community(), channel_id);
                         }
                         tracing::info!(workflow_id = %wf.id, name = d_tag, "Workflow deleted via NIP-09 a-tag (name)");
+                        // The a-tag d-value here is a *name*, not the event
+                        // coordinate — tombstone by the resolved workflow id.
+                        tombstone_workflow_def_event(
+                            tenant,
+                            state,
+                            &def_author_bytes,
+                            &wf.id.to_string(),
+                        )
+                        .await?;
                     }
                     Ok(None) => {
                         tracing::warn!(
@@ -2102,6 +2128,50 @@ async fn handle_a_tag_deletion(
         }
     }
 
+    Ok(())
+}
+
+/// Soft-delete the live kind:30620 event row for a workflow-def coordinate.
+///
+/// The `workflows` table is a projection the workflow engine reads; the
+/// `events` row is what REQ subscribers (e.g. `buzz workflows list`) see.
+/// `handle_workflow_def` stores the def event with `d` = workflow UUID, so
+/// the NIP-33 coordinate is `(KIND_WORKFLOW_DEF, def author, workflow id)`.
+/// Audit lookups use `get_event_by_id_including_deleted` and are unaffected.
+///
+/// Logs at `info` when a live row was tombstoned, `debug` when no live row
+/// matched (already deleted, or a legacy row whose d-tag predates the
+/// id-as-d-tag invariant — those need the reconciliation path from #1593).
+async fn tombstone_workflow_def_event(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    def_author_bytes: &[u8],
+    event_d_tag: &str,
+) -> anyhow::Result<()> {
+    // Safe cast: KIND_WORKFLOW_DEF is 30620, well within i32.
+    let deleted = state
+        .db
+        .soft_delete_by_coordinate(
+            tenant.community(),
+            buzz_core::kind::KIND_WORKFLOW_DEF as i32,
+            def_author_bytes,
+            event_d_tag,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("failed to soft-delete workflow def event {event_d_tag}: {e}")
+        })?;
+    if deleted {
+        tracing::info!(
+            d_tag = event_d_tag,
+            "NIP-09 a-tag deletion: soft-deleted workflow def event"
+        );
+    } else {
+        tracing::debug!(
+            d_tag = event_d_tag,
+            "NIP-09 a-tag deletion: no live workflow def event matched coordinate"
+        );
+    }
     Ok(())
 }
 
