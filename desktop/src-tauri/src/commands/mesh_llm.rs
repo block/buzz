@@ -57,6 +57,12 @@ fn share_stop_should_teardown(mode: mesh_llm::MeshNodeMode) -> bool {
     matches!(mode, mesh_llm::MeshNodeMode::Serve)
 }
 
+/// Sentinel prefix on every `last_error` the ingress re-arm watchdog writes, so
+/// `clear_mesh_last_error_if_set` only clears errors this path actually set
+/// rather than any message that merely mentions "shared compute"
+/// (micspiral review #2). Kept out of the user-facing tail of the string.
+pub(crate) const MESH_REARM_ERROR_SENTINEL: &str = "[buzz-mesh-rearm] ";
+
 pub type CmdResult<T> = Result<T, String>;
 
 fn advance_mesh_status_cursor(
@@ -263,6 +269,24 @@ pub(crate) fn should_evict_stale_runtime_after_probe(
     matches!(current_id, Some(id) if id == candidate_id)
 }
 
+/// Consecutive dead-probe debounce before we evict a healthy-looking runtime
+/// (micspiral review, #2304 #1). `rearm_relay_mesh_for_running_agents`
+/// early-returns on a healthy handle, so a dead probe is the *only* thing that
+/// ever touches a running runtime — a single false-negative (a transient stall
+/// past the 3s probe budget: model load/reload, VRAM alloc, GC/mmap pause,
+/// inference saturation) would otherwise force an avoidable cold re-bootstrap
+/// (and, for a serve node, a mode flip). Requiring 2 consecutive dead probes
+/// costs ~15-30s extra on genuine recovery at the 15s base cadence while
+/// eliminating transient-blip false evictions; `wait_for_mesh_inference`
+/// already tolerates a 120s warm-up on the readiness path, so the liveness
+/// probe having zero tolerance was the asymmetry worth closing.
+pub(crate) const DEAD_PROBE_EVICT_THRESHOLD: u32 = 2;
+
+/// Pure debounce gate: evict only once dead probes have reached the threshold.
+pub(crate) fn should_evict_after_consecutive_dead_probes(consecutive: u32) -> bool {
+    consecutive >= DEAD_PROBE_EVICT_THRESHOLD
+}
+
 pub(crate) async fn drop_stale_mesh_runtime_if_ingress_dead(state: &AppState) -> bool {
     drop_stale_mesh_runtime_if_ingress_dead_with_probe(state, mesh_ingress_is_live()).await
 }
@@ -280,15 +304,44 @@ where
     // that swaps the handle mid-probe cannot cause us to evict the replacement.
     let candidate_id = match state.mesh_llm_runtime.lock().await.as_ref() {
         Some(runtime) => runtime.id(),
-        None => return false,
+        None => {
+            // No handle to guard — keep the debounce counter clean.
+            state
+                .mesh_ingress_dead_probes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
     };
     if probe_ingress_live.await {
+        // A live probe clears any accumulated dead streak (micspiral #1).
+        state
+            .mesh_ingress_dead_probes
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
+    // Dead probe: debounce so one transient stall does not evict a healthy
+    // runtime. Only proceed to eviction once we have seen the ingress dead
+    // across N consecutive watchdog ticks (micspiral review #1).
+    let consecutive = state
+        .mesh_ingress_dead_probes
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        + 1;
+    if !should_evict_after_consecutive_dead_probes(consecutive) {
+        eprintln!(
+            "buzz-mesh: ingress probe dead ({consecutive}/{DEAD_PROBE_EVICT_THRESHOLD}); debouncing before eviction (#2304)"
+        );
         return false;
     }
     let stale = {
         let mut guard = state.mesh_llm_runtime.lock().await;
         let current_id = guard.as_ref().map(|runtime| runtime.id());
         if !should_evict_stale_runtime_after_probe(candidate_id, current_id) {
+            // A concurrent stop/start swapped in a different runtime during the
+            // probe window; leave it alone and reset the streak so the fresh
+            // handle is judged on its own probes (micspiral #1 + #2304 #2).
+            state
+                .mesh_ingress_dead_probes
+                .store(0, std::sync::atomic::Ordering::Relaxed);
             return false;
         }
         guard.take()
@@ -296,6 +349,11 @@ where
     let Some(stale) = stale else {
         return false;
     };
+    // Confirmed dead across the debounce window and we own the eviction — reset
+    // the streak so the next runtime starts with a clean counter.
+    state
+        .mesh_ingress_dead_probes
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     eprintln!(
         "buzz-mesh: Buzz shared compute ingress is down while a runtime handle is present; dropping the stale runtime for re-arm (#2062)"
     );
@@ -369,7 +427,7 @@ pub(crate) async fn rearm_relay_mesh_for_running_agents(app: &AppHandle) -> Resu
             }
             Err(error) => {
                 let msg = format!(
-                    "Buzz shared compute offline — failed to re-arm local ingress for this agent: {error}"
+                    "{MESH_REARM_ERROR_SENTINEL}Buzz shared compute offline — failed to re-arm local ingress for this agent: {error}"
                 );
                 eprintln!("buzz-mesh: re-arm failed for {}: {msg}", record.pubkey);
                 if let Err(persist_error) = persist_mesh_last_error(app, &record.pubkey, &msg) {
@@ -459,7 +517,9 @@ fn clear_mesh_last_error_if_set(app: &AppHandle, pubkey: &str) -> Result<(), Str
     let Some(err) = record.last_error.as_deref() else {
         return Ok(());
     };
-    if !err.contains("Buzz shared compute offline") && !err.contains("shared compute") {
+    // Only clear errors this watchdog set (sentinel prefix), never an unrelated
+    // last_error that merely mentions "shared compute" (micspiral #2).
+    if !err.starts_with(MESH_REARM_ERROR_SENTINEL) {
         return Ok(());
     }
     record.last_error = None;
@@ -778,6 +838,15 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         }
     };
 
+    // Serve→Client re-arm transition (micspiral review #3, intentional-by-design):
+    // if the dead ingress belonged to a *serve* node with running consumer
+    // agents, this re-arms it as a Client (`MeshNodeMode::Client`). That is the
+    // correct/safe recovery here — config-backed serve restoration is
+    // `restore_mesh_sharing`'s job (`MeshNodeMode::Serve`), and
+    // `ensure_client_node_for_model` reuses any live runtime of *either* mode
+    // (the router resolves per-request), so it only cold-starts a Client when
+    // there is genuinely no runtime. Falling back to Client if a serve node
+    // crashed under local pressure is a desirable fail-safe, not a regression.
     ensure_client_node_for_model(&state, &model_id, Some(target.endpoint_addr)).await?;
     wait_for_mesh_inference(&model_id).await
 }
@@ -1196,15 +1265,38 @@ mod tests {
         assert!(STALE_STOP_TIMEOUT.as_secs() <= 5);
     }
 
-    /// Brad #2304 #4: clear only shared-compute offline errors; preserve others.
+    /// Brad #2304 #4 + micspiral #2: clear only errors this watchdog set
+    /// (sentinel prefix); never an unrelated last_error, even one that mentions
+    /// "shared compute".
     #[test]
     fn mesh_error_classifier_preserves_unrelated_last_error() {
-        let mesh = "Buzz shared compute offline — failed to re-arm local ingress for this agent: x";
-        let other = "npm install failed: EACCES";
-        assert!(mesh.contains("Buzz shared compute offline") || mesh.contains("shared compute"));
-        assert!(
-            !other.contains("Buzz shared compute offline") && !other.contains("shared compute")
+        let ours = format!(
+            "{MESH_REARM_ERROR_SENTINEL}Buzz shared compute offline — failed to re-arm local ingress for this agent: x"
         );
+        // Sentinel-tagged → this watchdog owns it → clearable.
+        assert!(ours.starts_with(MESH_REARM_ERROR_SENTINEL));
+        // An unrelated error that merely mentions "shared compute" must NOT be
+        // cleared (the loose-substring bug micspiral flagged).
+        let bystander = "user note: shared compute config looks wrong";
+        assert!(!bystander.starts_with(MESH_REARM_ERROR_SENTINEL));
+        let other = "npm install failed: EACCES";
+        assert!(!other.starts_with(MESH_REARM_ERROR_SENTINEL));
+    }
+
+    /// micspiral #1: eviction is debounced — a single dead probe must not evict
+    /// a healthy runtime; only a sustained dead streak (>= threshold) does.
+    #[test]
+    fn eviction_debounces_transient_dead_probe() {
+        assert!(DEAD_PROBE_EVICT_THRESHOLD >= 2);
+        // One transient blip: do not evict.
+        assert!(!should_evict_after_consecutive_dead_probes(1));
+        // Sustained dead across the window: evict.
+        assert!(should_evict_after_consecutive_dead_probes(
+            DEAD_PROBE_EVICT_THRESHOLD
+        ));
+        assert!(should_evict_after_consecutive_dead_probes(
+            DEAD_PROBE_EVICT_THRESHOLD + 5
+        ));
     }
 
     /// Hardware-gated live kill-:9337 recovery proof (Brad sequence).
@@ -1224,8 +1316,9 @@ mod tests {
     fn rearm_failure_message_is_actionable_shared_compute_offline() {
         let error = "no live member is serving this model";
         let msg = format!(
-            "Buzz shared compute offline — failed to re-arm local ingress for this agent: {error}"
+            "{MESH_REARM_ERROR_SENTINEL}Buzz shared compute offline — failed to re-arm local ingress for this agent: {error}"
         );
+        assert!(msg.starts_with(MESH_REARM_ERROR_SENTINEL));
         assert!(msg.contains("Buzz shared compute offline"));
         assert!(msg.contains("re-arm"));
         assert!(msg.contains(error));

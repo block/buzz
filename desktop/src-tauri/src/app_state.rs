@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Write,
     sync::{
-        atomic::{AtomicBool, AtomicU16},
+        atomic::{AtomicBool, AtomicU16, AtomicU32},
         Arc, Mutex,
     },
 };
@@ -108,6 +108,13 @@ pub struct AppState {
     /// In-process mesh-llm node started by Buzz Desktop.
     #[cfg(feature = "mesh-llm")]
     pub mesh_llm_runtime: AsyncMutex<Option<crate::mesh_llm::DesktopMeshRuntime>>,
+    /// Consecutive dead ingress probes observed by the coordinator watchdog
+    /// while a runtime handle was present. Used to debounce eviction so a
+    /// single transient stall (model load/reload, VRAM alloc, GC/mmap pause,
+    /// inference saturation) past the 3s probe budget does not cold-restart a
+    /// healthy runtime (micspiral review, #2304). Reset to 0 on a live probe.
+    #[cfg(feature = "mesh-llm")]
+    pub mesh_ingress_dead_probes: AtomicU32,
     /// Runtime-owned shared-compute coordinator. It publishes member-signed
     /// discovery status and reconciles MeshLLM's admission roster; MeshLLM
     /// itself owns direct QUIC/iroh connection establishment.
@@ -222,6 +229,7 @@ pub fn build_app_state() -> AppState {
         reset_failed: AtomicBool::new(false),
         #[cfg(feature = "mesh-llm")]
         mesh_llm_runtime: AsyncMutex::new(None),
+        mesh_ingress_dead_probes: AtomicU32::new(0),
         #[cfg(feature = "mesh-llm")]
         mesh_coordinator: AsyncMutex::new(None),
         pending_owned_channels: Mutex::new(std::collections::HashSet::new()),
