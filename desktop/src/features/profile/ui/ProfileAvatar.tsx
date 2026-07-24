@@ -46,7 +46,12 @@ export function ProfileAvatar({
 
   // Compute the live (proxied) source. Failures are tracked per resolved URL so
   // the poster and hover animation can recover independently.
-  const liveSrc = baseUrl ? rewriteRelayUrl(baseUrl) : null;
+  // Prefer the cached data URL while the media proxy is still warming up —
+  // `rewriteRelayUrl` returns `buzz-media://` until the port is known, and
+  // that scheme fails in the WebView (#2665).
+  const rewritten = baseUrl ? rewriteRelayUrl(baseUrl) : null;
+  const proxyPending = rewritten?.startsWith("buzz-media:") ?? false;
+  const liveSrc = proxyPending ? null : rewritten;
   const [failedSrc, setFailedSrc] = React.useState<string | null>(null);
   const liveFailed = liveSrc !== null && failedSrc === liveSrc;
 
@@ -55,7 +60,10 @@ export function ProfileAvatar({
   const src = liveFailed
     ? (avatarDataUrl ?? undefined)
     : (liveSrc ?? avatarDataUrl ?? undefined);
-  const shouldShowFallback = src === undefined || (!animated && liveFailed);
+  // Don't force the monogram while we still have a usable image source
+  // (including the cached data URL after a live load failure).
+  const shouldShowFallback =
+    src === undefined || (!animated && liveFailed && !avatarDataUrl);
 
   return (
     <Avatar
