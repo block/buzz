@@ -400,7 +400,16 @@ const overrides = new Map([
   // transition lock doc broadened to cover all protected-PID transitions, and
   // clear_agent_session_caches (per-pubkey retain) added alongside the
   // per-key clear. Load-bearing identity-contract change; queued to split.
-  ["src-tauri/src/app_state.rs", 1081],
+  // +8 (1081 -> 1089): mesh re-arm watchdog (#2304) adds mesh_ingress_dead_probes
+  // AtomicU32 counter on AppState for consecutive dead-probe debounce. Narrow
+  // counter field + init spars; still queued to split more AppState sections.
+  ["src-tauri/src/app_state.rs", 1089],
+  // mesh_llm re-arm watchdog + Brad/micspiral correctness suite (#2304):
+  // probe/evict identity gate, bounded stop timeout, process-map filter,
+  // store-lock error persistence, consecutive-probe debounce, sentinel-cleared
+  // last_error. Load-bearing recovery path; queued to split re-arm helpers
+  // into mesh_llm/rearm.rs. Ratchet covers current size after rustfmt.
+  ["src-tauri/src/commands/mesh_llm.rs", 1410],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,
