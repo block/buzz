@@ -115,6 +115,7 @@ export default defineConfig({
         "**/agent-lifecycle-feedback.spec.ts",
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
+        "**/command-console.spec.ts",
         "**/observer-archive-policy.spec.ts",
       ],
       use: {

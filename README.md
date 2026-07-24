@@ -218,6 +218,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 ## Going further
 
+- **[Command Console Phase 1](docs/command-console/phase-1-foundation.md)** — local launch, security boundaries, readiness, backup, and deferred capabilities
 - **[VISION.md](VISION.md)** · **[VISION_SOVEREIGN.md](VISION_SOVEREIGN.md)** · **[VISION_PROJECTS.md](VISION_PROJECTS.md)** · **[VISION_AGENT.md](VISION_AGENT.md)** — the four vision docs
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — system design, kind ranges, subsystem boundaries
 - **[TESTING.md](TESTING.md)** — multi-agent E2E test suite
