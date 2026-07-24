@@ -232,6 +232,48 @@ void main() {
         final loaded = await storage.loadAll();
         expect(loaded.first.name, 'Local Dev');
       });
+
+      test('migrates wss:// relay URLs to https:// on load', () async {
+        final community = Community.create(
+          name: 'Invite Community',
+          relayUrl: 'wss://hosted.relay.example',
+          pubkey: 'pub1',
+          nsec: 'nsec1',
+        );
+        fakeSecure['buzz_communities'] = jsonEncode([community.toJson()]);
+
+        final loaded = await storage.loadAll();
+
+        expect(loaded.single.relayUrl, 'https://hosted.relay.example');
+        // Verify persisted so re-load doesn't re-migrate.
+        final reloaded = await storage.loadAll();
+        expect(reloaded.single.relayUrl, 'https://hosted.relay.example');
+      });
+
+      test('migrates ws:// relay URLs to http:// on load', () async {
+        final community = Community.create(
+          name: 'Dev Community',
+          relayUrl: 'ws://localhost:3000',
+          pubkey: 'pub2',
+        );
+        fakeSecure['buzz_communities'] = jsonEncode([community.toJson()]);
+
+        final loaded = await storage.loadAll();
+
+        expect(loaded.single.relayUrl, 'http://localhost:3000');
+      });
+
+      test('does not rewrite already-https communities', () async {
+        final community = Community.create(
+          name: 'Normal',
+          relayUrl: 'https://relay.example.com',
+        );
+        fakeSecure['buzz_communities'] = jsonEncode([community.toJson()]);
+
+        final loaded = await storage.loadAll();
+
+        expect(loaded.single.relayUrl, 'https://relay.example.com');
+      });
     });
   });
 }

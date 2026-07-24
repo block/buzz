@@ -17,10 +17,31 @@ class RelayConfig {
 
   const RelayConfig({required this.baseUrl, this.nsec});
 
-  /// Derive the websocket URL from the HTTP base URL.
+  /// Derive the websocket URL from the base URL.
+  ///
+  /// Handles both HTTP-scheme (`https` → `wss`, `http` → `ws`) and
+  /// already-websocket URLs (`wss`/`ws` passed through unchanged). The invite
+  /// join flow stores `wss://` relay URLs directly from the parsed deep link;
+  /// without this, those URLs were incorrectly downgraded to `ws://`.
   String get wsUrl {
     final uri = Uri.parse(baseUrl);
-    final scheme = uri.scheme == 'https' ? 'wss' : 'ws';
+    final scheme = switch (uri.scheme) {
+      'https' || 'wss' => 'wss',
+      _ => 'ws',
+    };
+    return uri.replace(scheme: scheme).toString();
+  }
+
+  /// Derive the HTTP base URL for REST endpoints (`/query`, `/upload`, etc.).
+  ///
+  /// Handles both HTTP-scheme (passed through) and websocket-scheme URLs
+  /// (`wss` → `https`, `ws` → `http`).
+  String get httpUrl {
+    final uri = Uri.parse(baseUrl);
+    final scheme = switch (uri.scheme) {
+      'wss' || 'https' => 'https',
+      _ => 'http',
+    };
     return uri.replace(scheme: scheme).toString();
   }
 }
@@ -86,7 +107,7 @@ final myPubkeyProvider = Provider<String?>((ref) {
 /// through the relay WebSocket session.
 final relayClientProvider = Provider<RelayClient>((ref) {
   final config = ref.watch(relayConfigProvider);
-  final client = RelayClient(baseUrl: config.baseUrl);
+  final client = RelayClient(baseUrl: config.httpUrl);
   ref.onDispose(client.dispose);
   return client;
 });

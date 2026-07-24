@@ -22,10 +22,15 @@ class CommunityStorage {
     : _secure = secure ?? const FlutterSecureStorage();
 
   /// Load all communities. On first call, migrates legacy single-community
-  /// credentials if present.
+  /// credentials if present. Also canonicalizes any stored `wss://`/`ws://`
+  /// relay URLs to `https://`/`http://` (invite-created communities before
+  /// the normalization fix stored websocket-scheme URLs directly).
   Future<List<Community>> loadAll() async {
     final raw = await _secure.read(key: _keyCommunities);
-    if (raw != null) return _decodeList(raw);
+    if (raw != null) {
+      final communities = _decodeList(raw);
+      return _migrateRelaySchemes(communities);
+    }
 
     final legacyCommunities = await _secure.read(key: _legacyCommunities);
     if (legacyCommunities != null) {
@@ -107,5 +112,35 @@ class CommunityStorage {
   Future<void> _saveList(List<Community> communities) async {
     final json = jsonEncode(communities.map((item) => item.toJson()).toList());
     await _secure.write(key: _keyCommunities, value: json);
+  }
+
+  /// Rewrite stored `wss://`/`ws://` relay URLs to `https://`/`http://`.
+  ///
+  /// Communities created via the invite deep-link flow before the
+  /// normalization fix stored the raw websocket-scheme URL. This migration
+  /// canonicalizes them on first load so [RelayConfig.httpUrl] and
+  /// downstream HTTP consumers (media upload, `/query`) work correctly.
+  Future<List<Community>> _migrateRelaySchemes(
+    List<Community> communities,
+  ) async {
+    var dirty = false;
+    final migrated = communities.map((community) {
+      final uri = Uri.tryParse(community.relayUrl);
+      if (uri == null) return community;
+      final scheme = uri.scheme;
+      if (scheme == 'wss' || scheme == 'ws') {
+        dirty = true;
+        final httpScheme = scheme == 'wss' ? 'https' : 'http';
+        return community.copyWith(
+          relayUrl: uri.replace(scheme: httpScheme).toString(),
+        );
+      }
+      return community;
+    }).toList();
+
+    if (dirty) {
+      await _saveList(migrated);
+    }
+    return migrated;
   }
 }

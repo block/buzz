@@ -121,7 +121,7 @@ class MediaGetAuthService {
 
 final mediaGetAuthServiceProvider = Provider<MediaGetAuthService>((ref) {
   final config = ref.watch(relayConfigProvider);
-  return MediaGetAuthService(baseUrl: config.baseUrl, nsec: config.nsec);
+  return MediaGetAuthService(baseUrl: config.httpUrl, nsec: config.nsec);
 });
 
 Map<String, String> mediaGetHeadersFor(WidgetRef ref, String url) {

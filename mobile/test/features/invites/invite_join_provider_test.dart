@@ -65,7 +65,11 @@ void main() {
         final stored = (await storage.loadAll()).single;
         expect(state.status, InviteJoinStatus.switchedExisting);
         expect(await storage.loadActiveId(), existing.id);
-        expect(stored.relayUrl, existingRelayUrl);
+        // After loading, wss:// URLs are migrated to https:// by storage.
+        final expectedStoredUrl = existingRelayUrl.startsWith('wss://')
+            ? existingRelayUrl.replaceFirst('wss://', 'https://')
+            : existingRelayUrl;
+        expect(stored.relayUrl, expectedStoredUrl);
         expect(stored.pubkey, 'old-pubkey');
         expect(stored.nsec, 'old-nsec');
         expect(generatedKeys, 0);
@@ -132,12 +136,57 @@ void main() {
       expect(auth.authenticatedCommunities, hasLength(1));
       expect(
         auth.authenticatedCommunities.single.relayUrl,
-        'wss://relay.example.com',
+        'https://relay.example.com',
       );
       expect(auth.authenticatedCommunities.single.pubkey, keys.public);
       expect(auth.authenticatedCommunities.single.nsec, keys.nsec);
     },
   );
+
+  for (final entry in [
+    ('wss://relay.example.com', 'https://relay.example.com'),
+    ('ws://local.dev:3000', 'http://local.dev:3000'),
+  ]) {
+    test(
+      'confirmJoin normalizes ${entry.$1} to ${entry.$2} for storage',
+      () async {
+        final keys = nostr.Keys.generate();
+        final storage = CommunityStorage(secure: FakeSecureStorage());
+        final auth = _RecordingAuthNotifier();
+        final container = ProviderContainer(
+          overrides: [
+            communityStorageProvider.overrideWithValue(storage),
+            authProvider.overrideWith(() => auth),
+            inviteKeyGeneratorProvider.overrideWithValue(() => keys),
+            inviteJoinHttpClientProvider.overrideWithValue(
+              http_testing.MockClient((request) async {
+                return http.Response(
+                  jsonEncode({
+                    'status': 'joined',
+                    'host': 'relay.example.com',
+                    'role': 'member',
+                  }),
+                  200,
+                );
+              }),
+            ),
+          ],
+        );
+        addTearDown(container.dispose);
+
+        await container
+            .read(inviteJoinProvider.notifier)
+            .prepare(InviteDeepLink(relayUrl: entry.$1, code: 'code'));
+        await container.read(inviteJoinProvider.notifier).confirmJoin();
+
+        expect(
+          container.read(inviteJoinProvider).status,
+          InviteJoinStatus.success,
+        );
+        expect(auth.authenticatedCommunities.single.relayUrl, entry.$2);
+      },
+    );
+  }
 
   test('join_policy_required requires a fresh link and cannot retry', () async {
     final keys = nostr.Keys.generate();
