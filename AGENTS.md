@@ -59,6 +59,7 @@ crates/
   # Tooling + shared
   buzz-cli            # Agent-first CLI
   buzz-sdk            # Typed Nostr event builders
+  buzz-transport      # Pluggable Transport seam — signed-event streams (relay, remote bridge, in-memory)
   buzz-admin          # Operator CLI for relay administration
   buzz-ws-client      # Shared NIP-42 WebSocket client (connect, auth, publish)
   buzz-test-client    # Integration test client and E2E test suite

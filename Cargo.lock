@@ -769,6 +769,7 @@ dependencies = [
  "buzz-core",
  "buzz-persona",
  "buzz-sdk",
+ "buzz-transport",
  "chrono",
  "clap",
  "evalexpr",
@@ -1256,6 +1257,23 @@ dependencies = [
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "buzz-transport"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "nostr",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tokio-util",
+ "tracing",
  "url",
  "uuid",
 ]

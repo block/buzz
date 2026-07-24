@@ -208,7 +208,7 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 
 **Git & pairing** — `git-sign-nostr` / `git-credential-nostr` (nostr-signed git) · `buzz-pair-relay` / `buzz-pairing-cli` (relay pairing)
 
-**Shared** — `buzz-sdk` (typed event builders) · `buzz-media` (Blossom/S3)
+**Shared** — `buzz-sdk` (typed event builders) · `buzz-transport` (pluggable event-transport seam: relay, remote bridge, in-memory) · `buzz-media` (Blossom/S3)
 
 **Tooling** — `buzz-admin` (admin CLI) · `buzz-test-client` (E2E)
 

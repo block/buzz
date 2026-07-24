@@ -87,6 +87,7 @@ buzz-core    (zero I/O — types, verification, filter matching, kind registry)
          └── buzz-relay       (ties everything together — the server)
 
 buzz-acp            (agent harness — bridges relay @mentions → AI agents via ACP/JSON-RPC)
+buzz-transport      (pluggable Transport seam — signed-event streams; used by buzz-acp)
 buzz-sdk            (typed Nostr event builders — used by buzz-acp and buzz-cli)
 buzz-media          (Blossom/S3 media storage)
 buzz-cli            (agent-first CLI)
@@ -672,6 +673,58 @@ Buzz Relay ──WS──→ buzz-acp ──stdio (ACP/JSON-RPC)──→ Agent 
 - Depends on `buzz-core` (kind constants) and `buzz-sdk` (relay/REST utilities).
 
 **Does NOT:** persist state.
+
+---
+
+### buzz-transport — Pluggable Event-Transport Seam
+
+Captures what the relay connection *provides* as one small trait — a
+bidirectional stream of signed events — so the network under a Buzz consumer
+becomes swappable.
+
+**Key types:**
+
+```rust
+pub trait Transport: Send {
+    fn subscribe(&mut self, subscription: Subscription) -> …;
+    fn unsubscribe(&mut self, channel_id: Uuid) -> …;
+    fn next_event(&mut self) -> …;   // None = connection lost → reconnect()
+    fn publish(&self, event: SignedEvent) -> …;
+    fn try_publish(&self, event: SignedEvent) -> Result<(), TransportError>;
+    fn reconnect(&mut self) -> …;
+    fn shutdown(self: Box<Self>) -> …;
+}
+
+pub struct SignedEvent { id, pubkey, created_at, kind, tags, content, sig }
+```
+
+`SignedEvent` is crate-owned plain data — structurally the NIP-01 event Buzz
+already speaks (lossless conversion, Schnorr verification), but implementors
+never need a Nostr library. The trait has no side-channel API: membership,
+discovery, presence, and typing already *are* events in Buzz, so they ride
+the same stream.
+
+**Implementations:**
+
+| Implementation | Where | Purpose |
+|----------------|-------|---------|
+| `HarnessRelay` | `buzz-acp` | The NIP-42 relay WebSocket — the default |
+| `RemoteTransport` | `buzz-transport` | Dials an operator-run bridge speaking the JSON protocol in `PROTOCOL.md` — bridge Buzz onto any network (Slack, a private mesh) in any language |
+| `InMemoryHub` | `buzz-transport` | Reference implementation: in-process fan-out between participants, used by integration tests |
+
+`RemoteTransport` carriers are selected by URL scheme: `wss://`/`ws://`
+(WebSocket) or `unix:///path.sock` (newline-delimited JSON over a Unix
+socket), optionally tunneled through a SOCKS5 proxy. Security policy:
+`wss://` always; plaintext `ws://` only to loopback, to `.onion` through a
+loopback proxy, or with an explicit insecure opt-in. Inbound events are
+signature-verified and dropped on failure. `buzz-acp` ships a
+`connect_transport` factory selecting the implementation from
+`BUZZ_TRANSPORT` env vars (see the harness README); the harness event loop
+still constructs the relay client directly — converting it to consume
+`Box<dyn Transport>` is the tracked follow-up.
+
+**Does NOT:** persist events, implement channel membership, or expose any
+API beyond the event stream.
 
 ---
 

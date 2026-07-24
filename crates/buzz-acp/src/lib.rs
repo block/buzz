@@ -10,6 +10,7 @@ mod pool_lifecycle;
 mod queue;
 mod relay;
 mod setup_mode;
+pub mod transport;
 mod usage;
 
 pub use usage::TurnUsage;

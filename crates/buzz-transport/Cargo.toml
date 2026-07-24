@@ -1,0 +1,39 @@
+[package]
+name = "buzz-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pluggable event-transport seam: bidirectional streams of signed Nostr events"
+
+[features]
+# In-memory MockTransport for harness/integration tests in dependent crates.
+test-utils = []
+
+[dependencies]
+# Nostr event types (the payload of every frame)
+nostr = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Remote bridge carriers: WebSocket + line-framed Unix socket
+tokio-tungstenite = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+url = { workspace = true }
+
+# Frame serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# IDs
+uuid = { workspace = true }
+
+# Errors + logging
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

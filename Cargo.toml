@@ -13,6 +13,7 @@ members = [
     "crates/buzz-agent",
     "crates/sprig",
     "crates/buzz-test-client",
+    "crates/buzz-transport",
     "crates/buzz-ws-client",
     "crates/buzz-admin",
     "crates/buzz-workflow",
@@ -131,6 +132,7 @@ buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
 buzz-sdk = { path = "crates/buzz-sdk" }
+buzz-transport = { path = "crates/buzz-transport" }
 buzz-ws-client = { path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 

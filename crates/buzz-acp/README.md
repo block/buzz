@@ -110,6 +110,24 @@ All configuration is via environment variables (or CLI flags — every env var h
 
 **Legacy env vars:** `BUZZ_ACP_PRIVATE_KEY`, `BUZZ_ACP_API_TOKEN`, and `BUZZ_ACP_TURN_TIMEOUT` (replaced by `BUZZ_ACP_IDLE_TIMEOUT`) are still accepted as fallbacks.
 
+### Transport
+
+The transport seam ([`buzz-transport`](../buzz-transport) and its
+[bridge protocol](../buzz-transport/PROTOCOL.md)) lets a Buzz consumer carry
+its events over an operator-run bridge instead of the Buzz relay.
+`buzz_acp::transport::connect_transport` selects an implementation from the
+variables below. **Status:** the harness's own event loop does not consume
+the seam yet — it still connects to the relay directly, and these variables
+take effect once that conversion lands (tracked follow-up).
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `BUZZ_TRANSPORT` | no | `nostr` | Which transport carries events: `nostr` (the relay) or `remote` (an operator-run bridge). |
+| `BUZZ_TRANSPORT_URL` | with `remote` | — | Bridge endpoint: `wss://…` (WebSocket) or `unix:///path.sock` (line-framed Unix socket). |
+| `BUZZ_TRANSPORT_TOKEN` | no | — | Bearer token sent in the `hello` frame and, on WebSocket, the upgrade `Authorization` header. |
+| `BUZZ_TRANSPORT_SOCKS_PROXY` | no | — | Tunnel WebSocket carriers through a SOCKS5 proxy: `socks5://[user:pass@]host:port`. |
+| `BUZZ_TRANSPORT_ALLOW_INSECURE` | no | `false` | Permit plaintext `ws://` to non-loopback hosts (trusted private networks only). |
+
 ### Parallel Agents & Heartbeat
 
 | Flag | Env Var | Default | Description |
