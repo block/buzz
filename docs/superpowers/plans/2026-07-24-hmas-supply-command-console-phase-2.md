@@ -57,9 +57,10 @@ Phase 2 excludes:
 2. Write failing parser tests for `message`, executed `tool_call`, `reasoning`, and `invalid_tool_call` output items; token statistics and `response_id`; duplicate or malformed fields; over-large bodies; and unknown item types.
 3. Require `invalid_tool_call`, missing terminal message, invalid argument/output shapes, and malformed response IDs to fail closed with bounded diagnostics.
 4. Prove that tool-looking text inside `message` or `reasoning` never becomes a structured tool call.
-5. Implement serialisable request types and a bounded response parser without adding `unwrap()` or `expect()` to production paths.
-6. Run focused Rust tests and formatting.
-7. Commit only Task 1 changes.
+5. Implement an ordered native output enum so interleaved messages, reasoning, tool calls, and invalid calls retain provider order. Synthesise stable ACP call IDs from the request identity and output index because native tool records do not document a call ID.
+6. Implement serialisable request types and a bounded response parser without adding `unwrap()` or `expect()` to production paths.
+7. Run focused Rust tests and formatting.
+8. Commit only Task 1 changes.
 
 ### Task 2: Add the typed `OFFICIAL` runtime and egress policy
 
@@ -123,24 +124,33 @@ Phase 2 excludes:
 - Modify: `desktop/src-tauri/src/managed_agents/agent_env.rs` only if packaging requires it
 - Modify: `desktop/src-tauri/tauri.conf.json`
 - Modify: `Justfile`
+- Modify: `crates/sprig/src/main.rs`
+- Modify: `scripts/build-sprig.sh`
+- Modify: `scripts/bundle-sidecars.sh`
+- Modify: `.github/workflows/ci.yml`
+- Modify: `.github/workflows/release.yml`
+- Modify: `.github/workflows/signed-macos-canary.yml`
 - Modify: `desktop/src/features/agents/AGENTS.md`
 - Modify: `desktop/src/features/agents/ui/agentConfigOptions.tsx`
 - Modify: `desktop/src/features/agents/lib/agentConfigCore.ts`
+- Modify: `desktop/src/features/command-console/hooks/useCommandConsoleStatus.ts`
+- Modify: `desktop/src/features/command-console/ui/CommandSystemStatus.tsx`
 - Modify corresponding Rust and TypeScript tests
 
 **Steps:**
 
 1. Write failing Rust catalog/readiness tests for the distinct runtime identity, command, provider lock, model discovery capability, absence of a stdio MCP command, required native model/base configuration, and optional Keychain-backed LM Studio token.
-2. Add `buzz-lmstudio-agent` to the Tauri external binaries, every platform-specific Just build/copy/setup loop, `default_agent_args`, and the Rust runtime catalog. Keep capability facts in `KnownAcpRuntime`; do not add renderer-level runtime-ID checks.
+2. Add `buzz-lmstudio-agent` to the Sprig multicall, sidecar build/bundle scripts, Tauri external binaries, CI/release/canary sidecar lists, every platform-specific Just build/copy/setup loop, `default_agent_args`, cleanup process names, and the Rust runtime catalog. Keep capability facts in `KnownAcpRuntime`; do not add renderer-level runtime-ID checks.
 3. Make the runtime provider-locked to `lmstudio-native`, model-switchable through ACP, and explicit that MCP integrations are native policy configuration rather than a desktop stdio MCP command. Extend locked-provider metadata so the config bridge renders the catalog's real locked provider rather than its current Anthropic-only label.
 4. Reserve classification, provider, base URL, and integration-policy environment keys from user/persona configuration and force-write the security values after user environment layering. Tests must prove persona/global/default environment values cannot override them; `KnownAcpRuntime::default_env` alone is not a security boundary or readiness input.
-5. Add read-only `/api/v1/models` discovery through the native egress policy and return downloaded/loaded state without claiming an unloaded model is ready.
+5. Add read-only `/api/v1/models` discovery through the native egress policy, filter to `type == "llm"`, and return key, display name, loaded instances, context limits, and capabilities without claiming an unloaded model is ready.
 6. Extend readiness to distinguish application installed, API unreachable, authentication required, no loaded model, configured model unavailable, and ready.
 7. Report a wildcard-bound or unauthenticated server as a security warning; do not silently change the user's LM Studio global settings.
-8. Project the catalog metadata through `agentConfigCore` and render the existing canonical configuration controls.
-9. Update the nested `AGENTS.md` because runtime configuration behavior changes.
-10. Run focused Tauri Rust tests, focused TypeScript tests, `just desktop-check`, and formatting.
-11. Commit only Task 4 changes.
+8. Add a distinct Command Console LM Studio health source; mesh-serve readiness must never be reused as evidence that LM Studio is ready.
+9. Project the catalog metadata through `agentConfigCore` and render the existing canonical configuration controls.
+10. Update the nested `AGENTS.md` because runtime configuration behavior changes.
+11. Run focused Tauri Rust tests, focused TypeScript tests, `just desktop-check`, and formatting.
+12. Commit only Task 4 changes.
 
 ### Task 5: Add structured adviser validation and bounded single-model scheduling
 
@@ -182,12 +192,13 @@ Phase 2 excludes:
 3. Run a live native chat against the loaded local model and capture response item types, model identity, and statistics without recording prompt content or secrets.
 4. If a pre-existing read-only Memory or RAG HTTP MCP endpoint can be represented as a loopback ephemeral integration without configuration changes, prove one structured native tool call. Otherwise record the proof as blocked pending the Phase 3 local service and keep the runtime tests deterministic with a fake loopback MCP server.
 5. Prove that reasoning-text pseudo-tool markup causes no tool execution and that only native `tool_call` output produces observer evidence.
-6. Exercise the egress denial suite with a local capture server and proxy environment variables, proving denied `OFFICIAL` routes generate no request and valid requests do not use the proxy.
-7. Document exact configuration, Keychain/token handling, MCP allowlists, offline behavior, security boundary, diagnostics, and Phase 3 dependencies.
-8. Run `cargo test -p buzz-agent`, focused desktop/Tauri tests, `just desktop-check`, `just test-unit`, and `just ci`.
-9. Request whole-phase code review, address all Critical and Important findings, and rerun affected tests.
-10. Record verified Phase 2 decisions, live endpoints, version facts, and gotchas in Memory MCP with `agent="CODEX"`.
-11. Commit remaining documentation/evidence, push the branch, and update the draft PR.
+6. Prove installed-model reasoning capability negotiation (`off | on` on the current Qwen model); never forward the existing OpenAI/Anthropic effort vocabulary blindly.
+7. Exercise the egress denial suite with a local capture server and proxy environment variables, proving denied `OFFICIAL` routes generate no request and valid requests do not use the proxy.
+8. Document exact configuration, Keychain/token handling, MCP allowlists, LM Studio `response_id` state and restart behavior, offline behavior, security boundary, diagnostics, and Phase 3 dependencies.
+9. Run `cargo test -p buzz-agent`, `cargo test -p buzz-acp`, focused desktop/Tauri tests, `just desktop-check`, `just test-unit`, and `just ci`.
+10. Request whole-phase code review, address all Critical and Important findings, and rerun affected tests.
+11. Record verified Phase 2 decisions, live endpoints, version facts, and gotchas in Memory MCP with `agent="CODEX"`.
+12. Commit remaining documentation/evidence, push the branch, and update the draft PR.
 
 ## Final verification
 
