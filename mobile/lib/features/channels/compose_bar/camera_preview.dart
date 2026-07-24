@@ -100,7 +100,11 @@ class _InlineCameraPreview extends HookConsumerWidget {
       error.value = null;
       try {
         final image = await activeController.takePicture();
-        if (context.mounted) await onCapture(image);
+        if (context.mounted) {
+          await processCapturedImage(image, onCapture);
+        } else {
+          await processCapturedImage(image, (_) async {});
+        }
       } catch (captureError) {
         if (context.mounted) {
           error.value = _cameraErrorMessage(captureError);
