@@ -63,6 +63,7 @@ import {
 import { teamsQueryKey } from "@/features/agents/teamHooks";
 import type {
   AcpRuntime,
+  AcpRuntimeCatalogEntry,
   AgentPersona,
   Channel,
   CreateManagedAgentInput,
@@ -229,10 +230,37 @@ export function useConnectAcpRuntimeMutation() {
 export function useInstallAcpRuntimeMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (runtimeId: string) => installAcpRuntime(runtimeId),
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
-      void queryClient.invalidateQueries({ queryKey: managedAgentsQueryKey });
+    mutationFn: async (runtimeId: string) => {
+      const result = await installAcpRuntime(runtimeId);
+      // Await the active catalog refetch inside mutationFn so `isPending`
+      // stays true until discovery reflects the new install. Fire-and-forget
+      // invalidation in onSettled left a gap where onboarding reverted to
+      // UPDATE CLI / INSTALL on stale `unknown` catalog data.
+      await queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
+      if (result.success && runtimeId === "claude") {
+        const catalog =
+          queryClient.getQueryData<AcpRuntimeCatalogEntry[]>(
+            acpRuntimesQueryKey,
+          );
+        const claude = catalog?.find((entry) => entry.id === "claude");
+        if (
+          claude?.availability === "available" &&
+          claude.authStatus.status === "unknown"
+        ) {
+          // `claude update` can exit before the replacement binary is fully
+          // visible to the next auth probe — retry once after a short wait.
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, 1_500);
+          });
+          await queryClient.invalidateQueries({
+            queryKey: acpRuntimesQueryKey,
+          });
+        }
+      }
+      await queryClient.invalidateQueries({
+        queryKey: managedAgentsQueryKey,
+      });
+      return result;
     },
   });
 }
