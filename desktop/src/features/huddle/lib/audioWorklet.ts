@@ -1,20 +1,5 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-
-/**
- * Raw binary invoke — uses Tauri's internal IPC for zero-copy ArrayBuffer transfer.
- *
- * The typed @tauri-apps/api doesn't support raw binary payloads (InvokeBody::Raw).
- * This wrapper isolates the internal API dependency to a single call site.
- * Tested against Tauri v2. If this breaks on upgrade, only this function needs updating.
- */
-function invokeRawBinary(cmd: string, payload: Uint8Array): Promise<unknown> {
-  // biome-ignore lint/suspicious/noExplicitAny: Tauri internals have no public type definition
-  const internals = (window as any).__TAURI_INTERNALS__;
-  if (!internals?.invoke) {
-    return Promise.reject(new Error("Tauri internals not available"));
-  }
-  return internals.invoke(cmd, payload);
-}
+import { setupPcmCapture } from "@/shared/lib/pcmCapture";
 
 /** Return type for setupAudioWorklet — stop + mode control. */
 export type AudioWorkletHandle = {
@@ -52,49 +37,11 @@ export async function setupAudioWorklet(
   audioTrack: MediaStreamTrack,
   initialTransmitting = true,
 ): Promise<AudioWorkletHandle> {
-  const audioContext = new AudioContext({ sampleRate: 48000 });
-
-  // Resume after user gesture (required by autoplay policy)
-  if (audioContext.state === "suspended") {
-    await audioContext.resume();
-  }
-
-  // Load the worklet processor (must live in public/ for Vite to serve it)
-  await audioContext.audioWorklet.addModule("/worklet.js");
-
-  const source = audioContext.createMediaStreamSource(
-    new MediaStream([audioTrack]),
+  const capture = await setupPcmCapture(
+    audioTrack,
+    "push_audio_pcm",
+    initialTransmitting,
   );
-
-  const gainNode = audioContext.createGain();
-
-  const workletNode = new AudioWorkletNode(audioContext, "stt-tap-processor");
-
-  // Connect: mic → gain → worklet (tap only — no playback)
-  source.connect(gainNode);
-  gainNode.connect(workletNode);
-
-  // Set initial PTT state (worklet defaults to transmitting=true).
-  // In PTT mode, immediately gate audio until the user presses the key.
-  if (!initialTransmitting) {
-    workletNode.port.postMessage({ type: "ptt", active: false });
-  }
-
-  // Forward PCM batches to Rust via raw binary invoke.
-  // Direction: worklet→main (receives PCM data from worklet processor).
-  workletNode.port.onmessage = (event: MessageEvent<Float32Array>) => {
-    const float32 = event.data;
-    // Fire-and-forget — Rust side uses try_send which drops on backpressure.
-    // No await: prevents main-thread backpressure from slow Rust processing.
-    // Create a zero-copy Uint8Array view over the same underlying buffer.
-    // Rust reinterprets the bytes as f32 on the other side.
-    invokeRawBinary(
-      "push_audio_pcm",
-      new Uint8Array(float32.buffer, float32.byteOffset, float32.byteLength),
-    ).catch(() => {
-      /* silently drop — Rust handles backpressure */
-    });
-  };
 
   // Track the current mode so PTT events are only forwarded in PTT mode.
   // In VAD mode, the worklet stays in transmitting=true regardless of
@@ -111,7 +58,7 @@ export async function setupAudioWorklet(
       // Only forward PTT events to the worklet when in PTT mode.
       // In VAD mode, Ctrl+Space is ignored — the worklet stays open.
       if (currentMode === "push_to_talk") {
-        workletNode.port.postMessage({ type: "ptt", active: event.payload });
+        capture.setTransmitting(event.payload);
       }
     });
   } catch {
@@ -122,27 +69,20 @@ export async function setupAudioWorklet(
 
   return {
     stop: () => {
-      workletNode.port.onmessage = null;
       pttUnlisten?.();
-      source.disconnect();
-      gainNode.disconnect();
-      workletNode.disconnect();
-      void audioContext.close();
+      capture.stop();
     },
     setTransmitting: (active: boolean) => {
-      workletNode.port.postMessage({ type: "ptt", active });
+      capture.setTransmitting(active);
     },
     setMode: (mode: "push_to_talk" | "voice_activity") => {
       currentMode = mode;
       // When switching to VAD, immediately open the mic.
       // When switching to PTT, immediately gate until key press.
-      workletNode.port.postMessage({
-        type: "ptt",
-        active: mode === "voice_activity",
-      });
+      capture.setTransmitting(mode === "voice_activity");
     },
     setGain: (value: number) => {
-      gainNode.gain.value = value;
+      capture.setGain(value);
     },
   };
 }
