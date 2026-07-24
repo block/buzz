@@ -1463,13 +1463,16 @@ pub fn format_prompt(batch: &FlushBatch, args: &FormatPromptArgs<'_>) -> Vec<Str
     //   - in a thread  → anchor to the thread ROOT (no depth-2 nesting)
     //   - top-level     → anchor to the triggering event (it becomes the root)
     // Agent↔agent turns get no forced anchor — deep nesting is intentional
-    // there. DMs are always 1:1 with a human, so they always anchor.
+    // there.
+    //
+    // DMs follow the same layer-1 rule (#2748): inside a thread, anchor to the
+    // thread ROOT — NOT `last_event.event.id`, which anchored each reply to the
+    // human's latest comment and nested the conversation one level deeper every
+    // round. `root_event_id` is `Some` only inside a thread, so a top-level DM
+    // exchange stays flat (`None`), preserving existing behaviour.
     let sender_pubkey = last_event.event.pubkey.to_hex();
     let reply_anchor = if is_dm {
-        thread_tags
-            .root_event_id
-            .is_some()
-            .then(|| last_event.event.id.to_hex())
+        thread_tags.root_event_id.clone()
     } else {
         resolve_reply_anchor(
             &sender_pubkey,
@@ -3021,6 +3024,92 @@ mod tests {
     }
 
     #[test]
+    fn test_format_prompt_dm_reply_in_thread_anchors_to_root() {
+        // Regression for #2748: a DM reply inside a thread must anchor to the
+        // thread ROOT, not the human's latest message — otherwise each round
+        // nests one level deeper into a sub-thread of a sub-thread.
+        let ch = Uuid::new_v4();
+        let event = make_event_with_tags(
+            "and another thing",
+            vec![vec![
+                "e".into(),
+                "dmroot999".into(),
+                "".into(),
+                "reply".into(),
+            ]],
+        );
+        let latest_id = event.id.to_hex();
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(prompt.contains("Scope: dm"));
+        assert!(
+            prompt.contains("--reply-to dmroot999"),
+            "DM thread reply must anchor to the thread root"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {latest_id}")),
+            "DM thread reply must NOT anchor to the latest message (#2748)"
+        );
+    }
+
+    #[test]
+    fn test_format_prompt_dm_top_level_stays_flat() {
+        // A top-level DM (no thread tags) has no root, so it stays flat — no
+        // forced `--reply-to` anchor. Preserves pre-#2748 behaviour.
+        let ch = Uuid::new_v4();
+        let event = make_event("hey");
+        let batch = FlushBatch {
+            channel_id: ch,
+            events: vec![BatchEvent {
+                event,
+                prompt_tag: "dm".into(),
+                received_at: Instant::now(),
+            }],
+            cancelled_events: vec![],
+            cancel_reason: None,
+        };
+        let ci = PromptChannelInfo {
+            name: "DM".into(),
+            channel_type: "dm".into(),
+        };
+
+        let prompt = format_prompt(
+            &batch,
+            &FormatPromptArgs {
+                channel_info: Some(&ci),
+                ..Default::default()
+            },
+        )
+        .join("\n\n");
+        assert!(prompt.contains("Scope: dm"));
+        assert!(
+            !prompt.contains("--reply-to"),
+            "top-level DM must stay flat (no forced anchor)"
+        );
+    }
+
+    #[test]
     fn test_format_prompt_thread_scope() {
         let ch = Uuid::new_v4();
         let event = make_event_with_tags(
@@ -3909,7 +3998,7 @@ mod tests {
         let root_id = "b".repeat(64);
         let event = make_event_with_tags(
             "thanks",
-            vec![vec!["e".into(), root_id, "".into(), "reply".into()]],
+            vec![vec!["e".into(), root_id.clone(), "".into(), "reply".into()]],
         );
         let event_id = event.id.to_hex();
         let batch = FlushBatch {
@@ -3935,9 +4024,16 @@ mod tests {
             },
         )
         .join("\n\n");
+        // A DM thread reply must still carry a reply instruction, and (#2748)
+        // it must anchor to the thread ROOT — not the human's latest message,
+        // which is what nested the conversation one level deeper each round.
         assert!(
-            prompt.contains(&format!("--reply-to {event_id}")),
-            "DM thread reply should include reply instruction"
+            prompt.contains(&format!("--reply-to {root_id}")),
+            "DM thread reply should anchor to the thread root"
+        );
+        assert!(
+            !prompt.contains(&format!("--reply-to {event_id}")),
+            "DM thread reply must NOT anchor to the latest message (#2748)"
         );
     }
 
