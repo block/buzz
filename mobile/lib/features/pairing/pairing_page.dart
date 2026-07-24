@@ -1,11 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../shared/theme/theme.dart';
 import 'pairing_provider.dart';
+import 'pairing_qr_scanner.dart';
 
 class PairingPage extends HookConsumerWidget {
   /// When true, the pairing page is being used to add a new community
@@ -18,6 +20,7 @@ class PairingPage extends HookConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final pairingState = ref.watch(pairingProvider);
     final codeController = useTextEditingController();
+    final fallbackScannerVisible = useState(false);
     final isBusy =
         pairingState.status == PairingStatus.connecting ||
         pairingState.status == PairingStatus.transferring ||
@@ -33,7 +36,28 @@ class PairingPage extends HookConsumerWidget {
       });
     }
 
-    return PopScope(
+    Future<void> handleScannerResult(String? code) async {
+      if (code != null && context.mounted) {
+        await ref.read(pairingProvider.notifier).pair(code);
+      }
+    }
+
+    Future<void> openScanner() async {
+      final usesDynamicIslandPortal = await usesDynamicIslandQrScannerPortal();
+      if (!context.mounted) {
+        return;
+      }
+
+      if (!usesDynamicIslandPortal) {
+        fallbackScannerVisible.value = true;
+        return;
+      }
+
+      final code = await showDynamicIslandPairingQrScanner(context);
+      await handleScannerResult(code);
+    }
+
+    final appSurface = PopScope(
       onPopInvokedWithResult: (didPop, _) {
         if (didPop) {
           ref.read(pairingProvider.notifier).reset();
@@ -84,9 +108,7 @@ class PairingPage extends HookConsumerWidget {
 
                       // Scan QR button
                       FilledButton.icon(
-                        onPressed: isBusy
-                            ? null
-                            : () => _openScanner(context, ref),
+                        onPressed: isBusy ? null : openScanner,
                         icon: const Icon(LucideIcons.scanLine),
                         label: const Text('Scan QR Code'),
                       ),
@@ -198,18 +220,17 @@ class PairingPage extends HookConsumerWidget {
         ),
       ),
     );
-  }
 
-  void _openScanner(BuildContext context, WidgetRef ref) {
-    Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => _ScannerPage(
-          onScanned: (code) {
-            Navigator.of(context).pop();
-            ref.read(pairingProvider.notifier).pair(code);
-          },
-        ),
-      ),
+    if (!fallbackScannerVisible.value) {
+      return appSurface;
+    }
+
+    return FallbackPairingQrScanner(
+      appSurface: appSurface,
+      onClosed: (code) {
+        fallbackScannerVisible.value = false;
+        unawaited(handleScannerResult(code));
+      },
     );
   }
 }
@@ -333,75 +354,6 @@ class _SasVerificationView extends StatelessWidget {
 
         const Spacer(flex: 3),
       ],
-    );
-  }
-}
-
-class _ScannerPage extends HookWidget {
-  final void Function(String code) onScanned;
-
-  const _ScannerPage({required this.onScanned});
-
-  @override
-  Widget build(BuildContext context) {
-    final handled = useState(false);
-    final controller = useMemoized(() => MobileScannerController());
-
-    useEffect(() => controller.dispose, const []);
-
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Scan QR Code'),
-        leading: IconButton(
-          icon: const Icon(LucideIcons.arrowLeft),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ),
-      body: MobileScanner(
-        controller: controller,
-        errorBuilder: (context, error) {
-          final message = switch (error.errorCode) {
-            MobileScannerErrorCode.permissionDenied =>
-              'Camera permission is required to scan QR codes.\n\nPlease grant camera access in your device settings.',
-            _ =>
-              'Could not start camera: ${error.errorDetails?.message ?? 'unknown error'}',
-          };
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(Grid.sm),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    LucideIcons.cameraOff,
-                    size: 48,
-                    color: context.colors.onSurfaceVariant,
-                  ),
-                  const SizedBox(height: Grid.xs),
-                  Text(
-                    message,
-                    textAlign: TextAlign.center,
-                    style: context.textTheme.bodyMedium?.copyWith(
-                      color: context.colors.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-        onDetect: (capture) {
-          if (handled.value) return;
-          final barcodes = capture.barcodes;
-          if (barcodes.isNotEmpty) {
-            final value = barcodes.first.rawValue;
-            if (value != null && value.isNotEmpty) {
-              handled.value = true;
-              onScanned(value);
-            }
-          }
-        },
-      ),
     );
   }
 }

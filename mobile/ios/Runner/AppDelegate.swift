@@ -6,6 +6,7 @@ import UserNotifications
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   private var mediaUploadChannel: FlutterMethodChannel?
+  private var qrScannerChannel: FlutterMethodChannel?
 
   override func application(
     _ application: UIApplication,
@@ -24,6 +25,63 @@ import UserNotifications
     mediaUploadChannel?.setMethodCallHandler { [weak self] call, result in
       self?.handleMediaUploadMethodCall(call, result: result)
     }
+    qrScannerChannel = FlutterMethodChannel(
+      name: "buzz/qr_scanner",
+      binaryMessenger: engineBridge.applicationRegistrar.messenger()
+    )
+    qrScannerChannel?.setMethodCallHandler { call, result in
+      Self.handleQrScannerMethodCall(call, result: result)
+    }
+  }
+
+  private static func handleQrScannerMethodCall(
+    _ call: FlutterMethodCall,
+    result: @escaping FlutterResult
+  ) {
+    switch call.method {
+    case "usesDynamicIslandQrScannerPortal":
+      result(
+        UIDevice.current.userInterfaceIdiom == .phone
+          && usesDynamicIslandQrScannerPortal(
+            safeAreaTopInset: activeWindowSafeAreaTopInset()
+          )
+      )
+    case "setDynamicIslandScannerStatusBarHidden":
+      guard let hidden = call.arguments as? Bool else {
+        result(
+          FlutterError(
+            code: "invalid_arguments",
+            message: "Expected a Bool status-bar visibility value.",
+            details: nil
+          )
+        )
+        return
+      }
+      UIApplication.shared.setStatusBarHidden(hidden, with: .fade)
+      result(nil)
+    case "performDynamicIslandQrScanSuccessHaptic":
+      let generator = UINotificationFeedbackGenerator()
+      generator.prepare()
+      generator.notificationOccurred(.success)
+      result(nil)
+    default:
+      result(FlutterMethodNotImplemented)
+    }
+  }
+
+  static func usesDynamicIslandQrScannerPortal(
+    safeAreaTopInset: CGFloat
+  ) -> Bool {
+    safeAreaTopInset > 50
+  }
+
+  private static func activeWindowSafeAreaTopInset() -> CGFloat {
+    UIApplication.shared.connectedScenes
+      .compactMap { $0 as? UIWindowScene }
+      .filter { $0.activationState == .foregroundActive }
+      .flatMap(\.windows)
+      .first(where: \.isKeyWindow)?
+      .safeAreaInsets.top ?? 0
   }
 
   private func handleMediaUploadMethodCall(

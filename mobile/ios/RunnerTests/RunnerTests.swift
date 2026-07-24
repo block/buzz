@@ -6,6 +6,28 @@ import XCTest
 
 class RunnerTests: XCTestCase {
 
+  func testDynamicIslandQrScannerRecognizesTallSafeAreas() {
+    for safeAreaTopInset in [51, 59, 62] {
+      XCTAssertTrue(
+        AppDelegate.usesDynamicIslandQrScannerPortal(
+          safeAreaTopInset: CGFloat(safeAreaTopInset)
+        ),
+        "\(safeAreaTopInset)"
+      )
+    }
+  }
+
+  func testDynamicIslandQrScannerRejectsStandardSafeAreas() {
+    for safeAreaTopInset in [0, 44, 47, 50] {
+      XCTAssertFalse(
+        AppDelegate.usesDynamicIslandQrScannerPortal(
+          safeAreaTopInset: CGFloat(safeAreaTopInset)
+        ),
+        "\(safeAreaTopInset)"
+      )
+    }
+  }
+
   func testClipboardImageDataPrefersOriginalPngBytes() throws {
     let pasteboard = try XCTUnwrap(
       UIPasteboard(name: UIPasteboard.Name(UUID().uuidString), create: true)
