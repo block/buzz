@@ -151,7 +151,7 @@ class InviteJoinNotifier extends Notifier<InviteJoinState> {
 
       final community = Community.create(
         name: _communityNameFromClaim(claim, invite.relayUrl),
-        relayUrl: invite.relayUrl,
+        relayUrl: _normalizeRelayUrlForStorage(invite.relayUrl),
         pubkey: keys.public,
         nsec: keys.nsec,
       );
@@ -273,4 +273,21 @@ String _friendlyInviteError(Object error) {
     return 'Could not reach the relay. Check your connection and try again.';
   }
   return 'Could not join this community: $message';
+}
+
+/// Normalize a relay URL from websocket scheme to HTTP scheme for storage.
+///
+/// The invite deep-link parser produces `wss://` or `ws://` URLs, but the
+/// [Community.relayUrl] convention (matching the pairing flow) is HTTP-scheme
+/// (`https://` / `http://`). [RelayConfig] then derives both `wsUrl` and
+/// `httpUrl` from the stored base URL, so storing the canonical HTTP form
+/// keeps all downstream derivations correct.
+String _normalizeRelayUrlForStorage(String relayUrl) {
+  final uri = Uri.parse(relayUrl);
+  final scheme = switch (uri.scheme) {
+    'wss' => 'https',
+    'ws' => 'http',
+    _ => uri.scheme, // already http/https — pass through
+  };
+  return uri.replace(scheme: scheme).toString();
 }
