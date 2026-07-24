@@ -32,6 +32,14 @@ export type QuotedLocation = {
 /** A quoted source chunk pinned to a collection snapshot. */
 export type SourceReference = ContractBase & {
   readonly kind: "source-reference";
+  readonly ledgerId: string;
+  readonly sourceKind:
+    | "rag"
+    | "memory"
+    | "calendar"
+    | "reminders"
+    | "notes"
+    | "file";
   readonly sourceId: string;
   readonly collection: string;
   readonly documentId: string;
@@ -196,6 +204,8 @@ export function createSourceReference(
       kind: "source-reference",
       version: COMMAND_CONTRACT_VERSION,
       classification: resolveClassification(input.classification),
+      ledgerId: input.ledgerId,
+      sourceKind: input.sourceKind,
       sourceId: input.sourceId,
       collection: input.collection,
       documentId: input.documentId,
@@ -216,6 +226,8 @@ export function parseSourceReference(value: unknown): SourceReference | null {
       "kind",
       "version",
       "classification",
+      "ledgerId",
+      "sourceKind",
       "sourceId",
       "collection",
       "documentId",
@@ -227,6 +239,10 @@ export function parseSourceReference(value: unknown): SourceReference | null {
     value.kind !== "source-reference" ||
     value.version !== COMMAND_CONTRACT_VERSION ||
     !isClassification(value.classification) ||
+    !isText(value.ledgerId) ||
+    !["rag", "memory", "calendar", "reminders", "notes", "file"].includes(
+      value.sourceKind as string,
+    ) ||
     !isText(value.sourceId) ||
     !isText(value.collection) ||
     !isText(value.documentId) ||
@@ -241,6 +257,8 @@ export function parseSourceReference(value: unknown): SourceReference | null {
     kind: value.kind,
     version: value.version,
     classification: value.classification,
+    ledgerId: value.ledgerId,
+    sourceKind: value.sourceKind as SourceReference["sourceKind"],
     sourceId: value.sourceId,
     collection: value.collection,
     documentId: value.documentId,

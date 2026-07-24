@@ -2,6 +2,7 @@
 mod app_state;
 mod archive;
 mod builderlab;
+pub mod command_brief;
 mod command_services;
 mod commands;
 mod deep_link;

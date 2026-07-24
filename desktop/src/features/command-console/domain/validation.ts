@@ -24,7 +24,9 @@ export function hasExactKeys(
   value: UnknownRecord,
   keys: readonly string[],
 ): boolean {
-  const actual = Object.keys(value);
+  // Non-enumerable own keys are still attacker-controlled persisted input;
+  // include them so `__proto__` cannot hide from exact-contract parsers.
+  const actual = Object.getOwnPropertyNames(value);
   return (
     actual.length === keys.length && actual.every((key) => keys.includes(key))
   );

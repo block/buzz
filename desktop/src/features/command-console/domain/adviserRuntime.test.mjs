@@ -14,6 +14,8 @@ function source(overrides = {}) {
     kind: "source-reference",
     version: 1,
     classification: "OFFICIAL",
+    ledgerId: "ledger-1",
+    sourceKind: "rag",
     sourceId: "source-1",
     collection: "navigation-orders",
     documentId: "document-1",

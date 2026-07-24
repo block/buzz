@@ -31,6 +31,8 @@ const HASH_B = `sha256:${"b".repeat(64)}`;
 
 function source(overrides = {}) {
   return createSourceReference({
+    ledgerId: "ledger-1",
+    sourceKind: "rag",
     sourceId: "source-1",
     collection: "engineering-orders",
     documentId: "document-1",
@@ -220,6 +222,8 @@ test("every approved contract preserves all required fields through JSON", () =>
     "kind",
     "version",
     "classification",
+    "ledgerId",
+    "sourceKind",
     "sourceId",
     "collection",
     "documentId",
