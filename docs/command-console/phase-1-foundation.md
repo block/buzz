@@ -127,22 +127,20 @@ before using it.
 
 ## Acceptance evidence
 
-Task 6 acceptance is incomplete on the verification host. Aggregate `just ci`
-did not finish: every gate reached before `mobile-check` passed, then
-`dart format --output=none --set-exit-if-changed .` remained sleeping for more
-than 3 minutes 40 seconds and the run was terminated cleanly. A separately
-invoked `flutter test` also remained sleeping without output for more than one
-minute and was terminated. The mobile format, analysis, and test gates therefore
-remain unverified rather than passed.
+Aggregate `just ci` passes on the verification host. The first attempt appeared
+to stall at `mobile-check`, but diagnosis showed that Hermit was silently
+downloading the pinned Flutter 3.41.7 SDK (a roughly 1.6 GB first-run
+prerequisite), rather than deadlocking. After that verified toolchain download,
+mobile formatting and analysis passed, all 541 Flutter tests passed, and the
+complete aggregate gate was rerun successfully.
 
-The preceding aggregate gates passed: root Rust formatting and workspace
-Clippy, desktop checks, desktop Tauri formatting and Clippy, and web checks.
-The following unaffected gates also passed in separate runs:
+The following focused and integration gates also passed:
 
 - root unit tests;
 - desktop type checking, repository checks, Node tests, and production build;
 - desktop Tauri compile checks and unit tests;
 - web production build;
+- mobile formatting, analysis, and all 541 Flutter tests;
 - Compose configuration validation and Keycloak health;
 - the mocked local-workspace backup and restore regression suite; and
 - the focused Command Console E2E described below.
