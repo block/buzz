@@ -603,7 +603,7 @@ function RuntimeProvidersSection({
 
       <div className="flex w-full flex-1 flex-col items-center justify-center gap-8 py-10">
         {orderedItems.length > 0 ? (
-          <div className="grid min-w-0 w-full max-w-[592px] grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="grid min-w-0 w-full max-w-[1200px] grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
             {orderedItems.map((runtime) => (
               <RuntimeCard
                 installError={installResults[runtime.id]?.error ?? null}
