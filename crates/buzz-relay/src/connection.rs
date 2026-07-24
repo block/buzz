@@ -9,6 +9,7 @@ use std::time::Duration;
 use axum::extract::ws::{Message as WsMessage, WebSocket};
 use futures_util::{Sink, SinkExt, StreamExt};
 use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use tracing::{debug, info, trace, warn};
@@ -28,6 +29,37 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Shared mutable subscription map for a single WebSocket connection.
 pub(crate) type ConnectionSubscriptions = Arc<Mutex<HashMap<String, Vec<Filter>>>>;
+
+/// A cancellable lease for one in-flight REQ. The lease is installed before
+/// the handler task starts so CLOSE can invalidate a subscription that has not
+/// reached registration yet.
+#[derive(Debug)]
+pub(crate) struct PendingSubscription {
+    cancel: CancellationToken,
+}
+
+impl PendingSubscription {
+    fn new() -> Self {
+        Self {
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancel.cancel();
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+
+    pub(crate) async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+}
+
+/// In-flight REQs keyed by client-supplied subscription ID.
+pub(crate) type PendingSubscriptions = Arc<Mutex<HashMap<String, Arc<PendingSubscription>>>>;
 
 /// Maximum outbound data frames buffered into the websocket sink before one flush.
 const MAX_WS_SEND_BATCH: usize = 64;
@@ -63,6 +95,8 @@ pub struct ConnectionState {
     pub auth_state: RwLock<AuthState>,
     /// Active subscriptions keyed by subscription ID.
     pub subscriptions: ConnectionSubscriptions,
+    /// REQs that have started but may not yet be registered for fan-out.
+    pub(crate) pending_subscriptions: PendingSubscriptions,
     /// Sender for outbound data messages (EVENT, NOTICE, OK, etc.).
     pub send_tx: mpsc::Sender<WsMessage>,
     /// Sender for outbound control frames (Pong, Close).
@@ -80,6 +114,47 @@ pub struct ConnectionState {
 }
 
 impl ConnectionState {
+    /// Install a pending REQ before its handler task starts. A repeated REQ
+    /// with the same subscription ID supersedes and cancels the older task.
+    pub(crate) async fn begin_pending_subscription(
+        &self,
+        sub_id: &str,
+    ) -> Arc<PendingSubscription> {
+        let pending = Arc::new(PendingSubscription::new());
+        if let Some(replaced) = self
+            .pending_subscriptions
+            .lock()
+            .await
+            .insert(sub_id.to_owned(), Arc::clone(&pending))
+        {
+            replaced.cancel();
+        }
+        pending
+    }
+
+    /// Cancel every in-flight REQ before connection registry cleanup begins.
+    async fn cancel_all_pending_subscriptions(&self) {
+        let mut pending = self.pending_subscriptions.lock().await;
+        for (_, request) in pending.drain() {
+            request.cancel();
+        }
+    }
+
+    /// Forget a completed REQ only if it still owns this subscription ID.
+    async fn finish_pending_subscription(
+        &self,
+        sub_id: &str,
+        completed: &Arc<PendingSubscription>,
+    ) {
+        let mut pending = self.pending_subscriptions.lock().await;
+        if pending
+            .get(sub_id)
+            .is_some_and(|current| Arc::ptr_eq(current, completed))
+        {
+            pending.remove(sub_id);
+        }
+    }
+
     /// Sends a data message to this connection's outbound channel.
     ///
     /// On a full buffer, increments the backpressure counter. The first
@@ -163,6 +238,7 @@ async fn handle_active_connection(
 
     let backpressure_count = Arc::new(AtomicU8::new(0));
     let subscriptions = Arc::new(Mutex::new(HashMap::new()));
+    let pending_subscriptions = Arc::new(Mutex::new(HashMap::new()));
 
     let conn = Arc::new(ConnectionState {
         conn_id,
@@ -172,6 +248,7 @@ async fn handle_active_connection(
             challenge: challenge.clone(),
         }),
         subscriptions: Arc::clone(&subscriptions),
+        pending_subscriptions,
         send_tx: tx.clone(),
         ctrl_tx: ctrl_tx.clone(),
         cancel: cancel.clone(),
@@ -412,6 +489,8 @@ async fn recv_loop(
     missed_pongs: Arc<AtomicU8>,
     cancel: CancellationToken,
 ) {
+    let mut req_tasks = JoinSet::new();
+
     loop {
         tokio::select! {
             msg = ws_recv.next() => {
@@ -433,7 +512,12 @@ async fn recv_loop(
                             break;
                         }
                         trace!(len = text.len(), "frame received");
-                        handle_text_message(text.to_string(), Arc::clone(&conn), Arc::clone(&state)).await;
+                        handle_text_message(
+                            text.to_string(),
+                            Arc::clone(&conn),
+                            Arc::clone(&state),
+                            &mut req_tasks,
+                        ).await;
                     }
                     Some(Ok(WsMessage::Binary(bytes))) => {
                         let max_frame_bytes = state.config.max_frame_bytes;
@@ -455,7 +539,12 @@ async fn recv_loop(
                         // (notably certain Nostr libraries) send text payloads in binary frames.
                         // NIP-01 is text-only, but accepting binary is a common relay extension.
                         if let Ok(text) = String::from_utf8(bytes.to_vec()) {
-                            handle_text_message(text, Arc::clone(&conn), Arc::clone(&state)).await;
+                            handle_text_message(
+                                text,
+                                Arc::clone(&conn),
+                                Arc::clone(&state),
+                                &mut req_tasks,
+                            ).await;
                         }
                     }
                     Some(Ok(WsMessage::Pong(_))) => {
@@ -481,12 +570,31 @@ async fn recv_loop(
                     }
                 }
             }
+            completed = req_tasks.join_next(), if !req_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    debug!(conn_id = %conn.conn_id, %error, "REQ handler task failed");
+                }
+            }
             _ = cancel.cancelled() => break,
         }
     }
+
+    shutdown_pending_requests(&conn, &mut req_tasks).await;
 }
 
-async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Arc<AppState>) {
+pub(crate) async fn shutdown_pending_requests(conn: &ConnectionState, req_tasks: &mut JoinSet<()>) {
+    conn.cancel.cancel();
+    conn.cancel_all_pending_subscriptions().await;
+    req_tasks.abort_all();
+    while req_tasks.join_next().await.is_some() {}
+}
+
+async fn handle_text_message(
+    text: String,
+    conn: Arc<ConnectionState>,
+    state: Arc<AppState>,
+    req_tasks: &mut JoinSet<()>,
+) {
     let msg = match ClientMessage::parse(&text) {
         Ok(m) => m,
         Err(e) => {
@@ -548,10 +656,22 @@ async fn handle_text_message(text: String, conn: Arc<ConnectionState>, state: Ar
                     return;
                 }
             };
+            let pending = conn.begin_pending_subscription(&sub_id).await;
             let span = tracing::info_span!("ws.req", conn_id = %conn.conn_id, sub_id = %sub_id);
-            tokio::spawn(
+            req_tasks.spawn(
                 async move {
-                    handlers::req::handle_req(sub_id, filters, conn, state).await;
+                    tokio::select! {
+                        biased;
+                        _ = pending.cancelled() => {}
+                        _ = handlers::req::handle_req(
+                            sub_id.clone(),
+                            filters,
+                            Arc::clone(&conn),
+                            state,
+                            Arc::clone(&pending),
+                        ) => {}
+                    }
+                    conn.finish_pending_subscription(&sub_id, &pending).await;
                     drop(permit);
                 }
                 .instrument(span),
