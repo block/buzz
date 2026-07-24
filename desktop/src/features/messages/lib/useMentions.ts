@@ -38,6 +38,7 @@ import { trimMapToSize } from "@/shared/lib/trimMapToSize";
 import { flushMentionDebounce } from "./flushMentionDebounce";
 import { hasMention } from "./hasMention";
 import { useDraftMentionRouting } from "./useDraftMentionRouting";
+import { collectMentionPubkeys } from "./collectMentionPubkeys";
 import { rankMentionCandidates } from "./mentionRanking";
 import { mapMentionCandidateToSuggestion } from "./mentionSuggestionMapping";
 import {
@@ -792,42 +793,13 @@ export function useMentions(
   );
 
   const extractMentionPubkeys = React.useCallback(
-    (text: string): string[] => {
-      const pubkeys: string[] = [];
-      const selectedDisplayNames = new Set(
-        [
-          ...mentionMapRef.current.keys(),
-          ...personaMentionMapRef.current.keys(),
-        ].map((name) => name.trim().toLowerCase()),
-      );
-
-      for (const [displayName, pubkey] of mentionMapRef.current) {
-        if (hasMention(text, displayName)) {
-          pubkeys.push(pubkey);
-        }
-      }
-
-      for (const candidate of mentionCandidates) {
-        if (!candidate.pubkey) {
-          continue;
-        }
-        if (!candidate.isMember) {
-          continue;
-        }
-        if (pubkeys.includes(candidate.pubkey)) {
-          continue;
-        }
-        const name = candidate.displayName;
-        if (name && selectedDisplayNames.has(name.trim().toLowerCase())) {
-          continue;
-        }
-        if (name && hasMention(text, name)) {
-          pubkeys.push(candidate.pubkey);
-        }
-      }
-
-      return [...new Set(pubkeys)];
-    },
+    (text: string): string[] =>
+      collectMentionPubkeys(
+        text,
+        mentionMapRef.current,
+        mentionCandidates,
+        new Set(personaMentionMapRef.current.keys()),
+      ),
     [mentionCandidates],
   );
 
