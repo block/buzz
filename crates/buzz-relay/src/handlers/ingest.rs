@@ -19,17 +19,18 @@ use buzz_core::kind::{
     KIND_FORUM_POST, KIND_FORUM_VOTE, KIND_GIFT_WRAP, KIND_GIT_ISSUE, KIND_GIT_PATCH,
     KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT, KIND_GIT_REPO_STATE,
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
-    KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
-    KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_GROUP_ADD_MEMBER, KIND_GROUP_CREATE, KIND_GROUP_DELETE, KIND_GROUP_EDIT,
+    KIND_GROUP_REMOVE_MEMBER, KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES,
+    KIND_HUDDLE_PARTICIPANT_JOINED, KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED,
+    KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -192,6 +193,17 @@ fn map_push_accept_error(error: super::push_lease::AcceptError) -> IngestError {
     }
 }
 
+const fn is_user_group_command_kind(kind: u32) -> bool {
+    matches!(
+        kind,
+        KIND_GROUP_CREATE
+            | KIND_GROUP_EDIT
+            | KIND_GROUP_DELETE
+            | KIND_GROUP_ADD_MEMBER
+            | KIND_GROUP_REMOVE_MEMBER
+    )
+}
+
 /// Determine the required scope for a given event kind.
 ///
 /// Returns `Err` for unknown kinds — the relay rejects them.
@@ -277,6 +289,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
             }
         }
         KIND_NIP29_CREATE_GROUP | KIND_CANVAS => Ok(Scope::ChannelsWrite),
+        kind if is_user_group_command_kind(kind) => Ok(Scope::ChannelsWrite),
         KIND_NIP29_JOIN_REQUEST | KIND_NIP29_LEAVE_REQUEST | KIND_NIP43_LEAVE_REQUEST => {
             Ok(Scope::ChannelsRead)
         }
@@ -431,6 +444,13 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_MODERATION_TIMEOUT
             | KIND_MODERATION_UNTIMEOUT
             | KIND_MODERATION_RESOLVE_REPORT
+            // User-group commands are community-global. Fine-grained
+            // creator/admin authorization lives in side_effects.rs.
+            | KIND_GROUP_CREATE
+            | KIND_GROUP_EDIT
+            | KIND_GROUP_DELETE
+            | KIND_GROUP_ADD_MEMBER
+            | KIND_GROUP_REMOVE_MEMBER
             // NIP-43: relay admin commands and leave requests are global — they
             // must never be channel-scoped, even if the event carries a stray `h` tag.
             | RELAY_ADMIN_ADD_MEMBER
@@ -1908,6 +1928,33 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    let validated_user_group_command = if is_user_group_command_kind(kind_u32) {
+        match crate::handlers::side_effects::validate_user_group_command(tenant, state, &event)
+            .await
+        {
+            Ok(command) => Some(command),
+            Err(crate::handlers::side_effects::UserGroupCommandValidationError::Duplicate(
+                message,
+            )) => {
+                return Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: false,
+                    message,
+                });
+            }
+            Err(crate::handlers::side_effects::UserGroupCommandValidationError::Rejected(
+                message,
+            )) => return Err(IngestError::Rejected(message)),
+            Err(crate::handlers::side_effects::UserGroupCommandValidationError::Internal) => {
+                return Err(IngestError::Internal(
+                    "error: internal user-group validation failure".into(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // Processed here (verify consent, mutate archived_identities, emit the
     // relay-signed 8002/8003 delta + 13535 snapshot), then — unlike the
     // NIP-43 admin commands above — the request itself falls through to normal
@@ -2431,14 +2478,21 @@ async fn ingest_event_inner(
         });
     }
 
-    if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
-        if let Err(e) =
-            crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
-                .await
-        {
-            warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+    let user_group_side_effect_error = if let Some(command) = validated_user_group_command {
+        crate::handlers::side_effects::handle_user_group_command(tenant, state, &event, command)
+            .await
+            .err()
+    } else {
+        if crate::handlers::side_effects::is_side_effect_kind(kind_u32) {
+            if let Err(e) =
+                crate::handlers::side_effects::handle_side_effects(tenant, kind_u32, &event, state)
+                    .await
+            {
+                warn!(event_id = %event_id_hex, kind = kind_u32, "Side effect failed: {e}");
+            }
         }
-    }
+        None
+    };
 
     // A freshly inserted reply changed its thread's counters (updated in the
     // same transaction as the insert) — push a fresh relay-signed 39005 so
@@ -2493,6 +2547,24 @@ async fn ingest_event_inner(
         threaded_visibility.clone(),
     )
     .await;
+
+    if let Some(error) = user_group_side_effect_error {
+        return match error {
+            crate::handlers::side_effects::UserGroupCommandValidationError::Duplicate(message) => {
+                Ok(IngestResult {
+                    event_id: event_id_hex,
+                    accepted: false,
+                    message,
+                })
+            }
+            crate::handlers::side_effects::UserGroupCommandValidationError::Rejected(message) => {
+                Err(IngestError::Rejected(message))
+            }
+            crate::handlers::side_effects::UserGroupCommandValidationError::Internal => Err(
+                IngestError::Internal("error: internal user-group side-effect failure".into()),
+            ),
+        };
+    }
 
     info!(event_id = %event_id_hex, kind = kind_u32, "Event ingested via pipeline");
 
@@ -2717,6 +2789,26 @@ mod tests {
     }
 
     #[test]
+    fn user_group_commands_are_global_and_require_channels_write() {
+        let dummy = make_dummy_event();
+        for kind in [
+            KIND_GROUP_CREATE,
+            KIND_GROUP_EDIT,
+            KIND_GROUP_DELETE,
+            KIND_GROUP_ADD_MEMBER,
+            KIND_GROUP_REMOVE_MEMBER,
+        ] {
+            assert!(is_user_group_command_kind(kind));
+            assert_eq!(
+                required_scope_for_kind(kind, &dummy).expect("scope"),
+                Scope::ChannelsWrite
+            );
+            assert!(is_global_only_kind(kind));
+            assert!(!requires_h_channel_scope(kind));
+        }
+    }
+
+    #[test]
     fn moderation_command_rejection_from_ingest_preserves_prefix() {
         let rejection = "restricted: moderator access required".to_string();
         let map_rejection = IngestError::Rejected;
@@ -2779,6 +2871,11 @@ mod tests {
             KIND_MODERATION_TIMEOUT,
             KIND_MODERATION_UNTIMEOUT,
             KIND_MODERATION_RESOLVE_REPORT,
+            KIND_GROUP_CREATE,
+            KIND_GROUP_EDIT,
+            KIND_GROUP_DELETE,
+            KIND_GROUP_ADD_MEMBER,
+            KIND_GROUP_REMOVE_MEMBER,
             KIND_STREAM_MESSAGE,
             KIND_NIP29_PUT_USER,
             KIND_NIP29_REMOVE_USER,

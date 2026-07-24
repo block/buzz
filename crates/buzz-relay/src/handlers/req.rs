@@ -1483,6 +1483,16 @@ mod tests {
         assert!(p_gated_filters_authorized(&[member_notif_ids], authed));
     }
 
+    #[test]
+    fn user_group_state_does_not_require_p_tag() {
+        let authed = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let filter = Filter::new().kind(nostr::Kind::Custom(
+            buzz_core::kind::KIND_GROUP_STATE as u16,
+        ));
+
+        assert!(p_gated_filters_authorized(&[filter], authed));
+    }
+
     /// NIP-AM: kind 44200 must deny `{kinds:[44200], ids:[...]}` by non-owner.
     /// Thufir's implementation note: the helper treats explicit-kind+ids and
     /// kindless ids differently. Explicit `{kinds:[44200], ids:[...]}` is denied;
