@@ -617,6 +617,14 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        // Grok Build speaks ACP natively over stdio.
+        // `grok agent --always-approve stdio` keeps managed turns unattended.
+        "grok" | "grok-build" | "grok-acp" => Some(vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ]),
+
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -692,10 +700,10 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     }
 
     // Older callers relied on the Goose-specific default even for runtimes like
-    // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
-    // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
-    {
+    // Codex, Claude, and Grok. Treat a bare `acp` as "use the runtime default"
+    // so desktop- and env-based launches behave the same way (empty for zero-arg
+    // adapters; `agent stdio` for Grok Build).
+    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") {
         return default_args;
     }
 
@@ -1438,6 +1446,21 @@ mod tests {
     fn normalizes_goose_args_to_acp() {
         assert_eq!(normalize_agent_args("goose", Vec::new()), vec!["acp"]);
         assert_eq!(normalize_agent_args("goose", vec!["".into()]), vec!["acp"]);
+    }
+
+    #[test]
+    fn normalizes_grok_args_to_agent_stdio() {
+        let expected = vec![
+            "agent".to_string(),
+            "--always-approve".to_string(),
+            "stdio".to_string(),
+        ];
+        assert_eq!(normalize_agent_args("grok", Vec::new()), expected);
+        assert_eq!(normalize_agent_args("grok", vec!["acp".into()]), expected);
+        assert_eq!(
+            normalize_agent_args("/Users/me/.grok/bin/grok", Vec::new()),
+            expected
+        );
     }
 
     #[test]
