@@ -2,6 +2,7 @@ import {
   BellOff,
   BellRing,
   Clock,
+  Code,
   Copy,
   CornerUpLeft,
   EllipsisVertical,
@@ -208,6 +209,29 @@ function MoreActionsMenu({
             >
               <Copy className="h-4 w-4" />
               Copy message
+            </DropdownMenuItem>
+          ) : null}
+
+          {hasCopyActions ? (
+            <DropdownMenuItem
+              data-testid={`copy-raw-event-${message.id}`}
+              onClick={() => {
+                const rawEvent = {
+                  id: message.id,
+                  pubkey: message.signerPubkey ?? message.pubkey ?? "",
+                  created_at: message.createdAt,
+                  kind: message.kind ?? 9,
+                  tags: message.tags ?? [],
+                  content: message.body,
+                };
+                copyTextToClipboard(
+                  JSON.stringify(rawEvent, null, 2),
+                  "Raw event JSON copied to clipboard",
+                );
+              }}
+            >
+              <Code className="h-4 w-4" />
+              Copy raw event JSON
             </DropdownMenuItem>
           ) : null}
 
