@@ -61,6 +61,25 @@ test("does not replace direct-message notification titles", () => {
   assert.equal(notificationTitle(item, "Taylor"), "Taylor");
 });
 
+test("mention category produces an @Mention toast title", () => {
+  // Regression for block/buzz#2106: native used to stamp category
+  // `"mentions"` (plural). After fromRawFeedItem canonicalizes to
+  // `"mention"`, notificationTitle must take the mention branch.
+  const item = enrichFeedItemChannel(
+    feedItem({
+      category: "mention",
+      kind: 9,
+      content: "hey @you",
+    }),
+    channels,
+  );
+
+  assert.equal(
+    notificationTitle(item, "Ada"),
+    "Ada mentioned you in #ship-room",
+  );
+});
+
 const feedResponse = (mentions, needsAction = []) => ({
   feed: { mentions, needsAction },
 });
