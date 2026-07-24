@@ -1634,6 +1634,8 @@ test("duplicate instances move from the agents gallery into the agent profile", 
   const personaId = "custom:duplicate-auditor";
   const primaryPubkey = TEST_IDENTITIES.alice.pubkey;
   const additionalPubkey = TEST_IDENTITIES.charlie.pubkey;
+  const primaryRelayUrl = "wss://primary.example.com";
+  const additionalRelayUrl = "wss://secondary.example.com";
   await installMockBridge(page, {
     personas: [
       {
@@ -1646,12 +1648,14 @@ test("duplicate instances move from the agents gallery into the agent profile", 
       {
         pubkey: primaryPubkey,
         name: "Duplicate Auditor",
+        relayUrl: primaryRelayUrl,
         personaId,
         status: "running",
       },
       {
         pubkey: additionalPubkey,
         name: "Duplicate Auditor",
+        relayUrl: additionalRelayUrl,
         personaId,
         status: "stopped",
       },
@@ -1667,11 +1671,33 @@ test("duplicate instances move from the agents gallery into the agent profile", 
 
   await page.getByTestId(`persona-agent-row-${personaId}`).click();
   await page.getByTestId("user-profile-instances").click();
+  await expect(page.getByText(primaryRelayUrl, { exact: true })).toBeVisible();
+  await expect(
+    page.getByText(additionalRelayUrl, { exact: true }),
+  ).toBeVisible();
   await page.getByTestId(`user-profile-instance-${additionalPubkey}`).click();
 
   await expect(page.getByTestId("user-profile-panel")).toBeVisible();
-  await page.getByTestId("user-profile-settings-menu-trigger").click();
-  await expect(
-    page.getByTestId(`user-profile-agent-delete-${additionalPubkey}`),
-  ).toBeVisible();
+  await page.getByTestId("user-profile-edit-agent").click();
+  const dialog = page.getByTestId("edit-agent-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Advanced", exact: true }).click();
+  await dialog.getByTestId("env-vars-add").click();
+  await dialog.getByTestId("env-vars-key").fill("CLAUDE_CONFIG_DIR");
+  await dialog.getByTestId("env-vars-value").fill("C:\\buzz-secondary");
+  await dialog.getByTestId("edit-agent-dialog-submit").click();
+  await expect(dialog).not.toBeVisible();
+
+  const agents = await invokeTauri<
+    Array<{
+      pubkey: string;
+      env_vars: Record<string, string>;
+    }>
+  >(page, "list_managed_agents");
+  expect(
+    agents.find((agent) => agent.pubkey === primaryPubkey)?.env_vars,
+  ).toEqual({});
+  expect(
+    agents.find((agent) => agent.pubkey === additionalPubkey)?.env_vars,
+  ).toEqual({ CLAUDE_CONFIG_DIR: "C:\\buzz-secondary" });
 });

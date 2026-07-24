@@ -401,8 +401,13 @@ function ProfileInstancesSection({
                 onClick={() => onOpenInstance(instance.pubkey)}
                 type="button"
               >
-                <span className="min-w-0 flex-1 truncate text-sm font-medium">
-                  {instance.name}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-medium">
+                    {instance.name}
+                  </span>
+                  <span className="block truncate text-xs text-muted-foreground">
+                    {instance.relayUrl}
+                  </span>
                 </span>
                 <span className="text-xs capitalize text-muted-foreground">
                   {isCurrent ? "Current" : instance.status.replace("_", " ")}
