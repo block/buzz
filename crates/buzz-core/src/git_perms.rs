@@ -24,10 +24,13 @@ pub const MAX_WILDCARDS_PER_PATTERN: usize = 3;
 
 /// A validated ref pattern for matching git refs.
 ///
-/// Grammar: `segment ("/" segment)*` where segment is either a literal
-/// `[a-zA-Z0-9._-]+` or `*` (matches exactly one path segment).
+/// Grammar: `segment ("/" segment)*` where each segment is a literal
+/// `[a-zA-Z0-9._-]+`, `*` (matches exactly one path segment), or `**`
+/// (matches one or more path segments; valid only as the final segment).
 ///
-/// Patterns MUST start with `refs/`. No `**`, `?`, `[...]`, or partial globs.
+/// Patterns MUST start with `refs/` and may contain at most
+/// [`MAX_WILDCARDS_PER_PATTERN`] wildcard segments. No `?`, `[...]`, or
+/// partial globs — a `*` or `**` must be a whole segment, so `v*` is invalid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefPattern {
     /// The original pattern string (e.g., "refs/heads/*").
