@@ -1,6 +1,9 @@
 //! EVENT handler — WS dispatcher → ingest pipeline → fan-out.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use axum::body::Bytes;
 use tracing::{debug, error, info, warn};
@@ -71,6 +74,105 @@ where
             .or_insert_with(|| event_frame_bytes_for_sub(sub_id, event_json));
     }
     frames
+}
+
+const EXPLICIT_MENTION_TAG: &str = "mention";
+const MAX_EXPLICIT_MENTION_NOTICES: usize = 50;
+
+/// Extract Buzz explicit mentions from kind:9 message metadata.
+///
+/// Raw Nostr `p` tags are structural reply/subscription metadata in Buzz, so
+/// they are deliberately ignored here. Only client-authored
+/// `["mention", "<pubkey_hex>"]` tags mean the sender explicitly mentioned a
+/// user and should receive an offline-presence warning.
+fn explicit_mention_pubkeys_for_kind(event: &Event, kind_u32: u32) -> Vec<PublicKey> {
+    if kind_u32 != buzz_core::kind::KIND_STREAM_MESSAGE {
+        return Vec::new();
+    }
+
+    let mut seen = HashSet::new();
+    let mut pubkeys = Vec::new();
+
+    for tag in event.tags.iter() {
+        let parts = tag.as_slice();
+        if parts.first().map(String::as_str) != Some(EXPLICIT_MENTION_TAG) {
+            continue;
+        }
+
+        let Some(pubkey_hex) = parts.get(1) else {
+            continue;
+        };
+        let Ok(pubkey) = PublicKey::from_hex(pubkey_hex) else {
+            continue;
+        };
+        if pubkey == event.pubkey {
+            continue;
+        }
+
+        if seen.insert(pubkey.to_hex()) {
+            pubkeys.push(pubkey);
+            if pubkeys.len() >= MAX_EXPLICIT_MENTION_NOTICES {
+                break;
+            }
+        }
+    }
+
+    pubkeys
+}
+
+fn has_current_buzz_presence(status: Option<&String>) -> bool {
+    status.is_some_and(|status| !status.eq_ignore_ascii_case("offline"))
+}
+
+fn offline_mention_notice_pubkeys(
+    accepted: bool,
+    mentioned_pubkeys: &[PublicKey],
+    presence_by_pubkey: &HashMap<String, String>,
+) -> Vec<PublicKey> {
+    if !accepted {
+        return Vec::new();
+    }
+
+    mentioned_pubkeys
+        .iter()
+        .copied()
+        .filter(|pubkey| !has_current_buzz_presence(presence_by_pubkey.get(&pubkey.to_hex())))
+        .collect()
+}
+
+async fn send_offline_mention_notices(
+    state: &AppState,
+    conn: &ConnectionState,
+    mentioned_pubkeys: &[PublicKey],
+) {
+    if mentioned_pubkeys.is_empty() {
+        return;
+    }
+
+    let presence_by_pubkey = match state
+        .pubsub
+        .get_presence_bulk(&conn.tenant, mentioned_pubkeys)
+        .await
+    {
+        Ok(presence) => presence,
+        Err(error) => {
+            warn!(
+                error = %error,
+                mention_count = mentioned_pubkeys.len(),
+                "offline mention presence lookup failed; skipping sender NOTICE"
+            );
+            metrics::counter!("buzz_mention_presence_lookup_errors_total").increment(1);
+            return;
+        }
+    };
+
+    for pubkey in offline_mention_notice_pubkeys(true, mentioned_pubkeys, &presence_by_pubkey) {
+        let pubkey_hex = pubkey.to_hex();
+        metrics::counter!("buzz_mention_offline_notices_total").increment(1);
+        conn.send(RelayMessage::notice(&format!(
+            "offline: explicitly mentioned user {pubkey_hex} has no current Buzz presence in this workspace"
+        )));
+    }
 }
 
 fn send_fanout_frames<'a, I>(
@@ -702,6 +804,11 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
         conn_id,
     };
 
+    // For kind:9, capture only explicit Buzz mention tags before the event is
+    // moved into ingest. Raw `p` tags are reply/subscription metadata and do
+    // not mean the sender intentionally mentioned that pubkey.
+    let mentioned_pubkeys = explicit_mention_pubkeys_for_kind(&event, kind_u32);
+
     match super::ingest::ingest_event(&state, &conn.tenant, event, ingest_auth).await {
         Ok(result) => {
             if result.accepted {
@@ -721,6 +828,13 @@ pub async fn handle_event(event: Event, conn: Arc<ConnectionState>, state: Arc<A
                 result.accepted,
                 &result.message,
             ));
+
+            // After accepting a kind:9 message, warn only for explicit Buzz
+            // mentions that have no current Redis presence anywhere in this
+            // workspace. This is presence best-effort, not delivery proof.
+            if result.accepted {
+                send_offline_mention_notices(&state, &conn, &mentioned_pubkeys).await;
+            }
         }
         Err(e) => {
             // Sanitize internal errors — don't leak DB/system details over WS.
@@ -1183,6 +1297,81 @@ mod tests {
                 next_cycle.get("same").expect("same frame in next cycle")
             ),
             "fan-out frame sharing must not escape a single cycle"
+        );
+    }
+
+    #[test]
+    fn explicit_mention_pubkeys_ignore_structural_p_tags() {
+        let sender = Keys::generate();
+        let reply_author = Keys::generate();
+        let explicit = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .tags([
+                Tag::parse(["h", &uuid::Uuid::new_v4().to_string()]).expect("h tag"),
+                Tag::parse(["p", &reply_author.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["mention", &explicit.public_key().to_hex()]).expect("mention tag"),
+            ])
+            .sign_with_keys(&sender)
+            .expect("sign event");
+
+        assert_eq!(
+            super::explicit_mention_pubkeys_for_kind(&event, KIND_STREAM_MESSAGE),
+            vec![explicit.public_key()]
+        );
+    }
+
+    #[test]
+    fn explicit_mention_pubkeys_dedupe_filter_and_cap() {
+        let sender = Keys::generate();
+        let duplicate = Keys::generate().public_key();
+        let mut expected = vec![duplicate];
+        let mut tags = vec![
+            Tag::parse(["h", &uuid::Uuid::new_v4().to_string()]).expect("h tag"),
+            Tag::parse(["mention", &duplicate.to_hex()]).expect("mention tag"),
+            Tag::parse(["mention", &duplicate.to_hex().to_ascii_uppercase()])
+                .expect("duplicate mention tag"),
+            Tag::parse(["mention", &sender.public_key().to_hex()]).expect("self mention tag"),
+            Tag::parse(["mention", "not-a-pubkey"]).expect("invalid mention tag"),
+        ];
+
+        for _ in 1..(super::MAX_EXPLICIT_MENTION_NOTICES + 5) {
+            let pubkey = Keys::generate().public_key();
+            expected.push(pubkey);
+            tags.push(Tag::parse(["mention", &pubkey.to_hex()]).expect("mention tag"));
+        }
+        expected.truncate(super::MAX_EXPLICIT_MENTION_NOTICES);
+
+        let event = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .tags(tags)
+            .sign_with_keys(&sender)
+            .expect("sign event");
+
+        assert_eq!(
+            super::explicit_mention_pubkeys_for_kind(&event, KIND_STREAM_MESSAGE),
+            expected
+        );
+        assert!(
+            super::explicit_mention_pubkeys_for_kind(&event, KIND_FORUM_POST).is_empty(),
+            "offline mention NOTICEs are only for stream messages"
+        );
+    }
+
+    #[test]
+    fn offline_mention_notice_pubkeys_require_acceptance_and_missing_presence() {
+        let offline = Keys::generate().public_key();
+        let explicit_offline = Keys::generate().public_key();
+        let online = Keys::generate().public_key();
+        let away = Keys::generate().public_key();
+        let mentioned = vec![offline, explicit_offline, online, away];
+        let mut presence = HashMap::new();
+        presence.insert(explicit_offline.to_hex(), "offline".to_string());
+        presence.insert(online.to_hex(), "online".to_string());
+        presence.insert(away.to_hex(), "away".to_string());
+
+        assert!(super::offline_mention_notice_pubkeys(false, &mentioned, &presence).is_empty());
+        assert_eq!(
+            super::offline_mention_notice_pubkeys(true, &mentioned, &presence),
+            vec![offline, explicit_offline]
         );
     }
 
