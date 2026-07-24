@@ -624,8 +624,8 @@ function RuntimeProvidersSection({
             className="max-w-[560px] rounded-2xl bg-white/70 px-6 py-6 text-sm text-muted-foreground"
             data-testid="onboarding-acp-empty"
           >
-            No supported agent harnesses were detected yet. Install Claude Code
-            or Codex, then check again.
+            No supported agent harnesses were detected yet. Install a supported
+            harness, then check again.
           </p>
         )}
 
