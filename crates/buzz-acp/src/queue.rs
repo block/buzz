@@ -1148,9 +1148,10 @@ pub(crate) fn format_event_block(
 /// top level.
 fn append_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
-        "\nIMPORTANT: For ordinary replies in this turn, use `--reply-to {event_id}` \
-         on `buzz messages send` so the conversation stays threaded. \
-         If the human explicitly asks for a channel-root, top-level, \
+        "\nIMPORTANT: Your session text is NOT delivered to the channel — publish \
+         with `buzz messages send`. For ordinary replies in this turn, use \
+         `--reply-to {event_id}` on `buzz messages send` so the conversation stays \
+         threaded. If the human explicitly asks for a channel-root, top-level, \
          or broadcast post, send that message without `--reply-to`. \
          If the requested destination is ambiguous, ask before sending."
     ));
@@ -1163,9 +1164,10 @@ fn append_reply_instruction(s: &mut String, event_id: &str) {
 /// choice open) prevents replying into a stale/unrelated prior thread.
 fn append_new_thread_reply_instruction(s: &mut String, event_id: &str) {
     s.push_str(&format!(
-        "\nIMPORTANT: This is a new top-level message. For ordinary replies in \
-         this turn, use `--reply-to {event_id}` on `buzz messages send` — the \
-         triggering message is the thread root. Do NOT reply into any other \
+        "\nIMPORTANT: Your session text is NOT delivered to the channel — publish \
+         with `buzz messages send`. This is a new top-level message. For ordinary \
+         replies in this turn, use `--reply-to {event_id}` on `buzz messages send` \
+         — the triggering message is the thread root. Do NOT reply into any other \
          (older) thread. If the human explicitly asks for a channel-root, \
          top-level, or broadcast post, send that message without `--reply-to`."
     ));
@@ -3888,6 +3890,10 @@ mod tests {
         assert!(
             prompt.contains(&format!("--reply-to {root_id}")),
             "human-facing thread reply should anchor to the thread root"
+        );
+        assert!(
+            prompt.contains("session text is NOT delivered to the channel"),
+            "reply instruction must state that session text is not delivered"
         );
         assert!(
             prompt.contains("For ordinary replies in this turn"),
