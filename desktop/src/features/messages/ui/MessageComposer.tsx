@@ -60,6 +60,7 @@ import { useMentionSendFlow } from "./useMentionSendFlow";
 import { usePersistentAgentMentionHydration } from "./usePersistentAgentMentionHydration";
 import { useComposerContentState } from "./useComposerContentState";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
+import { useComposerDictation } from "./useComposerDictation";
 
 type MessageComposerAudienceContext = {
   type: "thread";
@@ -358,8 +359,12 @@ function MessageComposerImpl({
       }
     },
   });
-
   const linkEditor = useLinkEditor(richText);
+  const dictation = useComposerDictation({
+    disabled,
+    editor: richText.editor,
+    sessionKey: effectiveDraftKey,
+  });
   syncContentRefFromEditorRef.current = () => {
     const markdown = richText.getMarkdown();
     contentRef.current = markdown;
@@ -598,6 +603,7 @@ function MessageComposerImpl({
 
   // ── Submit message ──────────────────────────────────────────────────
   const submitMessage = React.useCallback(async () => {
+    if (dictation.isActive) return;
     const trimmed = syncComposerContentFromEditor().trim();
 
     // Edit mode
@@ -712,6 +718,7 @@ function MessageComposerImpl({
     channelId,
     channelLinks.clearChannels,
     customEmoji,
+    dictation.isActive,
     drafts.loadDraft,
     emojiAutocomplete.clearEmojis,
     media.pendingImetaRef,
@@ -913,21 +920,12 @@ function MessageComposerImpl({
     });
   }, [media.setPendingImeta, richText.editor, scrollComposerToBottom]);
 
-  // ── Send button state ───────────────────────────────────────────────
-  const sendDisabled = React.useMemo(
-    () =>
-      disabled ||
-      media.isUploading ||
-      mentionSendFlow.isPreparingMentionSend ||
-      (isContentEmpty && media.pendingImeta.length === 0),
-    [
-      disabled,
-      media.isUploading,
-      mentionSendFlow.isPreparingMentionSend,
-      isContentEmpty,
-      media.pendingImeta.length,
-    ],
-  );
+  const sendDisabled =
+    disabled ||
+    dictation.isActive ||
+    media.isUploading ||
+    mentionSendFlow.isPreparingMentionSend ||
+    (isContentEmpty && media.pendingImeta.length === 0);
 
   const handleCaptureSelection = React.useCallback(() => {
     // No-op for Tiptap — selection is managed by ProseMirror.
@@ -1077,6 +1075,7 @@ function MessageComposerImpl({
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={disabled}
+              dictationStatus={dictation.status}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending}
@@ -1085,6 +1084,7 @@ function MessageComposerImpl({
               onEmojiPickerOpenChange={setIsEmojiPickerOpen}
               onEmojiSelect={insertEmoji}
               onFormattingToggle={handleFormattingToggle}
+              onDictationToggle={dictation.toggle}
               onLinkButton={linkEditor.openFromToolbar}
               onOpenMentionPicker={openMentionPicker}
               onPaperclip={handlePaperclipClick}
