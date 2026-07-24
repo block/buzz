@@ -3051,7 +3051,7 @@ impl Db {
     /// exactly once; only its SHA-256 hash is persisted.
     ///
     /// `max_uses` is `None` for unlimited or `Some(1..=10000)`.
-    /// `ttl_secs` is clamped to `[60, 30 days]`.
+    /// `ttl_secs` must be in the shared invite lifetime range.
     pub async fn mint_relay_invite(
         &self,
         community: CommunityId,

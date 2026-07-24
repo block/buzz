@@ -25,7 +25,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::handlers::side_effects::{publish_nip43_member_added, publish_nip43_membership_list};
-use crate::invite_token::{self, DEFAULT_INVITE_TTL_SECS};
+use crate::invite_token::{self, DEFAULT_INVITE_TTL_SECS, MAX_INVITE_TTL_SECS};
 use crate::state::AppState;
 
 use super::{api_error, bridge, internal_error};
@@ -43,7 +43,8 @@ pub(crate) const CLAIM_RATE_CACHE_CAPACITY: u64 = 10_000;
 /// Body for `POST /api/invites`.
 #[derive(Debug, Default, Deserialize)]
 pub struct MintInviteRequest {
-    /// Requested lifetime in seconds. Clamped to
+    /// Requested lifetime in seconds. Must be between
+    /// [`buzz_core::invite::MIN_INVITE_TTL_SECS`] and
     /// [`invite_token::MAX_INVITE_TTL_SECS`]; defaults to 72 h.
     #[serde(default)]
     pub ttl_secs: Option<u64>,
@@ -52,6 +53,35 @@ pub struct MintInviteRequest {
     /// must be an integer from 1 through [`buzz_db::relay_invite::MAX_INVITE_USES`].
     #[serde(default)]
     pub max_uses: Option<i32>,
+}
+
+fn validate_mint_request(
+    request: &MintInviteRequest,
+) -> Result<(u64, Option<i32>), (StatusCode, Json<Value>)> {
+    let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
+    if !(buzz_core::invite::MIN_INVITE_TTL_SECS..=MAX_INVITE_TTL_SECS).contains(&ttl) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "ttl_secs must be between {} and {MAX_INVITE_TTL_SECS}",
+                buzz_core::invite::MIN_INVITE_TTL_SECS
+            ),
+        ));
+    }
+
+    if let Some(max_uses) = request.max_uses {
+        if !(1..=buzz_db::relay_invite::MAX_INVITE_USES).contains(&max_uses) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                &format!(
+                    "max_uses must be between 1 and {}",
+                    buzz_db::relay_invite::MAX_INVITE_USES
+                ),
+            ));
+        }
+    }
+
+    Ok((ttl, request.max_uses))
 }
 
 /// Body for `POST /api/invites/claim`.
@@ -265,26 +295,12 @@ pub async fn mint_invite(
         })?
     };
 
-    let ttl = request.ttl_secs.unwrap_or(DEFAULT_INVITE_TTL_SECS);
-
-    // Validate max_uses strictly: reject zero, negatives, and over-cap values
-    // with 400. Do not silently clamp.
-    if let Some(mu) = request.max_uses {
-        if !(1..=buzz_db::relay_invite::MAX_INVITE_USES).contains(&mu) {
-            return Err(api_error(
-                StatusCode::BAD_REQUEST,
-                &format!(
-                    "max_uses must be between 1 and {}",
-                    buzz_db::relay_invite::MAX_INVITE_USES
-                ),
-            ));
-        }
-    }
+    let (ttl, max_uses) = validate_mint_request(&request)?;
 
     // Mint a v2 opaque, database-backed invite.
     let invite = state
         .db
-        .mint_relay_invite(tenant.community(), &sender_hex, ttl, request.max_uses)
+        .mint_relay_invite(tenant.community(), &sender_hex, ttl, max_uses)
         .await
         .map_err(|e| internal_error(&format!("invite mint: {e}")))?;
 
@@ -348,6 +364,9 @@ pub async fn claim_invite(
     // Route by exact prefix: v2. codes use the durable invite table. No
     // fallback to v1 HMAC verification for malformed v2 input.
     if request.code.starts_with(invite_token::V2_PREFIX) {
+        invite_token::validate_v2_code(&request.code)
+            .map_err(|_| api_error(StatusCode::FORBIDDEN, "invite_invalid"))?;
+
         // Join-policy receipt verification, same mechanism as v1: the receipt
         // is bound to the code string by SHA-256, so it works for v2 codes.
         if let Some(policy) = &state.config.join_policy {
@@ -413,7 +432,7 @@ pub async fn claim_invite(
                 Err(api_error(StatusCode::FORBIDDEN, "invite_exhausted"))
             }
             buzz_db::relay_invite::ClaimOutcome::Invalid => {
-                Err(api_error(StatusCode::BAD_REQUEST, "invite_invalid"))
+                Err(api_error(StatusCode::FORBIDDEN, "invite_invalid"))
             }
         };
     }
@@ -521,7 +540,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use crate::invite_token::{derive_invite_key, InvitePayload};
+    use crate::invite_token::{derive_invite_key, InvitePayload, MAX_INVITE_TTL_SECS};
 
     use crate::router::build_router;
     use crate::state::AppState;
@@ -702,6 +721,358 @@ mod tests {
             .await
             .expect("read response body");
         serde_json::from_slice(&bytes).expect("response JSON")
+    }
+
+    async fn mint_code(state: Arc<AppState>, host: &str, owner: &Keys, request: Value) -> String {
+        let response = post_json(state, host, "/api/invites", owner, request.to_string()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        read_json(response)
+            .await
+            .get("code")
+            .and_then(Value::as_str)
+            .expect("minted code")
+            .to_string()
+    }
+
+    async fn event_count(state: &AppState, community: buzz_core::CommunityId, kind: i32) -> i64 {
+        state
+            .db
+            .count_events(&buzz_db::EventQuery {
+                kinds: Some(vec![kind]),
+                global_only: true,
+                ..buzz_db::EventQuery::for_community(community)
+            })
+            .await
+            .expect("count side-effect events")
+    }
+
+    #[test]
+    fn mint_request_deserialization_is_strict() {
+        for valid in [
+            serde_json::json!({}),
+            serde_json::json!({ "max_uses": null }),
+            serde_json::json!({ "max_uses": 1 }),
+            serde_json::json!({ "max_uses": buzz_db::relay_invite::MAX_INVITE_USES }),
+        ] {
+            serde_json::from_value::<super::MintInviteRequest>(valid).expect("valid request");
+        }
+
+        for invalid in [
+            serde_json::json!({ "max_uses": 1.5 }),
+            serde_json::json!({ "max_uses": "10" }),
+            serde_json::json!({ "ttl_secs": -1 }),
+            serde_json::json!({ "ttl_secs": 1.5 }),
+            serde_json::json!({ "ttl_secs": "3600" }),
+        ] {
+            assert!(
+                serde_json::from_value::<super::MintInviteRequest>(invalid.clone()).is_err(),
+                "accepted wrong JSON type: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn mint_request_validation_enforces_bounds_without_a_database() {
+        use super::validate_mint_request;
+
+        for (request, expected) in [
+            (
+                super::MintInviteRequest::default(),
+                (crate::invite_token::DEFAULT_INVITE_TTL_SECS, None),
+            ),
+            (
+                super::MintInviteRequest {
+                    ttl_secs: Some(buzz_core::invite::MIN_INVITE_TTL_SECS),
+                    max_uses: Some(1),
+                },
+                (buzz_core::invite::MIN_INVITE_TTL_SECS, Some(1)),
+            ),
+            (
+                super::MintInviteRequest {
+                    ttl_secs: Some(MAX_INVITE_TTL_SECS),
+                    max_uses: Some(buzz_db::relay_invite::MAX_INVITE_USES),
+                },
+                (
+                    MAX_INVITE_TTL_SECS,
+                    Some(buzz_db::relay_invite::MAX_INVITE_USES),
+                ),
+            ),
+        ] {
+            assert_eq!(
+                validate_mint_request(&request).expect("valid request"),
+                expected
+            );
+        }
+
+        for request in [
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(0),
+            },
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(-1),
+            },
+            super::MintInviteRequest {
+                ttl_secs: None,
+                max_uses: Some(buzz_db::relay_invite::MAX_INVITE_USES + 1),
+            },
+            super::MintInviteRequest {
+                ttl_secs: Some(buzz_core::invite::MIN_INVITE_TTL_SECS - 1),
+                max_uses: None,
+            },
+            super::MintInviteRequest {
+                ttl_secs: Some(MAX_INVITE_TTL_SECS + 1),
+                max_uses: None,
+            },
+        ] {
+            assert_eq!(
+                validate_mint_request(&request)
+                    .expect_err("invalid request")
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn mint_validates_max_uses_and_ttl_bounds() {
+        let host = format!("invites-validation-{}.example", Uuid::new_v4().simple());
+        let owner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+
+        for body in [
+            serde_json::json!({ "max_uses": 0 }),
+            serde_json::json!({ "max_uses": -1 }),
+            serde_json::json!({ "max_uses": buzz_db::relay_invite::MAX_INVITE_USES + 1 }),
+            serde_json::json!({ "ttl_secs": buzz_core::invite::MIN_INVITE_TTL_SECS - 1 }),
+            serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS + 1 }),
+        ] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites",
+                &owner,
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({ "max_uses": null }),
+            serde_json::json!({ "max_uses": 1 }),
+            serde_json::json!({ "max_uses": buzz_db::relay_invite::MAX_INVITE_USES }),
+            serde_json::json!({ "ttl_secs": buzz_core::invite::MIN_INVITE_TTL_SECS }),
+            serde_json::json!({ "ttl_secs": MAX_INVITE_TTL_SECS }),
+        ] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites",
+                &owner,
+                body.to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn malformed_and_unknown_v2_codes_are_forbidden_without_v1_fallback() {
+        let host = format!("invites-v2-invalid-{}.example", Uuid::new_v4().simple());
+        let joiner = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let unknown = format!("v2.{}", URL_SAFE_NO_PAD.encode([9_u8; 32]));
+
+        for code in [
+            "v2.".to_string(),
+            "v2.not-base64!".to_string(),
+            format!("v2.{}", URL_SAFE_NO_PAD.encode([9_u8; 31])),
+            unknown,
+        ] {
+            let response = post_json(
+                state.clone(),
+                &host,
+                "/api/invites/claim",
+                &joiner,
+                serde_json::json!({ "code": code }).to_string(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{code}");
+            assert_eq!(
+                read_json(response)
+                    .await
+                    .get("error")
+                    .and_then(Value::as_str),
+                Some("invite_invalid")
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bounded_v2_claims_publish_side_effects_only_for_joined() {
+        let host = format!(
+            "invites-v2-side-effects-{}.example",
+            Uuid::new_v4().simple()
+        );
+        let owner = Keys::generate();
+        let first = Keys::generate();
+        let second = Keys::generate();
+        let state = invite_test_state(&host)
+            .await
+            .expect("requires reachable Postgres and relay test state");
+        let community = state
+            .db
+            .lookup_community_by_host(&host)
+            .await
+            .expect("lookup")
+            .expect("community exists");
+        state
+            .db
+            .add_relay_member(community.id, &owner.public_key().to_hex(), "owner", None)
+            .await
+            .expect("seed owner");
+        let before_delta_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+        )
+        .await;
+        let before_list_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+        )
+        .await;
+        let code = mint_code(
+            state.clone(),
+            &host,
+            &owner,
+            serde_json::json!({ "max_uses": 1 }),
+        )
+        .await;
+        let claim_body = serde_json::json!({ "code": code }).to_string();
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &first,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("joined")
+        );
+        let delta_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+        )
+        .await;
+        let list_count = event_count(
+            &state,
+            community.id,
+            buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+        )
+        .await;
+        assert_eq!(delta_count, before_delta_count + 1);
+        assert_eq!(list_count, before_list_count + 1);
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &first,
+            claim_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("status")
+                .and_then(Value::as_str),
+            Some("already_member")
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+            )
+            .await,
+            delta_count
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            )
+            .await,
+            list_count
+        );
+
+        let response = post_json(
+            state.clone(),
+            &host,
+            "/api/invites/claim",
+            &second,
+            claim_body,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            read_json(response)
+                .await
+                .get("error")
+                .and_then(Value::as_str),
+            Some("invite_exhausted")
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBER_ADDED as i32,
+            )
+            .await,
+            delta_count
+        );
+        assert_eq!(
+            event_count(
+                &state,
+                community.id,
+                buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST as i32,
+            )
+            .await,
+            list_count
+        );
     }
 
     #[tokio::test]

@@ -74,6 +74,28 @@ pub struct MintedInvite {
     pub invite_id: uuid::Uuid,
 }
 
+fn validate_mint_inputs(ttl_secs: u64, max_uses: Option<i32>) -> Result<()> {
+    if !(buzz_core::invite::MIN_INVITE_TTL_SECS..=buzz_core::invite::MAX_INVITE_TTL_SECS)
+        .contains(&ttl_secs)
+    {
+        return Err(crate::error::DbError::InvalidData(format!(
+            "ttl_secs must be between {} and {}",
+            buzz_core::invite::MIN_INVITE_TTL_SECS,
+            buzz_core::invite::MAX_INVITE_TTL_SECS
+        )));
+    }
+
+    if let Some(max_uses) = max_uses {
+        if !(1..=MAX_INVITE_USES).contains(&max_uses) {
+            return Err(crate::error::DbError::InvalidData(format!(
+                "max_uses must be between 1 and {MAX_INVITE_USES}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Hash a v2 code string to its SHA-256 digest (32 bytes).
 ///
 /// The code is the full `v2.<base64url>` string. We hash the entire string so
@@ -85,7 +107,7 @@ pub fn hash_invite_code(code: &str) -> [u8; 32] {
 /// Mint a v2 invite: generate a 32-byte random secret, hash it, persist the
 /// row, and return the plaintext code plus metadata.
 ///
-/// `ttl_secs` is clamped to the same `[60, MAX_INVITE_TTL_SECS]` range as v1.
+/// `ttl_secs` must be in the shared invite lifetime range.
 /// `max_uses` must be `None` (unlimited) or `Some(1..=10000)`.
 pub async fn mint_relay_invite(
     pool: &PgPool,
@@ -94,25 +116,14 @@ pub async fn mint_relay_invite(
     ttl_secs: u64,
     max_uses: Option<i32>,
 ) -> Result<MintedInvite> {
+    validate_mint_inputs(ttl_secs, max_uses)?;
+
     // Generate 32 random bytes and encode as base64url — this is the secret.
     let secret: [u8; 32] = rand::random();
     let code = format!("v2.{}", URL_SAFE_NO_PAD.encode(secret));
     let token_hash = hash_invite_code(&code);
-
-    // Clamp TTL the same way v1 does.
-    let max_ttl = 30 * 24 * 60 * 60; // 30 days, matches invite_token::MAX_INVITE_TTL_SECS
-    let ttl = ttl_secs.clamp(60, max_ttl);
     let now = Utc::now();
-    let expires_at = now + chrono::Duration::seconds(ttl as i64);
-
-    // Validate max_uses range (defense-in-depth; the DB CHECK also enforces this).
-    if let Some(mu) = max_uses {
-        if !(1..=MAX_INVITE_USES).contains(&mu) {
-            return Err(crate::error::DbError::InvalidData(format!(
-                "max_uses must be between 1 and {MAX_INVITE_USES}"
-            )));
-        }
-    }
+    let expires_at = now + chrono::Duration::seconds(ttl_secs as i64);
 
     let row = sqlx::query(
         "INSERT INTO relay_invites (community_id, token_hash, max_uses, expires_at, created_by) \
@@ -233,8 +244,10 @@ pub async fn claim_relay_invite(
         }
     }
 
-    // 8. Insert relay member.
-    sqlx::query(
+    // 8. Insert relay member. The conflict branch covers a claimant admitted
+    // concurrently through a different invite: only the transaction that
+    // actually inserted membership may consume this invite.
+    let inserted = sqlx::query(
         "INSERT INTO relay_members (community_id, pubkey, role, added_by) \
          VALUES ($1, $2, 'member', 'invite') \
          ON CONFLICT (community_id, pubkey) DO NOTHING",
@@ -242,9 +255,12 @@ pub async fn claim_relay_invite(
     .bind(community.as_uuid())
     .bind(claimer_pubkey)
     .execute(&mut *tx)
-    .await?;
+    .await?
+    .rows_affected()
+        > 0;
 
-    // 9. Insert join-policy acceptance evidence.
+    // 9. Insert join-policy acceptance evidence. This is required for both a
+    // new member and a claimant whose concurrent membership insert won first.
     if let Some(version) = policy_version {
         sqlx::query(
             "INSERT INTO join_policy_acceptances (community_id, pubkey, policy_version) \
@@ -255,6 +271,14 @@ pub async fn claim_relay_invite(
         .bind(version)
         .execute(&mut *tx)
         .await?;
+    }
+
+    if !inserted {
+        tx.commit().await?;
+        return Ok(ClaimOutcome::AlreadyMember {
+            use_count,
+            uses_remaining: uses_remaining(),
+        });
     }
 
     // 10. Increment use_count (for every new member, even unlimited).
@@ -283,4 +307,266 @@ pub async fn claim_relay_invite(
         use_count: new_use_count,
         uses_remaining: new_uses_remaining,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relay_members::is_relay_member;
+    use sqlx::PgPool;
+    use uuid::Uuid;
+
+    const TEST_DB_URL: &str = "postgres://buzz:buzz_dev@localhost:5432/buzz"; // sadscan:disable np.postgres.1
+
+    async fn setup_pool() -> PgPool {
+        let database_url = std::env::var("BUZZ_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .unwrap_or_else(|_| TEST_DB_URL.to_owned());
+        PgPool::connect(&database_url)
+            .await
+            .expect("connect to test DB")
+    }
+
+    async fn make_test_community(pool: &PgPool) -> CommunityId {
+        let id = Uuid::new_v4();
+        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+            .bind(id)
+            .bind(format!("relay-invite-test-{}.example", id.simple()))
+            .execute(pool)
+            .await
+            .expect("insert test community");
+        CommunityId::from_uuid(id)
+    }
+
+    async fn delete_test_community(pool: &PgPool, community: CommunityId) {
+        let mut tx = pool.begin().await.expect("begin test cleanup");
+        sqlx::query("DELETE FROM relay_invites WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test invites");
+        sqlx::query("DELETE FROM relay_members WHERE community_id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test members");
+        sqlx::query("DELETE FROM communities WHERE id = $1")
+            .bind(community.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .expect("delete test community");
+        tx.commit().await.expect("commit test cleanup");
+    }
+
+    fn test_pubkey() -> String {
+        format!("{:064x}", Uuid::new_v4().as_u128())
+    }
+
+    async fn use_count(pool: &PgPool, community: CommunityId, invite_id: Uuid) -> i32 {
+        sqlx::query_scalar(
+            "SELECT use_count FROM relay_invites WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community.as_uuid())
+        .bind(invite_id)
+        .fetch_one(pool)
+        .await
+        .expect("read invite use_count")
+    }
+
+    #[test]
+    fn mint_validation_rejects_invalid_bounds_before_database_access() {
+        for (ttl, max_uses) in [
+            (buzz_core::invite::MIN_INVITE_TTL_SECS - 1, None),
+            (buzz_core::invite::MAX_INVITE_TTL_SECS + 1, None),
+            (3600, Some(0)),
+            (3600, Some(-1)),
+            (3600, Some(MAX_INVITE_USES + 1)),
+        ] {
+            let error = validate_mint_inputs(ttl, max_uses).expect_err("invalid mint contract");
+            assert!(matches!(error, crate::DbError::InvalidData(_)), "{error:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn bounded_claim_exhausts_and_existing_member_retry_does_not_consume() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let first = test_pubkey();
+        let second = test_pubkey();
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint bounded invite");
+        let hash = hash_invite_code(&invite.code);
+
+        assert_eq!(
+            claim_relay_invite(&pool, community, &hash, &first, None)
+                .await
+                .expect("first claim"),
+            ClaimOutcome::Joined {
+                use_count: 1,
+                uses_remaining: Some(0),
+            }
+        );
+        assert_eq!(
+            claim_relay_invite(&pool, community, &hash, &first, None)
+                .await
+                .expect("idempotent retry"),
+            ClaimOutcome::AlreadyMember {
+                use_count: 1,
+                uses_remaining: Some(0),
+            }
+        );
+        assert_eq!(
+            claim_relay_invite(&pool, community, &hash, &second, None)
+                .await
+                .expect("exhausted claim"),
+            ClaimOutcome::Exhausted
+        );
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 1);
+        assert!(is_relay_member(&pool, community, &first)
+            .await
+            .expect("first membership"));
+        assert!(!is_relay_member(&pool, community, &second)
+            .await
+            .expect("second membership"));
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn concurrent_claims_serialize_the_final_slot() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let first = test_pubkey();
+        let second = test_pubkey();
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint bounded invite");
+        let hash = hash_invite_code(&invite.code);
+
+        let (first_outcome, second_outcome) = tokio::join!(
+            claim_relay_invite(&pool, community, &hash, &first, None),
+            claim_relay_invite(&pool, community, &hash, &second, None),
+        );
+        let outcomes = [
+            first_outcome.expect("first concurrent claim"),
+            second_outcome.expect("second concurrent claim"),
+        ];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ClaimOutcome::Joined { .. }))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, ClaimOutcome::Exhausted))
+                .count(),
+            1
+        );
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 1);
+        let admitted = is_relay_member(&pool, community, &first)
+            .await
+            .expect("first membership") as u8
+            + is_relay_member(&pool, community, &second)
+                .await
+                .expect("second membership") as u8;
+        assert_eq!(admitted, 1);
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn expiry_and_tenant_scope_return_typed_failures() {
+        let pool = setup_pool().await;
+        let community_a = make_test_community(&pool).await;
+        let community_b = make_test_community(&pool).await;
+        let invite = mint_relay_invite(&pool, community_a, "owner", 3600, Some(2))
+            .await
+            .expect("mint invite");
+        let hash = hash_invite_code(&invite.code);
+
+        assert_eq!(
+            claim_relay_invite(&pool, community_b, &hash, &test_pubkey(), None)
+                .await
+                .expect("cross-tenant claim"),
+            ClaimOutcome::Invalid
+        );
+
+        sqlx::query(
+            "UPDATE relay_invites SET expires_at = now() - interval '1 second' \
+             WHERE community_id = $1 AND id = $2",
+        )
+        .bind(community_a.as_uuid())
+        .bind(invite.invite_id)
+        .execute(&pool)
+        .await
+        .expect("expire invite");
+        assert_eq!(
+            claim_relay_invite(&pool, community_a, &hash, &test_pubkey(), None)
+                .await
+                .expect("expired claim"),
+            ClaimOutcome::Expired
+        );
+        assert_eq!(use_count(&pool, community_a, invite.invite_id).await, 0);
+        delete_test_community(&pool, community_a).await;
+        delete_test_community(&pool, community_b).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unlimited_invites_count_each_new_member() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, None)
+            .await
+            .expect("mint unlimited invite");
+        let hash = hash_invite_code(&invite.code);
+
+        for (expected_count, pubkey) in [(1, test_pubkey()), (2, test_pubkey())] {
+            assert_eq!(
+                claim_relay_invite(&pool, community, &hash, &pubkey, None)
+                    .await
+                    .expect("unlimited claim"),
+                ClaimOutcome::Joined {
+                    use_count: expected_count,
+                    uses_remaining: None,
+                }
+            );
+        }
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 2);
+        delete_test_community(&pool, community).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn policy_evidence_failure_rolls_back_membership_and_consumption() {
+        let pool = setup_pool().await;
+        let community = make_test_community(&pool).await;
+        let pubkey = test_pubkey();
+        let invite = mint_relay_invite(&pool, community, "owner", 3600, Some(1))
+            .await
+            .expect("mint bounded invite");
+        let hash = hash_invite_code(&invite.code);
+
+        let error = claim_relay_invite(&pool, community, &hash, &pubkey, Some("too-short"))
+            .await
+            .expect_err("policy CHECK must reject an invalid version");
+        assert!(matches!(error, crate::DbError::Sqlx(_)), "{error:?}");
+        assert!(!is_relay_member(&pool, community, &pubkey)
+            .await
+            .expect("membership after rollback"));
+        assert_eq!(use_count(&pool, community, invite.invite_id).await, 0);
+
+        assert!(matches!(
+            claim_relay_invite(&pool, community, &hash, &pubkey, None)
+                .await
+                .expect("claim after rollback"),
+            ClaimOutcome::Joined { use_count: 1, .. }
+        ));
+        delete_test_community(&pool, community).await;
+    }
 }
