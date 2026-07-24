@@ -869,10 +869,16 @@ async fn try_load_persisted_session(
                 session_id = %stored,
                 channel_id = %channel_id,
                 error = %e,
-                "session/load failed — clearing binding and creating a new session"
+                "session/load failed — clearing stale binding (if unchanged) and creating a new session"
             );
-            ctx.session_store
-                .remove(&ctx.agent_command, &ctx.agent_args, channel_id);
+            // Only drop the binding we failed to load. A concurrent process may
+            // already have written a newer session for this channel.
+            let _ = ctx.session_store.remove_if_equals(
+                &ctx.agent_command,
+                &ctx.agent_args,
+                channel_id,
+                &stored,
+            );
             None
         }
     }

@@ -102,9 +102,11 @@ tools as the Hermes CLI.
 
 export BUZZ_ACP_AGENT_COMMAND="hermes"
 export BUZZ_ACP_AGENT_ARGS="acp"          # empty also normalises to acp
-export HERMES_HOME="$HOME/.hermes"        # or a named profile home
+export HERMES_HOME="$HOME/.hermes"        # process home; does not namespace the durable store
 export BUZZ_ACP_NO_MEMORY="true"          # must be the string true (not 1)
 # Keep a single worker per profile home (Desktop: parallelism=1).
+# For a second Hermes profile, use unique args (e.g. BUZZ_ACP_AGENT_ARGS="-p chad acp")
+# so session bindings do not collide. HERMES_HOME alone is not enough.
 
 buzz-acp
 ```

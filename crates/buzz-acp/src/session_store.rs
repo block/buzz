@@ -130,7 +130,7 @@ impl SessionStore {
         }
     }
 
-    /// Remove a binding (after invalidation / failed load).
+    /// Remove a binding (after invalidation / explicit rotate).
     pub fn remove(&self, agent_command: &str, agent_args: &[String], channel_id: &Uuid) {
         let key = binding_key(agent_command, agent_args, channel_id);
         let Some(_lock) = self.acquire_lock(true) else {
@@ -145,6 +145,53 @@ impl SessionStore {
                 }
             }
             Err(e) => self.warn_io("failed to read ACP session bindings before removal", &e),
+        }
+    }
+
+    /// Remove a binding only if it still points at `expected_session_id`.
+    ///
+    /// Used after a failed `session/load`: another process may have already
+    /// written a newer session for the same channel, and a key-only remove
+    /// would delete that fresher binding.
+    ///
+    /// Returns `true` when a matching binding was removed.
+    pub fn remove_if_equals(
+        &self,
+        agent_command: &str,
+        agent_args: &[String],
+        channel_id: &Uuid,
+        expected_session_id: &str,
+    ) -> bool {
+        let key = binding_key(agent_command, agent_args, channel_id);
+        let Some(_lock) = self.acquire_lock(true) else {
+            return false;
+        };
+        match load_store(&self.path) {
+            Ok(mut data) => {
+                let matches = data
+                    .sessions
+                    .get(&key)
+                    .is_some_and(|current| current == expected_session_id);
+                if !matches {
+                    return false;
+                }
+                data.sessions.remove(&key);
+                if let Err(e) = save_store(&self.path, &data) {
+                    self.warn_io(
+                        "failed to persist conditional ACP session binding removal",
+                        &e,
+                    );
+                    return false;
+                }
+                true
+            }
+            Err(e) => {
+                self.warn_io(
+                    "failed to read ACP session bindings before conditional removal",
+                    &e,
+                );
+                false
+            }
         }
     }
 
@@ -361,5 +408,53 @@ mod tests {
             store.get("hermes", &["acp".into()], &channel).as_deref(),
             Some("recovered")
         );
+    }
+
+    #[test]
+    fn remove_if_equals_does_not_delete_newer_binding() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let args = ["acp".into()];
+        let channel = Uuid::new_v4();
+
+        // Process A reads X.
+        let process_a = SessionStore::open(path.clone());
+        process_a.put("hermes", &args, &channel, "session-x");
+        let read_x = process_a
+            .get("hermes", &args, &channel)
+            .expect("process A read X");
+        assert_eq!(read_x, "session-x");
+
+        // Process B writes Y for the same channel.
+        let process_b = SessionStore::open(path.clone());
+        process_b.put("hermes", &args, &channel, "session-y");
+        assert_eq!(
+            process_b.get("hermes", &args, &channel).as_deref(),
+            Some("session-y")
+        );
+
+        // Process A's failed load of X must not delete Y.
+        let removed = process_a.remove_if_equals("hermes", &args, &channel, &read_x);
+        assert!(!removed);
+
+        let final_store = SessionStore::open(path);
+        assert_eq!(
+            final_store.get("hermes", &args, &channel).as_deref(),
+            Some("session-y")
+        );
+    }
+
+    #[test]
+    fn remove_if_equals_clears_matching_stale_binding() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let args = ["acp".into()];
+        let channel = Uuid::new_v4();
+        let store = SessionStore::open(path.clone());
+        store.put("hermes", &args, &channel, "session-x");
+        assert!(store.remove_if_equals("hermes", &args, &channel, "session-x"));
+        assert!(store.get("hermes", &args, &channel).is_none());
+        // No-op when already gone.
+        assert!(!store.remove_if_equals("hermes", &args, &channel, "session-x"));
     }
 }

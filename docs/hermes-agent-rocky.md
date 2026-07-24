@@ -88,17 +88,22 @@ buzz-acp
 
 ## Multi-profile later
 
-When you want another Hermes profile on Buzz, add a **second** managed agent with either:
+When you want another Hermes profile on Buzz, add a **second** managed agent
+with **unique ACP args** so durable session bindings do not collide:
 
 ```text
+command: hermes
 arguments: -p chad acp
+HERMES_HOME=/Users/you/.hermes/profiles/chad   # optional, for the process env
+parallelism: 1
 ```
 
-or
-
-```text
-HERMES_HOME=/Users/you/.hermes/profiles/chad
-```
+Do **not** run two managed agents with identical command/args (e.g. both
+`hermes` + empty/`acp` args) and only different `HERMES_HOME` values. The durable
+session store is keyed by command + args + channel, not by environment or
+managed-agent identity, so those two agents would overwrite each other's channel
+bindings. Until the store is namespaced by agent identity, unique `-p <profile>
+acp` args are required for multi-profile.
 
 Keep `parallelism=1` per profile.
 
@@ -107,3 +112,22 @@ Keep `parallelism=1` per profile.
 - **This PR:** local Desktop/managed Hermes runtime discovery, arg normalisation, durable `session/load`, onboarding picker, owner Rocky dogfood guide. Intentionally does **not** include external-agent directory / kind `10100` / relay-observer presentation work.
 - **#2468 (nytemode):** broader external-agent hosting + VPS observer path. Currently conflicting with `main`. Ready-to-steal pieces already folded here: command-specific `hermes acp --check` readiness as AdapterMissing, exact `python`/`python3` process recognition.
 - **Deeper native Hermes integration** (first-class Nous product surface inside Buzz, shared memory protocols, etc.) is still best done by the Nous Research team upstream.
+
+## Staying alive (OAuth / long-lived ACP)
+
+Rocky over Buzz is a **long-lived** `hermes acp` process. Telegram/Discord/gateway
+stay warm and refresh tokens; a parked ACP worker can hold a stale xAI access
+token after hours of idle.
+
+**One-time ops**
+1. Rocky managed agent: **Start on app launch** on
+2. **Parallelism = 1** (instance, not only definition)
+3. After this Hermes fix is installed: restart Rocky once so new ACP sessions
+   get `credential_pool` and can self-heal on `403 bad-credentials`
+
+**You should not need reauth** when Telegram still works. Prefer restart Rocky
+in Buzz Agents if a single turn fails with OAuth 403 after long idle.
+
+**Fixed upstream** (Hermes): ACP now wires `credential_pool` like the gateway,
+and 403 auth refreshes the same path as 401 for xAI OAuth.
+
