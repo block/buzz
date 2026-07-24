@@ -1,4 +1,4 @@
-# AGENTS.md — AI Agent Contributor Guide
+# AGENTS.md — AI Agent Contributor Guide LOLOLOLOLOL
 
 This guide is for AI agents contributing to the Buzz codebase. It covers
 agent-specific context and conventions. For general contributor info (setup,
