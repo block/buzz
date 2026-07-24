@@ -400,11 +400,19 @@ pub fn parse_command_response<T: DeserializeOwned>(message: &str) -> Result<T, S
 /// same wire format.
 fn build_profile_event(
     agent_keys: &nostr::Keys,
+    existing_profile: &serde_json::Map<String, serde_json::Value>,
     display_name: &str,
     avatar_url: Option<&str>,
     auth_tag_json: Option<&str>,
 ) -> Result<nostr::Event, String> {
-    let builder = crate::events::build_profile(Some(display_name), None, avatar_url, None, None)?;
+    let builder = crate::events::build_profile_with_existing(
+        existing_profile,
+        Some(display_name),
+        None,
+        avatar_url,
+        None,
+        None,
+    )?;
 
     let builder = if let Some(tag_json) = auth_tag_json {
         // Bridge nostr 0.37 PublicKey → nostr 0.36 PublicKey via hex encoding.
@@ -446,8 +454,19 @@ pub async fn sync_managed_agent_profile(
     auth_tag: Option<&str>, // NIP-OA auth tag JSON
 ) -> Result<(), String> {
     crate::relay_admission::wait_for_rate_limit().await;
+    let agent_pubkey = agent_keys.public_key().to_hex();
+    let existing_profile = query_agent_profile(state, relay_url, &agent_pubkey)
+        .await?
+        .map(|profile| profile.metadata)
+        .unwrap_or_default();
     // Build a signed kind:0 profile event (with optional NIP-OA auth tag).
-    let event = build_profile_event(agent_keys, display_name, avatar_url, auth_tag)?;
+    let event = build_profile_event(
+        agent_keys,
+        &existing_profile,
+        display_name,
+        avatar_url,
+        auth_tag,
+    )?;
     let event_json = event.as_json();
     let body_bytes = event_json.into_bytes();
 
@@ -519,6 +538,7 @@ pub async fn query_agent_profile(
             .get("picture")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        metadata: content.as_object().cloned().unwrap_or_default(),
     }))
 }
 
@@ -527,6 +547,7 @@ pub async fn query_agent_profile(
 pub struct AgentProfileInfo {
     pub display_name: Option<String>,
     pub picture: Option<String>,
+    pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
 // ── Signed-event submission ─────────────────────────────────────────────────
@@ -971,8 +992,14 @@ mod tests {
     fn profile_event_with_valid_auth_tag() {
         let agent_keys = nostr::Keys::generate();
         let tag_json = make_valid_auth_tag(&agent_keys);
-        let event = build_profile_event(&agent_keys, "TestBot", None, Some(&tag_json))
-            .expect("should succeed with a valid auth tag");
+        let event = build_profile_event(
+            &agent_keys,
+            &serde_json::Map::new(),
+            "TestBot",
+            None,
+            Some(&tag_json),
+        )
+        .expect("should succeed with a valid auth tag");
 
         // Exactly one "auth" tag must be present.
         let auth_tags: Vec<_> = event
@@ -989,8 +1016,9 @@ mod tests {
     #[test]
     fn profile_event_without_auth_tag() {
         let agent_keys = nostr::Keys::generate();
-        let event = build_profile_event(&agent_keys, "TestBot", None, None)
-            .expect("should succeed without an auth tag");
+        let event =
+            build_profile_event(&agent_keys, &serde_json::Map::new(), "TestBot", None, None)
+                .expect("should succeed without an auth tag");
 
         // No "auth" tags should be present.
         let auth_tags: Vec<_> = event
@@ -1008,11 +1036,42 @@ mod tests {
         let agent_keys = nostr::Keys::generate();
         // Structurally valid JSON array but with a bogus signature — verification must fail.
         let bad_json = format!(r#"["auth","{}","","{}"]"#, "a".repeat(64), "b".repeat(128));
-        let result = build_profile_event(&agent_keys, "TestBot", None, Some(&bad_json));
+        let result = build_profile_event(
+            &agent_keys,
+            &serde_json::Map::new(),
+            "TestBot",
+            None,
+            Some(&bad_json),
+        );
         assert!(result.is_err(), "should reject an invalid auth tag");
         assert!(
             result.unwrap_err().contains("verification failed"),
             "error message should mention verification failure"
         );
+    }
+
+    #[test]
+    fn profile_event_preserves_unmodeled_metadata() {
+        let agent_keys = nostr::Keys::generate();
+        let existing = serde_json::json!({
+            "display_name": "Old bot",
+            "bot": true,
+            "website": "https://example.com",
+            "nip05": "bot@example.com"
+        });
+        let event = build_profile_event(
+            &agent_keys,
+            existing.as_object().unwrap(),
+            "Renamed bot",
+            None,
+            None,
+        )
+        .expect("profile merge should succeed");
+        let content: serde_json::Value =
+            serde_json::from_str(&event.content).expect("profile content should be JSON");
+        assert_eq!(content["display_name"], "Renamed bot");
+        assert_eq!(content["bot"], true);
+        assert_eq!(content["website"], "https://example.com");
+        assert_eq!(content["nip05"], "bot@example.com");
     }
 }

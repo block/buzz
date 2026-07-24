@@ -163,46 +163,13 @@ pub async fn cmd_set_profile(
     // Read-merge-write: fetch current profile, merge in the new fields, then sign.
     let current = fetch_current_profile(client).await?;
 
-    // Merge: caller-supplied fields win; fall back to current profile values.
-    let merged_name = display_name
-        .map(|s| s.to_string())
-        .or_else(|| {
-            current
-                .get("display_name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .or_else(|| {
-            current
-                .get("name")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        });
-    let merged_picture = avatar_url.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("picture")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_about = about.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("about")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    let merged_nip05 = nip05_handle.map(|s| s.to_string()).or_else(|| {
-        current
-            .get("nip05")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-
-    let builder = buzz_sdk::build_profile(
-        merged_name.as_deref(),
-        None, // `name` field (username) — not exposed by CLI
-        merged_picture.as_deref(),
-        merged_about.as_deref(),
-        merged_nip05.as_deref(),
+    let builder = buzz_sdk::build_profile_with_existing(
+        &current,
+        display_name,
+        None, // `name` is not exposed by the CLI, so preserve its existing value.
+        avatar_url,
+        about,
+        nip05_handle,
     )
     .map_err(|e| CliError::Other(format!("build_profile failed: {e}")))?;
 
