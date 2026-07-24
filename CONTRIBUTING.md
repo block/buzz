@@ -4,7 +4,7 @@ Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
-If you have questions that aren't answered here, open a GitHub Discussion or
+If you have questions that aren't answered here, open a GitHub issue or
 reach out in the community channels.
 
 ---
@@ -12,14 +12,14 @@ reach out in the community channels.
 ## Table of Contents
 
 1. [Code of Conduct](#code-of-conduct)
-2. [Setting Up the Development Environment](#setting-up-the-development-environment)
-3. [Running Tests](#running-tests)
-4. [Code Style](#code-style)
-5. [Making a Pull Request](#making-a-pull-request)
-6. [Architecture Overview](#architecture-overview)
-7. [Ecosystem](#ecosystem)
-8. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-9. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
+2. [Before You Open a PR](#before-you-open-a-pr)
+3. [Setting Up the Development Environment](#setting-up-the-development-environment)
+4. [Running Tests](#running-tests)
+5. [Code Style](#code-style)
+6. [Making a Pull Request](#making-a-pull-request)
+7. [Architecture Overview](#architecture-overview)
+8. [Ecosystem](#ecosystem)
+9. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
 10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
 11. [License and CLA](#license-and-cla)
 
@@ -30,6 +30,68 @@ reach out in the community channels.
 This project follows the [Contributor Covenant v2.1](CODE_OF_CONDUCT.md).
 By participating you agree to uphold these standards. Please report
 unacceptable behavior to **conduct@buzz-relay.org**.
+
+---
+
+## Before You Open a PR
+
+This section exists to help your PR land quickly. The most common reason
+PRs are closed without review is a duplicate — there's already an open PR
+or issue for the same thing.
+
+### Check for duplicates first
+
+Search [open PRs](https://github.com/block/buzz/pulls) and
+[open issues](https://github.com/block/buzz/issues) before you start.
+When you open your PR, name the closest existing one in the description
+(or "none found"). That one field saves maintainers a lot of triage time.
+
+**Duplicate-triage policy:** when two PRs address the same thing, the
+earlier one wins unless the later one is clearly more complete. Duplicates
+are closed with a pointer to the surviving PR — no hard feelings, just
+keeping the queue manageable.
+
+### Features need an issue first
+
+For anything beyond a typo fix, doc improvement, or obvious bug:
+
+1. Open an issue describing the problem and proposed solution.
+2. Wait for a maintainer to acknowledge the approach (a comment or label is enough).
+3. Comment on the issue to claim it — so two people don't build the same thing.
+4. Then open a PR.
+
+Small fixes (typos, doc improvements, obvious bugs with clear fixes) can
+skip straight to a PR.
+
+### AI / agent-assisted contributions
+
+Buzz is an agent platform — AI-assisted PRs are welcome and encouraged.
+But the **human submitter is accountable**: you personally verified the
+change builds and behaves as described, you searched for duplicates, and
+you will respond to review feedback. Unattended agent-generated PRs that
+don't meet this bar will be closed without detailed review. The PR
+template has a checkbox for this — please use it honestly.
+
+### Duplicate-check in your PR template
+
+The PR template will ask you to name the closest existing PR or issue.
+This isn't a formality — it's the main mechanism that keeps us from
+reviewing the same change five times.
+
+### PR titles follow Conventional Commits
+
+We squash-merge, so your PR title becomes the commit subject in `main`.
+Follow the same format as commit messages:
+
+```
+feat(mcp): add get_feed_actions tool
+fix(auth): reject expired NIP-42 challenges
+docs(contributing): add duplicate-check policy
+```
+
+The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is
+required. See the [Commit Messages](#commit-messages) section for the
+full reference.
 
 ---
 
@@ -248,13 +310,6 @@ required. The scope (in parentheses) is optional but encouraged.
 
 ## Making a Pull Request
 
-### Before You Start
-
-- Check open issues and PRs to avoid duplicate work.
-- For significant changes, open an issue first to discuss the approach.
-- For small fixes (typos, doc improvements, obvious bugs), go ahead and open
-  a PR directly.
-
 ### What a Good PR Looks Like
 
 1. **Focused** — one logical change per PR. If you're fixing a bug and
@@ -274,16 +329,6 @@ required. The scope (in parentheses) is optional but encouraged.
    - How it was implemented (key decisions, trade-offs)
    - How to test it manually (if applicable)
    - Any follow-up work deferred to a future PR
-
-### PR Checklist
-
-```
-- [ ] `just ci` passes (fmt + clippy + unit tests + mobile)
-- [ ] Integration tests pass (`just test`)
-- [ ] New public APIs / tools / endpoints are documented
-- [ ] No new `unwrap()` in production code paths
-- [ ] No new `unsafe` blocks
-```
 
 ### Review Process
 
