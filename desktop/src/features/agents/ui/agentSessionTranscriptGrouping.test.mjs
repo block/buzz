@@ -1718,9 +1718,14 @@ test("getDisplayBlockKey_single_returnsItemId", () => {
   assert.equal(getDisplayBlockKey(block), "item-42");
 });
 
-test("getDisplayBlockKey_turn_returnsPrefixedTurnId", () => {
-  const block = { kind: "turn", turnId: "t-99", segments: [] };
-  assert.equal(getDisplayBlockKey(block), "turn:t-99");
+test("getDisplayBlockKey_turn_returnsPrefixedTurnIdAndFirstItemId", () => {
+  const block = {
+    kind: "turn",
+    turnId: "t-99",
+    firstItemId: "item-1",
+    segments: [],
+  };
+  assert.equal(getDisplayBlockKey(block), "turn:t-99:item-1");
 });
 
 test("getDisplayBlockKey_sessionBoundary_usesFirstItemIdNotRunIndex", () => {
@@ -1807,6 +1812,35 @@ test("getDisplayBlockKey_parity_matchesBuildTranscriptDisplayBlocksOutput", () =
 
   // No duplicates.
   assert.equal(new Set(keys).size, keys.length, "all keys must be unique");
+});
+
+test("getDisplayBlockKey_turnSplitAcrossSessionRuns_keysUnique", () => {
+  // A session restart mid-turn splits one turn's items across two session
+  // runs. Each run emits its own turn block for the same turnId — their React
+  // keys must still be distinct (regression: duplicate `turn:<id>` keys).
+  const items = [
+    sessionItem("a", "sess-1", "2026-07-08T00:00:00.000Z"),
+    sessionItem("b", "sess-1", "2026-07-08T00:00:01.000Z"),
+    sessionItem("c", "sess-2", "2026-07-08T00:00:02.000Z"),
+  ];
+  for (const item of items) {
+    item.turnId = "turn-split";
+  }
+
+  const blocks = buildTranscriptDisplayBlocks(items, null);
+  const turnBlocks = blocks.filter((b) => b.kind === "turn");
+  assert.equal(
+    turnBlocks.length,
+    2,
+    "turn split across two runs emits two turn blocks (test setup sanity)",
+  );
+
+  const keys = blocks.map(getDisplayBlockKey);
+  assert.equal(
+    new Set(keys).size,
+    keys.length,
+    `all keys must be unique, got: ${keys.join(", ")}`,
+  );
 });
 
 // ── Key-parity invariant: transient [turn, single] → [single, turn] reorder ──
