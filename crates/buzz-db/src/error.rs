@@ -29,6 +29,14 @@ pub enum DbError {
     #[error("member not found in channel {0}")]
     MemberNotFound(uuid::Uuid),
 
+    /// The requested active user group does not exist.
+    #[error("user group not found: {0}")]
+    UserGroupNotFound(uuid::Uuid),
+
+    /// The requested user-group handle is already active in this community.
+    #[error("user group handle already exists: {0}")]
+    UserGroupHandleConflict(String),
+
     /// A generic not-found error.
     #[error("not found: {0}")]
     NotFound(String),
