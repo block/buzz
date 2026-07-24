@@ -436,6 +436,18 @@ pub async fn mesh_node_status(state: State<'_, AppState>) -> CmdResult<mesh_llm:
     }
 }
 
+/// Current Buzz shared compute availability as gossiped on this relay:
+/// member-verified, freshness-filtered serve targets and their models. Read
+/// path only — used by the UI to tell the user where relay-mesh inference
+/// actually runs (which models, how many live serving nodes).
+#[tauri::command]
+pub async fn mesh_availability(
+    state: State<'_, AppState>,
+) -> CmdResult<mesh_llm::MeshAvailability> {
+    let events = query_mesh_discovery_events(&state).await?;
+    Ok(mesh_llm::availability_from_events(events))
+}
+
 #[tauri::command]
 pub async fn mesh_installed_models(
     state: State<'_, AppState>,

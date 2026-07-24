@@ -56,6 +56,32 @@ export async function meshInstalledModels(): Promise<MeshModelOption[]> {
   return await invokeTauri<MeshModelOption[]>("mesh_installed_models");
 }
 
+export type MeshServeTarget = {
+  modelId: string;
+  modelName: string | null;
+  endpointAddr: string;
+  nodeName: string | null;
+  capacity: { vramGb: number | null } | null;
+  endpointId?: string | null;
+  deviceId?: string | null;
+  deviceName?: string | null;
+};
+
+export type MeshAvailability = {
+  reason: string | null;
+  models: MeshModelOption[];
+  serveTargets: MeshServeTarget[];
+};
+
+/**
+ * Live Buzz shared compute availability on this relay: member-verified,
+ * freshness-filtered serve targets and the models they host. Read-only — used
+ * to tell the user where relay-mesh inference actually runs.
+ */
+export async function meshAvailability(): Promise<MeshAvailability> {
+  return await invokeTauri<MeshAvailability>("mesh_availability");
+}
+
 export type MeshModelFit = "comfortable" | "tight" | "tradeoff" | "too_large";
 
 export type MeshCatalogEntry = {

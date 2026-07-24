@@ -18,6 +18,7 @@ import {
 import { deriveTranscriptBlockIds } from "@/features/agents/ui/agentSessionTranscriptGrouping";
 import type { ObserverEvent } from "@/features/agents/ui/agentSessionTypes";
 import { ManagedAgentSessionPanel } from "@/features/agents/ui/ManagedAgentSessionPanel";
+import { useMeshInferenceLocation } from "@/features/mesh-compute/hooks/useMeshInferenceLocation";
 import {
   useArchivedChannelEvents,
   useObserverEvents,
@@ -239,6 +240,9 @@ export function AgentSessionThreadPanel({
     : "All channels";
   const animateActivity = useTranscriptAnimationEnabled();
   const showTimestamps = useTranscriptTimestampsEnabled();
+  // Non-null only for relay-mesh (Buzz shared compute) agents: tells the user
+  // where this agent's inference actually runs, e.g. "Qwen3 8B · 3 nodes".
+  const meshInferenceLocation = useMeshInferenceLocation(agent.pubkey);
   async function handleInterruptTurn() {
     if (!channel) {
       return;
@@ -430,6 +434,17 @@ export function AgentSessionThreadPanel({
         >
           {scopeLabel}
         </span>
+        {meshInferenceLocation ? (
+          // Where inference runs: only for Buzz shared compute agents, and
+          // only once availability is known — never a guess.
+          <span
+            className="min-w-0 shrink truncate text-xs text-muted-foreground"
+            data-testid="agent-session-mesh-inference-location"
+            title={meshInferenceLocation.title}
+          >
+            {meshInferenceLocation.label}
+          </span>
+        ) : null}
       </AuxiliaryPanelHeaderGroup>
       {agentHeaderActions}
     </>

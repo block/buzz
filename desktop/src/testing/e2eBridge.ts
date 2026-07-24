@@ -9227,6 +9227,29 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "mesh_installed_models":
         return mockMeshState.models;
+      case "mesh_availability":
+        // Mirrors the Rust MeshAvailability shape: when admitted, every mock
+        // model is served by one mock node; otherwise no live targets.
+        return mockMeshState.admitted
+          ? {
+              reason: null,
+              models: mockMeshState.models,
+              serveTargets: mockMeshState.models.map((model) => ({
+                modelId: model.id,
+                modelName: model.name,
+                endpointAddr: "mock-endpoint-addr",
+                nodeName: "Mock desktop",
+                capacity: null,
+                endpointId: "mock-endpoint-id",
+                deviceId: "mock-endpoint-id",
+                deviceName: "Mock desktop",
+              })),
+            }
+          : {
+              reason: mockMeshState.denyReason,
+              models: [],
+              serveTargets: [],
+            };
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       case "mesh_start_node": {
