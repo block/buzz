@@ -174,6 +174,30 @@ async fn main() -> anyhow::Result<()> {
         error!("Failed to ensure partitions: {e}");
     }
 
+    // Partition roll-forward tick: a long-running relay crosses month
+    // boundaries, so the startup pass alone would let writes drift into the
+    // `*_p_future` catch-all again (issue #2396). The roll is idempotent and
+    // advisory-locked, so concurrent ticks from multiple pods are harmless.
+    {
+        let partition_db = db.clone();
+        let partition_interval_secs: u64 = std::env::var("BUZZ_PARTITION_ROLL_INTERVAL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(21_600);
+        tokio::spawn(async move {
+            info!(
+                interval_secs = partition_interval_secs,
+                "Partition roll-forward task started"
+            );
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(partition_interval_secs)).await;
+                if let Err(e) = partition_db.ensure_future_partitions(3).await {
+                    error!("Partition roll-forward tick failed: {e}");
+                }
+            }
+        });
+    }
+
     // Freshness fence probe: cursor pages route to the replica only for
     // history the probe has verified as fully replayed. Deliberately AFTER
     // the migration decision: spawn_fence_probe first verifies the
