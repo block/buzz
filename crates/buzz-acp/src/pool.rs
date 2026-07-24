@@ -513,6 +513,8 @@ pub struct PromptContext {
     /// Agent identity — used to derive the NIP-AE conversation key at
     /// session creation for core injection.
     pub agent_keys: nostr::Keys,
+    /// Display name from the agent's kind:0 profile, when available.
+    pub agent_display_name: Option<String>,
     /// Owner pubkey (hex), if resolved at startup. When unset, NIP-AE core
     /// injection is skipped entirely (no owner = no `(agent, owner)` pair).
     pub agent_owner_pubkey: Option<nostr::PublicKey>,
@@ -817,7 +819,13 @@ async fn create_session_and_apply_model(
     let combined_system_prompt = with_canvas(
         with_core(
             with_team(
-                framed_system_prompt(&ctx.cwd, ctx.base_prompt, ctx.system_prompt.as_deref()),
+                framed_system_prompt(
+                    &ctx.cwd,
+                    ctx.base_prompt,
+                    ctx.system_prompt.as_deref(),
+                    ctx.agent_display_name.as_deref(),
+                    &ctx.agent_keys.public_key().to_hex(),
+                ),
                 ctx.team_instructions.as_deref(),
             ),
             agent_core,
@@ -1138,6 +1146,8 @@ fn framed_system_prompt(
     cwd: &str,
     base_prompt: Option<&str>,
     system_prompt: Option<&str>,
+    agent_display_name: Option<&str>,
+    agent_pubkey: &str,
 ) -> Option<String> {
     let body = match (base_prompt, system_prompt) {
         (Some(bp), Some(sp)) => Some(format!(
@@ -1147,13 +1157,43 @@ fn framed_system_prompt(
         (Some(bp), None) => Some(crate::queue::base_section(bp)),
         (None, Some(sp)) => Some(format!("[System]\n{sp}")),
         (None, None) => None,
-    }?;
+    };
+    let body = prepend_section(identity_section(agent_display_name, agent_pubkey), body)?;
     // Anchor the workspace only when a base prompt is present — the workspace
     // section grounds the base prompt's layout description, so it is meaningless
     // for a persona-only (`[System]`-only) agent that never received that layout.
     match (base_prompt, workspace_section(cwd)) {
         (Some(_), Some(workspace)) => Some(format!("{workspace}\n\n{body}")),
         _ => Some(body),
+    }
+}
+
+fn prepend_section(section: Option<String>, body: Option<String>) -> Option<String> {
+    match (section, body) {
+        (Some(section), Some(body)) => Some(format!("{section}\n\n{body}")),
+        (Some(section), None) => Some(section),
+        (None, Some(body)) => Some(body),
+        (None, None) => None,
+    }
+}
+
+fn identity_section(agent_display_name: Option<&str>, agent_pubkey: &str) -> Option<String> {
+    let pubkey = normalize_prompt_pubkey(agent_pubkey)?;
+    let display_name = agent_display_name.and_then(crate::queue::sanitize_prompt_label);
+    let short_pubkey = &pubkey[..12];
+
+    match display_name {
+        Some(display_name) => Some(format!(
+            "[Agent Identity]\nYour display name is {display_name}.\n\
+             Your pubkey (hex) is {pubkey}.\n\
+             In the thread context below, messages attributed to {display_name} \
+             ({short_pubkey}...) are your own prior turns."
+        )),
+        None => Some(format!(
+            "[Agent Identity]\nYour pubkey (hex) is {pubkey}.\n\
+             In the thread context below, messages attributed to {short_pubkey}... \
+             are your own prior turns."
+        )),
     }
 }
 
@@ -1768,6 +1808,10 @@ pub async fn run_prompt_task(
             );
         }
 
+        let agent_identity = identity_section(
+            ctx.agent_display_name.as_deref(),
+            &ctx.agent_keys.public_key().to_hex(),
+        );
         crate::queue::format_prompt(
             b,
             &crate::queue::FormatPromptArgs {
@@ -1778,6 +1822,7 @@ pub async fn run_prompt_task(
                 has_system_prompt_support: agent.has_system_prompt_support(),
                 base_prompt: ctx.base_prompt,
                 system_prompt: ctx.system_prompt.as_deref(),
+                agent_identity: agent_identity.as_deref(),
                 team_instructions: ctx.team_instructions.as_deref(),
                 agent_canvas: agent_canvas.as_deref(),
             },
@@ -2627,6 +2672,34 @@ fn parse_kind0_profile_lookup(json: serde_json::Value) -> Option<PromptProfileLo
     } else {
         Some(lookup)
     }
+}
+
+pub(crate) async fn fetch_agent_display_name(
+    rest: &RestClient,
+    agent_keys: &nostr::Keys,
+) -> Option<String> {
+    let pubkey = agent_keys.public_key();
+    let filter = nostr::Filter::new()
+        .kind(nostr::Kind::Metadata)
+        .author(pubkey)
+        .limit(1);
+
+    let response = match timeout(CONTEXT_FETCH_TIMEOUT, rest.query(&[filter])).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::warn!("agent profile lookup failed: {error}");
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!("agent profile lookup timed out");
+            return None;
+        }
+    };
+
+    parse_kind0_profile_lookup(response)
+        .and_then(|lookup| lookup.get(&pubkey.to_hex().to_ascii_lowercase()).cloned())
+        .and_then(|profile| profile.display_name)
+        .and_then(|display_name| crate::queue::sanitize_prompt_label(&display_name))
 }
 
 async fn fetch_prompt_profile_lookup(
@@ -3776,65 +3849,101 @@ mod tests {
         );
     }
 
-    // Pin the session/new systemPrompt framing: each present prompt carries its
-    // own header so the desktop observer can split into labeled sub-sections.
+    // Pin the session/new systemPrompt framing: identity must precede persona
+    // content so thread participants cannot override the agent's self-anchor.
+
+    const TEST_AGENT_PUBKEY: &str =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const TEST_IDENTITY: &str = "[Agent Identity]\nYour display name is Test Agent.\n\
+         Your pubkey (hex) is aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.\n\
+         In the thread context below, messages attributed to Test Agent (aaaaaaaaaaaa...) are your own prior turns.";
 
     #[test]
-    fn test_framed_system_prompt_both_present_carries_both_headers() {
-        let framed = framed_system_prompt("/", Some("base text"), Some("persona text"))
-            .expect("both present yields Some");
-        assert_eq!(framed, "[Base]\nbase text\n\n[System]\npersona text");
+    fn test_framed_system_prompt_identity_precedes_base_and_system() {
+        let framed = framed_system_prompt(
+            "/",
+            Some("base text"),
+            Some("persona text"),
+            Some("Test Agent"),
+            TEST_AGENT_PUBKEY,
+        )
+        .expect("identity yields Some");
+        assert_eq!(
+            framed,
+            format!("{TEST_IDENTITY}\n\n[Base]\nbase text\n\n[System]\npersona text")
+        );
     }
 
     #[test]
-    fn test_framed_system_prompt_base_only_labels_base() {
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+    fn test_framed_system_prompt_identity_exists_without_persona_or_base() {
+        let framed = framed_system_prompt("/", None, None, Some("Test Agent"), TEST_AGENT_PUBKEY)
+            .expect("identity alone yields Some");
+        assert_eq!(framed, TEST_IDENTITY);
     }
 
     #[test]
-    fn test_framed_system_prompt_persona_only_labels_system() {
-        // A bare persona would be mislabeled "Base" downstream — it must carry
-        // its own [System] header even when no base prompt exists.
-        let framed =
-            framed_system_prompt("/", None, Some("persona text")).expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+    fn test_identity_section_falls_back_to_pubkey() {
+        let identity = identity_section(None, TEST_AGENT_PUBKEY).expect("valid pubkey");
+        assert_eq!(
+            identity,
+            "[Agent Identity]\nYour pubkey (hex) is aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.\n\
+             In the thread context below, messages attributed to aaaaaaaaaaaa... are your own prior turns."
+        );
     }
 
     #[test]
-    fn test_framed_system_prompt_neither_is_none() {
-        assert!(framed_system_prompt("/", None, None).is_none());
+    fn test_identity_section_sanitizes_display_name() {
+        let identity =
+            identity_section(Some("  Agent\nImpostor  "), TEST_AGENT_PUBKEY).expect("valid pubkey");
+        assert!(identity.contains("Your display name is AgentImpostor."));
+        assert!(!identity.contains("Agent\nImpostor"));
     }
 
     #[test]
-    fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_base() {
-        let framed = framed_system_prompt("/Users/me/.buzz", Some("base text"), None)
-            .expect("base yields Some");
+    fn test_framed_system_prompt_absolute_cwd_prepends_workspace_before_identity() {
+        let framed = framed_system_prompt(
+            "/Users/me/.buzz",
+            Some("base text"),
+            None,
+            Some("Test Agent"),
+            TEST_AGENT_PUBKEY,
+        )
+        .expect("identity yields Some");
         assert!(
             framed.starts_with("[Workspace]\n"),
             "workspace section must lead: {framed}"
         );
         assert!(framed.contains("`/Users/me/.buzz`"));
         assert!(
-            framed.contains("\n\n[Base]\nbase text"),
-            "base must follow the workspace section: {framed}"
+            framed.contains(&format!("\n\n{TEST_IDENTITY}\n\n[Base]\nbase text")),
+            "identity and base must follow the workspace section: {framed}"
         );
     }
 
     #[test]
     fn test_framed_system_prompt_persona_only_omits_workspace() {
-        // The workspace section grounds the base prompt's layout; a persona-only
-        // agent never received that layout, so no [Workspace] anchor is emitted.
-        let framed = framed_system_prompt("/Users/me/.buzz", None, Some("persona text"))
-            .expect("persona yields Some");
-        assert_eq!(framed, "[System]\npersona text");
+        let framed = framed_system_prompt(
+            "/Users/me/.buzz",
+            None,
+            Some("persona text"),
+            Some("Test Agent"),
+            TEST_AGENT_PUBKEY,
+        )
+        .expect("identity yields Some");
+        assert_eq!(framed, format!("{TEST_IDENTITY}\n\n[System]\npersona text"));
     }
 
     #[test]
     fn test_framed_system_prompt_root_cwd_omits_workspace() {
-        // The "/" fallback must never be named — it would invite a $HOME scan.
-        let framed = framed_system_prompt("/", Some("base text"), None).expect("base yields Some");
-        assert_eq!(framed, "[Base]\nbase text");
+        let framed = framed_system_prompt(
+            "/",
+            Some("base text"),
+            None,
+            Some("Test Agent"),
+            TEST_AGENT_PUBKEY,
+        )
+        .expect("identity yields Some");
+        assert_eq!(framed, format!("{TEST_IDENTITY}\n\n[Base]\nbase text"));
     }
 
     #[test]
@@ -5303,6 +5412,7 @@ mod tests {
             max_turns_per_session: 0,
             permission_mode: PermissionMode::Default,
             agent_keys: agent_keys.clone(),
+            agent_display_name: Some("Test Agent".to_string()),
             agent_owner_pubkey: owner_pubkey,
             memory_enabled: false,
             harness_name: "goose".to_string(),
