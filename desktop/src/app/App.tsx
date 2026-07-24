@@ -19,6 +19,7 @@ import {
 import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
+import { useWindowDecorationsPreference } from "@/app/useWindowDecorationsPreference";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
@@ -673,6 +674,7 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
 
 export function App() {
   useReloadShortcut();
+  useWindowDecorationsPreference();
   useInitialRenderReady();
   const [sharedIdentity, setSharedIdentity] = useState<boolean | null>(null);
   const [queryClient] = useState(createBuzzQueryClient);
