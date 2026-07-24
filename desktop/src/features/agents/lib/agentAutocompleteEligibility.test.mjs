@@ -306,3 +306,66 @@ test("coalesceAgentAutocompleteCandidates: leaves non-agents alone", () => {
 
   assert.deepEqual(coalesce([first, second]), [first, second]);
 });
+
+// Regression: an externally-hosted relay agent (kind:10100 announcement with
+// respond_to="allowlist" naming the viewer) must survive the composer's
+// candidate gates. useMentions gates candidates with
+// isAgentIdentityInManagedList using the MENTIONABLE set (managed ∪ invocable
+// relay agents); gating on the managed set alone silently dropped external
+// agents before shouldHideAgentFromMentions could show them.
+test("invocable external relay agent passes the composed mention gates", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_A,
+      respondTo: "allowlist",
+      respondToAllowlist: [CURRENT_PUBKEY],
+      channelIds: [],
+    },
+  ];
+  const mentionable = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: new Set(),
+    relayAgents,
+    sharedChannelIds: new Set(),
+  });
+  const candidate = { pubkey: PUB_A, isAgent: true, isMember: true };
+
+  // Gate 1 (managed-list identity gate, fed the mentionable set):
+  assert.equal(isAgentIdentityInManagedList(candidate, mentionable), true);
+  // Gate 2 (invocable => always show):
+  assert.equal(
+    shouldHideAgentFromMentions({
+      isAgent: true,
+      isMember: true,
+      pubkey: PUB_A,
+      mentionableAgentPubkeys: mentionable,
+      directoryAgentPubkeys: new Set([PUB_A]),
+    }),
+    false,
+  );
+});
+
+test("non-invocable external relay agent is still hidden from mentions", () => {
+  const relayAgents = [
+    {
+      pubkey: PUB_B,
+      respondTo: "owner-only",
+      respondToAllowlist: [],
+      channelIds: [],
+    },
+  ];
+  const mentionable = getMentionableAgentPubkeys({
+    currentPubkey: CURRENT_PUBKEY,
+    managedAgentPubkeys: new Set(),
+    relayAgents,
+    sharedChannelIds: new Set(),
+  });
+
+  assert.equal(
+    isAgentIdentityInManagedList(
+      { pubkey: PUB_B, isAgent: true, isMember: true },
+      mentionable,
+    ),
+    false,
+  );
+});
