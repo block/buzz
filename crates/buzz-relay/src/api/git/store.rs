@@ -21,10 +21,26 @@
 //! object bytes against the expected digest on `get_verified`; any mismatch is
 //! *detectable*, not silent — that is what A1's "create-only + content-address"
 //! discipline buys us, independent of bucket immutability features.
+//!
+//! ## The 429 sharp edge (rate limit != CAS loss)
+//!
+//! Cloudflare R2 enforces a **max 1 write/sec/key** limit and rejects a
+//! contended same-key write with HTTP **429** (`TooManyRequests`) — *not* 412.
+//! 429 is transient backpressure, not a CAS outcome: the correct response is to
+//! back off and RETRY the identical write, whereas 412 means the precondition
+//! genuinely failed (a competing writer won) and the caller must re-read the
+//! current ETag before retrying. Conflating the two makes a *strongly
+//! consistent* backend look non-conforming: the boot conformance probe would
+//! see a racer's 429 as a failure and refuse to start. `is_rate_limited` +
+//! `retry_with_backoff` keep 429 distinct — every write path retries 429 under
+//! a bounded jittered-exponential budget, and a genuinely exhausted budget
+//! surfaces as [`StoreError::RateLimited`], never as `LostRace`.
 
 #![allow(dead_code)] // wired in by the push path in a follow-up commit
 
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use s3::creds::Credentials;
@@ -43,6 +59,89 @@ pub enum Precond {
     IfNoneMatchStar,
     /// CAS: succeed iff the current ETag matches.
     IfMatch(ETag),
+}
+
+/// Bounded jittered-exponential backoff for the object store's per-key write
+/// rate limit (R2 answers a same-key write faster than 1/sec with HTTP 429).
+///
+/// `max_retries` is the number of retries *after* the first attempt, so a hot
+/// key is attempted up to `max_retries + 1` times. Delays use **full jitter**
+/// (uniform in `[0, min(base * 2^attempt, max)]`) — the AWS-recommended scheme
+/// that decorrelates concurrent racers so they don't re-collide in lockstep on
+/// the same 1-write/sec key. The default budget (base 50ms, cap 2s, 6 retries)
+/// spans several seconds of contention, comfortably past R2's 1s window.
+#[derive(Debug, Clone)]
+pub struct RetryConfig {
+    /// Retries after the initial attempt. `0` disables retrying.
+    pub max_retries: usize,
+    /// Base delay; the first backoff is jittered within `[0, base]`.
+    pub base_delay: Duration,
+    /// Ceiling on any single (pre-jitter) backoff delay.
+    pub max_delay: Duration,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 6,
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_secs(2),
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Full-jitter backoff for a 0-based `attempt`: uniform random in
+    /// `[0, min(base_delay * 2^attempt, max_delay)]`.
+    fn delay_for_attempt(&self, attempt: usize) -> Duration {
+        let base_ms = self.base_delay.as_millis() as u64;
+        let max_ms = self.max_delay.as_millis() as u64;
+        // Cap the shift so `1 << attempt` can never overflow; `min(max_ms)`
+        // dominates well before the cap anyway.
+        let factor = 1u64.checked_shl(attempt.min(20) as u32).unwrap_or(u64::MAX);
+        let capped_ms = base_ms.saturating_mul(factor).min(max_ms);
+        let jitter = rand::random::<f64>(); // [0, 1)
+        Duration::from_millis((capped_ms as f64 * jitter) as u64)
+    }
+}
+
+/// Does this raw PUT result carry an HTTP 429 (rate limit)?
+///
+/// Under the `fail-on-err` feature a 429 arrives as
+/// `HttpFailWithBody(429, _)`; without it, as an `Ok(resp)` with status 429.
+/// Detect both so the retry path is independent of feature unification.
+fn is_rate_limited(result: &Result<s3::request::ResponseData, S3Error>) -> bool {
+    match result {
+        Ok(resp) => resp.status_code() == 429,
+        Err(S3Error::HttpFailWithBody(429, _)) => true,
+        Err(_) => false,
+    }
+}
+
+/// Retry `op` while `should_retry` holds, backing off per `cfg`, up to
+/// `cfg.max_retries` retries. Returns the final result (success, or the last
+/// still-retryable result once the budget is spent).
+///
+/// Generic over the result type so the 429 backoff policy is unit-testable
+/// without a live object store.
+async fn retry_with_backoff<T, E, F, Fut>(
+    cfg: &RetryConfig,
+    should_retry: impl Fn(&Result<T, E>) -> bool,
+    mut op: F,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, E>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        let result = op().await;
+        if attempt >= cfg.max_retries || !should_retry(&result) {
+            return result;
+        }
+        tokio::time::sleep(cfg.delay_for_attempt(attempt)).await;
+        attempt += 1;
+    }
 }
 
 /// Result of a CAS pointer write.
@@ -87,6 +186,18 @@ pub enum StoreError {
         expected: String,
         /// Digest computed from the returned bytes.
         actual: String,
+    },
+    /// The backend rejected a write with HTTP 429 (rate limit) even after the
+    /// bounded retry budget was exhausted. **Distinct from `LostRace` (412):**
+    /// this is transient backpressure (R2's per-key 1-write/sec limit), not a
+    /// CAS loss — a hot key that stayed contended past the whole backoff
+    /// budget. Callers must not treat it as a lost race.
+    #[error("rate limited by object store after {attempts} retries: {key}")]
+    RateLimited {
+        /// Object key the throttled write targeted.
+        key: String,
+        /// Number of retries attempted before giving up (`RetryConfig::max_retries`).
+        attempts: usize,
     },
     /// Any other backend / transport error.
     #[error("s3 backend error: {0}")]
@@ -169,6 +280,8 @@ impl From<ProbeFailure> for StoreError {
 #[derive(Clone)]
 pub struct GitStore {
     bucket: Arc<Bucket>,
+    /// Backoff budget for HTTP 429 (rate-limit) retries on write paths.
+    retry: RetryConfig,
 }
 
 impl GitStore {
@@ -214,7 +327,45 @@ impl GitStore {
             .with_path_style();
         Ok(Self {
             bucket: Arc::from(bucket),
+            retry: RetryConfig::default(),
         })
+    }
+
+    /// Override the 429 backoff budget (mainly for tests that need a tiny
+    /// budget so a persistent rate limit surfaces quickly).
+    pub fn with_retry_config(mut self, retry: RetryConfig) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// PUT `key` with 429 backoff-retry applied. Returns the raw retried
+    /// result so callers can classify 2xx / 412 / other themselves; a
+    /// persistent 429 is left for the caller to map to
+    /// [`StoreError::RateLimited`] (see `rate_limited_err`).
+    async fn put_with_backoff(
+        &self,
+        key: &str,
+        body: &[u8],
+        content_type: &str,
+        headers: axum::http::HeaderMap,
+    ) -> Result<s3::request::ResponseData, S3Error> {
+        retry_with_backoff(&self.retry, is_rate_limited, || {
+            let headers = headers.clone();
+            async move {
+                self.bucket
+                    .put_object_with_content_type_and_headers(key, body, content_type, Some(headers))
+                    .await
+            }
+        })
+        .await
+    }
+
+    /// Build the `RateLimited` error for `key` from the configured budget.
+    fn rate_limited_err(&self, key: &str) -> StoreError {
+        StoreError::RateLimited {
+            key: key.to_string(),
+            attempts: self.retry.max_retries,
+        }
     }
 
     /// Compute the hex SHA-256 of `bytes`. The content-addressed key.
@@ -260,16 +411,15 @@ impl GitStore {
         let key = Self::content_key(prefix, bytes);
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
-        match self
-            .bucket
-            .put_object_with_content_type_and_headers(&key, bytes, content_type, Some(headers))
-            .await
-        {
+        match self.put_with_backoff(&key, bytes, content_type, headers).await {
             Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
             // 412 on a content-addressed key means the key already holds the
             // same bytes (by construction — the key is the digest). A1 is
             // preserved without a defensive GET.
             Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
+            // Retry budget spent on a persistent 429: transient backpressure,
+            // not a semantic outcome — surface it as `RateLimited`.
+            Err(S3Error::HttpFailWithBody(429, _)) => Err(self.rate_limited_err(&key)),
             Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
                 resp.status_code(),
                 "unexpected status".into(),
@@ -296,17 +446,12 @@ impl GitStore {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
         match self
-            .bucket
-            .put_object_with_content_type_and_headers(
-                &key,
-                idx_bytes,
-                "application/x-git-index",
-                Some(headers),
-            )
+            .put_with_backoff(&key, idx_bytes, "application/x-git-index", headers)
             .await
         {
             Ok(resp) if (200..300).contains(&resp.status_code()) => Ok(key),
             Err(S3Error::HttpFailWithBody(412, _)) => Ok(key),
+            Err(S3Error::HttpFailWithBody(429, _)) => Err(self.rate_limited_err(&key)),
             Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
                 resp.status_code(),
                 "unexpected status".into(),
@@ -501,19 +646,26 @@ impl GitStore {
                 );
             }
         }
+        // 429 (rate limit) is retried with backoff inside `put_with_backoff`;
+        // a persistent 429 falls through to `classify_cas` as
+        // `HttpFailWithBody(429, _)` and becomes `StoreError::RateLimited` —
+        // never `LostRace` (412).
         let result = self
-            .bucket
-            .put_object_with_content_type_and_headers(key, body, "application/json", Some(headers))
+            .put_with_backoff(key, body, "application/json", headers)
             .await;
-        Self::classify_cas(result)
+        self.classify_cas(key, result)
     }
 
     /// Map a rust-s3 PUT outcome to a `CasOutcome`.
     ///
-    /// 412 → `LostRace`. 2xx → `Won(etag)` (etag read from response headers,
-    /// empty if missing — callers must tolerate empty etag and re-HEAD if they
-    /// need it strictly). Everything else bubbles as `StoreError::Backend`.
+    /// 412 → `LostRace`. 429 → `StoreError::RateLimited` (transient rate limit
+    /// surviving the retry budget — a distinct signal from a lost race). 2xx →
+    /// `Won(etag)` (etag read from response headers, empty if missing — callers
+    /// must tolerate empty etag and re-HEAD if they need it strictly).
+    /// Everything else bubbles as `StoreError::Backend`.
     fn classify_cas(
+        &self,
+        key: &str,
         result: Result<s3::request::ResponseData, S3Error>,
     ) -> Result<CasOutcome, StoreError> {
         match result {
@@ -539,6 +691,7 @@ impl GitStore {
                 Ok(CasOutcome::Won(ETag(etag)))
             }
             Err(S3Error::HttpFailWithBody(412, _)) => Ok(CasOutcome::LostRace),
+            Err(S3Error::HttpFailWithBody(429, _)) => Err(self.rate_limited_err(key)),
             Ok(resp) => Err(StoreError::Backend(S3Error::HttpFailWithBody(
                 resp.status_code(),
                 "unexpected status".into(),
@@ -678,6 +831,21 @@ impl GitStore {
                             "transport drop (pre-classification: socket/send failure)"
                         );
                     }
+                    // A 429 that survived the backoff budget is *unknown*, not
+                    // negative: the racer was throttled (R2's 1-write/sec/key
+                    // limit) and never got a classified CAS answer. Drop it
+                    // from the observer set exactly like a transport drop —
+                    // the `classified >= 2` floor still guards A3, and a
+                    // correctly rate-limiting backend no longer false-fails.
+                    Err(StoreError::RateLimited { .. }) => {
+                        transport_drops += 1;
+                        tracing::warn!(
+                            phase = "if_match_race",
+                            round,
+                            racer = i,
+                            "rate-limit drop (429 past retry budget; unknown observation)"
+                        );
+                    }
                     Err(e) => {
                         return Err(ProbeFailure {
                             phase: "if_match_race",
@@ -771,6 +939,18 @@ impl GitStore {
                             round,
                             racer = i,
                             "transport drop (pre-classification: socket/send failure)"
+                        );
+                    }
+                    // Persistent 429 → unknown observation (see the
+                    // `if_match_race` arm): drop it rather than false-fail a
+                    // correctly rate-limiting backend.
+                    Err(StoreError::RateLimited { .. }) => {
+                        transport_drops += 1;
+                        tracing::warn!(
+                            phase = "if_none_match_race",
+                            round,
+                            racer = i,
+                            "rate-limit drop (429 past retry budget; unknown observation)"
                         );
                     }
                     Err(e) => {
@@ -891,17 +1071,16 @@ impl GitStore {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(axum::http::header::IF_NONE_MATCH, "*".parse().unwrap());
         match self
-            .bucket
-            .put_object_with_content_type_and_headers(
-                key,
-                bytes,
-                "application/octet-stream",
-                Some(headers),
-            )
+            .put_with_backoff(key, bytes, "application/octet-stream", headers)
             .await
         {
             Ok(resp) => Ok(resp.status_code()),
             Err(S3Error::HttpFailWithBody(412, _)) => Ok(412),
+            // Persistent 429 after the retry budget: report it as a typed
+            // `RateLimited` so the probe can drop it as an *unknown* observation
+            // (like a transport drop) rather than false-fail the conformance
+            // gate against a correctly rate-limiting backend (R2).
+            Err(S3Error::HttpFailWithBody(429, _)) => Err(self.rate_limited_err(key)),
             Err(e) => Err(StoreError::Backend(e)),
         }
     }
@@ -927,19 +1106,127 @@ mod tests {
         }
     }
 
+    fn test_store() -> GitStore {
+        // `Bucket::new` does not open a connection, so this builds a usable
+        // `GitStore` for pure classification tests without any live backend.
+        GitStore::new(
+            "http://localhost:9000",
+            "buzz_dev",
+            "buzz_dev_secret",
+            "buzz-git",
+            "us-east-1",
+        )
+        .expect("build store")
+    }
+
     #[test]
     fn classify_cas_412_is_lost_race() {
         let r = Err(S3Error::HttpFailWithBody(412, "PreconditionFailed".into()));
-        assert_eq!(GitStore::classify_cas(r).unwrap(), CasOutcome::LostRace);
+        assert_eq!(
+            test_store().classify_cas("probe/pointer", r).unwrap(),
+            CasOutcome::LostRace
+        );
+    }
+
+    #[test]
+    fn classify_cas_429_is_rate_limited_not_lost_race() {
+        // The core R2 bug: a 429 (rate limit) must NOT collapse into
+        // `LostRace` (412). It is a distinct, typed backpressure signal.
+        let r = Err(S3Error::HttpFailWithBody(429, "TooManyRequests".into()));
+        let err = test_store()
+            .classify_cas("probe/pointer", r)
+            .expect_err("429 must not be a CasOutcome");
+        match err {
+            StoreError::RateLimited { key, attempts } => {
+                assert_eq!(key, "probe/pointer");
+                assert_eq!(attempts, RetryConfig::default().max_retries);
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 
     #[test]
     fn classify_cas_other_4xx_bubbles() {
         let r = Err(S3Error::HttpFailWithBody(403, "AccessDenied".into()));
         assert!(matches!(
-            GitStore::classify_cas(r),
+            test_store().classify_cas("probe/pointer", r),
             Err(StoreError::Backend(S3Error::HttpFailWithBody(403, _)))
         ));
+    }
+
+    #[test]
+    fn is_rate_limited_distinguishes_429_from_412() {
+        assert!(is_rate_limited(&Err(S3Error::HttpFailWithBody(
+            429,
+            "TooManyRequests".into()
+        ))));
+        assert!(!is_rate_limited(&Err(S3Error::HttpFailWithBody(
+            412,
+            "PreconditionFailed".into()
+        ))));
+        assert!(!is_rate_limited(&Err(S3Error::HttpFailWithBody(
+            503,
+            "SlowDown".into()
+        ))));
+    }
+
+    #[test]
+    fn backoff_delay_is_bounded_by_max() {
+        let cfg = RetryConfig {
+            max_retries: 10,
+            base_delay: Duration::from_millis(50),
+            max_delay: Duration::from_millis(200),
+        };
+        // Full jitter keeps every delay within [0, capped]; capped <= max.
+        for attempt in 0..12 {
+            for _ in 0..64 {
+                assert!(cfg.delay_for_attempt(attempt) <= cfg.max_delay);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_retries_then_succeeds() {
+        use std::cell::Cell;
+        let cfg = RetryConfig {
+            max_retries: 5,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let calls = Cell::new(0usize);
+        let out: Result<u16, ()> = retry_with_backoff(&cfg, |r| r.is_err(), || {
+            let n = calls.get() + 1;
+            calls.set(n);
+            async move {
+                if n < 3 {
+                    Err(())
+                } else {
+                    Ok(200)
+                }
+            }
+        })
+        .await;
+        assert_eq!(out, Ok(200));
+        assert_eq!(calls.get(), 3, "two retries then success");
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_stops_at_budget() {
+        use std::cell::Cell;
+        let cfg = RetryConfig {
+            max_retries: 4,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+        };
+        let calls = Cell::new(0usize);
+        let out: Result<u16, ()> = retry_with_backoff(&cfg, |r| r.is_err(), || {
+            calls.set(calls.get() + 1);
+            async move { Err(()) }
+        })
+        .await;
+        assert_eq!(out, Err(()));
+        // Initial attempt + max_retries retries.
+        assert_eq!(calls.get(), 5);
     }
 
     #[test]
