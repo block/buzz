@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound as _, Utc};
 use futures_util::FutureExt as _;
 use sqlx::{Acquire, PgPool, Row};
 use tracing::{debug, instrument, warn};
@@ -100,7 +100,11 @@ impl AuditService {
         };
         let seq = prev_seq + 1;
 
-        let created_at: DateTime<Utc> = Utc::now();
+        // Truncate to microsecond precision to match what Postgres stores in a
+        // TIMESTAMPTZ column (1 µs resolution). Hashing the raw nanosecond
+        // value would produce a digest the verifier can never reproduce after
+        // the sub-microsecond digits are discarded on write. See #2637.
+        let created_at: DateTime<Utc> = Utc::now().trunc_subsecs(6);
 
         let mut audit_entry = AuditEntry {
             community_id,
