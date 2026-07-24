@@ -2,15 +2,14 @@ use super::{
     MemoryError, ReplicationResult, TrustedMemoryConfig, MAXIMUM_RESPONSE_BYTES, SYNC_CANCELLED,
 };
 use chrono::Utc;
-use reqwest::blocking::{Client, Response};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
-use reqwest::Method;
+use reqwest::{Client, Method, Response};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+use tokio::runtime::{Builder, Runtime};
 
 const PAGE_SIZE: u64 = 50;
 const MAXIMUM_PAGES: u64 = 10_000;
@@ -20,6 +19,7 @@ const MAXIMUM_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAXIMUM_REQUEST_BYTES: usize = MAXIMUM_RESPONSE_BYTES + 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 const MAXIMUM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[path = "memory_replication_validation.rs"]
 mod validation;
@@ -98,6 +98,7 @@ struct JsonRequest<'a> {
 
 struct HttpJsonExchange {
     client: Client,
+    runtime: Runtime,
 }
 
 impl HttpJsonExchange {
@@ -108,7 +109,11 @@ impl HttpJsonExchange {
             .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|_| MemoryError::LocalServiceUnavailable)?;
-        Ok(Self { client })
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| MemoryError::LocalServiceUnavailable)?;
+        Ok(Self { client, runtime })
     }
 }
 
@@ -141,30 +146,58 @@ impl JsonExchange for HttpJsonExchange {
         if let Some(bytes) = &body {
             budget.add_bytes(bytes.len())?;
         }
-        let mut request = self
+        let mut request_builder = self
             .client
             .request(request.method, format!("{}{}", node.endpoint, request.path))
-            .timeout(timeout)
             .header(ACCEPT, "application/json")
             .header(
                 AUTHORIZATION,
                 format!("Bearer {}", node.token(request.capability)),
             );
         if let Some(bytes) = body {
-            request = request.header(CONTENT_TYPE, "application/json").body(bytes);
+            request_builder = request_builder
+                .header(CONTENT_TYPE, "application/json")
+                .body(bytes);
         }
-        let response = request
-            .send()
-            .map_err(|_| current_error(deadline, MemoryError::LocalServiceUnavailable))?;
-        read_response(response, deadline, budget)
+        let request_deadline = Instant::now() + timeout;
+        let result = self.runtime.block_on(async {
+            let response = tokio::select! {
+                biased;
+                error = cancellation_or_deadline(request_deadline) => return Err(error),
+                response = request_builder.send() => response
+                    .map_err(|_| current_error(deadline, MemoryError::LocalServiceUnavailable))?,
+            };
+            read_response(response, request_deadline).await
+        });
+        if matches!(&result, Err(MemoryError::Cancelled | MemoryError::Timeout)) {
+            self.runtime.block_on(async {
+                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            });
+        }
+        let (value, response_bytes) = result?;
+        budget.add_bytes(response_bytes)?;
+        Ok(value)
     }
 }
 
-fn read_response(
+async fn cancellation_or_deadline(deadline: Instant) -> MemoryError {
+    loop {
+        if SYNC_CANCELLED.load(Ordering::SeqCst) {
+            return MemoryError::Cancelled;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return MemoryError::Timeout;
+        }
+        tokio::time::sleep(remaining.min(CANCELLATION_POLL_INTERVAL)).await;
+    }
+}
+
+async fn read_response(
     mut response: Response,
     deadline: Instant,
-    budget: &mut TransferBudget,
-) -> Result<Value, MemoryError> {
+) -> Result<(Value, usize), MemoryError> {
     let status = response.status();
     if matches!(status.as_u16(), 401 | 403) {
         return Err(MemoryError::AuthenticationFailed);
@@ -201,26 +234,26 @@ fn read_response(
         }
     }
     let mut body = Vec::new();
-    let mut chunk = [0_u8; 16 * 1024];
     loop {
-        check_active(deadline)?;
-        let count = response
-            .read(&mut chunk)
-            .map_err(|_| current_error(deadline, MemoryError::InvalidResponse))?;
-        if count == 0 {
+        let next = tokio::select! {
+            biased;
+            error = cancellation_or_deadline(deadline) => return Err(error),
+            chunk = response.chunk() => chunk
+                .map_err(|_| current_error(deadline, MemoryError::InvalidResponse))?,
+        };
+        let Some(chunk) = next else {
             break;
-        }
-        if body.len() + count > MAXIMUM_RESPONSE_BYTES {
+        };
+        if body.len() + chunk.len() > MAXIMUM_RESPONSE_BYTES {
             return Err(MemoryError::ResponseTooLarge);
         }
-        body.extend_from_slice(&chunk[..count]);
+        body.extend_from_slice(&chunk);
     }
-    budget.add_bytes(body.len())?;
     let value: Value = serde_json::from_slice(&body).map_err(|_| MemoryError::InvalidResponse)?;
     if !value.is_object() {
         return Err(MemoryError::InvalidResponse);
     }
-    Ok(value)
+    Ok((value, body.len()))
 }
 
 fn check_active(deadline: Instant) -> Result<(), MemoryError> {

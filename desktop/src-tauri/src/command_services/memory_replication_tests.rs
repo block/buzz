@@ -2,9 +2,9 @@ use super::*;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::Mutex;
+use std::sync::{mpsc, Mutex};
 
 static HTTP_ENV_LOCK: Mutex<()> = Mutex::new(());
 static REPLICATION_TEST_STATE: Mutex<()> = Mutex::new(());
@@ -235,6 +235,37 @@ fn accepts_agent_memory_python_canonical_json_golden_without_self_sealing() {
         &value,
         value["envelope_id"].as_str().expect("golden envelope id")
     ));
+}
+
+#[test]
+fn matches_immutable_cpython_311_float_boundary_golden() {
+    // Expected bytes and digest were captured from CPython 3.11
+    // json.dumps(..., ensure_ascii=False, allow_nan=False,
+    // separators=(",", ":"), sort_keys=True), never from this Rust writer.
+    let value = json!({
+        "unicode": "Café ⚓",
+        "fixed_pos_low": 1e-4,
+        "scientific_pos_low": 1e-5,
+        "fixed_pos_high": 1e15,
+        "scientific_pos_high": 1e16,
+        "fixed_neg_low": -1e-4,
+        "scientific_neg_low": -1e-5,
+        "fixed_neg_high": -1e15,
+        "scientific_neg_high": -1e16,
+        "one": 1.0,
+        "negative_zero": -0.0,
+        "min_subnormal": f64::from_bits(1),
+        "max_finite": f64::MAX
+    });
+    let canonical = python_canonical_json_bytes(&value).expect("canonical CPython vector");
+    assert_eq!(
+        String::from_utf8(canonical.clone()).expect("canonical UTF-8"),
+        r#"{"fixed_neg_high":-1000000000000000.0,"fixed_neg_low":-0.0001,"fixed_pos_high":1000000000000000.0,"fixed_pos_low":0.0001,"max_finite":1.7976931348623157e+308,"min_subnormal":5e-324,"negative_zero":-0.0,"one":1.0,"scientific_neg_high":-1e+16,"scientific_neg_low":-1e-05,"scientific_pos_high":1e+16,"scientific_pos_low":1e-05,"unicode":"Café ⚓"}"#
+    );
+    assert_eq!(
+        format!("sha256:{}", hex::encode(Sha256::digest(canonical))),
+        "sha256:6b796b744e8a9ae9330d5787983e613e3ca959269341c50f63acb5dc22eae6ae"
+    );
 }
 
 #[test]
@@ -691,6 +722,145 @@ fn valid_response_can_take_more_than_half_a_second_within_the_operation_deadline
         Ok(json!({}))
     );
     server.join().expect("join delayed fixture");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn async_transport_runs_safely_inside_the_manual_spawn_blocking_boundary() {
+    let (endpoint, server) = one_response_server("200 OK", "application/json; charset=utf-8", "{}");
+    let request = tokio::task::spawn_blocking(move || {
+        let _state = REPLICATION_TEST_STATE
+            .lock()
+            .expect("lock replication state");
+        let node = Node {
+            endpoint,
+            read_token: "read",
+            replicate_token: "replicate",
+            expected_node_id: "node:test",
+        };
+        let mut exchange = HttpJsonExchange::new().expect("build client");
+        let mut budget = TransferBudget::default();
+        exchange.request(
+            &node,
+            JsonRequest {
+                method: Method::GET,
+                path: "/replication/readiness",
+                capability: Capability::Read,
+                payload: None,
+            },
+            Instant::now() + Duration::from_secs(2),
+            &mut budget,
+        )
+    });
+    assert_eq!(
+        request.await.expect("join blocking boundary"),
+        Ok(json!({}))
+    );
+    server.join().expect("join blocking boundary fixture");
+}
+
+fn assert_cancellation_closes_stalled_exchange(partial_response: Option<&'static [u8]>) {
+    SYNC_CANCELLED.store(false, Ordering::SeqCst);
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind stalled fixture");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("stalled fixture address")
+    );
+    let (ready_sender, ready_receiver) = mpsc::sync_channel(0);
+    let (closed_sender, closed_receiver) = mpsc::sync_channel(0);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept stalled fixture");
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = stream.read(&mut chunk).expect("read stalled request");
+            if count == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..count]);
+        }
+        if let Some(response) = partial_response {
+            stream
+                .write_all(response)
+                .expect("write partial stalled response");
+            stream.flush().expect("flush partial stalled response");
+        }
+        ready_sender.send(()).expect("signal stalled request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("bound stalled socket observation");
+        let closed = loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break true,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break false;
+                }
+                Err(_) => break true,
+            }
+        };
+        closed_sender.send(closed).expect("report socket closure");
+    });
+    let canceller = std::thread::spawn(move || {
+        ready_receiver.recv().expect("wait for stalled request");
+        SYNC_CANCELLED.store(true, Ordering::SeqCst);
+    });
+    let node = Node {
+        endpoint,
+        read_token: "read",
+        replicate_token: "replicate",
+        expected_node_id: "node:test",
+    };
+    let mut exchange = HttpJsonExchange::new().expect("build client");
+    let mut budget = TransferBudget::default();
+    let started = Instant::now();
+    let result = exchange.request(
+        &node,
+        JsonRequest {
+            method: Method::GET,
+            path: "/replication/readiness",
+            capability: Capability::Read,
+            payload: None,
+        },
+        Instant::now() + Duration::from_secs(2),
+        &mut budget,
+    );
+    let elapsed = started.elapsed();
+    let socket_closed = closed_receiver
+        .recv_timeout(Duration::from_secs(1))
+        .expect("server must report socket state");
+    canceller.join().expect("join stalled canceller");
+    server.join().expect("join stalled server");
+    SYNC_CANCELLED.store(false, Ordering::SeqCst);
+
+    assert_eq!(result, Err(MemoryError::Cancelled));
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "cancellation must abort stalled socket I/O within the shutdown bound"
+    );
+    assert!(socket_closed, "cancelled request must close its socket");
+}
+
+#[test]
+fn cancellation_aborts_a_request_stalled_before_response_headers() {
+    let _state = REPLICATION_TEST_STATE
+        .lock()
+        .expect("lock replication state");
+    assert_cancellation_closes_stalled_exchange(None);
+}
+
+#[test]
+fn cancellation_aborts_a_response_stalled_after_one_body_chunk() {
+    let _state = REPLICATION_TEST_STATE
+        .lock()
+        .expect("lock replication state");
+    assert_cancellation_closes_stalled_exchange(Some(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+    ));
 }
 
 #[test]

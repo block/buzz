@@ -109,16 +109,11 @@ fn write_python_canonical(value: &Value, output: &mut Vec<u8>) -> Result<(), Mem
         Value::Bool(true) => output.extend_from_slice(b"true"),
         Value::Bool(false) => output.extend_from_slice(b"false"),
         Value::Number(number) => {
-            let mut encoded = number.to_string();
-            if let Some(index) = encoded.find(['e', 'E']) {
-                let mantissa = encoded[..index].to_string();
-                let exponent = &encoded[index + 1..];
-                let (sign, digits) = exponent
-                    .strip_prefix('-')
-                    .map_or(("+", exponent), |digits| ("-", digits));
-                let digits = digits.strip_prefix('+').unwrap_or(digits);
-                encoded = format!("{mantissa}e{sign}{digits:0>2}");
-            }
+            let encoded = if number.as_i64().is_some() || number.as_u64().is_some() {
+                number.to_string()
+            } else {
+                python_float(number)?
+            };
             output.extend_from_slice(encoded.as_bytes());
         }
         Value::String(text) => output.extend_from_slice(
@@ -159,6 +154,69 @@ fn write_python_canonical(value: &Value, output: &mut Vec<u8>) -> Result<(), Mem
         return Err(MemoryError::ResponseTooLarge);
     }
     Ok(())
+}
+
+fn python_float(number: &serde_json::Number) -> Result<String, MemoryError> {
+    let rendered = number.to_string();
+    let (sign, magnitude) = rendered
+        .strip_prefix('-')
+        .map_or(("", rendered.as_str()), |value| ("-", value));
+    let (coefficient, explicit_exponent) = magnitude
+        .split_once(['e', 'E'])
+        .map_or((magnitude, 0_i32), |(coefficient, exponent)| {
+            (coefficient, exponent.parse::<i32>().unwrap_or(i32::MIN))
+        });
+    if explicit_exponent == i32::MIN {
+        return Err(MemoryError::InvalidResponse);
+    }
+    let decimal_position = coefficient.find('.').unwrap_or(coefficient.len()) as i32;
+    let digits = coefficient
+        .bytes()
+        .filter(|byte| *byte != b'.')
+        .collect::<Vec<_>>();
+    let Some(first_nonzero) = digits.iter().position(|byte| *byte != b'0') else {
+        return Ok(format!("{sign}0.0"));
+    };
+    let last_nonzero = digits
+        .iter()
+        .rposition(|byte| *byte != b'0')
+        .ok_or(MemoryError::InvalidResponse)?;
+    let significant = std::str::from_utf8(&digits[first_nonzero..=last_nonzero])
+        .map_err(|_| MemoryError::InvalidResponse)?;
+    let adjusted_exponent = explicit_exponent + decimal_position - first_nonzero as i32 - 1;
+
+    if !(-4..16).contains(&adjusted_exponent) {
+        let mut coefficient = significant[..1].to_string();
+        if significant.len() > 1 {
+            coefficient.push('.');
+            coefficient.push_str(&significant[1..]);
+        }
+        let exponent_sign = if adjusted_exponent < 0 { '-' } else { '+' };
+        return Ok(format!(
+            "{sign}{coefficient}e{exponent_sign}{:02}",
+            adjusted_exponent.unsigned_abs()
+        ));
+    }
+
+    let decimal_position = adjusted_exponent + 1;
+    if decimal_position <= 0 {
+        return Ok(format!(
+            "{sign}0.{}{significant}",
+            "0".repeat((-decimal_position) as usize)
+        ));
+    }
+    let decimal_position = decimal_position as usize;
+    if decimal_position >= significant.len() {
+        return Ok(format!(
+            "{sign}{significant}{}.0",
+            "0".repeat(decimal_position - significant.len())
+        ));
+    }
+    Ok(format!(
+        "{sign}{}.{}",
+        &significant[..decimal_position],
+        &significant[decimal_position..]
+    ))
 }
 
 pub(super) fn python_canonical_json_bytes(value: &Value) -> Result<Vec<u8>, MemoryError> {
