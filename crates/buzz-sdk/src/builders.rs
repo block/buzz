@@ -10,9 +10,9 @@ use buzz_core::{
         KIND_GIT_PR_UPDATE, KIND_GIT_PULL_REQUEST, KIND_GIT_REPO_ANNOUNCEMENT,
         KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED,
         KIND_GIT_STATUS_OPEN, KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST,
-        KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT,
-        KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF,
-        KIND_WORKFLOW_TRIGGER,
+        KIND_IMPORT_IDENTITY_BINDING, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
+        KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT,
+        KIND_PRESENCE_UPDATE, KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER,
     },
     observer::{
         content_looks_like_nip44, OBSERVER_AGENT_TAG, OBSERVER_FRAME_CONTROL, OBSERVER_FRAME_TAG,
@@ -529,6 +529,37 @@ pub fn build_custom_emoji_set(emojis: &[CustomEmoji]) -> Result<EventBuilder, Sd
 pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder, SdkError> {
     let tags = vec![tag(&["h", &channel_id.to_string()])?];
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
+}
+
+/// Canonical `d`-tag for a Slack identity binding: `slack:<user id>`.
+pub fn slack_identity_binding_d_tag(slack_user_id: &str) -> String {
+    format!("slack:{slack_user_id}")
+}
+
+/// Build an owner/admin-signed import identity binding (kind 30623).
+///
+/// Attests that the foreign workspace identity keyed by `d_tag` (e.g.
+/// `slack:U060976D0QN`, via [`slack_identity_binding_d_tag`]) belongs to
+/// `bound_pubkey`. Carries **public keys only** — no secret transits. The
+/// relay accepts this event solely from a community owner/admin, so a member
+/// cannot claim another person's imported history. Parameterized-replaceable:
+/// re-binding the same `d_tag` supersedes the prior binding.
+pub fn build_import_identity_binding(
+    d_tag: &str,
+    bound_pubkey: &str,
+) -> Result<EventBuilder, SdkError> {
+    if d_tag.trim().is_empty() {
+        return Err(SdkError::InvalidInput(
+            "identity binding d tag must not be empty".into(),
+        ));
+    }
+    let bound_pubkey = check_pubkey_hex(bound_pubkey, "bound_pubkey")?;
+    let tags = vec![
+        tag(&["d", d_tag])?,
+        tag(&["p", &bound_pubkey])?,
+        tag(&["import", "slack"])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_BINDING as u16), "").tags(tags))
 }
 
 /// Build a NIP-01 profile metadata event (kind 0).

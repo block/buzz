@@ -33,9 +33,6 @@ pub struct SlackUserProfile {
     /// Full real name (may be empty).
     #[serde(default)]
     pub real_name: String,
-    /// 512px avatar URL, when present.
-    #[serde(default)]
-    pub image_512: Option<String>,
 }
 
 impl SlackUser {
@@ -116,14 +113,13 @@ pub struct SlackMessage {
     pub files: Vec<SlackFile>,
 }
 
-/// One emoji reaction group on a message.
+/// One emoji reaction group on a message. Only the emoji name is used: bot
+/// mode signs one reaction per distinct emoji, so per-reactor identity (the
+/// export's `users` array) cannot be reproduced and is not parsed.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SlackReaction {
     /// Emoji shortcode without colons (may carry `::skin-tone-N`).
     pub name: String,
-    /// User IDs who reacted.
-    #[serde(default)]
-    pub users: Vec<String>,
 }
 
 /// One file attachment stub.

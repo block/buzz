@@ -926,25 +926,24 @@ pub enum WorkflowsCmd {
 #[derive(Subcommand)]
 pub enum ImportCmd {
     /// Import a Slack workspace export directory (see docs/slack-import.md)
-    #[command(after_help = "Modes:\n  \
-bot mode (default): everything is signed by the CLI identity; original \
-authors are preserved in content prefixes and import_author tags.\n  \
-mapping mode (--mapping): a JSON file maps Slack user IDs to private keys \
-({\"U123\": {\"private_key\": \"nsec1...\"}}); each user's history is signed \
-with their own key. Requires the CLI identity to be a community owner/admin \
-so mapped users can be added as relay members.\n\n\
+    #[command(
+        after_help = "History is signed by the CLI identity (bot mode) and tagged with the \
+original author (import_author) and timestamp. No private key is ever \
+generated for or distributed to anyone.\n\n\
+To attribute history to real people, publish owner/admin-signed identity \
+bindings mapping a Slack user id to that person's own PUBLIC key (npub or \
+hex) — via --identity-map here, or `buzz import bind` later. A member cannot \
+claim another person's history: only an owner/admin can publish a binding.\n\n\
 Re-running resumes from the state file — completed writes are skipped.\n\n\
 Examples:\n  \
 buzz import slack --export-dir ./export --dry-run\n  \
 buzz import slack --export-dir ./export\n  \
-buzz import slack --export-dir ./export --mapping keys.json --channels general,random")]
+buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1def"
+    )]
     Slack {
         /// Path to the unzipped Slack export directory
         #[arg(long)]
         export_dir: String,
-        /// JSON file mapping Slack user IDs to Nostr private keys (mapping mode)
-        #[arg(long)]
-        mapping: Option<String>,
         /// State file path (default: <export-dir>/buzz-import-state.json)
         #[arg(long)]
         state: Option<String>,
@@ -957,9 +956,25 @@ buzz import slack --export-dir ./export --mapping keys.json --channels general,r
         /// Skip importing reactions
         #[arg(long, default_value_t = false)]
         skip_reactions: bool,
-        /// Skip publishing kind 0 profiles for mapped users
-        #[arg(long, default_value_t = false)]
-        skip_profiles: bool,
+        /// Owner/admin-signed identity bindings: SLACKID=npub-or-hex, comma-separated.
+        /// Public keys only — never an nsec.
+        #[arg(long)]
+        identity_map: Option<String>,
+    },
+    /// Publish one owner/admin-signed identity binding (Slack id → public key)
+    #[command(
+        after_help = "Attributes imported history to a real person. The pubkey is PUBLIC \
+(npub or hex) — never an nsec. Requires the CLI identity to be a community \
+owner or admin.\n\nExample:\n  \
+buzz import bind --slack-id U060976D0QN --pubkey npub1abc..."
+    )]
+    Bind {
+        /// Slack user id (e.g. U060976D0QN)
+        #[arg(long)]
+        slack_id: String,
+        /// The person's PUBLIC key: npub1… or 64-char hex
+        #[arg(long)]
+        pubkey: String,
     },
 }
 
@@ -1974,7 +1989,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
-        assert_eq!(names(&cmd, "import"), vec!["slack"]);
+        assert_eq!(names(&cmd, "import"), vec!["bind", "slack"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2045,7 +2060,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
-            ("import", 1),
+            ("import", 2),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),

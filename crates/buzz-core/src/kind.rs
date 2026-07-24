@@ -312,6 +312,17 @@ pub const KIND_WORKFLOW_DEF: u32 = 30620;
 /// `hidden_at` per viewer; this is the only Nostr-visible projection of it.
 pub const KIND_DM_VISIBILITY: u32 = 30622;
 
+/// Import identity binding: an owner/admin-signed attestation that a foreign
+/// workspace identity (e.g. a Slack user id) belongs to a given Buzz pubkey.
+/// Parameterized-replaceable, `d = <source>:<foreign id>` (e.g.
+/// `slack:U060976D0QN`), with a single `["p", <pubkey hex>]` naming the bound
+/// identity. The relay accepts this kind ONLY from a community owner or admin
+/// (mirrors the kind:9030 relay-admin authorization), so a member cannot claim
+/// another person's imported history — the whole point of the binding. Clients
+/// read these to render `import_author`-tagged history under the bound pubkey's
+/// profile. It carries public keys only; no secret ever transits.
+pub const KIND_IMPORT_IDENTITY_BINDING: u32 = 30623;
+
 /// Lower bound of the NIP-33 parameterized replaceable range (30000–39999).
 pub const PARAM_REPLACEABLE_KIND_MIN: u32 = 30000;
 /// Upper bound of the NIP-33 parameterized replaceable range (30000–39999).
@@ -615,6 +626,7 @@ pub const ALL_KINDS: &[u32] = &[
     KIND_GIT_STATUS_MERGED,
     KIND_GIT_STATUS_CLOSED,
     KIND_GIT_STATUS_DRAFT,
+    KIND_IMPORT_IDENTITY_BINDING,
 ];
 
 /// Returns `true` if `kind` is in the ephemeral range (20000–29999).

@@ -21,15 +21,15 @@ use buzz_core::kind::{
     KIND_GIT_STATUS_CLOSED, KIND_GIT_STATUS_DRAFT, KIND_GIT_STATUS_MERGED, KIND_GIT_STATUS_OPEN,
     KIND_HUDDLE_ENDED, KIND_HUDDLE_GUIDELINES, KIND_HUDDLE_PARTICIPANT_JOINED,
     KIND_HUDDLE_PARTICIPANT_LEFT, KIND_HUDDLE_STARTED, KIND_IA_ARCHIVE_REQUEST,
-    KIND_IA_UNARCHIVE_REQUEST, KIND_LONG_FORM, KIND_MANAGED_AGENT, KIND_MEMBER_ADDED_NOTIFICATION,
-    KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN, KIND_MODERATION_RESOLVE_REPORT,
-    KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN, KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST,
-    KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
-    KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
-    KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_IA_UNARCHIVE_REQUEST, KIND_IMPORT_IDENTITY_BINDING, KIND_LONG_FORM, KIND_MANAGED_AGENT,
+    KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_MODERATION_BAN,
+    KIND_MODERATION_RESOLVE_REPORT, KIND_MODERATION_TIMEOUT, KIND_MODERATION_UNBAN,
+    KIND_MODERATION_UNTIMEOUT, KIND_MUTE_LIST, KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT,
+    KIND_NIP29_DELETE_GROUP, KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST,
+    KIND_NIP29_LEAVE_REQUEST, KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER,
+    KIND_NIP43_LEAVE_REQUEST, KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -300,6 +300,10 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_DM_OPEN | KIND_DM_ADD_MEMBER | KIND_DM_HIDE => Ok(Scope::MessagesWrite),
         KIND_WORKFLOW_DEF | KIND_WORKFLOW_TRIGGER => Ok(Scope::MessagesWrite),
         KIND_APPROVAL_GRANT | KIND_APPROVAL_DENY => Ok(Scope::MessagesWrite),
+        // Import identity binding — scope gets the caller in the door; the
+        // owner/admin role check that actually authorizes it runs in
+        // `validate_import_identity_binding` before storage.
+        KIND_IMPORT_IDENTITY_BINDING => Ok(Scope::AdminUsers),
         _ => Err("restricted: unknown event kind"),
     }
 }
@@ -310,6 +314,49 @@ fn has_import_tag(event: &Event) -> bool {
         .tags
         .iter()
         .any(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("import"))
+}
+
+/// Validate the shape of a `KIND_IMPORT_IDENTITY_BINDING` event before storage.
+///
+/// Requires a non-empty `d` tag (the `<source>:<foreign id>` key, e.g.
+/// `slack:U060976D0QN`) and exactly one `p` tag holding a 64-char hex pubkey
+/// (the bound Buzz identity). Authorization (owner/admin) is checked by the
+/// caller; this only enforces that the stored event is well-formed so clients
+/// can trust its shape.
+fn validate_import_identity_binding(event: &Event) -> Result<(), IngestError> {
+    let d_tag = event.tags.iter().find_map(|t| {
+        let parts = t.as_slice();
+        (parts.first().map(|s| s.as_str()) == Some("d"))
+            .then(|| parts.get(1).map(|s| s.as_str()).unwrap_or(""))
+    });
+    match d_tag {
+        Some(d) if !d.is_empty() => {}
+        _ => {
+            return Err(IngestError::Rejected(
+                "invalid: identity binding requires a non-empty d tag (e.g. slack:U123)".into(),
+            ))
+        }
+    }
+
+    let p_tags: Vec<&str> = event
+        .tags
+        .iter()
+        .filter_map(|t| {
+            let parts = t.as_slice();
+            (parts.first().map(|s| s.as_str()) == Some("p"))
+                .then(|| parts.get(1).map(|s| s.as_str()))
+                .flatten()
+        })
+        .collect();
+    match p_tags.as_slice() {
+        [pubkey] if pubkey.len() == 64 && pubkey.chars().all(|c| c.is_ascii_hexdigit()) => Ok(()),
+        [_] => Err(IngestError::Rejected(
+            "invalid: identity binding p tag must be a 64-char hex pubkey".into(),
+        )),
+        _ => Err(IngestError::Rejected(
+            "invalid: identity binding requires exactly one p tag (the bound pubkey)".into(),
+        )),
+    }
 }
 
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
@@ -1485,24 +1532,41 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
+    // Whether the authenticated caller is a community owner/admin. Looked up
+    // once and reused for the import carve-out and the identity-binding gate.
+    let caller_is_community_admin = matches!(
+        state
+            .db
+            .get_relay_member(tenant.community(), &auth.pubkey().to_hex())
+            .await
+            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+            .as_ref()
+            .map(|m| m.role.as_str()),
+        Some("owner") | Some("admin")
+    );
+
     // Authorized-import carve-out: an event carrying an `import` provenance
-    // tag, submitted by an authenticated community owner/admin, may (a) be
-    // backdated past the drift envelope and (b) be signed by a key other
-    // than the submitter — the Schnorr signature already proves authorship,
-    // and the admin's own auth answers "who is allowed to write history
-    // here". The trust model matches BUZZ_MAX_PAST_DRIFT_SECS (trust the
+    // tag, submitted by an authenticated community owner/admin, may be
+    // backdated past the drift envelope so history replays with its original
+    // timestamps. The trust model matches BUZZ_MAX_PAST_DRIFT_SECS (trust the
     // operator), scoped per event instead of relay-wide, with no restart.
-    let import_exempt = has_import_tag(&event)
-        && matches!(
-            state
-                .db
-                .get_relay_member(tenant.community(), &auth.pubkey().to_hex())
-                .await
-                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-                .as_ref()
-                .map(|m| m.role.as_str()),
-            Some("owner") | Some("admin")
-        );
+    // Note: the event is still signed by the submitter (bot mode) — the
+    // pubkey==submitter check below is NOT waived; attribution to real people
+    // is carried by `import_author` tags plus owner-signed identity bindings
+    // (kind KIND_IMPORT_IDENTITY_BINDING), never by third-party signatures.
+    let import_exempt = has_import_tag(&event) && caller_is_community_admin;
+
+    // Identity bindings are owner/admin-only: this is what stops a member from
+    // claiming someone else's imported history (`d = slack:<id>` → their own
+    // pubkey). Reject before storage if the caller is not owner/admin.
+    if kind_u32 == KIND_IMPORT_IDENTITY_BINDING {
+        if !caller_is_community_admin {
+            return Err(IngestError::AuthFailed(
+                "restricted: identity bindings require a community owner or admin".into(),
+            ));
+        }
+        validate_import_identity_binding(&event)?;
+    }
 
     // Future drift is a fixed bound — a future timestamp is always a clock
     // error or a forgery. Past drift is operator-tunable
@@ -1528,8 +1592,12 @@ async fn ingest_event_inner(
         )));
     }
 
+    // Every stored event must be signed by the authenticated submitter (only
+    // NIP-59 gift wraps, which deliberately use an ephemeral pubkey, are
+    // exempt). Imports are bot-signed, so this holds for them too — there is
+    // no third-party-signature path into the relay.
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
-    if event.pubkey != *auth.pubkey() && !is_gift_wrap && !import_exempt {
+    if event.pubkey != *auth.pubkey() && !is_gift_wrap {
         return Err(IngestError::AuthFailed(
             "invalid: event pubkey does not match authenticated identity".into(),
         ));
@@ -2681,6 +2749,62 @@ mod tests {
             required_scope_for_kind(KIND_LONG_FORM, &dummy).unwrap(),
             Scope::MessagesWrite,
         );
+    }
+
+    #[test]
+    fn identity_binding_shape_validation() {
+        use buzz_core::kind::KIND_IMPORT_IDENTITY_BINDING;
+        let pk = "8f3904246ba9d9cc7e821e7752e123d435234d17c2513d85785f4a0b1ca07e56";
+        let keys = nostr::Keys::generate();
+        let build = |tags: Vec<nostr::Tag>| {
+            EventBuilder::new(Kind::Custom(KIND_IMPORT_IDENTITY_BINDING as u16), "")
+                .tags(tags)
+                .sign_with_keys(&keys)
+                .expect("sign binding")
+        };
+        let tag = |parts: &[&str]| nostr::Tag::parse(parts.iter().copied()).expect("tag");
+
+        // Well-formed: d = slack:<id>, one 64-hex p tag.
+        let ok = build(vec![tag(&["d", "slack:U1"]), tag(&["p", pk])]);
+        assert!(validate_import_identity_binding(&ok).is_ok());
+
+        // Missing d tag.
+        let no_d = build(vec![tag(&["p", pk])]);
+        assert!(validate_import_identity_binding(&no_d).is_err());
+
+        // Empty d tag.
+        let empty_d = build(vec![tag(&["d", ""]), tag(&["p", pk])]);
+        assert!(validate_import_identity_binding(&empty_d).is_err());
+
+        // Missing p tag.
+        let no_p = build(vec![tag(&["d", "slack:U1"])]);
+        assert!(validate_import_identity_binding(&no_p).is_err());
+
+        // Non-hex / wrong-length p tag.
+        let bad_p = build(vec![tag(&["d", "slack:U1"]), tag(&["p", "notapubkey"])]);
+        assert!(validate_import_identity_binding(&bad_p).is_err());
+
+        // Two p tags — ambiguous, rejected.
+        let two_p = build(vec![
+            tag(&["d", "slack:U1"]),
+            tag(&["p", pk]),
+            tag(&["p", pk]),
+        ]);
+        assert!(validate_import_identity_binding(&two_p).is_err());
+    }
+
+    #[test]
+    fn import_tag_detection() {
+        let keys = nostr::Keys::generate();
+        let with = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .tags(vec![nostr::Tag::parse(["import", "slack"]).expect("tag")])
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert!(has_import_tag(&with));
+        let without = EventBuilder::new(Kind::Custom(KIND_STREAM_MESSAGE as u16), "hi")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        assert!(!has_import_tag(&without));
     }
 
     #[test]
