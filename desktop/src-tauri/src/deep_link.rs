@@ -433,6 +433,23 @@ mod tests {
         assert!(queue.first().is_none());
     }
 
+    /// The bundled Linux `.desktop` template must keep a `%u` field code on
+    /// `Exec`. Per the freedesktop Desktop Entry spec a launcher only passes
+    /// the URL to a handler whose `Exec` carries a field code, and Tauri's
+    /// default template emits `MimeType=x-scheme-handler/buzz` *without* one.
+    /// Shipping that template meant `buzz://join?…` started Buzz with empty
+    /// argv, silently dropping every invite opened on Linux.
+    #[test]
+    fn linux_desktop_template_forwards_the_url_to_the_app() {
+        let template = include_str!("../linux/main.desktop");
+        let exec = template
+            .lines()
+            .find(|line| line.starts_with("Exec="))
+            .expect("template defines Exec");
+        assert_eq!(exec, "Exec={{exec}} %u");
+        assert!(template.contains("MimeType={{mime_type}}"));
+    }
+
     fn valid_nostr_bind_url() -> Url {
         Url::parse(
             "buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2999-01-01T00%3A00%3A00Z&return=clipboard",

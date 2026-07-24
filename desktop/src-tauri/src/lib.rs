@@ -558,6 +558,30 @@ pub fn run() {
                         handle_deep_link_url(&dl_handle, url.as_str());
                     }
                 });
+
+                // Linux and Windows deliver a cold-start deep link as a CLI
+                // argument, which the plugin turns into a one-shot
+                // `deep-link://new-url` event during its own setup — before
+                // the listener above exists. Nothing replays it, so an invite
+                // that launches the app would be dropped. Read the launch URL
+                // back explicitly; `handle_deep_link_url` parks it on the
+                // pending queue for the frontend to drain once it mounts.
+                // macOS is excluded because there the OS delivers cold starts
+                // through `on_open_url` after setup, so this would double-fire.
+                #[cfg(any(target_os = "linux", windows))]
+                {
+                    let launch_urls = match app.deep_link().get_current() {
+                        Ok(urls) => urls.unwrap_or_default(),
+                        Err(error) => {
+                            eprintln!("buzz-desktop: failed to read launch deep link: {error}");
+                            Vec::new()
+                        }
+                    };
+                    let launch_handle = app.handle().clone();
+                    for url in launch_urls {
+                        handle_deep_link_url(&launch_handle, url.as_str());
+                    }
+                }
             }
 
             // Defer launch-time agent restoration until `apply_workspace` has
