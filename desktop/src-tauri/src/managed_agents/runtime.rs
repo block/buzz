@@ -16,6 +16,9 @@ use crate::{
 
 mod path;
 pub(in crate::managed_agents) use path::build_augmented_path;
+pub(crate) use path::compose_path_entries;
+pub(crate) use path::should_skip_claude_executable;
+pub(crate) use path::should_use_inherited;
 
 mod stop;
 pub(crate) use stop::managed_agent_runtime_keys;
@@ -1602,6 +1605,15 @@ pub(crate) fn configure_runtime_cli(
         return;
     }
     if let Some(cli_path) = runtime.underlying_cli.and_then(resolve_command) {
+        // On Windows, `.cmd` and `.bat` files are batch shims — they cannot be
+        // passed directly to `CreateProcess` and cause EINVAL when the Claude
+        // adapter tries to spawn them (issue #2397). Skip setting
+        // `CLAUDE_CODE_EXECUTABLE` for shim paths so the adapter falls back to
+        // its own PATH lookup and finds the real binary instead.
+        // Non-Windows: `.cmd`/`.bat` are valid executables and must be assigned.
+        if should_skip_claude_executable(&cli_path, cfg!(windows)) {
+            return;
+        }
         command.env("CLAUDE_CODE_EXECUTABLE", cli_path);
     }
 }

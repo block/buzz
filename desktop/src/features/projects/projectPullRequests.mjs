@@ -180,7 +180,7 @@ function eventToPullRequestComment(event) {
   const parsedLine =
     lineTag && /^[1-9]\d*$/.test(lineTag) ? Number(lineTag) : Number.NaN;
   const anchor =
-    isReviewRequest || isApproval || isChangeRequest
+    isReviewRequest || isApproval
       ? null
       : normalizeProjectPullRequestCommentAnchor({
           line: parsedLine,
@@ -355,6 +355,7 @@ export function eventToProjectPullRequest(
     author: pullRequest.pubkey,
     createdAt: pullRequest.created_at,
     repoAddress: getTag(pullRequest, "a") ?? null,
+    channelId: getTag(pullRequest, "h") ?? null,
     labels: getAllTags(pullRequest, "t"),
     recipients: getAllTags(pullRequest, "p"),
     reviewers,

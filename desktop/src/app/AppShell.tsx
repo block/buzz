@@ -8,6 +8,7 @@ import { AppShellOverlays } from "@/app/AppShellOverlays";
 import { AppTopChrome } from "@/app/AppTopChrome";
 import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useBackForwardControls } from "@/app/navigation/useBackForwardControls";
+import { useCommunityNavigationTransitions } from "@/app/useCommunityNavigationTransitions";
 import { useLiveHomeFeedActions } from "@/app/useLiveHomeFeedActions";
 import { useChannelBrowserDialog } from "@/app/useChannelBrowserDialog";
 import { useMarkAsReadShortcuts } from "@/app/useMarkAsReadShortcuts";
@@ -67,10 +68,16 @@ import { useDueReminderBadgeCount } from "@/features/reminders/hooks";
 import { RemindMeLaterProvider } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { useReminderNotifications } from "@/features/reminders/useReminderNotifications";
 import { AppSidebar } from "@/features/sidebar/ui/AppSidebar";
+import { requestFocusedThreadClose } from "@/features/channels/focusedThreadCloseRequest";
 import { CommunityRail } from "@/features/sidebar/ui/CommunityRail";
 import { useChannelMutes } from "@/features/sidebar/lib/useChannelMutes";
 import { useChannelStars } from "@/features/sidebar/lib/useChannelStars";
 import { useCommunities } from "@/features/communities/useCommunities";
+import {
+  consumePendingCommunityRestore,
+  loadCommunityDestination,
+  saveCommunityDestination,
+} from "@/features/communities/communityNavigationStorage";
 import { useAddCommunityDialogState } from "@/features/communities/addCommunityPrefill";
 import { useApplyTemplate } from "@/features/channel-templates/useApplyTemplate";
 import { relayClient } from "@/shared/api/relayClient";
@@ -129,30 +136,19 @@ export function AppShell() {
   } = useAppNavigation();
   const { canGoBack, canGoForward, goBack, goForward } =
     useBackForwardControls();
-  // Navigate home before switching communities so the outgoing channel URL is
-  // cleared. Without this, ChannelScreen's read effect continues firing
-  // markChannelRead({ topLevelOnly: true }) for the previous community's
-  // channel, advancing its NIP-RS markers and causing the rail badge to vanish
-  // on the next 30s poll (A→B→A→B disappearance bug).
-  // Guard: skip goHome() when re-selecting the already-active community so
-  // the current channel is not unexpectedly cleared.
-  const handleSwitchCommunity = React.useCallback(
-    (id: string) => {
-      if (id !== communitiesHook.activeCommunity?.id) {
-        void goHome();
-      }
-      communitiesHook.switchCommunity(id);
-    },
-    [
-      goHome,
-      communitiesHook.activeCommunity?.id,
-      communitiesHook.switchCommunity,
-    ],
-  );
   const { selectedChannelId, selectedView } = React.useMemo(
     () => deriveShellRoute(location.pathname),
     [location.pathname],
   );
+  const {
+    removeCommunity: handleRemoveCommunity,
+    switchCommunity: handleSwitchCommunity,
+  } = useCommunityNavigationTransitions({
+    communities: communitiesHook,
+    goHome,
+    selectedChannelId,
+    selectedView,
+  });
   // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
   const locationSearchSection = (location.search as { section?: unknown })
@@ -241,6 +237,54 @@ export function AppShell() {
     () => memberChannels.filter((channel) => channel.archivedAt === null),
     [memberChannels],
   );
+  const hasRestoredCommunityDestinationRef = React.useRef(false);
+  React.useEffect(() => {
+    const activeCommunityId = communitiesHook.activeCommunity?.id;
+    if (
+      hasRestoredCommunityDestinationRef.current ||
+      !channelsQuery.isSuccess ||
+      channelsQuery.dataUpdatedAt === 0 ||
+      !activeCommunityId
+    ) {
+      return;
+    }
+    hasRestoredCommunityDestinationRef.current = true;
+
+    // Restoration belongs to an explicit community transition. Cold boot and
+    // reconnect remounts must preserve the route the user explicitly opened.
+    if (!consumePendingCommunityRestore(activeCommunityId)) {
+      return;
+    }
+
+    const destination = loadCommunityDestination(activeCommunityId);
+    if (!destination || destination.kind === "home") {
+      return;
+    }
+
+    const channelIsAvailable = sidebarChannels.some(
+      (channel) => channel.id === destination.channelId,
+    );
+    if (!channelIsAvailable) {
+      saveCommunityDestination(activeCommunityId, { kind: "home" });
+      void goHome({ replace: true });
+      return;
+    }
+
+    // The normal switch path writes the remembered channel into the hash before
+    // the target community mounts, so no intermediate Inbox frame is painted.
+    // Older transition callers may still arrive at neutral Home; repair those.
+    if (selectedView === "home") {
+      void goChannel(destination.channelId, { replace: true });
+    }
+  }, [
+    channelsQuery.dataUpdatedAt,
+    channelsQuery.isSuccess,
+    communitiesHook.activeCommunity?.id,
+    goChannel,
+    goHome,
+    selectedView,
+    sidebarChannels,
+  ]);
   const activeChannel = React.useMemo(
     () =>
       selectedChannelId
@@ -713,7 +757,7 @@ export function AppShell() {
                         communitiesHook.activeCommunity?.id ?? null
                       }
                       onAddCommunity={addCommunityDialog.openDialog}
-                      onRemoveCommunity={communitiesHook.removeCommunity}
+                      onRemoveCommunity={(id) => void handleRemoveCommunity(id)}
                       onReorderCommunities={communitiesHook.reorderCommunities}
                       onSwitchCommunity={handleSwitchCommunity}
                       onUpdateCommunity={communitiesHook.updateCommunity}
@@ -801,11 +845,14 @@ export function AppShell() {
                             addCommunityDialog.onOpenChange
                           }
                           onNewMessage={handleOpenNewDm}
+                          onBackgroundClick={requestFocusedThreadClose}
                           onCreateChannelOpenChange={setIsCreateChannelOpen}
                           onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
-                          onRemoveCommunity={communitiesHook.removeCommunity}
+                          onRemoveCommunity={(id) =>
+                            void handleRemoveCommunity(id)
+                          }
                           onSwitchCommunity={handleSwitchCommunity}
                           onCreateAgent={() => requestOpenCreateAgent()}
                           selfPresenceStatus={presenceSession.currentStatus}

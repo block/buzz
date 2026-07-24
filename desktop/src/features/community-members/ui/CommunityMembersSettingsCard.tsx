@@ -12,12 +12,13 @@ import { nip19 } from "nostr-tools";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { canEditCommunityProfile } from "@/shared/api/relayMembers";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   useAddRelayMemberMutation,
   useChangeRelayMemberRoleMutation,
-  useMyRelayMembershipQuery,
+  useMyRelayMembershipLookupQuery,
   useRelayMembersQuery,
   useRemoveRelayMemberMutation,
 } from "@/features/community-members/hooks";
@@ -275,9 +276,13 @@ export function CommunityMembersSettingsCard({
 }: {
   currentPubkey?: string;
 }) {
-  const myMembershipQuery = useMyRelayMembershipQuery();
-  const currentRole = myMembershipQuery.data?.role ?? null;
+  const myMembershipQuery = useMyRelayMembershipLookupQuery();
+  const currentRole = myMembershipQuery.data?.membership?.role ?? null;
   const canManageRelay = currentRole === "owner" || currentRole === "admin";
+  // Open relays do not advertise NIP-43, so they cannot expose an admin role
+  // snapshot. Keep the icon editor available there and let the relay enforce
+  // the authoritative owner/admin check on kind 9033.
+  const canEditIcon = canEditCommunityProfile(myMembershipQuery.data);
   const membersQuery = useRelayMembersQuery(canManageRelay);
   const members = React.useMemo(
     () => membersQuery.data ?? [],
@@ -323,8 +328,20 @@ export function CommunityMembersSettingsCard({
     );
   }
 
-  if (!canManageRelay || !currentRole) {
+  if (!canEditIcon) {
     return null;
+  }
+
+  if (!canManageRelay || !currentRole) {
+    return (
+      <section className="min-w-0" data-testid="settings-community-members">
+        <SettingsSectionHeader
+          title="Community access"
+          description="Manage how this community appears to members."
+        />
+        <CommunityIconSettingsCard />
+      </section>
+    );
   }
 
   const normalizedInput = normalizeRelayPubkeyInput(pubkeyInput);

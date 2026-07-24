@@ -223,6 +223,8 @@ type MockBridgeOptions = {
   addChannelMembersErrors?: (string | null)[];
   channelMembersReadDelayMs?: number;
   channelsReadError?: string;
+  /** Reject successive mock `get_channels` calls, then resume. */
+  channelsReadErrors?: (string | null)[];
   /** Reject successive mock `create_channel` calls, then resume. */
   createChannelErrors?: string[];
   /** Reject successive mock `ensure_starter_channels` calls, then resume. */
@@ -399,6 +401,15 @@ type MockBridgeOptions = {
     model: string | null;
     preferred_runtime?: string | null;
   };
+  /** File-layer config returned by runtime id. */
+  runtimeFileConfigs?: Record<
+    string,
+    {
+      provider: string | null;
+      model: string | null;
+      satisfiedEnvKeys: string[];
+    } | null
+  >;
   bakedBuildEnv?: Array<{
     key: string;
     masked: boolean;

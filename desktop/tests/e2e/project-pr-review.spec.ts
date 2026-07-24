@@ -32,6 +32,70 @@ async function openBuzzProject(page: import("@playwright/test").Page) {
   await projectEntry.click();
 }
 
+test("same-second request changes supersedes approval", async ({ page }) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    Date.now = () => 1_900_000_000_000;
+  });
+  await installMockBridge(page);
+  await openBuzzProject(page);
+
+  await page.getByRole("tab", { name: "Pull Request" }).click();
+  const aliceRow = page
+    .getByTestId("project-pull-request-row")
+    .filter({ hasText: "alice" })
+    .first();
+  await expect(aliceRow).toBeVisible({ timeout: 10_000 });
+  await aliceRow.getByRole("button", { name: /^#/ }).click();
+
+  await page.getByRole("button", { name: "Approve", exact: true }).click();
+  const approveDialog = page.getByRole("dialog", {
+    name: "Approve pull request",
+  });
+  await approveDialog
+    .getByRole("textbox", { name: "Approval summary" })
+    .fill("Approved at the fixed second.");
+  await approveDialog
+    .getByRole("button", { name: "Approve", exact: true })
+    .click();
+  await expect(page.getByText("Pull request approved.")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Approve", exact: true }),
+  ).toHaveCount(0);
+
+  const commentComposer = page.getByTestId(
+    "project-pull-request-comment-composer",
+  );
+  await commentComposer
+    .getByRole("button", { name: "Comment", exact: true })
+    .click();
+  await page.getByRole("menuitemradio", { name: "Request changes" }).click();
+  await commentComposer
+    .locator('[contenteditable="true"]')
+    .fill("Changes requested at the same fixed second.");
+  await commentComposer.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Changes requested.")).toBeVisible();
+
+  const [approvalEvent, changeRequestEvent] = await page.evaluate(() => {
+    const decisions =
+      window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
+        (event) =>
+          event.kind === 1 &&
+          event.tags.some(
+            (tag) =>
+              tag[0] === "t" &&
+              (tag[1] === "approval" || tag[1] === "changes-requested"),
+          ),
+      ) ?? [];
+    return [decisions.at(-2), decisions.at(-1)];
+  });
+  expect(approvalEvent?.tags).toContainEqual(["t", "approval"]);
+  expect(changeRequestEvent?.tags).toContainEqual(["t", "changes-requested"]);
+  expect(changeRequestEvent?.createdAt).toBeGreaterThan(
+    approvalEvent?.createdAt ?? 0,
+  );
+});
+
 test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   page,
 }) => {
@@ -54,22 +118,38 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
 
   const header = page.getByRole("heading", { level: 3 });
   await expect(header.first()).toBeVisible();
-
-  // Owner viewing an open PR: draft toggle and both review decisions are offered.
-  const convertToDraft = page.getByRole("button", {
-    name: "Convert to draft",
-  });
-  const approve = page.getByRole("button", { name: "Approve", exact: true });
-  const requestChanges = page.getByRole("button", {
-    name: "Request changes",
+  const sourceChannelLink = page.getByRole("button", {
+    name: "Open author-claimed source channel #general",
     exact: true,
   });
-  await expect(convertToDraft).toBeVisible();
-  await expect(approve).toBeVisible();
-  await expect(requestChanges).toBeVisible();
+  await expect(sourceChannelLink).toBeVisible();
 
-  // Request a review from bob via the reviewers dropdown.
-  await page.getByRole("button", { name: "Request", exact: true }).click();
+  // Owner viewing an open PR: draft toggle and both review decisions are offered.
+  const morePullRequestActions = page.getByRole("button", {
+    name: "More pull request actions",
+  });
+  const approve = page.getByRole("button", { name: "Approve", exact: true });
+  const commentComposer = page.getByTestId(
+    "project-pull-request-comment-composer",
+  );
+  const reviewMode = commentComposer.getByRole("button", {
+    name: "Comment",
+    exact: true,
+  });
+  await expect(morePullRequestActions).toBeVisible();
+  await expect(approve).toBeVisible();
+  await expect(reviewMode).toBeVisible();
+
+  // Request a review from bob via the centered reviewer dialog.
+  await page.getByRole("button", { name: "Add Reviewer", exact: true }).click();
+  await expect(
+    page.getByRole("dialog").getByRole("heading", { name: "Add reviewer" }),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    fullPage: false,
+    path: `${SHOTS}/00-add-reviewer-dialog.png`,
+  });
   await page.getByTestId("project-reviewer-search").fill("bob");
   await page
     .getByTestId(`project-reviewer-result-${TEST_IDENTITIES.bob.pubkey}`)
@@ -92,7 +172,14 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       ),
     )
     .toBe(1);
-  // The requested reviewer appears in the reviewers row and the timeline.
+  const reviewHistoryToggle = page.getByTestId(
+    "project-pull-request-review-history-toggle",
+  );
+  await expect(reviewHistoryToggle).toHaveAttribute("aria-expanded", "true");
+  await expect(
+    page.getByTestId("project-pull-request-timeline-row"),
+  ).toHaveCount(1);
+  // The requested reviewer appears in the reviewers row and default timeline.
   await expect(page.getByText("Requested a review from bob")).toBeVisible({
     timeout: 10_000,
   });
@@ -103,22 +190,25 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
     path: `${SHOTS}/01-review-requested.png`,
   });
 
-  // Fire opposite decisions in the same event turn. The first choice wins;
-  // the shared synchronous guard must prevent the approval from publishing.
-  await requestChanges.evaluate((requestChangesButton) => {
-    const approveButton = [...document.querySelectorAll("button")].find(
-      (button) => button.textContent?.trim() === "Approve",
-    );
-    requestChangesButton.click();
-    approveButton?.click();
-  });
+  await reviewMode.click();
+  await page.getByRole("menuitemradio", { name: "Request changes" }).click();
+  await commentComposer
+    .locator('[contenteditable="true"]')
+    .fill("Please handle the empty state before merging.");
+  await commentComposer.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("Changes requested.")).toBeVisible();
+  await expect(reviewMode).toHaveText("Comment");
   await expect(
-    page.getByText("requested changes", { exact: true }),
-  ).toBeVisible({
-    timeout: 10_000,
-  });
-  await expect(requestChanges).toHaveCount(0);
+    page.getByText("Please handle the empty state before merging."),
+  ).toBeVisible();
+  await expect(
+    page
+      .getByTestId("project-pull-request-timeline-row")
+      .filter({ hasText: "requested changes" }),
+  ).toBeVisible({ timeout: 10_000 });
+  await expect(
+    page.getByText("Changes requested", { exact: true }),
+  ).toHaveCount(0);
   const changeRequestEvent = await page.evaluate(() =>
     window.__BUZZ_E2E_SIGNED_EVENTS__
       ?.filter(
@@ -130,8 +220,11 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       )
       .at(-1),
   );
+  expect(changeRequestEvent?.content).toBe(
+    "Please handle the empty state before merging.",
+  );
   expect(changeRequestEvent?.tags).toContainEqual(["c", expect.any(String)]);
-  const rapidDecisionEvents = await page.evaluate(
+  const reviewDecisionEvents = await page.evaluate(
     () =>
       window.__BUZZ_E2E_SIGNED_EVENTS__?.filter(
         (event) =>
@@ -143,18 +236,56 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
           ),
       ) ?? [],
   );
-  expect(rapidDecisionEvents).toHaveLength(1);
+  expect(reviewDecisionEvents).toHaveLength(1);
+
+  await waitForAnimations(page);
+  await page.screenshot({
+    fullPage: false,
+    path: `${SHOTS}/05-changes-requested.png`,
+  });
+  const changeRequestRow = page
+    .getByTestId("project-pull-request-timeline-row")
+    .filter({ hasText: "requested changes" })
+    .first();
+  await changeRequestRow.getByRole("button").first().hover();
+  await expect(page.getByTestId("user-profile-popover")).toBeVisible();
+  await page.mouse.move(0, 0);
+  await expect(page.getByTestId("user-profile-popover")).toBeHidden();
+
+  await expect(reviewHistoryToggle).toContainText("Collapse review history");
+  const expandedReviewRows = page.getByTestId(
+    "project-pull-request-timeline-row",
+  );
+  await expect(expandedReviewRows).toHaveCount(2);
+  await expect(expandedReviewRows.nth(0)).toContainText(
+    "Requested a review from bob",
+  );
+  await expect(expandedReviewRows.nth(1)).toContainText("requested changes");
+  await expect(approve).toBeVisible();
+  await reviewHistoryToggle.click();
+  await expect(reviewHistoryToggle).toContainText("Show 2 earlier activities");
+  await expect(
+    page.getByTestId("project-pull-request-timeline-row"),
+  ).toHaveCount(0);
+  await expect(changeRequestRow).toBeHidden();
 
   // Replace the completed change request with an approval. Both decisions
   // remain tied to the current commit and their timestamps preserve order.
   await approve.click();
-  await expect(page.getByText("Pull request approved.")).toBeVisible();
-  await expect(page.getByText("approved these changes")).toBeVisible({
-    timeout: 10_000,
+  const approveDialog = page.getByRole("dialog", {
+    name: "Approve pull request",
   });
+  await approveDialog
+    .getByRole("textbox", { name: "Approval summary" })
+    .fill("Ready to merge.");
+  await approveDialog
+    .getByRole("button", { name: "Approve", exact: true })
+    .click();
+  await expect(page.getByText("Pull request approved.")).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Approve", exact: true }),
   ).toHaveCount(0);
+  await expect(page.getByText("Approved", { exact: true })).toHaveCount(0);
   const approvalEvent = await page.evaluate(() =>
     window.__BUZZ_E2E_SIGNED_EVENTS__
       ?.filter(
@@ -164,10 +295,18 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       )
       .at(-1),
   );
+  expect(approvalEvent?.content).toBe("Ready to merge.");
   expect(approvalEvent?.tags).toContainEqual(["c", expect.any(String)]);
   expect(approvalEvent?.createdAt).toBeGreaterThan(
     changeRequestEvent?.createdAt ?? 0,
   );
+  await reviewHistoryToggle.click();
+  await expect(page.getByText("Ready to merge.")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(
+    page.getByTestId("project-pull-request-timeline-row"),
+  ).toHaveCount(3);
 
   await waitForAnimations(page);
   await page.screenshot({
@@ -175,14 +314,43 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
     path: `${SHOTS}/02-approved.png`,
   });
 
+  // Histories over three entries show only the latest three until explicitly
+  // expanded. Collapsing the whole timeline preserves that inner choice.
+  await commentComposer
+    .locator('[contenteditable="true"]')
+    .fill("Remember the expanded history state.");
+  await commentComposer.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Comment posted.")).toBeVisible();
+  const timelineRows = page.getByTestId("project-pull-request-timeline-row");
+  const earlierActivities = page.getByTestId(
+    "project-pull-request-earlier-activities",
+  );
+  await expect(timelineRows).toHaveCount(3);
+  await expect(earlierActivities).toContainText("Show 1 earlier activity");
+
+  await reviewHistoryToggle.click();
+  await expect(timelineRows).toHaveCount(0);
+  await reviewHistoryToggle.click();
+  await expect(timelineRows).toHaveCount(3);
+  await expect(earlierActivities).toBeVisible();
+
+  await earlierActivities.click();
+  await expect(timelineRows).toHaveCount(4);
+  await reviewHistoryToggle.click();
+  await expect(timelineRows).toHaveCount(0);
+  await reviewHistoryToggle.click();
+  await expect(timelineRows).toHaveCount(4);
+  await expect(earlierActivities).toHaveCount(0);
+
   // Convert to draft: badge flips to Draft and the ready button appears.
-  await convertToDraft.click();
+  await morePullRequestActions.click();
+  await page.getByRole("menuitem", { name: "Convert to draft" }).click();
   await expect(page.getByText("Converted to draft.")).toBeVisible();
   const readyForReview = page.getByRole("button", {
     name: "Ready for review",
   });
   await expect(readyForReview).toBeVisible({ timeout: 10_000 });
-  await expect(convertToDraft).toHaveCount(0);
+  await expect(morePullRequestActions).toBeVisible();
 
   await waitForAnimations(page);
   await page.screenshot({
@@ -193,9 +361,24 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
   // And back: Ready for review restores the Open state.
   await readyForReview.click();
   await expect(page.getByText("Marked as ready for review.")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Convert to draft" }),
-  ).toBeVisible({ timeout: 10_000 });
+  await expect(morePullRequestActions).toBeVisible({ timeout: 10_000 });
+
+  // Closing is reversible, unlike merging: a closed PR can be reopened.
+  await morePullRequestActions.click();
+  const closePullRequest = page.getByRole("menuitem", {
+    name: "Close pull request",
+  });
+  await closePullRequest.click();
+  await expect(page.getByText("Pull request closed.")).toBeVisible();
+  const reopenPullRequest = page.getByRole("button", {
+    name: "Reopen pull request",
+  });
+  await expect(reopenPullRequest).toBeVisible({ timeout: 10_000 });
+  await expect(closePullRequest).toHaveCount(0);
+
+  await reopenPullRequest.click();
+  await expect(page.getByText("Pull request reopened.")).toBeVisible();
+  await expect(morePullRequestActions).toBeVisible({ timeout: 10_000 });
 
   await page.getByRole("button", { name: "Merge", exact: true }).click();
   await expect(page.getByTestId("merge-pull-request-confirm")).toBeVisible();
@@ -266,6 +449,9 @@ test("PR creator/owner can toggle draft, request reviews, and approve", async ({
       targetOwner: DEFAULT_MOCK_PUBKEY,
     },
   });
+
+  await sourceChannelLink.click();
+  await expect(page.getByTestId("chat-title")).toHaveText("general");
 });
 
 test("merge conflicts offer persistent terminal recovery", async ({ page }) => {
@@ -366,8 +552,10 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
   await composer
     .locator("[contenteditable='true']")
     .fill("Please add a type for this parameter.");
+  await composer.getByRole("button", { name: "Comment", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "Request changes" }).click();
   await composer.getByRole("button", { name: "Send message" }).click();
-  await expect(page.getByText("Line comment posted.")).toBeVisible();
+  await expect(page.getByText("Changes requested.")).toBeVisible();
 
   await expect
     .poll(() =>
@@ -384,6 +572,7 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
     ),
   );
   expect(inlineCommentEvent?.tags).toContainEqual(["t", "inline-comment"]);
+  expect(inlineCommentEvent?.tags).toContainEqual(["t", "changes-requested"]);
   expect(inlineCommentEvent?.tags).toContainEqual(["c", expect.any(String)]);
   expect(inlineCommentEvent?.tags).toContainEqual([
     "file",
@@ -397,11 +586,38 @@ test("reviewer can leave a commit-scoped inline diff comment", async ({
 
   await page.getByRole("tab", { name: "Conversation" }).click();
   await expect(
+    page.getByTestId("project-pull-request-review-history-toggle"),
+  ).toHaveAttribute("aria-expanded", "true");
+  await expect(
     page.getByText("Please add a type for this parameter."),
   ).toBeVisible();
   await expect(
     page.getByText("desktop/src/features/projects/ui/ProjectDetailScreen.tsx"),
   ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    fullPage: false,
+    path: `${SHOTS}/04-inline-comment.png`,
+  });
+
+  await page
+    .getByRole("button", {
+      name: "Open desktop/src/features/projects/ui/ProjectDetailScreen.tsx new line 3 in Files changed",
+    })
+    .click();
+  await expect(
+    page.getByRole("tab", { name: /Files changed/ }),
+  ).toHaveAttribute("data-state", "active");
+  const focusedLine = page.getByTestId("project-diff-focused-line");
+  await expect(focusedLine).toBeVisible();
+  await expect(focusedLine).toHaveAttribute(
+    "data-path",
+    "desktop/src/features/projects/ui/ProjectDetailScreen.tsx",
+  );
+  await expect(focusedLine).toHaveAttribute("data-side", "new");
+  await expect(focusedLine).toHaveAttribute("data-line", "3");
+  await focusedLine.click();
+  await expect(page.getByTestId("project-diff-focused-line")).toHaveCount(0);
 });
 
 test("managed agent repository owner can merge", async ({ page }) => {
@@ -430,7 +646,7 @@ test("managed agent repository owner can merge", async ({ page }) => {
     .first();
   await expect(agentRow).toBeVisible({ timeout: 10_000 });
   await agentRow.getByRole("button", { name: /^#/ }).click();
-  await page.getByRole("button", { name: "Request", exact: true }).click();
+  await page.getByRole("button", { name: "Add Reviewer", exact: true }).click();
   await page.getByTestId("project-reviewer-search").fill("Reviewer Bot");
   await page
     .getByTestId(`project-reviewer-result-${REVIEWER_AGENT_PUBKEY}`)
@@ -447,6 +663,35 @@ test("managed agent repository owner can merge", async ({ page }) => {
       targetOwner: TEST_IDENTITIES.alice.pubkey,
     },
   });
+  await page.getByRole("button", { name: "More pull request actions" }).click();
+  const closePullRequest = page.getByRole("menuitem", {
+    name: "Close pull request",
+  });
+  await expect(closePullRequest).toBeVisible();
+  await closePullRequest.click();
+  await expect(page.getByText("Pull request closed.")).toBeVisible();
+  await page.getByRole("button", { name: "Reopen pull request" }).click();
+  await expect(page.getByText("Pull request reopened.")).toBeVisible();
+  const statusPayloads = await page.evaluate(() =>
+    window.__BUZZ_E2E_COMMAND_PAYLOADS__?.filter(
+      (entry) => entry.command === "sign_project_pull_request_status",
+    ),
+  );
+  expect(statusPayloads).toHaveLength(2);
+  expect(statusPayloads?.map((entry) => entry.payload)).toEqual([
+    expect.objectContaining({
+      input: expect.objectContaining({
+        status: "closed",
+        targetOwner: TEST_IDENTITIES.alice.pubkey,
+      }),
+    }),
+    expect.objectContaining({
+      input: expect.objectContaining({
+        status: "open",
+        targetOwner: TEST_IDENTITIES.alice.pubkey,
+      }),
+    }),
+  ]);
   await page.getByRole("button", { name: "Merge", exact: true }).click();
   await page.getByTestId("merge-pull-request-confirm-button").click();
   await expect(page.getByText("Merged feature into main.")).toBeVisible();

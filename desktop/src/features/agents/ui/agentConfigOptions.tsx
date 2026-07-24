@@ -457,7 +457,10 @@ export function buildPersonaRuntimeDropdownOptions({
         ]
       : []),
     ...sortPersonaRuntimes(runtimes).map((candidate) => ({
-      disabled: isCreateMode && candidate.availability !== "available",
+      disabled:
+        isCreateMode &&
+        defaultRuntimeId !== undefined &&
+        candidate.availability !== "available",
       label: `${formatRuntimeOptionLabel(candidate)}${
         isCreateMode && candidate.id === defaultRuntimeId ? " (default)" : ""
       }`,

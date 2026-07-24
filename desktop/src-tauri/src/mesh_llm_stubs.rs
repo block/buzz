@@ -27,6 +27,11 @@ pub async fn mesh_node_status(_state: State<'_, AppState>) -> CmdResult<serde_js
 }
 
 #[tauri::command]
+pub async fn mesh_serving_usage(_state: State<'_, AppState>) -> CmdResult<serde_json::Value> {
+    Err("mesh-llm feature not enabled".to_string())
+}
+
+#[tauri::command]
 pub async fn mesh_installed_models(
     _state: State<'_, AppState>,
 ) -> CmdResult<Vec<serde_json::Value>> {

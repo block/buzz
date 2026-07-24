@@ -55,12 +55,12 @@ fn run_with_timeout(
     argv: &[String],
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, String> {
-    let mut child = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..])
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("spawn failed: {e}"))?;
+        .stderr(std::process::Stdio::null());
+    crate::util::configure_no_window(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
 
     let deadline = std::time::Instant::now() + timeout;
     loop {

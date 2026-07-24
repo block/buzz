@@ -21,10 +21,7 @@ import { SecretRevealDialog } from "./SecretRevealDialog";
 import { TeamDeleteDialog } from "./TeamDeleteDialog";
 import { TeamDialog } from "./TeamDialog";
 import { TeamsSection } from "./TeamsSection";
-import {
-  AGENT_CARD_GRID_COLUMNS_CLASS,
-  UnifiedAgentsSection,
-} from "./UnifiedAgentsSection";
+import { UnifiedAgentsSection } from "./UnifiedAgentsSection";
 import { useManagedAgentActions } from "./useManagedAgentActions";
 import { usePersonaActions } from "./usePersonaActions";
 import { useTeamActions } from "./useTeamActions";
@@ -113,11 +110,8 @@ export function AgentsView() {
   return (
     <>
       <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-7 sm:px-6 sm:py-8">
-        <div
-          className={`mx-auto grid w-full max-w-6xl ${AGENT_CARD_GRID_COLUMNS_CLASS} justify-start gap-x-3 gap-y-8`}
-        >
+        <div className="mx-auto flex w-full max-w-6xl flex-col gap-8">
           <PageHeader
-            className="col-[1/-1]"
             action={
               <div className="flex flex-wrap justify-end gap-2">
                 <Button
@@ -147,10 +141,11 @@ export function AgentsView() {
                 ) : null}
               </div>
             }
+            className="mx-auto w-full max-w-[996px]"
             description="Set up and manage your agents."
             title="Agents"
           />
-          <div className="col-[1/-1] flex flex-col gap-8">
+          <div className="flex flex-col gap-8">
             <UnifiedAgentsSection
               defaultModel={inheritedDefaults.model.value}
               actionErrorMessage={agents.actionErrorMessage}

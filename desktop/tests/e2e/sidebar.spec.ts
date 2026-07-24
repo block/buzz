@@ -328,6 +328,16 @@ test("aligns the sidebar search with the channel title outside the Buzz theme", 
   expect(Math.abs(searchCenter - channelTitleCenter)).toBeLessThanOrEqual(2);
 });
 
+test("sidebar rail resizes without toggling the sidebar", async ({ page }) => {
+  await page.goto("/");
+  const rail = page.getByRole("button", { name: "Resize sidebar" });
+  await rail.click();
+  await expect(page.getByTestId("app-sidebar")).toBeVisible();
+
+  await page.getByRole("button", { name: "Toggle Sidebar" }).click();
+  await expect(rail).toBeHidden();
+});
+
 test("resizes, persists, and snaps to the default sidebar width", async ({
   page,
 }) => {
