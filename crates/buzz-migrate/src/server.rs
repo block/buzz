@@ -242,14 +242,30 @@ async fn email_complete(
     }))
 }
 
-/// Sign + publish the owner/admin attestation `subject → pubkey`. Shared by
-/// every channel; `channel` is only for logging.
+/// Register the claimant as a community member, then sign + publish the
+/// owner/admin attestation `subject → pubkey`. Shared by every channel;
+/// `channel` is only for logging.
+///
+/// Membership is added first so an OAuth sign-in doubles as joining the
+/// migration community. Both steps are idempotent (9030 no-ops an existing
+/// member; the 30623 attestation is parameterized-replaceable), so a retried
+/// claim never duplicates anything.
 async fn publish_attestation_for(
     inner: &Inner,
     subject: &str,
     pubkey: &str,
     channel: &str,
 ) -> Result<String, ApiError> {
+    let member_event_id = crate::attest::publish_add_member(
+        &inner.relay_url,
+        &inner.admin,
+        pubkey,
+        inner.auth_tag.as_ref(),
+    )
+    .await
+    .map_err(|e| ApiError::upstream(&e.to_string()))?;
+    tracing::info!(pubkey, member_event_id, channel, "ensured community member");
+
     let event_id = crate::attest::publish_attestation(
         &inner.relay_url,
         &inner.admin,
@@ -554,6 +570,34 @@ mod tests {
             token::mint(&inner.token_secret, "slack:U060", 1000, 10, &[3u8; 16]).expect("mint");
         let err = reserve_email_token(&inner, tok.as_str(), 2000).unwrap_err();
         assert_eq!(err.status, StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn disabled_mailer_does_not_expose_known_addresses() {
+        let mut inner = test_inner();
+        inner.mailer = Mailer::Disabled;
+        let state = AppState(Arc::new(inner));
+
+        let known = email_start(
+            State(state.clone()),
+            Json(EmailStartReq {
+                email: "alice@corp.com".into(),
+            }),
+        )
+        .await
+        .expect("generic response");
+        let unknown = email_start(
+            State(state),
+            Json(EmailStartReq {
+                email: "unknown@corp.com".into(),
+            }),
+        )
+        .await
+        .expect("generic response");
+
+        assert!(known.0.dev_link.is_none());
+        assert!(unknown.0.dev_link.is_none());
+        assert_eq!(known.0.message, unknown.0.message);
     }
 
     #[test]

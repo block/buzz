@@ -13,19 +13,47 @@
 //! stolen admin key can, at worst, publish attestations that stay inert without
 //! each subject's separate consent.
 
-use nostr::{Keys, Tag};
+use buzz_core::kind::RELAY_ADMIN_ADD_MEMBER;
+use nostr::{EventBuilder, Keys, Kind, Tag};
 
-/// Why publishing an attestation failed.
+/// Why publishing an admin-signed event failed.
 #[derive(Debug, thiserror::Error)]
 pub enum AttestError {
-    #[error("could not build attestation: {0}")]
+    #[error("could not build event: {0}")]
     Build(String),
-    #[error("could not sign attestation: {0}")]
+    #[error("could not sign event: {0}")]
     Sign(String),
-    #[error("relay rejected the attestation: {0}")]
+    #[error("relay rejected the event: {0}")]
     Rejected(String),
     #[error(transparent)]
     Transport(#[from] buzz_ws_client::WsClientError),
+}
+
+/// Add the claimant as a community member (kind 9030 relay-admin add-member).
+///
+/// The relay derives the community from the connection, checks the signer is an
+/// owner/admin, and — crucially — treats an already-present member as a silent
+/// no-op, so re-running a claim never duplicates or downgrades membership. This
+/// is the "join" half of a Slack-migration sign-in: the OAuth-verified person
+/// is registered before their history is attributed.
+pub async fn publish_add_member(
+    relay_url: &str,
+    admin: &Keys,
+    member_pubkey_hex: &str,
+    auth_tag: Option<&Tag>,
+) -> Result<String, AttestError> {
+    let p = Tag::parse(["p", member_pubkey_hex]).map_err(|e| AttestError::Build(e.to_string()))?;
+    let role = Tag::parse(["role", "member"]).map_err(|e| AttestError::Build(e.to_string()))?;
+    let event = EventBuilder::new(Kind::Custom(RELAY_ADMIN_ADD_MEMBER as u16), "")
+        .tags([p, role])
+        .sign_with_keys(admin)
+        .map_err(|e| AttestError::Sign(e.to_string()))?;
+    let event_id = event.id.to_hex();
+    let ok = buzz_ws_client::publish_event(relay_url, event, admin, auth_tag, 75).await?;
+    if !ok.accepted {
+        return Err(AttestError::Rejected(ok.message));
+    }
+    Ok(event_id)
 }
 
 /// Sign and publish the attestation `subject → bound_pubkey_hex` with the
