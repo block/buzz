@@ -25,7 +25,7 @@ buzz-persona = { path = "../buzz-persona" }
 nostr = { workspace = true }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-std"] }
 
 # WebSocket
 tokio-tungstenite = { workspace = true }
@@ -45,6 +45,7 @@ serde_json = { workspace = true }
 # IDs
 uuid = { workspace = true }
 chrono = { workspace = true }
+dirs = "6"
 
 # URL parsing
 url = { workspace = true }

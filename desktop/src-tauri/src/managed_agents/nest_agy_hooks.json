@@ -1,0 +1,35 @@
+{
+  "buzz-antigravity-observer": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "buzz-acp agy-hook pre-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "buzz-acp agy-hook post-tool-use",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "buzz-acp agy-hook stop",
+        "timeout": 10
+      }
+    ]
+  }
+}

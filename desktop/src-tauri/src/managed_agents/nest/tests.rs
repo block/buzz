@@ -1,3 +1,4 @@
+use super::agy_hooks::AGY_HOOKS_KEY;
 use super::*;
 
 #[test]
@@ -47,6 +48,11 @@ fn ensure_nest_creates_all_dirs_and_agents_md() {
     // AGENTS.md was written with default content.
     let content = fs::read_to_string(root.join("AGENTS.md")).unwrap();
     assert_eq!(content, AGENTS_MD);
+
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".agents/hooks.json")).unwrap())
+            .unwrap();
+    assert!(hooks.get(AGY_HOOKS_KEY).is_some());
 
     // Permissions are 700 on Unix for root and all subdirs.
     #[cfg(unix)]
@@ -147,6 +153,39 @@ fn ensure_nest_does_not_overwrite_skill_file() {
 
     ensure_nest_at(&root).unwrap();
     assert_eq!(fs::read_to_string(&skill).unwrap(), "custom skill content");
+}
+
+#[test]
+fn ensure_nest_merges_antigravity_hook_with_user_hooks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    fs::create_dir_all(root.join(".agents")).unwrap();
+    fs::write(
+        root.join(".agents/hooks.json"),
+        r#"{"my-hook":{"Stop":[{"command":"./notify.sh"}]}}"#,
+    )
+    .unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    let hooks: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join(".agents/hooks.json")).unwrap())
+            .unwrap();
+    assert!(hooks.get("my-hook").is_some());
+    assert!(hooks.get(AGY_HOOKS_KEY).is_some());
+}
+
+#[test]
+fn ensure_nest_preserves_malformed_antigravity_hooks_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join(".buzz");
+    fs::create_dir_all(root.join(".agents")).unwrap();
+    let hooks_path = root.join(".agents/hooks.json");
+    fs::write(&hooks_path, "not-json").unwrap();
+
+    ensure_nest_at(&root).unwrap();
+
+    assert_eq!(fs::read_to_string(hooks_path).unwrap(), "not-json");
 }
 
 #[cfg(unix)]

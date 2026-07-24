@@ -145,8 +145,8 @@ pub fn ensure_nest() -> Result<(), String> {
 /// - Creates the root directory and all subdirectories.
 /// - Writes `AGENTS.md` only if it doesn't already exist.
 /// - Writes `.agents/skills/buzz-cli/SKILL.md` only if it doesn't already exist.
-/// - Creates harness-specific symlinks pointing to the canonical
-///   `.agents/skills/buzz-cli` directory for each known provider.
+/// - Creates provider skill symlinks and merges the Antigravity observer into
+///   `.agents/hooks.json`.
 /// - Sets 700 permissions on the root, all subdirectories, and the skill
 ///   directory tree (Unix).
 ///
@@ -234,10 +234,9 @@ pub fn ensure_nest_at(root: &Path) -> Result<(), String> {
         }
     }
 
-    // Create harness-specific symlinks for all known providers.
-    // Migration of the old .claude/skills/buzz-cli real dir is handled in
-    // refresh_skill_md_if_stale; ensure_skill_symlinks skips paths that already exist.
+    // Create provider skill symlinks and AGY hooks.
     ensure_skill_symlinks(root)?;
+    agy_hooks::ensure_agy_hooks(root)?;
 
     // Refresh static content if the embedded template version is newer.
     refresh_agents_md_if_stale(root)?;
@@ -699,5 +698,6 @@ pub fn try_regenerate_nest(app: &AppHandle) {
     }
 }
 
+mod agy_hooks;
 #[cfg(test)]
 mod tests;

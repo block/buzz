@@ -6902,7 +6902,9 @@ function withMockRuntimeConfigMetadata(
           ? "BUZZ_AGENT_MODEL"
           : runtime.id === "goose"
             ? "GOOSE_MODEL"
-            : null,
+            : runtime.id === "antigravity"
+              ? "BUZZ_AGY_MODEL"
+              : null,
     provider_env_var:
       "provider_env_var" in runtime
         ? runtime.provider_env_var
@@ -7012,6 +7014,26 @@ async function handleDiscoverAcpRuntimes(
       node_required: false,
       auth_status: { status: "unknown" },
       login_hint: undefined,
+    },
+    {
+      id: "antigravity",
+      label: "Antigravity",
+      avatar_url: "",
+      availability: "not_installed",
+      command: null,
+      binary_path: null,
+      default_args: [],
+      mcp_command: null,
+      model_env_var: "BUZZ_AGY_MODEL",
+      install_hint:
+        "Install the Antigravity CLI via the official install script.",
+      install_instructions_url: "https://antigravity.google/docs/cli/install",
+      can_auto_install: true,
+      underlying_cli_path: null,
+      node_required: false,
+      auth_status: { status: "not_applicable" },
+      login_hint:
+        "Run `agy` once in a terminal to complete Google authentication.",
     },
     {
       id: "buzz-agent",

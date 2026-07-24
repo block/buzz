@@ -16,6 +16,7 @@ pub(crate) use runtime_metadata::KnownAcpRuntime;
 const GOOSE_AVATAR_URL: &str = "https://goose-docs.ai/img/logo_dark.png";
 const CLAUDE_CODE_AVATAR_URL: &str = "https://anthropic.gallerycdn.vsassets.io/extensions/anthropic/claude-code/2.1.77/1773707456892/Microsoft.VisualStudio.Services.Icons.Default";
 const CODEX_AVATAR_URL: &str = "https://openai.gallerycdn.vsassets.io/extensions/openai/chatgpt/26.5313.41514/1773706730621/Microsoft.VisualStudio.Services.Icons.Default";
+const ANTIGRAVITY_AVATAR_URL: &str = "https://github.com/google-antigravity.png";
 const BUZZ_AGENT_AVATAR_URL: &str =
     "https://raw.githubusercontent.com/block/buzz/refs/heads/main/crates/buzz-agent/buzz-agent.png";
 
@@ -49,6 +50,7 @@ fn common_binary_paths() -> &'static [PathBuf] {
                 paths.push(PathBuf::from(appdata).join("npm"));
             }
             if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                paths.push(PathBuf::from(local.clone()).join("agy").join("bin"));
                 paths.push(
                     PathBuf::from(local)
                         .join("Programs")
@@ -156,6 +158,48 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         login_hint: Some("Run `codex login` to authenticate."),
         // Verified: `codex login status` exits 0 when logged in, non-zero otherwise.
         auth_probe_args: Some(&["codex", "login", "status"]),
+    },
+    KnownAcpRuntime {
+        id: "antigravity",
+        label: "Antigravity",
+        // Antigravity has no native ACP transport yet. The bundled buzz-acp
+        // sidecar provides a compatibility bridge around `agy --print`.
+        commands: &["buzz-acp"],
+        aliases: &["agy", "google-antigravity"],
+        avatar_url: ANTIGRAVITY_AVATAR_URL,
+        mcp_command: None,
+        mcp_hooks: false,
+        underlying_cli: Some("agy"),
+        cli_install_commands: &[
+            "curl -fsSL https://antigravity.google/cli/install.sh | bash",
+        ],
+        cli_install_commands_windows: &[
+            "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"irm https://antigravity.google/cli/install.ps1 | iex\"",
+        ],
+        adapter_install_commands: &[],
+        install_instructions_url: "https://antigravity.google/docs/cli/install",
+        cli_install_hint: "Install the Antigravity CLI via the official install script.",
+        adapter_install_hint: "The Antigravity ACP bridge ships with Buzz.",
+        // AGY reads the canonical `.agents/skills` path directly.
+        skill_dir: None,
+        supports_acp_model_switching: false,
+        model_env_var: Some("BUZZ_AGY_MODEL"),
+        provider_env_var: None,
+        provider_locked: true,
+        default_env: &[],
+        config_file_path: Some("~/.gemini/antigravity-cli/settings.json"),
+        config_file_format: Some("json"),
+        supports_acp_native_config: false,
+        // AGY accepts low/medium/high, but the shared effort picker currently
+        // has a broader provider-derived catalog. Keep it in Advanced env vars
+        // until the catalog can express a runtime-owned fixed value set.
+        thinking_env_var: None,
+        max_tokens_env_var: None,
+        context_limit_env_var: None,
+        required_normalized_fields: &[],
+        login_hint: Some("Run `agy` once in a terminal to complete Google authentication."),
+        // AGY 1.1.x has no reliable non-interactive auth-status command.
+        auth_probe_args: None,
     },
     KnownAcpRuntime {
         id: "buzz-agent",
@@ -343,6 +387,7 @@ pub use overrides::{apply_agent_command_update, create_time_agent_command_overri
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "buzz-acp" => Some(vec!["agy-acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -364,7 +409,9 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
         return default_args;
     }
 
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
+    if normalized.len() == 1
+        && normalized[0].eq_ignore_ascii_case("acp")
+        && default_args != normalized
     {
         return default_args;
     }

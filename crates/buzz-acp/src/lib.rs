@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 mod acp;
+mod agy_adapter;
 mod config;
 mod engram_fetch;
 mod filter;
@@ -1241,6 +1242,12 @@ async fn tokio_main() -> Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
+    if is_subcommand("agy-hook") {
+        return agy_adapter::run_hook().await;
+    }
+    if is_subcommand("agy-acp") {
+        return agy_adapter::run().await;
+    }
     if is_subcommand("models") {
         // Strip the subcommand token so clap doesn't reject it as a positional.
         // Keeps argv[0] (binary name) and passes everything after the subcommand.

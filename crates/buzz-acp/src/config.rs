@@ -617,6 +617,7 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
         "goose" => Some(vec!["acp".to_string()]),
+        "buzz-acp" => Some(vec!["agy-acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -694,7 +695,9 @@ pub fn normalize_agent_args(command: &str, agent_args: Vec<String>) -> Vec<Strin
     // Older callers relied on the Goose-specific default even for runtimes like
     // Codex and Claude. Treat that legacy fallback as "no args" for zero-arg
     // providers so desktop- and env-based launches behave the same way.
-    if normalized.len() == 1 && normalized[0].eq_ignore_ascii_case("acp") && default_args.is_empty()
+    if normalized.len() == 1
+        && normalized[0].eq_ignore_ascii_case("acp")
+        && default_args != normalized
     {
         return default_args;
     }
@@ -1489,6 +1492,22 @@ mod tests {
         assert_eq!(
             normalize_agent_args("buzz-agent", vec!["acp".into()]),
             Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn normalizes_bundled_antigravity_bridge_args() {
+        assert_eq!(
+            normalize_agent_args("buzz-acp", Vec::new()),
+            vec!["agy-acp"]
+        );
+        assert_eq!(
+            normalize_agent_args("/Applications/Buzz/buzz-acp", vec!["acp".into()]),
+            vec!["agy-acp"]
+        );
+        assert_eq!(
+            normalize_agent_args("buzz-acp", vec!["agy-acp".into()]),
+            vec!["agy-acp"]
         );
     }
 

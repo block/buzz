@@ -771,6 +771,7 @@ dependencies = [
  "buzz-sdk",
  "chrono",
  "clap",
+ "dirs",
  "evalexpr",
  "futures-util",
  "hex",

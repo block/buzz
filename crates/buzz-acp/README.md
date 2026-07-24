@@ -9,7 +9,13 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports agents that speak [ACP](https://agentclientprotocol.com/) over stdio:
+**goose**, **codex** (via
+[codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude
+code** (via
+[claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+It also includes a compatibility bridge for **Google Antigravity CLI (`agy`)**
+while native protocol support is pending upstream.
 
 ## Prerequisites
 
@@ -88,6 +94,68 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Google Antigravity CLI
+
+Install and authenticate the official CLI first:
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy # complete Google sign-in, then exit
+```
+
+Buzz Desktop discovers `agy` automatically and uses the bundled compatibility
+bridge. For a standalone harness:
+
+```bash
+export BUZZ_ACP_AGENT_COMMAND="buzz-acp"
+export BUZZ_ACP_AGENT_ARGS="agy-acp"
+
+buzz-acp
+```
+
+The bridge runs each turn through AGY's non-interactive `--print` mode in the
+ACP session workspace. The child inherits `BUZZ_PRIVATE_KEY`, relay variables,
+and the rest of the managed agent environment, so AGY can use the installed
+Buzz CLI skill as the same Buzz identity.
+
+Buzz-owned nests (`~/.buzz` and `~/.buzz-dev`) include documented Antigravity
+`PreToolUse`, `PostToolUse`, and `Stop` hooks. The bridge registers the ACP
+workspace with `agy --add-dir`, which makes print mode load its `.agents`
+customizations, and maps hook events to ACP tool updates, including file-edit
+arguments and completion/error status. Hook metadata retains AGY's documented
+`transcriptPath` and `artifactDirectoryPath`; Buzz deliberately does not parse
+the currently undocumented transcript JSONL record format.
+
+As a fail-closed fallback if a future or locally customized AGY build does not
+deliver the `Stop` hook, the bridge detects the single new documented
+`brain/<conversation-uuid>/.system_generated/logs/transcript.jsonl` path
+created by the turn. It uses only the UUID-bearing directory name; if zero or
+multiple trajectories appear, it refuses to guess.
+
+Until Antigravity exposes a native agent protocol:
+
+- The first prompt in an ACP session starts a new AGY trajectory. The `Stop`
+  hook supplies its conversation UUID, and later prompts resume it with
+  `agy --conversation`. Rotating the Buzz session starts a fresh trajectory.
+- Buzz still supplies the current channel/thread context on every turn, so the
+  relay remains the canonical conversation record.
+- AGY stdout becomes the agent message stream; hooks provide tool and patch
+  observability.
+- ACP cancellation terminates the active AGY process.
+- The bridge uses `--dangerously-skip-permissions`, matching the managed
+  harness's unattended auto-approval behavior. Run managed agents only in
+  workspaces and environments you trust.
+
+Optional bridge settings:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `BUZZ_AGY_COMMAND` | `agy` | Antigravity executable or absolute path. |
+| `BUZZ_AGY_MODEL` | AGY default | Value passed to `agy --model`. |
+| `BUZZ_AGY_EFFORT` | AGY default | `low`, `medium`, or `high`, passed to `agy --effort`. |
+| `BUZZ_AGY_PRINT_TIMEOUT` | `2h` | Value passed to `agy --print-timeout`. |
+| `BUZZ_AGY_APP_DATA_DIR` | `~/.gemini/antigravity-cli` | Alternate AGY app-data root used only for trajectory discovery. |
 
 ## Configuration
 
