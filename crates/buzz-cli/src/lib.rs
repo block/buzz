@@ -203,6 +203,9 @@ enum Cmd {
     /// Read the activity feed
     #[command(subcommand)]
     Feed(FeedCmd),
+    /// Import history from an external workspace (Slack export)
+    #[command(subcommand)]
+    Import(ImportCmd),
     /// Publish notes and manage the social graph (NIP-01/02)
     #[command(subcommand)]
     Social(SocialCmd),
@@ -916,6 +919,47 @@ pub enum WorkflowsCmd {
         /// Optional note to include with the approval/denial
         #[arg(long)]
         note: Option<String>,
+    },
+}
+
+/// Subcommands for `buzz import`.
+#[derive(Subcommand)]
+pub enum ImportCmd {
+    /// Import a Slack workspace export directory (see docs/slack-import.md)
+    #[command(after_help = "Modes:\n  \
+bot mode (default): everything is signed by the CLI identity; original \
+authors are preserved in content prefixes and import_author tags.\n  \
+mapping mode (--mapping): a JSON file maps Slack user IDs to private keys \
+({\"U123\": {\"private_key\": \"nsec1...\"}}); each user's history is signed \
+with their own key. Requires the CLI identity to be a community owner/admin \
+so mapped users can be added as relay members.\n\n\
+Re-running resumes from the state file — completed writes are skipped.\n\n\
+Examples:\n  \
+buzz import slack --export-dir ./export --dry-run\n  \
+buzz import slack --export-dir ./export\n  \
+buzz import slack --export-dir ./export --mapping keys.json --channels general,random")]
+    Slack {
+        /// Path to the unzipped Slack export directory
+        #[arg(long)]
+        export_dir: String,
+        /// JSON file mapping Slack user IDs to Nostr private keys (mapping mode)
+        #[arg(long)]
+        mapping: Option<String>,
+        /// State file path (default: <export-dir>/buzz-import-state.json)
+        #[arg(long)]
+        state: Option<String>,
+        /// Only import these channel names (comma-separated)
+        #[arg(long)]
+        channels: Option<String>,
+        /// Parse and report what would be imported without writing
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Skip importing reactions
+        #[arg(long, default_value_t = false)]
+        skip_reactions: bool,
+        /// Skip publishing kind 0 profiles for mapped users
+        #[arg(long, default_value_t = false)]
+        skip_profiles: bool,
     },
 }
 
@@ -1775,6 +1819,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
         Cmd::Feed(sub) => commands::feed::dispatch(sub, &client, &cli.format).await,
+        Cmd::Import(sub) => commands::import::dispatch(sub, &client).await,
         Cmd::Social(sub) => commands::social::dispatch(sub, &client).await,
         Cmd::Notes(sub) => commands::notes::dispatch(sub, &client).await,
         Cmd::Repos(sub) => commands::repos::dispatch(sub, &client).await,
@@ -1809,6 +1854,7 @@ mod tests {
             "dms",
             "emoji",
             "feed",
+            "import",
             "issues",
             "media",
             "mem",
@@ -1928,6 +1974,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "import"), vec!["slack"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -1998,6 +2045,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("import", 1),
             ("issues", 4),
             ("media", 1),
             ("messages", 8),
