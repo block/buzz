@@ -9,11 +9,30 @@ final communityStorageProvider = Provider<CommunityStorage>((ref) {
   return CommunityStorage();
 });
 
+typedef CommunitySnapshotWriter =
+    Future<void> Function(List<Community> communities);
+
+/// Writes the complete persisted community set to storage shared with the iOS
+/// notification service extension. Tests override this provider to verify that
+/// every persistence path refreshes (or clears) the native snapshot.
+final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
+  ref,
+) {
+  return registerBuzzPushCommunitySnapshot;
+});
+
+Future<void> syncStoredCommunitySnapshot(Ref ref) async {
+  final communities = await ref.read(communityStorageProvider).loadAll();
+  await ref.read(communitySnapshotWriterProvider)(communities);
+}
+
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   @override
   Future<List<Community>> build() async {
     final storage = ref.read(communityStorageProvider);
-    return storage.loadAll();
+    final communities = await storage.loadAll();
+    await ref.read(communitySnapshotWriterProvider)(communities);
+    return communities;
   }
 
   /// Add a community. If one with the same relay URL already exists, update

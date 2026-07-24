@@ -24,6 +24,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     final storage = ref.read(communityStorageProvider);
     final communities = await storage.loadAll();
     if (communities.isEmpty) {
+      await ref.read(communitySnapshotWriterProvider)(communities);
       return const AuthState(status: AuthStatus.unauthenticated);
     }
 
@@ -36,6 +37,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
       await storage.saveActiveId(active.id);
 
       if (_hasValidNsec(active.nsec)) {
+        await ref.read(communitySnapshotWriterProvider)(communities);
         return AuthState(status: AuthStatus.authenticated, community: active);
       }
 
@@ -47,6 +49,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     }
 
     await storage.clearActiveId();
+    await ref.read(communitySnapshotWriterProvider)(communities);
     return const AuthState(status: AuthStatus.unauthenticated);
   }
 
@@ -57,6 +60,7 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     final storage = ref.read(communityStorageProvider);
     await storage.save(community);
     await storage.saveActiveId(community.id);
+    await syncStoredCommunitySnapshot(ref);
 
     // Invalidate community providers so other consumers pick up the new data.
     ref.invalidate(communityListProvider);
@@ -76,8 +80,10 @@ class AuthNotifier extends AsyncNotifier<AuthState> {
     }
 
     // Check if other communities remain — switch to the next one instead of
-    // forcing the user back to the pairing screen.
+    // forcing the user back to the pairing screen. Refreshing the complete
+    // snapshot also removes revoked keys from the extension Keychain.
     final remaining = await storage.loadAll();
+    await ref.read(communitySnapshotWriterProvider)(remaining);
 
     // Invalidate community providers so other consumers pick up the change.
     ref.invalidate(communityListProvider);

@@ -1,8 +1,11 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:buzz/shared/community/community.dart';
 import 'package:buzz/shared/community/community_provider.dart';
 import 'package:buzz/shared/community/community_storage.dart';
+import 'package:nostr/nostr.dart' as nostr;
 
 import 'community_storage_test.dart';
 
@@ -10,17 +13,24 @@ void main() {
   late FakeSecureStorage fakeSecure;
   late CommunityStorage communityStorage;
   late ProviderContainer container;
+  late List<List<Community>> snapshots;
 
   setUp(() {
     fakeSecure = FakeSecureStorage();
     communityStorage = CommunityStorage(secure: fakeSecure);
+    snapshots = [];
   });
 
   tearDown(() => container.dispose());
 
   ProviderContainer createContainer() {
     return ProviderContainer(
-      overrides: [communityStorageProvider.overrideWithValue(communityStorage)],
+      overrides: [
+        communityStorageProvider.overrideWithValue(communityStorage),
+        communitySnapshotWriterProvider.overrideWithValue((communities) async {
+          snapshots.add(List.of(communities));
+        }),
+      ],
     );
   }
 
@@ -29,6 +39,24 @@ void main() {
       container = createContainer();
       final communities = await container.read(communityListProvider.future);
       expect(communities, isEmpty);
+      expect(snapshots, [isEmpty]);
+    });
+
+    test('exports migrated communities on startup', () async {
+      final community = Community.create(
+        name: 'Migrated',
+        relayUrl: 'https://migrated.example.com',
+        nsec: nostr.Keys.generate().nsec,
+      );
+      // Seed legacy storage to exercise the same migration path as an app
+      // upgrade.
+      fakeSecure['buzz_workspaces'] = jsonEncode([community.toJson()]);
+
+      container = createContainer();
+      await container.read(communityListProvider.future);
+
+      expect(snapshots.single.single.id, community.id);
+      expect(fakeSecure['buzz_workspaces'], isNull);
     });
 
     test('addCommunity adds to list', () async {
