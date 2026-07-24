@@ -491,7 +491,16 @@ async fn main() -> anyhow::Result<()> {
             .git_store
             .run_conformance_probe(cfg)
             .await
-            .map_err(|e| anyhow::anyhow!("git conformance probe failed: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "git conformance probe failed: {e}. \
+                     Object stores that do not honor S3 If-Match / If-None-Match \
+                     (notably GCS via the S3-interop XML API) cannot satisfy the \
+                     A3 pointer-CAS gate. Use a CAS-capable backend (MinIO, AWS S3), \
+                     or set BUZZ_GIT_CONFORMANCE_PROBE=false to skip admission \
+                     (git ref updates will not be linearizable)."
+                )
+            })?;
         tracing::info!(
             race_width = report.race_width,
             race_rounds = report.race_rounds,

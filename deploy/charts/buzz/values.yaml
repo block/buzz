@@ -343,6 +343,10 @@ git:
   packCacheVolumeSize: 7Gi       # per-pod emptyDir; includes cold-population staging
   maxReposPerPubkey: 100
   maxConcurrentOps: 20
+  # Startup A3 probe (S3 conditional-write CAS). Default true. Set false only
+  # for backends that cannot honor If-Match (e.g. GCS S3-interop) — see #2470.
+  # Skipping means git pointer updates are not linearizable.
+  conformanceProbe: true
 
 # ── Migrations ───────────────────────────────────────────────────────────────
 # Relay runs sqlx migrations at startup via BUZZ_AUTO_MIGRATE=true.
