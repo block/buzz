@@ -45,7 +45,7 @@ export type AudioWorkletHandle = {
  *   and forwards them to the worklet via port.postMessage({ type: 'ptt', active }).
  *   The worklet discards audio frames when transmitting=false.
  *
- * @param audioTrack - Mic track from LiveKit
+ * @param audioTrack - Mic track from getUserMedia
  * @param initialTransmitting - Initial PTT state. true=open mic (VAD), false=muted until PTT press.
  */
 export async function setupAudioWorklet(
