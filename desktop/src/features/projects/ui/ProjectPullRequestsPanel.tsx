@@ -1,26 +1,37 @@
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
   FileCode2,
   GitBranch,
   GitCommitHorizontal,
   GitMerge,
   GitPullRequest,
+  History,
   MessageSquare,
+  TriangleAlert,
   UserPlus,
   X,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import { useChannelsQuery } from "@/features/channels/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
   type Project,
   type ProjectPullRequest,
+  type ProjectPullRequestCommentAnchor,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
 import { projectPullRequestCommentTimelineKind } from "@/features/projects/projectPullRequests.mjs";
-import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
+import {
+  formatExactTimestamp,
+  relativeTime,
+} from "@/features/projects/lib/projectsViewHelpers";
+import { canReviewProjectPullRequest } from "@/features/projects/pullRequestReviews";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import type { ChannelMember } from "@/shared/api/types";
@@ -41,13 +52,6 @@ import { ProjectRichContent } from "./ProjectRichContent";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 import { PullRequestReviewCard } from "./PullRequestReviewCard";
 
-function compactDate(createdAt: number) {
-  return new Date(createdAt * 1_000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
-}
-
 function profileForPubkey(pubkey: string, profiles?: UserProfileLookup) {
   return profiles?.[normalizePubkey(pubkey)] ?? null;
 }
@@ -59,25 +63,6 @@ function labelForPubkey(pubkey: string, profiles?: UserProfileLookup) {
     profile?.nip05Handle?.trim() ||
     truncatePubkey(pubkey)
   );
-}
-
-function relativeCreatedAt(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
 }
 
 function pluralize(count: number, singular: string, plural = `${singular}s`) {
@@ -128,11 +113,13 @@ function AuthorIdentity({
   profiles,
   pubkey,
   role,
+  showLabel = true,
 }: {
   avatarSize?: "xs" | "sm" | "md";
   profiles?: UserProfileLookup;
   pubkey: string;
   role?: React.ReactNode;
+  showLabel?: boolean;
 }) {
   const profile = profileForPubkey(pubkey, profiles);
   return (
@@ -144,6 +131,7 @@ function AuthorIdentity({
       label={labelForPubkey(pubkey, profiles)}
       pubkey={pubkey}
       role={role}
+      showLabel={showLabel}
     />
   );
 }
@@ -213,7 +201,10 @@ function PullRequestCommitRow({
           />
           <span className="truncate">
             <ProfileAuthorName pubkey={author}>{authorLabel}</ProfileAuthorName>{" "}
-            authored {relativeTime(createdAt)}
+            authored{" "}
+            <span title={formatExactTimestamp(createdAt)}>
+              {relativeTime(createdAt)}
+            </span>
           </span>
           {branch ? (
             <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5 font-mono text-2xs">
@@ -276,7 +267,10 @@ function PullRequestRow({
             <ProfileAuthorName pubkey={pullRequest.author}>
               {authorLabel}
             </ProfileAuthorName>{" "}
-            created this pull request {relativeCreatedAt(pullRequest.createdAt)}
+            created this pull request{" "}
+            <span title={formatExactTimestamp(pullRequest.createdAt)}>
+              {relativeTime(pullRequest.createdAt)}
+            </span>
           </span>
           {pullRequest.branchName ? (
             <span className="inline-flex min-w-0 items-center gap-1 rounded-full border border-border/60 px-1.5 py-0.5 font-mono text-2xs">
@@ -335,18 +329,60 @@ export function PullRequestDetailHeader({
   pullRequest: ProjectPullRequest;
 }) {
   const authorLabel = labelForPubkey(pullRequest.author, profiles);
+  const sourceChannelId = pullRequest.channelId;
+  const { goChannel } = useAppNavigation();
+  const channelsQuery = useChannelsQuery({
+    enabled: Boolean(sourceChannelId),
+  });
+  const sourceChannel = channelsQuery.data?.find(
+    (channel) => channel.id === sourceChannelId,
+  );
 
   return (
-    <header className="min-w-0 space-y-1.5 p-4 pb-2">
-      <h3 className="line-clamp-2 min-w-0 text-base font-semibold text-foreground">
+    <header className="min-w-0 space-y-1 p-4 pb-4">
+      <h3 className="line-clamp-2 min-w-0 text-xl font-semibold text-foreground">
         {pullRequest.title}{" "}
         <span className="font-normal text-muted-foreground">
           #{pullRequest.id.slice(0, 8)}
         </span>
       </h3>
-      <p className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+      <p className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
         <GitPullRequest className="h-3.5 w-3.5" />
-        Created {compactDate(pullRequest.createdAt)} by {authorLabel}
+        <span className="flex min-w-0 items-center gap-1">
+          <AuthorIdentity
+            avatarSize="xs"
+            profiles={profiles}
+            pubkey={pullRequest.author}
+            showLabel={false}
+          />
+          <ProfileAuthorName pubkey={pullRequest.author}>
+            {authorLabel}
+          </ProfileAuthorName>
+        </span>
+        <span title={formatExactTimestamp(pullRequest.createdAt)}>
+          created {relativeTime(pullRequest.createdAt)}
+        </span>
+        {sourceChannelId ? (
+          <span
+            className="inline-flex min-w-0 items-center gap-1"
+            title="Source channel is claimed by the pull request author and is not relay-verified."
+          >
+            <span>linked from</span>
+            {sourceChannel ? (
+              <button
+                aria-label={`Open author-claimed source channel #${sourceChannel.name}`}
+                className="truncate font-medium text-foreground underline-offset-2 hover:underline"
+                onClick={() => void goChannel(sourceChannel.id)}
+                type="button"
+              >
+                #{sourceChannel.name}
+              </button>
+            ) : (
+              <span>an unavailable channel</span>
+            )}
+            <span>(author-claimed)</span>
+          </span>
+        ) : null}
       </p>
     </header>
   );
@@ -430,14 +466,20 @@ export function PullRequestMetaRail({
         <dl className="space-y-1.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between gap-3">
             <dt>Created</dt>
-            <dd className="font-medium text-foreground">
-              {compactDate(pullRequest.createdAt)}
+            <dd
+              className="font-medium text-foreground"
+              title={formatExactTimestamp(pullRequest.createdAt)}
+            >
+              {relativeTime(pullRequest.createdAt)}
             </dd>
           </div>
           <div className="flex items-center justify-between gap-3">
             <dt>Updated</dt>
-            <dd className="font-medium text-foreground">
-              {compactDate(pullRequest.updatedAt)}
+            <dd
+              className="font-medium text-foreground"
+              title={formatExactTimestamp(pullRequest.updatedAt)}
+            >
+              {relativeTime(pullRequest.updatedAt)}
             </dd>
           </div>
         </dl>
@@ -448,6 +490,7 @@ export function PullRequestMetaRail({
 
 function PullRequestDetail({
   mode,
+  onOpenInlineComment,
   onOpenCommit,
   onOpenTerminal,
   profiles,
@@ -455,31 +498,47 @@ function PullRequestDetail({
   pullRequest,
 }: {
   mode: PullRequestPanelMode;
+  onOpenInlineComment?: (anchor: ProjectPullRequestCommentAnchor) => void;
   onOpenCommit?: (commitHash: string) => void;
   onOpenTerminal?: OpenMergeRecoveryTerminal;
   profiles?: UserProfileLookup;
   project: Project;
   pullRequest: ProjectPullRequest;
 }) {
+  const identityQuery = useIdentityQuery();
   const commentMutation = useCreateProjectPullRequestCommentMutation(project);
+  const [
+    expandedReviewHistoryPullRequestIds,
+    setExpandedReviewHistoryPullRequestIds,
+  ] = React.useState<Set<string>>(() => new Set());
+  const [
+    collapsedReviewHistoryPullRequestIds,
+    setCollapsedReviewHistoryPullRequestIds,
+  ] = React.useState<Set<string>>(() => new Set());
   const members = React.useMemo(
     () => pullRequestMembers(project, pullRequest, profiles),
     [profiles, project, pullRequest],
   );
-  const handleCommentSubmit = React.useCallback(
+  const submitComment = React.useCallback(
     async (
       content: string,
       mentionPubkeys: string[],
       mediaTags?: string[][],
+      decision?: "request-changes",
     ) => {
       try {
         await commentMutation.mutateAsync({
           content,
+          decision,
           mediaTags,
           mentionPubkeys,
           pullRequest,
         });
-        toast.success("Comment posted.");
+        toast.success(
+          decision === "request-changes"
+            ? "Changes requested."
+            : "Comment posted.",
+        );
       } catch (error) {
         toast.error(
           error instanceof Error ? error.message : "Failed to post comment.",
@@ -488,6 +547,16 @@ function PullRequestDetail({
       }
     },
     [commentMutation, pullRequest],
+  );
+  const handleCommentSubmit = React.useCallback(
+    (content: string, mentionPubkeys: string[], mediaTags?: string[][]) =>
+      submitComment(content, mentionPubkeys, mediaTags),
+    [submitComment],
+  );
+  const handleChangeRequestSubmit = React.useCallback(
+    (content: string, mentionPubkeys: string[], mediaTags?: string[][]) =>
+      submitComment(content, mentionPubkeys, mediaTags, "request-changes"),
+    [submitComment],
   );
 
   if (mode === "commits") {
@@ -536,8 +605,38 @@ function PullRequestDetail({
     );
   }
 
+  const reviewHistory = pullRequest.comments
+    .map((item) => ({
+      item,
+      timelineKind: projectPullRequestCommentTimelineKind(item),
+    }))
+    .sort(
+      (left, right) =>
+        left.item.createdAt - right.item.createdAt ||
+        left.item.id.localeCompare(right.item.id),
+    );
+  const reviewHistoryCollapsed = collapsedReviewHistoryPullRequestIds.has(
+    pullRequest.id,
+  );
+  const reviewHistoryExpanded = expandedReviewHistoryPullRequestIds.has(
+    pullRequest.id,
+  );
+  const earlierReviewHistoryCount = Math.max(0, reviewHistory.length - 3);
+  const visibleReviewHistory =
+    reviewHistoryExpanded || earlierReviewHistoryCount === 0
+      ? reviewHistory
+      : reviewHistory.slice(-3);
+  const displayedReviewHistory = reviewHistoryCollapsed
+    ? []
+    : visibleReviewHistory;
+  const canRequestChanges = canReviewProjectPullRequest(
+    project,
+    pullRequest,
+    identityQuery.data?.pubkey,
+  );
+
   return (
-    <div className="divide-y divide-border/50">
+    <div>
       {pullRequest.content ? (
         <header className="p-4">
           <ProjectRichContent
@@ -548,7 +647,7 @@ function PullRequestDetail({
       ) : null}
 
       {pullRequest.updates.length > 0 ? (
-        <section className="space-y-3 p-4">
+        <section className="space-y-3 border-border/50 border-t p-4">
           <h4 className="text-sm font-semibold text-foreground">Updates</h4>
           {pullRequest.updates.map((update) => (
             <article className="space-y-1" key={update.id}>
@@ -556,7 +655,11 @@ function PullRequestDetail({
                 <AuthorIdentity
                   profiles={profiles}
                   pubkey={update.author}
-                  role={compactDate(update.createdAt)}
+                  role={
+                    <span title={formatExactTimestamp(update.createdAt)}>
+                      {relativeTime(update.createdAt)}
+                    </span>
+                  }
                 />
                 {update.commit ? (
                   <CommitHashChip
@@ -578,109 +681,214 @@ function PullRequestDetail({
       ) : null}
 
       <section className="space-y-3 p-4">
-        {pullRequest.comments.length > 0 ? (
-          <div className="-mt-4">
-            {pullRequest.comments.map((item) => {
-              // Review decisions and requests render as compact timeline
-              // rows (GitHub-style) rather than full comment cards.
-              const timelineKind = projectPullRequestCommentTimelineKind(item);
-              if (timelineKind) {
-                const isHistoricalDecision =
-                  item.reviewDecisionStatus === "historical";
-                return (
-                  <div
-                    className="-mx-4 flex min-h-10 min-w-0 items-center gap-2 border-b border-border/50 px-4 text-sm text-muted-foreground"
-                    key={item.id}
-                  >
+        <div className="group/timeline -mx-4 overflow-hidden border-border/50 border-b">
+          {reviewHistory.length > 0 ? (
+            <button
+              aria-expanded={!reviewHistoryCollapsed}
+              className="flex min-h-10 w-full items-center gap-2 px-3 py-2.5 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
+              data-testid="project-pull-request-review-history-toggle"
+              onClick={() => {
+                setCollapsedReviewHistoryPullRequestIds((current) => {
+                  const next = new Set(current);
+                  if (reviewHistoryCollapsed) {
+                    next.delete(pullRequest.id);
+                  } else {
+                    next.add(pullRequest.id);
+                  }
+                  return next;
+                });
+              }}
+              type="button"
+            >
+              <span className="relative flex w-5 shrink-0 justify-center self-stretch">
+                {reviewHistoryCollapsed ? (
+                  <span className="absolute top-2.5 -bottom-11 hidden w-px bg-border/80 group-has-[.pull-request-action-timeline]/timeline:block" />
+                ) : (
+                  <span className="absolute top-2.5 -bottom-[1.875rem] w-px bg-border/80" />
+                )}
+                <span className="relative z-10 flex h-5 w-5 items-center justify-center rounded-full bg-primary/10 text-primary ring-1 ring-primary/35">
+                  <History className="h-3 w-3" />
+                </span>
+              </span>
+              <span className="flex min-h-5 min-w-0 flex-1 items-center text-left">
+                {reviewHistoryCollapsed
+                  ? `Show ${reviewHistory.length} earlier ${
+                      reviewHistory.length === 1 ? "activity" : "activities"
+                    }`
+                  : "Collapse review history"}
+              </span>
+              {reviewHistoryCollapsed ? (
+                <ChevronDown className="mt-0.5 h-3.5 w-3.5" />
+              ) : (
+                <ChevronUp className="mt-0.5 h-3.5 w-3.5" />
+              )}
+            </button>
+          ) : null}
+          {!reviewHistoryCollapsed &&
+          earlierReviewHistoryCount > 0 &&
+          !reviewHistoryExpanded ? (
+            <button
+              className="flex min-h-10 w-full items-center gap-2 px-3 py-2.5 text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground"
+              data-testid="project-pull-request-earlier-activities"
+              onClick={() => {
+                setExpandedReviewHistoryPullRequestIds((current) => {
+                  const next = new Set(current);
+                  next.add(pullRequest.id);
+                  return next;
+                });
+              }}
+              type="button"
+            >
+              <span className="relative flex w-5 shrink-0 justify-center self-stretch">
+                <span className="absolute top-2.5 -bottom-[1.875rem] w-px bg-border/80" />
+                <span className="relative z-10 flex h-5 w-5 items-center justify-center rounded-full bg-background ring-1 ring-border/70">
+                  <ChevronDown className="h-3 w-3" />
+                </span>
+              </span>
+              <span className="min-w-0 flex-1 text-left">
+                Show {earlierReviewHistoryCount} earlier{" "}
+                {earlierReviewHistoryCount === 1 ? "activity" : "activities"}
+              </span>
+            </button>
+          ) : null}
+          {displayedReviewHistory.map(({ item, timelineKind }, index) => {
+            const isHistoricalDecision =
+              item.reviewDecisionStatus === "historical";
+            const trimmedContent = item.content.trim();
+            const activityContent =
+              timelineKind === null
+                ? trimmedContent
+                : timelineKind === "changes-requested" &&
+                    !/^requested changes\.?$/i.test(trimmedContent)
+                  ? trimmedContent
+                  : timelineKind === "approved" &&
+                      !/^approved (these )?changes\.?$/i.test(trimmedContent)
+                    ? trimmedContent
+                    : null;
+            return (
+              <div
+                className="flex min-h-10 min-w-0 items-start gap-2 px-3 py-2.5 text-sm text-muted-foreground"
+                data-testid="project-pull-request-timeline-row"
+                key={item.id}
+              >
+                <div className="relative flex w-5 shrink-0 justify-center self-stretch">
+                  {index < displayedReviewHistory.length - 1 ? (
+                    <span className="absolute top-2.5 -bottom-[1.875rem] w-px bg-border/80" />
+                  ) : (
+                    <span className="absolute top-2.5 -bottom-11 hidden w-px bg-border/80 group-has-[.pull-request-action-timeline]/timeline:block" />
+                  )}
+                  <span className="relative z-10 flex h-5 w-5 items-center justify-center rounded-full bg-background ring-1 ring-border/70">
                     {timelineKind === "approved" ? (
                       <Check
-                        className={`h-3.5 w-3.5 shrink-0 ${
+                        className={`h-3 w-3 ${
                           isHistoricalDecision
                             ? "text-muted-foreground"
                             : "text-green-600 dark:text-green-500"
                         }`}
                       />
                     ) : timelineKind === "changes-requested" ? (
-                      <X
-                        className={`h-3.5 w-3.5 shrink-0 ${
+                      <TriangleAlert
+                        className={`h-3 w-3 ${
                           isHistoricalDecision
                             ? "text-muted-foreground"
-                            : "text-destructive"
+                            : "text-amber-600 dark:text-amber-400"
                         }`}
                       />
+                    ) : timelineKind === "review-request" ? (
+                      <UserPlus className="h-3 w-3" />
                     ) : (
-                      <UserPlus className="h-3.5 w-3.5 shrink-0" />
+                      <MessageSquare className="h-3 w-3" />
                     )}
-                    <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
-                      <span className="shrink-0 font-medium text-foreground">
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center">
+                    <span className="min-w-0 truncate">
+                      <ProfileAuthorName pubkey={item.author}>
                         {labelForPubkey(item.author, profiles)}
-                      </span>
-                      <span className="min-w-0 truncate">
-                        {timelineKind === "approved"
-                          ? isHistoricalDecision
-                            ? "approved an earlier commit"
-                            : "approved these changes"
-                          : timelineKind === "changes-requested"
+                      </ProfileAuthorName>
+                      {timelineKind ? (
+                        <>
+                          {" "}
+                          {timelineKind === "approved"
                             ? isHistoricalDecision
-                              ? "requested changes on an earlier commit"
-                              : "requested changes"
-                            : item.content.trim() || "requested a review"}
-                      </span>
+                              ? "approved an earlier commit"
+                              : "approved these changes"
+                            : timelineKind === "changes-requested"
+                              ? isHistoricalDecision
+                                ? "requested changes on an earlier commit"
+                                : "requested changes"
+                              : trimmedContent || "requested a review"}
+                        </>
+                      ) : null}
                     </span>
-                    <span className="w-20 shrink-0 text-right text-xs text-muted-foreground/70">
-                      {compactDate(item.createdAt)}
+                    <span
+                      className="ml-auto w-20 shrink-0 text-right text-xs text-muted-foreground/70"
+                      title={formatExactTimestamp(item.createdAt)}
+                    >
+                      {relativeTime(item.createdAt)}
                     </span>
                   </div>
-                );
-              }
-              return (
-                <article className="py-3" key={item.id}>
+                  {activityContent ? (
+                    <ProjectRichContent
+                      className="mt-1 text-sm text-foreground/90"
+                      content={activityContent}
+                      tags={item.tags}
+                    />
+                  ) : null}
                   {item.anchor ? (
-                    <div className="mb-2 flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
-                      <FileCode2 className="h-3.5 w-3.5 shrink-0" />
+                    <button
+                      aria-label={`Open ${item.anchor.path} ${item.anchor.side} line ${item.anchor.line} in Files changed`}
+                      className="mt-1 inline-flex min-w-0 items-center gap-1 rounded-md bg-muted/65 px-1.5 py-0.5 font-mono text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      onClick={() => {
+                        if (item.anchor) onOpenInlineComment?.(item.anchor);
+                      }}
+                      type="button"
+                    >
+                      <FileCode2 className="h-3 w-3 shrink-0" />
                       <span className="truncate">{item.anchor.path}</span>
-                      <span className="shrink-0 font-mono">
+                      <span className="shrink-0">
                         {item.anchor.side === "new" ? "+" : "-"}
                         {item.anchor.line}
                       </span>
                       {item.inlineCommentStatus === "outdated" ? (
-                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-2xs">
+                        <span className="shrink-0 text-destructive">
                           Outdated
                         </span>
                       ) : null}
-                    </div>
+                    </button>
                   ) : null}
-                  <div className="mb-2">
-                    <AuthorIdentity
-                      profiles={profiles}
-                      pubkey={item.author}
-                      role={compactDate(item.createdAt)}
-                    />
-                  </div>
-                  <ProjectRichContent content={item.content} tags={item.tags} />
-                </article>
-              );
-            })}
+                </div>
+              </div>
+            );
+          })}
+          <div className="flex min-h-12 items-start justify-start px-3 py-2.5">
+            <PullRequestReviewCard
+              onOpenTerminal={onOpenTerminal}
+              project={project}
+              pullRequest={pullRequest}
+            />
           </div>
-        ) : null}
-        <PullRequestReviewCard
-          onOpenTerminal={onOpenTerminal}
-          project={project}
-          pullRequest={pullRequest}
-        />
+        </div>
         <h4 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
           <MessageSquare className="h-3.5 w-3.5" />
           Add Your Comment
         </h4>
-        <ForumComposer
-          className="border border-border/60 bg-background/45"
-          disabled={commentMutation.isPending}
-          isSending={commentMutation.isPending}
-          members={members}
-          onSubmit={handleCommentSubmit}
-          placeholder="Add a comment…"
-          profiles={profiles}
-        />
+        <div data-testid="project-pull-request-comment-composer">
+          <ForumComposer
+            className="border border-border/60 bg-background/45"
+            disabled={commentMutation.isPending}
+            isSending={commentMutation.isPending}
+            members={members}
+            onSecondarySubmit={
+              canRequestChanges ? handleChangeRequestSubmit : undefined
+            }
+            onSubmit={handleCommentSubmit}
+            placeholder="Add a comment…"
+            profiles={profiles}
+            secondarySubmitLabel="Request changes"
+          />
+        </div>
       </section>
     </div>
   );
@@ -690,6 +898,7 @@ export function PullRequestsPanel({
   error,
   isLoading,
   mode = "conversation",
+  onOpenInlineComment,
   onOpenCommit,
   onOpenTerminal,
   onSelectedPullRequestIdChange,
@@ -701,6 +910,7 @@ export function PullRequestsPanel({
   error: unknown;
   isLoading: boolean;
   mode?: PullRequestPanelMode;
+  onOpenInlineComment?: (anchor: ProjectPullRequestCommentAnchor) => void;
   onOpenCommit?: (commitHash: string) => void;
   onOpenTerminal?: OpenMergeRecoveryTerminal;
   onSelectedPullRequestIdChange: (id: string | null) => void;
@@ -743,6 +953,7 @@ export function PullRequestsPanel({
     return (
       <PullRequestDetail
         mode={mode}
+        onOpenInlineComment={onOpenInlineComment}
         onOpenCommit={onOpenCommit}
         onOpenTerminal={onOpenTerminal}
         profiles={profiles}

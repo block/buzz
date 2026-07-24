@@ -6,7 +6,7 @@ import { parse as yamlParse } from "yaml";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { RelayEvent } from "@/shared/api/types";
+import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -185,6 +185,18 @@ type E2eConfig = {
      *  Call N returns results[N]; when exhausted the last entry repeats.
      *  Takes precedence over `installAcpRuntimeResult`. */
     installAcpRuntimeResults?: RawInstallRuntimeResult[];
+    /** Per-runtime install configuration keyed by runtimeId.
+     *  When a runtimeId matches, its entry overrides the global
+     *  installAcpRuntime* fields for that specific runtime. */
+    installAcpRuntimeByRuntime?: Record<
+      string,
+      {
+        delayMs?: number;
+        result?: RawInstallRuntimeResult;
+        /** Call-order sequence — same semantics as installAcpRuntimeResults. */
+        results?: RawInstallRuntimeResult[];
+      }
+    >;
     managedAgentPrereqs?: {
       acp?: MockCommandAvailability;
       mcp?: MockCommandAvailability;
@@ -203,6 +215,7 @@ type E2eConfig = {
     addChannelMembersErrors?: (string | null)[];
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
+    channelTemplates?: ChannelTemplate[];
     channelsReadError?: string;
     /** Reject successive mock `get_channels` calls, then resume. */
     channelsReadErrors?: (string | null)[];
@@ -4986,6 +4999,7 @@ function buildMockProjectEvents(): RelayEvent[] {
           ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
           ...(kind === KIND_GIT_PULL_REQUEST
             ? [
+                ["h", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
                 ["branch-name", `feature/mock-${dayOffset}-${index}`],
                 [
                   "clone",
@@ -7058,6 +7072,8 @@ async function handleConnectAcpRuntime(
 // Per-page install call counter. Reset each test run because this module is
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
+/** Per-runtime call counters for `installAcpRuntimeByRuntime` sequences. */
+const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
 let mockGlobalAgentConfig: {
   env_vars: Record<string, string>;
@@ -7078,6 +7094,31 @@ async function handleInstallAcpRuntime(
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
+  const runtimeId = args.runtimeId ?? "";
+  const perRuntime = config?.mock?.installAcpRuntimeByRuntime?.[runtimeId];
+
+  if (perRuntime) {
+    const delayMs = perRuntime.delayMs ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    const seq = perRuntime.results;
+    if (seq && seq.length > 0) {
+      const idx = Math.min(
+        installCallCountByRuntime[runtimeId] ?? 0,
+        seq.length - 1,
+      );
+      installCallCountByRuntime[runtimeId] = idx + 1;
+      const result = seq[idx];
+      if (result.success) mockInstallCompleted = true;
+      return result;
+    }
+    if (perRuntime.result) {
+      if (perRuntime.result.success) mockInstallCompleted = true;
+      return perRuntime.result;
+    }
+  }
+
   const delayMs = config?.mock?.installAcpRuntimeDelayMs ?? 0;
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
@@ -9766,6 +9807,44 @@ export function maybeInstallE2eTauriMocks() {
           message: `Deleted branch ${input.branch}.`,
         };
       }
+      case "sign_project_pull_request_status": {
+        const { input } = payload as {
+          input: {
+            createdAt: number;
+            pullRequestAuthor: string;
+            pullRequestId: string;
+            repoAddress: string;
+            status: "open" | "draft" | "closed";
+            targetOwner: string;
+          };
+        };
+        const kind = {
+          open: KIND_GIT_STATUS_OPEN,
+          draft: KIND_GIT_STATUS_DRAFT,
+          closed: KIND_GIT_STATUS_CLOSED,
+        }[input.status];
+        const recipientPubkeys = Array.from(
+          new Set(
+            [input.targetOwner, input.pullRequestAuthor].map((pubkey) =>
+              pubkey.trim().toLowerCase(),
+            ),
+          ),
+        );
+        const event = createMockEvent(
+          kind,
+          "",
+          [
+            ["e", input.pullRequestId, "", "root"],
+            ["a", input.repoAddress],
+            ...recipientPubkeys.map((pubkey) => ["p", pubkey]),
+          ],
+          input.targetOwner,
+          input.createdAt,
+        );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push(event);
+        getMockProjectEventStore().push(event);
+        return null;
+      }
       case "sign_project_pull_request_review_request": {
         const { input } = payload as {
           input: {
@@ -10031,6 +10110,19 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_teams":
         return handleListTeams();
+      case "list_channel_templates":
+        return (activeConfig?.mock?.channelTemplates ?? []).map((template) => ({
+          id: template.id,
+          name: template.name,
+          description: template.description,
+          channel_type: template.channelType,
+          visibility: template.visibility,
+          canvas_template: template.canvasTemplate,
+          agents: template.agents,
+          is_builtin: template.isBuiltin,
+          created_at: template.createdAt,
+          updated_at: template.updatedAt,
+        }));
       case "create_team":
         return handleCreateTeam(
           payload as Parameters<typeof handleCreateTeam>[0],
