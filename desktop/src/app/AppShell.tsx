@@ -18,6 +18,7 @@ import { useAppShellLifecycleEffects } from "@/app/useAppShellLifecycleEffects";
 import { useThreadActivityFeedItems } from "@/app/useThreadActivityFeedItems";
 import { useTauriWindowDrag } from "@/app/useTauriWindowDrag";
 import { useWebviewZoomShortcuts } from "@/app/useWebviewZoomShortcuts";
+import { useGlobalShortcuts } from "@/app/useGlobalShortcuts";
 import {
   channelsQueryKey,
   useChannelsQuery,
@@ -91,7 +92,6 @@ import { ChannelNavigationProvider } from "@/shared/context/ChannelNavigationCon
 import { MainInsetProvider } from "@/shared/layout/MainInsetContext";
 import { chromeCssVarDefaults } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
-import { hasPrimaryShortcutModifier } from "@/shared/lib/platform";
 import { useMessageDeepLinks } from "@/shared/useMessageDeepLinks";
 import { SidebarInset, SidebarProvider } from "@/shared/ui/sidebar";
 import { RelayConnectionOverlay } from "@/app/RelayConnectionOverlay";
@@ -628,69 +628,15 @@ export function AppShell() {
     () => setIsCreateChannelOpen(true),
     [],
   );
-  React.useLayoutEffect(() => {
-    if (settingsOpen) {
-      return;
-    }
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (!hasPrimaryShortcutModifier(event) || event.altKey || event.repeat) {
-        return;
-      }
-
-      // A focused surface may claim the shortcut first — e.g. the composer
-      // consumes ⌘K to open the link editor when text is selected. Its
-      // element-level handler runs before this window-level bubble listener
-      // and calls `preventDefault()`; respect that instead of also opening
-      // the global dialog.
-      if (event.defaultPrevented) {
-        return;
-      }
-
-      const key = event.key.toLowerCase();
-      if (key === "k" && !event.shiftKey) {
-        event.preventDefault();
-        handleOpenSearch();
-        return;
-      }
-
-      if (key === "k" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenNewDm();
-        return;
-      }
-
-      if (key === "n" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenCreateChannel();
-        return;
-      }
-
-      if (key === "o" && event.shiftKey) {
-        event.preventDefault();
-        handleOpenBrowseChannels();
-        return;
-      }
-
-      if (key === "a" && event.shiftKey) {
-        event.preventDefault();
-        void goHome();
-        return;
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [
-    handleOpenBrowseChannels,
-    handleOpenNewDm,
-    handleOpenCreateChannel,
-    handleOpenSearch,
-    goHome,
-    settingsOpen,
-  ]);
+  const handleGoHome = React.useCallback(() => void goHome(), [goHome]);
+  useGlobalShortcuts({
+    disabled: settingsOpen,
+    onOpenSearch: handleOpenSearch,
+    onOpenNewDm: handleOpenNewDm,
+    onOpenCreateChannel: handleOpenCreateChannel,
+    onBrowseChannels: handleOpenBrowseChannels,
+    onGoHome: handleGoHome,
+  });
   useSettingsShortcuts({
     onClose: handleCloseSettings,
     onOpenSettings: handleOpenSettings,
@@ -732,7 +678,6 @@ export function AppShell() {
             isFollowingThread,
             isNotifiedForThread,
             isThreadMuted: (rootId) => mutedRootIds.has(rootId),
-            threadActivityItems,
             threadActivityFeedItems,
             feedItemState,
             onOpenSettings: handleOpenSettings,

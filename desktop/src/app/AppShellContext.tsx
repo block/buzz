@@ -1,6 +1,5 @@
 import * as React from "react";
 import type { ContextParentResolver } from "@/features/channels/readState/readStateManager";
-import type { ThreadActivityItem } from "@/features/channels/useUnreadChannels";
 import type { FeedItemState } from "@/features/home/useFeedItemState";
 import type { FeedItem } from "@/shared/api/types";
 import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
@@ -44,7 +43,6 @@ type AppShellContextValue = {
   isFollowingThread: (rootId: string) => boolean;
   isNotifiedForThread: (rootId: string) => boolean;
   isThreadMuted: (rootId: string) => boolean;
-  threadActivityItems: ThreadActivityItem[];
   threadActivityFeedItems: FeedItem[];
   feedItemState: FeedItemState;
   // Open the Settings panel at the given section. Available on all surfaces
@@ -72,7 +70,6 @@ const AppShellContext = React.createContext<AppShellContextValue>({
   isFollowingThread: () => false,
   isNotifiedForThread: () => false,
   isThreadMuted: () => false,
-  threadActivityItems: [],
   threadActivityFeedItems: [],
   feedItemState: {
     doneSet: EMPTY_SET,
