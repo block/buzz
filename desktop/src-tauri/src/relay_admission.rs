@@ -101,12 +101,14 @@ pub fn reset_rate_limit_gate() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // The gate is a process-wide static shared by every test in this binary,
     // so all gate tests serialize on one async lock to keep armed expiries
-    // from bleeding between parallel test threads.
+    // from bleeding between parallel test threads. `relay.rs`'s
+    // `oversized_hint_is_capped_*` test also arms the gate, so it locks this
+    // same serial (hence `pub(crate)`).
     pub(crate) static TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[tokio::test(start_paused = true)]
