@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   ArrowUpRight,
+  BadgeCheck,
   Copy,
   Cpu,
   Ear,
@@ -22,6 +23,7 @@ import type {
   Profile,
   RelayAgent,
 } from "@/shared/api/types";
+import { VerifiedBadge } from "@/shared/ui/VerifiedBadge";
 
 const RUNTIME_LABELS: Record<string, string> = {
   goose: "Goose",
@@ -47,6 +49,7 @@ export type ProfileField = {
 
 const AGENT_INFO_LABELS = new Set([
   "Public key",
+  "Corporate identity",
   "Managed by",
   "NIP-05",
   "Agent type",
@@ -171,6 +174,22 @@ export function buildPublicFields({
       displayNode: <PubKey pubkey={pubkey} testId="user-profile-copy-pubkey" />,
       icon: Fingerprint,
       label: "Public key",
+    });
+  }
+
+  const verifiedName = profile?.verifiedName?.trim();
+  if (verifiedName) {
+    fields.push({
+      displayValue: verifiedName,
+      icon: BadgeCheck,
+      label: "Corporate identity",
+      testId: "user-profile-corporate-identity",
+      trailingNode: (
+        <span className="flex shrink-0 items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <VerifiedBadge verifiedName={verifiedName} />
+          Binding active
+        </span>
+      ),
     });
   }
 
@@ -407,16 +426,19 @@ export function buildOwnerFields({
 function orderProfileFields(fields: ProfileField[]) {
   const visibilityLabel = "Visibility";
   const publicKeyLabel = "Public key";
+  const corporateIdentityLabel = "Corporate identity";
   const managedByLabel = "Managed by";
   const statusLabel = "Status";
   return [
     ...fields.filter((field) => field.label === visibilityLabel),
     ...fields.filter((field) => field.label === publicKeyLabel),
+    ...fields.filter((field) => field.label === corporateIdentityLabel),
     ...fields.filter((field) => field.label === managedByLabel),
     ...fields.filter(
       (field) =>
         field.label !== visibilityLabel &&
         field.label !== publicKeyLabel &&
+        field.label !== corporateIdentityLabel &&
         field.label !== managedByLabel &&
         field.copyValue,
     ),
@@ -425,6 +447,7 @@ function orderProfileFields(fields: ProfileField[]) {
       if (
         field.label === visibilityLabel ||
         field.label === publicKeyLabel ||
+        field.label === corporateIdentityLabel ||
         field.label === managedByLabel ||
         field.label === statusLabel
       ) {
