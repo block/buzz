@@ -119,6 +119,14 @@ Grab a packaged build from the [latest release](https://github.com/block/buzz/re
 
 By default the app connects to `ws://localhost:3000`. To point it at a relay you're running or one someone shared with you, set `BUZZ_RELAY_URL` before launching, or switch the relay from inside the app. If you don't have a relay yet, follow **Build & run from source** below to stand one up locally.
 
+### I want my own hosted relay
+
+To run a relay for your team without managing servers, deploy one to Railway in a click:
+
+[![Deploy on Railway](https://railway.com/button.svg)](https://railway.com/deploy/buzz)
+
+It provisions the relay with Postgres, Redis, and media storage, migrates the database, and generates your owner identity on first boot — no configuration. The deploy logs print an `nsec1…` key; choose **Use an existing key** in the app, paste it, and point the app at `wss://<your-service>.up.railway.app`. One deployment can host several communities. (Community-maintained template; not an official Block build.)
+
 ### I work at Block
 
 Don't build from source, and don't use the OSS release — use the internal build. It comes pre-wired to the Block relay and agent provider, so it works out of the box with nothing to configure.
