@@ -2,6 +2,7 @@ import {
   formatInboxFullTimestamp,
   type InboxContextMessage,
   type InboxFilter,
+  type InboxItem,
 } from "@/features/home/lib/inbox";
 import {
   getChannelIdFromTags,
@@ -14,11 +15,26 @@ import type {
   RelayEvent,
   UserProfileSummary,
 } from "@/shared/api/types";
+import { KIND_REMINDER } from "@/shared/constants/kinds";
+import { normalizePubkey } from "@/shared/lib/pubkey";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 
 function hasThreadReplyTags(tags: string[][]) {
   const thread = getThreadReference(tags);
   return thread.parentId !== null && !isBroadcastReply(tags);
+}
+
+export function filterActivityInboxItems(items: InboxItem[]) {
+  return items.filter((item) => item.item.kind !== KIND_REMINDER);
+}
+
+export function hasInboxThreadContext(
+  item: Pick<InboxItem, "groupItems" | "item">,
+  contextMessages: readonly Pick<InboxContextMessage, "tags">[] = [],
+) {
+  return [item.item, ...item.groupItems, ...contextMessages].some((event) =>
+    hasThreadReplyTags(event.tags ?? []),
+  );
 }
 
 export function matchesInboxFilter(
@@ -28,9 +44,12 @@ export function matchesInboxFilter(
     item?: FeedItem;
   },
   filter: InboxFilter,
+  ownedAgentPubkeys?: ReadonlySet<string>,
 ) {
   if (filter === "all") {
-    return true;
+    return ownedAgentPubkeys
+      ? matchesActivityAllView(item, ownedAgentPubkeys)
+      : true;
   }
 
   if (filter === "thread") {
@@ -39,7 +58,37 @@ export function matchesInboxFilter(
     );
   }
 
+  if (filter === "agent_activity" && ownedAgentPubkeys) {
+    const representative = item.item ?? item.groupItems?.at(-1);
+    return representative
+      ? ownedAgentPubkeys.has(normalizePubkey(representative.pubkey))
+      : false;
+  }
+
   return item.categories.includes(filter);
+}
+
+export function matchesActivityAllView(
+  item: {
+    categories: readonly string[];
+    groupItems?: readonly FeedItem[];
+    item?: FeedItem;
+  },
+  ownedAgentPubkeys: ReadonlySet<string>,
+): boolean {
+  const representative = item.item ?? item.groupItems?.at(-1);
+  return (
+    representative?.channelType === "dm" ||
+    item.categories.includes("mention") ||
+    [item.item, ...(item.groupItems ?? [])].some((groupItem) =>
+      groupItem ? hasThreadReplyTags(groupItem.tags) : false,
+    ) ||
+    item.categories.includes("needs_action") ||
+    Boolean(
+      representative &&
+        ownedAgentPubkeys.has(normalizePubkey(representative.pubkey)),
+    )
+  );
 }
 
 export function getContextMessageDepth(

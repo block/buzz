@@ -478,10 +478,9 @@ type BridgeOptions = {
   skipOnboardingSeed?: boolean;
   skipCommunitySeed?: boolean;
   /**
-   * When true (default), seed every preview feature in preview-features.json as
-   * enabled in localStorage so E2E tests can interact with gated UI without
-   * clicking through the Experiments settings panel. Set to false in specs
-   * that exercise the Experiments toggle UI itself.
+   * When true (default), seed established preview features as enabled so E2E
+   * tests can interact with gated UI. Activity stays disabled as the control.
+   * Set to false in specs that exercise an unseeded Experiments panel.
    */
   seedPreviewFeatures?: boolean;
   user?: keyof typeof TEST_IDENTITIES;
@@ -719,8 +718,9 @@ export async function installBridge(page: Page, options: BridgeOptions) {
   if (!options.skipOnboardingSeed) {
     await seedOnboardingCompletionForKnownIdentities(page, options.relayWsUrl);
   }
-  // Default to opting every preview feature in. Specs that exercise the
-  // Experiments toggle UI itself pass `seedPreviewFeatures: false`.
+  // Default to opting into established preview features. Activity remains off
+  // so the existing suite continues to validate Inbox as the control; its
+  // dedicated experiment spec exercises both states.
   if (options.seedPreviewFeatures !== false) {
     await seedPreviewFeaturesEnabled(page);
   }

@@ -9,21 +9,23 @@ import { RightAuxiliaryPane } from "@/features/channels/ui/RightAuxiliaryPane";
 import { ChannelManagementSheet } from "@/features/channels/ui/ChannelManagementSheet";
 import {
   type InboxFilter,
-  type InboxContextMessage,
-  type InboxItem,
   type InboxReply,
   buildInboxItems,
+  findInboxItemByEventId,
   formatInboxFullTimestamp,
   getInboxConversationId,
 } from "@/features/home/lib/inbox";
 import { useInboxSelectionAnchor } from "@/features/home/useInboxSelectionAnchor";
+import { useOwnedAgentPubkeys } from "@/features/home/useOwnedAgentPubkeys";
 import {
-  getReactionTargetId,
+  filterActivityInboxItems,
   matchesInboxFilter,
-  toInboxContextMessage,
 } from "@/features/home/lib/inboxViewHelpers";
+import { resolveActivityFilterSelection } from "@/features/home/lib/activitySelection";
 import { useHomeInboxReadState } from "@/features/home/useHomeInboxReadState";
-import { useHomeDrafts } from "@/features/home/useHomeDrafts";
+import { useHomeInboxAutoSelection } from "@/features/home/useHomeInboxAutoSelection";
+import { useHomeInboxContextMessages } from "@/features/home/useHomeInboxContextMessages";
+import { useHomePersonalActivity } from "@/features/home/useHomePersonalActivity";
 import { useInboxThreadContext } from "@/features/home/useInboxThreadContext";
 import {
   type ProfilePanelTab,
@@ -35,32 +37,26 @@ import {
   profilePanelViewFromSearch,
 } from "@/features/profile/ui/UserProfilePanelUtils";
 import {
-  INBOX_COLUMN_MIN_WIDTH_PX,
   INBOX_SINGLE_COLUMN_BREAKPOINT_PX,
   useResizableInboxListWidth,
 } from "@/features/home/useResizableInboxListWidth";
+import { getHomePaneLayout } from "@/features/home/lib/homePaneLayout";
+import { getHomeMessageCapabilities } from "@/features/home/lib/homeMessageCapabilities";
 import { HomeLoadingState } from "@/features/home/ui/HomeLoadingState";
 import { InboxDetailPane } from "@/features/home/ui/InboxDetailPane";
 import { InboxListPane } from "@/features/home/ui/InboxListPane";
-import { DraftDetailPane } from "@/features/messages/ui/DraftDetailPane";
+import { HomePersonalActivityDetail } from "@/features/home/ui/HomePersonalActivityDetail";
 import {
   useChannelMessagesQuery,
   useToggleReactionMutation,
 } from "@/features/messages/hooks";
-import {
-  collectMessageMentionPubkeys,
-  formatTimelineMessages,
-} from "@/features/messages/lib/formatTimelineMessages";
+import { collectMessageMentionPubkeys } from "@/features/messages/lib/formatTimelineMessages";
 import { formatTime } from "@/features/messages/lib/dateFormatters";
 import { splitOutgoingTags } from "@/features/messages/lib/imetaMediaMarkdown";
 import { getThreadReference } from "@/features/messages/lib/threading";
 import { useUsersBatchQuery } from "@/features/profile/hooks";
 import { useRelaySelfQuery } from "@/features/moderation/hooks";
 import { resolveUserLabel } from "@/features/profile/lib/identity";
-import {
-  countDueReminders,
-  useRemindersQuery,
-} from "@/features/reminders/hooks";
 import { useRemindLater } from "@/features/reminders/ui/RemindMeLaterProvider";
 import { deleteMessage, sendChannelMessage } from "@/shared/api/tauri";
 import type { HomeFeedResponse } from "@/shared/api/types";
@@ -81,27 +77,6 @@ const INBOX_SEARCH_KEYS = [
   "profileTab",
   "profileView",
 ] as const;
-
-/**
- * Finds the InboxItem whose stable conversation contains the given event ID.
- * Checks `item.id` (the current representative/latest event) first, then
- * falls back to `item.groupItems` so that a deep-linked or URL-anchored event
- * that is no longer the representative still resolves to its row.
- */
-function findItemByEventId(
-  items: readonly InboxItem[],
-  eventId: string,
-): InboxItem | null {
-  // Fast path: representative event matches (the common case).
-  const direct = items.find((item) => item.id === eventId);
-  if (direct) return direct;
-  // Slow path: event is a non-representative group member (e.g. original
-  // mention that was later superseded by a newer reply as the representative).
-  return (
-    items.find((item) => item.groupItems.some((gi) => gi.id === eventId)) ??
-    null
-  );
-}
 
 type HomeViewProps = {
   feed?: HomeFeedResponse;
@@ -142,18 +117,29 @@ export function HomeView({
   const isReminders = filter === "reminders";
   const isDrafts = filter === "drafts";
   const isMessagesMode = !isReminders && !isDrafts;
-  const remindersQuery = useRemindersQuery(currentPubkey);
-  const dueReminderCount = countDueReminders(remindersQuery.data ?? []);
+  const allowMixedPersonalSelection = filter === "all";
   const {
-    activeCount: activeDraftCount,
-    deleteDraft: handleDeleteDraft,
-    items: draftItems,
-    selectedItem: selectedDraftItem,
-    selectedKey: selectedDraftKey,
-    selectDraft: setSelectedDraftKey,
-  } = useHomeDrafts({
+    drafts: {
+      activeCount: activeDraftCount,
+      deleteDraft: handleDeleteDraft,
+      items: draftItems,
+      selectedItem: selectedDraftItem,
+      selectedKey: selectedDraftKey,
+      selectDraft: setSelectedDraftKey,
+    },
+    dueReminderCount,
+    pendingReminders,
+    reminders: {
+      selectedId: selectedReminderId,
+      selectedItem: selectedReminder,
+      select: setSelectedReminderId,
+    },
+  } = useHomePersonalActivity({
+    allowMixedSelection: allowMixedPersonalSelection,
+    currentPubkey,
     isDrafts,
     isNarrowHomeViewport,
+    isReminders,
     viewportWidthPx: homeInboxWidthPx,
   });
   // `?item=` is Messages-mode-only machinery: a reminder never enters the
@@ -167,37 +153,23 @@ export function HomeView({
   const profilePanelView = profilePanelViewFromSearch(
     inboxSearchValues.profileView,
   );
-  // Selection state — two-tier design so explicit and automatic selections
-  // have distinct ownership:
-  //
-  //   urlSelectedItemId  — explicit/user anchor, URL-authoritative.  Written
-  //     only by handleUserSelectItem (via applyInboxSearchPatch) and by
-  //     back/forward navigation.  Never touched by background data loads.
-  //
-  //   autoSelectedEventId — default desktop selection when the URL carries no
-  //     explicit anchor.  Written only by the auto-selection effect.  Never
-  //     triggers a history push.
-  //
-  //   selectedEventId — the effective anchor used everywhere below: the URL
-  //     anchor when present, otherwise the auto-selected fallback.  Derived
-  //     synchronously, no separate state — so there is no mirror-revert race.
+  // Explicit selection is URL-owned; automatic desktop selection stays local.
   const [autoSelectedEventId, setAutoSelectedEventId] = React.useState<
     string | null
   >(null);
+  const [unreadBoundary, setUnreadBoundary] = React.useState<{
+    conversationId: string;
+    eventId: string;
+  } | null>(null);
   const selectedEventId = urlSelectedItemId ?? autoSelectedEventId;
   const [managedChannelId, setManagedChannelId] = React.useState<string | null>(
     null,
   );
   const { goChannel } = useAppNavigation();
   const openDmMutation = useOpenDmMutation();
-  // handleUserSelectItem: explicit selection — only patches the URL.
-  // No local setSelectedEventId call; the URL patch triggers a TanStack Router
-  // navigation which updates urlSelectedItemId, which becomes selectedEventId
-  // on the next render.  This avoids the mirror-revert race where
-  // useEffect([urlSelectedItemId]) would fire before navigation commits and
-  // overwrite the optimistically-set local state with the stale URL null.
   const handleUserSelectItem = React.useCallback(
     (itemId: string | null) => {
+      setAutoSelectedEventId(null);
       applyInboxSearchPatch({ item: itemId });
     },
     [applyInboxSearchPatch],
@@ -267,6 +239,7 @@ export function HomeView({
     getMessageReadAt,
     feedItemState,
     markChannelRead,
+    markMessageRead,
     markThreadRead,
     readStateVersion,
   } = useAppShell();
@@ -290,7 +263,6 @@ export function HomeView({
       ? (getThreadReference(activeLatchedItem.tags).parentId ??
         activeLatchedItem.id)
       : null;
-
   const channelsQuery = useChannelsQuery();
   const channels = channelsQuery.data;
   const selectedChannelIdCandidate = React.useMemo(() => {
@@ -321,6 +293,13 @@ export function HomeView({
   const threadContext = useInboxThreadContext(
     threadContextFeedItem,
     channelMessages,
+    {
+      fullChannel:
+        selectedChannel?.channelType === "dm" ||
+        threadContextFeedItem?.channelType === "dm",
+      hasChannelLoadError: channelMessagesQuery.isError,
+      isChannelLoading: channelMessagesQuery.isPending,
+    },
   );
 
   const feedProfilePubkeys = React.useMemo(
@@ -342,6 +321,11 @@ export function HomeView({
     enabled: feedProfilePubkeys.length > 0,
   });
   const feedProfiles = feedProfilesQuery.data?.profiles;
+  const ownedAgentPubkeys = useOwnedAgentPubkeys(
+    true,
+    feedProfiles,
+    currentPubkey,
+  );
   const feedOwnerPubkeys = React.useMemo(
     () => [
       ...new Set(
@@ -356,8 +340,6 @@ export function HomeView({
     enabled: feedOwnerPubkeys.length > 0,
   });
   const feedOwnerProfiles = feedOwnerProfilesQuery.data?.profiles;
-  // Agent set for the inbox list/detail bot badges: the community-scoped
-  // baseline widened with this surface's profile lookup.
   const communityAgentPubkeys = useKnownAgentPubkeys();
   const inboxAgentPubkeys = React.useMemo(() => {
     const pubkeys = new Set(communityAgentPubkeys);
@@ -370,16 +352,28 @@ export function HomeView({
 
     return pubkeys;
   }, [feedProfiles, communityAgentPubkeys]);
-  const inboxItems = React.useMemo(
-    () =>
-      buildInboxItems({
-        channels,
-        currentPubkey,
-        feed,
-        profiles: feedProfiles,
-      }),
-    [channels, currentPubkey, feed, feedProfiles],
-  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: readStateVersion invalidates the stable getChannelReadAt callback
+  const inboxItems = React.useMemo(() => {
+    const items = buildInboxItems({
+      channels,
+      currentPubkey,
+      feed,
+      getChannelReadAt,
+      getMessageReadAt,
+      getThreadReadAt,
+      profiles: feedProfiles,
+    });
+    return filterActivityInboxItems(items);
+  }, [
+    channels,
+    currentPubkey,
+    feed,
+    feedProfiles,
+    getChannelReadAt,
+    getMessageReadAt,
+    getThreadReadAt,
+    readStateVersion,
+  ]);
   const { effectiveDoneSet, markItemRead, markItemUnread } =
     useHomeInboxReadState({
       items: inboxItems,
@@ -390,20 +384,18 @@ export function HomeView({
       localDoneSet: doneSet,
       localUnreadSet: unreadSet,
       markChannelRead,
+      markMessageRead,
       markThreadRead,
       markDoneLocal: markDone,
       markUnreadLocal: markUnread,
       undoDoneLocal: undoDone,
       undoUnreadLocal: undoUnread,
     });
-  // Resolve the selected row and stable conversation ID from inboxItems
-  // (unfiltered). We need conversationId before filtering so we can keep the
-  // selected item visible when unreadOnly is on. The event anchor may point to
-  // any event in the group (representative or older member), so search both.
+  // Resolve selection before filtering so unread-only can retain its active row.
   const selectedItemFromAll = React.useMemo(
     () =>
       selectedEventId
-        ? (findItemByEventId(inboxItems, selectedEventId) ?? null)
+        ? findInboxItemByEventId(inboxItems, selectedEventId)
         : null,
     [inboxItems, selectedEventId],
   );
@@ -413,7 +405,12 @@ export function HomeView({
   // correct row selected (by conversationId) even after the anchor event has
   // been displaced from groupItems by a newer representative.
   const latchedConversationId = activeLatchedItem
-    ? getInboxConversationId(activeLatchedItem.tags, activeLatchedItem.id)
+    ? getInboxConversationId(
+        activeLatchedItem.tags,
+        activeLatchedItem.id,
+        activeLatchedItem.channelId,
+        activeLatchedItem.channelType,
+      )
     : null;
   const selectedConversationId =
     selectedItemFromAll?.conversationId ?? latchedConversationId;
@@ -421,7 +418,7 @@ export function HomeView({
   const filteredItems = React.useMemo(() => {
     return inboxItems.filter(
       (item) =>
-        matchesInboxFilter(item, filter) &&
+        matchesInboxFilter(item, filter, ownedAgentPubkeys) &&
         (!unreadOnly ||
           !effectiveDoneSet.has(item.id) ||
           item.conversationId === selectedConversationId),
@@ -430,99 +427,45 @@ export function HomeView({
     effectiveDoneSet,
     filter,
     inboxItems,
+    ownedAgentPubkeys,
     selectedConversationId,
     unreadOnly,
   ]);
-  // Prefer the filtered view for the selected item so that filter/unread
-  // changes can still dismiss it, but fall back to the unfiltered row so a
-  // live representative-event change (which keeps the conversation in the
-  // filter) does not make selectedItem go null mid-session.
+  // A filter change may only retain detail for a conversation that remains
+  // visible. The filter handler selects the next valid row in the same update,
+  // so the detail pane never renders a stale conversation between states.
   const selectedItem = React.useMemo(() => {
     if (!selectedEventId) return null;
-    // Primary: find by event anchor in the filtered view.
-    const fromFiltered = findItemByEventId(filteredItems, selectedEventId);
+    const fromFiltered = findInboxItemByEventId(filteredItems, selectedEventId);
     if (fromFiltered) return fromFiltered;
-    // Secondary: event anchor is in an unfiltered row (e.g., dismissed item).
-    if (selectedItemFromAll) return selectedItemFromAll;
-    // Tertiary: anchor has been displaced from all groupItems (e.g., a very old
-    // event that fell off the feed window). Resolve by conversationId so the
-    // correct row stays selected and the auto-selection effect doesn't replace
-    // the anchor with a different conversation.
     if (selectedConversationId) {
       return (
         filteredItems.find(
           (item) => item.conversationId === selectedConversationId,
-        ) ??
-        inboxItems.find(
-          (item) => item.conversationId === selectedConversationId,
-        ) ??
-        null
+        ) ?? null
       );
     }
     return null;
-  }, [
-    filteredItems,
-    inboxItems,
-    selectedConversationId,
-    selectedEventId,
-    selectedItemFromAll,
-  ]);
-  const contextMessages = React.useMemo<InboxContextMessage[]>(() => {
-    if (!selectedItem) {
-      return [];
+  }, [filteredItems, selectedConversationId, selectedEventId]);
+  const unreadBoundaryEventId = React.useMemo(() => {
+    if (!selectedItem) return null;
+    if (unreadBoundary?.conversationId === selectedItem.conversationId) {
+      return unreadBoundary.eventId;
     }
-
-    const eventById = new Map(
-      threadContext.events.map((event) => [event.id, event]),
-    );
-    const contextEventIds = new Set(eventById.keys());
-    const reactionEvents = [
-      ...(channelMessages ?? []),
-      ...threadContext.reactionEvents,
-    ].filter((event) => {
-      if (event.kind !== KIND_REACTION) {
-        return false;
-      }
-
-      const targetId = getReactionTargetId(event.tags);
-      return Boolean(targetId && contextEventIds.has(targetId));
-    });
-    const currentUserAvatarUrl = currentPubkey
-      ? (feedProfiles?.[currentPubkey.toLowerCase()]?.avatarUrl ?? null)
-      : null;
-    const timelineMessages = formatTimelineMessages(
-      [...threadContext.events, ...reactionEvents],
-      selectedChannel,
-      currentPubkey,
-      currentUserAvatarUrl,
-      feedProfiles,
-      undefined,
-      undefined,
-      undefined,
-      relaySelfPubkey,
-      feedOwnerProfiles,
-    );
-
-    return timelineMessages.map((message) =>
-      toInboxContextMessage(message, {
-        eventById,
-        fallbackAuthorPubkey: selectedItem.item.pubkey,
-        profiles: feedProfiles,
-        selectedItemId: selectedEventId ?? selectedItem.id,
-      }),
-    );
-  }, [
+    return effectiveDoneSet.has(selectedItem.id) ? null : selectedItem.id;
+  }, [effectiveDoneSet, selectedItem, unreadBoundary]);
+  const contextMessages = useHomeInboxContextMessages({
     channelMessages,
     currentPubkey,
-    feedProfiles,
-    feedOwnerProfiles,
+    events: threadContext.events,
+    ownerProfiles: feedOwnerProfiles,
+    profiles: feedProfiles,
+    reactionEvents: threadContext.reactionEvents,
     relaySelfPubkey,
     selectedChannel,
     selectedEventId,
     selectedItem,
-    threadContext.events,
-    threadContext.reactionEvents,
-  ]);
+  });
   const selectedItemReplies = React.useMemo<InboxReply[]>(() => {
     if (!selectedItem) return [];
     const localReplies =
@@ -530,79 +473,74 @@ export function HomeView({
     const contextIds = new Set(contextMessages.map((message) => message.id));
     return localReplies.filter((reply) => !contextIds.has(reply.id));
   }, [contextMessages, localRepliesByItemId, selectedItem]);
-  React.useEffect(() => {
-    // Auto-selection is Messages-mode-only: in Reminders mode no FeedItem is
-    // ever selected, so default-selecting one behind the reminders list would
-    // be wasted work and could drive narrow-viewport detail off a stale feed
-    // selection.
-    if (!isMessagesMode) {
-      return;
-    }
-
-    // The URL carries an explicit anchor — auto-selection must not overwrite
-    // it. Clear any stale auto fallback so it cannot reappear if back later
-    // returns to a no-item entry.
-    if (urlSelectedItemId !== null) {
-      setAutoSelectedEventId(null);
-      return;
-    }
-
-    // While the feed is loading (e.g. a reload restoring `?item=` from the
-    // URL) the selected item simply hasn't arrived yet — don't clobber it.
-    if (isLoading || !feed) {
-      return;
-    }
-
-    if (filteredItems.length === 0) {
-      setAutoSelectedEventId(null);
-      return;
-    }
-
-    // Don't default-select before the width is measured: at width 0
-    // isNarrowHomeViewport is false, so narrow Home would cold-load into detail.
-    if (homeInboxWidthPx === 0) {
-      return;
-    }
-
-    // The event anchor is still valid if the conversation it belongs to is
-    // still present in the filtered list. A live representative-event change
-    // does NOT invalidate the anchor (the same conversationId is still there).
-    if (
-      selectedConversationId !== null &&
-      filteredItems.some(
-        (item) => item.conversationId === selectedConversationId,
-      )
-    ) {
-      return;
-    }
-
-    // A cold URL anchor is being resolved via getEventById — the user navigated
-    // to a specific event that is not yet in the inbox list. Do not overwrite
-    // selectedEventId; wait for cold recovery to commit before auto-selecting.
-    if (coldResolutionPending) {
-      return;
-    }
-
-    setAutoSelectedEventId(
-      isNarrowHomeViewport ? null : (filteredItems[0]?.id ?? null),
-    );
-  }, [
+  useHomeInboxAutoSelection({
     coldResolutionPending,
-    feed,
     filteredItems,
+    hasFeed: Boolean(feed),
+    hasPersonalSelection:
+      selectedDraftItem !== null || selectedReminder !== null,
     homeInboxWidthPx,
     isLoading,
     isMessagesMode,
     isNarrowHomeViewport,
     selectedConversationId,
+    setAutoSelectedEventId,
     urlSelectedItemId,
-  ]);
+  });
 
   React.useEffect(() => {
     void selectedConversationId;
     setIsDeletingMessage(false);
     setIsSendingReply(false);
   }, [selectedConversationId]);
+
+  const handleFilterChange = React.useCallback(
+    (nextFilter: InboxFilter) => {
+      const nextItems = inboxItems.filter(
+        (item) =>
+          matchesInboxFilter(item, nextFilter, ownedAgentPubkeys) &&
+          (!unreadOnly ||
+            !effectiveDoneSet.has(item.id) ||
+            item.conversationId === selectedConversationId),
+      );
+      const selection = resolveActivityFilterSelection({
+        isNarrow: isNarrowHomeViewport,
+        items: nextItems,
+        selectedConversationId,
+      });
+
+      setUnreadBoundary(null);
+      setSelectedDraftKey(null);
+      setSelectedReminderId(null);
+      setFilter(nextFilter);
+
+      if (
+        nextFilter === "reminders" ||
+        nextFilter === "drafts" ||
+        selection.preserveSelection
+      ) {
+        if (nextFilter === "reminders" || nextFilter === "drafts") {
+          setAutoSelectedEventId(null);
+          applyInboxSearchPatch({ item: null });
+        }
+        return;
+      }
+
+      applyInboxSearchPatch({ item: null });
+      setAutoSelectedEventId(selection.autoSelectedEventId);
+    },
+    [
+      applyInboxSearchPatch,
+      effectiveDoneSet,
+      inboxItems,
+      isNarrowHomeViewport,
+      ownedAgentPubkeys,
+      selectedConversationId,
+      setSelectedDraftKey,
+      setSelectedReminderId,
+      unreadOnly,
+    ],
+  );
 
   if (isLoading && !feed) {
     return <HomeLoadingState />;
@@ -629,63 +567,43 @@ export function HomeView({
     );
   }
 
-  const canReact =
-    selectedItem !== null &&
-    selectedItem.item.channelId !== null &&
-    availableChannelIds.has(selectedItem.item.channelId);
-  const canReply =
-    canReact &&
-    selectedItem.item.kind !== 45001 &&
-    selectedItem.item.kind !== 45003;
-  const disabledReplyReason =
-    canReply || !selectedItem
-      ? null
-      : selectedItem.item.channelId
-        ? availableChannelIds.has(selectedItem.item.channelId)
-          ? "This item does not support inline replies yet."
-          : "Open the linked channel to reply."
-        : "This inbox item does not have a reply target.";
-  const canDelete =
-    selectedItem !== null &&
-    currentPubkey?.trim().toLowerCase() ===
-      selectedItem.item.pubkey.trim().toLowerCase();
-  const isSinglePanelDetailView =
-    isMessagesMode &&
-    isNarrowHomeViewport &&
-    selectedEventId !== null &&
-    !isSinglePanelAuxiliaryView;
-  const isSinglePanelDraftDetailView =
-    isDrafts &&
-    isNarrowHomeViewport &&
-    selectedDraftItem !== null &&
-    !isSinglePanelAuxiliaryView;
-  const showListPane =
-    !isSinglePanelDetailView &&
-    !isSinglePanelDraftDetailView &&
-    !isSinglePanelAuxiliaryView;
-  const showDetailPane =
-    !isSinglePanelAuxiliaryView &&
-    ((isMessagesMode && (!isNarrowHomeViewport || isSinglePanelDetailView)) ||
-      (isDrafts && (!isNarrowHomeViewport || isSinglePanelDraftDetailView)));
-  const auxiliaryPaneWidthPx = isSinglePanelAuxiliaryView
-    ? homeInboxWidthPx
-    : threadPanelWidthPx;
-  const maxEffectiveInboxListWidthPx =
-    homeInboxWidthPx > 0
-      ? Math.max(
-          INBOX_COLUMN_MIN_WIDTH_PX,
-          homeInboxWidthPx -
-            INBOX_COLUMN_MIN_WIDTH_PX -
-            (hasAuxiliaryPane ? auxiliaryPaneWidthPx : 0),
-        )
-      : undefined;
-  const effectiveInboxListWidthPx =
-    homeInboxWidthPx > 0
-      ? Math.min(
-          inboxListWidthPx,
-          maxEffectiveInboxListWidthPx ?? inboxListWidthPx,
-        )
-      : inboxListWidthPx;
+  const { canDelete, canReact, canReply, disabledReplyReason } =
+    getHomeMessageCapabilities(
+      selectedItem,
+      currentPubkey,
+      availableChannelIds,
+    );
+  const detailMode = isDrafts
+    ? "drafts"
+    : isReminders
+      ? "reminders"
+      : selectedDraftItem
+        ? "drafts"
+        : selectedReminder
+          ? "reminders"
+          : "messages";
+  const {
+    auxiliaryPaneWidthPx,
+    effectiveInboxListWidthPx,
+    isSinglePanelDetailView,
+    isSinglePanelDraftDetailView,
+    isSinglePanelReminderDetailView,
+    showDetailPane,
+    showListPane,
+  } = getHomePaneLayout({
+    hasAuxiliaryPane,
+    homeWidthPx: homeInboxWidthPx,
+    inboxListWidthPx,
+    isDrafts: detailMode === "drafts",
+    isMessagesMode: detailMode === "messages",
+    isNarrow: isNarrowHomeViewport,
+    isReminders: detailMode === "reminders",
+    isSinglePanelAuxiliaryView,
+    selectedDraft: selectedDraftItem !== null,
+    selectedEvent: selectedEventId !== null,
+    selectedReminder: selectedReminder !== null,
+    threadPanelWidthPx,
+  });
 
   return (
     <ProfilePanelProvider onOpenProfilePanel={handleOpenProfilePanel}>
@@ -731,7 +649,7 @@ export function HomeView({
               filter={filter}
               items={filteredItems}
               onDeleteDraft={handleDeleteDraft}
-              onFilterChange={setFilter}
+              onFilterChange={handleFilterChange}
               onMarkRead={markItemRead}
               onMarkUnread={markItemUnread}
               onOpenDirect={(item) => {
@@ -758,14 +676,38 @@ export function HomeView({
                 });
               }}
               onSelect={(itemId) => {
+                const item = findInboxItemByEventId(inboxItems, itemId);
+                setUnreadBoundary(
+                  item && !effectiveDoneSet.has(item.id)
+                    ? {
+                        conversationId: item.conversationId,
+                        eventId: item.id,
+                      }
+                    : null,
+                );
+                setSelectedDraftKey(null);
+                setSelectedReminderId(null);
                 handleUserSelectItem(itemId);
                 markItemRead(itemId);
               }}
-              onSelectDraft={setSelectedDraftKey}
+              onSelectDraft={(draftKey) => {
+                setUnreadBoundary(null);
+                setSelectedReminderId(null);
+                handleUserSelectItem(null);
+                setSelectedDraftKey(draftKey);
+              }}
+              onSelectReminder={(reminderId) => {
+                setUnreadBoundary(null);
+                setSelectedDraftKey(null);
+                handleUserSelectItem(null);
+                setSelectedReminderId(reminderId);
+              }}
               onUnreadOnlyChange={setUnreadOnly}
               reminderPubkey={currentPubkey}
+              reminders={pendingReminders}
               selectedConversationId={selectedConversationId}
               selectedDraftKey={selectedDraftKey}
+              selectedReminderId={selectedReminderId}
               showRightDivider={showListPane && showDetailPane}
               unreadOnly={unreadOnly}
             />
@@ -794,7 +736,7 @@ export function HomeView({
             <span className="absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-transparent transition-colors group-hover:bg-border/80 group-focus-visible:bg-border/80" />
           </button>
 
-          {showDetailPane && isMessagesMode ? (
+          {showDetailPane && detailMode === "messages" ? (
             <InboxDetailPane
               agentPubkeys={inboxAgentPubkeys}
               canDelete={canDelete}
@@ -810,12 +752,14 @@ export function HomeView({
               isDeletingMessage={isDeletingMessage}
               isSendingReply={isSendingReply}
               isSinglePanelView={isSinglePanelDetailView}
+              hasThreadContextLoadError={threadContext.hasLoadError}
               isThreadContextLoading={threadContext.isLoading}
               item={selectedItem}
               latchedDefaultParentId={latchedDefaultParentId}
               messages={contextMessages}
               profiles={feedProfiles}
               selectedEventId={selectedEventId}
+              unreadBoundaryEventId={unreadBoundaryEventId}
               onBack={
                 isSinglePanelDetailView
                   ? () => {
@@ -931,16 +875,20 @@ export function HomeView({
               replies={selectedItemReplies}
             />
           ) : null}
-          {showDetailPane && isDrafts ? (
-            <DraftDetailPane
-              item={selectedDraftItem}
-              key={selectedDraftItem?.entry.key ?? "empty"}
+          {showDetailPane && detailMode !== "messages" ? (
+            <HomePersonalActivityDetail
+              currentPubkey={currentPubkey}
+              draftItem={selectedDraftItem}
+              mode={detailMode}
               onBack={
                 isSinglePanelDraftDetailView
                   ? () => setSelectedDraftKey(null)
-                  : undefined
+                  : isSinglePanelReminderDetailView
+                    ? () => setSelectedReminderId(null)
+                    : undefined
               }
-              onDelete={handleDeleteDraft}
+              onDeleteDraft={handleDeleteDraft}
+              reminder={selectedReminder}
             />
           ) : null}
           {profilePanelPubkey ? (

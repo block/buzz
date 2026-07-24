@@ -1,4 +1,12 @@
-import { ArrowLeft, Hash, Mail, MoreHorizontal, Trash2 } from "lucide-react";
+import {
+  AlertCircle,
+  ArrowLeft,
+  ExternalLink,
+  LoaderCircle,
+  Mail,
+  MoreHorizontal,
+  Trash2,
+} from "lucide-react";
 import * as React from "react";
 
 import type {
@@ -9,6 +17,7 @@ import type {
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
+import { hasInboxThreadContext } from "@/features/home/lib/inboxViewHelpers";
 import {
   type InboxDisplayMessage,
   InboxMessageRow,
@@ -58,6 +67,7 @@ type InboxDetailPaneProps = {
   isDeletingMessage?: boolean;
   isSendingReply?: boolean;
   isSinglePanelView?: boolean;
+  hasThreadContextLoadError?: boolean;
   isThreadContextLoading?: boolean;
   item: InboxItem | null;
   messages?: InboxContextMessage[];
@@ -73,6 +83,7 @@ type InboxDetailPaneProps = {
    * representative `item.id`.
    */
   selectedEventId: string | null;
+  unreadBoundaryEventId?: string | null;
   /**
    * The default reply-parent event ID derived from the latched anchor's tags
    * in HomeView (`parentId ?? anchor.id`). Populated once the anchor is found
@@ -93,7 +104,7 @@ type InboxDetailPaneProps = {
     content: string;
     mediaTags?: string[][];
     mentionPubkeys: string[];
-    parentEventId: string;
+    parentEventId: string | null;
   }) => Promise<void>;
   onToggleReaction?: (
     message: TimelineMessage,
@@ -111,6 +122,7 @@ export function InboxDetailPane({
   isDeletingMessage = false,
   isSendingReply = false,
   isSinglePanelView = false,
+  hasThreadContextLoadError = false,
   isThreadContextLoading = false,
   item,
   messages = [],
@@ -120,6 +132,7 @@ export function InboxDetailPane({
   contextChannelName = null,
   currentPubkey,
   selectedEventId,
+  unreadBoundaryEventId = null,
   latchedDefaultParentId = null,
   onBack,
   onDelete,
@@ -143,6 +156,7 @@ export function InboxDetailPane({
   // scroll centering) key on this.
   const conversationId = item?.conversationId ?? null;
   const selectedChannelId = item?.item.channelId ?? null;
+  const isDirectMessage = item?.item.channelType === "dm";
   // Build the plain, non-virtualized timeline the shared hook anchors against.
   // Live arrivals rerun its layout compensation without changing the target.
 
@@ -354,7 +368,8 @@ export function InboxDetailPane({
   // (derived from the selected-event anchor at conversation entry), which does
   // not change when a live incoming message advances the representative item.
   const composerParentEventId =
-    replyTarget?.id ?? capturedDefaultParentId ?? item.id;
+    replyTarget?.id ??
+    (isDirectMessage ? null : (capturedDefaultParentId ?? item.id));
   const composerReplyTarget =
     replyTarget && replyTarget.id !== item.id
       ? {
@@ -370,10 +385,27 @@ export function InboxDetailPane({
     item.item.channelType === "forum"
       ? item.item.channelType
       : null;
-  const contextLabel = channelContextName ?? formatInboxTypeLabel(item);
-  const hasChannelContext = Boolean(channelContextName);
+  const isThreadContext =
+    !isDirectMessage && hasInboxThreadContext(item, messages);
+  const contextLabel = isThreadContext
+    ? isDirectMessage
+      ? `Thread with ${item.senderLabel}`
+      : channelContextName
+        ? `Thread in #${channelContextName}`
+        : "Thread"
+    : isDirectMessage
+      ? `DM with ${item.senderLabel}`
+      : channelContextName
+        ? `Message in #${channelContextName}`
+        : formatInboxTypeLabel(item);
   const contextChannelId = item.item.channelId;
-  const contextThreadRootId = getThreadReference(item.item.tags).rootId;
+  const sourceEventId = selectedEventId ?? item.id;
+  const contextThreadRootId = isThreadContext ? item.conversationId : null;
+  const openContextLabel = isThreadContext
+    ? "Open full thread"
+    : isDirectMessage
+      ? "Open conversation"
+      : "Open in channel";
 
   const handleSelectReplyTarget = (message: InboxDisplayMessage) => {
     setReplyTargetId((currentReplyTargetId) =>
@@ -412,34 +444,31 @@ export function InboxDetailPane({
                 ) : null}
                 <div className="min-w-0">
                   {canOpenChannel && contextChannelId ? (
-                    <button
-                      className="flex min-w-0 items-center gap-[4px] text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                      onClick={() =>
-                        onOpenContext(
-                          contextChannelId,
-                          item.id,
-                          contextThreadRootId,
-                        )
-                      }
-                      title={item.fullTimestampLabel}
-                      type="button"
-                    >
-                      {hasChannelContext ? (
-                        <Hash className="h-4 w-4 shrink-0" color="gray" />
-                      ) : null}
-                      <span className="min-w-0 translate-y-px truncate">
-                        {contextLabel}
-                      </span>
-                    </button>
+                    <h2 className="min-w-0">
+                      <button
+                        className="block min-w-0 text-left text-sm font-semibold leading-5 tracking-tight text-foreground hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        data-testid="home-inbox-context-title"
+                        onClick={() =>
+                          onOpenContext(
+                            contextChannelId,
+                            sourceEventId,
+                            contextThreadRootId,
+                          )
+                        }
+                        title={openContextLabel}
+                        type="button"
+                      >
+                        <span className="block min-w-0 translate-y-px truncate">
+                          {contextLabel}
+                        </span>
+                      </button>
+                    </h2>
                   ) : (
                     <h2
-                      className="flex min-w-0 items-center gap-[4px] text-sm font-semibold leading-5 tracking-tight text-foreground"
+                      className="min-w-0 text-sm font-semibold leading-5 tracking-tight text-foreground"
                       title={item.fullTimestampLabel}
                     >
-                      {hasChannelContext ? (
-                        <Hash className="h-4 w-4 shrink-0" color="gray" />
-                      ) : null}
-                      <span className="min-w-0 translate-y-px truncate">
+                      <span className="block min-w-0 translate-y-px truncate">
                         {contextLabel}
                       </span>
                     </h2>
@@ -450,6 +479,30 @@ export function InboxDetailPane({
               <TooltipProvider delayDuration={200}>
                 <div className="flex shrink-0 items-center gap-1">
                   <UpdateIndicator />
+                  {canOpenChannel && contextChannelId ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          aria-label={openContextLabel}
+                          className="rounded-full text-muted-foreground"
+                          data-testid="home-inbox-open-context"
+                          onClick={() =>
+                            onOpenContext(
+                              contextChannelId,
+                              sourceEventId,
+                              contextThreadRootId,
+                            )
+                          }
+                          size="icon"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <ExternalLink />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent>{openContextLabel}</TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   {channel ? (
                     <ChannelMembersBar
                       channel={channel}
@@ -484,8 +537,27 @@ export function InboxDetailPane({
           ref={scrollContainerRef}
         >
           <div ref={contentRef}>
+            {isThreadContextLoading && displayMessages.length <= 1 ? (
+              <div
+                className="mx-4 mb-2 flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2 text-sm text-muted-foreground"
+                data-testid="home-inbox-context-loading"
+              >
+                <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" />
+                <span>Loading surrounding context...</span>
+              </div>
+            ) : null}
+            {hasThreadContextLoadError ? (
+              <div
+                className="mx-4 mb-2 flex items-center gap-2 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                data-testid="home-inbox-context-error"
+              >
+                <AlertCircle className="h-4 w-4 shrink-0" />
+                <span>Some message context could not be loaded.</span>
+              </div>
+            ) : null}
             {displayMessages.map((message, index) => {
-              const isAfterSeparator = index === 1;
+              const hasUnreadBoundary = message.id === unreadBoundaryEventId;
+              const isAfterSeparator = index === 1 || hasUnreadBoundary;
               const previousMessage = displayMessages[index - 1];
               const isContinuation =
                 !isAfterSeparator &&
@@ -510,6 +582,7 @@ export function InboxDetailPane({
                   message={message}
                   onSelectReplyTarget={handleSelectReplyTarget}
                   onToggleReaction={onToggleReaction}
+                  showUnreadBoundary={hasUnreadBoundary}
                 />
               );
             })}
@@ -543,17 +616,25 @@ export function InboxDetailPane({
           />
           <div className="pointer-events-auto">
             <MessageComposer
-              audienceContext={{
-                type: "thread",
-                threadRootId: item.conversationId,
-                initialAgentPubkeys,
-              }}
+              audienceContext={
+                isDirectMessage
+                  ? null
+                  : {
+                      type: "thread",
+                      threadRootId: item.conversationId,
+                      initialAgentPubkeys,
+                    }
+              }
               channelId={item.item.channelId}
               channelName={item.channelLabel ?? "channel"}
               channelType={composerChannelType}
               containerClassName="px-4 pb-4 sm:px-4"
               disabled={!canReply}
-              draftKey={`thread:${item.conversationId}`}
+              draftKey={
+                isDirectMessage
+                  ? (item.item.channelId ?? item.conversationId)
+                  : `thread:${item.conversationId}`
+              }
               isSending={isSendingReply}
               onCancelReply={
                 composerReplyTarget ? () => setReplyTargetId(null) : undefined
@@ -568,7 +649,9 @@ export function InboxDetailPane({
               }
               placeholder={
                 canReply
-                  ? `Send reply to ${item.channelLabel ? `#${item.channelLabel} thread` : "channel thread"}`
+                  ? isDirectMessage
+                    ? `Message ${item.senderLabel}`
+                    : `Send reply to ${item.channelLabel ? `#${item.channelLabel} thread` : "channel thread"}`
                   : (disabledReplyReason ??
                     "Replies are not available for this item.")
               }
