@@ -1,0 +1,28 @@
+[package]
+name = "buzz-migrate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Operator claim-service for zero-touch, no-takeover Slack→Buzz identity migration"
+
+[lib]
+name = "buzz_migrate"
+path = "src/lib.rs"
+
+[dependencies]
+buzz-sdk = { workspace = true }
+buzz-ws-client = { workspace = true }
+buzz-core = { workspace = true }
+nostr = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+subtle = { workspace = true }
+rand = { workspace = true }
