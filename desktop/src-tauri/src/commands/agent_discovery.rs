@@ -568,16 +568,32 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
         cmd.env("npm_config_cache", prefix.join("cache"));
     }
 
-    let mut path_parts = Vec::new();
-    if let Some(managed_node_bin) = crate::managed_agents::buzz_managed_node_bin_dir() {
-        path_parts.push(managed_node_bin);
-    }
-    if let Some(managed_bin) = crate::managed_agents::buzz_managed_npm_bin_dir() {
-        path_parts.push(managed_bin);
-    }
-    if let Some(ref path) = crate::managed_agents::login_shell_path() {
-        path_parts.extend(std::env::split_paths(path));
-    }
+    // Compose the PATH for the install shell using the same kernel as the
+    // runtime/probe path so the two can never drift.  managed entries first
+    // (Node/npm bins keep precedence); login-shell entries next; inherited
+    // process PATH appended last on Windows when no login-shell PATH exists
+    // (login_shell_path() always returns None on Windows — Git Bash paths are
+    // POSIX-shaped and poison native children; cmd.env("PATH", …) replaces
+    // rather than extends, so without inherited the install shell loses npm).
+    let login_path = crate::managed_agents::login_shell_path();
+    let had_login = login_path.is_some();
+    let managed: Vec<std::path::PathBuf> = [
+        crate::managed_agents::buzz_managed_node_bin_dir(),
+        crate::managed_agents::buzz_managed_npm_bin_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let login: Vec<std::path::PathBuf> = login_path
+        .as_deref()
+        .map(|p| std::env::split_paths(p).collect())
+        .unwrap_or_default();
+    let inherited: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).collect())
+        .unwrap_or_default();
+    let use_inherited = crate::managed_agents::should_use_inherited(had_login, true, cfg!(windows));
+    let path_parts =
+        crate::managed_agents::compose_path_entries(managed, login, inherited, use_inherited);
     if !path_parts.is_empty() {
         if let Ok(path) = std::env::join_paths(path_parts) {
             cmd.env("PATH", path);
@@ -1293,6 +1309,45 @@ mod tests {
             result.is_ok(),
             "install_shell_command must succeed on Windows with Git; got: {:?}",
             result.err()
+        );
+    }
+
+    /// On Windows, `install_shell_command` must set PATH to a value that
+    /// includes the inherited process PATH, so node/npm are visible inside
+    /// the install shell even when no managed Node runtime is present.
+    #[cfg(windows)]
+    #[test]
+    fn test_install_shell_command_includes_process_path_on_windows() {
+        let _guard = crate::managed_agents::lock_path_mutex();
+        let previous = std::env::var_os("PATH");
+        // Plant a sentinel in the process PATH that the test can detect.
+        let sentinel = r"C:\TestSentinel\bin";
+        std::env::set_var("PATH", sentinel);
+
+        let result = super::install_shell_command("echo test");
+
+        match previous {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        let cmd = result.expect("install_shell_command must succeed on Windows with Git");
+        let path_value = cmd
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .and_then(|(_, val)| val)
+            .map(|v| v.to_string_lossy().into_owned())
+            .expect("install_shell_command must always set a PATH env var on Windows");
+
+        // The sentinel (inherited process PATH) must appear in the composed PATH.
+        assert!(
+            path_value.contains(sentinel),
+            "install_shell_command PATH must include the inherited process PATH; got: {path_value}"
+        );
+        // The sentinel must appear LAST — managed Buzz dirs must have precedence.
+        assert!(
+            path_value.ends_with(sentinel),
+            "inherited process PATH must be appended LAST so managed dirs keep precedence; got: {path_value}"
         );
     }
 

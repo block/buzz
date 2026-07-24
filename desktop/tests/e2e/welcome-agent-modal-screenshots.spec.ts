@@ -69,7 +69,8 @@ test.describe("welcome and channel agent entry points", () => {
     await page
       .getByTestId("create-channel-description")
       .fill("A private channel for getting oriented in this workspace.");
-    await page.getByTestId("create-channel-private-toggle").click();
+    await page.getByTestId("create-channel-permissions").click();
+    await page.getByTestId("create-channel-permissions-option-private").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
     await expect(
@@ -108,7 +109,8 @@ test.describe("welcome and channel agent entry points", () => {
     await page.goto("/", { waitUntil: "domcontentloaded" });
     await openCreateChannelDialog(page);
     await page.getByTestId("create-channel-name").fill("Welcome");
-    await page.getByTestId("create-channel-private-toggle").click();
+    await page.getByTestId("create-channel-permissions").click();
+    await page.getByTestId("create-channel-permissions-option-private").click();
     await page.getByTestId("create-channel-submit").click();
     await expect(page.getByTestId("chat-title")).toHaveText("Welcome");
     await page.getByTestId("welcome-intro-action-create-agent").click();

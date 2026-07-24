@@ -178,6 +178,10 @@ const overrides = new Map([
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
   ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
+  // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
+  // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1041],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing

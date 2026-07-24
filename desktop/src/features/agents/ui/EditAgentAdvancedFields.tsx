@@ -14,7 +14,6 @@ import { isBuzzAgentRuntime } from "./buzzAgentConfig";
 export function EditAgentAdvancedFields({
   acpCommand,
   agentArgs,
-  agentCommand,
   autoRestartOnConfigChange,
   disabled,
   envVars,
@@ -29,11 +28,9 @@ export function EditAgentAdvancedFields({
   parallelism,
   provider,
   requiredEnvKeys,
-  selectedRuntimeId,
   systemPrompt,
   onAcpCommandChange,
   onAgentArgsChange,
-  onAgentCommandChange,
   onEnvVarsChange,
   onInheritHarnessChange,
   onParallelismChange,
@@ -42,7 +39,6 @@ export function EditAgentAdvancedFields({
 }: {
   acpCommand: string;
   agentArgs: string;
-  agentCommand: string;
   autoRestartOnConfigChange: boolean;
   disabled: boolean;
   envVars: EnvVarsValue;
@@ -65,11 +61,9 @@ export function EditAgentAdvancedFields({
   /** Active LLM provider id — forwarded to BuzzAgentModelTuningFields for effort filtering. */
   provider?: string;
   requiredEnvKeys: readonly string[];
-  selectedRuntimeId: string;
   systemPrompt: string;
   onAcpCommandChange: (value: string) => void;
   onAgentArgsChange: (value: string) => void;
-  onAgentCommandChange: (value: string) => void;
   onEnvVarsChange: (value: EnvVarsValue) => void;
   onInheritHarnessChange: (value: boolean) => void;
   onParallelismChange: (value: string) => void;
@@ -123,37 +117,6 @@ export function EditAgentAdvancedFields({
             : "Configuration changes only show the restart badge; restart manually to apply them."}
         </p>
       </div>
-
-      {/* Custom agent command (when custom runtime) */}
-      {selectedRuntimeId === "custom" && !inheritHarness ? (
-        <div className="space-y-1.5">
-          <label
-            className="text-sm font-medium text-foreground"
-            htmlFor="edit-agent-command"
-          >
-            Agent command
-          </label>
-          <div
-            className={cn(
-              "flex min-h-11 items-center px-3",
-              PERSONA_FIELD_SHELL_CLASS,
-            )}
-          >
-            <Input
-              autoCorrect="off"
-              className={cn(
-                "h-8 px-0 py-0 leading-6",
-                PERSONA_FIELD_CONTROL_CLASS,
-              )}
-              disabled={disabled}
-              id="edit-agent-command"
-              onChange={(event) => onAgentCommandChange(event.target.value)}
-              placeholder="Full path or shell command"
-              value={agentCommand}
-            />
-          </div>
-        </div>
-      ) : null}
 
       {/* Agent runtime args */}
       <div className="space-y-1.5">

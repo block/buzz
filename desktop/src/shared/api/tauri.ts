@@ -359,6 +359,10 @@ export function getDefaultRelayUrl(): Promise<string> {
   return invokeTauri<string>("get_default_relay_url");
 }
 
+export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
+  return invokeTauri<boolean>("auto_connect_default_relay_enabled");
+}
+
 export function isSharedIdentity(): Promise<boolean> {
   return invokeTauri<boolean>("is_shared_identity");
 }
