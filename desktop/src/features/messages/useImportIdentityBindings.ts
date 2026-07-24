@@ -24,6 +24,7 @@ export const importIdentityBindingsQueryKey = [
 ] as const;
 
 const EMPTY_PUBKEYS: string[] = [];
+const IMPORT_IDENTITY_EVENT_LIMIT = 10_000;
 
 /**
  * Returns the confirmed binding map plus the deduped list of bound pubkeys —
@@ -38,11 +39,17 @@ export function useImportIdentityBindings(): {
   const query = useQuery({
     queryKey: importIdentityBindingsQueryKey,
     queryFn: async () => {
-      const events = await relayClient.fetchEvents({
-        kinds: [KIND_IMPORT_IDENTITY_BINDING, KIND_IMPORT_IDENTITY_CLAIM],
-        limit: 2000,
-      });
-      return buildConfirmedImportBindings(events);
+      // Fetch each half separately so the relay's per-query cap supports up to
+      // 10,000 identities instead of being shared by attestations and claims.
+      const eventPages = await Promise.all(
+        [KIND_IMPORT_IDENTITY_BINDING, KIND_IMPORT_IDENTITY_CLAIM].map((kind) =>
+          relayClient.fetchEvents({
+            kinds: [kind],
+            limit: IMPORT_IDENTITY_EVENT_LIMIT,
+          }),
+        ),
+      );
+      return buildConfirmedImportBindings(eventPages.flat());
     },
     // Bindings change rarely (only when an operator attributes an import or a
     // person consents).

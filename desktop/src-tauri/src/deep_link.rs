@@ -371,11 +371,14 @@ struct ImportClaimDeepLinkPayload {
     /// `/email/complete`; the OIDC channel uses it to bind the callback to the
     /// pending `join-slack` transaction.
     service: Option<String>,
-    /// OIDC channel marker (`"oidc"`) — the attestation is already published by
-    /// the service, so the app only needs to publish its self-claim.
+    /// OIDC channel marker (`"oidc"`). The service has NOT yet published the
+    /// attestation — the app must first redeem `code` at `/oidc/finalize` with a
+    /// signed self-claim (proof of key possession), then publish that self-claim.
     via: Option<String>,
     /// OIDC join channel: relay that received membership + attestation.
     relay_url: Option<String>,
+    /// OIDC join channel: short-lived finalize code from the Slack callback.
+    code: Option<String>,
 }
 
 /// A foreign-identity subject is `<source>:<id>` with both parts present and an
@@ -407,6 +410,9 @@ fn validate_claim_service(service: &str) -> Result<(), String> {
     if !url.username().is_empty() || url.password().is_some() {
         return Err("service must not include credentials".into());
     }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("service must not include a query or fragment".into());
+    }
     Ok(())
 }
 
@@ -420,15 +426,20 @@ fn parse_import_claim_deep_link(url: &Url) -> Result<ImportClaimDeepLinkPayload,
     let token = optional_non_empty_param(url, "token");
     let service = optional_non_empty_param(url, "service");
     let via = optional_non_empty_param(url, "via");
+    let code = optional_non_empty_param(url, "code");
     let mut relay_url = None;
 
     match (token.as_deref(), service.as_deref(), via.as_deref()) {
         // Email channel: both halves present; the service must be well-formed.
         (Some(_), Some(service), None) => validate_claim_service(service)?,
-        // OIDC channel: bind the callback to both the target relay and the
-        // claim service from the pending join-slack transaction.
+        // OIDC channel: bind the callback to the target relay and the claim
+        // service from the pending join-slack transaction, and require the
+        // short-lived finalize code the app redeems with its signed self-claim.
         (None, Some(service), Some("oidc")) => {
             validate_claim_service(service)?;
+            if code.is_none() {
+                return Err("import-claim OIDC requires a finalize code".into());
+            }
             relay_url = Some(
                 parse_websocket_relay_param(url)
                     .ok_or_else(|| "import-claim OIDC requires a valid relay".to_string())?,
@@ -436,7 +447,7 @@ fn parse_import_claim_deep_link(url: &Url) -> Result<ImportClaimDeepLinkPayload,
         }
         _ => {
             return Err(
-                "import-claim requires token+service (email) or via=oidc+relay+service".into(),
+                "import-claim requires token+service (email) or via=oidc+code+relay+service".into(),
             )
         }
     }
@@ -447,6 +458,7 @@ fn parse_import_claim_deep_link(url: &Url) -> Result<ImportClaimDeepLinkPayload,
         service,
         via,
         relay_url,
+        code,
     })
 }
 

@@ -945,6 +945,10 @@ buzz import slack --export-dir ./export --identity-map U060=npub1abc,U081=npub1d
         /// Path to the unzipped Slack export directory
         #[arg(long)]
         export_dir: String,
+        /// Slack workspace id (team id, e.g. T0266FRGM). Namespaces identity
+        /// bindings and channel UUIDs so ids never collide across workspaces.
+        #[arg(long)]
+        team_id: String,
         /// State file path (default: <export-dir>/buzz-import-state.json)
         #[arg(long)]
         state: Option<String>,
@@ -971,6 +975,9 @@ community owner or admin. History is attributed only once the person also runs \
 buzz import bind --slack-id U060976D0QN --pubkey npub1abc..."
     )]
     Bind {
+        /// Slack workspace id (team id, e.g. T0266FRGM)
+        #[arg(long)]
+        team_id: String,
         /// Slack user id (e.g. U060976D0QN)
         #[arg(long)]
         slack_id: String,
@@ -987,6 +994,9 @@ matching `buzz import bind` attestation for your pubkey.\n\nExample:\n  \
 buzz import claim --slack-id U060976D0QN"
     )]
     Claim {
+        /// Slack workspace id (team id, e.g. T0266FRGM)
+        #[arg(long)]
+        team_id: String,
         /// Your Slack user id (e.g. U060976D0QN)
         #[arg(long)]
         slack_id: String,

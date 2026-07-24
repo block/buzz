@@ -416,13 +416,14 @@ function CommunityApp({
     const transaction = communityOnboarding.transaction;
     if (transaction?.stage !== "slack-auth" || !transaction.slackService)
       return;
+    // Require the device key to exist before sending them to Slack, so the
+    // finalize step (which signs with it) can't strand a completed sign-in. The
+    // key is NOT sent to /oidc/start — possession is proven only at finalize.
     if (!currentPubkey) return;
     if (slackAuthTransactionRef.current === transaction.id) return;
     slackAuthTransactionRef.current = transaction.id;
     const base = transaction.slackService.replace(/\/+$/, "");
-    const startUrl = `${base}/oidc/start?pubkey=${encodeURIComponent(
-      currentPubkey,
-    )}`;
+    const startUrl = `${base}/oidc/start`;
     try {
       await openUrl(startUrl);
     } catch (error) {
@@ -495,14 +496,13 @@ function CommunityApp({
     const transactionId = transaction.id;
     const relayUrl = transaction.relayUrl;
 
-    // A Slack join is admitted by the migration service before this app
-    // connects. Publish the person's consent only after the target relay is
-    // active; doing it during the OAuth callback would publish to the previous
-    // community (or fail on a first-community join).
+    // Slack OIDC already admitted this key and published the attestation before
+    // entering "connecting". Once the target relay is active, publish the
+    // member's matching self-claim to complete two-party attribution.
     if (transaction.slackSubject) {
       if (slackClaimTransactionRef.current === transactionId) return;
-      slackClaimTransactionRef.current = transactionId;
       const subject = transaction.slackSubject;
+      slackClaimTransactionRef.current = transactionId;
       void publishImportIdentityClaim(subject)
         .then(async () => {
           if (

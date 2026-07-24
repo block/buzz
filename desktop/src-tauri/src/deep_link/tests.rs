@@ -1,4 +1,3 @@
-
 use url::Url;
 
 use super::{
@@ -56,7 +55,7 @@ fn parse_import_claim_email_channel() {
 #[test]
 fn parse_import_claim_oidc_channel() {
     let url = Url::parse(
-            "buzz://import-claim?subject=slack:U060&via=oidc&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+            "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
         )
         .unwrap();
     let p = parse_import_claim_deep_link(&url).unwrap();
@@ -65,6 +64,7 @@ fn parse_import_claim_oidc_channel() {
     assert_eq!(p.token, None);
     assert_eq!(p.service.as_deref(), Some("https://mig.example"));
     assert_eq!(p.relay_url.as_deref(), Some("wss://relay.example"));
+    assert_eq!(p.code.as_deref(), Some("abc123"));
 }
 
 #[test]
@@ -76,6 +76,14 @@ fn parse_import_claim_rejects_incomplete_and_malformed() {
     .is_err());
     assert!(parse_import_claim_deep_link(
         &Url::parse("buzz://import-claim?subject=slack:U060&via=oidc").unwrap()
+    )
+    .is_err());
+    // OIDC with relay + service but no finalize code.
+    assert!(parse_import_claim_deep_link(
+        &Url::parse(
+            "buzz://import-claim?subject=slack:U060&via=oidc&relay=wss%3A%2F%2Fr.example&service=https%3A%2F%2Fmig.example"
+        )
+        .unwrap()
     )
     .is_err());
     // token without service.
@@ -94,6 +102,20 @@ fn parse_import_claim_rejects_incomplete_and_malformed() {
             .unwrap()
     )
     .is_err());
+    // A query or fragment would make the app append /oidc/start or
+    // /email/complete at the wrong location.
+    for service in [
+        "https%3A%2F%2Fmig.example%3Fnext%3Devil",
+        "https%3A%2F%2Fmig.example%23fragment",
+    ] {
+        assert!(parse_import_claim_deep_link(
+            &Url::parse(&format!(
+                "buzz://import-claim?subject=slack:U060&token=t&service={service}"
+            ))
+            .unwrap()
+        )
+        .is_err());
+    }
 }
 
 #[test]
@@ -101,7 +123,7 @@ fn pending_import_claims_dedupe_and_acknowledge() {
     let queue = PendingImportClaimDeepLinks::default();
     let payload = parse_import_claim_deep_link(
             &Url::parse(
-                "buzz://import-claim?subject=slack:U060&via=oidc&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
+                "buzz://import-claim?subject=slack:U060&via=oidc&code=abc123&relay=wss%3A%2F%2Frelay.example&service=https%3A%2F%2Fmig.example",
             )
             .unwrap(),
         )

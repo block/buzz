@@ -1,40 +1,32 @@
 import { expect, test } from "@playwright/test";
 
-import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
-
-const SHOTS = "test-results/import-claim";
 
 type SignedEvent = { kind: number; tags: string[][] };
 
 /**
  * Deliver a `buzz://import-claim` deep link the way the native Tauri plugin
  * does — via the mockIPC event system (`plugin:event|emit`), which fans out to
- * the app's `listen("deep-link-import-claim", …)` subscriber. Re-emits under
- * `toPass` so the first emit can't race the listener's async registration.
+ * the app's `listen("deep-link-import-claim", …)` subscriber.
  */
 async function emitImportClaim(
   page: import("@playwright/test").Page,
   payload: Record<string, string>,
 ) {
-  const dialog = page.getByRole("dialog");
-  await expect(async () => {
-    await page.evaluate(
-      (p) =>
-        (
-          window as unknown as {
-            __TAURI_INTERNALS__: {
-              invoke: (cmd: string, args: unknown) => Promise<unknown>;
-            };
-          }
-        ).__TAURI_INTERNALS__.invoke("plugin:event|emit", {
-          event: "deep-link-import-claim",
-          payload: p,
-        }),
-      payload,
-    );
-    await expect(dialog).toBeVisible({ timeout: 500 });
-  }).toPass({ timeout: 5_000 });
+  await page.evaluate(
+    (p) =>
+      (
+        window as unknown as {
+          __TAURI_INTERNALS__: {
+            invoke: (cmd: string, args: unknown) => Promise<unknown>;
+          };
+        }
+      ).__TAURI_INTERNALS__.invoke("plugin:event|emit", {
+        event: "deep-link-import-claim",
+        payload: p,
+      }),
+    payload,
+  );
 }
 
 test.beforeEach(async ({ page }) => {
@@ -51,7 +43,7 @@ test.beforeEach(async ({ page }) => {
     .waitFor({ state: "visible", timeout: 15_000 });
 });
 
-test("join-slack callback: connects the target relay before self-claim", async ({
+test("join-slack callback: automatically connects before self-claim", async ({
   page,
 }) => {
   const now = new Date().toISOString();
@@ -74,25 +66,39 @@ test("join-slack callback: connects the target relay before self-claim", async (
     { createdAt: now },
   );
   await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByText("Join E2E Test with Slack")).toBeVisible();
+
+  // The app must redeem the finalize code with a signed self-claim BEFORE the
+  // attestation exists — capture what it POSTs to prove the pubkey is proven,
+  // not server-trusted.
+  let finalize: {
+    code?: string;
+    claim?: { kind?: number; tags?: string[][] };
+  } = {};
+  await page.route("**/oidc/finalize", async (route) => {
+    finalize = JSON.parse(route.request().postData() ?? "{}");
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        subject: "slack:T060:U060",
+        attestation_event_id: "mock-attestation",
+      }),
+    });
+  });
 
   await emitImportClaim(page, {
-    subject: "slack:U060",
+    subject: "slack:T060:U060",
     via: "oidc",
+    code: "oidc-code-1",
     relayUrl: "ws://localhost:3000",
     service: "http://mock.local",
   });
 
-  const dialog = page.getByRole("dialog");
-  await expect(dialog.getByText("Link your imported history")).toBeVisible();
-  await expect(dialog.getByText("slack:U060")).toBeVisible();
-  await waitForAnimations(page);
-  await page.screenshot({ path: `${SHOTS}/oidc-confirm.png` });
+  await expect(page.getByRole("dialog")).toBeHidden();
 
-  await dialog.getByRole("button", { name: "Link my history" }).click();
-  await expect(dialog).toBeHidden({ timeout: 10_000 });
-
-  // The target community becomes active before the deferred subject
-  // self-claim is signed and published.
+  // The target community becomes active, then the app finalizes: it POSTs the
+  // signed self-claim to /oidc/finalize and publishes the same kind-30624 event.
   let signed: SignedEvent[] = [];
   await expect(async () => {
     signed = await page.evaluate(
@@ -104,8 +110,17 @@ test("join-slack callback: connects the target relay before self-claim", async (
   }).toPass({ timeout: 10_000 });
   const claim = signed.find((e) => e.kind === 30624);
   expect(claim, "a kind-30624 self-claim should have been signed").toBeTruthy();
-  expect(claim?.tags).toContainEqual(["d", "slack:U060"]);
+  expect(claim?.tags).toContainEqual(["d", "slack:T060:U060"]);
   expect(claim?.tags).toContainEqual(["import", "slack"]);
+
+  // Finalize received the single-use code and the signed self-claim as proof of
+  // possession — the pubkey being attested is the one that signed. The POST is
+  // awaited inside the finalize helper, so poll until the route captured it.
+  await expect(() => {
+    expect(finalize.code).toBe("oidc-code-1");
+    expect(finalize.claim?.kind).toBe(30624);
+    expect(finalize.claim?.tags).toContainEqual(["d", "slack:T060:U060"]);
+  }).toPass({ timeout: 10_000 });
 });
 
 test("email import-claim: POSTs token + own pubkey to the service, then done", async ({
@@ -131,6 +146,7 @@ test("email import-claim: POSTs token + own pubkey to the service, then done", a
   });
 
   const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
   await expect(dialog.getByText("slack:U081")).toBeVisible();
   await dialog.getByRole("button", { name: "Link my history" }).click();
   await expect(dialog.getByText(/now show under your account/i)).toBeVisible({

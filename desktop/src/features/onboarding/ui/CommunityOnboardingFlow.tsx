@@ -478,7 +478,7 @@ export function CommunityOnboardingFlow({
               </h1>
               <p className="mt-3 text-sm text-foreground/80">
                 {transaction.error ??
-                  "Continue in your browser to sign in with Slack, then return to Buzz to confirm the connection to your imported history."}
+                  "Continue in your browser to sign in with Slack. Buzz will return here and connect your imported history automatically."}
               </p>
               <div className="mt-6 flex justify-center gap-3">
                 <Button

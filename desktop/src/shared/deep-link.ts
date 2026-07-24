@@ -56,10 +56,15 @@ export type ImportClaimDeepLinkPayload = {
   token?: string;
   /** Email channel: base URL of the operator claim-service (http/https). */
   service?: string;
-  /** OIDC channel marker (`"oidc"`); the attestation is already published. */
+  /**
+   * OIDC channel marker (`"oidc"`). The attestation is NOT yet published — the
+   * app redeems `code` at `/oidc/finalize` with a signed self-claim first.
+   */
   via?: string;
-  /** OIDC join channel: community relay that received the attestation. */
+  /** OIDC join channel: community relay to connect before finalizing. */
   relayUrl?: string;
+  /** OIDC join channel: short-lived finalize code from the Slack callback. */
+  code?: string;
 };
 
 /**
