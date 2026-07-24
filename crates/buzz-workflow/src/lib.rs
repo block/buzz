@@ -188,31 +188,15 @@ impl WorkflowEngine {
                 let trace_json = serde_json::Value::Array(full_trace);
                 let step_count = result.step_index as i32;
 
-                if result.approval_token.is_some() {
-                    // Approval gates are not yet implemented (WF-08).
-                    // Fail explicitly rather than creating unreachable WaitingApproval rows.
-                    tracing::warn!(
-                        run_id = %run_id,
-                        step_index = result.step_index,
-                        "Workflow hit approval gate — not yet implemented, marking as failed"
-                    );
-                    if let Err(e) = self
-                        .db
-                        .update_workflow_run(
-                            community_id,
-                            run_id,
-                            RunStatus::Failed,
-                            step_count,
-                            &trace_json,
-                            Some("approval gates not yet implemented — see WF-08"),
-                        )
-                        .await
-                    {
-                        tracing::error!(
-                            run_id = %run_id,
-                            "Failed to update run to Failed (approval gate): {e}"
-                        );
-                    }
+                if let Some(pending) = result.approval {
+                    self.suspend_run_for_approval(
+                        community_id,
+                        run_id,
+                        pending,
+                        step_count,
+                        &trace_json,
+                    )
+                    .await;
                 } else {
                     tracing::info!(run_id = %run_id, "Workflow run completed");
                     if let Err(e) = self
@@ -258,6 +242,158 @@ impl WorkflowEngine {
                 }
             }
         }
+    }
+
+    /// Persist a `RequestApproval` suspension (WF-08): mint the approval row,
+    /// move the run to `WaitingApproval`, and announce the pending approval as
+    /// a kind:46010 event.
+    ///
+    /// Ordering matters: approval row first, then run status, then the
+    /// announcement. A grant can only act on a run that is both
+    /// `WaitingApproval` and has a pending row, so persisting in this order
+    /// never exposes a half-armed gate. Any persistence failure marks the run
+    /// Failed — a run must never sit in `WaitingApproval` without a grantable
+    /// approval row. The announcement itself is best-effort: by then the gate
+    /// is fully armed and grantable through any surface that knows the token,
+    /// so an emit failure is logged loudly but does not fail the run.
+    async fn suspend_run_for_approval(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+        pending: executor::PendingApproval,
+        step_count: i32,
+        trace_json: &serde_json::Value,
+    ) {
+        match self
+            .arm_approval_gate(community_id, run_id, &pending, step_count, trace_json)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    run_id = %run_id,
+                    step_id = %pending.step_id,
+                    "Workflow run waiting for approval"
+                );
+            }
+            Err(reason) => {
+                tracing::error!(
+                    run_id = %run_id,
+                    step_id = %pending.step_id,
+                    "Failed to arm approval gate — marking run failed: {reason}"
+                );
+                if let Err(e) = self
+                    .db
+                    .update_workflow_run(
+                        community_id,
+                        run_id,
+                        RunStatus::Failed,
+                        step_count,
+                        trace_json,
+                        Some(&format!("approval gate: {reason}")),
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        run_id = %run_id,
+                        "Failed to update run to Failed (approval gate): {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Fallible core of [`suspend_run_for_approval`].
+    async fn arm_approval_gate(
+        &self,
+        community_id: CommunityId,
+        run_id: uuid::Uuid,
+        pending: &executor::PendingApproval,
+        step_count: i32,
+        trace_json: &serde_json::Value,
+    ) -> Result<(), String> {
+        let run = self
+            .db
+            .get_workflow_run(community_id, run_id)
+            .await
+            .map_err(|e| format!("load run: {e}"))?;
+        let workflow = self
+            .db
+            .get_workflow(community_id, run.workflow_id)
+            .await
+            .map_err(|e| format!("load workflow {}: {e}", run.workflow_id))?;
+
+        let expires_at = Utc::now()
+            + chrono::Duration::seconds(i64::try_from(pending.timeout_secs).unwrap_or(i64::MAX));
+
+        self.db
+            .create_approval(buzz_db::workflow::CreateApprovalParams {
+                community_id,
+                token: &pending.token,
+                workflow_id: run.workflow_id,
+                run_id,
+                step_id: &pending.step_id,
+                step_index: step_count,
+                approver_spec: &pending.approver_spec,
+                expires_at,
+            })
+            .await
+            .map_err(|e| format!("create approval record: {e}"))?;
+
+        self.db
+            .update_workflow_run(
+                community_id,
+                run_id,
+                RunStatus::WaitingApproval,
+                step_count,
+                trace_json,
+                None,
+            )
+            .await
+            .map_err(|e| format!("set run WaitingApproval: {e}"))?;
+
+        // Announce the pending approval (kind:46010). The gate is armed at
+        // this point, so emit failures must not fail the run — but they do
+        // hide the token from feeds, so log at ERROR for operator visibility.
+        let owner_pubkey_hex = hex::encode(&workflow.owner_pubkey);
+        let notify_pubkey_hex = if pending.approver_spec == "any" {
+            owner_pubkey_hex
+        } else {
+            pending.approver_spec.clone()
+        };
+        match self.action_sink() {
+            Ok(sink) => {
+                if let Err(e) = sink
+                    .emit_approval_requested(
+                        community_id,
+                        action_sink::ApprovalRequestNotice {
+                            channel_id: workflow.channel_id,
+                            raw_token: pending.token.clone(),
+                            message: pending.message.clone(),
+                            notify_pubkey_hex,
+                            workflow_id: run.workflow_id,
+                            run_id,
+                            step_id: pending.step_id.clone(),
+                            expires_at,
+                        },
+                    )
+                    .await
+                {
+                    tracing::error!(
+                        run_id = %run_id,
+                        step_id = %pending.step_id,
+                        "Failed to announce pending approval (kind:46010): {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    run_id = %run_id,
+                    "No action sink — cannot announce pending approval: {e}"
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Called from the event handler post-store hook for every stored event.

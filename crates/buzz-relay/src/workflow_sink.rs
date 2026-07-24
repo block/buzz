@@ -8,9 +8,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 
-use buzz_core::kind::KIND_STREAM_MESSAGE;
+use buzz_core::kind::{KIND_STREAM_MESSAGE, KIND_WORKFLOW_APPROVAL_REQUESTED};
 use buzz_core::tenant::CommunityId;
-use buzz_workflow::action_sink::{ActionSink, ActionSinkError};
+use buzz_workflow::action_sink::{ActionSink, ActionSinkError, ApprovalRequestNotice};
 use chrono::Utc;
 use nostr::{EventBuilder, Kind, Tag};
 use tracing::info;
@@ -354,6 +354,126 @@ impl ActionSink for RelayActionSink {
                     &stored_event,
                     kind_u32,
                     &author_pubkey_hex,
+                    None,
+                )
+                .await;
+            }
+
+            Ok(event_id_hex)
+        })
+    }
+
+    fn emit_approval_requested(
+        &self,
+        community_id: CommunityId,
+        notice: ApprovalRequestNotice,
+    ) -> Pin<Box<dyn Future<Output = Result<String, ActionSinkError>> + Send + '_>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .upgrade()
+                .ok_or_else(|| ActionSinkError::Database("relay is shutting down".into()))?;
+
+            // Same tenant-binding rule as send_message: the suspended run
+            // carries its owning community; never re-derive from config.
+            let host = state
+                .db
+                .lookup_community_host(community_id)
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?
+                .ok_or_else(|| {
+                    ActionSinkError::Database(format!(
+                        "workflow run community {community_id} is not mapped to a host"
+                    ))
+                })?;
+            let tenant = buzz_core::tenant::TenantContext::resolved(community_id, host);
+
+            // `d` tag carries the token *hash* — the exact lookup key
+            // grant/deny handlers use (`get_approval_by_stored_hash`). The
+            // raw token travels only in the content payload.
+            let token_hash_hex =
+                hex::encode(buzz_db::workflow::hash_approval_token(&notice.raw_token));
+
+            let content = serde_json::json!({
+                "message": notice.message,
+                "token": notice.raw_token,
+                "workflow_id": notice.workflow_id,
+                "run_id": notice.run_id,
+                "step_id": notice.step_id,
+                "expires_at": notice.expires_at.to_rfc3339(),
+            })
+            .to_string();
+
+            let mut tags = vec![
+                Tag::parse(["d", &token_hash_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("d tag: {e}")))?,
+                Tag::parse(["p", &notice.notify_pubkey_hex])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("p tag: {e}")))?,
+                Tag::parse(["buzz:workflow", "true"])
+                    .map_err(|e| ActionSinkError::EventBuild(format!("workflow tag: {e}")))?,
+            ];
+            if let Some(channel_uuid) = notice.channel_id {
+                tags.push(
+                    Tag::parse(["h", &channel_uuid.to_string()])
+                        .map_err(|e| ActionSinkError::EventBuild(format!("h tag: {e}")))?,
+                );
+            }
+
+            let kind = Kind::from(KIND_WORKFLOW_APPROVAL_REQUESTED as u16);
+            let event = EventBuilder::new(kind, &content)
+                .tags(tags)
+                .sign_with_keys(&state.relay_keypair)
+                .map_err(|e| ActionSinkError::EventBuild(format!("signing: {e}")))?;
+
+            let event_id_hex = event.id.to_hex();
+            let event_id_bytes = event.id.as_bytes().to_vec();
+            let event_created_at = {
+                let ts = event.created_at.as_secs() as i64;
+                chrono::DateTime::from_timestamp(ts, 0).unwrap_or_else(Utc::now)
+            };
+
+            info!(
+                event_id = %event_id_hex,
+                run_id = %notice.run_id,
+                step_id = %notice.step_id,
+                "Workflow RequestApproval: announcing kind {KIND_WORKFLOW_APPROVAL_REQUESTED} event"
+            );
+
+            // Approval announcements are top-level events; give them thread
+            // metadata only when channel-scoped (same shape as send_message).
+            let thread_meta =
+                notice
+                    .channel_id
+                    .map(|channel_uuid| buzz_db::event::ThreadMetadataParams {
+                        event_id: &event_id_bytes,
+                        event_created_at,
+                        channel_id: channel_uuid,
+                        parent_event_id: None,
+                        parent_event_created_at: None,
+                        root_event_id: None,
+                        root_event_created_at: None,
+                        depth: 0,
+                        broadcast: false,
+                    });
+
+            let (stored_event, was_inserted) = state
+                .db
+                .insert_event_with_thread_metadata(
+                    tenant.community(),
+                    &event,
+                    notice.channel_id,
+                    thread_meta,
+                )
+                .await
+                .map_err(|e| ActionSinkError::Database(e.to_string()))?;
+
+            if was_inserted {
+                let _ = dispatch_persistent_event(
+                    &tenant,
+                    &state,
+                    &stored_event,
+                    KIND_WORKFLOW_APPROVAL_REQUESTED,
+                    &notice.notify_pubkey_hex,
                     None,
                 )
                 .await;
