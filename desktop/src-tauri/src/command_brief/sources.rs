@@ -169,7 +169,7 @@ impl FrozenSourceContext {
     }
 
     pub(crate) fn rag_catalogue(&self) -> &[String] {
-        self.snapshot.collections()
+        self.snapshot.logical_collections()
     }
 }
 
@@ -219,7 +219,7 @@ impl<B: SourceBackend> SourceCollector<B> {
 
     pub(crate) fn freeze(&self) -> Result<FrozenSourceContext, SourceCollectionError> {
         let snapshot = self.backend.verify_active_rag_snapshot()?;
-        if snapshot.collections().is_empty() {
+        if snapshot.physical_collections().is_empty() || snapshot.logical_collections().is_empty() {
             return Err(SourceCollectionError::RagInvalid);
         }
         let intents = fixed_retrieval_intents(&self.co_request);
@@ -340,6 +340,7 @@ impl<B: SourceBackend> SourceCollector<B> {
         let mut canonical = canonical_ledger(&self.run_id, snapshot.snapshot_id(), candidates)?;
         limitations.append(&mut canonical.limitations);
         apply_ledger_omissions(&canonical.omitted_by_kind, &mut degraded, &mut limitations);
+        apply_ledger_rejections(&canonical.rejected_by_kind, &mut degraded, &mut limitations);
         let validated_sources = canonical
             .ledger
             .iter()
@@ -434,7 +435,8 @@ fn snapshot_catalogue_source(
 ) -> Result<CandidateSource, SourceCollectionError> {
     let quote = serde_jcs::to_vec(&json!({
         "active_snapshot_id": snapshot.snapshot_id(),
-        "collections": snapshot.collections(),
+        "logical_collections": snapshot.logical_collections(),
+        "physical_collections": snapshot.physical_collections(),
         "snapshot_time": snapshot.snapshot_time(),
         "verified_at": snapshot.verified_at(),
     }))
@@ -728,7 +730,7 @@ fn calendar_record_in_window(
     ) else {
         return false;
     };
-    start >= window_start && start < end && end <= window_end
+    start < end && start < window_end && end > window_start
 }
 
 fn reminder_record_in_window(
@@ -761,13 +763,11 @@ fn reminder_record_in_window(
         return false;
     };
     let inside = |value: &DateTime<_>| *value >= window_start && *value < window_end;
-    due.as_ref().is_none_or(&inside)
-        && completion.as_ref().is_none_or(&inside)
-        && if completed {
-            completion.as_ref().is_some_and(inside)
-        } else {
-            due.as_ref().is_some_and(inside)
-        }
+    if completed {
+        completion.as_ref().is_some_and(inside)
+    } else {
+        due.as_ref().is_some_and(inside)
+    }
 }
 
 fn canonical_ledger(
@@ -777,11 +777,12 @@ fn canonical_ledger(
 ) -> Result<CanonicalLedgerOutput, SourceCollectionError> {
     let mut by_source = BTreeMap::<String, CandidateSource>::new();
     let mut limitations = BTreeSet::new();
+    let mut rejected_by_kind = [0_usize; 6];
     for mut candidate in candidates {
-        let (quote, truncated) = truncate_utf8(candidate.quote.trim(), MAX_TEXT_BYTES);
-        if quote.is_empty() {
+        let Some((quote, truncated)) = canonical_quote(&candidate.quote, MAX_TEXT_BYTES) else {
+            rejected_by_kind[source_priority(candidate.source_kind) as usize] += 1;
             continue;
-        }
+        };
         candidate.quote = quote;
         if truncated {
             limitations.insert(format!(
@@ -817,42 +818,43 @@ fn canonical_ledger(
         }
         candidates.truncate(MAX_SOURCE_LEDGER_ITEMS);
     }
-    let ledger = candidates
-        .into_iter()
-        .map(|candidate| {
-            let ledger_id = format!(
-                "source-{}",
-                &digest_text(&format!(
-                    "{run_id}:{}:{}:{snapshot_id}",
-                    source_priority(candidate.source_kind),
-                    candidate.source_id
-                ))[..24]
-            );
-            let value = json!({
-                "classification": "OFFICIAL",
-                "ledgerId": ledger_id,
-                "sourceId": candidate.source_id,
-                "sourceKind": candidate.source_kind,
-                "collection": candidate.collection,
-                "documentId": candidate.document_id,
-                "chunkId": candidate.chunk_id,
-                "timestamp": candidate.timestamp,
-                "snapshotId": snapshot_id,
-                "quotedLocation": {
-                    "quote": candidate.quote,
-                    "location": candidate.location
-                },
-                "retrievedAt": candidate.retrieved_at,
-                "observedAt": candidate.observed_at
-            });
-            SourceLedgerEntry::parse_for_snapshot(value, snapshot_id)
-                .map_err(|_| SourceCollectionError::RagInvalid)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut ledger = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let priority = source_priority(candidate.source_kind);
+        let ledger_id = format!(
+            "source-{}",
+            &digest_text(&format!(
+                "{run_id}:{priority}:{}:{snapshot_id}",
+                candidate.source_id
+            ))[..24]
+        );
+        let value = json!({
+            "classification": "OFFICIAL",
+            "ledgerId": ledger_id,
+            "sourceId": candidate.source_id,
+            "sourceKind": candidate.source_kind,
+            "collection": candidate.collection,
+            "documentId": candidate.document_id,
+            "chunkId": candidate.chunk_id,
+            "timestamp": candidate.timestamp,
+            "snapshotId": snapshot_id,
+            "quotedLocation": {
+                "quote": candidate.quote,
+                "location": candidate.location
+            },
+            "retrievedAt": candidate.retrieved_at,
+            "observedAt": candidate.observed_at
+        });
+        match SourceLedgerEntry::parse_for_snapshot(value, snapshot_id) {
+            Ok(entry) => ledger.push(entry),
+            Err(_) => rejected_by_kind[priority as usize] += 1,
+        }
+    }
     Ok(CanonicalLedgerOutput {
         ledger,
         limitations,
         omitted_by_kind,
+        rejected_by_kind,
     })
 }
 
@@ -860,6 +862,7 @@ struct CanonicalLedgerOutput {
     ledger: Vec<SourceLedgerEntry>,
     limitations: BTreeSet<String>,
     omitted_by_kind: [usize; 6],
+    rejected_by_kind: [usize; 6],
 }
 
 fn apply_ledger_omissions(
@@ -880,6 +883,35 @@ fn apply_ledger_omissions(
         }
         limitations.insert(format!(
             "{count} {} sources were omitted by the canonical ledger limit.",
+            source_kind_name(kind)
+        ));
+        match kind {
+            SourceKind::Rag | SourceKind::Memory => degraded.extend(RAG_MEMORY_SECTIONS),
+            SourceKind::Calendar | SourceKind::Reminders | SourceKind::Notes | SourceKind::File => {
+                degraded.insert(BriefSection::DailyRoutine);
+            }
+        }
+    }
+}
+
+fn apply_ledger_rejections(
+    rejected_by_kind: &[usize; 6],
+    degraded: &mut BTreeSet<BriefSection>,
+    limitations: &mut BTreeSet<String>,
+) {
+    for (kind, count) in [
+        (SourceKind::Rag, rejected_by_kind[0]),
+        (SourceKind::Memory, rejected_by_kind[1]),
+        (SourceKind::Calendar, rejected_by_kind[2]),
+        (SourceKind::Reminders, rejected_by_kind[3]),
+        (SourceKind::Notes, rejected_by_kind[4]),
+        (SourceKind::File, rejected_by_kind[5]),
+    ] {
+        if count == 0 {
+            continue;
+        }
+        limitations.insert(format!(
+            "{count} malformed {} sources were excluded from the canonical ledger.",
             source_kind_name(kind)
         ));
         match kind {
@@ -925,6 +957,36 @@ const fn source_priority(kind: SourceKind) -> u8 {
 
 fn digest_text(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn canonical_quote(value: &str, maximum_bytes: usize) -> Option<(String, bool)> {
+    if value.trim().is_empty() {
+        return None;
+    }
+    let encoded = serde_json::to_string(value).ok()?;
+    if encoded.len() <= maximum_bytes {
+        return Some((encoded, false));
+    }
+
+    let boundaries = value
+        .char_indices()
+        .map(|(index, character)| index + character.len_utf8())
+        .collect::<Vec<_>>();
+    let mut low = 0;
+    let mut high = boundaries.len();
+    let mut best = None;
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let end = boundaries[middle];
+        let candidate = serde_json::to_string(&value[..end]).ok()?;
+        if candidate.len() <= maximum_bytes {
+            best = Some(candidate);
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    best.map(|candidate| (candidate, true))
 }
 
 fn truncate_utf8(value: &str, maximum_bytes: usize) -> (String, bool) {

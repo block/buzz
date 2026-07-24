@@ -206,7 +206,7 @@ fn rag_evidence(snapshot: &str, source_id: &str, quote: &str) -> Value {
             "untrusted_evidence": true,
             "source": {
                 "source_id": source_id,
-                "collection": "documents",
+                "collection": "navy-publications",
                 "document_id": "doc-1",
                 "chunk_id": "chunk-1",
                 "snapshot_id": snapshot,
@@ -264,6 +264,10 @@ fn sha(value: &Value) -> String {
 }
 
 fn phase3_memory_wrapper() -> Value {
+    phase3_memory_wrapper_with_quote("Historical machinery evidence from the Mac node.")
+}
+
+fn phase3_memory_wrapper_with_quote(quote: &str) -> Value {
     let entity_id = "01K10QH8AF7M8N8VP1KX3J4H5T";
     let content = json!({
         "id": entity_id,
@@ -272,7 +276,7 @@ fn phase3_memory_wrapper() -> Value {
         "entities": ["hmas-supply"],
         "tags": ["readiness"],
         "agent": "CODEX",
-        "content": "Historical machinery evidence from the Mac node.",
+        "content": quote,
         "markdown": "synthetic fixture"
     });
     let content_hash = sha(&json!({
@@ -335,7 +339,7 @@ fn phase3_memory_wrapper() -> Value {
             "revision": envelope["payload"].clone(),
             "replication_envelope": envelope,
             "conflicted_fields": [],
-            "quoted_text": "Historical machinery evidence from the Mac node.",
+            "quoted_text": quote,
             "citation": {
                 "event_id": revision_hash,
                 "revision_hash": revision_hash,
@@ -506,7 +510,7 @@ fn fresh_collection_freezes_one_snapshot_and_all_local_source_kinds() {
 
     assert_eq!(context.snapshot_id(), SNAPSHOT_A);
     assert_eq!(context.observed_at(), OBSERVED_AT);
-    assert_eq!(context.rag_catalogue(), &["documents".to_string()]);
+    assert_eq!(context.rag_catalogue(), &["navy-publications".to_string()]);
     assert!(context.degraded_sections().is_empty());
     assert!(context
         .ledger()
@@ -746,7 +750,8 @@ fn apple_records_require_exact_per_source_schema_and_freshness_fields() {
 #[test]
 fn eventkit_timestamps_and_booleans_are_typed_and_bound_to_requested_day() {
     let mut bad_calendar_time = calendar_record("bad-time", false, false, false);
-    bad_calendar_time["start"] = json!("2026-07-24T23:59:59+10:00");
+    bad_calendar_time["start"] = json!("2026-07-24T22:00:00+10:00");
+    bad_calendar_time["end"] = json!("2026-07-24T23:00:00+10:00");
     let mut bad_calendar_bool = calendar_record("bad-bool", false, false, false);
     bad_calendar_bool["is_recurring"] = json!("yes");
     let mut bad_reminder_time = reminder_record("bad-time", false, false);
@@ -781,6 +786,38 @@ fn eventkit_timestamps_and_booleans_are_typed_and_bound_to_requested_day() {
             .iter()
             .any(|item| item.contains("malformed")));
     }
+}
+
+#[test]
+fn eventkit_window_semantics_match_the_signed_helper() {
+    let mut overnight = calendar_record("overnight", false, false, false);
+    overnight["start"] = json!("2026-07-24T23:30:00+10:00");
+    overnight["end"] = json!("2026-07-25T00:30:00+10:00");
+    let mut completed = reminder_record("completed", false, false);
+    completed["is_completed"] = json!("true");
+    completed["due_date"] = json!("2026-07-20T12:00:00+10:00");
+    completed["completion_date"] = json!("2026-07-25T10:00:00+10:00");
+
+    let backend = FakeBackend::with_state(|state| {
+        state.apple_results = VecDeque::from([
+            apple_response("calendar", "authorized", vec![overnight], false, None),
+            apple_response("reminders", "authorized", vec![completed], false, None),
+            apple_response("notes", "authorized", vec![note_record()], false, None),
+            apple_response("files", "authorized", vec![file_record()], false, None),
+        ]);
+    });
+    let context = collector(backend, "Daily routine")
+        .freeze()
+        .expect("producer-compatible EventKit records");
+
+    assert!(context
+        .ledger()
+        .iter()
+        .any(|source| source.source_id().contains("overnight")));
+    assert!(context
+        .ledger()
+        .iter()
+        .any(|source| source.source_id().contains("completed")));
 }
 
 #[test]
@@ -1027,6 +1064,67 @@ fn exact_duplicate_sources_are_deduplicated_but_conflicting_ids_fail_closed() {
 }
 
 #[test]
+fn multiline_rag_and_memory_quotes_are_canonical_control_safe_strings() {
+    let multiline = "Line one.\n\tLine two.";
+    let backend = FakeBackend::with_state(|state| {
+        state.rag_results =
+            VecDeque::from([Ok(rag_evidence(SNAPSHOT_A, "rag:multiline", multiline))]);
+        state.memory_results = VecDeque::from([Ok(phase3_memory_wrapper_with_quote(multiline))]);
+    });
+    let context = collector(backend, "Brief")
+        .freeze()
+        .expect("multiline producer evidence is normalised");
+
+    for (kind, source_id) in [
+        (SourceKind::Rag, Some("rag:multiline")),
+        (SourceKind::Memory, None),
+    ] {
+        let source = context
+            .ledger()
+            .iter()
+            .find(|source| {
+                source.source_kind() == kind
+                    && source_id.is_none_or(|source_id| source.source_id() == source_id)
+            })
+            .expect("normalised source");
+        assert!(!source.quote().chars().any(char::is_control));
+        assert!(source.quote().contains(r"\n"));
+        assert!(source.quote().contains(r"\t"));
+        assert_eq!(
+            serde_json::from_str::<String>(source.quote()).expect("reversible JSON string"),
+            multiline,
+        );
+    }
+}
+
+#[test]
+fn unnormalisable_quote_degrades_only_its_source_path() {
+    let backend = FakeBackend::with_state(|state| {
+        state.rag_results = VecDeque::from([Ok(rag_evidence(SNAPSHOT_A, "rag:blank", " \n\t "))]);
+    });
+    let context = collector(backend, "Brief")
+        .freeze()
+        .expect("bad RAG quote remains fail soft");
+
+    assert!(!context
+        .ledger()
+        .iter()
+        .any(|source| source.source_id() == "rag:blank"));
+    assert!(source_kinds(&context).contains(&SourceKind::Memory));
+    assert!(source_kinds(&context).contains(&SourceKind::Calendar));
+    assert!(context
+        .degraded_sections()
+        .contains(&BriefSection::Navigation));
+    assert!(!context
+        .degraded_sections()
+        .contains(&BriefSection::Decisions));
+    assert!(context
+        .limitations()
+        .iter()
+        .any(|item| item.contains("RAG") && item.contains("malformed")));
+}
+
+#[test]
 fn oversized_source_text_is_utf8_safely_truncated_and_reported() {
     let quote = "⚓".repeat(MAX_TEXT_BYTES);
     let backend = FakeBackend::with_state(|state| {
@@ -1220,9 +1318,11 @@ fn rag_evidence_requires_exact_native_query_and_verified_catalogue_membership() 
     let valid = collector(FakeBackend::fresh(), "Brief")
         .freeze()
         .expect("verified catalogue result");
-    assert!(valid.ledger().iter().any(
-        |source| source.source_kind() == SourceKind::Rag && source.collection() == "documents"
-    ));
+    assert!(valid
+        .ledger()
+        .iter()
+        .any(|source| source.source_kind() == SourceKind::Rag
+            && source.collection() == "navy-publications"));
 }
 
 #[test]

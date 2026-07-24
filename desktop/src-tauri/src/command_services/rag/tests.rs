@@ -60,8 +60,24 @@ fn hex(value: &Value) -> String {
     crate::command_services::policy::sha256_hex(&bytes)
 }
 
-fn fixture() -> (RagConfig, Value, Value, Value, FakeMcpProbe) {
+fn fixture() -> (RagConfig, Value, Value, Value, Value, FakeMcpProbe) {
     let signer = "b".repeat(64);
+    let collection_schema = json!({"vectors":{"dense":{"distance":"Cosine","size":1024}}});
+    let catalogue = json!({
+        "collections": [{
+            "name": "documents",
+            "point_count": 2,
+            "schema": collection_schema.clone(),
+        }],
+        "documents": [{
+            "doc_id": "doc-1",
+            "collection": "navy-publications",
+        }, {
+            "doc_id": "doc-2",
+            "collection": "navy-publications",
+        }],
+    });
+    let catalogue_hash = hex(&catalogue);
     let manifest = json!({
         "format": "rag-snapshot-v1",
         "snapshot_time": SNAPSHOT_TIME,
@@ -84,13 +100,13 @@ fn fixture() -> (RagConfig, Value, Value, Value, FakeMcpProbe) {
         "collections": [{
             "name":"documents",
             "point_count":2,
-            "schema":{"vectors":{"dense":{"distance":"Cosine","size":1024}}},
+            "schema":collection_schema,
             "snapshot_path":"objects/qdrant/documents.snapshot",
         }],
         "catalogue": {
             "document_count":2,
             "path":"objects/catalogue.json",
-            "sha256":"c".repeat(64),
+            "sha256":catalogue_hash,
         },
         "golden_queries": {
             "path":"objects/golden.json",
@@ -104,7 +120,7 @@ fn fixture() -> (RagConfig, Value, Value, Value, FakeMcpProbe) {
         },{
             "media_type":"application/json",
             "path":"objects/catalogue.json",
-            "sha256":"c".repeat(64),
+            "sha256":catalogue_hash,
             "size":64,
         },{
             "media_type":"application/json",
@@ -170,17 +186,24 @@ fn fixture() -> (RagConfig, Value, Value, Value, FakeMcpProbe) {
             .collect(),
         snapshot_status: readiness.clone(),
     };
-    (config, manifest, activation, readiness, probe)
+    (config, manifest, catalogue, activation, readiness, probe)
+}
+
+fn signed_documents<'a>(manifest: &'a Value, catalogue: &'a Value) -> SignedSnapshotDocuments<'a> {
+    SignedSnapshotDocuments {
+        manifest,
+        catalogue,
+    }
 }
 
 #[test]
 fn recomputes_manifest_and_activation_hashes_before_ready() {
-    let (config, manifest, activation, _readiness, probe) = fixture();
+    let (config, manifest, catalogue, activation, _readiness, probe) = fixture();
     let result = verify_rag_service(
         &config,
         "rag-read-token-123456",
         "rag-attestation-secret-123456",
-        &manifest,
+        signed_documents(&manifest, &catalogue),
         &activation,
         &probe,
         "2026-07-24T04:30:00Z",
@@ -203,7 +226,11 @@ fn recomputes_manifest_and_activation_hashes_before_ready() {
     );
     let binding = verified_snapshot_from_readiness(&result).expect("frozen snapshot binding");
     assert_eq!(binding.snapshot_id(), config.expected_active_snapshot_id);
-    assert_eq!(binding.collections(), &["documents".to_string()]);
+    assert_eq!(binding.physical_collections(), &["documents".to_string()]);
+    assert_eq!(
+        binding.logical_collections(),
+        &["navy-publications".to_string()],
+    );
     assert_eq!(
         result.admitted.expect("admission candidate").bearer_token,
         "rag-read-token-123456",
@@ -211,8 +238,27 @@ fn recomputes_manifest_and_activation_hashes_before_ready() {
 }
 
 #[test]
+fn rejects_catalogue_content_that_does_not_match_the_signed_manifest_hash() {
+    let (config, manifest, mut catalogue, activation, _readiness, probe) = fixture();
+    catalogue["documents"][0]["collection"] = json!("untrusted-logical-collection");
+
+    assert_eq!(
+        verify_rag_service(
+            &config,
+            "rag-read-token-123456",
+            "rag-attestation-secret-123456",
+            signed_documents(&manifest, &catalogue),
+            &activation,
+            &probe,
+            "2026-07-24T04:30:00Z",
+        ),
+        Err(RagError::SnapshotHashMismatch),
+    );
+}
+
+#[test]
 fn verifies_manifest_signature_and_pinned_public_key_fingerprint() {
-    let (_config, mut manifest, _activation, _readiness, _probe) = fixture();
+    let (_config, mut manifest, _catalogue, _activation, _readiness, _probe) = fixture();
     let signing_key = SigningKey::from_bytes(&[7; 32]);
     let public_key = signing_key.verifying_key().to_bytes();
     manifest["signer"]["public_key_sha256"] =
@@ -249,7 +295,7 @@ fn verifies_manifest_signature_and_pinned_public_key_fingerprint() {
 
 #[test]
 fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
-    let (config, manifest, activation, _readiness, probe) = fixture();
+    let (config, manifest, catalogue, activation, _readiness, probe) = fixture();
 
     let mut tampered_manifest = manifest.clone();
     tampered_manifest["collections"][0]["point_count"] = json!(3);
@@ -258,7 +304,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
             &config,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &tampered_manifest,
+            signed_documents(&tampered_manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-24T04:30:00Z",
@@ -273,7 +319,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
             &config,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &tampered_activation,
             &probe,
             "2026-07-24T04:30:00Z",
@@ -288,7 +334,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
             &stale,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-24T04:30:00Z",
@@ -299,7 +345,7 @@ fn rejects_tampered_manifest_activation_and_stale_expected_snapshot() {
 
 #[test]
 fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
-    let (config, manifest, activation, _readiness, probe) = fixture();
+    let (config, manifest, catalogue, activation, _readiness, probe) = fixture();
 
     let mut wrong_server = probe.clone();
     wrong_server.server_identity = "memory".to_string();
@@ -308,7 +354,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
             &config,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &wrong_server,
             "2026-07-24T04:30:00Z",
@@ -325,7 +371,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
             &config,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &missing_tool,
             "2026-07-24T04:30:00Z",
@@ -338,7 +384,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
             &config,
             "",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-24T04:30:00Z",
@@ -351,7 +397,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
             &config,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-27T04:30:01Z",
@@ -366,7 +412,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
             &invalid_credential_key,
             "rag-read-token-123456",
             "rag-attestation-secret-123456",
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-24T04:30:00Z",
@@ -377,7 +423,7 @@ fn rejects_wrong_server_tool_catalog_missing_auth_and_stale_data() {
 
 #[test]
 fn rejects_reused_rag_admission_secret_values() {
-    let (config, manifest, activation, _readiness, mut probe) = fixture();
+    let (config, manifest, catalogue, activation, _readiness, mut probe) = fixture();
     let shared = "r".repeat(256);
     probe.expected_token = shared.clone();
     assert_eq!(
@@ -385,7 +431,7 @@ fn rejects_reused_rag_admission_secret_values() {
             &config,
             &shared,
             &shared,
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-24T04:30:00Z",
@@ -401,7 +447,7 @@ fn rejects_reused_rag_admission_secret_values() {
             &config,
             &bearer,
             &attestation,
-            &manifest,
+            signed_documents(&manifest, &catalogue),
             &activation,
             &probe,
             "2026-07-24T04:30:00Z",

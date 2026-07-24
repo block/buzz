@@ -10,13 +10,14 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tauri::Manager;
 
 const CONFIG_FILE_NAME: &str = "command-rag.json";
 const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
 const MAXIMUM_MANIFEST_BYTES: u64 = 4 * 1024 * 1024;
 const MAXIMUM_ACTIVATION_BYTES: u64 = 1024 * 1024;
+const MAXIMUM_CATALOGUE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -75,7 +76,8 @@ pub(crate) struct RagServiceReadiness {
     #[serde(skip)]
     admitted: Option<VerifiedService>,
     #[serde(skip)]
-    verified_collections: Vec<String>,
+    verified_physical_collections: Vec<String>,
+    verified_logical_collections: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,7 +118,8 @@ pub(crate) struct VerifiedRagSnapshot {
     snapshot_id: String,
     verified_at: String,
     snapshot_time: String,
-    collections: Vec<String>,
+    physical_collections: Vec<String>,
+    logical_collections: Vec<String>,
 }
 
 #[cfg_attr(
@@ -136,8 +139,12 @@ impl VerifiedRagSnapshot {
         &self.snapshot_time
     }
 
-    pub(crate) fn collections(&self) -> &[String] {
-        &self.collections
+    pub(crate) fn physical_collections(&self) -> &[String] {
+        &self.physical_collections
+    }
+
+    pub(crate) fn logical_collections(&self) -> &[String] {
+        &self.logical_collections
     }
 
     pub(crate) fn verify_unchanged(
@@ -159,7 +166,8 @@ impl VerifiedRagSnapshot {
             snapshot_id: snapshot_id.to_string(),
             verified_at: verified_at.to_string(),
             snapshot_time: snapshot_time.to_string(),
-            collections: vec!["documents".to_string()],
+            physical_collections: vec!["documents".to_string()],
+            logical_collections: vec!["navy-publications".to_string()],
         }
     }
 }
@@ -194,7 +202,8 @@ pub(crate) fn verified_snapshot_from_readiness(
         snapshot_id: snapshot_id.to_string(),
         verified_at: readiness.observed_at.clone(),
         snapshot_time: snapshot_time.to_string(),
-        collections: readiness.verified_collections.clone(),
+        physical_collections: readiness.verified_physical_collections.clone(),
+        logical_collections: readiness.verified_logical_collections.clone(),
     })
 }
 
@@ -251,7 +260,7 @@ pub(crate) fn extract_verified_rag_evidence(
                 .and_then(Value::as_str)
                 .is_none_or(|collection| {
                     !snapshot
-                        .collections
+                        .logical_collections
                         .iter()
                         .any(|allowed| allowed == collection)
                 })
@@ -443,15 +452,22 @@ fn validate_config(config: &RagConfig) -> Result<(), RagError> {
     Ok(())
 }
 
+struct SignedSnapshotDocuments<'a> {
+    manifest: &'a Value,
+    catalogue: &'a Value,
+}
+
 fn verify_rag_service(
     config: &RagConfig,
     bearer_token: &str,
     attestation_secret: &str,
-    manifest: &Value,
+    documents: SignedSnapshotDocuments<'_>,
     activation: &Value,
     probe: &dyn McpProbe,
     observed_at: &str,
 ) -> Result<RagServiceReadiness, RagError> {
+    let manifest = documents.manifest;
+    let catalogue = documents.catalogue;
     validate_config(config)?;
     let observed = DateTime::parse_from_rfc3339(observed_at)
         .map_err(|_| RagError::InvalidConfig)?
@@ -539,6 +555,8 @@ fn verify_rag_service(
         .get("collections")
         .and_then(Value::as_array)
         .ok_or(RagError::InvalidResponse)?;
+    let (physical_collections, logical_collections) =
+        verify_signed_catalogue(manifest_object, manifest_collections, catalogue)?;
     let expected_collections = manifest_collections
         .iter()
         .map(|collection| {
@@ -676,16 +694,97 @@ fn verify_rag_service(
         observed_at: observed_at.to_string(),
         error: None,
         admitted: Some(admitted),
-        verified_collections: manifest_collections
-            .iter()
-            .filter_map(|collection| {
-                collection
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect(),
+        verified_physical_collections: physical_collections,
+        verified_logical_collections: logical_collections,
     })
+}
+
+fn verify_signed_catalogue(
+    manifest: &Map<String, Value>,
+    manifest_collections: &[Value],
+    catalogue: &Value,
+) -> Result<(Vec<String>, Vec<String>), RagError> {
+    let reference = exact_object(
+        manifest.get("catalogue").ok_or(RagError::InvalidResponse)?,
+        &["document_count", "path", "sha256"],
+    )?;
+    if digest(catalogue)? != field_text(reference, "sha256")? {
+        return Err(RagError::SnapshotHashMismatch);
+    }
+    let catalogue = exact_object(catalogue, &["collections", "documents"])?;
+    let collections = catalogue
+        .get("collections")
+        .and_then(Value::as_array)
+        .filter(|collections| !collections.is_empty() && collections.len() <= 256)
+        .ok_or(RagError::InvalidResponse)?;
+    if collections.len() != manifest_collections.len() {
+        return Err(RagError::ValidationFailed);
+    }
+    let physical = collections
+        .iter()
+        .zip(manifest_collections)
+        .map(|(catalogue_collection, manifest_collection)| {
+            let catalogue_collection =
+                exact_object(catalogue_collection, &["name", "point_count", "schema"])?;
+            let manifest_collection = manifest_collection
+                .as_object()
+                .ok_or(RagError::InvalidResponse)?;
+            if catalogue_collection.get("point_count") != manifest_collection.get("point_count")
+                || catalogue_collection.get("schema") != manifest_collection.get("schema")
+            {
+                return Err(RagError::ValidationFailed);
+            }
+            let name = field_text(catalogue_collection, "name")?;
+            if manifest_collection.get("name").and_then(Value::as_str) != Some(name)
+                || !valid_catalogue_name(name)
+            {
+                return Err(RagError::ValidationFailed);
+            }
+            Ok(name.to_string())
+        })
+        .collect::<Result<Vec<_>, RagError>>()?;
+    if physical
+        .iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != physical.len()
+    {
+        return Err(RagError::InvalidResponse);
+    }
+    let documents = catalogue
+        .get("documents")
+        .and_then(Value::as_array)
+        .filter(|documents| documents.len() <= 100_000)
+        .ok_or(RagError::InvalidResponse)?;
+    if reference.get("document_count").and_then(Value::as_u64) != Some(documents.len() as u64) {
+        return Err(RagError::ValidationFailed);
+    }
+    let mut logical = documents
+        .iter()
+        .map(|document| {
+            document
+                .as_object()
+                .and_then(|document| document.get("collection"))
+                .and_then(Value::as_str)
+                .filter(|name| valid_catalogue_name(name))
+                .map(str::to_string)
+                .ok_or(RagError::InvalidResponse)
+        })
+        .collect::<Result<Vec<_>, RagError>>()?;
+    logical.sort();
+    logical.dedup();
+    if logical.is_empty() || logical.len() > 256 {
+        return Err(RagError::InvalidResponse);
+    }
+    Ok((physical, logical))
+}
+
+fn valid_catalogue_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn fail_soft_readiness(error: RagError) -> RagServiceReadiness {
@@ -718,7 +817,8 @@ fn fail_soft_readiness(error: RagError) -> RagServiceReadiness {
         observed_at: Utc::now().to_rfc3339(),
         error: Some(error.code().to_string()),
         admitted: None,
-        verified_collections: Vec::new(),
+        verified_physical_collections: Vec::new(),
+        verified_logical_collections: Vec::new(),
     }
 }
 
@@ -842,6 +942,14 @@ fn query_rag_readiness(
         MAXIMUM_MANIFEST_BYTES,
     )?;
     verify_manifest_signature(&snapshot_directory, &manifest, &manifest_bytes)?;
+    let catalogue_path = manifest
+        .get("catalogue")
+        .and_then(Value::as_object)
+        .and_then(|catalogue| catalogue.get("path"))
+        .and_then(Value::as_str)
+        .ok_or(RagError::InvalidResponse)?;
+    let catalogue_path = signed_snapshot_object_path(&snapshot_directory, catalogue_path)?;
+    let (catalogue, _) = protected_canonical_json(&catalogue_path, MAXIMUM_CATALOGUE_BYTES)?;
     let (activation, _) = protected_canonical_json(
         &config
             .state_root
@@ -855,7 +963,10 @@ fn query_rag_readiness(
         &config,
         &bearer_token,
         &attestation_secret,
-        &manifest,
+        SignedSnapshotDocuments {
+            manifest: &manifest,
+            catalogue: &catalogue,
+        },
         &activation,
         &FixedMcpProbe(attestation),
         &observed_at,
@@ -864,6 +975,20 @@ fn query_rag_readiness(
         cache_verified_service(admitted);
     }
     Ok(result)
+}
+
+fn signed_snapshot_object_path(root: &Path, relative: &str) -> Result<PathBuf, RagError> {
+    let path = Path::new(relative);
+    let components = path.components().collect::<Vec<_>>();
+    if components.len() < 2
+        || components.first() != Some(&Component::Normal("objects".as_ref()))
+        || components
+            .iter()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(RagError::InvalidResponse);
+    }
+    Ok(root.join(path))
 }
 
 fn config_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, RagError> {
