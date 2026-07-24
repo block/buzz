@@ -546,6 +546,9 @@ pub struct HarnessRelay {
     keys: Keys,
     /// Optional NIP-OA auth tag for relay membership delegation.
     auth_tag: Option<nostr::Tag>,
+    /// Relay signing identity advertised by NIP-11 `self`. Relay-authored
+    /// workflow messages are trusted only when their signature matches this key.
+    relay_self: Option<String>,
     /// Handle to the background task (for clean shutdown).
     /// Wrapped in `Option` so `shutdown()` can take ownership without conflicting
     /// with `Drop` (which only has `&mut self`).
@@ -599,6 +602,16 @@ impl HarnessRelay {
         agent_pubkey_hex: &str,
         auth_tag: Option<nostr::Tag>,
     ) -> Result<Self, RelayError> {
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .connect_timeout(std::time::Duration::from_secs(5))
+            .build()
+            .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?;
+        // NIP-11 is the authority binding between this configured endpoint and
+        // its relay signing key. Missing, malformed, or unreachable info fails
+        // closed for workflow delegation without preventing ordinary ACP use.
+        let relay_self = fetch_relay_self(&http, relay_url).await;
+
         // Perform the initial connection and auth handshake, retrying
         // transient failures (dropped handshake, timeout) with bounded
         // jittered backoff. A terminal error (bad URL, bad auth tag,
@@ -636,14 +649,11 @@ impl HarnessRelay {
             event_rx,
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
-            http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .connect_timeout(std::time::Duration::from_secs(5))
-                .build()
-                .map_err(|e| RelayError::Http(format!("failed to build HTTP client: {e}")))?,
+            http,
             relay_url: relay_url.to_string(),
             keys: keys.clone(),
             auth_tag,
+            relay_self,
             bg_handle: Some(bg_handle),
         })
     }
@@ -710,6 +720,11 @@ impl HarnessRelay {
 
         debug!("discovered {} channel(s)", map.len());
         Ok(map)
+    }
+
+    /// Return the configured endpoint's NIP-11 relay signing identity.
+    pub fn relay_self(&self) -> Option<&str> {
+        self.relay_self.as_deref()
     }
 
     /// Build a [`RestClient`] that shares this relay's HTTP credentials.
@@ -3467,6 +3482,33 @@ async fn send_auth_response(
 /// `ws://host:port` → `http://host:port`
 /// `wss://host:port` → `https://host:port`
 /// Trailing slashes are stripped.
+#[derive(serde::Deserialize)]
+struct RelayInformationDocument {
+    #[serde(default, rename = "self")]
+    relay_self: Option<String>,
+}
+
+async fn fetch_relay_self(http: &reqwest::Client, relay_url: &str) -> Option<String> {
+    let response = http
+        .get(relay_ws_to_http(relay_url))
+        .header("Accept", "application/nostr+json")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let value = response
+        .json::<RelayInformationDocument>()
+        .await
+        .ok()?
+        .relay_self?
+        .to_ascii_lowercase();
+    nostr::PublicKey::from_hex(&value)
+        .ok()
+        .map(|key| key.to_hex())
+}
+
 pub(crate) fn relay_ws_to_http(url: &str) -> String {
     url.replace("wss://", "https://")
         .replace("ws://", "http://")

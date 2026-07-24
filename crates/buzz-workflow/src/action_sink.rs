@@ -56,7 +56,8 @@ pub trait ActionSink: Send + Sync {
     /// - `channel_id`: UUID string of the target channel
     /// - `text`: message body (must not be empty/whitespace-only)
     /// - `author_pubkey`: hex-encoded pubkey of the workflow owner (used for
-    ///   the `p` attribution tag; the relay keypair signs the event)
+    ///   the dedicated `workflow-owner` authority tag and a `p` attribution
+    ///   tag; the relay keypair signs the event)
     ///
     /// Returns the event ID hex string on success.
     fn send_message(

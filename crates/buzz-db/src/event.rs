@@ -67,6 +67,11 @@ pub struct EventQuery {
     /// channel-less global events. Applied before SQL `LIMIT` so access-filtered
     /// historical pages have exact exhaustion semantics.
     pub channel_ids: Option<Vec<uuid::Uuid>>,
+    /// Restrict results to events in exactly these channels. Unlike
+    /// `channel_ids`, this excludes channel-less global events. Used for
+    /// multi-value `#h` filters so unrelated accessible channels and global
+    /// events cannot consume the SQL `LIMIT` before NIP-01 post-filtering.
+    pub exact_channel_ids: Option<Vec<uuid::Uuid>>,
     /// Override the default limit clamp (1000). Used by COUNT fallback path
     /// which needs to fetch all matching events for post-filter counting.
     /// When None, the default clamp of 1000 applies.
@@ -98,6 +103,7 @@ impl EventQuery {
             ids: None,
             e_tags: None,
             channel_ids: None,
+            exact_channel_ids: None,
             max_limit: None,
         }
     }
@@ -390,6 +396,21 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
         }
     }
 
+    // Exact multi-channel pushdown for NIP-01 `#h` filters. Unlike the access
+    // scope above, an `#h` filter never matches channel-less global events.
+    if let Some(ref ch_ids) = q.exact_channel_ids {
+        if ch_ids.is_empty() {
+            qb.push(" AND FALSE");
+        } else {
+            qb.push(format!(" AND {col_prefix}channel_id IN ("));
+            let mut sep = qb.separated(", ");
+            for ch in ch_ids {
+                sep.push_bind(*ch);
+            }
+            qb.push(")");
+        }
+    }
+
     if let Some(ks) = q.kinds.as_deref().filter(|k| !k.is_empty()) {
         qb.push(format!(" AND {col_prefix}kind IN ("));
         let mut sep = qb.separated(", ");
@@ -612,6 +633,21 @@ pub async fn count_events(pool: &PgPool, q: &EventQuery) -> Result<i64> {
                 sep.push_bind(*ch);
             }
             qb.push("))");
+        }
+    }
+
+    // Exact multi-channel pushdown for NIP-01 `#h` filters. Unlike the access
+    // scope above, an `#h` filter never matches channel-less global events.
+    if let Some(ref ch_ids) = q.exact_channel_ids {
+        if ch_ids.is_empty() {
+            qb.push(" AND FALSE");
+        } else {
+            qb.push(format!(" AND {col_prefix}channel_id IN ("));
+            let mut sep = qb.separated(", ");
+            for ch in ch_ids {
+                sep.push_bind(*ch);
+            }
+            qb.push(")");
         }
     }
 
@@ -1813,6 +1849,84 @@ mod tests {
             events[1].event.id, older_accessible.id,
             "older accessible row must not be hidden behind newer inaccessible rows"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn exact_channel_scope_is_applied_before_limit_and_excludes_globals() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let requested_a = make_test_channel(&pool, community_uuid, None).await;
+        let requested_b = make_test_channel(&pool, community_uuid, None).await;
+        let unrequested = make_test_channel(&pool, community_uuid, None).await;
+        let base = 1_800_100_000;
+
+        // Newer rows outside the exact #h set must not consume the SQL page.
+        for offset in 10..13 {
+            let event = make_event_at(39_001, "newer unrequested", base + offset);
+            insert_event(&pool, community, &event, Some(unrequested))
+                .await
+                .expect("insert unrequested candidate");
+        }
+        let global = make_event_at(39_001, "newer global", base + 9);
+        insert_event(&pool, community, &global, None)
+            .await
+            .expect("insert global candidate");
+        let requested_newer = make_event_at(39_001, "requested a", base + 2);
+        insert_event(&pool, community, &requested_newer, Some(requested_a))
+            .await
+            .expect("insert requested a candidate");
+        let requested_older = make_event_at(39_001, "requested b", base + 1);
+        insert_event(&pool, community, &requested_older, Some(requested_b))
+            .await
+            .expect("insert requested b candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_001]),
+                exact_channel_ids: Some(vec![requested_a, requested_b]),
+                limit: Some(2),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query exact-channel page");
+
+        assert_eq!(events.len(), 2, "exact-channel page must fill before EOF");
+        assert_eq!(events[0].event.id, requested_newer.id);
+        assert_eq!(events[1].event.id, requested_older.id);
+        assert!(
+            events.iter().all(|stored| stored.channel_id.is_some()),
+            "an explicit #h list must exclude channel-less global events"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn empty_exact_channel_scope_matches_nothing() {
+        let pool = setup_pool().await;
+        let community_uuid = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_uuid);
+        let channel = make_test_channel(&pool, community_uuid, None).await;
+        let event = make_event_at(39_002, "must not match", 1_800_200_000);
+        insert_event(&pool, community, &event, Some(channel))
+            .await
+            .expect("insert candidate");
+
+        let events = query_events(
+            &pool,
+            &EventQuery {
+                kinds: Some(vec![39_002]),
+                exact_channel_ids: Some(vec![]),
+                ..EventQuery::for_community(community)
+            },
+        )
+        .await
+        .expect("query empty exact-channel scope");
+
+        assert!(events.is_empty());
     }
 
     fn make_text_event(content: &str) -> nostr::Event {
