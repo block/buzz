@@ -6,7 +6,7 @@ import { parse as yamlParse } from "yaml";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { RelayEvent } from "@/shared/api/types";
+import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -207,6 +207,7 @@ type E2eConfig = {
     addChannelMembersErrors?: (string | null)[];
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
+    channelTemplates?: ChannelTemplate[];
     channelsReadError?: string;
     /** Reject successive mock `get_channels` calls, then resume. */
     channelsReadErrors?: (string | null)[];
@@ -10147,6 +10148,19 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_teams":
         return handleListTeams();
+      case "list_channel_templates":
+        return (activeConfig?.mock?.channelTemplates ?? []).map((template) => ({
+          id: template.id,
+          name: template.name,
+          description: template.description,
+          channel_type: template.channelType,
+          visibility: template.visibility,
+          canvas_template: template.canvasTemplate,
+          agents: template.agents,
+          is_builtin: template.isBuiltin,
+          created_at: template.createdAt,
+          updated_at: template.updatedAt,
+        }));
       case "create_team":
         return handleCreateTeam(
           payload as Parameters<typeof handleCreateTeam>[0],
