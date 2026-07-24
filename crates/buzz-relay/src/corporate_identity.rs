@@ -303,6 +303,27 @@ async fn enforce_corporate_identity_inner(
         return Ok(CorporateIdentityDecision::NotRequired);
     };
 
+    // cf-doorman injects the owner's corporate JWT into every request,
+    // including requests signed by an agent. Prefer a cryptographically
+    // verified NIP-OA owner declaration when one is present so the owner's
+    // existing binding authorizes the agent. Treating the injected JWT as the
+    // agent's identity would instead try to bind the owner's uid to the agent
+    // key and incorrectly report a binding conflict.
+    //
+    // This is deliberately not a general agent bypass: an auth tag must prove
+    // ownership, delegation must be enabled, and the owner must have an active
+    // corporate identity binding.
+    if auth_tag_json.is_some() {
+        return enforce_delegated_corporate_identity(
+            &state.db,
+            &service.config,
+            community_id,
+            signer,
+            auth_tag_json,
+        )
+        .await;
+    }
+
     if let Some(token) = identity_jwt {
         let claims = service.validate_jwt(token).await?;
         let source = binding_source_for_signer(claims.pubkey, signer)?;
