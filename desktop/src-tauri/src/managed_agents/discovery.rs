@@ -111,7 +111,11 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
-        model_env_var: None,
+        // The Claude CLI honors this env var as a session model override,
+        // and the adapter's child `claude` process inherits the spawn env —
+        // without this, the model picked in the UI is persisted but never
+        // applied (#2692).
+        model_env_var: Some(crate::managed_agents::ANTHROPIC_MODEL_ENV_KEY),
         provider_env_var: None,
         provider_locked: true,
         default_env: &[],

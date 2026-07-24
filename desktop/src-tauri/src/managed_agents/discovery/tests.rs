@@ -1270,3 +1270,25 @@ fn test_install_shell_from_some_returns_path() {
         "install_shell_from(Some) must return the path as Ok"
     );
 }
+
+/// The claude runtime must declare a model env channel — without one, the
+/// model picked in the UI is persisted but never applied at spawn (#2692).
+/// ANTHROPIC_MODEL is the override the Claude CLI honors, and the same key
+/// readiness uses for the anthropic provider.
+#[test]
+fn claude_runtime_declares_anthropic_model_env_var() {
+    let claude = super::known_acp_runtime_exact("claude").expect("claude runtime registered");
+    assert_eq!(claude.model_env_var, Some("ANTHROPIC_MODEL"));
+    // Provider stays locked: only the model is injectable for this harness.
+    assert!(claude.provider_locked);
+    assert_eq!(claude.provider_env_var, None);
+}
+
+/// A stale persisted ANTHROPIC_MODEL must not shadow the structured model
+/// field after a UI edit — same treatment as GOOSE_MODEL / BUZZ_AGENT_MODEL.
+#[test]
+fn anthropic_model_is_a_derived_env_key() {
+    use crate::managed_agents::is_derived_provider_model_key;
+    assert!(is_derived_provider_model_key("ANTHROPIC_MODEL"));
+    assert!(is_derived_provider_model_key("anthropic_model"));
+}
