@@ -43,6 +43,11 @@ type MessageTimelineProps = {
   huddleMemberPubkeysPending?: boolean;
   messages: TimelineMessage[];
   mainEntries?: MainTimelineEntry[];
+  /**
+   * When true, deferred entry rebuilds keep reply-tagged events inline (private
+   * rooms / DMs). Ignored when `mainEntries` is provided.
+   */
+  flattenReplies?: boolean;
   /** Relay thread summaries (root id → summary) for the deferred-pass entry
    *  fallback, so badge rows survive while a scrollback page commits. */
   threadSummaries?: ReadonlyMap<string, ChannelWindowThreadSummary>;
@@ -151,6 +156,7 @@ const MessageTimelineBase = React.forwardRef<
     directMessageIntro = null,
     messages,
     mainEntries,
+    flattenReplies = false,
     threadSummaries,
     isLoading = false,
     entranceMessageId = null,
@@ -619,6 +625,7 @@ const MessageTimelineBase = React.forwardRef<
       onEntranceMessageComplete={onEntranceMessageComplete}
       messageFooters={messageFooters}
       mainEntries={renderedMessages === messages ? mainEntries : undefined}
+      flattenReplies={flattenReplies}
       leadingContent={virtualizedLeadingContent}
       historyExhausted={renderedHistoryExhausted}
       threadSummaries={threadSummaries}

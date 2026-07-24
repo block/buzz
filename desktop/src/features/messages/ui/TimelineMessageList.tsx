@@ -69,6 +69,11 @@ type TimelineMessageListProps = {
   /** Hoisted main-timeline entries (computed once in ChannelPane). Falls back
    *  to deriving them here when omitted (e.g. the deferred-render pass). */
   mainEntries?: MainTimelineEntry[];
+  /**
+   * Private/DM presentation: render reply-tagged events inline when rebuilding
+   * entries without `mainEntries`. Wire tags stay untouched.
+   */
+  flattenReplies?: boolean;
   /** Relay thread summaries keyed by thread root id. Keeps badge rows alive on
    *  the deferred-render fallback — replies usually are not local timeline
    *  rows, so without the relay map every summary row unmounts mid-scrollback. */
@@ -137,6 +142,7 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   onEntranceMessageComplete,
   messageFooters,
   mainEntries,
+  flattenReplies = false,
   threadSummaries,
   messages,
   onDelete,
@@ -166,8 +172,10 @@ export const TimelineMessageList = React.memo(function TimelineMessageList({
   const entries = React.useMemo(
     () =>
       mainEntries ??
-      buildMainTimelineEntries(messages, undefined, threadSummaries, profiles),
-    [mainEntries, messages, profiles, threadSummaries],
+      buildMainTimelineEntries(messages, undefined, threadSummaries, profiles, {
+        flattenReplies,
+      }),
+    [flattenReplies, mainEntries, messages, profiles, threadSummaries],
   );
   const reviewCommentsByRootId = React.useMemo(
     () =>
