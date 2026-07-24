@@ -862,7 +862,7 @@ pub async fn remove_reaction(
 
     let reaction_event = reactions
         .iter()
-        .find(|ev| ev.content.trim() == trimmed_emoji)
+        .find(|ev| buzz_sdk_pkg::reaction_content_matches(&ev.content, trimmed_emoji))
         .ok_or("could not find your reaction event for this emoji")?;
 
     let builder = events::build_remove_reaction(reaction_event.id)?;
