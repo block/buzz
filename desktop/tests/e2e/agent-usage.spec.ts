@@ -257,6 +257,7 @@ test("clicking an agent row opens the profile panel's Usage focused view", async
           mockAgentUsage(agentPubkey, {
             models: [
               {
+                harness: "goose",
                 hasUnknownUsage: false,
                 model: "claude-opus",
                 reportCount: 1,
@@ -287,6 +288,9 @@ test("clicking an agent row opens the profile panel's Usage focused view", async
   );
   await expect(page.getByTestId("agent-usage-focused-models")).toContainText(
     "claude-opus",
+  );
+  await expect(page.getByTestId("agent-usage-focused-models")).toContainText(
+    "goose",
   );
 
   // Reaching the same view via the Info-tab ingress row lands on the same

@@ -150,6 +150,7 @@ export type MockAgentUsageSeriesBucket = {
 };
 
 export type MockAgentUsageModel = {
+  harness: string | null;
   model: string | null;
   usage: MockReportedUsage;
   reportCount: number;

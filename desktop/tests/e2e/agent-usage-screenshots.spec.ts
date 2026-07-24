@@ -298,6 +298,7 @@ test.describe("agent usage screenshots", () => {
               ],
               models: [
                 {
+                  harness: "claude-code",
                   hasUnknownUsage: false,
                   model: "claude-opus-4-5",
                   reportCount: 4,
@@ -309,6 +310,7 @@ test.describe("agent usage screenshots", () => {
                   }),
                 },
                 {
+                  harness: "goose",
                   hasUnknownUsage: false,
                   model: "claude-sonnet-4-5",
                   reportCount: 1,
@@ -350,6 +352,11 @@ test.describe("agent usage screenshots", () => {
     await page.getByTestId(`agent-usage-row-${agentPubkey}`).click();
     await expect(page.getByTestId("user-profile-panel")).toBeVisible();
     await expect(page.getByTestId("agent-usage-focused-view")).toBeVisible();
+
+    // Shot 02 must render a visible harness label on the model breakdown rows.
+    await expect(
+      page.getByTestId("agent-usage-model-harness-label").first(),
+    ).toBeVisible();
 
     const panel = page.getByTestId("user-profile-panel");
     await waitForAnimations(page);

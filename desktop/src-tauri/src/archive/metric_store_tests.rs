@@ -87,6 +87,15 @@ fn from_payload_parses_valid_row() {
     assert_eq!(row.turn_input_tokens, Some(10));
     assert_eq!(row.cumulative_input_tokens, Some(100));
     assert_eq!(row.model, Some("claude".to_string()));
+    assert_eq!(row.harness, Some("goose".to_string()));
+}
+
+#[test]
+fn from_payload_parses_harness_field() {
+    let json = r#"{"harness":"claude-code","model":"claude-sonnet","timestamp":"2026-07-01T20:11:03Z","turn":{"inputTokens":5,"outputTokens":null,"totalTokens":null,"costUsd":null}}"#;
+    let row = AgentMetricIndexRow::from_payload(json, "eid1", "agent1", 100, 200);
+    assert_eq!(row.parse_status, ParseStatus::Valid);
+    assert_eq!(row.harness, Some("claude-code".to_string()));
 }
 
 #[test]
@@ -575,5 +584,70 @@ fn predecessor_lookup_uses_session_index() {
     assert!(
         plan.contains("idx_agent_metric_session"),
         "predecessor lookup must use the session index, plan was:\n{plan}"
+    );
+}
+
+// ── Migration: old-shape rows get harness populated on rebuild ────────────────
+
+/// Simulate a pre-harness archive row by inserting an archived_event and an
+/// index row with harness = NULL (as the old schema would have stored it),
+/// then running the backfill rebuild path to verify harness is populated.
+#[test]
+fn migration_old_shape_rows_get_harness_populated_after_rebuild() {
+    let conn = in_memory();
+    let json = valid_payload_json("s1", 1, "2026-07-01T00:00:00Z");
+    // Seed an archived event.
+    insert_archived_event(
+        &conn, "id", "relay", "eid1", 44200, "agent1", 100, &json, 200,
+    );
+    // Seed an index row with harness explicitly NULL (simulates pre-migration row).
+    conn.execute(
+        "INSERT INTO agent_metric_index
+             (identity_pubkey, relay_url, id, agent_pubkey, event_created_at,
+              archived_at, reported_at, session_id, turn_seq, harness, model,
+              delta_reliable, turn_input_tokens, turn_output_tokens,
+              turn_total_tokens, turn_cost_usd, cumulative_input_tokens,
+              cumulative_output_tokens, cumulative_total_tokens,
+              cumulative_cost_usd, parse_status)
+         VALUES ('id','relay','eid1','agent1',100,200,1751414400000,
+                 's1','00000000000000000001',NULL,'claude',
+                 1,'00000000000000000010','00000000000000000020',
+                 '00000000000000000030',0.01,
+                 '00000000000000000100','00000000000000000200',
+                 '00000000000000000300',0.1,'valid')",
+        [],
+    )
+    .unwrap();
+
+    // Verify the row is there with NULL harness.
+    let harness_before: Option<String> = conn
+        .query_row(
+            "SELECT harness FROM agent_metric_index WHERE id = 'eid1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        harness_before, None,
+        "old-shape row should start with NULL harness"
+    );
+
+    // Simulate the migration: delete index rows and re-run backfill.
+    conn.execute_batch("DELETE FROM agent_metric_index")
+        .unwrap();
+    backfill_agent_metric_index(&conn, "id", "relay").unwrap();
+
+    // The rebuilt row must have harness populated.
+    let harness_after: Option<String> = conn
+        .query_row(
+            "SELECT harness FROM agent_metric_index WHERE id = 'eid1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        harness_after,
+        Some("goose".to_string()),
+        "rebuilt row must have harness populated from raw_json"
     );
 }

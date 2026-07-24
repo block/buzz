@@ -28,6 +28,7 @@ export type AgentUsageSeriesBucket = {
 };
 
 export type AgentUsageModel = {
+  harness: string | null;
   model: string | null;
   usage: ReportedUsage;
   reportCount: number;

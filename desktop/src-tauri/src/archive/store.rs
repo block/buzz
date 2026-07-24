@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS agent_metric_index (
     cumulative_output_tokens     TEXT,
     cumulative_total_tokens      TEXT,
     cumulative_cost_usd          REAL,
+    harness                      TEXT,
     parse_status                 TEXT NOT NULL CHECK (parse_status IN ('valid','invalid')),
     PRIMARY KEY (identity_pubkey, relay_url, id)
 );
@@ -153,7 +154,87 @@ pub fn open_archive_db(path: &Path) -> Result<Connection, String> {
     conn.execute_batch(SCHEMA)
         .map_err(|e| format!("failed to initialize archive schema: {e}"))?;
 
+    apply_schema_migrations(&conn)?;
+
     Ok(conn)
+}
+
+/// One-shot, idempotent schema migrations recorded in `archive_migrations`.
+///
+/// Each migration is guarded by a `SELECT 1 FROM archive_migrations WHERE
+/// name = '...'` check so it is safe to call on every open — a migration
+/// that already ran is a no-op. `ALTER TABLE ... ADD COLUMN` is also itself
+/// idempotent on SQLite ≥ 3.37 (the column already exists → error, so we
+/// guard with the migrations table instead of relying on that).
+fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
+    // Migration M1: add `harness` column to `agent_metric_index`.
+    //
+    // Pre-existing rows land with `harness = NULL` (TEXT nullable). The
+    // backfill path in `metric_store::backfill_agent_metric_index` re-parses
+    // `archived_events.raw_json` — but that anti-join only inserts NEW rows;
+    // rows already in the index are never re-parsed. To populate `harness` for
+    // existing valid rows we use the index-rebuild migration below, which
+    // DELETE-then-reinserts every row so the shared `from_payload` parser
+    // populates the new column uniformly. `DELETE + reinsert` inside one
+    // transaction is safe: `archived_events` is the canonical store; the index
+    // is always fully rebuildable from it.
+    let already_run: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_harness_to_metric_index'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(|e| format!("migration guard check failed: {e}"))?
+        > 0;
+
+    if !already_run {
+        // 1. Add the nullable column (safe no-op on brand-new DBs where SCHEMA
+        //    already included the column — SQLite returns "duplicate column name"
+        //    which we ignore; new DBs have no rows to migrate anyway).
+        let _ = conn.execute_batch("ALTER TABLE agent_metric_index ADD COLUMN harness TEXT");
+
+        // 2. Rebuild the entire index so existing valid rows get harness
+        //    populated from the retained raw_json. We delete all existing index
+        //    rows and re-run the backfill anti-join; `backfill_agent_metric_index`
+        //    is the canonical rebuild path shared by ingest and backfill.
+        //    We collect all (identity, relay) pairs present in the index first.
+        let pairs: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT identity_pubkey, relay_url FROM agent_metric_index")
+                .map_err(|e| format!("migration M1: prepare pairs query: {e}"))?;
+            let pairs = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| format!("migration M1: query pairs: {e}"))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| format!("migration M1: read pairs: {e}"))?;
+            pairs
+        };
+
+        if !pairs.is_empty() {
+            // Delete all existing index rows; backfill will re-insert them with
+            // harness populated.
+            conn.execute_batch("DELETE FROM agent_metric_index")
+                .map_err(|e| format!("migration M1: delete index rows: {e}"))?;
+
+            for (identity, relay) in &pairs {
+                super::metric_store::backfill_agent_metric_index(conn, identity, relay)?;
+            }
+        }
+
+        // 3. Record migration as applied.
+        conn.execute(
+            "INSERT OR IGNORE INTO archive_migrations (name, applied_at) VALUES ('add_harness_to_metric_index', ?1)",
+            params![
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64
+            ],
+        )
+        .map_err(|e| format!("migration M1: record applied: {e}"))?;
+    }
+
+    Ok(())
 }
 
 fn set_wal_mode(conn: &Connection) -> Result<(), String> {

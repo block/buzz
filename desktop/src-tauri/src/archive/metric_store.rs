@@ -80,6 +80,7 @@ pub(super) struct AgentMetricIndexRow {
     pub reported_at: Option<i64>,
     pub session_id: Option<String>,
     pub turn_seq: Option<u64>,
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub delta_reliable: Option<bool>,
     pub turn_input_tokens: Option<u64>,
@@ -141,6 +142,7 @@ impl AgentMetricIndexRow {
             reported_at,
             session_id: payload.session_id,
             turn_seq: payload.turn_seq,
+            harness: Some(payload.harness),
             model: payload.model,
             delta_reliable: Some(payload.delta_reliable),
             turn_input_tokens: turn.and_then(|t| t.input_tokens),
@@ -164,6 +166,7 @@ impl AgentMetricIndexRow {
             reported_at: None,
             session_id: None,
             turn_seq: None,
+            harness: None,
             model: None,
             delta_reliable: None,
             turn_input_tokens: None,
@@ -208,6 +211,7 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
         reported_at: row.get("reported_at")?,
         session_id: row.get("session_id")?,
         turn_seq: turn_seq_text.as_deref().and_then(decode_u64_sortable),
+        harness: row.get("harness")?,
         model: row.get("model")?,
         delta_reliable: delta_reliable_int.map(|v| v != 0),
         turn_input_tokens: turn_input_text.as_deref().and_then(decode_u64_sortable),
@@ -223,7 +227,7 @@ fn row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<AgentMetricIndexRow> {
 }
 
 const ROW_COLUMNS: &str = "id, agent_pubkey, event_created_at, archived_at, reported_at, \
-     session_id, turn_seq, model, delta_reliable, turn_input_tokens, turn_output_tokens, \
+     session_id, turn_seq, harness, model, delta_reliable, turn_input_tokens, turn_output_tokens, \
      turn_total_tokens, turn_cost_usd, cumulative_input_tokens, cumulative_output_tokens, \
      cumulative_total_tokens, cumulative_cost_usd, parse_status";
 
@@ -256,13 +260,13 @@ pub(super) fn insert_metric_index_row(
         .execute(
             "INSERT INTO agent_metric_index
                  (identity_pubkey, relay_url, id, agent_pubkey, event_created_at,
-                  archived_at, reported_at, session_id, turn_seq, model,
+                  archived_at, reported_at, session_id, turn_seq, harness, model,
                   delta_reliable, turn_input_tokens, turn_output_tokens,
                   turn_total_tokens, turn_cost_usd, cumulative_input_tokens,
                   cumulative_output_tokens, cumulative_total_tokens,
                   cumulative_cost_usd, parse_status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)
+                     ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
              ON CONFLICT (identity_pubkey, relay_url, id) DO NOTHING",
             params![
                 identity_pubkey,
@@ -274,6 +278,7 @@ pub(super) fn insert_metric_index_row(
                 row.reported_at,
                 row.session_id,
                 turn_seq,
+                row.harness,
                 row.model,
                 delta_reliable,
                 turn_input,

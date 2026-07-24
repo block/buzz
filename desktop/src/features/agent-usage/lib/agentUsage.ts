@@ -221,7 +221,9 @@ export function sortAgentsByKnownTotal(
   );
 }
 
-/** Model rows use the same ranking rule as agents, tiebroken by model name (`null` model sorts last as "Unknown model"). */
+/** Model rows use the same ranking rule as agents, tiebroken by harness name
+ * (null harness sorts last as "Unknown harness"), then by model name
+ * (null model sorts last as "Unknown model"). */
 export function sortModelsByKnownTotal(
   models: readonly AgentUsageModel[],
 ): AgentUsageModel[] {
@@ -229,6 +231,17 @@ export function sortModelsByKnownTotal(
     models,
     (model) => model.usage.totalTokens,
     (a, b) => {
+      // Harness tiebreak first.
+      const harnessCmp =
+        a.harness === b.harness
+          ? 0
+          : a.harness === null
+            ? 1
+            : b.harness === null
+              ? -1
+              : a.harness.localeCompare(b.harness);
+      if (harnessCmp !== 0) return harnessCmp;
+      // Then model.
       if (a.model === b.model) return 0;
       if (a.model === null) return 1;
       if (b.model === null) return -1;

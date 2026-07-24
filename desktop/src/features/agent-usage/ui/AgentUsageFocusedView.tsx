@@ -244,10 +244,18 @@ function AgentUsageFocusedTotals({
           {models.map((model) => (
             <div
               className="flex items-center justify-between gap-3 text-sm"
-              key={model.model ?? "unknown"}
+              key={`${model.harness ?? ""}:${model.model ?? "unknown"}`}
             >
               <span className="min-w-0 truncate text-muted-foreground">
                 {model.model ?? "Unknown model"}
+                {model.harness !== null ? (
+                  <span
+                    className="ml-1.5 text-xs text-muted-foreground/70"
+                    data-testid="agent-usage-model-harness-label"
+                  >
+                    {model.harness}
+                  </span>
+                ) : null}
               </span>
               <span className="shrink-0 font-medium text-foreground">
                 {isUnknownField(model.usage.totalTokens)

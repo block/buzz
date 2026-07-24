@@ -125,6 +125,7 @@ pub struct SeriesBucket {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub usage: ReportedUsage,
     pub report_count: i64,
@@ -464,7 +465,8 @@ struct AgentScope {
     bucket_counts: Vec<i64>,
     total: UsageAccumulator,
     report_count: i64,
-    models: HashMap<Option<String>, (UsageAccumulator, i64)>,
+    /// Keyed by `(harness, model)` — same model via two harnesses → two rows.
+    models: HashMap<(Option<String>, Option<String>), (UsageAccumulator, i64)>,
 }
 
 /// Compute the full [`AgentUsageSeries`] from already-loaded rows.
@@ -551,7 +553,7 @@ pub(super) fn compute_series(
 
         let model_entry = scope
             .models
-            .entry(row.model.clone())
+            .entry((row.harness.clone(), row.model.clone()))
             .or_insert_with(|| (UsageAccumulator::default(), 0i64));
         model_entry.0.add(&outcome);
         model_entry.1 += 1;
@@ -602,31 +604,65 @@ pub(super) fn compute_series(
                 })
                 .collect();
 
-            let mut model_rows: Vec<(Option<u64>, Option<String>, ModelUsage)> = scope
-                .models
-                .into_iter()
-                .map(|(model, (acc, count))| {
-                    let model_total = acc.total_tokens_value();
-                    let has_unknown_usage = acc.has_unknown();
-                    (
-                        model_total,
-                        model.clone(),
-                        ModelUsage {
-                            model,
-                            usage: acc.finish(),
-                            report_count: count,
-                            has_unknown_usage,
-                        },
-                    )
-                })
-                .collect();
+            let mut model_rows: Vec<(Option<u64>, Option<String>, Option<String>, ModelUsage)> =
+                scope
+                    .models
+                    .into_iter()
+                    .map(|((harness, model), (acc, count))| {
+                        let model_total = acc.total_tokens_value();
+                        let has_unknown_usage = acc.has_unknown();
+                        (
+                            model_total,
+                            harness.clone(),
+                            model.clone(),
+                            ModelUsage {
+                                harness,
+                                model,
+                                usage: acc.finish(),
+                                report_count: count,
+                                has_unknown_usage,
+                            },
+                        )
+                    })
+                    .collect();
+            // A2 ranking: known totalTokens descending, unknown-total after;
+            // tiebreak: harness ascending (None last), then model ascending
+            // (None last), for deterministic ordering.
             model_rows.sort_by(|a, b| match (a.0, b.0) {
-                (Some(av), Some(bv)) => bv.cmp(&av).then_with(|| a.1.cmp(&b.1)),
+                (Some(av), Some(bv)) => bv.cmp(&av).then_with(|| {
+                    // harness tiebreak
+                    match (&a.1, &b.1) {
+                        (Some(ah), Some(bh)) => ah.cmp(bh),
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                    .then_with(|| {
+                        // model tiebreak
+                        match (&a.2, &b.2) {
+                            (Some(am), Some(bm)) => am.cmp(bm),
+                            (Some(_), None) => std::cmp::Ordering::Less,
+                            (None, Some(_)) => std::cmp::Ordering::Greater,
+                            (None, None) => std::cmp::Ordering::Equal,
+                        }
+                    })
+                }),
                 (Some(_), None) => std::cmp::Ordering::Less,
                 (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.1.cmp(&b.1),
+                (None, None) => match (&a.1, &b.1) {
+                    (Some(ah), Some(bh)) => ah.cmp(bh),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }
+                .then_with(|| match (&a.2, &b.2) {
+                    (Some(am), Some(bm)) => am.cmp(bm),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => std::cmp::Ordering::Equal,
+                }),
             });
-            let models = model_rows.into_iter().map(|(_, _, m)| m).collect();
+            let models = model_rows.into_iter().map(|(_, _, _, m)| m).collect();
 
             (
                 total_tokens_value,

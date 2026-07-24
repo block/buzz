@@ -49,6 +49,7 @@ function agentUsage(pubkey, totalTokensValue, overrides = {}) {
 
 function modelUsage(model, totalTokensValue, overrides = {}) {
   return {
+    harness: null,
     model,
     usage: reportedUsage({
       totalTokens: usageField({ value: totalTokensValue }),
@@ -365,6 +366,32 @@ test("sortModelsByKnownTotal sorts null model ('Unknown model') last among ties"
   assert.deepEqual(
     sorted.map((m) => m.model),
     ["claude", "gpt-4", null],
+  );
+});
+
+test("sortModelsByKnownTotal tiebreaks harness before model when totals are equal", () => {
+  const models = [
+    modelUsage("m", "100", { harness: "z-harness" }),
+    modelUsage("m", "100", { harness: "a-harness" }),
+    modelUsage("m", "100", { harness: null }),
+  ];
+  const sorted = sortModelsByKnownTotal(models);
+  assert.deepEqual(
+    sorted.map((m) => m.harness),
+    ["a-harness", "z-harness", null],
+  );
+});
+
+test("sortModelsByKnownTotal same model two harnesses produces two rows in harness order", () => {
+  // Same model via two harnesses should be distinct rows; harness-ascending tiebreak.
+  const models = [
+    modelUsage("claude-sonnet", "500", { harness: "goose" }),
+    modelUsage("claude-sonnet", "500", { harness: "claude-code" }),
+  ];
+  const sorted = sortModelsByKnownTotal(models);
+  assert.deepEqual(
+    sorted.map((m) => m.harness),
+    ["claude-code", "goose"],
   );
 });
 

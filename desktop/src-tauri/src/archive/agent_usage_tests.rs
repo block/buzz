@@ -18,6 +18,7 @@ fn row(id: &str, agent: &str, session: &str, seq: u64, reported_at: i64) -> Agen
         reported_at: Some(reported_at),
         session_id: Some(session.to_string()),
         turn_seq: Some(seq),
+        harness: None,
         model: None,
         delta_reliable: Some(true),
         turn_input_tokens: None,
@@ -588,6 +589,73 @@ fn compute_series_model_breakdown_attributes_per_event_model() {
     let series = compute_series(&rows, &rows, 0, &boundaries, None, true);
     assert_eq!(series.agents.len(), 1);
     assert_eq!(series.agents[0].models.len(), 2);
+}
+
+#[test]
+fn compute_series_same_model_two_harnesses_produces_two_rows() {
+    // Collapse-fix requirement: same model via two different harnesses must
+    // NOT collapse into one row — (harness, model) is the grouping key.
+    let r1 = AgentMetricIndexRow {
+        harness: Some("goose".to_string()),
+        model: Some("claude-sonnet".to_string()),
+        turn_input_tokens: Some(100),
+        delta_reliable: Some(true),
+        ..row("e1", "agent1", "s1", 1, 0)
+    };
+    let r2 = AgentMetricIndexRow {
+        harness: Some("claude-code".to_string()),
+        model: Some("claude-sonnet".to_string()),
+        turn_input_tokens: Some(200),
+        delta_reliable: Some(true),
+        ..row("e2", "agent1", "s2", 1, 1)
+    };
+    let boundaries = boundaries_7();
+    let rows = vec![r1, r2];
+    let series = compute_series(&rows, &rows, 0, &boundaries, None, true);
+    assert_eq!(series.agents.len(), 1);
+    // Two distinct harnesses → two rows, not one collapsed row.
+    assert_eq!(
+        series.agents[0].models.len(),
+        2,
+        "same model under two harnesses must produce two rows"
+    );
+    let harneses: Vec<Option<&str>> = series.agents[0]
+        .models
+        .iter()
+        .map(|m| m.harness.as_deref())
+        .collect();
+    assert!(
+        harneses.contains(&Some("claude-code")),
+        "claude-code row must be present"
+    );
+    assert!(
+        harneses.contains(&Some("goose")),
+        "goose row must be present"
+    );
+}
+
+#[test]
+fn compute_series_single_harness_data_looks_unchanged_with_harness_label() {
+    // Single-harness data: still exactly one row per model, harness label present.
+    let r = AgentMetricIndexRow {
+        harness: Some("goose".to_string()),
+        model: Some("claude-sonnet".to_string()),
+        turn_total_tokens: Some(500),
+        delta_reliable: Some(true),
+        ..row("e1", "agent1", "s1", 1, 0)
+    };
+    let boundaries = boundaries_7();
+    let rows = vec![r];
+    let series = compute_series(&rows, &rows, 0, &boundaries, None, true);
+    assert_eq!(series.agents[0].models.len(), 1);
+    assert_eq!(
+        series.agents[0].models[0].harness,
+        Some("goose".to_string())
+    );
+    assert_eq!(
+        series.agents[0].models[0].model,
+        Some("claude-sonnet".to_string())
+    );
 }
 
 #[test]
