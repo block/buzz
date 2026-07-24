@@ -415,6 +415,38 @@ for crash_point in crash_after_old_rename crash_after_new_install; do
   [[ "$(cat "$crash_target/current/revisions.jsonl")" == "old-memory" ]] ||
     fail "next restore entry must recover old Memory after ${crash_point}"
 done
+fresh_target="$test_tmp/memory-target-fresh-finalize"
+mkdir -p "$fresh_target/current"
+printf 'new-memory' >"$fresh_target/current/revisions.jsonl"
+/bin/sh "$memory_restore_helper" "$memory_archive" "$fresh_target" finalize
+[[ "$(cat "$fresh_target/current/revisions.jsonl")" == "new-memory" ]] ||
+  fail "fresh-volume finalize must preserve the installed Memory vault"
+printf 'ok - fresh-volume Memory finalize succeeds without an old vault\n'
+
+finalize_crash_target="$test_tmp/memory-target-finalize-crash"
+mkdir -p \
+  "$finalize_crash_target/current" \
+  "$finalize_crash_target/.buzz-restore-old/one" \
+  "$finalize_crash_target/.buzz-restore-old/two"
+printf 'new-memory' >"$finalize_crash_target/current/revisions.jsonl"
+printf 'old-one' >"$finalize_crash_target/.buzz-restore-old/one/revisions.jsonl"
+printf 'old-two' >"$finalize_crash_target/.buzz-restore-old/two/revisions.jsonl"
+assert_fails "SIGKILL during Memory finalize leaves only non-authoritative residue" \
+  env BUZZ_TEST_MEMORY_RESTORE_FAILURE=crash_during_finalize_delete \
+  /bin/sh "$memory_restore_helper" "$memory_archive" \
+  "$finalize_crash_target" finalize
+[[ ! -e "$finalize_crash_target/.buzz-restore-old" ]] ||
+  fail "partially deleted old vault must never remain rollback-authoritative"
+[[ -d "$finalize_crash_target/.buzz-restore-garbage" ]] ||
+  fail "SIGKILL fixture must leave partial non-authoritative garbage"
+/bin/sh "$memory_restore_helper" "$memory_archive" \
+  "$finalize_crash_target" rollback
+[[ "$(cat "$finalize_crash_target/current/revisions.jsonl")" == "new-memory" ]] ||
+  fail "rollback entry must ignore partial finalized garbage"
+[[ ! -e "$finalize_crash_target/.buzz-restore-garbage" ]] ||
+  fail "next restore entry must clean partial finalized garbage"
+printf 'ok - interrupted Memory finalization cannot resurrect partial old data\n'
+
 invalid_archive="$test_tmp/invalid-memory-restore.tar.gz"
 printf 'not-a-tar' >"$invalid_archive"
 invalid_target="$test_tmp/memory-target-invalid"

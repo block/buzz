@@ -8,8 +8,6 @@ use reqwest::Method;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -20,7 +18,14 @@ const MAXIMUM_OBJECTS_PER_PAGE: usize = 200;
 const MAXIMUM_TOTAL_OBJECTS: u64 = 1_000_000;
 const MAXIMUM_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
 const MAXIMUM_REQUEST_BYTES: usize = MAXIMUM_RESPONSE_BYTES + 1024;
-const REQUEST_SLICE_TIMEOUT: Duration = Duration::from_millis(500);
+const CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+const MAXIMUM_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[path = "memory_replication_validation.rs"]
+mod validation;
+use validation::{object_is_tombstone, validate_envelope, Envelope};
+#[cfg(test)]
+use validation::{python_canonical_json_bytes, valid_envelope_id};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Capability {
@@ -100,7 +105,7 @@ impl HttpJsonExchange {
         let client = Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(REQUEST_SLICE_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .map_err(|_| MemoryError::LocalServiceUnavailable)?;
         Ok(Self { client })
@@ -118,7 +123,7 @@ impl JsonExchange for HttpJsonExchange {
         check_active(deadline)?;
         let timeout = deadline
             .saturating_duration_since(Instant::now())
-            .min(REQUEST_SLICE_TIMEOUT);
+            .min(MAXIMUM_REQUEST_TIMEOUT);
         if timeout.is_zero() {
             return Err(MemoryError::Timeout);
         }
@@ -264,20 +269,6 @@ struct Acknowledgement {
     cursor: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    schema_version: u32,
-    source_node_id: String,
-    from_cursor: u64,
-    to_cursor: u64,
-    has_more: bool,
-    revisions: Vec<Value>,
-    objects: BTreeMap<String, Value>,
-    contracts: Vec<Value>,
-    envelope_id: String,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ImportResult {
@@ -333,43 +324,6 @@ fn readiness(
         };
     }
     Ok(value)
-}
-
-fn object_is_tombstone(value: &Value) -> bool {
-    value
-        .as_object()
-        .and_then(|object| object.get("kind"))
-        .and_then(Value::as_str)
-        == Some("tombstone")
-}
-
-fn canonicalize(value: &Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.iter().map(canonicalize).collect()),
-        Value::Object(values) => {
-            let mut entries = values.iter().collect::<Vec<_>>();
-            entries.sort_by(|left, right| left.0.cmp(right.0));
-            Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key.clone(), canonicalize(value)))
-                    .collect(),
-            )
-        }
-        _ => value.clone(),
-    }
-}
-
-fn valid_envelope_id(value: &Value, supplied: &str) -> bool {
-    let Some(mut unsigned) = value.as_object().cloned() else {
-        return false;
-    };
-    unsigned.remove("envelope_id");
-    let Ok(bytes) = serde_json::to_vec(&canonicalize(&Value::Object(unsigned))) else {
-        return false;
-    };
-    let actual = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-    supplied == actual
 }
 
 fn checked_add(target: &mut u64, value: u64) -> Result<(), MemoryError> {
@@ -439,27 +393,13 @@ fn replicate_with_exchange(
             &mut budget,
         )?;
         let envelope: Envelope = decode(envelope_value.clone())?;
-        if envelope.schema_version != 1
-            || envelope.source_node_id != source_ready.node_id
-            || envelope.from_cursor != cursor
-            || envelope.to_cursor < cursor
-            || envelope.revisions.len() > PAGE_SIZE as usize
-            || envelope.revisions.len() as u64 > source_ready.max_page_items
-            || envelope.objects.len() > MAXIMUM_OBJECTS_PER_PAGE
-            || envelope.contracts.len() != envelope.revisions.len()
-            || envelope
-                .revisions
-                .iter()
-                .chain(envelope.contracts.iter())
-                .any(|item| !item.is_object())
-            || envelope.objects.values().any(|item| !item.is_object())
-            || !valid_envelope_id(&envelope_value, &envelope.envelope_id)
-            || (envelope.has_more && envelope.to_cursor == cursor)
-            || (!envelope.revisions.is_empty() && envelope.to_cursor == cursor)
-            || (envelope.revisions.is_empty() && envelope.to_cursor != cursor)
-        {
-            return Err(MemoryError::InvalidResponse);
-        }
+        validate_envelope(
+            &envelope,
+            &envelope_value,
+            &source_ready.node_id,
+            cursor,
+            source_ready.max_page_items,
+        )?;
         if envelope.revisions.is_empty() {
             if envelope.has_more {
                 return Err(MemoryError::InvalidResponse);

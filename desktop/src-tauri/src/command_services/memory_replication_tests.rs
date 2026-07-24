@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::net::TcpListener;
@@ -83,12 +84,7 @@ impl JsonExchange for PageFloodExchange {
                 let cursor = request.payload.expect("export payload")["cursor"]
                     .as_u64()
                     .expect("export cursor");
-                let mut value = envelope(cursor, cursor + 1, true);
-                value["revisions"] = json!([{"sequence": cursor + 1}]);
-                value["objects"] = json!({"sha256:a": {"kind": "entity"}});
-                value["contracts"] = json!([{"cursor": cursor + 1}]);
-                seal(&mut value);
-                Ok(value)
+                Ok(page_flood_envelope(cursor))
             }
             "/replication/import" => {
                 let envelope = &request.payload.expect("import payload")["envelope"];
@@ -132,31 +128,60 @@ fn ack(peer: &str, cursor: u64) -> Value {
     json!({"peer_node_id": peer, "cursor": cursor})
 }
 
-fn envelope(from: u64, to: u64, has_more: bool) -> Value {
-    let mut value = json!({
-        "schema_version": 1,
-        "source_node_id": "node:remote",
-        "from_cursor": from,
-        "to_cursor": to,
-        "has_more": has_more,
-        "revisions": [{"sequence": from + 1}, {"sequence": to}],
-        "objects": {
-            "sha256:a": {"kind": "entity"},
-            "sha256:b": {"kind": "tombstone"}
-        },
-        "contracts": [{"cursor": from + 1}, {"cursor": to}]
-    });
-    seal(&mut value);
-    value
+const PYTHON_GOLDEN_ENVELOPE: &str = r#"{"contracts":[{"classification":"OFFICIAL","cursor":"3","entityId":"entity:one","eventId":"replication:sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128:3","hashes":{"envelope":"sha256:0a6149bb7ab9083f257a94fdec5ca10434ca5bf1c8b917db700dca1a39cbe4e4","payload":"sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128"},"kind":"replication-envelope","nodeId":"node:remote","parentRevisionIds":["sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128"],"payload":{"classification":"OFFICIAL","content":{"content":"Café ⚓","large":1e+20,"negative_zero":-0.0,"score":1e-07,"whole":1.0},"cursor":"3","entityId":"entity:one","eventId":"sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128","hashes":{"content":"sha256:de4d24ed1920a5ecd669170691b07c8bb42510324db2c3fc695070a918320d53","revision":"sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128"},"kind":"memory-revision","nodeId":"node:remote","parentRevisionIds":[],"timestamp":"2026-07-25T00:00:00Z","tombstone":false,"version":1},"timestamp":"2026-07-25T00:00:00Z","tombstone":false,"version":1},{"classification":"OFFICIAL","cursor":"4","entityId":"entity:one","eventId":"replication:sha256:ff2fb831d5a0505fe1c04254751548ba4e1c520605655ab286a2c15d69396ed6:4","hashes":{"envelope":"sha256:bcd5b02e0869bb2bfdf67f15bc7c120f664028f00d356ac4f770a4c6e2d62641","payload":"sha256:ff2fb831d5a0505fe1c04254751548ba4e1c520605655ab286a2c15d69396ed6"},"kind":"replication-envelope","nodeId":"node:remote","parentRevisionIds":["sha256:ff2fb831d5a0505fe1c04254751548ba4e1c520605655ab286a2c15d69396ed6"],"payload":{"classification":"OFFICIAL","content":null,"cursor":"4","entityId":"entity:one","eventId":"sha256:ff2fb831d5a0505fe1c04254751548ba4e1c520605655ab286a2c15d69396ed6","hashes":{"content":"sha256:26b541201f830607c71ca9327d12a0361775e2dea354371470fa7fed3c3d7b8d","revision":"sha256:ff2fb831d5a0505fe1c04254751548ba4e1c520605655ab286a2c15d69396ed6"},"kind":"memory-revision","nodeId":"node:remote","parentRevisionIds":["sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128"],"timestamp":"2026-07-25T01:00:00Z","tombstone":true,"version":1},"timestamp":"2026-07-25T01:00:00Z","tombstone":true,"version":1}],"envelope_id":"sha256:bd77f0b2a7fa6b66495cd1845c3ea9859c9b2566b94d04b839ba0247a19b6ec9","from_cursor":2,"has_more":false,"objects":{"sha256:26b541201f830607c71ca9327d12a0361775e2dea354371470fa7fed3c3d7b8d":{"kind":"tombstone","object_id":"sha256:26b541201f830607c71ca9327d12a0361775e2dea354371470fa7fed3c3d7b8d","payload":{"deleted_at":"2026-07-25T01:00:00+00:00","prior_object_id":"sha256:de4d24ed1920a5ecd669170691b07c8bb42510324db2c3fc695070a918320d53","retain_until":"2026-10-23T01:00:00+00:00","target_id":"entity:one","target_type":"entity"}},"sha256:de4d24ed1920a5ecd669170691b07c8bb42510324db2c3fc695070a918320d53":{"kind":"entity","object_id":"sha256:de4d24ed1920a5ecd669170691b07c8bb42510324db2c3fc695070a918320d53","payload":{"content":"Café ⚓","large":1e+20,"negative_zero":-0.0,"score":1e-07,"whole":1.0}}},"revisions":[{"created_at":"2026-07-25T00:00:00Z","node_id":"node:remote","object_id":"sha256:de4d24ed1920a5ecd669170691b07c8bb42510324db2c3fc695070a918320d53","parent_ids":[],"revision_id":"sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128","sequence":3,"subject_id":"entity:one","subject_type":"entity"},{"created_at":"2026-07-25T01:00:00Z","node_id":"node:remote","object_id":"sha256:26b541201f830607c71ca9327d12a0361775e2dea354371470fa7fed3c3d7b8d","parent_ids":["sha256:35a2f4658db52c21f35ae16493e00a68167340f729f36a1a70d0205d99c8b128"],"revision_id":"sha256:ff2fb831d5a0505fe1c04254751548ba4e1c520605655ab286a2c15d69396ed6","sequence":4,"subject_id":"entity:one","subject_type":"entity"}],"schema_version":1,"source_node_id":"node:remote","to_cursor":4}"#;
+
+fn envelope(_from: u64, _to: u64, _has_more: bool) -> Value {
+    serde_json::from_str(PYTHON_GOLDEN_ENVELOPE).expect("Python golden envelope")
 }
 
-fn seal(value: &mut Value) {
+fn reseal_structural_fixture(value: &mut Value) {
     value
         .as_object_mut()
         .expect("envelope object")
         .remove("envelope_id");
-    let bytes = serde_json::to_vec(&canonicalize(value)).expect("canonical fixture");
+    let bytes = python_canonical_json_bytes(value).expect("canonical fixture");
     value["envelope_id"] = json!(format!("sha256:{}", hex::encode(Sha256::digest(bytes))));
+}
+
+fn page_flood_envelope(cursor: u64) -> Value {
+    let mut value = envelope(2, 4, false);
+    value["from_cursor"] = json!(cursor);
+    value["to_cursor"] = json!(cursor + 1);
+    value["has_more"] = json!(true);
+    value["revisions"]
+        .as_array_mut()
+        .expect("revisions")
+        .truncate(1);
+    value["contracts"]
+        .as_array_mut()
+        .expect("contracts")
+        .truncate(1);
+    value["revisions"][0]["sequence"] = json!(cursor + 1);
+    let revision_id = value["revisions"][0]["revision_id"]
+        .as_str()
+        .expect("revision id")
+        .to_string();
+    let object_id = value["revisions"][0]["object_id"]
+        .as_str()
+        .expect("object id")
+        .to_string();
+    value["objects"]
+        .as_object_mut()
+        .expect("objects")
+        .retain(|key, _| key == &object_id);
+    value["contracts"][0]["cursor"] = json!((cursor + 1).to_string());
+    value["contracts"][0]["eventId"] = json!(format!("replication:{revision_id}:{}", cursor + 1));
+    value["contracts"][0]["payload"]["cursor"] = json!((cursor + 1).to_string());
+    let mut contract_basis = value["contracts"][0].clone();
+    contract_basis["hashes"] = json!({"payload": revision_id});
+    let contract_bytes =
+        python_canonical_json_bytes(&contract_basis).expect("canonical contract fixture");
+    value["contracts"][0]["hashes"]["envelope"] = json!(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(contract_bytes))
+    ));
+    reseal_structural_fixture(&mut value);
+    value
 }
 
 fn successful_fixture() -> FakeExchange {
@@ -178,6 +203,118 @@ fn successful_fixture() -> FakeExchange {
         ]
         .into(),
         ..FakeExchange::default()
+    }
+}
+
+#[test]
+fn accepts_agent_memory_python_canonical_json_golden_without_self_sealing() {
+    let number_vector = json!({
+        "content": "Café ⚓",
+        "large": 1e20,
+        "negative_zero": -0.0,
+        "score": 1e-7,
+        "whole": 1.0
+    });
+    let canonical = python_canonical_json_bytes(&number_vector).expect("canonical number vector");
+    assert_eq!(
+        String::from_utf8(canonical.clone()).expect("canonical UTF-8"),
+        r#"{"content":"Café ⚓","large":1e+20,"negative_zero":-0.0,"score":1e-07,"whole":1.0}"#
+    );
+    assert_eq!(
+        format!("sha256:{}", hex::encode(Sha256::digest(canonical))),
+        "sha256:a945d2e9f6a46c71cda2af56ccafcde08183bfc01eccc3d7ab5d35450bfd44d4"
+    );
+
+    let value: Value =
+        serde_json::from_str(PYTHON_GOLDEN_ENVELOPE).expect("Python-produced JSON fixture");
+    assert_eq!(
+        value["envelope_id"],
+        "sha256:bd77f0b2a7fa6b66495cd1845c3ea9859c9b2566b94d04b839ba0247a19b6ec9"
+    );
+    assert!(valid_envelope_id(
+        &value,
+        value["envelope_id"].as_str().expect("golden envelope id")
+    ));
+}
+
+#[test]
+fn rejects_adversarial_envelope_internals_before_target_import() {
+    let _state = REPLICATION_TEST_STATE
+        .lock()
+        .expect("lock replication state");
+    let local = node("http://127.0.0.1:18006", "node:local");
+    let remote = node("http://127.0.0.1:28006", "node:remote");
+    let object_id = "sha256:de4d24ed1920a5ecd669170691b07c8bb42510324db2c3fc695070a918320d53";
+    let mut cases = Vec::new();
+
+    let mut duplicate_sequence = envelope(2, 4, false);
+    duplicate_sequence["revisions"][1]["sequence"] = json!(3);
+    cases.push(duplicate_sequence);
+
+    let mut cursor_gap = envelope(2, 4, false);
+    cursor_gap["revisions"][0]["sequence"] = json!(2);
+    cases.push(cursor_gap);
+
+    let mut out_of_order = envelope(2, 4, false);
+    out_of_order["revisions"]
+        .as_array_mut()
+        .expect("revisions")
+        .swap(0, 1);
+    cases.push(out_of_order);
+
+    let mut mismatched_object_key = envelope(2, 4, false);
+    let object = mismatched_object_key["objects"]
+        .as_object_mut()
+        .expect("objects")
+        .remove(object_id)
+        .expect("golden object");
+    mismatched_object_key["objects"]
+        .as_object_mut()
+        .expect("objects")
+        .insert(
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            object,
+        );
+    cases.push(mismatched_object_key);
+
+    let mut bad_object_hash = envelope(2, 4, false);
+    bad_object_hash["objects"][object_id]["payload"]["content"] = json!("tampered");
+    cases.push(bad_object_hash);
+
+    let mut revision_schema = envelope(2, 4, false);
+    revision_schema["revisions"][0]["unexpected"] = json!(true);
+    cases.push(revision_schema);
+
+    let mut contract_schema = envelope(2, 4, false);
+    contract_schema["contracts"][0]["unexpected"] = json!(true);
+    cases.push(contract_schema);
+
+    let mut broken_cross_link = envelope(2, 4, false);
+    broken_cross_link["contracts"][0]["payload"]["eventId"] =
+        json!("sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    cases.push(broken_cross_link);
+
+    for mut invalid in cases {
+        reseal_structural_fixture(&mut invalid);
+        let mut exchange = successful_fixture();
+        exchange.responses[3] = Ok(invalid);
+        assert_eq!(
+            replicate_with_exchange(
+                "pull",
+                &local,
+                &remote,
+                Duration::from_secs(2),
+                &mut exchange
+            ),
+            Err(MemoryError::InvalidResponse)
+        );
+        assert!(
+            exchange
+                .requests
+                .iter()
+                .all(|request| request.path != "/replication/import"),
+            "invalid internals must not reach the target import"
+        );
     }
 }
 
@@ -511,7 +648,53 @@ fn http_exchange_ignores_proxy_env_uses_exact_capability_and_rejects_media_and_r
 }
 
 #[test]
-fn cancellation_interrupts_a_streaming_response_within_the_request_slice() {
+fn valid_response_can_take_more_than_half_a_second_within_the_operation_deadline() {
+    let _state = REPLICATION_TEST_STATE
+        .lock()
+        .expect("lock replication state");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind delayed fixture");
+    let endpoint = format!(
+        "http://{}",
+        listener.local_addr().expect("delayed fixture address")
+    );
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept delayed fixture");
+        let mut request = [0_u8; 4096];
+        let _ = stream.read(&mut request).expect("read delayed request");
+        std::thread::sleep(Duration::from_millis(750));
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+            )
+            .expect("write delayed response");
+    });
+    let node = Node {
+        endpoint,
+        read_token: "read",
+        replicate_token: "replicate",
+        expected_node_id: "node:test",
+    };
+    let mut exchange = HttpJsonExchange::new().expect("build client");
+    let mut budget = TransferBudget::default();
+    assert_eq!(
+        exchange.request(
+            &node,
+            JsonRequest {
+                method: Method::GET,
+                path: "/replication/readiness",
+                capability: Capability::Read,
+                payload: None,
+            },
+            Instant::now() + Duration::from_secs(2),
+            &mut budget,
+        ),
+        Ok(json!({}))
+    );
+    server.join().expect("join delayed fixture");
+}
+
+#[test]
+fn cancellation_interrupts_a_streaming_response_between_chunks() {
     let _state = REPLICATION_TEST_STATE
         .lock()
         .expect("lock replication state");
@@ -531,7 +714,13 @@ fn cancellation_interrupts_a_streaming_response_within_the_request_slice() {
             )
             .expect("write partial streaming response");
         stream.flush().expect("flush partial response");
-        std::thread::sleep(Duration::from_millis(750));
+        for _ in 0..10 {
+            std::thread::sleep(Duration::from_millis(100));
+            if stream.write_all(b" ").is_err() {
+                break;
+            }
+            let _ = stream.flush();
+        }
     });
     let canceller = std::thread::spawn(|| {
         std::thread::sleep(Duration::from_millis(50));
@@ -564,5 +753,5 @@ fn cancellation_interrupts_a_streaming_response_within_the_request_slice() {
     SYNC_CANCELLED.store(false, Ordering::SeqCst);
 
     assert_eq!(error, MemoryError::Cancelled);
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(1));
 }

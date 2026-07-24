@@ -6,12 +6,13 @@ target="${2:?Memory volume mount is required}"
 action="${3:-prepare}"
 stage="${target}/.buzz-restore-stage"
 old="${target}/.buzz-restore-old"
+garbage="${target}/.buzz-restore-garbage"
 current="${target}/current"
 listing="${target}/.buzz-restore-listing"
 verbose_listing="${target}/.buzz-restore-verbose"
 
 cleanup_ephemeral() {
-  rm -rf "${stage}" "${listing}" "${verbose_listing}"
+  rm -rf "${stage}" "${garbage}" "${listing}" "${verbose_listing}"
 }
 
 recover_old() {
@@ -33,8 +34,17 @@ case "${action}" in
     ;;
   finalize)
     test -d "${current}"
-    test -d "${old}"
-    rm -rf "${old}"
+    rm -rf "${garbage}"
+    if [ -d "${old}" ]; then
+      # Once the prior vault has been renamed, it is no longer authoritative.
+      # A crash during deletion can leave garbage, but rollback will never
+      # mistake a partially deleted directory for the last-known-good vault.
+      mv "${old}" "${garbage}"
+      if [ "${BUZZ_TEST_MEMORY_RESTORE_FAILURE:-}" = "crash_during_finalize_delete" ]; then
+        rm -rf "${garbage}/one"
+        kill -KILL $$
+      fi
+    fi
     cleanup_ephemeral
     exit 0
     ;;
