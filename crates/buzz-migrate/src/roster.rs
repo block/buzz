@@ -8,7 +8,7 @@
 //! history import used.
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Deserialize)]
 struct RawUser {
@@ -36,6 +36,9 @@ pub struct Roster {
     email_to_subject: HashMap<String, String>,
     /// `slack:<user id>` → best human-readable name (for email copy).
     subject_to_name: HashMap<String, String>,
+    /// Emails shared by more than one active Slack user. These are never
+    /// eligible for magic-link attribution because ownership is ambiguous.
+    ambiguous_emails: HashSet<String>,
 }
 
 impl Roster {
@@ -48,6 +51,7 @@ impl Roster {
         let users: Vec<RawUser> = serde_json::from_slice(bytes)?;
         let mut email_to_subject = HashMap::new();
         let mut subject_to_name = HashMap::new();
+        let mut ambiguous_emails = HashSet::new();
         for u in users {
             if u.deleted {
                 continue;
@@ -62,22 +66,31 @@ impl Roster {
             };
             subject_to_name.insert(subject.clone(), name);
             let email = u.profile.email.trim().to_lowercase();
-            if !email.is_empty() {
-                email_to_subject.insert(email, subject);
+            if email.is_empty() || ambiguous_emails.contains(&email) {
+                continue;
+            }
+            if email_to_subject.insert(email.clone(), subject).is_some() {
+                email_to_subject.remove(&email);
+                ambiguous_emails.insert(email);
             }
         }
         Ok(Self {
             email_to_subject,
             subject_to_name,
+            ambiguous_emails,
         })
     }
 
     /// The `slack:<id>` subject for an email, if the export knows it. Matching
     /// is case-insensitive and whitespace-trimmed.
     pub fn subject_for_email(&self, email: &str) -> Option<&str> {
-        self.email_to_subject
-            .get(email.trim().to_lowercase().as_str())
-            .map(String::as_str)
+        let email = email.trim().to_lowercase();
+        // Defense in depth: shared emails are already absent from the map, but
+        // reject them explicitly so an ambiguous address can never resolve.
+        if self.ambiguous_emails.contains(&email) {
+            return None;
+        }
+        self.email_to_subject.get(&email).map(String::as_str)
     }
 
     /// The display name for a subject, for personalizing the email.
@@ -134,5 +147,16 @@ mod tests {
     fn unknown_email_is_none() {
         let r = Roster::from_users_json(USERS.as_bytes()).unwrap();
         assert_eq!(r.subject_for_email("nobody@corp.com"), None);
+    }
+
+    #[test]
+    fn duplicate_email_is_ambiguous_and_not_mailable() {
+        let users = r#"[
+          {"id":"U1","profile":{"email":"shared@corp.com"}},
+          {"id":"U2","profile":{"email":"SHARED@corp.com"}}
+        ]"#;
+        let r = Roster::from_users_json(users.as_bytes()).unwrap();
+        assert_eq!(r.subject_for_email("shared@corp.com"), None);
+        assert_eq!(r.mailable_count(), 0);
     }
 }

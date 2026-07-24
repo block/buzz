@@ -31,6 +31,7 @@
 //! signs is public-key-only and NIP-33-revocable.
 
 pub mod attest;
+pub mod oidc;
 pub mod roster;
 pub mod server;
 pub mod token;

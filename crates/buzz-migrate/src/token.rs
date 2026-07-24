@@ -79,6 +79,8 @@ pub enum TokenError {
     Expired,
     #[error("token has already been used")]
     AlreadyUsed,
+    #[error("token service is unavailable")]
+    Unavailable,
 }
 
 /// Serializable payload; the exact bytes the MAC is computed over. Field order
@@ -91,7 +93,7 @@ struct Payload<'a> {
     nonce: &'a str,
 }
 
-fn mac_hex(secret: &[u8], subject: &str, exp: u64, nonce: &str) -> String {
+fn mac_hex(secret: &[u8], subject: &str, exp: u64, nonce: &str) -> Result<String, TokenError> {
     // Canonical signed message. `serde_json` on a fixed-shape struct is
     // deterministic here (fixed field order, no maps), so the bytes are stable.
     let payload = Payload {
@@ -100,11 +102,11 @@ fn mac_hex(secret: &[u8], subject: &str, exp: u64, nonce: &str) -> String {
         exp,
         nonce,
     };
-    let msg = serde_json::to_vec(&payload).expect("payload serializes");
+    let msg = serde_json::to_vec(&payload).map_err(|_| TokenError::Unavailable)?;
     let mut mac =
-        <HmacSha256 as KeyInit>::new_from_slice(secret).expect("hmac accepts any key length");
+        <HmacSha256 as KeyInit>::new_from_slice(secret).map_err(|_| TokenError::Unavailable)?;
     mac.update(&msg);
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Mint a token for `subject`, valid for `ttl_secs` from `now`.
@@ -118,21 +120,21 @@ pub fn mint(
     now: u64,
     ttl_secs: u64,
     nonce_bytes: &[u8],
-) -> MagicToken {
+) -> Result<MagicToken, TokenError> {
     let exp = now.saturating_add(ttl_secs);
     let nonce = hex::encode(nonce_bytes);
-    let mac = mac_hex(secret, subject, exp, &nonce);
-    MagicToken(format!(
+    let mac = mac_hex(secret, subject, exp, &nonce)?;
+    Ok(MagicToken(format!(
         "v1.{}.{}.{}.{}",
         hex::encode(subject.as_bytes()),
         exp,
         nonce,
         mac
-    ))
+    )))
 }
 
 /// Verify a token's integrity and expiry (NOT single use — that is
-/// [`ConsumedNonces::try_consume`]). Returns the proven subject on success.
+/// [`ConsumedNonces::try_reserve`]). Returns the proven subject on success.
 ///
 /// The MAC comparison is constant-time, so a forger cannot learn the correct
 /// signature byte-by-byte from timing.
@@ -159,13 +161,13 @@ pub fn verify(secret: &[u8], token: &MagicToken, now: u64) -> Result<VerifiedTok
         return Err(TokenError::Malformed);
     }
 
-    let expected = mac_hex(secret, &subject, exp, nonce);
+    let expected = mac_hex(secret, &subject, exp, nonce)?;
     // Constant-time compare over equal-length hex strings.
     let ok: bool = expected.as_bytes().ct_eq(mac.as_bytes()).into();
     if !ok {
         return Err(TokenError::BadSignature);
     }
-    if now > exp {
+    if now >= exp {
         return Err(TokenError::Expired);
     }
     Ok(VerifiedToken {
@@ -184,8 +186,22 @@ pub fn verify(secret: &[u8], token: &MagicToken, now: u64) -> Result<VerifiedTok
 /// redeemed once per instance.
 #[derive(Debug, Default)]
 pub struct ConsumedNonces {
-    /// nonce -> the token's expiry, so used entries can be swept after expiry.
-    used: HashMap<String, u64>,
+    /// nonce -> reservation/consumption state and token expiry.
+    used: HashMap<String, NonceState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonceState {
+    Reserved { exp: u64 },
+    Consumed { exp: u64 },
+}
+
+impl NonceState {
+    fn exp(self) -> u64 {
+        match self {
+            Self::Reserved { exp } | Self::Consumed { exp } => exp,
+        }
+    }
 }
 
 impl ConsumedNonces {
@@ -193,21 +209,40 @@ impl ConsumedNonces {
         Self::default()
     }
 
-    /// Atomically mark a verified token used. Returns `AlreadyUsed` if the
-    /// nonce was consumed before. Call this only after [`verify`] succeeds.
-    pub fn try_consume(&mut self, token: &VerifiedToken, now: u64) -> Result<(), TokenError> {
+    /// Atomically reserve a verified token while its relay write is in flight.
+    ///
+    /// A reservation blocks concurrent redemption, but can be released after a
+    /// failed relay write so the legitimate claimant can retry.
+    pub fn try_reserve(&mut self, token: &VerifiedToken, now: u64) -> Result<(), TokenError> {
         self.sweep(now);
         if self.used.contains_key(&token.nonce) {
             return Err(TokenError::AlreadyUsed);
         }
-        self.used.insert(token.nonce.clone(), token.exp);
+        self.used
+            .insert(token.nonce.clone(), NonceState::Reserved { exp: token.exp });
         Ok(())
+    }
+
+    /// Commit a reservation after the attestation was accepted by the relay.
+    pub fn commit(&mut self, token: &VerifiedToken) {
+        self.used
+            .insert(token.nonce.clone(), NonceState::Consumed { exp: token.exp });
+    }
+
+    /// Release an in-flight reservation after a failed relay write.
+    pub fn release(&mut self, token: &VerifiedToken) {
+        if matches!(
+            self.used.get(&token.nonce),
+            Some(NonceState::Reserved { .. })
+        ) {
+            self.used.remove(&token.nonce);
+        }
     }
 
     /// Drop entries whose tokens have expired — a used token past its expiry
     /// can never be presented again validly, so its ledger entry is dead weight.
     fn sweep(&mut self, now: u64) {
-        self.used.retain(|_, &mut exp| exp >= now);
+        self.used.retain(|_, state| state.exp() > now);
     }
 
     #[cfg(test)]
@@ -226,7 +261,7 @@ mod tests {
 
     #[test]
     fn roundtrip_verifies_and_returns_subject() {
-        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE);
+        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE).expect("mint");
         let v = verify(SECRET, &t, 1_500).expect("valid");
         assert_eq!(v.subject, SUBJECT);
         assert_eq!(v.exp, 4_600);
@@ -234,14 +269,14 @@ mod tests {
 
     #[test]
     fn wire_form_survives_transport() {
-        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE);
+        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE).expect("mint");
         let reparsed = MagicToken::from_wire(t.as_str().to_string());
         assert!(verify(SECRET, &reparsed, 1_500).is_ok());
     }
 
     #[test]
     fn wrong_secret_is_rejected() {
-        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE);
+        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE).expect("mint");
         assert_eq!(
             verify(b"a-different-secret", &t, 1_500),
             Err(TokenError::BadSignature)
@@ -250,7 +285,7 @@ mod tests {
 
     #[test]
     fn tampered_subject_is_rejected() {
-        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE);
+        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE).expect("mint");
         // Re-encode a different subject with the original exp/nonce/mac.
         let mut parts: Vec<&str> = t.as_str().split('.').collect();
         let evil = hex::encode("slack:UATTACKER".as_bytes());
@@ -264,7 +299,7 @@ mod tests {
 
     #[test]
     fn tampered_expiry_is_rejected() {
-        let t = mint(SECRET, SUBJECT, 1_000, 10, NONCE); // exp = 1010
+        let t = mint(SECRET, SUBJECT, 1_000, 10, NONCE).expect("mint"); // exp = 1010
         let mut parts: Vec<&str> = t.as_str().split('.').collect();
         parts[2] = "9999999999"; // extend expiry
         let forged = MagicToken::from_wire(parts.join("."));
@@ -276,10 +311,13 @@ mod tests {
 
     #[test]
     fn expired_token_is_rejected() {
-        let t = mint(SECRET, SUBJECT, 1_000, 10, NONCE); // exp = 1010
+        let t = mint(SECRET, SUBJECT, 1_000, 10, NONCE).expect("mint"); // exp = 1010
         assert_eq!(verify(SECRET, &t, 1_011), Err(TokenError::Expired));
-        // Exactly at expiry is still valid.
-        assert!(verify(SECRET, &t, 1_010).is_ok());
+        assert_eq!(
+            verify(SECRET, &t, 1_010),
+            Err(TokenError::Expired),
+            "expiry is an exclusive upper bound"
+        );
     }
 
     #[test]
@@ -308,14 +346,35 @@ mod tests {
 
     #[test]
     fn single_use_is_enforced_once() {
-        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE);
+        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE).expect("mint");
         let v = verify(SECRET, &t, 1_500).unwrap();
         let mut ledger = ConsumedNonces::new();
-        assert_eq!(ledger.try_consume(&v, 1_500), Ok(()));
+        assert_eq!(ledger.try_reserve(&v, 1_500), Ok(()));
+        ledger.commit(&v);
         assert_eq!(
-            ledger.try_consume(&v, 1_500),
+            ledger.try_reserve(&v, 1_500),
             Err(TokenError::AlreadyUsed),
             "a token must not redeem twice"
+        );
+    }
+
+    #[test]
+    fn failed_write_can_release_reservation_for_retry() {
+        let t = mint(SECRET, SUBJECT, 1_000, 3_600, NONCE).expect("mint");
+        let v = verify(SECRET, &t, 1_500).expect("valid");
+        let mut ledger = ConsumedNonces::new();
+
+        ledger.try_reserve(&v, 1_500).expect("first reserve");
+        assert_eq!(
+            ledger.try_reserve(&v, 1_500),
+            Err(TokenError::AlreadyUsed),
+            "concurrent redemption is blocked"
+        );
+        ledger.release(&v);
+        assert_eq!(
+            ledger.try_reserve(&v, 1_500),
+            Ok(()),
+            "a failed relay write can be retried"
         );
     }
 
@@ -323,20 +382,21 @@ mod tests {
     fn distinct_nonces_are_independent() {
         let a = verify(
             SECRET,
-            &mint(SECRET, SUBJECT, 1_000, 3_600, &[1u8; 16]),
+            &mint(SECRET, SUBJECT, 1_000, 3_600, &[1u8; 16]).expect("mint"),
             1_500,
         )
         .unwrap();
         let b = verify(
             SECRET,
-            &mint(SECRET, SUBJECT, 1_000, 3_600, &[2u8; 16]),
+            &mint(SECRET, SUBJECT, 1_000, 3_600, &[2u8; 16]).expect("mint"),
             1_500,
         )
         .unwrap();
         let mut ledger = ConsumedNonces::new();
-        assert_eq!(ledger.try_consume(&a, 1_500), Ok(()));
+        assert_eq!(ledger.try_reserve(&a, 1_500), Ok(()));
+        ledger.commit(&a);
         assert_eq!(
-            ledger.try_consume(&b, 1_500),
+            ledger.try_reserve(&b, 1_500),
             Ok(()),
             "a different token for the same subject is still usable"
         );
@@ -344,19 +404,25 @@ mod tests {
 
     #[test]
     fn ledger_sweeps_expired_entries() {
-        let v = verify(SECRET, &mint(SECRET, SUBJECT, 1_000, 10, NONCE), 1_005).unwrap(); // exp 1010
+        let v = verify(
+            SECRET,
+            &mint(SECRET, SUBJECT, 1_000, 10, NONCE).expect("mint"),
+            1_005,
+        )
+        .unwrap(); // exp 1010
         let mut ledger = ConsumedNonces::new();
-        ledger.try_consume(&v, 1_005).unwrap();
+        ledger.try_reserve(&v, 1_005).unwrap();
+        ledger.commit(&v);
         assert_eq!(ledger.len(), 1);
         // A later consume of some other token triggers a sweep that drops the
         // now-expired entry.
         let other = verify(
             SECRET,
-            &mint(SECRET, "slack:U2", 2_000, 10, &[9u8; 16]),
+            &mint(SECRET, "slack:U2", 2_000, 10, &[9u8; 16]).expect("mint"),
             2_001,
         )
         .unwrap();
-        ledger.try_consume(&other, 2_001).unwrap();
+        ledger.try_reserve(&other, 2_001).unwrap();
         assert_eq!(
             ledger.len(),
             1,
