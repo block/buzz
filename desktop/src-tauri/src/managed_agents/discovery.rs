@@ -111,7 +111,10 @@ const KNOWN_ACP_RUNTIMES: &[KnownAcpRuntime] = &[
         adapter_install_hint: "Install the Claude Code ACP adapter via npm.",
         skill_dir: Some(".claude/skills"),
         supports_acp_model_switching: false,
-        model_env_var: None,
+        // Claude Code reads ANTHROPIC_MODEL at process start (same key readiness
+        // already maps for anthropic). Without this, Edit Agent model picks never
+        // reach the spawned process (#2692).
+        model_env_var: Some("ANTHROPIC_MODEL"),
         provider_env_var: None,
         provider_locked: true,
         default_env: &[],
