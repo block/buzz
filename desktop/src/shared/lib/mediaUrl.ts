@@ -233,6 +233,12 @@ export function resetMediaCaches(): void {
     cachedRelayOrigin = null;
     notifyRelayOriginListeners();
   }
+  // Kick a fresh port/origin fetch immediately so the next render does not
+  // linger on `buzz-media://` (which WebViews cannot load) after a community
+  // switch or restart (#2665).
+  if (typeof window !== "undefined") {
+    portPromise = fetchProxyPort();
+  }
 }
 
 /**

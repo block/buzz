@@ -639,8 +639,13 @@ async fn discover_anthropic_models(
         return Ok(None);
     }
 
-    let api_key = env_or_process_value(env, "ANTHROPIC_API_KEY")
-        .ok_or_else(|| "config: ANTHROPIC_API_KEY required".to_string())?;
+    // Claude Code users typically authenticate via OAuth (`claude setup-token`),
+    // not ANTHROPIC_API_KEY. Missing key must fall through to `buzz-acp models`
+    // rather than abort discovery with a hard error (#2581).
+    let api_key = match env_or_process_value(env, "ANTHROPIC_API_KEY") {
+        Some(key) => key,
+        None => return Ok(None),
+    };
     let redaction_env = redaction_env_with_value(env, "ANTHROPIC_API_KEY", &api_key);
     let url = anthropic_models_url_for_discovery(env);
     let mut models = Vec::new();
