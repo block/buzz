@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   availableRuntimesForStart,
   buildInstanceInputForDefinition,
+  resolveProvisioningRuntimeForDefinition,
   resolveStartRuntimeForDefinition,
   shouldPinSelectedRuntimeForDefinition,
 } from "./instanceInputForDefinition.ts";
@@ -99,6 +100,33 @@ test("row 2: harnessOverride follows the backend-aligned formula", async () => {
     false,
     "picked != configured → false (definition stays authoritative)",
   );
+});
+
+test("provisioning pins a visible fallback for a runtime-less definition", () => {
+  const resolved = resolveProvisioningRuntimeForDefinition(
+    null,
+    [buzzAgentRuntime, gooseRuntime],
+    null,
+    ["buzz-agent"],
+  );
+  assert.equal(resolved.runtime, gooseRuntime);
+  assert.equal(resolved.harnessOverride, true);
+});
+
+test("provisioning uses product ordering and leaves unavailable configured fallbacks unpinned", () => {
+  const ordered = resolveProvisioningRuntimeForDefinition(null, [
+    gooseRuntime,
+    claudeRuntime,
+    buzzAgentRuntime,
+  ]);
+  assert.equal(ordered.runtime, buzzAgentRuntime);
+  assert.equal(ordered.harnessOverride, true);
+
+  const unavailable = resolveProvisioningRuntimeForDefinition("missing", [
+    gooseRuntime,
+  ]);
+  assert.equal(unavailable.runtime, gooseRuntime);
+  assert.equal(unavailable.harnessOverride, false);
 });
 
 test("row 3: plain avatar URLs pass through; base64 data URIs upload via the injectable", async () => {

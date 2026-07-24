@@ -10,7 +10,7 @@ import {
   useProvisionChannelManagedAgentMutation,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
-import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { resolveProvisioningRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
@@ -313,7 +313,6 @@ export function useMentionSendFlow({
       }
 
       const runtimes = await getAvailableRuntimes();
-      const defaultRuntime = runtimes[0] ?? null;
       const errors: string[] = [];
       const agents: ManagedAgent[] = [];
       const pubkeys: string[] = [];
@@ -327,11 +326,8 @@ export function useMentionSendFlow({
         }
         seenPersonaIds.add(persona.id);
 
-        const { runtime } = resolvePersonaRuntime(
-          persona.runtime,
-          runtimes,
-          defaultRuntime,
-        );
+        const { harnessOverride, runtime } =
+          resolveProvisioningRuntimeForDefinition(persona.runtime, runtimes);
         if (!runtime) {
           errors.push(`${displayName}: No agent runtime available.`);
           continue;
@@ -345,6 +341,7 @@ export function useMentionSendFlow({
             runtime,
             name: persona.displayName,
             personaId: persona.id,
+            harnessOverride,
             systemPrompt: persona.systemPrompt,
             avatarUrl: persona.avatarUrl ?? undefined,
             model: persona.model ?? undefined,

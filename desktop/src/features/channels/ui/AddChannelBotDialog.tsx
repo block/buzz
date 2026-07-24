@@ -8,11 +8,8 @@ import {
   type CreateChannelManagedAgentResult,
 } from "@/features/agents/hooks";
 import { getActivePersonas } from "@/features/agents/lib/catalog";
-import {
-  canResolveAllPersonaRuntimes,
-  resolvePersonaRuntime,
-} from "@/features/agents/lib/resolvePersonaRuntime";
-import { shouldPinSelectedRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
+import { resolveProvisioningRuntimeForDefinition } from "@/features/agents/lib/instanceInputForDefinition";
+import { canResolveAllPersonaRuntimes } from "@/features/agents/lib/resolvePersonaRuntime";
 import { getUsableTeams } from "@/features/agents/lib/teamPersonas";
 import { AddChannelBotPersonasSection } from "@/features/channels/ui/AddChannelBotPersonasSection";
 import { AddChannelBotTeamsSection } from "@/features/channels/ui/AddChannelBotTeamsSection";
@@ -148,11 +145,9 @@ export function AddChannelBotDialog({
     }
 
     const inputs = selectedPersonas.flatMap((persona) => {
-      const resolved = resolvePersonaRuntime(
+      const resolved = resolveProvisioningRuntimeForDefinition(
         persona.runtime,
         providers,
-        providers[0] ?? null,
-        false,
       );
       if (!resolved.runtime) return [];
       return [
@@ -160,10 +155,7 @@ export function AddChannelBotDialog({
           runtime: resolved.runtime,
           name: persona.displayName,
           personaId: persona.id,
-          harnessOverride: shouldPinSelectedRuntimeForDefinition(
-            persona.runtime,
-            resolved.runtime.id,
-          ),
+          harnessOverride: resolved.harnessOverride,
           systemPrompt: persona.systemPrompt,
           avatarUrl: persona.avatarUrl ?? undefined,
           model: persona.model ?? undefined,

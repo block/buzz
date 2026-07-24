@@ -112,6 +112,35 @@ export function shouldPinSelectedRuntimeForDefinition(
 }
 
 /**
+ * Resolve the runtime and backend pinning bit together so persona-backed
+ * provisioning cannot discard a visible implicit fallback during handoff.
+ */
+export function resolveProvisioningRuntimeForDefinition(
+  definitionRuntimeId: string | null | undefined,
+  runtimes: readonly AcpRuntime[],
+  preferredRuntimeId?: string | null,
+  disabledRuntimeIds: readonly string[] = getDisabledAcpRuntimeIdsSnapshot(),
+): ResolvePersonaRuntimeResult & { harnessOverride: boolean } {
+  const defaultRuntime = getDefaultPersonaRuntime(runtimes, preferredRuntimeId);
+  const resolved = resolvePersonaRuntime(
+    definitionRuntimeId,
+    runtimes,
+    defaultRuntime,
+    false,
+    disabledRuntimeIds,
+  );
+  return {
+    ...resolved,
+    harnessOverride:
+      resolved.runtime !== null &&
+      shouldPinSelectedRuntimeForDefinition(
+        definitionRuntimeId,
+        resolved.runtime.id,
+      ),
+  };
+}
+
+/**
  * The single definition→instance mapping (Phase 1B.3.5 rows 2–4). Every
  * surface that creates a running instance from a definition builds its
  * CreateManagedAgentInput here so the mapping cannot drift per-site.

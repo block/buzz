@@ -242,7 +242,7 @@ pub(crate) fn global_model_provider_for_record<'a>(
     let selected_command = crate::managed_agents::record_agent_command(record, personas);
     let selected_runtime = crate::managed_agents::known_acp_runtime(&selected_command);
 
-    if selected_runtime.is_some_and(|selected| std::ptr::eq(preferred_runtime, selected)) {
+    if selected_runtime.is_some_and(|selected| preferred_runtime.id == selected.id) {
         global_values
     } else {
         (None, None)

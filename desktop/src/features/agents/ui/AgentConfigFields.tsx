@@ -27,8 +27,8 @@ import {
 } from "@/features/agents/ui/bakedEnvHelpers";
 import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
-  BLOCK_BUILD_HIDDEN_PROVIDER_IDS,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
+  getPersonaHiddenProviderIds,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
   requiredCredentialEnvKeys,
@@ -543,21 +543,16 @@ export function AgentConfigFields({
     onConfigChange({ ...config, env_vars: merged });
   }
 
-  // On internal Block builds, BUZZ_AGENT_PROVIDER is baked in and a boot
-  // migration rewrites v1→v2. Hide the legacy v1 option so it is not offered
-  // for new selections; OSS builds show it.
-  const hideProviderIds = React.useMemo(() => {
-    const hidden = new Set<string>();
-    if (bakedEnvKeys.includes("BUZZ_AGENT_PROVIDER")) {
-      for (const providerId of BLOCK_BUILD_HIDDEN_PROVIDER_IDS) {
-        hidden.add(providerId);
-      }
-    }
-    if (selectedRuntimeId !== "buzz-agent") {
-      hidden.add("relay-mesh");
-    }
-    return hidden;
-  }, [bakedEnvKeys, selectedRuntimeId]);
+  const hideProviderIds = React.useMemo(
+    () =>
+      getPersonaHiddenProviderIds({
+        bakedEnvKeys,
+        selectableRuntimes: selectedRuntime ? [selectedRuntime] : [],
+        currentRuntimeId: selectedRuntimeId,
+        preserveCurrentRuntime: false,
+      }),
+    [bakedEnvKeys, selectedRuntime, selectedRuntimeId],
+  );
   const providerOptions = getPersonaProviderOptions(
     providerValue,
     credentialRuntimeId,
