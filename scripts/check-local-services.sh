@@ -131,20 +131,46 @@ done
 runtime_tmp=$(mktemp -d)
 trap 'rm -rf "${runtime_tmp}"' EXIT
 
-run_bounded() {
+run_bounded() (
+  set -m
   local output_file="$1"
   local limit_seconds="$2"
   shift 2
 
   "$@" >"${output_file}" 2>&1 &
   local command_pid=$!
+  set +m
   local elapsed_ticks=0
   local max_ticks=$((limit_seconds * 10))
 
   while kill -0 "${command_pid}" 2>/dev/null; do
     if ((elapsed_ticks >= max_ticks)); then
-      kill "${command_pid}" 2>/dev/null || true
-      wait "${command_pid}" 2>/dev/null || true
+      kill -TERM -- "-${command_pid}" 2>/dev/null || true
+
+      local grace_ticks=0
+      while kill -0 -- "-${command_pid}" 2>/dev/null && ((grace_ticks < 5)); do
+        sleep 0.1
+        grace_ticks=$((grace_ticks + 1))
+      done
+
+      if kill -0 -- "-${command_pid}" 2>/dev/null; then
+        kill -KILL -- "-${command_pid}" 2>/dev/null || true
+      fi
+
+      local reap_ticks=0
+      local process_state
+      while ((reap_ticks < 5)); do
+        process_state=$(ps -o stat= -p "${command_pid}" 2>/dev/null | tr -d '[:space:]')
+        if [[ -z "${process_state}" || "${process_state}" == Z* ]]; then
+          wait "${command_pid}" 2>/dev/null || true
+          break
+        fi
+        sleep 0.1
+        reap_ticks=$((reap_ticks + 1))
+      done
+      if ((reap_ticks >= 5)); then
+        disown -a 2>/dev/null || true
+      fi
       return 124
     fi
     sleep 0.1
@@ -152,7 +178,7 @@ run_bounded() {
   done
 
   wait "${command_pid}"
-}
+)
 
 start_local_services() {
   local required_output="${runtime_tmp}/required-start"
@@ -233,9 +259,18 @@ service_state() {
 }
 
 state_is_ready() {
-  case "$1" in
-    healthy | running | completed) return 0 ;;
-    *) return 1 ;;
+  local service="$1"
+  local state="$2"
+  case "${service}:${state}" in
+    postgres:healthy | redis:healthy | keycloak:healthy | minio:healthy)
+      return 0
+      ;;
+    adminer:running | prometheus:running | minio-init:completed)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
   esac
 }
 
@@ -252,7 +287,7 @@ while true; do
     state=$(service_state "${service}")
     if contains_service "${service}" "${required_services[@]}"; then
       role="required"
-      if ! state_is_ready "${state}"; then
+      if ! state_is_ready "${service}" "${state}"; then
         required_not_ready+=("${service}=${state}")
       fi
     else

@@ -5,7 +5,19 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 checker="${repo_root}/scripts/check-local-services.sh"
 compose_file="${repo_root}/docker-compose.yml"
 test_tmp=$(mktemp -d)
-trap 'rm -rf "${test_tmp}"' EXIT
+
+cleanup() {
+  local pid_file pid
+  for pid_file in "${test_tmp}"/*-process-pids; do
+    [[ -f "${pid_file}" ]] || continue
+    while IFS= read -r pid; do
+      [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+      kill -KILL "${pid}" 2>/dev/null || true
+    done <"${pid_file}"
+  done
+  rm -rf "${test_tmp}"
+}
+trap cleanup EXIT
 
 mkdir -p "${test_tmp}/bin"
 cat >"${test_tmp}/bin/docker" <<'MOCK'
@@ -25,7 +37,19 @@ case "${1:-}" in
         echo "mock compose startup failed" >&2
         exit 1
         ;;
-      hang) sleep 3 ;;
+      hang)
+        trap '' TERM
+        sleep 30 &
+        child_pid=$!
+        if [[ -n "${MOCK_PROCESS_PID_FILE:-}" ]]; then
+          printf '%s\n%s\n' "$$" "${child_pid}" >"${MOCK_PROCESS_PID_FILE}"
+        fi
+        while true; do
+          wait "${child_pid}" || true
+          sleep 30 &
+          child_pid=$!
+        done
+        ;;
       *)
         echo "unsupported mock start state: ${start_state}" >&2
         exit 64
@@ -54,7 +78,19 @@ case "${1:-}" in
       completed) printf 'exited|none|0\n' ;;
       failed) printf 'exited|none|1\n' ;;
       missing) exit 1 ;;
-      hang) sleep 3 ;;
+      hang)
+        trap '' TERM
+        sleep 30 &
+        child_pid=$!
+        if [[ -n "${MOCK_PROCESS_PID_FILE:-}" ]]; then
+          printf '%s\n%s\n' "$$" "${child_pid}" >"${MOCK_PROCESS_PID_FILE}"
+        fi
+        while true; do
+          wait "${child_pid}" || true
+          sleep 30 &
+          child_pid=$!
+        done
+        ;;
       *)
         echo "unsupported mock state: ${state}" >&2
         exit 64
@@ -91,6 +127,24 @@ if PATH="${test_tmp}/bin:${PATH}" \
 fi
 grep -Fq "required postgres: unhealthy" "${required_output}"
 
+completed_required_output="${test_tmp}/completed-required-output"
+if PATH="${test_tmp}/bin:${PATH}" \
+  MOCK_POSTGRES_STATE=completed \
+  "${checker}" --timeout 0 --interval 1 >"${completed_required_output}" 2>&1; then
+  echo "checker accepted a completed Postgres service" >&2
+  exit 1
+fi
+grep -Fq "required postgres: completed" "${completed_required_output}"
+
+running_required_output="${test_tmp}/running-required-output"
+if PATH="${test_tmp}/bin:${PATH}" \
+  MOCK_POSTGRES_STATE=running \
+  "${checker}" --timeout 0 --interval 1 >"${running_required_output}" 2>&1; then
+  echo "checker accepted Postgres without a healthy health check" >&2
+  exit 1
+fi
+grep -Fq "required postgres: running" "${running_required_output}"
+
 promoted_output="${test_tmp}/promoted-output"
 if PATH="${test_tmp}/bin:${PATH}" \
   BUZZ_REQUIRED_LOCAL_SERVICES=keycloak \
@@ -101,21 +155,64 @@ if PATH="${test_tmp}/bin:${PATH}" \
 fi
 grep -Fq "required keycloak: unhealthy" "${promoted_output}"
 
-bounded_start_output=$(
-  PATH="${test_tmp}/bin:${PATH}" \
-    BUZZ_LOCAL_SERVICE_OPTIONAL_START_TIMEOUT_SECONDS=1 \
-    MOCK_OPTIONAL_START_STATE=hang \
-    "${checker}" --start --timeout 0 --interval 1 2>&1
-)
-grep -Fq "optional service startup timed out after 1s" <<<"${bounded_start_output}"
+promoted_completed_output="${test_tmp}/promoted-completed-output"
+if PATH="${test_tmp}/bin:${PATH}" \
+  BUZZ_REQUIRED_LOCAL_SERVICES=adminer \
+  MOCK_ADMINER_STATE=completed \
+  "${checker}" --timeout 0 --interval 1 >"${promoted_completed_output}" 2>&1; then
+  echo "checker accepted a completed promoted long-running service" >&2
+  exit 1
+fi
+grep -Fq "required adminer: completed" "${promoted_completed_output}"
+
+PATH="${test_tmp}/bin:${PATH}" \
+  BUZZ_REQUIRED_LOCAL_SERVICES=minio-init \
+  "${checker}" --timeout 0 --interval 1 >/dev/null
+
+bounded_start_output="${test_tmp}/bounded-start-output"
+bounded_start_pids="${test_tmp}/bounded-start-process-pids"
+PATH="${test_tmp}/bin:${PATH}" \
+  BUZZ_LOCAL_SERVICE_OPTIONAL_START_TIMEOUT_SECONDS=1 \
+  MOCK_OPTIONAL_START_STATE=hang \
+  MOCK_PROCESS_PID_FILE="${bounded_start_pids}" \
+  "${checker}" --start --timeout 0 --interval 1 >"${bounded_start_output}" 2>&1 &
+bounded_checker_pid=$!
+bounded_ticks=0
+while kill -0 "${bounded_checker_pid}" 2>/dev/null && ((bounded_ticks < 30)); do
+  sleep 0.1
+  bounded_ticks=$((bounded_ticks + 1))
+done
+if kill -0 "${bounded_checker_pid}" 2>/dev/null; then
+  kill -KILL "${bounded_checker_pid}" 2>/dev/null || true
+  wait "${bounded_checker_pid}" 2>/dev/null || true
+  echo "bounded checker exceeded the 3s hard test ceiling" >&2
+  exit 1
+fi
+wait "${bounded_checker_pid}"
+grep -Fq "optional service startup timed out after 1s" "${bounded_start_output}"
+while IFS= read -r process_pid; do
+  if kill -0 "${process_pid}" 2>/dev/null; then
+    echo "bounded checker leaked descendant pid ${process_pid}" >&2
+    exit 1
+  fi
+done <"${bounded_start_pids}"
+rm -f "${bounded_start_pids}"
 
 bounded_inspect_output=$(
   PATH="${test_tmp}/bin:${PATH}" \
     BUZZ_LOCAL_SERVICE_INSPECT_TIMEOUT_SECONDS=1 \
     MOCK_PROMETHEUS_STATE=hang \
+    MOCK_PROCESS_PID_FILE="${test_tmp}/bounded-inspect-process-pids" \
     "${checker}" --timeout 0 --interval 1 2>&1
 )
 grep -Fq "optional prometheus: inspection timed out" <<<"${bounded_inspect_output}"
+while IFS= read -r process_pid; do
+  if kill -0 "${process_pid}" 2>/dev/null; then
+    echo "bounded inspection leaked descendant pid ${process_pid}" >&2
+    exit 1
+  fi
+done <"${test_tmp}/bounded-inspect-process-pids"
+rm -f "${test_tmp}/bounded-inspect-process-pids"
 
 keycloak_block=$(
   sed -n '/^  keycloak:/,/^  minio:/p' "${compose_file}"
