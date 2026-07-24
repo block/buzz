@@ -113,6 +113,15 @@ pub(crate) enum RequirementPayload {
         /// One-line stderr excerpt identifying the parse error.
         diagnostic: String,
     },
+    /// The CLI's login-status probe failed before it could determine auth.
+    /// Routes to Agent runtimes so the diagnostic is visible without starting
+    /// another login flow.
+    CliProbeFailed {
+        probe_args: Vec<String>,
+        setup_copy: String,
+        /// One-line stderr excerpt identifying the CLI failure.
+        diagnostic: String,
+    },
     /// Git for Windows is missing; open Agent runtimes for the installation guide.
     GitBash,
 }
@@ -186,6 +195,17 @@ impl RequirementPayload {
                     config_file, diagnostic
                 )
             }
+            RequirementPayload::CliProbeFailed {
+                probe_args,
+                diagnostic,
+                ..
+            } => {
+                let cli = probe_args.first().map(String::as_str).unwrap_or("the CLI");
+                format!(
+                    "{} login-status check failed: {} — open Agent runtimes in Settings to diagnose",
+                    cli, diagnostic
+                )
+            }
             RequirementPayload::GitBash => {
                 "install Git for Windows (open Agent runtimes in Settings to diagnose)".to_string()
             }
@@ -253,10 +273,14 @@ impl SetupPayload {
                 .map(|r| format!("- {}", r.instruction()))
                 .collect();
 
-            let has_doctor_requirement = self
+            let has_git_bash_requirement = self
                 .requirements
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::GitBash));
+            let has_cli_probe_failure = self
+                .requirements
+                .iter()
+                .any(|r| matches!(r, RequirementPayload::CliProbeFailed { .. }));
             let all_external = self
                 .requirements
                 .iter()
@@ -266,7 +290,9 @@ impl SetupPayload {
                 .iter()
                 .any(|r| matches!(r, RequirementPayload::CliConfigInvalid { .. }));
 
-            let footer = if has_doctor_requirement {
+            let footer = if has_cli_probe_failure {
+                "Open Agent runtimes in Settings, repair the CLI installation, then re-check and restart the agent.".to_string()
+            } else if has_git_bash_requirement {
                 "Open Agent runtimes in Settings, install Git for Windows, then re-check and restart the agent.".to_string()
             } else if all_external {
                 // All requirements are external config files — Edit Agent cannot
@@ -818,6 +844,39 @@ mod tests {
             setup_copy: String::new(),
             diagnostic: diagnostic.to_string(),
         }
+    }
+
+    fn make_cli_probe_failed(cli: &str, diagnostic: &str) -> RequirementPayload {
+        RequirementPayload::CliProbeFailed {
+            probe_args: vec![cli.to_string(), "login".to_string(), "status".to_string()],
+            setup_copy: String::new(),
+            diagnostic: diagnostic.to_string(),
+        }
+    }
+
+    #[test]
+    fn nudge_body_cli_probe_failed_routes_to_agent_runtimes() {
+        let payload = SetupPayload {
+            agent_name: "Codex".to_string(),
+            agent_pubkey: "test".to_string(),
+            requirements: vec![make_cli_probe_failed(
+                "codex",
+                "Error: spawn /opt/codex/bin/codex ENOENT",
+            )],
+        };
+        let body = payload.nudge_body();
+        assert!(
+            body.contains("login-status check failed"),
+            "nudge must distinguish a broken probe from logged-out state: {body:?}"
+        );
+        assert!(
+            body.contains("Open Agent runtimes"),
+            "nudge must route CLI failures to Agent runtimes: {body:?}"
+        );
+        assert!(
+            body.contains("repair the CLI installation"),
+            "nudge footer must provide repair guidance: {body:?}"
+        );
     }
 
     #[test]

@@ -61,6 +61,13 @@ pub(super) fn requirements(
                         diagnostic: stderr_excerpt,
                     }]
                 }
+                cli_probe::ProbeOutcome::ProbeFailed { stderr_excerpt } => {
+                    vec![Requirement::CliProbeFailed {
+                        probe_args: probe_args.iter().map(|value| value.to_string()).collect(),
+                        setup_copy: setup_copy.to_string(),
+                        diagnostic: stderr_excerpt,
+                    }]
+                }
             }
         }
         other => vec![missing_requirement(probe_args, setup_copy, other)],

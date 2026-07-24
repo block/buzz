@@ -102,6 +102,22 @@ test("extractConfigNudge parses cli_login with adapter_outdated availability", (
   );
 });
 
+test("extractConfigNudge parses cli_probe_failed requirement", () => {
+  const payload = {
+    agent_name: "Codex",
+    agent_pubkey: CODEX_PUBKEY,
+    requirements: [
+      {
+        surface: "cli_probe_failed",
+        probe_args: ["codex", "login", "status"],
+        setup_copy: "run `codex login`",
+        diagnostic: "Error: spawn /opt/codex/bin/codex ENOENT",
+      },
+    ],
+  };
+  assert.deepEqual(extractConfigNudge(withSentinel("prose", payload)), payload);
+});
+
 test("extractConfigNudge returns null for cli_login without availability", () => {
   // availability is required — old-format payloads (no availability field)
   // must not parse so stale nudge JSON from before the Doctor-CTA update
