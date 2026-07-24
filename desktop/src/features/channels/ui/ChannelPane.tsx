@@ -54,15 +54,14 @@ import {
   mentionsKnownAgent,
 } from "@/features/channels/ui/ChannelPane.helpers";
 import { useChannelIntro } from "@/features/channels/ui/useChannelIntro";
+import { useLastOwnMessageEdit } from "@/features/channels/ui/useLastOwnMessageEdit";
 import type { ChannelPaneProps } from "@/features/channels/ui/ChannelPane.types";
 import * as agentSessionSelection from "@/features/channels/ui/agentSessionSelection";
 import { usePrepareDmSendChannel } from "@/features/channels/ui/usePrepareDmSendChannel";
 import { Button } from "@/shared/ui/button";
 import { buildMainTimelineEntries } from "@/features/messages/lib/threadPanel";
 import { useRenderScopedReactionHydration } from "@/features/messages/lib/useRenderScopedReactionHydration";
-import type { TimelineMessage } from "@/features/messages/types";
 import { isWelcomeExperienceChannel as isWelcomeExperience } from "@/features/onboarding/welcome";
-import { KIND_SYSTEM_MESSAGE } from "@/shared/constants/kinds";
 import { useIsThreadPanelOverlay } from "@/shared/hooks/use-mobile";
 import { channelChrome } from "@/shared/layout/chromeLayout";
 import { cn } from "@/shared/lib/cn";
@@ -104,6 +103,7 @@ export const ChannelPane = React.memo(function ChannelPane({
   onCancelEdit,
   onCancelThreadReply,
   onBackFromAgentSession,
+  onBackFromProfilePanel,
   onCloseAgentSession,
   onCloseChannelManagement,
   onChannelManagementDeleted,
@@ -150,9 +150,11 @@ export const ChannelPane = React.memo(function ChannelPane({
   profilePanelView,
   targetMessageId,
   threadHeadMessage,
+  threadInitialScrollAnchor,
   threadMessages,
   threadMessagesPending = false,
   threadPanelWidthPx,
+  onThreadInitialScrollAnchorRestored,
   threadScrollTargetId,
   threadTypingPubkeys,
   threadReplyTargetMessage,
@@ -262,44 +264,14 @@ export const ChannelPane = React.memo(function ChannelPane({
   const mainEditTarget = editTarget && !isEditInThread ? editTarget : null;
   const threadEditTarget = editTarget && isEditInThread ? editTarget : null;
 
-  const findLastOwnEditable = React.useCallback(
-    (candidates: TimelineMessage[]): TimelineMessage | null => {
-      if (!onEdit || !currentPubkey) return null;
-      let best: TimelineMessage | null = null;
-      for (const message of candidates) {
-        if (
-          message.kind === KIND_SYSTEM_MESSAGE ||
-          message.pubkey !== currentPubkey ||
-          message.pending
-        ) {
-          continue;
-        }
-        if (!best || message.createdAt >= best.createdAt) {
-          best = message;
-        }
-      }
-      return best;
-    },
-    [onEdit, currentPubkey],
-  );
-
-  const handleEditLastOwnMainMessage = React.useCallback((): boolean => {
-    const target = findLastOwnEditable(messages);
-    if (!target || !onEdit) return false;
-    onEdit(target);
-    return true;
-  }, [findLastOwnEditable, messages, onEdit]);
-
-  const handleEditLastOwnThreadMessage = React.useCallback((): boolean => {
-    if (!onEdit) return false;
-    const scope: TimelineMessage[] = [];
-    if (threadHeadMessage) scope.push(threadHeadMessage);
-    for (const entry of threadMessages) scope.push(entry.message);
-    const target = findLastOwnEditable(scope);
-    if (!target) return false;
-    onEdit(target);
-    return true;
-  }, [findLastOwnEditable, onEdit, threadHeadMessage, threadMessages]);
+  const { handleEditLastOwnMainMessage, handleEditLastOwnThreadMessage } =
+    useLastOwnMessageEdit({
+      currentPubkey,
+      messages,
+      onEdit,
+      threadHeadMessage,
+      threadMessages,
+    });
 
   const timeoutState = useTimeoutState();
 
@@ -865,6 +837,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 isFollowingThread={isFollowingThread}
                 isMessageUnreadById={isMessageUnreadById}
                 isSending={isSending}
+                initialScrollAnchor={threadInitialScrollAnchor}
                 {...threadLayoutProps}
                 autoSendDraftKey={autoSendDraftKey}
                 onAutoSubmitComplete={handleAutoSubmitComplete}
@@ -878,6 +851,9 @@ export const ChannelPane = React.memo(function ChannelPane({
                 onFollowThread={onFollowThread}
                 onMarkUnread={onMarkUnread}
                 onMarkRead={onMarkRead}
+                onInitialScrollAnchorRestored={
+                  onThreadInitialScrollAnchorRestored
+                }
                 onExpandReplies={onExpandThreadReplies}
                 onSelectReplyTarget={onSelectThreadReplyTarget}
                 onSend={onSendThreadReply}
@@ -978,6 +954,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                 }
                 layout={useSplitAuxiliaryPane ? "split" : "standalone"}
                 transparentChrome={useSplitAuxiliaryPane}
+                onBack={onBackFromProfilePanel}
                 onClose={onCloseProfilePanel}
                 onOpenDm={onOpenDm}
                 onOpenProfile={onOpenProfilePanel}

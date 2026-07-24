@@ -4,6 +4,10 @@ import {
   classifyTimelineMessageDelta,
   type TimelineMessageDelta,
 } from "@/features/messages/lib/timelineSnapshot";
+import {
+  type RestorableScrollAnchor,
+  restoreRestorableScrollAnchor,
+} from "@/features/messages/lib/restorableScrollAnchor";
 
 /**
  * Distance (in CSS pixels) below which we consider the scroll position
@@ -102,6 +106,13 @@ type UseAnchoredScrollOptions = {
   messages: Array<{ id: string }>;
   splitPanelOpen?: boolean;
 
+  /**
+   * One-shot viewport position captured before this conversation surface was
+   * replaced. Unlike targetMessageId, restoration preserves the row's exact
+   * top offset and does not center or highlight it.
+   */
+  initialScrollAnchor?: RestorableScrollAnchor | null;
+  onInitialScrollAnchorRestored?: () => void;
   /** When set, scroll to this message on mount and on change. */
   targetMessageId?: string | null;
   /** Whether a targeted message should pulse after scrolling to it. */
@@ -224,6 +235,8 @@ export function useAnchoredScroll({
   isLoading,
   messages,
   splitPanelOpen = false,
+  initialScrollAnchor = null,
+  onInitialScrollAnchorRestored,
 
   targetMessageId = null,
   highlightTargetMessage = true,
@@ -257,6 +270,8 @@ export function useAnchoredScroll({
   const prevMessageCountRef = React.useRef(0);
   const prevMessagesRef = React.useRef<Array<{ id: string }>>([]);
   const handledTargetIdRef = React.useRef<string | null>(null);
+  const handledInitialScrollAnchorRef =
+    React.useRef<RestorableScrollAnchor | null>(null);
   const highlightTimeoutRef = React.useRef<number | null>(null);
   // Tracks a pending rAF queued by pinToBottomOnMount so it can be cancelled
   // on channel switch (the channelId reset effect clears it).
@@ -293,6 +308,7 @@ export function useAnchoredScroll({
     prevMessageCountRef.current = 0;
     prevMessagesRef.current = [];
     handledTargetIdRef.current = null;
+    handledInitialScrollAnchorRef.current = null;
     forceBottomOnNextAppendRef.current = false;
     settlingRef.current = false;
     programmaticScrollTopRef.current = null;
@@ -603,6 +619,51 @@ export function useAnchoredScroll({
     const container = scrollContainerRef.current;
     if (!container) return;
 
+    // A replaced panel can remain mounted through AnimatePresence exit, so a
+    // return anchor may arrive on an already-initialized scroll owner. Handle
+    // each captured object once whether this is a cold mount or a revived pane.
+    if (
+      initialScrollAnchor &&
+      handledInitialScrollAnchorRef.current !== initialScrollAnchor
+    ) {
+      if (isLoading) return;
+      handledInitialScrollAnchorRef.current = initialScrollAnchor;
+      const applyInitialRestore = () => {
+        anchorRef.current = restoreRestorableScrollAnchor(
+          container,
+          initialScrollAnchor,
+        );
+        const restoredAtBottom = anchorRef.current.kind === "at-bottom";
+        settlingRef.current = restoredAtBottom;
+        setIsAtBottom(restoredAtBottom);
+        setNewMessageCount(0);
+      };
+      applyInitialRestore();
+      // The composer padding and deferred reply snapshot can settle after
+      // this layout pass. Re-apply across two frames, mirroring the mount
+      // bottom pin, so neither can overwrite the captured viewport before
+      // the anchor is handed back to the normal scroll owner.
+      let remainingSettleFrames = 2;
+      const settleInitialRestore = () => {
+        applyInitialRestore();
+        remainingSettleFrames -= 1;
+        if (remainingSettleFrames > 0) {
+          mountPinRafIdRef.current =
+            requestAnimationFrame(settleInitialRestore);
+          return;
+        }
+        mountPinRafIdRef.current = null;
+        onInitialScrollAnchorRestored?.();
+      };
+      mountPinRafIdRef.current = requestAnimationFrame(settleInitialRestore);
+      hasInitializedRef.current = true;
+      prevLastMessageIdRef.current = messages[messages.length - 1]?.id;
+      prevFirstMessageIdRef.current = messages[0]?.id;
+      prevMessageCountRef.current = messages.length;
+      prevMessagesRef.current = messages;
+      return;
+    }
+
     // First render after a reset (channel switch or initial mount): jump
     // to the requested target message, or to the bottom by default.
     if (!hasInitializedRef.current) {
@@ -737,8 +798,10 @@ export function useAnchoredScroll({
     prevMessagesRef.current = messages;
   }, [
     highlightTargetMessage,
+    initialScrollAnchor,
     isLoading,
     messages,
+    onInitialScrollAnchorRestored,
     onTargetReached,
     scrollContainerRef,
     scrollToBottomImperative,

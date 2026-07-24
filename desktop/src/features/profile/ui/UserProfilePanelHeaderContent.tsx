@@ -17,7 +17,8 @@ export function getUserProfilePanelHeaderContent({
   effectivePubkey,
   logCopyValue,
   logSubtitle,
-  onBack,
+  onBackFromSummary,
+  onBackToSummary,
   view,
   viewerIsOwner,
 }: {
@@ -25,19 +26,21 @@ export function getUserProfilePanelHeaderContent({
   effectivePubkey: string | null;
   logCopyValue?: string | null;
   logSubtitle?: string | null;
-  onBack: () => void;
+  onBackFromSummary?: () => void;
+  onBackToSummary: () => void;
   view: ProfilePanelView;
   viewerIsOwner: boolean;
 }) {
   const title = PROFILE_PANEL_VIEW_TITLES[view];
   const shouldShowLogDetails =
     (view === "diagnostics" || view === "logs") && Boolean(logSubtitle);
+  const isSummary = view === "summary";
   const headerLeftContent = (
     <AuxiliaryPanelHeaderGroup
       align={shouldShowLogDetails ? "start" : "center"}
-      backButtonAriaLabel="Back to profile"
+      backButtonAriaLabel={isSummary ? "Back to thread" : "Back to profile"}
       backButtonTestId="user-profile-panel-back"
-      onBack={view !== "summary" ? onBack : undefined}
+      onBack={isSummary ? onBackFromSummary : onBackToSummary}
     >
       <AuxiliaryPanelHeaderTitleBlock
         subtitle={shouldShowLogDetails ? logSubtitle : null}
