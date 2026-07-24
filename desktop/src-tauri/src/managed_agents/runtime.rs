@@ -2127,7 +2127,11 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    // Use lazy-pool startup for manual starts, matching launch-time restore.
+    // Eager startup (false) would immediately initialize the full worker pool,
+    // consuming large amounts of RAM and creating visible idle Codex sessions
+    // before any work arrives. See restore.rs F1 comment for the same rationale.
+    let mut process = spawn_agent_child(app, record, &key.relay_url, true, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
