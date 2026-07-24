@@ -114,6 +114,8 @@ type MockPersonaSeed = {
   model?: string | null;
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {
@@ -2160,6 +2162,11 @@ function resetMockPersonas(config?: E2eConfig) {
       model: persona.model ?? null,
       provider: persona.provider ?? null,
       name_pool: persona.namePool ?? [],
+      respond_to: persona.respondTo ?? null,
+      respond_to_allowlist:
+        persona.respondTo === "allowlist"
+          ? [...(persona.respondToAllowlist ?? [])]
+          : [],
       is_builtin: false,
       is_active: persona.isActive ?? true,
       source_team: persona.sourceTeam ?? null,
@@ -10260,6 +10267,7 @@ export function maybeInstallE2eTauriMocks() {
               runtime: persona?.runtime ?? null,
               model: persona?.model ?? null,
               provider: persona?.provider ?? null,
+              respondTo: persona?.respond_to ?? null,
               respondToAllowlist: persona?.respond_to_allowlist ?? [],
               namePool: persona?.name_pool ?? [],
             },

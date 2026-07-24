@@ -632,6 +632,14 @@ fn import_non_allowlist_mode_preserved_when_keep_false() {
     );
 }
 
+#[test]
+fn import_catalog_owner_only_without_allowlist_succeeds() {
+    let minted = resolve_snapshot_import_behavior(Some("owner-only"), &[], None, false).unwrap();
+
+    assert_eq!(minted.respond_to, RespondTo::OwnerOnly);
+    assert!(minted.respond_to_allowlist.is_empty());
+}
+
 /// Non-allowlist mode with a non-empty list and keep=true: preserve mode + list.
 /// The toggle WAS shown (list is non-empty) so keep_allowlist applies.
 #[test]

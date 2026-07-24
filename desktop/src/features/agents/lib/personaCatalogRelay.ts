@@ -103,6 +103,29 @@ function isMemoryLevel(value: unknown): value is SnapshotMemoryLevel {
   return value === "none" || value === "core" || value === "everything";
 }
 
+function isSafeHttpUrl(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    /[\s()]/u.test(value)
+  ) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+function isSafeAvatarUrl(value: unknown): value is string | null {
+  return (
+    value === null ||
+    (typeof value === "string" && value.length <= 2_048 && isSafeHttpUrl(value))
+  );
+}
+
 function isSafeSnapshotReference(
   value: unknown,
 ): value is CatalogSnapshotReference {
@@ -112,17 +135,7 @@ function isSafeSnapshotReference(
   const size = value.size;
   const url = value.url;
   return (
-    typeof url === "string" &&
-    url.length > 0 &&
-    !/[\s()]/u.test(url) &&
-    (() => {
-      try {
-        const parsed = new URL(url);
-        return parsed.protocol === "https:" || parsed.protocol === "http:";
-      } catch {
-        return false;
-      }
-    })() &&
+    isSafeHttpUrl(url) &&
     typeof sha256 === "string" &&
     /^[0-9a-f]{64}$/u.test(sha256) &&
     typeof size === "number" &&
@@ -181,7 +194,7 @@ function parseCatalogContent(event: RelayEvent): CatalogContent | null {
     typeof parsed.agent.displayName !== "string" ||
     parsed.agent.displayName.trim().length === 0 ||
     typeof parsed.agent.systemPrompt !== "string" ||
-    stringOrNull(parsed.agent.avatarUrl) === undefined ||
+    !isSafeAvatarUrl(parsed.agent.avatarUrl) ||
     stringOrNull(parsed.agent.runtime) === undefined ||
     stringOrNull(parsed.agent.model) === undefined ||
     stringOrNull(parsed.agent.provider) === undefined ||
@@ -219,7 +232,7 @@ export function catalogPublicationsFromEvents(
 ): PersonaCatalogPublication[] {
   const sorted = [...events].sort(
     (left, right) =>
-      right.created_at - left.created_at || right.id.localeCompare(left.id),
+      right.created_at - left.created_at || left.id.localeCompare(right.id),
   );
   const seenCoordinates = new Set<string>();
   const publications: PersonaCatalogPublication[] = [];
@@ -403,14 +416,16 @@ export function sanitizeCatalogSnapshotBytes(
   if (typeof parsed.definition.sourceIsBuiltIn === "boolean") {
     definition.sourceIsBuiltIn = parsed.definition.sourceIsBuiltIn;
   }
-  for (const key of [
-    "systemPrompt",
-    "runtime",
-    "model",
-    "provider",
-    "respondTo",
-  ]) {
+  for (const key of ["systemPrompt", "runtime", "model", "provider"]) {
     copyOptionalString(parsed.definition, definition, key);
+  }
+  if (parsed.definition.respondTo === "allowlist") {
+    definition.respondTo = "owner-only";
+  } else if (
+    parsed.definition.respondTo === "owner-only" ||
+    parsed.definition.respondTo === "anyone"
+  ) {
+    definition.respondTo = parsed.definition.respondTo;
   }
   for (const key of [
     "parallelism",
@@ -485,10 +500,7 @@ export function sanitizeCatalogSnapshotBytes(
 }
 
 function publicAvatarUrl(avatarUrl: string | null): string | null {
-  if (!avatarUrl || avatarUrl.startsWith("data:") || avatarUrl.length > 2_048) {
-    return null;
-  }
-  return avatarUrl;
+  return isSafeAvatarUrl(avatarUrl) ? avatarUrl : null;
 }
 
 function monotonicCreatedAt(previousCreatedAt?: number | null): number {

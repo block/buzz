@@ -1333,6 +1333,8 @@ test("custom personas can be shared to the relay catalog", async ({ page }) => {
       {
         id: personaId,
         displayName: "Catalog Analyst",
+        respondTo: "allowlist",
+        respondToAllowlist: [TEST_IDENTITIES.alice.pubkey],
         systemPrompt: `## Design System And Styling
 
 - For design-system changes, check the local guidance in \`DESIGN.md\`, \`docs/color-token-mapping.md\`, \`src/shared/ui/AGENTS.md\`, and \`src/features/design-system/AGENTS.md\` before judging the implementation.
@@ -1408,6 +1410,18 @@ This deliberately long fenced-code example must not establish the minimum width 
     .click();
   await expect(catalogAccess).toHaveText("Agent only");
   await expect(publishCatalogUpdatesButton).toHaveCount(0);
+  const uploadCommand = (await readAgentShareCommands(page)).find(
+    (entry) => entry.command === "upload_media_bytes",
+  );
+  const uploadedSnapshot = JSON.parse(
+    new TextDecoder().decode(
+      Uint8Array.from(
+        (uploadCommand?.payload as { data?: number[] } | undefined)?.data ?? [],
+      ),
+    ),
+  );
+  expect(uploadedSnapshot.definition.respondTo).toBe("owner-only");
+  expect(uploadedSnapshot.definition).not.toHaveProperty("respondToAllowlist");
   await page
     .getByTestId("persona-share-dialog")
     .getByRole("button", { name: "Close" })

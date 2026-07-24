@@ -104,6 +104,8 @@ type MockPersonaSeed = {
   /** Provider pinned on the persona. Leave empty for Codex/Claude runtimes. */
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {

@@ -24,6 +24,7 @@ function catalogEvent({
   sourcePersonaId = "reviewer",
   status = "published",
   memoryLevel = "none",
+  avatarUrl = null,
 }) {
   const sourceUpdatedAt = `2026-07-23T00:00:0${createdAt}.000Z`;
   const content =
@@ -37,7 +38,7 @@ function catalogEvent({
           memoryLevel,
           agent: {
             displayName: "Relay Reviewer",
-            avatarUrl: null,
+            avatarUrl,
             systemPrompt: "Review changes.",
             runtime: "goose",
             model: "claude",
@@ -106,6 +107,68 @@ test("catalog coordinates remain independent across authors", () => {
   );
 });
 
+test("equal-second catalog heads use the relay's lowest-id tie-break", () => {
+  const publications = catalogPublicationsFromEvents([
+    catalogEvent({
+      createdAt: 1,
+      id: "b".repeat(64),
+      status: "published",
+    }),
+    catalogEvent({
+      createdAt: 1,
+      id: "a".repeat(64),
+      status: "unpublished",
+    }),
+  ]);
+
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0].status, "unpublished");
+});
+
+test("an invalid canonical head does not resurrect an older publication", () => {
+  const invalidHead = {
+    ...catalogEvent({ createdAt: 2, id: "a".repeat(64) }),
+    content: "{}",
+  };
+  const publications = catalogPublicationsFromEvents([
+    catalogEvent({ createdAt: 1, id: "older-valid" }),
+    invalidHead,
+  ]);
+
+  assert.deepEqual(publications, []);
+});
+
+test("catalog avatars accept only bounded http or https URLs", () => {
+  assert.equal(
+    catalogPublicationsFromEvents([
+      catalogEvent({
+        createdAt: 1,
+        id: "safe-avatar",
+        avatarUrl: "https://relay.example/avatar.png",
+      }),
+    ]).length,
+    1,
+  );
+  for (const [index, avatarUrl] of [
+    "data:image/png;base64,abc",
+    "javascript:alert(1)",
+    "ftp://relay.example/avatar.png",
+    `https://relay.example/${"a".repeat(2_049)}`,
+  ].entries()) {
+    assert.equal(
+      catalogPublicationsFromEvents([
+        catalogEvent({
+          createdAt: index + 1,
+          id: `unsafe-avatar-${index}`,
+          sourcePersonaId: `unsafe-avatar-${index}`,
+          avatarUrl,
+        }),
+      ]).length,
+      0,
+    );
+  }
+});
+
 test("catalog snapshot sanitization strips secrets and response allowlists", () => {
   const source = {
     format: "buzz-agent-snapshot",
@@ -140,7 +203,7 @@ test("catalog snapshot sanitization strips secrets and response allowlists", () 
   );
 
   assert.equal(sanitized.definition.systemPrompt, "Review changes.");
-  assert.equal(sanitized.definition.respondTo, "allowlist");
+  assert.equal(sanitized.definition.respondTo, "owner-only");
   assert.equal("respondToAllowlist" in sanitized.definition, false);
   assert.equal("envVars" in sanitized.definition, false);
   assert.equal("privateKeyNsec" in sanitized.definition, false);
