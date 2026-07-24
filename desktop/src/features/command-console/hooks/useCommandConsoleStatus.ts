@@ -158,6 +158,17 @@ function lmStudioStatus(probe: {
     };
   }
   const status = probe.status;
+  const securityWarnings = [...status.securityWarnings];
+  if (
+    status.bindExposure === "unknown" &&
+    !securityWarnings.includes("LM Studio listener exposure is unverified.")
+  ) {
+    securityWarnings.push("LM Studio listener exposure is unverified.");
+  }
+  const detail =
+    securityWarnings.length === 0
+      ? status.detail
+      : `${status.detail} ${securityWarnings.join(" ")}`;
   if (status.status === "app_missing") {
     return {
       ...base,
@@ -174,17 +185,17 @@ function lmStudioStatus(probe: {
       statusLabel: "Unavailable",
     };
   }
-  if (status.status === "ready" && status.securityWarnings.length === 0) {
+  if (status.status === "ready" && securityWarnings.length === 0) {
     return {
       ...base,
-      detail: status.detail,
+      detail,
       state: "connected",
       statusLabel: "Connected",
     };
   }
   return {
     ...base,
-    detail: status.detail,
+    detail,
     state: "degraded",
     statusLabel: "Degraded",
   };

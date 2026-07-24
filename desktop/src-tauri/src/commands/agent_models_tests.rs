@@ -585,9 +585,35 @@ fn lmstudio_readiness_distinguishes_no_loaded_mismatch_and_ready() {
     assert_eq!(ready.status, super::LmStudioReadinessState::Ready);
     assert_eq!(
         ready.security_warnings,
-        ["LM Studio API authentication is not enabled."]
+        [
+            "LM Studio API authentication is not enabled.",
+            "LM Studio listener exposure is unverified."
+        ]
     );
     assert_eq!(ready.bind_exposure, "unknown");
+}
+
+#[test]
+fn lmstudio_authenticated_ready_still_warns_when_listener_exposure_is_unknown() {
+    let loaded = vec![crate::managed_agents::AgentModelInfo {
+        id: "loaded".to_string(),
+        name: Some("Loaded".to_string()),
+        description: None,
+        loaded_instance_ids: vec!["loaded".to_string()],
+        is_loaded: true,
+        max_context_length: Some(262_144),
+        capabilities: None,
+    }];
+
+    let ready =
+        super::lmstudio_readiness_from_models(true, Some("loaded".to_string()), loaded, true);
+
+    assert_eq!(ready.status, super::LmStudioReadinessState::Ready);
+    assert_eq!(ready.bind_exposure, "unknown");
+    assert_eq!(
+        ready.security_warnings,
+        ["LM Studio listener exposure is unverified."]
+    );
 }
 // (they moved there with the Option C refactor).
 

@@ -188,10 +188,14 @@ test("reports LM Studio from its own native readiness probe, never mesh", () => 
     lmStudio: {
       error: null,
       status: {
+        bindExposure: "unknown",
         configuredModel: "qwen/qwen3.6-27b",
         detail: "Loaded model is ready; authentication is not enabled.",
         loadedModels: ["qwen/qwen3.6-27b"],
-        securityWarnings: ["LM Studio API authentication is not enabled."],
+        securityWarnings: [
+          "LM Studio API authentication is not enabled.",
+          "LM Studio listener exposure is unverified.",
+        ],
         status: "ready",
       },
     },
@@ -206,10 +210,36 @@ test("reports LM Studio from its own native readiness probe, never mesh", () => 
     (service) => service.id === "lm-studio",
   );
   assert.deepEqual(lmStudio, {
-    detail: "Loaded model is ready; authentication is not enabled.",
+    detail:
+      "Loaded model is ready; authentication is not enabled. LM Studio API authentication is not enabled. LM Studio listener exposure is unverified.",
     id: "lm-studio",
     label: "LM Studio",
     state: "degraded",
     statusLabel: "Degraded",
   });
+});
+
+test("keeps authenticated ready LM Studio degraded while listener exposure is unknown", () => {
+  const viewModel = createCommandConsoleStatusViewModel({
+    lmStudio: {
+      error: null,
+      status: {
+        bindExposure: "unknown",
+        configuredModel: "qwen/qwen3.6-27b",
+        detail: "Loaded LM Studio model is ready.",
+        loadedModels: ["qwen/qwen3.6-27b"],
+        securityWarnings: [],
+        status: "ready",
+      },
+    },
+    localCompute: { error: null, status: null },
+    relayConnection: "connected",
+  });
+
+  const lmStudio = viewModel.liveServices.find(
+    (service) => service.id === "lm-studio",
+  );
+  assert.equal(lmStudio?.state, "degraded");
+  assert.equal(lmStudio?.statusLabel, "Degraded");
+  assert.match(lmStudio?.detail ?? "", /listener exposure is unverified/i);
 });

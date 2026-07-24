@@ -199,6 +199,10 @@ containment:
   its own internal MCP redirect behavior have not been contained or proven;
 - successful loopback access does not prove LM Studio is bound only to
   loopback;
+- Phase 2 therefore reports listener exposure as `unknown`, always emits the
+  fixed warning `LM Studio listener exposure is unverified.`, and keeps the
+  Command Console card Degraded even when authentication and a loaded model
+  are otherwise ready;
 - the Buzz ACP harness still exchanges signed prompts/results through its
   configured relay.
 
