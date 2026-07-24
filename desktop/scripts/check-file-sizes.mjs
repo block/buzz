@@ -80,7 +80,9 @@ const overrides = new Map([
   // entries with pinned checksums + license texts) + select_stt_model and its
   // unit tests. Load-bearing model-selection surface from the upstream PR;
   // queued to split when #2520 lands and this port is dropped in the rebase.
-  ["src-tauri/src/huddle/models.rs", 1320],
+  // composer-dictation model picker adds per-model slots + SttModelInfo +
+  // resolve_dictation_model (~110 lines); split rides the same rebase.
+  ["src-tauri/src/huddle/models.rs", 1430],
   // composer-dictation: live-transcript mode (live_tx partial re-decode loop),
   // sticky-punctuation heuristic + unit tests, and two #[ignore]d decode
   // experiments (silence/noise vs punctuation, v3 comparison) that document

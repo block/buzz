@@ -425,6 +425,19 @@ pub struct VoiceModelStatus {
     pub tts: ModelStatus,
 }
 
+/// One `STT_MODELS` registry entry with live status, for the dictation model
+/// picker in Settings.
+#[derive(Debug, Clone, Serialize)]
+pub struct SttModelInfo {
+    pub id: &'static str,
+    pub languages: &'static str,
+    pub multilingual: bool,
+    /// `true` for the model the app selected at startup (override / locale /
+    /// default) — what dictation uses when no explicit preference is set.
+    pub selected: bool,
+    pub status: ModelStatus,
+}
+
 // ── Safe archive extraction ───────────────────────────────────────────────────
 
 /// Extract a .tar.bz2 archive safely using Rust-native crates.
@@ -741,6 +754,9 @@ pub struct ModelManager {
     /// The STT model selected for this process (override / locale / default).
     stt_model: &'static SttModel,
     stt: ModelSlot,
+    /// One slot per `STT_MODELS` entry (dictation model picker). The entry for
+    /// the startup-selected model shares `stt`'s Arcs so status has one truth.
+    stt_slots: Vec<ModelSlot>,
     tts: ModelSlot,
 }
 
@@ -758,14 +774,26 @@ impl ModelManager {
             "buzz-desktop: STT model '{}' selected ({})",
             stt_model.id, stt_model.languages
         );
+        let stt = ModelSlot::new(
+            stt_model.dir_name,
+            stt_expected_files(stt_model),
+            stt_model.version,
+        );
+        let stt_slots = STT_MODELS
+            .iter()
+            .map(|m| {
+                if m.id == stt_model.id {
+                    stt.clone()
+                } else {
+                    ModelSlot::new(m.dir_name, stt_expected_files(m), m.version)
+                }
+            })
+            .collect();
         Some(Self {
             models_dir,
             stt_model,
-            stt: ModelSlot::new(
-                stt_model.dir_name,
-                stt_expected_files(stt_model),
-                stt_model.version,
-            ),
+            stt,
+            stt_slots,
             tts: ModelSlot::new(
                 TTS_MODEL_DIR_NAME,
                 TTS_EXPECTED_FILES.to_vec(),
@@ -797,6 +825,75 @@ impl ModelManager {
     /// Returns `true` once when the STT model just became ready. Resets the flag.
     pub fn take_stt_ready(&self) -> bool {
         self.stt.take_ready()
+    }
+
+    // ── Per-model STT accessors (dictation model picker) ─────────────────────
+
+    /// Registry model + its slot by id (case-insensitive).
+    fn stt_slot_for(&self, id: &str) -> Option<(&'static SttModel, &ModelSlot)> {
+        STT_MODELS
+            .iter()
+            .zip(&self.stt_slots)
+            .find(|(m, _)| m.id.eq_ignore_ascii_case(id))
+    }
+
+    /// Registry entries with live status, for the dictation model picker.
+    pub fn stt_model_infos(&self) -> Vec<SttModelInfo> {
+        STT_MODELS
+            .iter()
+            .zip(&self.stt_slots)
+            .map(|(m, slot)| SttModelInfo {
+                id: m.id,
+                languages: m.languages,
+                multilingual: m.multilingual,
+                selected: m.id == self.stt_model.id,
+                // A slot that never started a download this run still reports
+                // NotDownloaded in memory — trust the disk check first.
+                status: if slot.is_ready(&self.models_dir) {
+                    ModelStatus::Ready
+                } else {
+                    slot.status()
+                },
+            })
+            .collect()
+    }
+
+    /// Resolve the model for a dictation session: the preferred id when known
+    /// and ready on disk, else the startup-selected model. `None` when nothing
+    /// is ready.
+    pub fn resolve_dictation_model(
+        &self,
+        preferred: Option<&str>,
+    ) -> Option<(&'static str, PathBuf, SttFamily)> {
+        if let Some((model, slot)) = preferred.and_then(|id| self.stt_slot_for(id)) {
+            if let Some(dir) = slot.dir_if_ready(&self.models_dir) {
+                return Some((model.id, dir, model.family));
+            }
+        }
+        let dir = self.stt.dir_if_ready(&self.models_dir)?;
+        Some((self.stt_model.id, dir, self.stt_model.family))
+    }
+
+    /// Start a background download of a specific registry model. No-op if it
+    /// is already ready or downloading.
+    pub fn start_stt_download_for(
+        &self,
+        id: &str,
+        http_client: reqwest::Client,
+    ) -> Result<(), String> {
+        let (model, slot) = self
+            .stt_slot_for(id)
+            .ok_or_else(|| format!("unknown STT model id: {id}"))?;
+        let manager = self.clone();
+        let slot_for_task = slot.clone();
+        slot.start_download(&self.models_dir, http_client, "stt", move |client| {
+            async move {
+                manager
+                    .download_stt_model_for(model, slot_for_task, client)
+                    .await
+            }
+        });
+        Ok(())
     }
 
     // ── TTS accessors ─────────────────────────────────────────────────────────
@@ -863,15 +960,25 @@ impl ModelManager {
 
     // ── Private download implementations ─────────────────────────────────────
 
-    /// Download, extract, and verify the STT model archive.
+    /// Download, extract, and verify the startup-selected STT model archive.
     async fn download_stt_model(&self, http_client: reqwest::Client) -> Result<(), String> {
+        self.download_stt_model_for(self.stt_model, self.stt.clone(), http_client)
+            .await
+    }
+
+    /// Download, extract, and verify a specific STT model archive into `slot`.
+    async fn download_stt_model_for(
+        &self,
+        model: &'static SttModel,
+        slot: ModelSlot,
+        http_client: reqwest::Client,
+    ) -> Result<(), String> {
         tokio::fs::create_dir_all(&self.models_dir)
             .await
             .map_err(|e| format!("create models dir: {e}"))?;
 
         // Temp filenames derive from the final directory name to avoid colliding
         // with leftovers from any previous STT model (e.g. moonshine-tiny.*).
-        let model = self.stt_model;
         let archive_path = self.models_dir.join(format!("{}.tar.bz2", model.dir_name));
         let temp_dir = self.models_dir.join(format!("{}.tmp", model.dir_name));
 
@@ -881,7 +988,7 @@ impl ModelManager {
         );
         let response = fetch_url(&http_client, model.download_url, "stt archive").await?;
 
-        let slot = self.stt.clone();
+        let progress_slot = slot.clone();
         let bytes = download_file(
             response,
             &archive_path,
@@ -891,7 +998,7 @@ impl ModelManager {
                 if let Some(pct) =
                     content_length.and_then(|total| (downloaded * 89).checked_div(total))
                 {
-                    slot.set_status(ModelStatus::Downloading {
+                    progress_slot.set_status(ModelStatus::Downloading {
                         progress_percent: pct.min(89) as u8,
                     });
                 }
@@ -923,7 +1030,7 @@ impl ModelManager {
             }
         }
 
-        self.stt.set_status(ModelStatus::Downloading {
+        slot.set_status(ModelStatus::Downloading {
             progress_percent: 90,
         });
         fresh_temp_dir(&temp_dir).await?;
@@ -955,8 +1062,7 @@ impl ModelManager {
         }
 
         // verify_and_install takes the subdir (actual model files); temp_cleanup removes outer dir.
-        if let Err(e) = self
-            .stt
+        if let Err(e) = slot
             .verify_and_install(&self.models_dir, &extracted_subdir, Some(&temp_dir))
             .await
         {
@@ -975,7 +1081,7 @@ impl ModelManager {
 
         eprintln!(
             "buzz-desktop: STT model ready at {}",
-            self.stt.model_dir(&self.models_dir).display()
+            slot.model_dir(&self.models_dir).display()
         );
         Ok(())
     }
@@ -1126,6 +1232,14 @@ pub fn is_stt_ready() -> bool {
     global_model_manager()
         .map(|m| m.is_stt_ready())
         .unwrap_or(false)
+}
+
+/// Resolve the model for a dictation session (see
+/// `ModelManager::resolve_dictation_model`).
+pub fn resolve_dictation_model(
+    preferred: Option<&str>,
+) -> Option<(&'static str, PathBuf, SttFamily)> {
+    global_model_manager()?.resolve_dictation_model(preferred)
 }
 
 /// Best-effort cleanup of the legacy Moonshine STT model directory.

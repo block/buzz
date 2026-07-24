@@ -40,7 +40,10 @@ use deep_link::{
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
-use dictation::{push_dictation_pcm, start_dictation, stop_dictation};
+use dictation::{
+    download_dictation_model, get_dictation_models, push_dictation_pcm, start_dictation,
+    stop_dictation,
+};
 use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
     add_agent_to_huddle, check_pipeline_hotstart, confirm_huddle_active, download_voice_models,
@@ -858,6 +861,8 @@ pub fn run() {
             start_dictation,
             stop_dictation,
             push_dictation_pcm,
+            get_dictation_models,
+            download_dictation_model,
             reconnect_huddle_audio,
             start_stt_pipeline,
             set_huddle_transcription_enabled,

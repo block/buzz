@@ -9,6 +9,7 @@ import {
   setupAudioWorklet,
   type AudioWorkletHandle,
 } from "@/features/huddle/lib/audioWorklet";
+import { getDictationModelPreference } from "./dictationModelPreference";
 import { transcriptDiff } from "./transcriptDiff";
 
 export type DictationStatus = "idle" | "starting" | "recording";
@@ -187,7 +188,7 @@ export function useDictation(editor: Editor | null) {
     let rustSessionStarted = false;
     try {
       // Rust first: fails fast if the model is missing or a session is live.
-      await invoke("start_dictation");
+      await invoke("start_dictation", { model: getDictationModelPreference() });
       rustSessionStarted = true;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const track = stream.getAudioTracks()[0];

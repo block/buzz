@@ -13,6 +13,7 @@ import {
   LayoutTemplate,
   LockKeyhole,
   MessagesSquare,
+  Mic,
   MonitorCog,
   Moon,
   ShieldAlert,
@@ -84,6 +85,7 @@ import { SettingsOptionGroup, SettingsOptionRow } from "./SettingsOptionGroup";
 import { ProfileSettingsCard } from "./ProfileSettingsCard";
 import { UpdateChecker } from "../UpdateChecker";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
+import { VoiceSettingsCard } from "./VoiceSettingsCard";
 
 export type SettingsSection =
   | "profile"
@@ -94,6 +96,7 @@ export type SettingsSection =
   | "compute"
   | "appearance"
   | "shortcuts"
+  | "voice"
   | "hosted-communities"
   | "community-members"
   | "moderation"
@@ -113,6 +116,7 @@ const SETTINGS_SECTION_VALUES: readonly SettingsSection[] = [
   "compute",
   "appearance",
   "shortcuts",
+  "voice",
   "hosted-communities",
   "community-members",
   "moderation",
@@ -194,6 +198,11 @@ export const settingsSections: SettingsSectionDescriptor[] = [
     value: "shortcuts",
     label: "Shortcuts",
     icon: Keyboard,
+  },
+  {
+    value: "voice",
+    label: "Voice & dictation",
+    icon: Mic,
   },
   {
     value: "hosted-communities",
@@ -827,6 +836,8 @@ export function renderSettingsSection(
       return <ThemeSettingsCard />;
     case "shortcuts":
       return <KeyboardShortcutsCard />;
+    case "voice":
+      return <VoiceSettingsCard />;
     case "hosted-communities":
       return <HostedCommunitiesSettingsCard />;
     case "community-members":

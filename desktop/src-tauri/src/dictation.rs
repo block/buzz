@@ -49,13 +49,19 @@ const FLUSH_SILENCE_BYTES: usize = 4 * 48_000;
 /// memory ever matters.
 #[derive(Default)]
 pub struct DictationState {
-    pipeline: Mutex<Option<SttPipeline>>,
+    /// Loaded pipeline tagged with the model id it was built from, so a
+    /// changed model preference rebuilds it on the next start.
+    pipeline: Mutex<Option<(&'static str, SttPipeline)>>,
     /// True while a session is live — blocks a second concurrent session and
     /// gates `push_dictation_pcm` so late batches can't dirty the VAD buffer.
     active: AtomicBool,
 }
 
 /// Start (or resume) a dictation session.
+///
+/// `model` is the user's model preference (Settings → Voice & dictation); it
+/// is used when it names a registry model that is ready on disk, otherwise
+/// the startup-selected model is used.
 ///
 /// Errors if the speech model isn't downloaded yet or a session is already
 /// active (prevents two composers opening two mic streams into one pipeline).
@@ -64,6 +70,7 @@ pub fn start_dictation(
     app: tauri::AppHandle,
     state: tauri::State<'_, DictationState>,
     app_state: tauri::State<'_, AppState>,
+    model: Option<String>,
 ) -> Result<(), String> {
     if state.active.load(Ordering::Acquire) {
         return Err("dictation already active".to_string());
@@ -81,26 +88,31 @@ pub fn start_dictation(
         .lock()
         .map_err(|_| "dictation state poisoned".to_string())?;
 
-    // Clear a dead pipeline (init failure or crash) so retry works.
-    if guard.as_ref().is_some_and(|p| p.is_finished()) {
+    let (model_id, model_dir, family) = models::resolve_dictation_model(model.as_deref())
+        .ok_or("speech model still downloading — try again in a moment".to_string())?;
+
+    // Clear a dead pipeline (init failure or crash) so retry works, and a
+    // pipeline built from a different model so a preference change applies.
+    if guard
+        .as_ref()
+        .is_some_and(|(id, p)| p.is_finished() || *id != model_id)
+    {
         *guard = None;
     }
 
     if guard.is_none() {
-        let model_dir = models::stt_model_dir()
-            .ok_or("speech model still downloading — try again in a moment".to_string())?;
         let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<(String, bool)>(64);
         // In live mode all transcripts arrive on live_rx; the pipeline's own
         // text receiver stays silent and is dropped here.
         let (pipeline, _text_rx) = SttPipeline::new(
             model_dir,
-            models::stt_model_family(),
+            family,
             Arc::new(AtomicBool::new(false)), // no TTS during dictation
             None,
             None, // continuous VAD segments phrases at natural pauses
             Some(live_tx),
         )?;
-        *guard = Some(pipeline);
+        *guard = Some((model_id, pipeline));
 
         // Forward transcripts to the webview until the pipeline is dropped.
         tauri::async_runtime::spawn(async move {
@@ -126,10 +138,29 @@ pub fn stop_dictation(state: tauri::State<'_, DictationState>) {
         return;
     }
     if let Ok(guard) = state.pipeline.lock() {
-        if let Some(ref pipeline) = *guard {
+        if let Some((_, ref pipeline)) = *guard {
             let _ = pipeline.push_audio(vec![0u8; FLUSH_SILENCE_BYTES]);
         }
     }
+}
+
+/// Registry STT models with live install status, for the Settings picker.
+#[tauri::command]
+pub fn get_dictation_models() -> Result<Vec<models::SttModelInfo>, String> {
+    Ok(models::global_model_manager()
+        .ok_or("model manager unavailable (home directory could not be resolved)")?
+        .stt_model_infos())
+}
+
+/// Start a background download of a specific STT model (Settings picker).
+#[tauri::command]
+pub fn download_dictation_model(
+    id: String,
+    app_state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    models::global_model_manager()
+        .ok_or("model manager unavailable (home directory could not be resolved)")?
+        .start_stt_download_for(&id, app_state.http_client.clone())
 }
 
 /// Receive raw PCM (f32 LE, 48 kHz mono) from the AudioWorklet.
@@ -157,7 +188,7 @@ pub fn push_dictation_pcm(
                 .pipeline
                 .lock()
                 .map_err(|_| "dictation state poisoned".to_string())?;
-            if let Some(ref pipeline) = *guard {
+            if let Some((_, ref pipeline)) = *guard {
                 pipeline.push_audio(bytes.to_vec())?;
             }
             Ok(())
