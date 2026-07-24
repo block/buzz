@@ -114,6 +114,36 @@ echo "==> Symlinking system GStreamer plugin directory"
 rm -rf "$LIBDIR/gstreamer-1.0"
 ln -s "/usr/lib/$MULTIARCH/gstreamer-1.0" "$LIBDIR/gstreamer-1.0"
 
+# WebKitGTK 2.52 Skia's GPU path goes through Vulkan/radv. On non-conformant
+# AMD RDNA4 (gfx1200) that path paints nothing — transparent ghost window —
+# while WEBKIT_DISABLE_DMABUF_RENDERER does not help (#2643). Prefer Skia CPU
+# raster for AppImage launches; operators can override with =0.
+echo "==> Preferring WebKitGTK Skia CPU rendering for AppImage launches"
+HOOK_DIR="$WORKDIR/squashfs-root/apprun-hooks"
+mkdir -p "$HOOK_DIR"
+cat > "$HOOK_DIR/99-buzz-webkit-skia-cpu.sh" <<'EOF'
+# Allow operators to override (e.g. WEBKIT_SKIA_ENABLE_CPU_RENDERING=0) if needed.
+export WEBKIT_SKIA_ENABLE_CPU_RENDERING="${WEBKIT_SKIA_ENABLE_CPU_RENDERING:-1}"
+EOF
+if [[ -f "$WORKDIR/squashfs-root/AppRun" ]] \
+  && ! grep -q 'WEBKIT_SKIA_ENABLE_CPU_RENDERING' "$WORKDIR/squashfs-root/AppRun"; then
+  if ! grep -q 'apprun-hooks' "$WORKDIR/squashfs-root/AppRun"; then
+    tmp_apprun="$(mktemp)"
+    {
+      if head -n1 "$WORKDIR/squashfs-root/AppRun" | grep -q '^#!'; then
+        head -n1 "$WORKDIR/squashfs-root/AppRun"
+        echo 'export WEBKIT_SKIA_ENABLE_CPU_RENDERING="${WEBKIT_SKIA_ENABLE_CPU_RENDERING:-1}"'
+        tail -n +2 "$WORKDIR/squashfs-root/AppRun"
+      else
+        echo 'export WEBKIT_SKIA_ENABLE_CPU_RENDERING="${WEBKIT_SKIA_ENABLE_CPU_RENDERING:-1}"'
+        cat "$WORKDIR/squashfs-root/AppRun"
+      fi
+    } > "$tmp_apprun"
+    mv "$tmp_apprun" "$WORKDIR/squashfs-root/AppRun"
+    chmod +x "$WORKDIR/squashfs-root/AppRun"
+  fi
+fi
+
 echo "==> Repacking AppImage"
 # Pass a pinned type2 runtime when provided (CI sets APPIMAGETOOL_RUNTIME_FILE);
 # without it appimagetool downloads the runtime from its mutable `continuous`

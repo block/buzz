@@ -135,6 +135,14 @@ async fn wait_for_stable_initial_window_geometry<R: tauri::Runtime>(window: &tau
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK 2.52 Skia GPU/Vulkan paints nothing on non-conformant AMD RDNA4
+    // (radv gfx1200): transparent ghost window (#2643). Prefer CPU raster when
+    // unset; operators can force GPU with WEBKIT_SKIA_ENABLE_CPU_RENDERING=0.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WEBKIT_SKIA_ENABLE_CPU_RENDERING").is_none() {
+        std::env::set_var("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "1");
+    }
+
     // mesh-llm's async chains (model download, node start/join) overflow
     // tokio's default 2 MiB worker stacks — a stack-guard SIGABRT, not a
     // panic. Upstream mesh-llm and mesh-console both run on 8 MiB worker
