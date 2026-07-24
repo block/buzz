@@ -245,9 +245,13 @@ jobs:
           cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
 
           # Rebuild the updater archive from the signed .app and re-sign it with the Tauri updater key.
-          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig"
-          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
-          TARBALL_ABS="$(pwd)/${APP_DIR}/Buzz.app.tar.gz"
+          # Use an arch-qualified name so arm64 and Intel uploads cannot clobber each other on
+          # buzz-desktop-latest (#2690). Linux/Windows already ship versioned updater filenames.
+          ARCHIVE_NAME="Buzz_${VERSION}_aarch64.app.tar.gz"
+          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig" \
+            "${APP_DIR}/${ARCHIVE_NAME}" "${APP_DIR}/${ARCHIVE_NAME}.sig"
+          (cd "$APP_DIR" && tar -czf "$ARCHIVE_NAME" Buzz.app)
+          TARBALL_ABS="$(pwd)/${APP_DIR}/${ARCHIVE_NAME}"
           (cd desktop && pnpm tauri signer sign "$TARBALL_ABS")
 
       - name: Verify code signature
@@ -420,9 +424,12 @@ jobs:
           cp -R "${EXTRACT_DIR}/Buzz.app" "${APP_DIR}/Buzz.app"
 
           # Rebuild the updater archive from the signed .app and re-sign with the Tauri updater key.
-          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig"
-          (cd "$APP_DIR" && tar -czf Buzz.app.tar.gz Buzz.app)
-          TARBALL_ABS="$(pwd)/${APP_DIR}/Buzz.app.tar.gz"
+          # Arch-qualified name — must not share Buzz.app.tar.gz with arm64 (#2690).
+          ARCHIVE_NAME="Buzz_${VERSION}_x64.app.tar.gz"
+          rm -f "${APP_DIR}/Buzz.app.tar.gz" "${APP_DIR}/Buzz.app.tar.gz.sig" \
+            "${APP_DIR}/${ARCHIVE_NAME}" "${APP_DIR}/${ARCHIVE_NAME}.sig"
+          (cd "$APP_DIR" && tar -czf "$ARCHIVE_NAME" Buzz.app)
+          TARBALL_ABS="$(pwd)/${APP_DIR}/${ARCHIVE_NAME}"
           (cd desktop && pnpm tauri signer sign "$TARBALL_ABS")
 
       - name: Verify code signature
@@ -926,6 +933,14 @@ jobs:
           add_archive "$RESULT_X64" darwin-x86_64 "$ARCHIVE_X64"
           add_archive "$RESULT_LINUX" linux-x86_64 "$ARCHIVE_LINUX"
           add_archive "$RESULT_WIN" windows-x86_64 "$ARCHIVE_WIN"
+
+          # Fail closed if both macOS jobs somehow published the same filename —
+          # that collision is what broke Intel auto-update (#2690).
+          if [[ "$RESULT_ARM64" == "success" && "$RESULT_X64" == "success" \
+            && -n "$ARCHIVE_ARM64" && "$ARCHIVE_ARM64" == "$ARCHIVE_X64" ]]; then
+            echo "::error::darwin-aarch64 and darwin-x86_64 share updater archive name '$ARCHIVE_ARM64'"
+            exit 1
+          fi
 
           for name in "${ARCHIVES[@]}"; do
             echo "Checking $BASE/$name ..."
