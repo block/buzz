@@ -159,6 +159,67 @@ pub struct AdviserContribution {
     proposed_actions: Vec<PendingProposal>,
 }
 
+impl CitedFinding {
+    /// Parses one untrusted finding against the exact run-ledger IDs.
+    pub fn parse_for_ledger(
+        value: Value,
+        run_ledger_ids: &BTreeSet<String>,
+    ) -> Result<Self, ContractError> {
+        let raw: RawCitedFinding = serde_json::from_value(value).map_err(|_| ContractError)?;
+        let mut findings = parse_raw_findings(vec![raw], run_ledger_ids)?;
+        findings.pop().ok_or(ContractError)
+    }
+
+    /// Returns the validated factual text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the sorted, unique run-ledger citations.
+    pub fn source_ids(&self) -> &[String] {
+        &self.source_ids
+    }
+}
+
+impl AdviserContribution {
+    /// Parses one untrusted specialist terminal message against the canonical
+    /// contribution contract and the exact run-ledger IDs visible to the model.
+    pub fn parse_for_adviser(
+        value: Value,
+        expected_adviser: AdviserId,
+        run_ledger_ids: &BTreeSet<String>,
+    ) -> Result<Self, ContractError> {
+        let raw: RawAdviserContribution =
+            serde_json::from_value(value).map_err(|_| ContractError)?;
+        parse_raw_contribution(raw, expected_adviser, run_ledger_ids)
+    }
+
+    /// Returns the validated specialist identity.
+    pub const fn adviser(&self) -> AdviserId {
+        self.adviser
+    }
+
+    /// Returns the one section assigned to this specialist.
+    pub const fn section(&self) -> BriefSection {
+        self.section
+    }
+
+    /// Returns the validated ledger-cited findings.
+    pub fn findings(&self) -> &[CitedFinding] {
+        &self.findings
+    }
+
+    /// Returns bounded limitations preserved from the specialist.
+    pub fn limitations(&self) -> &[String] {
+        &self.limitations
+    }
+
+    /// Returns bounded dissent preserved from the specialist.
+    pub fn dissent(&self) -> &[String] {
+        &self.dissent
+    }
+}
+
 /// Freshness assessment referencing only entries in the source ledger.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -402,6 +463,90 @@ fn valid_sections(sections: &BTreeMap<BriefSection, Vec<CitedFinding>>) -> bool 
             .all(|findings| findings.len() <= MAX_ARRAY_ITEMS)
 }
 
+fn parse_raw_findings(
+    raw_findings: Vec<RawCitedFinding>,
+    ledger_ids: &BTreeSet<String>,
+) -> Result<Vec<CitedFinding>, ContractError> {
+    if raw_findings.len() > MAX_ARRAY_ITEMS {
+        return Err(ContractError);
+    }
+    raw_findings
+        .into_iter()
+        .map(|finding| {
+            if !valid_text(&finding.text)
+                || finding.source_ids.is_empty()
+                || !unique_valid_text_array(&finding.source_ids)
+                || finding
+                    .source_ids
+                    .iter()
+                    .any(|source_id| !ledger_ids.contains(source_id))
+            {
+                return Err(ContractError);
+            }
+            let mut source_ids = finding.source_ids;
+            source_ids.sort();
+            Ok(CitedFinding {
+                classification: finding.classification,
+                text: finding.text,
+                source_ids,
+            })
+        })
+        .collect()
+}
+
+fn parse_raw_contribution(
+    contribution: RawAdviserContribution,
+    expected_adviser: AdviserId,
+    ledger_ids: &BTreeSet<String>,
+) -> Result<AdviserContribution, ContractError> {
+    if contribution.adviser != expected_adviser
+        || expected_adviser == AdviserId::ChiefOfStaff
+        || !contribution.confidence.is_finite()
+        || !(0.0..=1.0).contains(&contribution.confidence)
+        || !valid_text_array(&contribution.limitations)
+        || !valid_text_array(&contribution.dissent)
+        || contribution.proposed_actions.len() > MAX_ARRAY_ITEMS
+    {
+        return Err(ContractError);
+    }
+    let expected_section = match contribution.adviser {
+        AdviserId::Operations => BriefSection::Operations,
+        AdviserId::Navigation => BriefSection::Navigation,
+        AdviserId::DailyRoutine => BriefSection::DailyRoutine,
+        AdviserId::Reporting => BriefSection::Reports,
+        AdviserId::Plans => BriefSection::Planning306090,
+        AdviserId::ChiefOfStaff => return Err(ContractError),
+    };
+    if contribution.section != expected_section {
+        return Err(ContractError);
+    }
+    let proposed_actions = contribution
+        .proposed_actions
+        .into_iter()
+        .map(|proposal| {
+            if !valid_text(&proposal.action_id) || !valid_text(&proposal.text) {
+                return Err(ContractError);
+            }
+            Ok(PendingProposal {
+                classification: proposal.classification,
+                action_id: proposal.action_id,
+                text: proposal.text,
+                approval_state: proposal.approval_state,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AdviserContribution {
+        classification: contribution.classification,
+        adviser: contribution.adviser,
+        section: contribution.section,
+        findings: parse_raw_findings(contribution.findings, ledger_ids)?,
+        confidence: contribution.confidence,
+        limitations: contribution.limitations,
+        dissent: contribution.dissent,
+        proposed_actions,
+    })
+}
+
 impl TryFrom<Value> for CommandBrief {
     type Error = ContractError;
 
@@ -475,38 +620,9 @@ impl TryFrom<Value> for CommandBrief {
             return Err(ContractError);
         }
 
-        let parse_findings =
-            |raw_findings: Vec<RawCitedFinding>| -> Result<Vec<CitedFinding>, ContractError> {
-                if raw_findings.len() > MAX_ARRAY_ITEMS {
-                    return Err(ContractError);
-                }
-                raw_findings
-                    .into_iter()
-                    .map(|finding| {
-                        if !valid_text(&finding.text)
-                            || finding.source_ids.is_empty()
-                            || !unique_valid_text_array(&finding.source_ids)
-                            || finding
-                                .source_ids
-                                .iter()
-                                .any(|source_id| !ledger_ids.contains(source_id))
-                        {
-                            return Err(ContractError);
-                        }
-                        let mut source_ids = finding.source_ids;
-                        source_ids.sort();
-                        Ok(CitedFinding {
-                            classification: finding.classification,
-                            text: finding.text,
-                            source_ids,
-                        })
-                    })
-                    .collect()
-            };
-
         let mut sections = BTreeMap::new();
         for (section, findings) in raw.sections {
-            sections.insert(section, parse_findings(findings)?);
+            sections.insert(section, parse_raw_findings(findings, &ledger_ids)?);
         }
         if !valid_sections(&sections) {
             return Err(ContractError);
@@ -524,50 +640,11 @@ impl TryFrom<Value> for CommandBrief {
         for contribution in raw.contributions {
             if !expected_specialists.contains(&contribution.adviser)
                 || !seen_specialists.insert(contribution.adviser)
-                || !contribution.confidence.is_finite()
-                || !(0.0..=1.0).contains(&contribution.confidence)
-                || !valid_text_array(&contribution.limitations)
-                || !valid_text_array(&contribution.dissent)
-                || contribution.proposed_actions.len() > MAX_ARRAY_ITEMS
             {
                 return Err(ContractError);
             }
-            let expected_section = match contribution.adviser {
-                AdviserId::Operations => BriefSection::Operations,
-                AdviserId::Navigation => BriefSection::Navigation,
-                AdviserId::DailyRoutine => BriefSection::DailyRoutine,
-                AdviserId::Reporting => BriefSection::Reports,
-                AdviserId::Plans => BriefSection::Planning306090,
-                AdviserId::ChiefOfStaff => return Err(ContractError),
-            };
-            if contribution.section != expected_section {
-                return Err(ContractError);
-            }
-            let proposals = contribution
-                .proposed_actions
-                .into_iter()
-                .map(|proposal| {
-                    if !valid_text(&proposal.action_id) || !valid_text(&proposal.text) {
-                        return Err(ContractError);
-                    }
-                    Ok(PendingProposal {
-                        classification: proposal.classification,
-                        action_id: proposal.action_id,
-                        text: proposal.text,
-                        approval_state: proposal.approval_state,
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            contributions.push(AdviserContribution {
-                classification: contribution.classification,
-                adviser: contribution.adviser,
-                section: contribution.section,
-                findings: parse_findings(contribution.findings)?,
-                confidence: contribution.confidence,
-                limitations: contribution.limitations,
-                dissent: contribution.dissent,
-                proposed_actions: proposals,
-            });
+            let adviser = contribution.adviser;
+            contributions.push(parse_raw_contribution(contribution, adviser, &ledger_ids)?);
         }
         if seen_specialists != expected_specialists {
             return Err(ContractError);

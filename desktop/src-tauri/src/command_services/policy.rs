@@ -87,6 +87,12 @@ pub(crate) enum AdmissionError {
     InvalidAttestation,
 }
 
+impl AdmissionError {
+    pub(crate) const fn is_authentication_failure(self) -> bool {
+        matches!(self, Self::AuthenticationUnavailable)
+    }
+}
+
 pub(crate) struct ServiceAdmissionPolicy {
     kind: KnowledgeServiceKind,
     expected_server_identity: String,

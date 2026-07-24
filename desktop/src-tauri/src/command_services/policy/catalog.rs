@@ -15,6 +15,22 @@ use tauri::Manager;
 const ADMISSION_CACHE_TTL: Duration = Duration::from_secs(30);
 const MAXIMUM_CONFIG_BYTES: u64 = 64 * 1024;
 
+#[derive(Clone)]
+pub(crate) struct AdviserRuntimeCatalog {
+    specialist_runtime: buzz_agent_pkg::egress::LmStudioRuntimeConfig,
+    chief_of_staff_runtime: buzz_agent_pkg::egress::LmStudioRuntimeConfig,
+}
+
+impl AdviserRuntimeCatalog {
+    pub(crate) fn specialist_runtime(&self) -> buzz_agent_pkg::egress::LmStudioRuntimeConfig {
+        self.specialist_runtime.clone()
+    }
+
+    pub(crate) fn chief_of_staff_runtime(&self) -> buzz_agent_pkg::egress::LmStudioRuntimeConfig {
+        self.chief_of_staff_runtime.clone()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CommandKnowledgeWorkflow {
     Adviser,
@@ -160,6 +176,57 @@ pub(crate) fn build_catalog_integrations(
         });
     }
     Ok(result)
+}
+
+pub(crate) fn build_adviser_runtime_catalog(
+    services: &[VerifiedService],
+    endpoint: &str,
+    api_token: Option<&str>,
+) -> Result<AdviserRuntimeCatalog, AdmissionError> {
+    let integrations = build_catalog_integrations(services, CommandKnowledgeWorkflow::Adviser)?;
+    let integrations_json =
+        serde_json::to_string(&integrations).map_err(|_| AdmissionError::InvalidAttestation)?;
+    let evidence_policy = (!services.is_empty())
+        .then(|| build_command_evidence_policy(services))
+        .transpose()?;
+    let evidence_policy_json = evidence_policy
+        .map(|policy| serde_json::to_string(&policy))
+        .transpose()
+        .map_err(|_| AdmissionError::InvalidAttestation)?;
+    let specialist_runtime =
+        buzz_agent_pkg::egress::LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            Some("OFFICIAL"),
+            endpoint,
+            None,
+            Some(&integrations_json),
+            api_token,
+            evidence_policy_json.as_deref(),
+        )
+        .map_err(|_| AdmissionError::InvalidAttestation)?;
+    let chief_of_staff_runtime =
+        buzz_agent_pkg::egress::LmStudioRuntimeConfig::parse_with_token_and_evidence(
+            Some("OFFICIAL"),
+            endpoint,
+            None,
+            None,
+            api_token,
+            None,
+        )
+        .map_err(|_| AdmissionError::InvalidAttestation)?;
+    Ok(AdviserRuntimeCatalog {
+        specialist_runtime,
+        chief_of_staff_runtime,
+    })
+}
+
+pub(crate) fn adviser_runtime_catalog() -> Result<AdviserRuntimeCatalog, AdmissionError> {
+    let facts = crate::managed_agents::trusted_lmstudio_runtime_facts()
+        .map_err(|_| AdmissionError::AuthenticationUnavailable)?;
+    build_adviser_runtime_catalog(
+        &cached_services(),
+        &facts.endpoint,
+        facts.api_token.as_deref(),
+    )
 }
 
 struct CachedAdmissions {

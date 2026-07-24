@@ -1,8 +1,10 @@
 use super::types::{
-    AdviserId, BriefLifecycleRecord, BriefRunState, BriefRunStatus, BriefSchedule, BriefSection,
-    CommandBrief, PublishedCommandBrief, ADVISORY_LIMITATION, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
+    AdviserContribution, AdviserId, BriefLifecycleRecord, BriefRunState, BriefRunStatus,
+    BriefSchedule, BriefSection, CitedFinding, CommandBrief, PublishedCommandBrief,
+    ADVISORY_LIMITATION, MAX_ARRAY_ITEMS, MAX_TEXT_BYTES,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 
 const NOW: &str = "2026-07-25T06:00:00Z";
 
@@ -88,6 +90,15 @@ fn brief_value() -> Value {
 
 fn parse(value: Value) -> Result<CommandBrief, String> {
     CommandBrief::try_from(value).map_err(|error| error.to_string())
+}
+
+fn parse_contribution(value: Value) -> Result<AdviserContribution, String> {
+    AdviserContribution::parse_for_adviser(
+        value,
+        AdviserId::Operations,
+        &BTreeSet::from(["ledger-1".to_string()]),
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[test]
@@ -358,4 +369,60 @@ fn published_wrapper_adds_the_signed_event_id_only_after_validating_the_brief() 
     let serialized = serde_json::to_value(published).expect("serialize envelope");
     assert!(serialized["brief"].get("lifecycleAuditEventId").is_none());
     assert_eq!(serialized["publicationState"], "queued");
+}
+
+#[test]
+fn standalone_contribution_parser_preserves_the_authoritative_contract() {
+    let finding = CitedFinding::parse_for_ledger(
+        finding("A supported specialist finding."),
+        &BTreeSet::from(["ledger-1".to_string()]),
+    )
+    .expect("standalone finding");
+    assert_eq!(finding.source_ids(), &["ledger-1"]);
+
+    let parsed = parse_contribution(contribution("operations")).expect("valid contribution");
+    assert_eq!(parsed.adviser(), AdviserId::Operations);
+    assert_eq!(parsed.section(), BriefSection::Operations);
+    assert_eq!(
+        parsed.findings()[0].text(),
+        "A supported specialist finding."
+    );
+    assert_eq!(parsed.findings()[0].source_ids(), &["ledger-1"]);
+    assert_eq!(
+        parsed.limitations(),
+        &["The source is bounded to the frozen snapshot."]
+    );
+    assert!(parsed.dissent().is_empty());
+
+    let mut missing_classification = contribution("operations");
+    missing_classification
+        .as_object_mut()
+        .expect("contribution")
+        .remove("classification");
+    assert!(parse_contribution(missing_classification).is_err());
+
+    let mut wrong_adviser = contribution("navigation");
+    wrong_adviser["section"] = json!("operations");
+    assert!(parse_contribution(wrong_adviser).is_err());
+
+    let mut dangling = contribution("operations");
+    dangling["findings"][0]["sourceIds"] = json!(["ledger-missing"]);
+    assert!(parse_contribution(dangling).is_err());
+
+    let mut oversized = contribution("operations");
+    oversized["findings"][0]["text"] = json!("x".repeat(MAX_TEXT_BYTES + 1));
+    assert!(parse_contribution(oversized).is_err());
+
+    let mut approved = contribution("operations");
+    approved["proposedActions"] = json!([{
+        "classification": "OFFICIAL",
+        "actionId": "action-1",
+        "text": "This must remain a proposal.",
+        "approvalState": "approved"
+    }]);
+    assert!(parse_contribution(approved).is_err());
+
+    let mut extra = contribution("operations");
+    extra["prompt"] = json!("renderer override");
+    assert!(parse_contribution(extra).is_err());
 }
