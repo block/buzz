@@ -28,8 +28,6 @@ export const BUZZ_AGENT_SERVICE_TIER_VALUES = [
   "priority",
 ] as const;
 
-export type ServiceTierValue = (typeof BUZZ_AGENT_SERVICE_TIER_VALUES)[number];
-
 /**
  * Ordered set of valid thinking-effort values accepted by buzz-agent.
  * Mirrors `parse_thinking_effort` in `crates/buzz-agent/src/config.rs`.
