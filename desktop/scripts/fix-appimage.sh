@@ -38,6 +38,8 @@
 # Fix: remove the offending libs so the app uses the system copies (which are
 # newer and ABI-compatible on any distro shipping glib >= 2.72 / Ubuntu 22.04+),
 # and symlink the system GStreamer plugin directory so discovery works correctly.
+# Keep bundled libzstd — NixOS/appimage-run hosts often lack libzstd.so.1 on the
+# FHS path, and zstd is not part of the Mesa/GLib conflict set above.
 # No tauri.conf.json knob can do this — bundle.linux.appimage only exposes
 # bundleMediaFramework, files (copy-only, no remove/symlink), and bundleXdgOpen.
 
@@ -103,7 +105,6 @@ rm -f \
   "$LIBDIR"/libselinux.so* \
   "$LIBDIR"/libpcre2-8.so* \
   "$LIBDIR"/libgst*.so* \
-  "$LIBDIR"/libzstd.so* \
   "$LIBDIR"/libelf.so* \
   "$LIBDIR"/libffi.so*
 
