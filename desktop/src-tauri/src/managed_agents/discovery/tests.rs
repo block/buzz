@@ -8,7 +8,7 @@ use super::{
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
     refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
-    GOOSE_AVATAR_URL,
+    GOOSE_AVATAR_URL, OMP_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
 
@@ -36,6 +36,10 @@ fn resolves_known_avatar_for_command_paths_and_aliases() {
     assert_eq!(
         managed_agent_avatar_url("/usr/local/bin/claude-code-acp"),
         Some(CLAUDE_CODE_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url(r"C:\Tools\omp.exe"),
+        Some(OMP_AVATAR_URL.to_string())
     );
 }
 
@@ -70,6 +74,38 @@ fn normalizes_claude_and_codex_args_to_empty() {
         normalize_agent_args("codex-acp", vec!["acp".into()]),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn normalizes_omp_args_to_acp() {
+    assert_eq!(
+        normalize_agent_args("omp", Vec::new()),
+        vec!["acp".to_string()]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn auth_probe_requires_positive_integer_stdout() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!("buzz-auth-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let binary = dir.join("probe");
+    std::fs::write(&binary, "#!/bin/sh\nprintf '0\\n'\n").expect("write probe");
+    std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).expect("chmod probe");
+
+    assert_eq!(
+        super::probe_auth_status(&binary, &["probe"], true),
+        crate::managed_agents::AuthStatus::LoggedOut
+    );
+    std::fs::write(&binary, "#!/bin/sh\nprintf '2\\n'\n").expect("update probe");
+    assert_eq!(
+        super::probe_auth_status(&binary, &["probe"], true),
+        crate::managed_agents::AuthStatus::LoggedIn
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -1074,9 +1110,10 @@ fn test_command_basenames_dotted_name_no_extra_candidates() {
 
 // ── Phase B: cli_install_commands_for_os ────────────────────────────────────
 
-/// Claude and Codex have non-empty default cli_install_commands (install.sh).
+/// Supported external runtimes have non-empty default CLI install commands.
 #[test]
-fn test_claude_and_codex_have_cli_install_commands() {
+fn test_external_runtimes_have_cli_install_commands() {
+    let omp = super::known_acp_runtime_exact("omp").unwrap();
     let claude = super::known_acp_runtime_exact("claude").unwrap();
     let codex = super::known_acp_runtime_exact("codex").unwrap();
     assert!(
@@ -1087,11 +1124,16 @@ fn test_claude_and_codex_have_cli_install_commands() {
         !codex.cli_install_commands.is_empty(),
         "codex must have cli install commands"
     );
+    assert!(
+        !omp.cli_install_commands.is_empty(),
+        "omp must have cli install commands"
+    );
 }
 
-/// cli_install_commands_for_os returns a non-empty slice for claude and codex.
+/// Install commands are available for each supported external runtime.
 #[test]
-fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
+fn test_cli_install_commands_for_os_non_empty_for_external_runtimes() {
+    let omp = super::known_acp_runtime_exact("omp").unwrap();
     let claude = super::known_acp_runtime_exact("claude").unwrap();
     let codex = super::known_acp_runtime_exact("codex").unwrap();
     assert!(
@@ -1102,18 +1144,24 @@ fn test_cli_install_commands_for_os_non_empty_for_claude_codex() {
         !codex.cli_install_commands_for_os().is_empty(),
         "codex must have install commands on every platform"
     );
+    assert!(
+        !omp.cli_install_commands_for_os().is_empty(),
+        "omp must have install commands on every platform"
+    );
 }
 
-/// On Windows, Claude and Codex select the PowerShell install commands.
+/// On Windows, supported external runtimes select PowerShell install commands.
 #[cfg(windows)]
 #[test]
 fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
+    let omp = super::known_acp_runtime_exact("omp").unwrap();
     let claude = super::known_acp_runtime_exact("claude").unwrap();
     let codex = super::known_acp_runtime_exact("codex").unwrap();
 
     // Windows must select the PowerShell commands, not the curl|bash ones.
     let claude_cmds = claude.cli_install_commands_for_os();
     let codex_cmds = codex.cli_install_commands_for_os();
+    let omp_cmds = omp.cli_install_commands_for_os();
 
     assert_ne!(
         claude_cmds, claude.cli_install_commands,
@@ -1122,6 +1170,10 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     assert_ne!(
         codex_cmds, codex.cli_install_commands,
         "Windows must NOT use the default curl|bash commands for codex"
+    );
+    assert_ne!(
+        omp_cmds, omp.cli_install_commands,
+        "Windows must NOT use the default curl|sh commands for omp"
     );
 
     // Verify they are the PowerShell installers.
@@ -1132,6 +1184,10 @@ fn test_cli_install_commands_for_os_selects_powershell_on_windows() {
     assert!(
         codex_cmds.iter().any(|c| c.contains("powershell")),
         "codex Windows install must use powershell; got: {codex_cmds:?}"
+    );
+    assert!(
+        omp_cmds.iter().any(|c| c.contains("powershell")),
+        "omp Windows install must use powershell; got: {omp_cmds:?}"
     );
 
     // Goose and buzz-agent must NOT use Windows-specific commands.
