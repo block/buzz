@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use buzz_core::CommunityId;
+use buzz_core::{kind::KIND_WORKFLOW_DEF, CommunityId};
 
 use crate::error::{DbError, Result};
 
@@ -710,8 +710,8 @@ pub async fn set_workflow_enabled(
 /// Delete a workflow and all its runs/approvals (CASCADE).
 ///
 /// NOTE: see the cache-invalidation note on [`update_workflow`]. The relay's
-/// deletion path uses [`delete_workflow_for_owner`], which returns the
-/// `channel_id` needed for invalidation. (No current callers.)
+/// deletion path uses [`delete_workflow_and_definition_for_owner`], which
+/// returns the `channel_id` needed for invalidation. (No current callers.)
 pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid) -> Result<()> {
     let affected = sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
         .bind(community_id.as_uuid())
@@ -726,21 +726,52 @@ pub async fn delete_workflow(pool: &PgPool, community_id: CommunityId, id: Uuid)
     Ok(())
 }
 
-/// Delete a workflow only when it belongs to `owner_pubkey`.
+/// Outcome of atomically deleting a workflow lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowLifecycleDeleteResult {
+    /// Whether the workflow control-plane row was deleted.
+    pub workflow_deleted: bool,
+    /// Channel whose workflow cache must be invalidated, when a row was deleted.
+    pub channel_id: Option<Uuid>,
+    /// Number of live kind:30620 definition events tombstoned.
+    pub definition_events_deleted: u64,
+}
+
+/// Delete a workflow and tombstone its live kind:30620 definition atomically.
 ///
-/// Used by event-driven deletion paths where the workflow UUID is attacker
-/// controlled. Keeping the owner predicate in the DELETE statement avoids a
-/// check-then-delete race and ensures a caller cannot delete another user's
-/// workflow just by learning its UUID.
+/// Both mutations are scoped to `community_id` and `owner_pubkey`. Keeping the
+/// owner predicate in the workflow DELETE avoids a check-then-delete race, and
+/// using the NIP-33 coordinate `(kind, owner_pubkey, d_tag)` ensures a stale
+/// client cannot leave a newer definition event queryable by referencing an
+/// older event ID.
 ///
-/// Returns the deleted workflow's `channel_id` so the caller can invalidate
-/// the per-channel trigger cache without a separate lookup.
-pub async fn delete_workflow_for_owner(
+/// The transaction takes the same coordinate advisory lock as workflow
+/// definition ingest before either mutation. This prevents an in-flight
+/// replacement event from committing after the workflow row is deleted.
+///
+/// The operation is idempotent: an already-missing workflow or definition is a
+/// no-op. The result includes the channel needed to invalidate the per-channel
+/// trigger cache.
+pub async fn delete_workflow_and_definition_for_owner(
     pool: &PgPool,
     community_id: CommunityId,
     id: Uuid,
     owner_pubkey: &[u8],
-) -> Result<Option<Uuid>> {
+    d_tag: &str,
+) -> Result<WorkflowLifecycleDeleteResult> {
+    let mut tx = pool.begin().await?;
+
+    let lock_key = crate::event_replacement_lock_key(
+        community_id,
+        KIND_WORKFLOW_DEF as i32,
+        owner_pubkey,
+        Some(d_tag.as_bytes()),
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(lock_key)
+        .execute(tx.as_mut())
+        .await?;
+
     let row = sqlx::query(
         "DELETE FROM workflows WHERE community_id = $1 AND id = $2 AND owner_pubkey = $3 \
          RETURNING channel_id",
@@ -748,13 +779,34 @@ pub async fn delete_workflow_for_owner(
     .bind(community_id.as_uuid())
     .bind(id)
     .bind(owner_pubkey)
-    .fetch_optional(pool)
+    .fetch_optional(tx.as_mut())
     .await?;
 
-    match row {
-        Some(row) => Ok(row.try_get("channel_id")?),
-        None => Err(DbError::NotFound(format!("workflow {id}"))),
-    }
+    let workflow_deleted = row.is_some();
+    let channel_id = row
+        .map(|row| row.try_get("channel_id"))
+        .transpose()?
+        .flatten();
+
+    let definition_events_deleted = sqlx::query(
+        "UPDATE events SET deleted_at = NOW() \
+         WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+           AND deleted_at IS NULL",
+    )
+    .bind(community_id.as_uuid())
+    .bind(KIND_WORKFLOW_DEF as i32)
+    .bind(owner_pubkey)
+    .bind(d_tag)
+    .execute(tx.as_mut())
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok(WorkflowLifecycleDeleteResult {
+        workflow_deleted,
+        channel_id,
+        definition_events_deleted,
+    })
 }
 
 // -- Workflow Run CRUD --------------------------------------------------------
@@ -1199,6 +1251,7 @@ pub async fn find_by_owner_and_name(
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 
     // -- WorkflowStatus enum --------------------------------------------------
 
@@ -2174,6 +2227,370 @@ mod tests {
             .expect("B's workflow must survive A's delete");
         assert_eq!(surviving_b.community_id, community_b);
         assert_eq!(surviving_b.name, "wf-B");
+    }
+
+    /// Regression for block/buzz#2390: deleting a recreated workflow must
+    /// tombstone the current kind:30620 definition by coordinate, even when a
+    /// stale client still references the first definition event.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_delete_tombstones_each_recreated_definition() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_bytes();
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let d_tag = workflow_id.to_string();
+
+        let insert_lifecycle = |created_at: u64| {
+            let pool = pool.clone();
+            let keys = keys.clone();
+            let owner = owner.to_vec();
+            let d_tag = d_tag.clone();
+            async move {
+                upsert_workflow(
+                    &pool,
+                    community,
+                    workflow_id,
+                    Some(channel_id),
+                    &owner,
+                    "recreated workflow",
+                    r#"{"trigger":{"on":"webhook"},"steps":[]}"#,
+                    &[0u8; 32],
+                )
+                .await
+                .expect("upsert workflow");
+
+                let event = EventBuilder::new(
+                    Kind::Custom(KIND_WORKFLOW_DEF as u16),
+                    "name: recreated workflow",
+                )
+                .tags([
+                    Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+                    Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+                ])
+                .custom_created_at(Timestamp::from(created_at))
+                .sign_with_keys(&keys)
+                .expect("sign workflow definition");
+                crate::event::insert_event(&pool, community, &event, Some(channel_id))
+                    .await
+                    .expect("insert workflow definition");
+                event.id.as_bytes().to_vec()
+            }
+        };
+
+        let first_event_id = insert_lifecycle(1_700_000_000).await;
+        let first_delete =
+            delete_workflow_and_definition_for_owner(&pool, community, workflow_id, &owner, &d_tag)
+                .await
+                .expect("delete first workflow lifecycle");
+        assert_eq!(
+            first_delete,
+            WorkflowLifecycleDeleteResult {
+                workflow_deleted: true,
+                channel_id: Some(channel_id),
+                definition_events_deleted: 1,
+            }
+        );
+        assert!(
+            crate::event::get_event_by_id(&pool, community, &first_event_id)
+                .await
+                .expect("query first definition")
+                .is_none(),
+            "the first workflow definition must be tombstoned"
+        );
+
+        let second_event_id = insert_lifecycle(1_700_000_001).await;
+        let duplicate_live_event = EventBuilder::new(
+            Kind::Custom(KIND_WORKFLOW_DEF as u16),
+            "name: recreated workflow duplicate",
+        )
+        .tags([
+            Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+            Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+        ])
+        .custom_created_at(Timestamp::from(1_700_000_002))
+        .sign_with_keys(&keys)
+        .expect("sign duplicate live workflow definition");
+        crate::event::insert_event(&pool, community, &duplicate_live_event, Some(channel_id))
+            .await
+            .expect("insert duplicate live workflow definition");
+
+        // A mismatched owner must not affect either half of the lifecycle:
+        // neither the workflow row nor its definition may disappear.
+        let wrong_owner = vec![0xcc; 32];
+        let denied = delete_workflow_and_definition_for_owner(
+            &pool,
+            community,
+            workflow_id,
+            &wrong_owner,
+            &d_tag,
+        )
+        .await
+        .expect("wrong-owner delete is an idempotent no-op");
+        assert_eq!(
+            denied,
+            WorkflowLifecycleDeleteResult {
+                workflow_deleted: false,
+                channel_id: None,
+                definition_events_deleted: 0,
+            }
+        );
+        get_workflow(&pool, community, workflow_id)
+            .await
+            .expect("workflow survives denied delete");
+        assert!(
+            crate::event::get_event_by_id(&pool, community, &second_event_id)
+                .await
+                .expect("query live second definition")
+                .is_some(),
+            "the current definition must survive a denied workflow delete"
+        );
+
+        // The second delete represents a stale client still naming E1. The
+        // lifecycle helper deliberately has no event-id input: it deletes E2
+        // by the authoritative NIP-33 coordinate.
+        let second_delete =
+            delete_workflow_and_definition_for_owner(&pool, community, workflow_id, &owner, &d_tag)
+                .await
+                .expect("delete recreated workflow lifecycle");
+        assert_eq!(
+            second_delete,
+            WorkflowLifecycleDeleteResult {
+                workflow_deleted: true,
+                channel_id: Some(channel_id),
+                definition_events_deleted: 2,
+            }
+        );
+        assert!(matches!(
+            get_workflow(&pool, community, workflow_id).await,
+            Err(DbError::NotFound(_))
+        ));
+        assert!(
+            crate::event::get_event_by_id(&pool, community, &second_event_id)
+                .await
+                .expect("query second definition")
+                .is_none(),
+            "the recreated workflow definition must be tombstoned by coordinate"
+        );
+        assert!(
+            crate::event::get_event_by_id(
+                &pool,
+                community,
+                duplicate_live_event.id.as_bytes().as_slice(),
+            )
+            .await
+            .expect("query duplicate live definition")
+            .is_none(),
+            "every live definition matching the coordinate must be tombstoned"
+        );
+
+        // Repair an already-inconsistent lifecycle left by the old behavior:
+        // the control-plane row is absent, but a definition remains queryable.
+        let orphaned_event_id = insert_lifecycle(1_700_000_003).await;
+        sqlx::query("DELETE FROM workflows WHERE community_id = $1 AND id = $2")
+            .bind(community.as_uuid())
+            .bind(workflow_id)
+            .execute(&pool)
+            .await
+            .expect("simulate old row-only deletion");
+        assert!(
+            crate::event::get_event_by_id(&pool, community, &orphaned_event_id)
+                .await
+                .expect("query orphaned definition")
+                .is_some(),
+            "the fixture must reproduce the ghost workflow state"
+        );
+
+        let orphan_cleanup =
+            delete_workflow_and_definition_for_owner(&pool, community, workflow_id, &owner, &d_tag)
+                .await
+                .expect("clean orphaned workflow definition");
+        assert_eq!(
+            orphan_cleanup,
+            WorkflowLifecycleDeleteResult {
+                workflow_deleted: false,
+                channel_id: None,
+                definition_events_deleted: 1,
+            }
+        );
+        assert!(
+            crate::event::get_event_by_id(&pool, community, &orphaned_event_id)
+                .await
+                .expect("query cleaned orphaned definition")
+                .is_none(),
+            "an already-orphaned definition must still be tombstoned"
+        );
+    }
+
+    /// A concurrent definition replacement must commit before deletion takes
+    /// its statement snapshot, so the new event cannot survive without its
+    /// workflow row.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_delete_serializes_with_definition_replacement() {
+        let pool = setup_pool().await;
+        let community = make_community(&pool).await;
+        let keys = Keys::generate();
+        let owner = keys.public_key().to_bytes();
+        ensure_user(&pool, community, &owner)
+            .await
+            .expect("ensure owner");
+        let channel_id = make_channel(&pool, community, &owner).await;
+        let workflow_id = Uuid::new_v4();
+        let d_tag = workflow_id.to_string();
+
+        upsert_workflow(
+            &pool,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "workflow v1",
+            r#"{"trigger":{"on":"webhook"},"steps":[]}"#,
+            &[1u8; 32],
+        )
+        .await
+        .expect("insert initial workflow");
+        let first_event =
+            EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), "name: workflow v1")
+                .tags([
+                    Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+                    Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+                ])
+                .custom_created_at(Timestamp::from(1_700_000_010))
+                .sign_with_keys(&keys)
+                .expect("sign initial definition");
+        crate::event::insert_event(&pool, community, &first_event, Some(channel_id))
+            .await
+            .expect("insert initial definition");
+
+        let second_event =
+            EventBuilder::new(Kind::Custom(KIND_WORKFLOW_DEF as u16), "name: workflow v2")
+                .tags([
+                    Tag::parse(["d", d_tag.as_str()]).expect("d tag"),
+                    Tag::parse(["h", channel_id.to_string().as_str()]).expect("h tag"),
+                ])
+                .custom_created_at(Timestamp::from(1_700_000_011))
+                .sign_with_keys(&keys)
+                .expect("sign replacement definition");
+
+        // Mirror persist_command_event's open transaction: hold the shared
+        // coordinate lock, retire E1, and insert E2 without committing it yet.
+        let mut writer_tx = pool.begin().await.expect("begin definition writer");
+        let lock_key = crate::event_replacement_lock_key(
+            community,
+            KIND_WORKFLOW_DEF as i32,
+            &owner,
+            Some(d_tag.as_bytes()),
+        );
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(lock_key)
+            .execute(writer_tx.as_mut())
+            .await
+            .expect("lock workflow definition coordinate");
+        sqlx::query(
+            "UPDATE events SET deleted_at = NOW() \
+             WHERE community_id = $1 AND kind = $2 AND pubkey = $3 AND d_tag = $4 \
+               AND deleted_at IS NULL",
+        )
+        .bind(community.as_uuid())
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(owner.as_slice())
+        .bind(&d_tag)
+        .execute(writer_tx.as_mut())
+        .await
+        .expect("retire initial definition");
+
+        let tags_json = serde_json::to_value(&second_event.tags).expect("serialize tags");
+        let received_at = Utc::now();
+        sqlx::query(
+            "INSERT INTO events \
+                (community_id, id, pubkey, created_at, kind, tags, content, sig, \
+                 received_at, channel_id, d_tag) \
+             VALUES ($1, $2, $3, to_timestamp($4), $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(community.as_uuid())
+        .bind(second_event.id.as_bytes().as_slice())
+        .bind(owner.as_slice())
+        .bind(second_event.created_at.as_secs() as f64)
+        .bind(KIND_WORKFLOW_DEF as i32)
+        .bind(tags_json)
+        .bind(&second_event.content)
+        .bind(second_event.sig.serialize().as_slice())
+        .bind(received_at)
+        .bind(channel_id)
+        .bind(&d_tag)
+        .execute(writer_tx.as_mut())
+        .await
+        .expect("insert uncommitted replacement definition");
+
+        // The domain upsert commits on a separate connection while the event
+        // transaction still owns the coordinate lock, matching relay ingest.
+        upsert_workflow(
+            &pool,
+            community,
+            workflow_id,
+            Some(channel_id),
+            &owner,
+            "workflow v2",
+            r#"{"trigger":{"on":"webhook"},"steps":[]}"#,
+            &[2u8; 32],
+        )
+        .await
+        .expect("commit replacement workflow row");
+
+        let delete_pool = pool.clone();
+        let delete_owner = owner.to_vec();
+        let delete_d_tag = d_tag.clone();
+        let delete_task = tokio::spawn(async move {
+            delete_workflow_and_definition_for_owner(
+                &delete_pool,
+                community,
+                workflow_id,
+                &delete_owner,
+                &delete_d_tag,
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(
+            !delete_task.is_finished(),
+            "deletion must wait for the in-flight definition replacement"
+        );
+
+        writer_tx
+            .commit()
+            .await
+            .expect("commit replacement definition");
+        let deleted = tokio::time::timeout(std::time::Duration::from_secs(2), delete_task)
+            .await
+            .expect("workflow deletion deadlocked")
+            .expect("delete task panicked")
+            .expect("delete replacement lifecycle");
+        assert_eq!(
+            deleted,
+            WorkflowLifecycleDeleteResult {
+                workflow_deleted: true,
+                channel_id: Some(channel_id),
+                definition_events_deleted: 1,
+            }
+        );
+        assert!(matches!(
+            get_workflow(&pool, community, workflow_id).await,
+            Err(DbError::NotFound(_))
+        ));
+        assert!(
+            crate::event::get_event_by_id(&pool, community, second_event.id.as_bytes().as_slice())
+                .await
+                .expect("query replacement definition")
+                .is_none(),
+            "the replacement definition must not survive lifecycle deletion"
+        );
     }
 
     /// Issue 4 (approval path): the same approval token can hash to the same
