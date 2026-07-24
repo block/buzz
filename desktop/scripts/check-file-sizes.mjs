@@ -82,14 +82,7 @@ const overrides = new Map([
   // queued to split when #2520 lands and this port is dropped in the rebase.
   // composer-dictation model picker adds per-model slots + SttModelInfo +
   // resolve_dictation_model (~110 lines); split rides the same rebase.
-  ["src-tauri/src/huddle/models.rs", 1430],
-  // composer-dictation: live-transcript mode (live_tx partial re-decode loop),
-  // sticky-punctuation heuristic + unit tests, and two #[ignore]d decode
-  // experiments (silence/noise vs punctuation, v3 comparison) that document
-  // measured model behavior. Experiments are test-only content; queued to
-  // split into stt/tests.rs with the feature PR review. +37: LiveEvent enum
-  // and the stop-flush sentinel echo (Enter-to-send flush marker).
-  ["src-tauri/src/huddle/stt.rs", 1240],
+  ["src-tauri/src/huddle/models.rs", 1432],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports

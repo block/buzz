@@ -886,13 +886,16 @@ impl ModelManager {
             .ok_or_else(|| format!("unknown STT model id: {id}"))?;
         let manager = self.clone();
         let slot_for_task = slot.clone();
-        slot.start_download(&self.models_dir, http_client, "stt", move |client| {
-            async move {
+        slot.start_download(
+            &self.models_dir,
+            http_client,
+            "stt",
+            move |client| async move {
                 manager
                     .download_stt_model_for(model, slot_for_task, client)
                     .await
-            }
-        });
+            },
+        );
         Ok(())
     }
 

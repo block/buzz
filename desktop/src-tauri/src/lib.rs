@@ -37,12 +37,12 @@ use deep_link::{
     acknowledge_pending_community_deep_link, handle_deep_link_url,
     take_pending_community_deep_link, PendingCommunityDeepLinks,
 };
-use huddle::audio_output::{
-    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
-};
 use dictation::{
     download_dictation_model, get_dictation_models, push_dictation_pcm, start_dictation,
     stop_dictation,
+};
+use huddle::audio_output::{
+    get_audio_output_device, list_audio_output_devices, set_audio_output_device,
 };
 use huddle::reconnect::reconnect_huddle_audio;
 use huddle::{
