@@ -15,6 +15,7 @@ import 'thread_replies_provider.dart';
 import 'channels_provider.dart';
 import 'compose_bar.dart';
 import 'date_formatters.dart';
+import 'day_divider.dart';
 import '../profile/user_profile_sheet.dart';
 import 'message_actions.dart';
 import 'message_content.dart';
@@ -167,6 +168,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
+                      DayDivider(label: formatDayHeading(liveHead.createdAt)),
                       _ThreadMessage(
                         message: liveHead,
                         channelNames: channelNamesMap,
@@ -205,8 +207,14 @@ class ThreadDetailPage extends HookConsumerWidget {
                 final chronIdx = replies.length - 1 - index;
                 final reply = replies[chronIdx];
                 final prevReply = chronIdx > 0 ? replies[chronIdx - 1] : null;
+                final previousMessage = prevReply ?? liveHead;
+                final showDayDivider = !isSameDay(
+                  previousMessage.createdAt,
+                  reply.createdAt,
+                );
                 final showAuthor =
                     prevReply == null ||
+                    showDayDivider ||
                     prevReply.pubkey.toLowerCase() !=
                         reply.pubkey.toLowerCase() ||
                     (reply.createdAt - prevReply.createdAt) > 300;
@@ -221,6 +229,8 @@ class ThreadDetailPage extends HookConsumerWidget {
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (showDayDivider)
+                      DayDivider(label: formatDayHeading(reply.createdAt)),
                     _ThreadMessage(
                       message: reply,
                       channelNames: channelNamesMap,

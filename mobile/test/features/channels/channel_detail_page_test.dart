@@ -12,7 +12,10 @@ import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
 import 'package:buzz/features/channels/date_formatters.dart';
+import 'package:buzz/features/channels/day_divider.dart';
+import 'package:buzz/features/channels/reaction_row.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
+import 'package:buzz/features/channels/thread_replies_provider.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
@@ -72,6 +75,25 @@ NostrEvent _systemMsg({
   sig: '',
 );
 
+NostrEvent _reaction({
+  required String id,
+  required String targetId,
+  String pubkey = 'bob',
+  int createdAt = 2000,
+  String content = '👍',
+}) => NostrEvent(
+  id: id,
+  pubkey: pubkey,
+  createdAt: createdAt,
+  kind: EventKind.reaction,
+  tags: [
+    ['h', _channelId],
+    ['e', targetId],
+  ],
+  content: content,
+  sig: '',
+);
+
 NostrEvent _deletion({
   required String id,
   required List<String> targetIds,
@@ -121,6 +143,7 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
+  List<NostrEvent>? threadReplies,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -155,6 +178,10 @@ Widget _buildTestable({
         channelActionsProvider.overrideWith(createChannelActions),
       if (readStateNotifier != null)
         readStateProvider.overrideWith(() => readStateNotifier),
+      if (threadReplies != null)
+        threadRepliesProvider(
+          const ThreadRepliesArgs(channelId: _channelId, rootId: 'thread-root'),
+        ).overrideWith((ref) async => threadReplies),
       // Stub the relay client provider so preloadMembers doesn't crash.
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
@@ -854,6 +881,44 @@ void main() {
       expect(find.byTooltip('Frank'), findsOneWidget);
     });
 
+    testWidgets('aligns grouped reactions with the system message content', (
+      tester,
+    ) async {
+      final messages = [
+        _systemMsg(
+          id: 'sys1',
+          payload: {'type': 'member_joined', 'actor': 'alice', 'target': 'bob'},
+          createdAt: 1000,
+        ),
+        _systemMsg(
+          id: 'sys2',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'carol',
+          },
+          createdAt: 1060,
+        ),
+        _reaction(id: 'reaction-1', targetId: 'sys1'),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'carol': const UserProfile(pubkey: 'carol', displayName: 'Carol'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final avatarRect = tester.getRect(find.byType(CircleAvatar));
+      final reactionRect = tester.getRect(find.byType(ReactionRow));
+      expect(reactionRect.left, avatarRect.left + 36 + Grid.xxs);
+    });
+
     testWidgets('renders member_left system event', (tester) async {
       final messages = [
         _systemMsg(
@@ -1451,6 +1516,72 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(observer.pushCount, initialPushCount + 1);
+    });
+
+    testWidgets('thread shows day dividers when replies cross days', (
+      tester,
+    ) async {
+      final rootCreatedAt =
+          DateTime(2025, 1, 1, 12).toUtc().millisecondsSinceEpoch ~/ 1000;
+      final nextDayCreatedAt =
+          DateTime(2025, 1, 2, 12).toUtc().millisecondsSinceEpoch ~/ 1000;
+      final rootEvent = _textMsg(
+        id: 'thread-root',
+        pubkey: 'alice',
+        content: 'Thread root',
+        createdAt: rootCreatedAt,
+      );
+      final replies = [
+        _textMsg(
+          id: 'reply-same-day',
+          pubkey: 'bob',
+          content: 'Same day',
+          createdAt: rootCreatedAt + 60,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+        _textMsg(
+          id: 'reply-next-day',
+          pubkey: 'bob',
+          content: 'Next day',
+          createdAt: nextDayCreatedAt,
+          extraTags: const [
+            ['e', 'thread-root', '', 'reply'],
+          ],
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [rootEvent],
+          threadReplies: replies,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final threadHead = formatTimeline([rootEvent]).single;
+      Navigator.of(tester.element(find.byType(ChannelDetailPage))).push(
+        MaterialPageRoute<void>(
+          builder: (_) => ThreadDetailPage(
+            threadHead: threadHead,
+            allMessages: [threadHead],
+            channelId: _channelId,
+            currentPubkey: 'self',
+            isMember: true,
+            isArchived: false,
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(DayDivider), findsNWidgets(2));
+      expect(find.text(formatDayHeading(rootCreatedAt)), findsOneWidget);
+      expect(find.text(formatDayHeading(nextDayCreatedAt)), findsOneWidget);
     });
   });
 }

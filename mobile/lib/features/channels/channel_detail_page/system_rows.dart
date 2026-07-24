@@ -119,7 +119,7 @@ class _SystemMessageRow extends ConsumerWidget {
               ),
             if (reactions.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(left: 28),
+                padding: const EdgeInsets.only(left: 36 + Grid.xxs),
                 child: ReactionRow(
                   reactions: reactions,
                   onToggle: groupedMessages == null
