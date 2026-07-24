@@ -10,6 +10,7 @@
   <a href="VISION_PROJECTS.md">Forge</a> ·
   <a href="VISION_AGENT.md">Agents</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="docs/get-buzz-on-your-phone.md">Mobile</a> ·
   <a href="LICENSE">Apache 2.0</a>
 </p>
 
