@@ -5,6 +5,7 @@ import * as React from "react";
 
 import { buildCustomEmojiCategory } from "@/features/custom-emoji/emojiMartCategory";
 import { useCustomEmoji } from "@/features/custom-emoji/hooks";
+import { useTheme } from "@/shared/theme/ThemeProvider";
 
 // emoji-mart builds its searchable index synchronously inside `init`, which
 // `<Picker>` calls on mount — so the first reaction popover open paid the full
@@ -105,13 +106,17 @@ type EmojiPickerProps = {
   autoFocus?: boolean;
   /** Called with the chosen emoji as a string: `native` glyph or `:shortcode:`. */
   onSelect: (emoji: string) => void;
+  /** Number of emoji columns. Defaults to the compact picker used elsewhere. */
+  perLine?: number;
 };
 
 export const EmojiPicker = React.memo(function EmojiPicker({
   autoFocus = false,
   onSelect,
+  perLine = 8,
 }: EmojiPickerProps) {
   const customEmoji = useCustomEmoji();
+  const { isDark } = useTheme();
   const custom = React.useMemo(
     () => buildCustomEmojiCategory(customEmoji),
     [customEmoji],
@@ -139,11 +144,11 @@ export const EmojiPicker = React.memo(function EmojiPicker({
             onSelect(value);
           }
         }}
-        perLine={8}
+        perLine={perLine}
         previewPosition="bottom"
         set="native"
         skinTonePosition="search"
-        theme="auto"
+        theme={isDark ? "dark" : "light"}
       />
     </div>
   );

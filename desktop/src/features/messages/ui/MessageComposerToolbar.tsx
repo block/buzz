@@ -3,6 +3,7 @@ import type { Editor } from "@tiptap/react";
 import { AnimatePresence, motion } from "motion/react";
 import { ALargeSmall, ArrowUp, AtSign, Paperclip, X } from "lucide-react";
 
+import type { MediaUploadController } from "@/features/messages/lib/useMediaUpload";
 import { Button } from "@/shared/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/shared/ui/tooltip";
 import { ComposerEmojiPicker } from "./ComposerEmojiPicker";
@@ -22,6 +23,7 @@ export const MessageComposerToolbar = React.memo(
     editor,
     extraActions,
     formattingDisabled,
+    gifUploadController,
     isEmojiPickerOpen,
     isFormattingOpen,
     isSending,
@@ -39,6 +41,10 @@ export const MessageComposerToolbar = React.memo(
     editor: Editor | null;
     extraActions?: React.ReactNode;
     formattingDisabled: boolean;
+    gifUploadController: Pick<
+      MediaUploadController,
+      "setUploadState" | "uploadFile"
+    >;
     isEmojiPickerOpen: boolean;
     isFormattingOpen: boolean;
     isSending: boolean;
@@ -194,6 +200,7 @@ export const MessageComposerToolbar = React.memo(
                 </Tooltip>
                 <ComposerEmojiPicker
                   disabled={composerDisabled}
+                  gifUploadController={gifUploadController}
                   onClose={() => editor?.commands.focus()}
                   onEmojiSelect={onEmojiSelect}
                   onOpenChange={onEmojiPickerOpenChange}

@@ -1077,6 +1077,7 @@ function MessageComposerImpl({
               editor={richText.editor}
               extraActions={toolbarExtraActions}
               formattingDisabled={disabled}
+              gifUploadController={media}
               isEmojiPickerOpen={isEmojiPickerOpen}
               isFormattingOpen={isFormattingOpen}
               isSending={isSending}
