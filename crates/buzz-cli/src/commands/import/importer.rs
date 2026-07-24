@@ -47,6 +47,8 @@ pub(super) struct Importer<'a> {
     export: &'a SlackExport,
     /// Slack user id → display name.
     names: &'a HashMap<String, String>,
+    /// Slack workspace id — namespaces identity bindings and channel UUIDs.
+    team_id: &'a str,
     state: ImportState,
     state_path: PathBuf,
     summary: Summary,
@@ -59,6 +61,7 @@ impl<'a> Importer<'a> {
         client: &'a BuzzClient,
         export: &'a SlackExport,
         names: &'a HashMap<String, String>,
+        team_id: &'a str,
         state: ImportState,
         state_path: PathBuf,
         skip_reactions: bool,
@@ -67,6 +70,7 @@ impl<'a> Importer<'a> {
             client,
             export,
             names,
+            team_id,
             state,
             state_path,
             summary: Summary::default(),
@@ -88,7 +92,7 @@ impl<'a> Importer<'a> {
                 state.metadata_done,
             ),
             None => {
-                let uuid = Uuid::new_v4();
+                let uuid = channel_uuid(self.team_id, &channel.id);
                 let about = if channel.purpose.value.is_empty() {
                     None
                 } else {
@@ -115,6 +119,7 @@ impl<'a> Importer<'a> {
                     ChannelState {
                         uuid: uuid.to_string(),
                         metadata_done: false,
+                        archived_done: false,
                     },
                 );
                 self.save()?;
@@ -187,23 +192,30 @@ impl<'a> Importer<'a> {
                     }
                     None => {
                         self.summary.warn(format!(
-                            "thread root {root_key} not imported — posting {key} as top-level"
+                            "thread root {root_key} is not imported yet — deferring reply {key}; \
+                             re-run to resume"
                         ));
-                        None
+                        self.summary.skipped += 1;
+                        continue;
                     }
                 },
                 None => None,
             };
 
-            let builder =
-                match build_imported_message(channel_uuid, msg, names, thread_ref.as_ref()) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.summary.warn(format!("skipping {key}: {e}"));
-                        self.summary.skipped += 1;
-                        continue;
-                    }
-                };
+            let builder = match build_imported_message(
+                channel_uuid,
+                msg,
+                names,
+                self.team_id,
+                thread_ref.as_ref(),
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    self.summary.warn(format!("skipping {key}: {e}"));
+                    self.summary.skipped += 1;
+                    continue;
+                }
+            };
             match submit(self.client, builder).await {
                 Ok(event_id) => {
                     consecutive_failures = 0;
@@ -238,12 +250,24 @@ impl<'a> Importer<'a> {
         }
 
         // Mirror Slack's archived flag once the channel's history is in.
-        if channel.is_archived {
+        let archive_done = self
+            .state
+            .channels
+            .get(&channel.id)
+            .is_some_and(|state| state.archived_done);
+        if channel.is_archived && !archive_done {
             let builder = buzz_sdk::build_archive(channel_uuid)
                 .map_err(|e| CliError::Other(format!("build_archive failed: {e}")))?;
-            if let Err(e) = submit(self.client, builder).await {
-                self.summary
-                    .warn(format!("archive failed for #{}: {e}", channel.name));
+            match submit(self.client, builder).await {
+                Ok(_) => {
+                    if let Some(state) = self.state.channels.get_mut(&channel.id) {
+                        state.archived_done = true;
+                    }
+                    self.save()?;
+                }
+                Err(e) => self
+                    .summary
+                    .warn(format!("archive failed for #{}: {e}", channel.name)),
             }
         }
         self.save()?;
@@ -312,7 +336,7 @@ impl<'a> Importer<'a> {
         bindings: &[(String, String)],
     ) -> Result<(), CliError> {
         for (slack_id, pubkey_hex) in bindings {
-            match publish_binding(self.client, slack_id, pubkey_hex).await {
+            match publish_binding(self.client, self.team_id, slack_id, pubkey_hex).await {
                 Ok(_) => self.summary.bindings_published += 1,
                 Err(e) => self
                     .summary
@@ -343,10 +367,16 @@ pub(super) fn build_imported_message(
     channel_uuid: Uuid,
     msg: &SlackMessage,
     names: &HashMap<String, String>,
+    team_id: &str,
     thread_ref: Option<&buzz_sdk::ThreadRef>,
 ) -> Result<EventBuilder, CliError> {
     let author = author_id(msg);
     let author_name = author_display(msg, names);
+    // The `import_author` id is the workspace-scoped foreign id `<team>:<user>`,
+    // so it composes to the same `slack:<team>:<user>` key the identity binding
+    // uses — that is how the client joins an imported message to its attributed
+    // Buzz profile. Without the team prefix the join would miss.
+    let author_foreign = format!("{team_id}:{}", author.as_deref().unwrap_or("unknown"));
 
     let mut content = mrkdwn::convert(&msg.text, names);
     for file in &msg.files {
@@ -360,16 +390,13 @@ pub(super) fn build_imported_message(
     // prefix when rendering the provenance-aware message.
     let content = format!("**{author_name}**: {}", content.trim());
 
-    buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], false, &[])
+    let broadcast = msg.subtype.as_deref() == Some("thread_broadcast");
+    buzz_sdk::build_message(channel_uuid, &content, thread_ref, &[], broadcast, &[])
         .map_err(|e| CliError::Other(format!("build_message failed: {e}")))
         .and_then(|builder| {
             Ok(builder
                 .custom_created_at(Timestamp::from(ts_seconds(&msg.ts)?))
-                .tags(provenance_tags(
-                    author.as_deref().unwrap_or("unknown"),
-                    &author_name,
-                    &msg.ts,
-                )?))
+                .tags(provenance_tags(&author_foreign, &author_name, &msg.ts)?))
         })
 }
 
@@ -420,13 +447,25 @@ pub(super) async fn submit(client: &BuzzClient, builder: EventBuilder) -> Result
     Ok(event_id)
 }
 
+/// Deterministic Buzz channel UUID for a Slack channel, derived from the
+/// workspace + Slack channel id. Making it a pure function of stable Slack ids
+/// means a re-run after a crash between the channel-create relay write and the
+/// state save reuses the same UUID (an idempotent NIP-33 replace) instead of
+/// minting a second channel. The `team_id` prefix keeps channel ids from two
+/// workspaces from colliding onto one UUID.
+pub(super) fn channel_uuid(team_id: &str, channel_id: &str) -> Uuid {
+    let name = format!("buzz:slack-import:{team_id}:{channel_id}");
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, name.as_bytes())
+}
+
 /// Build and submit an owner/admin-signed Slack identity binding.
 pub(super) async fn publish_binding(
     client: &BuzzClient,
+    team_id: &str,
     slack_id: &str,
     pubkey_hex: &str,
 ) -> Result<String, CliError> {
-    let d_tag = buzz_sdk::slack_identity_binding_d_tag(slack_id);
+    let d_tag = buzz_sdk::slack_identity_binding_d_tag(team_id, slack_id);
     let builder = buzz_sdk::build_import_identity_binding(&d_tag, pubkey_hex)
         .map_err(|e| CliError::Other(format!("build_import_identity_binding failed: {e}")))?;
     submit(client, builder).await

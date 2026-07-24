@@ -65,9 +65,11 @@ struct Args {
     #[arg(long, env = "SLACK_CLIENT_SECRET")]
     slack_client_secret: Option<String>,
 
-    /// Slack workspace id whose users may claim imported identities.
+    /// Slack workspace id (team id, e.g. T0266FRGM) whose users may claim
+    /// imported identities. Namespaces every `slack:<team>:<user>` subject so
+    /// ids can't collide across workspaces — required on both channels.
     #[arg(long, env = "SLACK_TEAM_ID")]
-    slack_team_id: Option<String>,
+    slack_team_id: String,
 
     /// OIDC redirect URI registered on the Slack app. Defaults to
     /// `<base_url>/oidc/callback`.
@@ -105,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let users_path = args.export_dir.join("users.json");
     let users_bytes = std::fs::read(&users_path)
         .map_err(|e| format!("could not read {}: {e}", users_path.display()))?;
-    let roster = Roster::from_users_json(&users_bytes)
+    let roster = Roster::from_users_json(&users_bytes, &args.slack_team_id)
         .map_err(|e| format!("could not parse {}: {e}", users_path.display()))?;
     tracing::info!(
         mailable = roster.mailable_count(),
@@ -132,18 +134,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--token-ttl-secs must be greater than zero".into());
     }
 
-    let base_url = args
-        .base_url
-        .unwrap_or_else(|| format!("http://{}", args.bind))
-        .trim_end_matches('/')
-        .to_string();
+    let base_url = normalize_public_base_url(
+        &args
+            .base_url
+            .unwrap_or_else(|| format!("http://{}", args.bind)),
+    )?;
 
-    let oidc = match (
-        args.slack_client_id,
-        args.slack_client_secret,
-        args.slack_team_id,
-    ) {
-        (Some(client_id), Some(client_secret), Some(team_id)) => {
+    let oidc = match (args.slack_client_id, args.slack_client_secret) {
+        (Some(client_id), Some(client_secret)) => {
             let redirect_uri = args
                 .oidc_redirect_uri
                 .unwrap_or_else(|| format!("{base_url}/oidc/callback"));
@@ -152,17 +150,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 client_id,
                 client_secret,
                 redirect_uri,
-                team_id,
+                team_id: args.slack_team_id.clone(),
             })
         }
-        (None, None, None) => {
-            tracing::info!("OIDC channel disabled (no Slack OIDC configuration)");
+        (None, None) => {
+            tracing::info!("OIDC channel disabled (no Slack OIDC credentials)");
             None
         }
         _ => {
             return Err(
-                "set SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, and SLACK_TEAM_ID together, or omit all"
-                    .into(),
+                "set SLACK_CLIENT_ID and SLACK_CLIENT_SECRET together, or omit both".into(),
             );
         }
     };
@@ -176,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         token_secret,
         consumed: Mutex::new(ConsumedNonces::new()),
         admin,
+        team_id: args.slack_team_id,
         relay_url: to_ws_url(&args.relay_url),
         auth_tag,
         base_url,
@@ -188,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         http: reqwest::Client::new(),
         oidc,
         oidc_states: Mutex::new(HashMap::new()),
+        oidc_codes: Mutex::new(HashMap::new()),
         dev: args.dev,
     };
     let state = AppState(Arc::new(inner));
@@ -210,6 +209,20 @@ fn to_ws_url(url: &str) -> String {
     }
 }
 
+fn normalize_public_base_url(value: &str) -> Result<String, String> {
+    let parsed = url::Url::parse(value).map_err(|error| format!("invalid --base-url: {error}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("--base-url must be an http(s) URL with a host".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("--base-url must not include credentials".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("--base-url must not include a query or fragment".into());
+    }
+    Ok(value.trim_end_matches('/').to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +233,17 @@ mod tests {
         assert_eq!(to_ws_url("https://relay.example"), "wss://relay.example");
         assert_eq!(to_ws_url("ws://x:1"), "ws://x:1");
         assert_eq!(to_ws_url("wss://x"), "wss://x");
+    }
+
+    #[test]
+    fn public_base_url_is_validated_and_normalized() {
+        assert_eq!(
+            normalize_public_base_url("https://migrate.example/").unwrap(),
+            "https://migrate.example"
+        );
+        assert!(normalize_public_base_url("file:///tmp/migrate").is_err());
+        assert!(normalize_public_base_url("https://user@migrate.example").is_err());
+        assert!(normalize_public_base_url("https://migrate.example?next=evil").is_err());
+        assert!(normalize_public_base_url("https://migrate.example#fragment").is_err());
     }
 }

@@ -21,6 +21,9 @@ pub struct ChannelState {
     /// Whether the create/topic/purpose events were accepted.
     #[serde(default)]
     pub metadata_done: bool,
+    /// Whether an archived Slack channel was archived in Buzz.
+    #[serde(default)]
+    pub archived_done: bool,
 }
 
 /// The whole state file.
@@ -90,19 +93,21 @@ mod tests {
             ChannelState {
                 uuid: "u-u-i-d".into(),
                 metadata_done: true,
+                archived_done: true,
             },
         );
         state
             .messages
             .insert(ImportState::message_key("C1", "1.000"), "ff".repeat(32));
-        state.reactions.insert("C1:1.000:👍:aa".into());
+        state.reactions.insert("C1:1.000:👍".into());
         state.save(&path).expect("save");
 
         let loaded = ImportState::load(&path).expect("load");
         assert_eq!(loaded.channels["C1"].uuid, "u-u-i-d");
         assert!(loaded.channels["C1"].metadata_done);
+        assert!(loaded.channels["C1"].archived_done);
         assert_eq!(loaded.messages["C1:1.000"], "ff".repeat(32));
-        assert!(loaded.reactions.contains("C1:1.000:👍:aa"));
+        assert!(loaded.reactions.contains("C1:1.000:👍"));
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -43,6 +43,9 @@ use state::ImportState;
 pub struct ImportSlackParams {
     /// Unzipped Slack export directory.
     pub export_dir: String,
+    /// Slack workspace id (team id) — namespaces identity bindings and channel
+    /// UUIDs so ids can't collide across workspaces.
+    pub team_id: String,
     /// State file path override.
     pub state: Option<String>,
     /// Optional comma-separated channel-name filter.
@@ -57,6 +60,7 @@ pub struct ImportSlackParams {
 }
 
 pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Result<(), CliError> {
+    let team_id = validate_team_id(&p.team_id)?.to_string();
     let export_dir = PathBuf::from(&p.export_dir);
     let export = SlackExport::load(&export_dir)?;
 
@@ -84,7 +88,15 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
         return dry_run_report(&export, &selected, &state, &bindings, p.skip_reactions);
     }
 
-    let mut importer = Importer::new(client, &export, &names, state, state_path, p.skip_reactions);
+    let mut importer = Importer::new(
+        client,
+        &export,
+        &names,
+        &team_id,
+        state,
+        state_path,
+        p.skip_reactions,
+    );
 
     for channel in &selected {
         importer.import_channel(channel).await?;
@@ -102,14 +114,17 @@ pub async fn cmd_import_slack(client: &BuzzClient, p: ImportSlackParams) -> Resu
 /// `cmd_import_claim` with their own key.
 pub async fn cmd_import_bind(
     client: &BuzzClient,
+    team_id: &str,
     slack_id: &str,
     pubkey: &str,
 ) -> Result<(), CliError> {
+    let team_id = validate_team_id(team_id)?;
     let slack_id = validate_slack_id(slack_id)?;
     let pubkey_hex = parse_pubkey(pubkey)?;
-    let event_id = publish_binding(client, slack_id, &pubkey_hex).await?;
+    let event_id = publish_binding(client, team_id, slack_id, &pubkey_hex).await?;
     print_json(&serde_json::json!({
         "event_id": event_id,
+        "team_id": team_id,
         "slack_id": slack_id,
         "pubkey": pubkey_hex,
         "accepted": true,
@@ -121,14 +136,20 @@ pub async fn cmd_import_bind(
 /// person whose history it is runs this with their own key. Inert until a
 /// community owner/admin has published the matching attestation for this
 /// pubkey.
-pub async fn cmd_import_claim(client: &BuzzClient, slack_id: &str) -> Result<(), CliError> {
+pub async fn cmd_import_claim(
+    client: &BuzzClient,
+    team_id: &str,
+    slack_id: &str,
+) -> Result<(), CliError> {
+    let team_id = validate_team_id(team_id)?;
     let slack_id = validate_slack_id(slack_id)?;
-    let d_tag = buzz_sdk::slack_identity_binding_d_tag(slack_id);
+    let d_tag = buzz_sdk::slack_identity_binding_d_tag(team_id, slack_id);
     let builder = buzz_sdk::build_import_identity_claim(&d_tag)
         .map_err(|e| CliError::Other(format!("build_import_identity_claim failed: {e}")))?;
     let event_id = submit(client, builder).await?;
     print_json(&serde_json::json!({
         "event_id": event_id,
+        "team_id": team_id,
         "slack_id": slack_id,
         "pubkey": client.keys().public_key().to_hex(),
         "accepted": true,
@@ -170,17 +191,25 @@ fn parse_identity_map(spec: Option<&str>) -> Result<Vec<(String, String)>, CliEr
 
 /// Validate and normalize a Slack user id supplied on the command line.
 fn validate_slack_id(slack_id: &str) -> Result<&str, CliError> {
-    let slack_id = slack_id.trim();
-    if slack_id.is_empty()
-        || !slack_id
+    validate_slack_ident(slack_id, "user id")
+}
+
+/// Validate and normalize a Slack workspace (team) id supplied on the command
+/// line. Same character rules as a user id.
+fn validate_team_id(team_id: &str) -> Result<&str, CliError> {
+    validate_slack_ident(team_id, "workspace (team) id")
+}
+
+fn validate_slack_ident<'a>(value: &'a str, label: &str) -> Result<&'a str, CliError> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(CliError::Usage(format!(
-            "invalid Slack user id {slack_id:?}"
-        )));
+        return Err(CliError::Usage(format!("invalid Slack {label} {value:?}")));
     }
-    Ok(slack_id)
+    Ok(value)
 }
 
 /// Parse an `npub1…` or 64-char hex string into a hex pubkey. Rejects nsec so
@@ -293,6 +322,7 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
     match cmd {
         crate::ImportCmd::Slack {
             export_dir,
+            team_id,
             state,
             channels,
             dry_run,
@@ -303,6 +333,7 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
                 client,
                 ImportSlackParams {
                     export_dir,
+                    team_id,
                     state,
                     channels,
                     dry_run,
@@ -312,17 +343,22 @@ pub async fn dispatch(cmd: crate::ImportCmd, client: &BuzzClient) -> Result<(), 
             )
             .await
         }
-        crate::ImportCmd::Bind { slack_id, pubkey } => {
-            cmd_import_bind(client, &slack_id, &pubkey).await
+        crate::ImportCmd::Bind {
+            team_id,
+            slack_id,
+            pubkey,
+        } => cmd_import_bind(client, &team_id, &slack_id, &pubkey).await,
+        crate::ImportCmd::Claim { team_id, slack_id } => {
+            cmd_import_claim(client, &team_id, &slack_id).await
         }
-        crate::ImportCmd::Claim { slack_id } => cmd_import_claim(client, &slack_id).await,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::importer::{
-        author_display, author_id, build_imported_message, provenance_tags, thread_root_key,
+        author_display, author_id, build_imported_message, channel_uuid, provenance_tags,
+        thread_root_key,
     };
     use super::*;
     use nostr::{EventId, Keys};
@@ -330,6 +366,17 @@ mod tests {
 
     fn msg(json: &str) -> SlackMessage {
         serde_json::from_str(json).expect("test message parses")
+    }
+
+    #[test]
+    fn channel_uuid_is_deterministic_and_team_scoped() {
+        // Same inputs → same UUID, so a crash-resumed run reuses the channel
+        // instead of minting a duplicate.
+        assert_eq!(channel_uuid("T1", "C1"), channel_uuid("T1", "C1"));
+        // Distinct team or channel → distinct UUID (no cross-workspace or
+        // cross-channel collision).
+        assert_ne!(channel_uuid("T1", "C1"), channel_uuid("T2", "C1"));
+        assert_ne!(channel_uuid("T1", "C1"), channel_uuid("T1", "C2"));
     }
 
     #[test]
@@ -421,7 +468,7 @@ mod tests {
         let mut names = HashMap::new();
         names.insert("U1".to_string(), "Alice".to_string());
 
-        let event = build_imported_message(channel_id, &message, &names, Some(&thread_ref))
+        let event = build_imported_message(channel_id, &message, &names, "T1", Some(&thread_ref))
             .expect("builder")
             .sign_with_keys(&Keys::generate())
             .expect("signs");
@@ -434,9 +481,45 @@ mod tests {
         assert!(tags.contains(&vec!["h".into(), channel_id.to_string()]));
         assert!(tags.iter().any(|tag| tag.first().is_some_and(|v| v == "e")));
         assert!(tags.contains(&vec!["import".into(), "slack".into()]));
-        assert!(tags.contains(&vec!["import_author".into(), "U1".into(), "Alice".into()]));
+        // The import_author id is workspace-scoped (`<team>:<user>`) so it
+        // composes to the same `slack:T1:U1` key the identity binding uses.
+        assert!(tags.contains(&vec![
+            "import_author".into(),
+            "T1:U1".into(),
+            "Alice".into()
+        ]));
         assert!(tags.contains(&vec!["import_ts".into(), "100.000002".into()]));
         assert_eq!(event.created_at.as_secs(), 100);
+    }
+
+    #[test]
+    fn imported_thread_broadcast_remains_visible_in_the_channel_timeline() {
+        let channel_id = Uuid::new_v4();
+        let root = EventId::from_hex(&"11".repeat(32)).expect("event id");
+        let thread_ref = buzz_sdk::ThreadRef {
+            root_event_id: root,
+            parent_event_id: root,
+        };
+        let message = msg(
+            r#"{"type":"message","subtype":"thread_broadcast","user":"U1",
+                "text":"shared reply","ts":"100.000002","thread_ts":"99.000001"}"#,
+        );
+        let event = build_imported_message(
+            channel_id,
+            &message,
+            &HashMap::new(),
+            "T1",
+            Some(&thread_ref),
+        )
+        .expect("builder")
+        .sign_with_keys(&Keys::generate())
+        .expect("signs");
+
+        assert!(event.tags.iter().any(|tag| {
+            let parts = tag.as_slice();
+            parts.first().map(String::as_str) == Some("broadcast")
+                && parts.get(1).map(String::as_str) == Some("1")
+        }));
     }
 
     #[tokio::test]
@@ -469,6 +552,7 @@ mod tests {
             &client,
             ImportSlackParams {
                 export_dir: dir.display().to_string(),
+                team_id: "T1".into(),
                 state: None,
                 channels: None,
                 dry_run: true,

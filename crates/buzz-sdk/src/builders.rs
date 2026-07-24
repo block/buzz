@@ -531,15 +531,21 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
     Ok(EventBuilder::new(Kind::Custom(40100), content).tags(tags))
 }
 
-/// Canonical `d`-tag for a Slack identity binding: `slack:<user id>`.
-pub fn slack_identity_binding_d_tag(slack_user_id: &str) -> String {
-    format!("slack:{slack_user_id}")
+/// Canonical `d`-tag for a Slack identity binding: `slack:<team id>:<user id>`.
+///
+/// Slack user ids are only unique **within** a workspace, so the workspace
+/// (`team_id`, e.g. `T0266FRGM`) is part of the key. Without it, the same
+/// `U…` id from two different Slack workspaces would collide, and an
+/// attestation or claim minted for one workspace could be replayed against
+/// another. Both parts must be non-empty (callers validate them).
+pub fn slack_identity_binding_d_tag(team_id: &str, slack_user_id: &str) -> String {
+    format!("slack:{team_id}:{slack_user_id}")
 }
 
 /// Build an owner/admin-signed import identity binding (kind 30623).
 ///
 /// Attests that the foreign workspace identity keyed by `d_tag` (e.g.
-/// `slack:U060976D0QN`, via [`slack_identity_binding_d_tag`]) belongs to
+/// `slack:T0266FRGM:U060976D0QN`, via [`slack_identity_binding_d_tag`]) belongs to
 /// `bound_pubkey`. Carries **public keys only** — no secret transits. The
 /// relay accepts this event solely from a community owner/admin, so a member
 /// cannot claim another person's imported history. Parameterized-replaceable:
@@ -565,7 +571,7 @@ pub fn build_import_identity_binding(
 /// Build a subject-signed import identity claim (kind 30624).
 ///
 /// The consent half of a two-party binding: the signer asserts that the
-/// foreign workspace identity keyed by `d_tag` (e.g. `slack:U060976D0QN`, via
+/// foreign workspace identity keyed by `d_tag` (e.g. `slack:T0266FRGM:U060976D0QN`, via
 /// [`slack_identity_binding_d_tag`]) is them. The signer's own pubkey is the
 /// consent, so there is no `p` tag — sign this with the subject's key. It only
 /// takes effect paired with a matching owner/admin
@@ -3838,8 +3844,8 @@ mod tests {
     #[test]
     fn identity_binding_carries_d_and_p_but_no_secret() {
         let pk = keys().public_key().to_hex();
-        let d = slack_identity_binding_d_tag("U060976D0QN");
-        assert_eq!(d, "slack:U060976D0QN");
+        let d = slack_identity_binding_d_tag("T0266FRGM", "U060976D0QN");
+        assert_eq!(d, "slack:T0266FRGM:U060976D0QN");
         let ev = sign(build_import_identity_binding(&d, &pk).unwrap());
         assert_eq!(ev.kind.as_u16() as u32, KIND_IMPORT_IDENTITY_BINDING);
         let get = |k: &str| {
@@ -3866,7 +3872,7 @@ mod tests {
     fn identity_claim_is_self_signed_with_no_p_tag() {
         // The claim's consent is the signature itself — it must NOT name a
         // pubkey, so nobody can craft a claim "for" someone else.
-        let d = slack_identity_binding_d_tag("U1");
+        let d = slack_identity_binding_d_tag("T1", "U1");
         let ev = sign(build_import_identity_claim(&d).unwrap());
         assert_eq!(ev.kind.as_u16() as u32, KIND_IMPORT_IDENTITY_CLAIM);
         assert_eq!(

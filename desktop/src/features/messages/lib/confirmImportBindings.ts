@@ -25,7 +25,9 @@ export function buildConfirmedImportBindings(
 ): Map<string, string> {
   // Attestations are parameterized-replaceable: newest per key wins, so sort
   // ascending and let later writes overwrite.
-  const ordered = [...events].sort((a, b) => a.created_at - b.created_at);
+  const ordered = [...events].sort(
+    (a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id),
+  );
 
   // slack:<id> -> attested pubkey (owner/admin-signed, relay-gated).
   const attested = new Map<string, string>();

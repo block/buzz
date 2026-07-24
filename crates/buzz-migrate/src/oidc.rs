@@ -181,7 +181,10 @@ pub async fn exchange_code_for_subject(
         .user_id
         .filter(|s| !s.is_empty())
         .ok_or(OidcError::NoUserId)?;
-    Ok(format!("slack:{user_id}"))
+    // Team-scope the subject: `slack:<team>:<user>`. `team_id` was just verified
+    // to equal the workspace Slack authenticated against, so this is the real
+    // workspace, not one the caller could choose.
+    Ok(format!("slack:{}:{user_id}", cfg.team_id))
 }
 
 /// Decode only the nonce from the ID token returned directly by Slack's token

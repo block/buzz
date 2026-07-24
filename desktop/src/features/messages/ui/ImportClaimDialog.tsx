@@ -20,7 +20,10 @@ import {
 } from "@/shared/ui/dialog";
 
 import { importIdentityBindingsQueryKey } from "../useImportIdentityBindings";
-import { publishImportIdentityClaim } from "../lib/publishImportIdentityClaim";
+import {
+  finalizeSlackOidcAttestation,
+  publishImportIdentityClaim,
+} from "../lib/publishImportIdentityClaim";
 
 type Phase = "confirm" | "working" | "done" | "error";
 
@@ -45,6 +48,7 @@ function assertMatchesSlackJoin(
     payload.via !== "oidc" ||
     !payload.relayUrl ||
     !payload.service ||
+    !payload.code ||
     normalizedUrl(payload.relayUrl) !== normalizedUrl(relayUrl) ||
     normalizedUrl(payload.service) !== normalizedUrl(serviceUrl ?? "")
   ) {
@@ -64,35 +68,27 @@ function assertMatchesSlackJoin(
  *   publishes the subject's self-claim (kind 30624). Only both together
  *   attribute the imported history — so a stray link can, at worst, make the
  *   user consent to an identity no attestation vouches for (inert).
- * - **oidc**: `via === "oidc"`. Slack already verified the user server-side,
- *   admitted their public key, and published the attestation. During a
- *   `join-slack` transaction this dialog records the verified subject; the
- *   onboarding flow connects to the target community before self-claiming.
+ * - **oidc**: `via === "oidc"`. Slack verified the user server-side but the
+ *   attestation is *not* yet published. During a `join-slack` transaction the
+ *   callback is matched to its expected relay and service, then the app redeems
+ *   the `code` at `/oidc/finalize` with a freshly signed self-claim. Only after
+ *   that creates membership and the attestation does onboarding connect to the
+ *   target community and publish the member's consent claim.
  *
- * Because the self-claim is a consent signature, we always show an explicit
- * confirm step naming the subject before signing anything.
+ * Completing the dedicated Slack OAuth flow is the consent action for OIDC, so
+ * it needs no second confirmation in Buzz. The email fallback retains an
+ * explicit confirmation because opening a bearer link is a different flow.
  */
 export function ImportClaimDialog() {
   const queryClient = useQueryClient();
-  const communityOnboarding = useCommunityOnboarding();
+  const { transaction, update } = useCommunityOnboarding();
   const [payload, setPayload] =
     React.useState<ImportClaimDeepLinkPayload | null>(null);
   const [phase, setPhase] = React.useState<Phase>("confirm");
   const [error, setError] = React.useState<string | null>(null);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    const unlistenPromise = listenForImportClaimDeepLinks((next) => {
-      if (cancelled) return;
-      setError(null);
-      setPhase("confirm");
-      setPayload(next);
-    });
-    return () => {
-      cancelled = true;
-      void unlistenPromise.then((unlisten) => unlisten());
-    };
-  }, []);
+  const transactionRef = React.useRef(transaction);
+  const oidcFinalizeRef = React.useRef<string | null>(null);
+  transactionRef.current = transaction;
 
   const close = React.useCallback(() => {
     setPayload(null);
@@ -100,44 +96,86 @@ export function ImportClaimDialog() {
     setPhase("confirm");
   }, []);
 
+  const receiveClaim = React.useCallback(
+    (next: ImportClaimDeepLinkPayload) => {
+      if (next.via === "oidc") {
+        try {
+          const pending = transactionRef.current;
+          if (pending?.stage !== "slack-auth") {
+            throw new Error(
+              "Start Slack sign-in from your team's Slack migration link.",
+            );
+          }
+          assertMatchesSlackJoin(next, pending.relayUrl, pending.slackService);
+          const service = next.service;
+          const code = next.code;
+          if (!service || !code) {
+            throw new Error("This Slack response is incomplete.");
+          }
+          if (oidcFinalizeRef.current === pending.id) return;
+          oidcFinalizeRef.current = pending.id;
+          void finalizeSlackOidcAttestation({
+            service,
+            code,
+            subject: next.subject,
+          })
+            .then(() => {
+              update(
+                {
+                  stage: "connecting",
+                  slackSubject: next.subject,
+                  error: undefined,
+                },
+                pending.id,
+              );
+              toast.success(
+                "Signed in with Slack — setting up your workspace.",
+              );
+            })
+            .catch((error: unknown) => {
+              oidcFinalizeRef.current = null;
+              const message =
+                error instanceof Error ? error.message : String(error);
+              toast.error(`Couldn't finish Slack migration: ${message}`);
+            });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          toast.error(`Couldn't finish Slack migration: ${message}`);
+        }
+        return;
+      }
+
+      setError(null);
+      setPhase("confirm");
+      setPayload(next);
+    },
+    [update],
+  );
+
+  React.useEffect(() => {
+    let cancelled = false;
+    const unlistenPromise = listenForImportClaimDeepLinks((next) => {
+      if (!cancelled) receiveClaim(next);
+    });
+    return () => {
+      cancelled = true;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [receiveClaim]);
+
   const confirm = React.useCallback(async () => {
     if (!payload) return;
     setPhase("working");
     setError(null);
     try {
+      if (!payload.token || !payload.service) {
+        throw new Error("This migration link is incomplete.");
+      }
       const { pubkey } = await getIdentity();
 
       // Email channel: redeem the token so the operator publishes the
       // attestation. The token proves inbox control; the pubkey is ours.
-      if (payload.token && payload.service) {
-        await completeEmailClaim(payload.service, payload.token, pubkey);
-      }
-
-      // If this claim completed a Slack-migration *join* (the person is mid
-      // onboarding at the slack-auth stage), connect to that community before
-      // publishing the self-claim. Publishing here would target whichever
-      // community happened to be active before the join.
-      const tx = communityOnboarding.transaction;
-      if (tx?.stage === "slack-auth") {
-        assertMatchesSlackJoin(payload, tx.relayUrl, tx.slackService);
-        communityOnboarding.update(
-          {
-            stage: "connecting",
-            slackSubject: payload.subject,
-            error: undefined,
-          },
-          tx.id,
-        );
-        toast.success("Signed in with Slack — setting up your workspace.");
-        close();
-        return;
-      }
-
-      if (payload.via === "oidc") {
-        throw new Error(
-          "Start Slack sign-in from your team's Slack migration link.",
-        );
-      }
+      await completeEmailClaim(payload.service, payload.token, pubkey);
 
       // Email fallback claims run inside an already-connected community.
       await publishImportIdentityClaim(payload.subject);
@@ -153,7 +191,7 @@ export function ImportClaimDialog() {
       setPhase("error");
       toast.error(`Couldn't link your history: ${message}`);
     }
-  }, [payload, queryClient, communityOnboarding, close]);
+  }, [payload, queryClient]);
 
   const open = payload !== null;
 

@@ -14,10 +14,12 @@ const MALLORY =
 
 let clock = 1000;
 function attestation(dTag, pubkey) {
+  const createdAt = clock++;
   return {
+    id: createdAt.toString(16).padStart(64, "0"),
     kind: KIND_IMPORT_IDENTITY_BINDING,
     pubkey: "admin".padEnd(64, "0"),
-    created_at: clock++,
+    created_at: createdAt,
     tags: [
       ["d", dTag],
       ["p", pubkey],
@@ -25,10 +27,12 @@ function attestation(dTag, pubkey) {
   };
 }
 function claim(dTag, author) {
+  const createdAt = clock++;
   return {
+    id: createdAt.toString(16).padStart(64, "0"),
     kind: KIND_IMPORT_IDENTITY_CLAIM,
     pubkey: author,
-    created_at: clock++,
+    created_at: createdAt,
     tags: [["d", dTag]],
   };
 }
@@ -89,4 +93,28 @@ test("bound pubkey is lowercased on both sides before matching", () => {
   ]);
   // Case must not defeat the match, and the stored key is lowercase.
   assert.deepEqual([...map], [["slack:U1", lower]]);
+});
+
+test("same-second conflicting attestations resolve deterministically by id", () => {
+  const first = attestation("slack:U1", ALICE);
+  const second = attestation("slack:U1", MALLORY);
+  first.created_at = 2000;
+  second.created_at = 2000;
+  first.id = "1".padStart(64, "0");
+  second.id = "2".padStart(64, "0");
+  const events = [
+    claim("slack:U1", ALICE),
+    claim("slack:U1", MALLORY),
+    second,
+    first,
+  ];
+
+  assert.deepEqual(
+    [...buildConfirmedImportBindings(events)],
+    [["slack:U1", MALLORY]],
+  );
+  assert.deepEqual(
+    [...buildConfirmedImportBindings([...events].reverse())],
+    [["slack:U1", MALLORY]],
+  );
 });
