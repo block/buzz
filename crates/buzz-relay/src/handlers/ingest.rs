@@ -304,6 +304,14 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
     }
 }
 
+/// Whether the event carries an `import` provenance tag (history import).
+fn has_import_tag(event: &Event) -> bool {
+    event
+        .tags
+        .iter()
+        .any(|tag| tag.as_slice().first().map(|s| s.as_str()) == Some("import"))
+}
+
 /// Extract a channel UUID from the `"h"` NIP-29 group tag.
 pub(crate) fn extract_channel_id(event: &Event) -> Option<Uuid> {
     for tag in event.tags.iter() {
@@ -1477,10 +1485,35 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    const MAX_TIMESTAMP_DRIFT_SECS: i64 = 900; // ±15 minutes
+    // Authorized-import carve-out: an event carrying an `import` provenance
+    // tag, submitted by an authenticated community owner/admin, may (a) be
+    // backdated past the drift envelope and (b) be signed by a key other
+    // than the submitter — the Schnorr signature already proves authorship,
+    // and the admin's own auth answers "who is allowed to write history
+    // here". The trust model matches BUZZ_MAX_PAST_DRIFT_SECS (trust the
+    // operator), scoped per event instead of relay-wide, with no restart.
+    let import_exempt = has_import_tag(&event)
+        && matches!(
+            state
+                .db
+                .get_relay_member(tenant.community(), &auth.pubkey().to_hex())
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+                .as_ref()
+                .map(|m| m.role.as_str()),
+            Some("owner") | Some("admin")
+        );
+
+    // Future drift is a fixed bound — a future timestamp is always a clock
+    // error or a forgery. Past drift is operator-tunable
+    // (BUZZ_MAX_PAST_DRIFT_SECS, default 900) so history imports can replay
+    // events with their original timestamps.
+    const MAX_FUTURE_DRIFT_SECS: i64 = 900; // +15 minutes
     let now = chrono::Utc::now().timestamp();
     let event_ts = event.created_at.as_secs() as i64;
-    if (event_ts - now).abs() > MAX_TIMESTAMP_DRIFT_SECS {
+    if event_ts - now > MAX_FUTURE_DRIFT_SECS
+        || (!import_exempt && now - event_ts > state.config.max_past_drift_secs)
+    {
         return Err(IngestError::Rejected(
             "invalid: event timestamp too far from server time".into(),
         ));
@@ -1496,7 +1529,7 @@ async fn ingest_event_inner(
     }
 
     let is_gift_wrap = kind_u32 == KIND_GIFT_WRAP;
-    if event.pubkey != *auth.pubkey() && !is_gift_wrap {
+    if event.pubkey != *auth.pubkey() && !is_gift_wrap && !import_exempt {
         return Err(IngestError::AuthFailed(
             "invalid: event pubkey does not match authenticated identity".into(),
         ));
@@ -2303,6 +2336,7 @@ async fn ingest_event_inner(
                 &target_id,
                 &actor_bytes,
                 emoji,
+                import_exempt,
             )
             .await
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
@@ -2391,11 +2425,12 @@ async fn ingest_event_inner(
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
         match state
             .db
-            .insert_event_with_thread_metadata(
+            .insert_event_with_thread_metadata_opts(
                 tenant.community(),
                 &event,
                 channel_id,
                 thread_params,
+                import_exempt,
             )
             .await
         {
