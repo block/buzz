@@ -373,10 +373,30 @@ pub enum TransferResult {
     LimitReached,
 }
 
-/// Maximum number of communities a single pubkey can own. Enforced at the
-/// relay layer — the authoritative layer — so that concurrent transfers or
-/// transfer-vs-create races cannot both pass a preflight count.
-pub const MAX_COMMUNITIES_PER_OWNER: i64 = 3;
+/// Default maximum number of communities a single pubkey can own.
+const DEFAULT_MAX_COMMUNITIES_PER_OWNER: i64 = 3;
+
+/// Parse and validate the effective per-owner community limit.
+///
+/// Accepts a raw string value (e.g., from an env var). Returns the parsed
+/// positive integer, or `DEFAULT_MAX_COMMUNITIES_PER_OWNER` if the input is
+/// absent, unparseable, or non-positive.
+pub fn effective_owner_limit(raw: Option<&str>) -> i64 {
+    raw.and_then(|s| s.parse::<i64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_MAX_COMMUNITIES_PER_OWNER)
+}
+
+/// Maximum number of communities a single pubkey can own. Operator-tunable via
+/// `BUZZ_MAX_COMMUNITIES_PER_OWNER`; falls back to 3 when the variable is
+/// absent, non-numeric, or non-positive so existing deployments are unaffected.
+pub fn max_communities_per_owner() -> i64 {
+    effective_owner_limit(
+        std::env::var("BUZZ_MAX_COMMUNITIES_PER_OWNER")
+            .ok()
+            .as_deref(),
+    )
+}
 
 /// Stable advisory-lock key for serializing ownership-granting operations
 /// (transfer + create) per recipient pubkey. Uses FNV-1a over the hex pubkey
@@ -472,7 +492,7 @@ pub async fn transfer_ownership(
     .fetch_one(&mut *tx)
     .await?;
 
-    if owned_count >= MAX_COMMUNITIES_PER_OWNER {
+    if owned_count >= max_communities_per_owner() {
         tx.rollback().await?;
         return Ok(TransferResult::LimitReached);
     }
@@ -948,5 +968,49 @@ mod tests {
                 .role,
             "owner"
         );
+    }
+
+    // ---- unit tests for effective_owner_limit (no DB required) ----
+
+    /// Missing env var falls back to the default of 3.
+    #[test]
+    fn owner_limit_default_when_absent() {
+        assert_eq!(
+            effective_owner_limit(None),
+            DEFAULT_MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    /// A non-numeric value falls back to the default.
+    #[test]
+    fn owner_limit_default_on_invalid_string() {
+        assert_eq!(
+            effective_owner_limit(Some("abc")),
+            DEFAULT_MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    /// Zero is not a positive integer — falls back to the default.
+    #[test]
+    fn owner_limit_default_on_zero() {
+        assert_eq!(
+            effective_owner_limit(Some("0")),
+            DEFAULT_MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    /// A negative value falls back to the default.
+    #[test]
+    fn owner_limit_default_on_negative() {
+        assert_eq!(
+            effective_owner_limit(Some("-5")),
+            DEFAULT_MAX_COMMUNITIES_PER_OWNER
+        );
+    }
+
+    /// A valid positive integer is accepted as the effective limit.
+    #[test]
+    fn owner_limit_positive_override() {
+        assert_eq!(effective_owner_limit(Some("100")), 100);
     }
 }
