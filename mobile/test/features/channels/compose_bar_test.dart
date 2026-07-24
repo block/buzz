@@ -18,6 +18,8 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
@@ -141,9 +143,11 @@ Widget _buildComposeBar({
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  List<CustomEmoji> customEmoji = const <CustomEmoji>[],
 }) {
   return ProviderScope(
     overrides: [
+      customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
@@ -258,6 +262,42 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('inserts a community emoji at the cursor from the action row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          customEmoji: const [
+            CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
+          ],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello world');
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.controller!.selection = const TextSelection.collapsed(
+        offset: 6,
+      );
+
+      await tester.tap(find.byIcon(LucideIcons.smilePlus));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.sparkles));
+      await tester.pump();
+      await tester.tap(find.byTooltip(':meow:'));
+      await tester.pumpAndSettle();
+
+      expect(textField.controller!.text, 'hello :meow:world');
+      expect(textField.controller!.selection.baseOffset, 12);
+    });
+
     testWidgets('uploads an image and sends markdown plus imeta tags', (
       tester,
     ) async {

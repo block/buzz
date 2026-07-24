@@ -22,6 +22,7 @@ import '../custom_emoji/custom_emoji_provider.dart';
 import 'channel.dart';
 import 'channel_management_provider.dart';
 import 'channels_provider.dart';
+import 'emoji_picker.dart';
 import 'mentions/mention_candidates.dart';
 import 'mentions/mention_candidates_provider.dart';
 import 'mentions/mention_ranking.dart';
@@ -323,6 +324,20 @@ class ComposeBar extends HookConsumerWidget {
 
     // Insert `#` at the cursor to manually trigger channel mode.
     void triggerChannel() => _insertTriggerAtCursor(controller, focusNode, '#');
+
+    // Insert a selected emoji at the cursor without replacing the draft.
+    void insertEmoji(String emoji) {
+      final text = controller.text;
+      final selection = controller.selection;
+      final cursor = selection.isValid
+          ? selection.baseOffset.clamp(0, text.length)
+          : text.length;
+      controller.value = TextEditingValue(
+        text: text.replaceRange(cursor, cursor, emoji),
+        selection: TextSelection.collapsed(offset: cursor + emoji.length),
+      );
+      focusNode.requestFocus();
+    }
 
     void clearComposer() {
       controller.clear();
@@ -863,6 +878,17 @@ class ComposeBar extends HookConsumerWidget {
                                                   showAttachments.value = false;
                                                   showCamera.value = false;
                                                   triggerChannel();
+                                                },
+                                              ),
+                                              _ComposeAction(
+                                                icon: LucideIcons.smilePlus,
+                                                onTap: () {
+                                                  showAttachments.value = false;
+                                                  showCamera.value = false;
+                                                  showEmojiPicker(
+                                                    context: context,
+                                                    onSelect: insertEmoji,
+                                                  );
                                                 },
                                               ),
                                               _ComposeAction(
