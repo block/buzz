@@ -28,9 +28,9 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import {
-  type Project,
   type ProjectPullRequest,
   type ProjectPullRequestCommentAnchor,
+  type Repository as Project,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
 import type { ProjectPullRequestComment } from "@/features/projects/projectPullRequests.mjs";

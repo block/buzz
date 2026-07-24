@@ -4,6 +4,7 @@ import type {
   Project,
   ProjectIssue,
   ProjectIssueListItem,
+  Repository,
 } from "@/features/projects/hooks";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import {
@@ -33,7 +34,11 @@ type ProjectsIssuesListProps = {
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
   isRetrying: boolean;
-  onOpen: (project: Project, issue: ProjectIssue) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    issue: ProjectIssue,
+  ) => void;
   onRetry: () => void;
   profiles?: UserProfileLookup;
   issues: ProjectIssueListItem[];
@@ -282,11 +287,13 @@ export function ProjectsIssuesList({
       <div className="space-y-3">
         {loadNotice}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {issues.map(({ project, issue }) => (
+          {issues.map(({ project, issue, repository }) => (
             <IssueGridCard
               issue={issue}
-              key={issue.id}
-              onOpen={onOpen}
+              key={`${repository.id}:${issue.id}`}
+              onOpen={(selectedProject, selectedIssue) =>
+                onOpen(selectedProject, repository, selectedIssue)
+              }
               profiles={profiles}
               project={project}
             />
@@ -300,11 +307,13 @@ export function ProjectsIssuesList({
     <div className="space-y-3">
       {loadNotice}
       <div className={PROJECT_LIST_CONTAINER_CLASS}>
-        {issues.map(({ project, issue }) => (
+        {issues.map(({ project, issue, repository }) => (
           <IssueListRow
             issue={issue}
-            key={issue.id}
-            onOpen={onOpen}
+            key={`${repository.id}:${issue.id}`}
+            onOpen={(selectedProject, selectedIssue) =>
+              onOpen(selectedProject, repository, selectedIssue)
+            }
             profiles={profiles}
             project={project}
           />

@@ -35,6 +35,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -4845,6 +4846,7 @@ const MOCK_PROJECT_SUBJECTS = [
 ];
 
 const MOCK_PROJECT_KINDS = new Set<number>([
+  KIND_PROJECT_ANNOUNCEMENT,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_GIT_PATCH,
@@ -4999,6 +5001,25 @@ function buildMockProjectEvents(): RelayEvent[] {
       }
     }
   }
+
+  const projectOwner =
+    window.__BUZZ_E2E_PROJECT_OWNER_OVERRIDE__ ?? MOCK_PROJECT_SEEDS[0].owner;
+  events.push(
+    createMockEvent(
+      KIND_PROJECT_ANNOUNCEMENT,
+      "Relay, desktop, mobile, and operator tooling for Buzz.",
+      [
+        ["d", "buzz"],
+        ["name", "buzz"],
+        ["description", "The complete Buzz community platform."],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${projectOwner}:buzz`, "", "primary"],
+        ["a", `${KIND_REPO_ANNOUNCEMENT}:${ALICE_PUBKEY}:relay-tools`],
+      ],
+      projectOwner,
+      now,
+      "project-buzz".padEnd(64, "0"),
+    ),
+  );
 
   return events;
 }

@@ -4,6 +4,7 @@ import type {
   Project,
   ProjectPullRequest,
   ProjectPullRequestListItem,
+  Repository,
 } from "@/features/projects/hooks";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import {
@@ -53,7 +54,11 @@ type ProjectsPullRequestsListProps = {
   failedSections: ProjectWorkItemSection[];
   isLoading: boolean;
   isRetrying: boolean;
-  onOpen: (project: Project, pullRequest: ProjectPullRequest) => void;
+  onOpen: (
+    project: Project,
+    repository: Repository,
+    pullRequest: ProjectPullRequest,
+  ) => void;
   onRetry: () => void;
   profiles?: UserProfileLookup;
   pullRequests: ProjectPullRequestListItem[];
@@ -306,10 +311,12 @@ export function ProjectsPullRequestsList({
       <div className="space-y-3">
         {loadNotice}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {pullRequests.map(({ project, pullRequest }) => (
+          {pullRequests.map(({ project, pullRequest, repository }) => (
             <PullRequestGridCard
-              key={pullRequest.id}
-              onOpen={onOpen}
+              key={`${repository.id}:${pullRequest.id}`}
+              onOpen={(selectedProject, selectedPullRequest) =>
+                onOpen(selectedProject, repository, selectedPullRequest)
+              }
               profiles={profiles}
               project={project}
               pullRequest={pullRequest}
@@ -324,10 +331,12 @@ export function ProjectsPullRequestsList({
     <div className="space-y-3">
       {loadNotice}
       <div className={PROJECT_LIST_CONTAINER_CLASS}>
-        {pullRequests.map(({ project, pullRequest }) => (
+        {pullRequests.map(({ project, pullRequest, repository }) => (
           <PullRequestListRow
-            key={pullRequest.id}
-            onOpen={onOpen}
+            key={`${repository.id}:${pullRequest.id}`}
+            onOpen={(selectedProject, selectedPullRequest) =>
+              onOpen(selectedProject, repository, selectedPullRequest)
+            }
             profiles={profiles}
             project={project}
             pullRequest={pullRequest}

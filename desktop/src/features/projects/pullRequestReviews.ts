@@ -10,7 +10,7 @@ import {
   KIND_GIT_STATUS_OPEN,
   KIND_TEXT_NOTE,
 } from "@/shared/constants/kinds";
-import type { Project } from "./hooks";
+import type { Repository as Project } from "./hooks";
 import {
   nextProjectPullRequestStatusCreatedAt,
   type ProjectPullRequest,

@@ -4,8 +4,8 @@ import { toast } from "sonner";
 
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
-  type Project,
   type ProjectIssue,
+  type Repository as Project,
   useCreateProjectIssueCommentMutation,
   useProjectIssuesQuery,
 } from "@/features/projects/hooks";

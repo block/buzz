@@ -2,7 +2,10 @@ import { AlertTriangle, Copy, GitMerge, SquareTerminal } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
 
-import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
+import type {
+  ProjectPullRequest,
+  Repository as Project,
+} from "@/features/projects/hooks";
 import { projectPullRequestConflictCommands } from "@/features/projects/projectPullRequestConflictRecovery";
 import {
   useMergeProjectPullRequestMutation,

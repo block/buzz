@@ -10,6 +10,7 @@ import type {
   ProjectPullRequest,
   ProjectPullRequestListItem,
   ProjectRepoSnapshot,
+  Repository,
 } from "@/features/projects/hooks";
 import {
   formatExactTimestamp,
@@ -37,9 +38,15 @@ type ActivityTarget =
   | {
       type: "pull-request";
       project: Project;
+      repository: Repository;
       pullRequest: ProjectPullRequest;
     }
-  | { type: "issue"; project: Project; issue: ProjectIssue };
+  | {
+      type: "issue";
+      project: Project;
+      repository: Repository;
+      issue: ProjectIssue;
+    };
 
 type ProjectActivityItem = {
   id: string;
@@ -59,10 +66,15 @@ type ProjectsActivityFeedProps = {
   isLoading: boolean;
   issues: ProjectIssueListItem[];
   onOpenCommit: (project: Project, commitHash: string) => void;
-  onOpenIssue: (project: Project, issue: ProjectIssue) => void;
+  onOpenIssue: (
+    project: Project,
+    repository: Repository,
+    issue: ProjectIssue,
+  ) => void;
   onOpenProject: (project: Project) => void;
   onOpenPullRequest: (
     project: Project,
+    repository: Repository,
     pullRequest: ProjectPullRequest,
   ) => void;
   profiles?: UserProfileLookup;
@@ -129,10 +141,15 @@ function buildActivityItems({
     });
   }
 
-  for (const { project, pullRequest } of pullRequests) {
-    const target = { type: "pull-request", project, pullRequest } as const;
+  for (const { project, pullRequest, repository } of pullRequests) {
+    const target = {
+      type: "pull-request",
+      project,
+      pullRequest,
+      repository,
+    } as const;
     items.push({
-      id: `pr:${pullRequest.id}`,
+      id: `pr:${repository.id}:${pullRequest.id}`,
       kind: "pull-request",
       createdAt: pullRequest.createdAt,
       actorPubkey: pullRequest.author,
@@ -145,7 +162,7 @@ function buildActivityItems({
     });
     for (const update of pullRequest.updates) {
       items.push({
-        id: `pr-update:${update.id}`,
+        id: `pr-update:${repository.id}:${update.id}`,
         kind: "commit",
         createdAt: update.createdAt,
         actorPubkey: update.author,
@@ -172,7 +189,7 @@ function buildActivityItems({
               ? "review-request"
               : "comment";
       items.push({
-        id: `pr-comment:${comment.id}`,
+        id: `pr-comment:${repository.id}:${comment.id}`,
         kind,
         createdAt: comment.createdAt,
         actorPubkey: comment.author,
@@ -198,10 +215,10 @@ function buildActivityItems({
     }
   }
 
-  for (const { project, issue } of issues) {
-    const target = { type: "issue", project, issue } as const;
+  for (const { project, issue, repository } of issues) {
+    const target = { type: "issue", project, issue, repository } as const;
     items.push({
-      id: `issue:${issue.id}`,
+      id: `issue:${repository.id}:${issue.id}`,
       kind: "issue",
       createdAt: issue.createdAt,
       actorPubkey: issue.author,
@@ -214,7 +231,7 @@ function buildActivityItems({
     });
     for (const comment of issue.comments) {
       items.push({
-        id: `issue-comment:${comment.id}`,
+        id: `issue-comment:${repository.id}:${comment.id}`,
         kind: "comment",
         createdAt: comment.createdAt,
         actorPubkey: comment.author,
@@ -421,10 +438,15 @@ export function ProjectsActivityFeed(props: ProjectsActivityFeedProps) {
                 } else if (item.target.type === "pull-request") {
                   props.onOpenPullRequest(
                     item.target.project,
+                    item.target.repository,
                     item.target.pullRequest,
                   );
                 } else {
-                  props.onOpenIssue(item.target.project, item.target.issue);
+                  props.onOpenIssue(
+                    item.target.project,
+                    item.target.repository,
+                    item.target.issue,
+                  );
                 }
               }}
               onOpenProject={() => props.onOpenProject(item.target.project)}

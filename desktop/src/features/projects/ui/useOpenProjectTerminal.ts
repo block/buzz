@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import * as React from "react";
 import { toast } from "sonner";
 
-import type { Project } from "@/features/projects/hooks";
+import type { Repository } from "@/features/projects/hooks";
 import { openProjectTerminal } from "@/shared/api/projectGit";
 
 export function projectTerminalLabel(hasLocalCheckout: boolean) {
@@ -19,7 +19,7 @@ export function useOpenProjectTerminal(reposDir?: string | null) {
 
   return React.useCallback(
     async (
-      project: Project,
+      project: Repository,
       options: { branch?: string | null; hasLocalCheckout: boolean },
     ) => {
       const toastId = options.hasLocalCheckout

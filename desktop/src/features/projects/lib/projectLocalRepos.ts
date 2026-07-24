@@ -1,4 +1,4 @@
-import type { Project } from "@/features/projects/hooks";
+import type { Project, Repository } from "@/features/projects/hooks";
 
 function localRepoNameCandidate(value: string | null | undefined) {
   const trimmed = value?.trim().replace(/\.git$/i, "") ?? "";
@@ -26,7 +26,7 @@ function cloneUrlRepoName(cloneUrl: string | undefined) {
   }
 }
 
-function localRepoCandidates(project: Project) {
+function localRepoCandidates(project: Repository) {
   return [
     localRepoNameCandidate(project.dtag),
     cloneUrlRepoName(project.cloneUrls[0]),
@@ -39,7 +39,9 @@ export function hasLocalCheckout(
   project: Project,
   localRepoNames: Set<string>,
 ) {
-  return localRepoCandidates(project).some((candidate) =>
-    localRepoNames.has(candidate),
+  return project.repositories.some((repository) =>
+    localRepoCandidates(repository).some((candidate) =>
+      localRepoNames.has(candidate),
+    ),
   );
 }

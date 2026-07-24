@@ -15,8 +15,8 @@ import { toast } from "sonner";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
 import { ForumComposer } from "@/features/forum/ui/ForumComposer";
 import {
-  type Project,
   type ProjectPullRequest,
+  type Repository as Project,
   useCreateProjectPullRequestCommentMutation,
 } from "@/features/projects/hooks";
 import { projectPullRequestCommentTimelineKind } from "@/features/projects/projectPullRequests.mjs";

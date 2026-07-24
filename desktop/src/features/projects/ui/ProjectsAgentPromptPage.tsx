@@ -81,10 +81,19 @@ const REPO_CONTEXT_MARKER = "Workspace repositories:";
  * with the first message of a conversation. */
 function repoContextBlock(projects: readonly Project[]) {
   if (projects.length === 0) return "";
-  const listed = projects
+  const repositories = projects.flatMap((project) =>
+    project.repositories.map((repository) => ({
+      label:
+        project.repositories.length > 1
+          ? `${project.name} / ${repository.name}`
+          : project.name,
+      repoAddress: repository.repoAddress,
+    })),
+  );
+  const listed = repositories
     .slice(0, MAX_CONTEXT_REPOS)
-    .map((project) => `- ${project.name} (${project.repoAddress})`);
-  const remaining = projects.length - listed.length;
+    .map((repository) => `- ${repository.label} (${repository.repoAddress})`);
+  const remaining = repositories.length - listed.length;
   return ["", "---", REPO_CONTEXT_MARKER, ...listed]
     .concat(remaining > 0 ? [`…and ${remaining} more`] : [])
     .join("\n");

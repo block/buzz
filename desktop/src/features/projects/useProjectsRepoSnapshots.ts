@@ -7,6 +7,7 @@ import {
 } from "@/shared/api/projectGit";
 import type { ProjectRepoSnapshot } from "@/shared/api/types";
 import type { Project } from "./hooks";
+import { selectProjectRepository } from "./projectModels";
 
 // Remote snapshots are backed by a blobless `git clone` per repository, so the
 // overview scan is deliberately throttled and cached for a long time.
@@ -27,25 +28,27 @@ async function fetchProjectSnapshot(
   project: Project,
   reposDir: string | null | undefined,
 ): Promise<ProjectRepoSnapshot | null> {
+  const repository = selectProjectRepository(project, null);
+  if (!repository) return null;
   try {
     const local = await getProjectLocalRepoSnapshot({
       reposDir,
-      projectDtag: project.dtag,
-      cloneUrl: project.cloneUrls[0] ?? null,
-      defaultBranch: project.defaultBranch,
-      baseBranch: project.defaultBranch,
+      projectDtag: repository.dtag,
+      cloneUrl: repository.cloneUrls[0] ?? null,
+      defaultBranch: repository.defaultBranch,
+      baseBranch: repository.defaultBranch,
     });
     if (snapshotHasData(local?.snapshot)) return local?.snapshot ?? null;
   } catch {
     // Best-effort: fall through to the remote snapshot.
   }
 
-  const cloneUrl = project.cloneUrls[0];
+  const cloneUrl = repository.cloneUrls[0];
   if (!cloneUrl) return null;
   return getProjectRepoSnapshot({
     cloneUrl,
-    defaultBranch: project.defaultBranch,
-    baseBranch: project.defaultBranch,
+    defaultBranch: repository.defaultBranch,
+    baseBranch: repository.defaultBranch,
   });
 }
 

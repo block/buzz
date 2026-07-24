@@ -1,11 +1,11 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
 import {
-  eventToProject,
   fetchProjects,
   type Project,
   projectsQueryKey,
 } from "@/features/projects/hooks";
+import { buildProjectReadModels } from "@/features/projects/projectModels";
 import { relayClient } from "@/shared/api/relayClient";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
 import { signRelayEvent } from "@/shared/api/tauri";
@@ -78,7 +78,15 @@ async function createProject(input: CreateProjectInput): Promise<Project> {
     "Failed to create project.",
   );
 
-  return eventToProject(event, getCachedRelayOrigin());
+  const [project] = buildProjectReadModels({
+    projectEvents: [],
+    repositoryEvents: [event],
+    relayOrigin: getCachedRelayOrigin(),
+  });
+  if (!project) {
+    throw new Error("The repository was created but could not be read.");
+  }
+  return project;
 }
 
 /** Mutation that creates a project and inserts it into the projects cache. */

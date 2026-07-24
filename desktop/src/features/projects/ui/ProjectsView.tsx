@@ -7,6 +7,7 @@ import {
   type Project,
   type ProjectIssue,
   type ProjectPullRequest,
+  type Repository,
   useDeleteProjectMutation,
   useProjectActivitySummariesQuery,
   useProjectLocalRepositoriesQuery,
@@ -14,6 +15,7 @@ import {
   useProjectsWorkItemsQuery,
 } from "@/features/projects/hooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
+import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
 import { ProjectsActivityFeed } from "@/features/projects/ui/ProjectsActivityFeed";
 import {
@@ -191,10 +193,7 @@ export function ProjectsView() {
       ...new Set(
         [
           ...projects.flatMap((project) =>
-            projectPeople(
-              project,
-              activitySummariesQuery.data?.[project.repoAddress],
-            ),
+            projectPeople(project, activitySummariesQuery.data?.[project.id]),
           ),
           ...(projectsWorkItemsQuery.data?.pullRequests.items.flatMap(
             ({ pullRequest }) => [
@@ -293,7 +292,7 @@ export function ProjectsView() {
 
     const sortedProjects = projects
       .filter((project) => {
-        const summary = activitySummariesQuery.data?.[project.repoAddress];
+        const summary = activitySummariesQuery.data?.[project.id];
         const people = projectPeople(project, summary);
         if (repositoryScope === "mine")
           return isProjectMine(project, currentPubkey);
@@ -306,8 +305,8 @@ export function ProjectsView() {
         return true;
       })
       .sort((left, right) => {
-        const leftSummary = activitySummariesQuery.data?.[left.repoAddress];
-        const rightSummary = activitySummariesQuery.data?.[right.repoAddress];
+        const leftSummary = activitySummariesQuery.data?.[left.id];
+        const rightSummary = activitySummariesQuery.data?.[right.id];
         if (sort === "name") {
           return left.name.localeCompare(right.name);
         }
@@ -392,25 +391,38 @@ export function ProjectsView() {
   );
 
   const handleOpenPullRequest = React.useCallback(
-    (project: Project, pullRequest: ProjectPullRequest) => {
-      void goProject(project.id, { pullRequestId: pullRequest.id });
+    (
+      project: Project,
+      repository: Repository,
+      pullRequest: ProjectPullRequest,
+    ) => {
+      void goProject(project.id, {
+        pullRequestId: pullRequest.id,
+        repositoryId: repository.id,
+      });
     },
     [goProject],
   );
 
   const handleOpenIssue = React.useCallback(
-    (project: Project, issue: ProjectIssue) => {
-      void goProject(project.id, { issueId: issue.id });
+    (project: Project, repository: Repository, issue: ProjectIssue) => {
+      void goProject(project.id, {
+        issueId: issue.id,
+        repositoryId: repository.id,
+      });
     },
     [goProject],
   );
 
   const openTerminal = useOpenProjectTerminal(activeCommunity?.reposDir);
   const handleOpenTerminal = React.useCallback(
-    (project: Project) =>
-      openTerminal(project, {
+    (project: Project) => {
+      const repository = selectProjectRepository(project, null);
+      if (!repository) return Promise.resolve();
+      return openTerminal(repository, {
         hasLocalCheckout: hasLocalCheckout(project, localRepoNames),
-      }),
+      });
+    },
     [localRepoNames, openTerminal],
   );
 
@@ -462,7 +474,7 @@ export function ProjectsView() {
         )}
       >
         {visibleProjects.map((project) => {
-          const summary = activitySummariesQuery.data?.[project.repoAddress];
+          const summary = activitySummariesQuery.data?.[project.id];
           return (
             <ProjectGridCard
               canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
@@ -483,7 +495,7 @@ export function ProjectsView() {
     ) : (
       <div className={PROJECT_LIST_CONTAINER_CLASS}>
         {visibleProjects.map((project) => {
-          const summary = activitySummariesQuery.data?.[project.repoAddress];
+          const summary = activitySummariesQuery.data?.[project.id];
           return (
             <ProjectListRow
               canDelete={isProjectOwnedByCurrentUser(project, currentPubkey)}
@@ -614,8 +626,15 @@ export function ProjectsView() {
       />
       {createPullRequestOpen ? (
         <CreatePullRequestDialog
-          onCreated={async (createdProject, pullRequestId) => {
-            await goProject(createdProject.id, { pullRequestId });
+          onCreated={async (
+            createdProject,
+            createdRepository,
+            pullRequestId,
+          ) => {
+            await goProject(createdProject.id, {
+              pullRequestId,
+              repositoryId: createdRepository.id,
+            });
           }}
           onOpenChange={setCreatePullRequestOpen}
           open
@@ -624,8 +643,11 @@ export function ProjectsView() {
         />
       ) : null}
       <CreateProjectIssueDialog
-        onCreated={async (createdProject, issueId) => {
-          await goProject(createdProject.id, { issueId });
+        onCreated={async (createdProject, createdRepository, issueId) => {
+          await goProject(createdProject.id, {
+            issueId,
+            repositoryId: createdRepository.id,
+          });
         }}
         onOpenChange={setCreateIssueOpen}
         open={createIssueOpen}

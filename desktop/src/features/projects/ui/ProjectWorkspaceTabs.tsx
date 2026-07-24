@@ -15,6 +15,7 @@ import type {
   ProjectRepoContributor,
   ProjectRepoDiff,
   ProjectRepoSnapshot,
+  Repository,
 } from "@/features/projects/hooks";
 import {
   commitAuthorPubkeysFromPullRequests,
@@ -51,7 +52,11 @@ import { PROJECT_PANEL_ACTION_BUTTON_CLASS } from "./projectPanelStyles";
 type CreatePullRequestAction = {
   projects: Project[];
   reposDir?: string | null;
-  onCreated: (project: Project, pullRequestId: string) => void | Promise<void>;
+  onCreated: (
+    project: Project,
+    repository: Repository,
+    pullRequestId: string,
+  ) => void | Promise<void>;
 };
 
 type CreateIssueAction = {
@@ -146,7 +151,7 @@ export function WorkspaceTabs({
   localSnapshot: ProjectLocalRepoSnapshot | null | undefined;
   localSnapshotError: unknown;
   localSnapshotLoading: boolean;
-  project: Project;
+  project: Repository;
   repoDiff: ProjectRepoDiff | null | undefined;
   repoDiffError: unknown;
   repoDiffLoading: boolean;

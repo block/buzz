@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { waitForAnimations } from "../helpers/animations";
-import { installMockBridge } from "../helpers/bridge";
+import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 
 const SHOTS = "test-results/project-commit-detail";
 const ALIGNMENT_TOLERANCE_PX = 2;
@@ -134,6 +134,39 @@ test("top-level project lists align dates and overflow actions", async ({
       (row) => row.scrollWidth <= row.clientWidth,
     ),
   ).toBe(true);
+});
+
+test("multi-repository projects switch the active repository", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page
+    .locator(
+      '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',
+    )
+    .first()
+    .click();
+
+  const picker = page.getByTestId("project-repository-picker");
+  await expect(picker).toContainText("buzz");
+  await picker.click();
+  await expect(
+    page.getByTestId("project-repository-relay-tools"),
+  ).toBeVisible();
+  await waitForAnimations(page);
+  await page.screenshot({
+    path: `${SHOTS}/04-multi-repository-picker.png`,
+  });
+
+  await page.getByTestId("project-repository-relay-tools").click();
+  await expect(picker).toContainText("relay-tools");
+  await expect(page).toHaveURL(
+    new RegExp(`repositoryId=${TEST_IDENTITIES.alice.pubkey}%3Arelay-tools`),
+  );
 });
 
 test("commit detail opens from the commits feed with a diff", async ({

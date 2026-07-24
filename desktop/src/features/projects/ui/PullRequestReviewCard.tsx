@@ -3,7 +3,10 @@ import * as React from "react";
 import { toast } from "sonner";
 
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
-import type { Project, ProjectPullRequest } from "@/features/projects/hooks";
+import type {
+  ProjectPullRequest,
+  Repository as Project,
+} from "@/features/projects/hooks";
 import {
   nextProjectPullRequestReviewCreatedAt,
   projectPullRequestReviewSummary,

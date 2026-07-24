@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildProjectReadModels, eventToRepository } from "./projectModels.ts";
+import {
+  buildProjectReadModels,
+  eventToRepository,
+  selectProjectRepository,
+} from "./projectModels.ts";
 
 const PROJECT_OWNER = "a".repeat(64);
 const FRONTEND_OWNER = "b".repeat(64);
@@ -116,4 +120,31 @@ test("buildProjectReadModels ignores malformed primary membership", () => {
   assert.equal(projects.length, 1);
   assert.equal(projects[0].legacy, true);
   assert.equal(projects[0].repositories[0].dtag, "frontend");
+});
+
+test("selectProjectRepository honors a request and falls back to primary", () => {
+  const frontendAddress = `30617:${FRONTEND_OWNER}:frontend`;
+  const projects = buildProjectReadModels({
+    projectEvents: [
+      projectEvent([
+        ["a", frontendAddress, "", "primary"],
+        ["a", `30617:${BACKEND_OWNER}:backend`],
+      ]),
+    ],
+    repositoryEvents: [
+      repositoryEvent(FRONTEND_OWNER, "frontend"),
+      repositoryEvent(BACKEND_OWNER, "backend"),
+    ],
+    relayOrigin: RELAY_ORIGIN,
+  });
+
+  assert.equal(
+    selectProjectRepository(projects[0], `${BACKEND_OWNER}:backend`)?.dtag,
+    "backend",
+  );
+  assert.equal(
+    selectProjectRepository(projects[0], "missing:repository")?.dtag,
+    "frontend",
+  );
+  assert.equal(selectProjectRepository(projects[0], null)?.dtag, "frontend");
 });

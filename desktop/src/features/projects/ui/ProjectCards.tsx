@@ -434,6 +434,11 @@ export function ProjectGridCard({
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">
               {project.name}
             </span>
+            {project.repositories.length > 1 ? (
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {project.repositories.length} repos
+              </span>
+            ) : null}
             <StatusPill status={project.status} />
           </div>
           <div className="relative z-10 flex shrink-0 items-center gap-1">
@@ -506,6 +511,11 @@ export function ProjectListRow({
               <span className={PROJECT_LIST_ROW_TITLE_CLASS}>
                 {project.name}
               </span>
+              {project.repositories.length > 1 ? (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {project.repositories.length} repos
+                </span>
+              ) : null}
               <StatusPill status={project.status} />
             </div>
             <p className={PROJECT_LIST_ROW_PREVIEW_CLASS}>

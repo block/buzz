@@ -27,7 +27,7 @@ function overviewStats(
 ) {
   return projects.reduce(
     (stats, project) => {
-      const summary = summaries?.[project.repoAddress];
+      const summary = summaries?.[project.id];
       return {
         issues: stats.issues + (summary?.issueCount ?? 0),
         prs: stats.prs + (summary?.prCount ?? 0),
@@ -82,7 +82,10 @@ export function ProjectsOverviewPanel({
       <div className="grid xl:grid-cols-[minmax(0,1fr)_18rem] 2xl:grid-cols-[minmax(0,1fr)_24rem]">
         <div className="order-1 grid grid-cols-2 gap-2 p-4 pt-0 sm:gap-3 xl:order-none xl:col-start-1 xl:row-start-1 xl:grid-cols-4">
           <StatPill
-            count={projects.length}
+            count={projects.reduce(
+              (count, project) => count + project.repositories.length,
+              0,
+            )}
             icon={FolderGit2}
             label="Repositories"
             onClick={() => onSelectSection("repositories")}
