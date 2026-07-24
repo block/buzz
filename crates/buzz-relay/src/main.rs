@@ -134,7 +134,14 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let usage_interval_secs = usage_metrics_interval_secs();
-    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(usage_interval_secs);
+    let git_gc_config =
+        buzz_relay::api::git::gc::GitGcWorkerConfig::from_env().map_err(anyhow::Error::msg)?;
+    let metrics_refresh_interval_secs = if git_gc_config.enabled {
+        usage_interval_secs.max(git_gc_config.interval.as_secs())
+    } else {
+        usage_interval_secs
+    };
+    let usage_idle_timeout_secs = usage_metrics_idle_timeout_secs(metrics_refresh_interval_secs);
     relay_metrics::install(config.metrics_port, usage_idle_timeout_secs);
     metrics::gauge!("buzz_audit_enabled").set(if config.audit_enabled { 1.0 } else { 0.0 });
     info!(
@@ -498,6 +505,21 @@ async fn main() -> anyhow::Result<()> {
             transport_drops = report.transport_drops,
             "git object-store backend admitted: A3 conformance probe passed"
         );
+    }
+
+    if git_gc_config.enabled {
+        info!(
+            interval_seconds = git_gc_config.interval.as_secs(),
+            max_pointers = git_gc_config.limits.max_pointers,
+            max_objects_per_prefix = git_gc_config.limits.max_objects_per_prefix,
+            max_manifest_bytes = git_gc_config.limits.max_manifest_bytes,
+            scan_timeout_seconds = git_gc_config.limits.timeout.as_secs(),
+            "Git object-store GC dry-run inventory enabled"
+        );
+        tokio::spawn(buzz_relay::api::git::gc::run_git_gc_worker(
+            Arc::clone(&state),
+            git_gc_config,
+        ));
     }
 
     // NIP-43: reconcile the event-backed roster for every provisioned
