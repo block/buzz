@@ -36,6 +36,87 @@ pub(crate) enum ProbeOutcome {
     },
 }
 
+/// Read Claude's local OAuth state on Windows instead of launching
+/// `claude auth status`.
+///
+/// Claude's native Windows CLI creates console-mode descendants even when the
+/// immediate probe process uses `CREATE_NO_WINDOW`, which makes Command Prompt
+/// windows flash whenever the desktop refreshes agent readiness. The
+/// credentials file contains refreshable OAuth state, so checking for a
+/// non-empty access or refresh token provides the same logged-in signal without
+/// launching a process.
+#[cfg(windows)]
+pub(crate) fn native_credentials_probe(
+    binary_path: &Path,
+    probe_args: &[&str],
+) -> Option<ProbeOutcome> {
+    let binary_name = binary_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+
+    if binary_name.eq_ignore_ascii_case("claude") && probe_args == ["claude", "auth", "status"] {
+        let credentials_path = dirs::home_dir()?.join(".claude").join(".credentials.json");
+        return classify_claude_credentials(&std::fs::read(credentials_path).ok()?);
+    }
+
+    if binary_name.eq_ignore_ascii_case("codex") && probe_args == ["codex", "login", "status"] {
+        let credentials_path = dirs::home_dir()?.join(".codex").join("auth.json");
+        return classify_codex_credentials(&std::fs::read(credentials_path).ok()?);
+    }
+
+    None
+}
+
+#[cfg(any(windows, test))]
+fn classify_claude_credentials(bytes: &[u8]) -> Option<ProbeOutcome> {
+    let credentials: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let oauth = credentials.get("claudeAiOauth")?;
+    let has_token = ["accessToken", "refreshToken"].iter().any(|key| {
+        oauth
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    Some(if has_token {
+        ProbeOutcome::LoggedIn
+    } else {
+        ProbeOutcome::LoggedOut
+    })
+}
+
+#[cfg(any(windows, test))]
+fn classify_codex_credentials(bytes: &[u8]) -> Option<ProbeOutcome> {
+    let credentials: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let has_api_key = credentials
+        .get("OPENAI_API_KEY")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    let has_token = credentials.get("tokens").is_some_and(|tokens| {
+        ["access_token", "refresh_token", "id_token"]
+            .iter()
+            .any(|key| {
+                tokens
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+    });
+    Some(if has_api_key || has_token {
+        ProbeOutcome::LoggedIn
+    } else {
+        ProbeOutcome::LoggedOut
+    })
+}
+
+#[cfg(not(windows))]
+pub(crate) fn native_credentials_probe(
+    _binary_path: &Path,
+    _probe_args: &[&str],
+) -> Option<ProbeOutcome> {
+    None
+}
+
 /// Signals emitted to stderr by codex (and related CLI tools) when they
 /// fail to parse their config file. We check these to distinguish a
 /// config-parse failure from a genuine "not authenticated" exit.
@@ -56,6 +137,10 @@ pub(crate) fn login_probe(
     probe_args: &[&str],
     augmented_path: Option<&str>,
 ) -> ProbeOutcome {
+    if let Some(outcome) = native_credentials_probe(binary_path, probe_args) {
+        return outcome;
+    }
+
     let mut command = std::process::Command::new(binary_path);
     command.args(&probe_args[1..]);
     if let Some(path) = augmented_path {
@@ -96,7 +181,64 @@ pub(crate) fn classify_probe_output(stderr_bytes: &[u8], exit_success: bool) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ProbeOutcome, CONFIG_PARSE_SIGNALS};
+    use super::{
+        classify_claude_credentials, classify_codex_credentials, ProbeOutcome, CONFIG_PARSE_SIGNALS,
+    };
+
+    #[test]
+    fn claude_credentials_accept_access_or_refresh_token() {
+        for credentials in [
+            br#"{"claudeAiOauth":{"accessToken":"access","refreshToken":""}}"#.as_slice(),
+            br#"{"claudeAiOauth":{"accessToken":"","refreshToken":"refresh"}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                classify_claude_credentials(credentials),
+                Some(ProbeOutcome::LoggedIn)
+            );
+        }
+    }
+
+    #[test]
+    fn claude_credentials_reject_missing_or_empty_tokens() {
+        for credentials in [
+            br#"{"claudeAiOauth":{"accessToken":"","refreshToken":""}}"#.as_slice(),
+            br#"{"other":{}}"#.as_slice(),
+            b"not-json".as_slice(),
+        ] {
+            assert_ne!(
+                classify_claude_credentials(credentials),
+                Some(ProbeOutcome::LoggedIn)
+            );
+        }
+    }
+
+    #[test]
+    fn codex_credentials_accept_api_key_or_refreshable_tokens() {
+        for credentials in [
+            br#"{"OPENAI_API_KEY":"key"}"#.as_slice(),
+            br#"{"tokens":{"access_token":"access"}}"#.as_slice(),
+            br#"{"tokens":{"refresh_token":"refresh"}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                classify_codex_credentials(credentials),
+                Some(ProbeOutcome::LoggedIn)
+            );
+        }
+    }
+
+    #[test]
+    fn codex_credentials_reject_missing_or_empty_tokens() {
+        for credentials in [
+            br#"{"OPENAI_API_KEY":"","tokens":{"access_token":""}}"#.as_slice(),
+            br#"{"other":{}}"#.as_slice(),
+            b"not-json".as_slice(),
+        ] {
+            assert_ne!(
+                classify_codex_credentials(credentials),
+                Some(ProbeOutcome::LoggedIn)
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]
