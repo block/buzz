@@ -1,36 +1,17 @@
 name: Linux Canary
 
-# Produces unsigned Linux .deb and .AppImage packages from any ref without
+# Produces unsigned Linux .deb and .AppImage packages from main without
 # creating a tag, GitHub Release, or auto-updater artifact. Artifacts are
 # available as a short-lived GitHub Actions artifact for explicit testing.
 #
 # Design notes vs. signed-macos-canary.yml:
-#   - Accepts a `ref` input (default: main) so pre-merge branches can be
-#     tested. The macOS canary requires main because it runs OIDC
-#     signing/notarization; this job is unsigned, contents: read only, and
-#     zero secrets — building arbitrary refs is safe and is the entire point.
-#   - No `Require main` guard for the same reason.
 #   - fix-appimage.sh is run without signing env vars; the script detects
 #     their absence and skips re-signing, repacking only (documented inline).
 #   - mold linker added (rui314/setup-mold) to reduce link time, matching
 #     the Linux Rust CI jobs in ci.yml.
 #   - pnpm store restore/save pattern mirrors ci.yml:149-196.
-#
-# Cache safety: workflow_dispatch executes on the dispatch ref (github.ref /
-# github.sha stay main-scoped even when inputs.ref points at a feature branch).
-# A cache write with the standard pnpm key from a non-main inputs.ref would
-# land in the main-scoped namespace and could be restored by CI later — a
-# cache-poisoning path. To close it:
-#   - Cache restores are unconditional (cold miss for untrusted refs is safe).
-#   - Cache saves (rust-cache save-if, pnpm actions/cache/save if:) only write
-#     when BOTH the dispatch ref and inputs.ref are trusted main.
 on:
   workflow_dispatch:
-    inputs:
-      ref:
-        description: "Branch, tag, or SHA to build (default: main)"
-        required: false
-        default: main
 
 permissions:
   contents: read
@@ -52,6 +33,15 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Require main
+        env:
+          SOURCE_REF: ${{ github.ref }}
+        run: |
+          if [[ "$SOURCE_REF" != "refs/heads/main" ]]; then
+            echo "::error::Canary builds must run from main; got $SOURCE_REF"
+            exit 1
+          fi
+
       - name: Install system dependencies
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -86,18 +76,10 @@ jobs:
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Mark workspace safe for git (containerized job)
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
-
-      # Capture the checked-out commit SHA for artifact naming and log lines.
-      # github.sha stays the dispatch-ref (main) SHA regardless of inputs.ref;
-      # this step resolves the actual source SHA so artifacts are unambiguous.
-      - name: Capture source SHA
-        id: source
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
 
@@ -112,9 +94,6 @@ jobs:
             .
             desktop/src-tauri
           shared-key: linux-canary-release
-          # Save only when both the dispatch ref and the checked-out input are
-          # trusted main; restores are unconditional (a cold miss is safe).
-          save-if: ${{ github.ref == 'refs/heads/main' && inputs.ref == 'main' }}
 
       - name: Install appimagetool
         run: |
@@ -157,8 +136,6 @@ jobs:
 
       - name: Derive canary version
         id: version
-        env:
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           set -euo pipefail
           BASE_VERSION=$(node -p "require('./desktop/package.json').version")
@@ -168,7 +145,7 @@ jobs:
           fi
           VERSION="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))-test.${GITHUB_RUN_NUMBER}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Building canary version $VERSION from $SOURCE_SHA"
+          echo "Building canary version $VERSION from $GITHUB_SHA"
 
       - name: Patch canary version
         env:
@@ -214,9 +191,6 @@ jobs:
           bash desktop/scripts/fix-appimage.sh "${APPIMAGES[0]}"
 
       - name: Save pnpm store cache
-        # Write only when both the dispatch ref and the checked-out input are
-        # trusted main; restores above are unconditional (a cold miss is safe).
-        if: ${{ github.ref == 'refs/heads/main' && inputs.ref == 'main' }}
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ steps.pnpm-cache.outputs.STORE_PATH }}
@@ -245,7 +219,7 @@ jobs:
       - name: Upload Linux canary packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: buzz-linux-canary-${{ steps.source.outputs.sha }}
+          name: buzz-linux-canary-${{ github.sha }}
           path: |
             ${{ steps.artifacts.outputs.deb }}
             ${{ steps.artifacts.outputs.appimage }}
