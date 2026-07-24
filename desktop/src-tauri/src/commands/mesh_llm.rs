@@ -1158,7 +1158,10 @@ mod tests {
 
     /// Build a local relay-mesh record (Brad #2304 #3 filter tests). The mesh
     /// preset env is the legacy discriminator `relay_mesh_model_id` detects.
-    fn mesh_record(pubkey: &str, runtime_pid: Option<u32>) -> crate::managed_agents::ManagedAgentRecord {
+    fn mesh_record(
+        pubkey: &str,
+        runtime_pid: Option<u32>,
+    ) -> crate::managed_agents::ManagedAgentRecord {
         let mut rec = crate::managed_agents::AgentDefinition {
             id: pubkey.to_string(),
             display_name: pubkey.to_string(),
@@ -1198,10 +1201,7 @@ mod tests {
     }
 
     fn active_set(pubkeys: &[&str]) -> std::collections::HashSet<String> {
-        pubkeys
-            .iter()
-            .map(|p| p.to_ascii_lowercase())
-            .collect()
+        pubkeys.iter().map(|p| p.to_ascii_lowercase()).collect()
     }
 
     /// Brad #2304 #3: stopped / not-in-process-map relay-mesh records must NOT
@@ -1211,7 +1211,10 @@ mod tests {
     fn stopped_relay_mesh_agent_is_not_a_rearm_target() {
         let empty = active_set(&[]);
         // Configured mesh record but no process-map entry → not running.
-        assert!(!is_running_relay_mesh_agent(&mesh_record("a", None), &empty));
+        assert!(!is_running_relay_mesh_agent(
+            &mesh_record("a", None),
+            &empty
+        ));
         assert!(!is_running_relay_mesh_agent(
             &mesh_record("a", Some(std::process::id())),
             &empty

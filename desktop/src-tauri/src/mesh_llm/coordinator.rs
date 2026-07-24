@@ -79,8 +79,7 @@ pub async fn start_coordinator(app: AppHandle) {
         let mut sleep_for = INGRESS_WATCHDOG_BASE;
         loop {
             tokio::time::sleep(sleep_for).await;
-            match crate::commands::mesh_llm::rearm_relay_mesh_for_running_agents(&ingress_app)
-                .await
+            match crate::commands::mesh_llm::rearm_relay_mesh_for_running_agents(&ingress_app).await
             {
                 Ok(()) => {
                     sleep_for = INGRESS_WATCHDOG_BASE;

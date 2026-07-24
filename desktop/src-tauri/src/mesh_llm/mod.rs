@@ -291,8 +291,7 @@ pub fn stopped_status() -> MeshNodeStatus {
 /// a concurrent stop/start swapped in while the ingress probe was in flight
 /// (Brad #2304 race), so it captures the id before probing and only evicts if
 /// the same handle is still installed on lock reacquire.
-static MESH_RUNTIME_ID_SEQ: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static MESH_RUNTIME_ID_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 pub struct DesktopMeshRuntime {
     id: u64,
