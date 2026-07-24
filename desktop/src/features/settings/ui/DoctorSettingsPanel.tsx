@@ -307,7 +307,6 @@ function RuntimeRow({
   }, [resetEpoch]);
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
-  const installSuccess = installResult?.success ?? false;
 
   function handleInstall() {
     setInstallResult(null);
