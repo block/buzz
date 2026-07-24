@@ -1294,6 +1294,44 @@ test("create stream with name and description", async ({ page }) => {
   await expect(page.getByTestId("chat-title")).toHaveText(channelName);
 });
 
+test("create channel template selector matches the lifecycle controls", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    channelTemplates: [
+      {
+        id: "project-kickoff",
+        name: "Project kickoff",
+        description: "Coordinate a new project from planning through launch.",
+        channelType: "stream",
+        visibility: "private",
+        canvasTemplate: null,
+        agents: { personas: [], teams: [] },
+        isBuiltin: false,
+        createdAt: "2026-07-23T00:00:00Z",
+        updatedAt: "2026-07-23T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto("/");
+  await openCreateChannelDialog(page);
+
+  const templateControl = page.getByTestId("create-channel-template");
+  await expect(templateControl).toHaveRole("button");
+  await expect(templateControl).toHaveText("No template");
+  await templateControl.click();
+  await page.getByRole("menuitemradio", { name: "Project kickoff" }).click();
+
+  await expect(templateControl).toHaveText("Project kickoff");
+  await expect(page.getByTestId("create-channel-description")).toHaveValue(
+    "Coordinate a new project from planning through launch.",
+  );
+  await expect(page.getByTestId("create-channel-permissions")).toContainText(
+    "Private",
+  );
+});
+
 test("create ephemeral stream shows sidebar and header affordances", async ({
   page,
 }) => {

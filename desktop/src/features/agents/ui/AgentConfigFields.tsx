@@ -7,8 +7,12 @@
  */
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 
-import type { BakedEnvEntry } from "@/shared/api/tauri";
+import type {
+  BakedEnvEntry,
+  RuntimeFileConfigSubset,
+} from "@/shared/api/tauri";
 import type {
   AcpRuntimeCatalogEntry,
   GlobalAgentConfig,
@@ -31,10 +35,10 @@ import {
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   getPersonaProviderOptions,
   getProviderApiKeyEnvVar,
-  requiredCredentialEnvKeys,
   runtimeSupportsLlmProviderSelection,
 } from "@/features/agents/ui/agentConfigOptions";
 import {
+  AgentConfigTextInput,
   AgentDropdownSelect,
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
@@ -48,10 +52,10 @@ import {
   EffortSelectField,
   useEffortAutoClear,
 } from "@/features/agents/ui/buzzAgentModelTuningFields";
-import { Input } from "@/shared/ui/input";
 import { SettingsOptionGroup } from "@/features/settings/ui/SettingsOptionGroup";
+import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
+import { getGlobalAgentCredentialState } from "./globalAgentCredentialState";
 
-/** Sentinel value for an unconfigured global agent config. */
 export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   env_vars: {},
   provider: null,
@@ -65,6 +69,16 @@ const BAKED_STRUCTURED_KEYS = new Set([
   "BUZZ_AGENT_MODEL",
   BUZZ_AGENT_THINKING_EFFORT,
 ]);
+
+const PROGRESSIVE_FIELDS_TRANSITION = {
+  duration: 0.22,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
+
+type AgentConfigDisclosure =
+  | "full"
+  | "onboarding-essential"
+  | "progressive-defaults";
 
 // Canonical behaviors (PR 2 flag cleanup). These were per-surface props;
 // onboarding's values won every call and are now the only behavior:
@@ -92,12 +106,13 @@ export const CANONICAL_CONFIG_BEHAVIORS = {
 } as const;
 
 /**
- * Disclosure preset → the eight visibility decisions it owns. Effort is
- * shown in both presets (onboarding never hid it; the old prop existed but
- * was never flipped). Exported for the contract test.
+ * Disclosure preset → the eight visibility decisions it owns. Full and
+ * progressive defaults expose the same controls; the progressive preset
+ * changes only when those controls are revealed. Exported for the contract
+ * test.
  */
-export function resolveDisclosure(disclosure: "full" | "onboarding-essential") {
-  const full = disclosure === "full";
+export function resolveDisclosure(disclosure: AgentConfigDisclosure) {
+  const full = disclosure !== "onboarding-essential";
   return {
     showAdvancedFields: full,
     showCustomModelOption: full,
@@ -108,6 +123,22 @@ export function resolveDisclosure(disclosure: "full" | "onboarding-essential") {
     showRequiredIndicators: full,
     showUnavailableEffortOptions: full,
   } as const;
+}
+
+export function shouldRevealDependentConfigFields({
+  disclosure,
+  providerFieldVisible,
+  providerValue,
+}: {
+  disclosure: AgentConfigDisclosure;
+  providerFieldVisible: boolean;
+  providerValue: string;
+}): boolean {
+  return (
+    disclosure !== "progressive-defaults" ||
+    !providerFieldVisible ||
+    providerValue.trim().length > 0
+  );
 }
 
 /**
@@ -170,6 +201,7 @@ export type AgentConfigFieldsProps = {
   onCustomModelEditingChange: (value: boolean) => void;
   onIsCustomProviderChange: (value: boolean) => void;
   onValidityChange?: (valid: boolean) => void;
+  runtimeFileConfig?: RuntimeFileConfigSubset | null;
   placeholderClassName?: string;
   selectClassName?: string;
   /**
@@ -182,11 +214,14 @@ export type AgentConfigFieldsProps = {
    *   valid forward choices. No advanced section, no custom escape hatches,
    *   no descriptions (the page copy does that job), no un-choosing via
    *   placeholder options, no greyed-out effort levels.
+   * - "progressive-defaults": the defaults modal's full controls, revealed in
+   *   order. Provider appears after harness selection; model, effort, and
+   *   Advanced appear after a provider is configured.
    * If a second surface wants the trimmed view, rename this value to plain
    * "essential" — and have the conversation about whether it should really
    * match onboarding.
    */
-  disclosure?: "full" | "onboarding-essential";
+  disclosure?: AgentConfigDisclosure;
   unstyled?: boolean;
   useCustomSelect?: boolean;
   useChevronSelectIcon?: boolean;
@@ -202,6 +237,7 @@ export function AgentConfigFields({
   onCustomModelEditingChange,
   onIsCustomProviderChange,
   onValidityChange,
+  runtimeFileConfig,
   placeholderClassName,
   selectClassName,
   disclosure = "full",
@@ -209,6 +245,7 @@ export function AgentConfigFields({
   useCustomSelect = false,
   useChevronSelectIcon = false,
 }: AgentConfigFieldsProps) {
+  const shouldReduceMotion = useReducedMotion();
   const {
     showAdvancedFields,
     showCustomModelOption,
@@ -260,9 +297,6 @@ export function AgentConfigFields({
     modelIsOptional ||
     (config.model?.trim().length ?? 0) > 0 ||
     fallbackModel !== null;
-  React.useEffect(() => {
-    onValidityChange?.(modelIsValid);
-  }, [modelIsValid, onValidityChange]);
   const bakedEffort = React.useMemo(
     () =>
       bakedEnv.find((e) => e.key === BUZZ_AGENT_THINKING_EFFORT)?.value ?? null,
@@ -278,10 +312,18 @@ export function AgentConfigFields({
     providerFieldVisible && !isCustomProvider
       ? providerValue || bakedProvider || ""
       : "";
+  const configuredProviderValue = isCustomProvider
+    ? providerValue
+    : providerForDiscovery;
   const dependentFieldsDisabled =
     providerFieldVisible &&
     requireProviderForModelAndEffort &&
-    providerForDiscovery.trim().length === 0;
+    configuredProviderValue.trim().length === 0;
+  const revealDependentFields = shouldRevealDependentConfigFields({
+    disclosure,
+    providerFieldVisible,
+    providerValue: configuredProviderValue,
+  });
   const credentialProvider =
     providerFieldVisible && !isCustomProvider ? effectiveProvider : "";
   const credentialRuntimeId = runtimeSupportsLlmProviderSelection(
@@ -289,24 +331,31 @@ export function AgentConfigFields({
   )
     ? selectedRuntimeId
     : "buzz-agent";
-  const requiredEnvKeys = requiredCredentialEnvKeys(
-    credentialRuntimeId,
-    credentialProvider,
-  );
-  const apiKeyEnvVar = getProviderApiKeyEnvVar(credentialProvider);
-  const advancedRequiredEnvKeys = requiredEnvKeys.filter(
-    (key) =>
-      key !== apiKeyEnvVar && !bakedEnv.some((entry) => entry.key === key),
-  );
-  const apiKeyValue = apiKeyEnvVar ? (config.env_vars[apiKeyEnvVar] ?? "") : "";
   const bakedEnvKeys = React.useMemo(
     () => bakedEnv.map((entry) => entry.key),
     [bakedEnv],
   );
-  const apiKeyInherited =
-    apiKeyEnvVar !== null &&
-    apiKeyValue.length === 0 &&
-    bakedEnvKeys.includes(apiKeyEnvVar);
+  const {
+    advancedCredentialMissing,
+    advancedFileSatisfiedEnvKeys,
+    advancedRequiredEnvKeys,
+    apiKeyEnvVar,
+    apiKeyFileSatisfied,
+    apiKeyInherited,
+    apiKeyValue,
+    credentialsValid,
+  } = getGlobalAgentCredentialState({
+    bakedEnvKeys,
+    envVars: config.env_vars,
+    provider: credentialProvider,
+    runtimeFileConfig,
+    runtimeId: credentialRuntimeId,
+  });
+  const configIsValid =
+    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
+  React.useEffect(() => {
+    onValidityChange?.(configIsValid);
+  }, [configIsValid, onValidityChange]);
 
   const {
     discoveredModelOptions,
@@ -343,16 +392,9 @@ export function AgentConfigFields({
   const healOnMount =
     fieldModel.dependentValuePolicy.onCatalogMismatch === "onboardingCleanup";
   const userEditedProviderRef = React.useRef(false);
-  // Env vars live under a collapsed Advanced section (matching the create
-  // flow). Auto-open when a required key is missing so the field the user
-  // must fill is never hidden behind the toggle.
+  // Advanced visibility is user-controlled. Provider changes can add required
+  // rows, but must not open this section without an explicit toggle click.
   const [advancedOpen, setAdvancedOpen] = React.useState(false);
-  const requiredAdvancedKeyMissing = advancedRequiredEnvKeys.some(
-    (key) => !(config.env_vars[key] ?? "").trim(),
-  );
-  React.useEffect(() => {
-    if (requiredAdvancedKeyMissing) setAdvancedOpen(true);
-  }, [requiredAdvancedKeyMissing]);
   // Read inside effects via ref so biome's exhaustive-deps stays honest:
   // refs are stable, and healOnMount is captured at declaration.
   const mayMutateDependentFieldsRef = React.useRef(false);
@@ -598,9 +640,15 @@ export function AgentConfigFields({
     : "";
   const effortFieldVisible = showEffortField && effortField !== undefined;
 
-  const fieldClassName = unstyled ? "space-y-4" : "space-y-1.5 p-3";
+  const progressiveDefaults = disclosure === "progressive-defaults";
+  const fieldClassName = unstyled
+    ? progressiveDefaults
+      ? "space-y-1.5"
+      : "space-y-4"
+    : "space-y-1.5 p-3";
   const blockClassName = unstyled ? "" : "p-3";
-  const fieldLabelClassName = unstyled ? "pl-3" : undefined;
+  const fieldLabelClassName =
+    unstyled && !progressiveDefaults ? "pl-3" : undefined;
   const providerDropdownOptions = [
     ...providerOptions
       .filter(
@@ -661,44 +709,49 @@ export function AgentConfigFields({
     </select>
   );
 
-  const content = (
-    <>
-      {providerFieldVisible ? (
-        <div className={fieldClassName}>
-          <label
-            className={cn("text-sm font-medium", fieldLabelClassName)}
-            htmlFor="global-agent-provider"
-          >
-            Provider
-          </label>
-          {!useCustomSelect && useChevronSelectIcon ? (
-            <div className="relative">
-              {providerSelect}
-              <ChevronDown
-                aria-hidden="true"
-                className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
-              />
-            </div>
-          ) : (
-            providerSelect
-          )}
-          {isCustomProvider ? (
-            <Input
-              aria-label="Custom global provider ID"
-              autoCorrect="off"
-              onChange={(e) => handleCustomProviderInput(e.target.value)}
-              placeholder="Custom provider ID"
-              value={providerValue}
-            />
-          ) : null}
+  const providerContent = providerFieldVisible ? (
+    <div className={fieldClassName}>
+      <label
+        className={cn("text-sm font-medium", fieldLabelClassName)}
+        htmlFor="global-agent-provider"
+      >
+        Provider
+      </label>
+      {!useCustomSelect && useChevronSelectIcon ? (
+        <div className="relative">
+          {providerSelect}
+          <ChevronDown
+            aria-hidden="true"
+            className="pointer-events-none absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 text-foreground"
+          />
         </div>
+      ) : (
+        providerSelect
+      )}
+      {isCustomProvider ? (
+        <AgentConfigTextInput
+          aria-label="Custom global provider ID"
+          autoCorrect="off"
+          onChange={(e) => handleCustomProviderInput(e.target.value)}
+          placeholder="Custom provider ID"
+          usePersonaInputStyle={progressiveDefaults}
+          value={providerValue}
+        />
       ) : null}
+    </div>
+  ) : null;
 
+  const dependentContent = (
+    <>
       {providerFieldVisible && apiKeyEnvVar ? (
         <div className={blockClassName}>
           <PersonaProviderApiKeyField
             disabled={false}
-            inheritedLabel="Provided by this build"
+            inheritedLabel={
+              apiKeyFileSatisfied
+                ? "Set in runtime config"
+                : "Provided by this build"
+            }
             isInherited={apiKeyInherited}
             isRequired={!apiKeyInherited && apiKeyValue.length === 0}
             label={
@@ -763,6 +816,7 @@ export function AgentConfigFields({
             testId="global-agent-model"
             useCustomSelect={useCustomSelect}
             useChevronIcon={useChevronSelectIcon}
+            usePersonaInputStyle={progressiveDefaults}
           />
         </div>
       ) : null}
@@ -817,12 +871,19 @@ export function AgentConfigFields({
         <div className={cn(blockClassName, "space-y-3")}>
           <button
             aria-expanded={advancedOpen}
-            className="inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+            className={cn(
+              "inline-flex h-9 items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-foreground/80 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring",
+              unstyled && "ml-3",
+            )}
             data-testid="global-agent-advanced-toggle"
             onClick={() => setAdvancedOpen((current) => !current)}
             type="button"
           >
             <span>Advanced</span>
+            <AdvancedRequiredBadge
+              show={advancedCredentialMissing}
+              testId="global-agent-advanced-required-badge"
+            />
             <ChevronDown
               className={cn(
                 "h-4 w-4 text-muted-foreground transition-transform duration-150 ease-out",
@@ -830,8 +891,42 @@ export function AgentConfigFields({
               )}
             />
           </button>
-          {advancedOpen ? (
+          {disclosure === "progressive-defaults" ? (
+            <AnimatePresence initial={false}>
+              {advancedOpen ? (
+                <motion.div
+                  animate={{ height: "auto", opacity: 1 }}
+                  className="overflow-hidden"
+                  data-testid="global-agent-advanced-fields-motion"
+                  exit={{ height: 0, opacity: 0 }}
+                  initial={{ height: 0, opacity: 0 }}
+                  key="global-agent-advanced-fields"
+                  transition={
+                    shouldReduceMotion
+                      ? { duration: 0 }
+                      : PROGRESSIVE_FIELDS_TRANSITION
+                  }
+                >
+                  <EnvVarsEditor
+                    fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
+                    hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
+                    inheritedRows={bakedGenericRows}
+                    inheritedRowsLabel="build"
+                    label="Environment variables"
+                    onChange={handleEnvVarsChange}
+                    requiredKeys={advancedRequiredEnvKeys}
+                    value={Object.fromEntries(
+                      Object.entries(config.env_vars).filter(
+                        ([k]) => k !== BUZZ_AGENT_THINKING_EFFORT,
+                      ),
+                    )}
+                  />
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          ) : advancedOpen ? (
             <EnvVarsEditor
+              fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
               hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
               inheritedRows={bakedGenericRows}
               inheritedRowsLabel="build"
@@ -850,9 +945,52 @@ export function AgentConfigFields({
     </>
   );
 
+  const content = (
+    <>
+      {providerContent}
+      {disclosure === "progressive-defaults" ? (
+        <AnimatePresence initial={false}>
+          {revealDependentFields ? (
+            <motion.div
+              animate={{ height: "auto", opacity: 1 }}
+              className={cn(
+                "overflow-hidden",
+                unstyled && (progressiveDefaults ? "space-y-5" : "space-y-7"),
+              )}
+              data-testid="global-agent-dependent-fields-motion"
+              exit={{ height: 0, opacity: 0 }}
+              initial={{ height: 0, opacity: 0 }}
+              key="global-agent-dependent-fields"
+              transition={
+                shouldReduceMotion
+                  ? { duration: 0 }
+                  : PROGRESSIVE_FIELDS_TRANSITION
+              }
+            >
+              {dependentContent}
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
+      ) : (
+        dependentContent
+      )}
+    </>
+  );
+
   if (unstyled) {
-    return <div className="space-y-7">{content}</div>;
+    return (
+      <div
+        className={progressiveDefaults ? "space-y-5" : "space-y-7"}
+        data-testid="global-agent-config-fields"
+      >
+        {content}
+      </div>
+    );
   }
 
-  return <SettingsOptionGroup>{content}</SettingsOptionGroup>;
+  return (
+    <SettingsOptionGroup data-testid="global-agent-config-fields">
+      {content}
+    </SettingsOptionGroup>
+  );
 }

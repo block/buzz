@@ -79,6 +79,27 @@ with a TypeScript lookup table or an id comparison in a component.
    harnesses always keep the field. Gate: `defaults hides model when optional
    harness has empty discovery` (and the failed-discovery counterpart) in
    `onboarding-agent-defaults.spec.ts`.
+9. **The defaults modal is progressively disclosed.** An unset global config
+   starts on the Buzz Agent-first deployment fallback and carries that visible
+   harness into the next saved edit. The `progressive-defaults` disclosure
+   preset therefore begins at Provider for Buzz Agent, then reveals Model,
+   Effort, and Advanced only after a provider is configured. Harnesses whose
+   runtime metadata has no provider field skip that gate. Reveals animate their
+   height through Motion and become immediate when reduced motion is requested.
+   Once the Advanced toggle is visible, its expanded state is exclusively
+   user-controlled: provider, harness, and required-env changes must never
+   open it automatically in defaults, create, or edit flows. In Create mode,
+   the defaults summary follows preferred-harness changes saved while the
+   dialog is open, and its configured state includes required credentials as
+   well as provider/model values. If no available harness can resolve, Create
+   starts in Customize and lets unavailable catalog entries be selected only
+   to expose their setup guidance; submission remains blocked.
+   Advanced-only required credentials mark the collapsed Advanced toggle
+   without opening it in Global Defaults and Edit, and block incomplete saves.
+   Runtime-file credentials satisfy Global Defaults just as they do Create and
+   Edit. In Edit,
+   selecting Custom command keeps its required command field beside the harness
+   picker rather than hiding it in Advanced.
 
 ## The tests that enforce this
 

@@ -595,6 +595,17 @@ export async function signProjectPullRequestReviewRequest(input: {
   });
 }
 
+export async function signProjectPullRequestStatus(input: {
+  targetOwner: string;
+  repoAddress: string;
+  pullRequestId: string;
+  pullRequestAuthor: string;
+  status: "open" | "draft" | "closed";
+  createdAt: number;
+}): Promise<void> {
+  await invokeTauri<void>("sign_project_pull_request_status", { input });
+}
+
 export async function publishProjectPullRequestMergedStatus(input: {
   targetOwner: string;
   statusEvent: string;
