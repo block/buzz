@@ -1,6 +1,7 @@
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
 import '../auth/auth_provider.dart';
+import '../push/push_bridge.dart';
 import 'community.dart';
 import 'community_storage.dart';
 
@@ -8,11 +9,68 @@ final communityStorageProvider = Provider<CommunityStorage>((ref) {
   return CommunityStorage();
 });
 
+typedef CommunitySnapshotWriter =
+    Future<void> Function(List<Community> communities);
+
+/// Writes the complete persisted community set to storage shared with the iOS
+/// notification service extension. Tests override this provider to verify that
+/// every persistence path refreshes (or clears) the native snapshot.
+final communitySnapshotWriterProvider = Provider<CommunitySnapshotWriter>((
+  ref,
+) {
+  return registerBuzzPushCommunitySnapshot;
+});
+
+final _communitySnapshotSyncProvider = Provider<_CommunitySnapshotSync>((ref) {
+  return _CommunitySnapshotSync(ref.read(communitySnapshotWriterProvider));
+});
+
+class _CommunitySnapshotSync {
+  _CommunitySnapshotSync(this._writer);
+
+  final CommunitySnapshotWriter _writer;
+  String? _lastSuccessfulSnapshot;
+
+  Future<void> write(List<Community> communities) async {
+    final fingerprint = communities
+        .map(
+          (community) => [
+            community.id,
+            community.name,
+            community.relayUrl,
+            community.pubkey,
+            community.nsec,
+          ].join('\u0000'),
+        )
+        .join('\u0001');
+    if (fingerprint == _lastSuccessfulSnapshot) return;
+
+    await _writer(communities);
+    _lastSuccessfulSnapshot = fingerprint;
+  }
+}
+
+Future<void> syncCommunitySnapshot(Ref ref, List<Community> communities) async {
+  try {
+    await ref.read(_communitySnapshotSyncProvider).write(communities);
+    pushCommunitySnapshotError.value = null;
+  } catch (error, stackTrace) {
+    reportPushCommunitySnapshotError(error, stackTrace);
+  }
+}
+
+Future<void> syncStoredCommunitySnapshot(Ref ref) async {
+  final communities = await ref.read(communityStorageProvider).loadAll();
+  await syncCommunitySnapshot(ref, communities);
+}
+
 class CommunityListNotifier extends AsyncNotifier<List<Community>> {
   @override
   Future<List<Community>> build() async {
     final storage = ref.read(communityStorageProvider);
-    return storage.loadAll();
+    final communities = await storage.loadAll();
+    await syncCommunitySnapshot(ref, communities);
+    return communities;
   }
 
   /// Add a community. If one with the same relay URL already exists, update
@@ -36,11 +94,14 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
       final updatedList = [...current];
       updatedList[existingIndex] = updated;
       state = AsyncData(updatedList);
+      await syncCommunitySnapshot(ref, updatedList);
       return existing.id;
     }
 
     await storage.save(community);
-    state = AsyncData([...current, community]);
+    final updatedList = [...current, community];
+    state = AsyncData(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
     return community.id;
   }
 
@@ -49,7 +110,9 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     await storage.remove(id);
 
     final current = state.value ?? [];
-    state = AsyncData(current.where((w) => w.id != id).toList());
+    final updatedList = current.where((w) => w.id != id).toList();
+    state = AsyncData(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
 
     // If we removed the active community, switch to another or sign out.
     final activeId = await storage.loadActiveId();
@@ -90,6 +153,7 @@ class CommunityListNotifier extends AsyncNotifier<List<Community>> {
     final updatedList = [...current];
     updatedList[index] = updated;
     state = AsyncData(updatedList);
+    await syncCommunitySnapshot(ref, updatedList);
   }
 }
 
