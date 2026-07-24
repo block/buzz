@@ -1,6 +1,7 @@
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { StartCommunityOnboardingInput } from "@/features/onboarding/communityOnboarding";
+import { listenTauriEvent } from "@/shared/api/tauriEvents";
 
 export type AddCommunityDeepLinkPayload = {
   relayUrl: string;
@@ -113,6 +114,10 @@ async function drainPendingCommunityDeepLinks(deps: DeepLinkDeps) {
 export async function listenForDeepLinks(
   deps: DeepLinkDeps,
 ): Promise<UnlistenFn> {
+  if (!isTauri()) {
+    return () => {};
+  }
+
   let drainRunning = false;
   let drainRequested = false;
   const drain = () => {
@@ -134,9 +139,12 @@ export async function listenForDeepLinks(
     })();
   };
   const stopAvailabilityListener = deps.onAddCommunityAvailable(drain);
-  const connectPromise = listen<string>("deep-link-connect", drain);
-  const joinPromise = listen<JoinDeepLinkPayload>("deep-link-join", drain);
-  const addCommunityPromise = listen<AddCommunityDeepLinkPayload>(
+  const connectPromise = listenTauriEvent<string>("deep-link-connect", drain);
+  const joinPromise = listenTauriEvent<JoinDeepLinkPayload>(
+    "deep-link-join",
+    drain,
+  );
+  const addCommunityPromise = listenTauriEvent<AddCommunityDeepLinkPayload>(
     "deep-link-add-community",
     drain,
   );
@@ -160,15 +168,20 @@ export async function listenForDeepLinks(
 export function listenForMessageDeepLinks(
   onOpen: (payload: MessageDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<MessageDeepLinkPayload>("deep-link-message", (event) => {
-    onOpen(event.payload);
-  });
+  return listenForPayloadDeepLink("deep-link-message", onOpen);
 }
 
 export function listenForNostrBindDeepLinks(
   onOpen: (payload: NostrBindDeepLinkPayload) => void,
 ): Promise<UnlistenFn> {
-  return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
+  return listenForPayloadDeepLink("deep-link-nostr-bind", onOpen);
+}
+
+function listenForPayloadDeepLink<T>(
+  eventName: string,
+  onOpen: (payload: T) => void,
+): Promise<UnlistenFn> {
+  return listenTauriEvent<T>(eventName, (event) => {
     onOpen(event.payload);
   });
 }

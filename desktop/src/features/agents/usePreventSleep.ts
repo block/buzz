@@ -6,8 +6,8 @@ import {
 } from "@/features/agents/observerRelayStore";
 import { createPreventSleepActivityTracker } from "@/features/agents/preventSleepActivity";
 import { setPreventSleepActive } from "@/shared/api/tauri";
+import { listenTauriEvent } from "@/shared/api/tauriEvents";
 import { normalizePubkey } from "@/shared/lib/pubkey";
-import { listen } from "@tauri-apps/api/event";
 
 // Intentionally not scoped per-pubkey — multi-user desktop is rare and the
 // setting applies to the machine's sleep behavior regardless of account.
@@ -85,7 +85,7 @@ function usePreventSleepInternal() {
     void setPreventSleepActive(active);
   }, [active]);
   React.useEffect(() => {
-    const unlisten = listen("prevent-sleep-expired", () => {
+    const unlisten = listenTauriEvent("prevent-sleep-expired", () => {
       setExpired(true);
     });
     return () => {

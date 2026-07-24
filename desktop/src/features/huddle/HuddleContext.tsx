@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import * as React from "react";
 
+import { listenTauriEvent } from "@/shared/api/tauriEvents";
 import { setupAudioWorklet, type AudioWorkletHandle } from "./lib/audioWorklet";
 import { useAudioDevices } from "./lib/useAudioDevices";
 import { formatHuddleActionError } from "./lib/huddleError";
@@ -196,7 +196,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    listen<string[]>("huddle-active-speakers", (event) => {
+    listenTauriEvent<string[]>("huddle-active-speakers", (event) => {
       if (!cancelled) setActiveSpeakers(event.payload);
     }).then((fn) => {
       if (cancelled) fn();
@@ -217,7 +217,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    listen<boolean>("ptt-state", (event) => {
+    listenTauriEvent<boolean>("ptt-state", (event) => {
       if (cancelled) return;
       setPttActive(event.payload);
       if (micConnected) {
@@ -618,7 +618,7 @@ export function HuddleProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     let cancelled = false;
     let unlisten: (() => void) | null = null;
-    listen("huddle-audio-disconnected", () => {
+    listenTauriEvent("huddle-audio-disconnected", () => {
       if (cancelled || audioReconnectInFlightRef.current) return;
       audioReconnectInFlightRef.current = true;
       const reconnectToken = tokenRef.current;

@@ -59,7 +59,9 @@ Hermit pins Rust, `just`, Node, pnpm, and other tools to the versions in
 `bin/`. Each tool is downloaded on first use. You can also run `just bootstrap`
 (which `just setup` calls automatically) to pre-download all required tools
 upfront. If you don't use Hermit, ensure your toolchain meets the minimum
-versions in the table above.
+versions in the table above. Supported `just` flows prepend the repo's `bin/`
+shims themselves; activate Hermit when you want ad hoc shell commands like
+`cargo`, `pnpm`, or `node` to resolve to the pinned versions too.
 
 ### First-Time Setup
 
@@ -96,15 +98,21 @@ just dev   # starts the relay + desktop app in one command
 ```
 
 `just dev` builds all agent tools, starts the relay (`ws://localhost:3000`) in
-the background, and launches the Tauri desktop app. The relay process is
+the background, and launches the real Tauri desktop app. This is the source
+pilot command. The relay process is
 automatically killed when you quit the app or press Ctrl+C.
 
-For a split-terminal workflow (relay logs visible separately from Vite output):
+For a frontend-only split-terminal preview (relay logs visible separately from
+Vite output):
 
 ```bash
 just relay        # terminal 1 — relay on ws://localhost:3000
 just desktop-dev  # terminal 2 — Vite dev server only (no Tauri shell)
 ```
+
+`desktop-dev` serves the React frontend in a normal browser. It is useful for
+fast UI iteration, but native desktop features that require the Tauri shell are
+not available there. Use `just dev` when validating the full desktop app.
 
 ### Stopping / Resetting
 

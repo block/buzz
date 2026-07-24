@@ -142,17 +142,17 @@ git clone https://github.com/block/buzz.git && cd buzz
 just setup && just build
 ```
 
-`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations.
+`just setup` runs `just bootstrap` automatically — it copies `.env.example` to `.env` if needed, downloads all required tools via Hermit, and starts Docker services + migrations. The main `just` recipes prepend the repo's `bin/` shims, so supported flows use the pinned toolchain even when your shell is not already Hermit-activated. Activation is still useful before running ad hoc `cargo`, `pnpm`, or `node` commands by hand.
 
 **Every day:**
 ```bash
 . ./bin/activate-hermit
-just dev   # starts the relay + desktop app together
+just dev   # starts the relay + Tauri desktop app together
 ```
 
 Relay on `ws://localhost:3000`. Desktop app pops up. You're in.
 
-For a split-terminal workflow (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another.
+For a frontend-only split-terminal preview (relay logs separate from Vite output), use `just relay` in one terminal and `just desktop-dev` in another. `desktop-dev` opens the React app in a normal browser; it is useful for fast UI iteration, but it is not the full desktop pilot because Tauri-native features are absent.
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
@@ -236,7 +236,8 @@ All defaults work out of the box. Override via `.env`. Full reference in [`.env.
 ```bash
 just setup          # Docker, migrations, desktop deps
 just relay          # Run the relay
-just dev            # Run the desktop app
+just dev            # Run relay + Tauri desktop app
+just desktop-dev    # Run browser-only frontend preview
 just build          # Build the Rust workspace
 just check          # fmt + clippy + desktop check
 just test-unit      # Unit tests (no infra required)

@@ -1,6 +1,7 @@
-import { listen } from "@tauri-apps/api/event";
 import { useEffect } from "react";
 import { toast } from "sonner";
+
+import { listenTauriEvent } from "@/shared/api/tauriEvents";
 
 const MIGRATION_TOAST_KEY = "buzz-legacy-nest-migrated-notified";
 
@@ -22,13 +23,16 @@ const MIGRATION_TOAST_KEY = "buzz-legacy-nest-migrated-notified";
  */
 export function useNestNotifications(): void {
   useEffect(() => {
-    const unlistenReposError = listen<string>("repos-dir-error", (event) => {
-      toast.error("Repos directory not applied", {
-        description: event.payload,
-      });
-    });
+    const unlistenReposError = listenTauriEvent<string>(
+      "repos-dir-error",
+      (event) => {
+        toast.error("Repos directory not applied", {
+          description: event.payload,
+        });
+      },
+    );
 
-    const unlistenMigrated = listen("legacy-nest-migrated", () => {
+    const unlistenMigrated = listenTauriEvent("legacy-nest-migrated", () => {
       if (localStorage.getItem(MIGRATION_TOAST_KEY) === "true") {
         return;
       }

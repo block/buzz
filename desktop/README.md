@@ -10,13 +10,17 @@ Desktop chat shell with:
 
 ## Scripts
 
-- `pnpm dev` - run the web frontend
-- `pnpm tauri dev` - run the desktop app
+- `pnpm dev` - run the browser-only frontend preview
+- `pnpm tauri dev` - run the desktop app with the Tauri shell
 - `pnpm build` - typecheck and build frontend
 - `pnpm typecheck` - TypeScript checks
 - `pnpm lint` - Biome lint
 - `pnpm format` - Biome format (write)
 - `pnpm check` - Biome check
+
+For source pilots from the repo root, prefer `just dev`; it starts the relay and
+launches the Tauri desktop app together. `pnpm dev` is only a Vite/browser
+preview, so native desktop features are absent.
 
 ## Structure
 

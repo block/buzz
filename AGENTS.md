@@ -424,8 +424,8 @@ The desktop app is Tauri 2 + React 19 + Vite + Tailwind CSS. Features are
 organized under `desktop/src/features/`. Biome handles linting and formatting.
 
 ```bash
-just desktop-dev   # web-only dev server (faster iteration)
-just dev           # full Tauri app with native shell
+just desktop-dev   # browser-only Vite preview; native Tauri features absent
+just dev           # full source pilot: relay + Tauri desktop app
 ```
 
 ### Text sizing & zoom (use rem, never px)

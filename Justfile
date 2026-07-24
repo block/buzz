@@ -136,10 +136,16 @@ desktop-build:
 
 # Format desktop Tauri Rust code
 desktop-tauri-fmt:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo fmt --manifest-path {{desktop_tauri_manifest}} --all
 
 # Check desktop Tauri Rust formatting
 desktop-tauri-fmt-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo fmt --manifest-path {{desktop_tauri_manifest}} --all -- --check
 
 # Format all code (Rust + Tauri Rust + Dart)
@@ -153,11 +159,25 @@ fix-all: fmt desktop-tauri-fmt desktop-fix web-fix mobile-fix
 _ensure-sidecar-stubs:
     #!/usr/bin/env bash
     set -euo pipefail
-    TARGET=$(rustc -vV | sed -n 's|host: ||p')
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    RUSTC="{{justfile_directory()}}/bin/rustc"
+    if [[ ! -x "$RUSTC" ]]; then
+        echo "Error: repo-local rustc shim is unavailable. Run 'just bootstrap' or '. ./bin/activate-hermit' from the repo root, then retry." >&2
+        exit 127
+    fi
+    TARGET=$("$RUSTC" -vV | sed -n 's|host: ||p')
     mkdir -p desktop/src-tauri/binaries
     for bin in buzz-acp buzz-agent buzz-dev-mcp git-credential-nostr buzz; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
+
+# Regression smoke: prerequisite recipes must find repo-local Hermit shims even
+# when the caller's ambient shell has no Rust tools on PATH.
+_smoke-hermit-path-prereqs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just_bin="$(command -v just)"
+    env PATH="/usr/bin:/bin" "$just_bin" _ensure-sidecar-stubs
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
@@ -187,19 +207,36 @@ _ensure-services:
 
 # Apply database migrations and seed the local dev community if the dev database is running
 _ensure-migrations: _ensure-services
-    cargo run -p buzz-admin -- migrate
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    CARGO="{{justfile_directory()}}/bin/cargo"
+    if [[ ! -x "$CARGO" ]]; then
+        echo "Error: repo-local cargo shim is unavailable. Run 'just bootstrap' or '. ./bin/activate-hermit' from the repo root, then retry." >&2
+        exit 127
+    fi
+    "$CARGO" run -p buzz-admin -- migrate
     ./scripts/seed-local-community.sh
 
 # Run clippy on the desktop Tauri Rust crate
 desktop-tauri-clippy: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo clippy --manifest-path {{desktop_tauri_manifest}} --all-targets -- -D warnings
 
 # Check the desktop Tauri Rust crate compiles
 desktop-tauri-check: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cargo check --manifest-path {{desktop_tauri_manifest}}
 
 # Run desktop Tauri Rust unit tests
 desktop-tauri-test: _ensure-sidecar-stubs
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cd desktop/src-tauri && cargo test
 
 # Verify compiled-flag behavior under both compile states (clean + internal).
@@ -208,6 +245,7 @@ desktop-tauri-test: _ensure-sidecar-stubs
 desktop-tauri-test-compiled-flags: _ensure-sidecar-stubs
     #!/usr/bin/env bash
     set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cd desktop/src-tauri
     echo "=== Clean build (no flag) → expect false ==="
     env -u BUZZ_BUILD_OBSERVER_ARCHIVE_DEFAULT \
@@ -556,6 +594,7 @@ production *ARGS: bootstrap _ensure-sidecar-stubs
 desktop-dev:
     #!/usr/bin/env bash
     set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
     cd {{desktop_dir}}
     [[ -d node_modules ]] || pnpm install
     source ../scripts/instance-env.sh

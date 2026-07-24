@@ -1,4 +1,4 @@
-import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import {
   activateRateLimit,
   parseRateLimitHint,
@@ -309,6 +309,17 @@ export async function invokeTauri<T>(
     applyTauriRateLimitIfNeeded(err.message);
     throw err;
   }
+}
+
+type TauriInvokeGlobal = typeof globalThis & {
+  __TAURI_INTERNALS__?: {
+    invoke?: unknown;
+  };
+};
+
+function hasTauriInvokeBridge(): boolean {
+  const internals = (globalThis as TauriInvokeGlobal).__TAURI_INTERNALS__;
+  return typeof internals?.invoke === "function";
 }
 
 export function fromRawFeedItem(item: RawFeedItem) {
@@ -1131,7 +1142,9 @@ export async function validateReposDir(dir: string): Promise<void> {
 }
 
 export const setPreventSleepActive = (active: boolean) =>
-  invokeTauri("set_prevent_sleep_active", { active });
+  isTauri() && hasTauriInvokeBridge()
+    ? invokeTauri("set_prevent_sleep_active", { active })
+    : Promise.resolve();
 
 export const setAgentManagedProfiles = (enabled: boolean) =>
   invokeTauri("set_agent_managed_profiles", { enabled });
