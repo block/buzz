@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/clipboard_utils.dart';
@@ -20,6 +23,47 @@ import 'message_media.dart';
 
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
+
+typedef OpenDownloadedFile =
+    Future<void> Function(
+      String url,
+      Map<String, String> headers,
+      String filename,
+    );
+
+final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
+  final client = ref.watch(mediaHttpClientProvider);
+  return (url, headers, filename) async {
+    final response = await client.get(Uri.parse(url), headers: headers);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw HttpException(
+        'Attachment download failed (${response.statusCode})',
+        uri: Uri.parse(url),
+      );
+    }
+
+    final directory = await getTemporaryDirectory();
+    final safeName = _safeDownloadedFilename(filename);
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}'
+      '${DateTime.now().microsecondsSinceEpoch}-$safeName',
+    );
+    await file.writeAsBytes(response.bodyBytes, flush: true);
+    final result = await OpenFilex.open(file.path);
+    if (result.type != ResultType.done) {
+      throw FileSystemException(result.message, file.path);
+    }
+  };
+});
+
+String _safeDownloadedFilename(String filename) {
+  final safe = filename
+      .split(RegExp(r'[/\\]'))
+      .last
+      .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
+      .trim();
+  return safe.isEmpty ? 'attachment' : safe;
+}
 
 /// Renders message content with markdown formatting, @mentions, #channel links,
 /// and media-aware markdown images/videos.
@@ -151,7 +195,7 @@ class MessageContent extends HookConsumerWidget {
       codeBuilder: (context, name, code, closed) =>
           _MessageCodeBlock(name: name, code: code),
       linkBuilder: (context, linkText, url, linkStyle) =>
-          _buildLink(context, linkText, url, linkStyle, style),
+          _buildLink(context, ref, linkText, url, linkStyle, style),
       imageBuilder: (context, imageUrl) =>
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
       maxLines: maxLines,
@@ -182,6 +226,7 @@ class MessageContent extends HookConsumerWidget {
 
   Widget _buildLink(
     BuildContext context,
+    WidgetRef ref,
     InlineSpan linkText,
     String url,
     TextStyle linkStyle,
@@ -198,10 +243,29 @@ class MessageContent extends HookConsumerWidget {
     final baseStyle = fallbackStyle ?? linkStyle;
 
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
         final uri = Uri.tryParse(url);
-        if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
-          launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+          return;
+        }
+
+        final auth = ref.read(mediaGetAuthServiceProvider);
+        if (!auth.isRelayMediaUrl(url)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          return;
+        }
+
+        try {
+          await ref.read(openDownloadedFileProvider)(
+            url,
+            auth.headersFor(url),
+            text,
+          );
+        } catch (_) {
+          if (!context.mounted) return;
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Could not open attachment')),
+          );
         }
       },
       child: Text(

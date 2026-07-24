@@ -34,6 +34,8 @@ dependencies:
   app_badge_plus: ^1.2.10
   app_links: ^6.4.0
   scrollable_positioned_list: ^0.3.8
+  open_filex: ^4.7.0
+  path_provider: ^2.1.6
 
 dev_dependencies:
   flutter_test:
