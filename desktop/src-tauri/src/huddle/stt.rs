@@ -35,9 +35,11 @@ use super::models::SttFamily;
 
 // ── Public pipeline handle ────────────────────────────────────────────────────
 
-/// Bounded audio queue capacity.
-/// 100 ms batches at 48 kHz ≈ 19 KB each → 50 slots ≈ 5 s / ~1 MB max backlog.
-const AUDIO_QUEUE_DEPTH: usize = 50;
+/// Bounded audio queue capacity: 100 ms batches at 48 kHz ≈ 19 KB each →
+/// 300 slots ≈ 30 s / ~6 MB backlog, riding out the worst live-mode decode
+/// stall (~2 s flush of a 30 s phrase). Overflow silently drops mic audio,
+/// splicing the phrase so later decodes delete words already shown.
+const AUDIO_QUEUE_DEPTH: usize = 300;
 
 /// Maximum speech buffer size: 30 seconds at 16 kHz.
 /// Prevents OOM if VAD stays in speech mode (noisy environment).
@@ -211,16 +213,21 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(50);
 /// Live-transcript mode: re-decode the in-progress phrase every this many new
 /// 16 kHz samples (~300 ms) so words stream out while the user is talking.
 /// The model is an offline recognizer, so "streaming" is repeated decoding of
-/// the growing phrase buffer — phrases reset at every VAD pause, but a long
-/// unbroken ramble grows toward MAX_SPEECH_SAMPLES. Decode cost grows with the
-/// buffer (~70 ms per second of audio for the 0.6B model, measured in
-/// `v3_long_buffer`), so this is only the MINIMUM step: the worker also waits
-/// at least the previous decode's duration worth of new audio before the next
-/// partial. Without that back-off the worker falls behind real time past ~5 s
-/// of phrase, the bounded audio queue overflows, and mic audio is silently
-/// dropped — splicing the phrase and making later decodes remove words that
-/// earlier partials showed.
+/// the growing phrase buffer, and decode cost grows with it (~70 ms per second
+/// of audio for the 0.6B model, measured in `v3_long_buffer`). So this is only
+/// the MINIMUM step: after every decode (partials AND phrase flushes) the
+/// worker holds off 2× that decode's duration before the next partial, capping
+/// decode duty at ~50%. The hold must be WALL-CLOCK, not new-samples: a
+/// post-stall backlog arrives faster than real time, so samples-based back-off
+/// collapses into decode storms that overflow the audio queue.
 const PARTIAL_DECODE_STEP: usize = 4800;
+
+/// Consecutive VAD speech frames (16 ms each, ~96 ms total) required to open a
+/// phrase in live (dictation) mode. Single-frame blips (keyboard click,
+/// breath, background noise) make Parakeet hallucinate filler ("yeah", "uh");
+/// real speech sustains the VAD easily, and the onset audio is buffered while
+/// it proves itself, so nothing is lost. Huddle mode is untouched.
+const ONSET_DEBOUNCE_FRAMES: usize = 6;
 
 /// 50 ms cooldown after TTS stops before STT re-enables.
 /// Prevents the tail of TTS audio from being transcribed as speech.
@@ -364,10 +371,12 @@ fn stt_worker(
     let mut barge_in_frames: usize = 0;
     // Live mode: speech_buf length at the last partial decode.
     let mut last_partial_len: usize = 0;
-    // Live mode: minimum new samples before the next partial decode —
-    // PARTIAL_DECODE_STEP, raised to the last decode's duration so partial
-    // decoding never outruns real time (see PARTIAL_DECODE_STEP docs).
-    let mut partial_step: usize = PARTIAL_DECODE_STEP;
+    // Live mode: no partial decode before this instant (see
+    // PARTIAL_DECODE_STEP — the 2× wall-clock hold after every decode).
+    let mut decode_hold_until = std::time::Instant::now();
+    // Live mode: VAD-positive frames buffered while a speech onset proves
+    // itself (ONSET_DEBOUNCE_FRAMES) before opening a phrase.
+    let mut onset_buf: Vec<f32> = Vec::new();
     // Live mode: most recent partial decode of the current phrase that ended
     // with terminal punctuation — see prefer_punctuated.
     let mut punct_partial: Option<String> = None;
@@ -411,7 +420,6 @@ fn stt_worker(
                 silence_frames = 0;
                 in_speech = false;
                 last_partial_len = 0;
-                partial_step = PARTIAL_DECODE_STEP;
             }
             ptt_was_active = ptt_now;
         }
@@ -454,7 +462,8 @@ fn stt_worker(
                     ptt_active.as_ref(),
                     live_tx.as_ref(),
                     &mut last_partial_len,
-                    &mut partial_step,
+                    &mut decode_hold_until,
+                    &mut onset_buf,
                     &mut punct_partial,
                 );
             }
@@ -520,7 +529,8 @@ fn process_16k_samples(
     ptt_active: Option<&Arc<AtomicBool>>,
     live_tx: Option<&tokio_mpsc::Sender<(String, bool)>>,
     last_partial_len: &mut usize,
-    partial_step: &mut usize,
+    decode_hold_until: &mut std::time::Instant,
+    onset_buf: &mut Vec<f32>,
     punct_partial: &mut Option<String>,
 ) {
     leftover.extend_from_slice(samples);
@@ -601,17 +611,28 @@ fn process_16k_samples(
 
         if is_speech {
             *silence_frames = 0;
+            if !*in_speech && live_tx.is_some() {
+                // Live mode: debounce the onset (see ONSET_DEBOUNCE_FRAMES).
+                // ponytail: any non-speech frame resets it; add grace if real onsets clip.
+                onset_buf.extend_from_slice(&frame);
+                if onset_buf.len() < ONSET_DEBOUNCE_FRAMES * VAD_FRAME_SAMPLES {
+                    continue;
+                }
+                speech_buf.append(onset_buf);
+            } else {
+                speech_buf.extend_from_slice(&frame);
+            }
             *in_speech = true;
-            speech_buf.extend_from_slice(&frame);
 
             // OOM guard: flush and reset if the buffer exceeds 30 s of audio.
             if speech_buf.len() >= MAX_SPEECH_SAMPLES {
+                let t0 = std::time::Instant::now();
                 flush_to_stt(speech_buf, recognizer, text_tx, live_tx, punct_partial.take());
+                *decode_hold_until = std::time::Instant::now() + t0.elapsed() * 2;
                 speech_buf.clear();
                 *silence_frames = 0;
                 *in_speech = false;
                 *last_partial_len = 0;
-                *partial_step = PARTIAL_DECODE_STEP;
             }
         } else if *in_speech {
             // Still accumulate during brief silence gaps.
@@ -628,33 +649,37 @@ fn process_16k_samples(
                 SILENCE_FLUSH_FRAMES
             };
             if ptt_active.is_none() && *silence_frames >= flush_frames {
-                // End of utterance — transcribe.
+                // End of utterance — transcribe. Flush decodes join the same
+                // wall-clock hold as partials (see PARTIAL_DECODE_STEP).
+                let t0 = std::time::Instant::now();
                 flush_to_stt(speech_buf, recognizer, text_tx, live_tx, punct_partial.take());
+                *decode_hold_until = std::time::Instant::now() + t0.elapsed() * 2;
                 speech_buf.clear();
                 *silence_frames = 0;
                 *in_speech = false;
                 *last_partial_len = 0;
-                *partial_step = PARTIAL_DECODE_STEP;
             }
+        } else {
+            // Not in speech: discard the frame, and drop any pending onset —
+            // the blip ended before it proved itself to be speech.
+            onset_buf.clear();
         }
-        // If not in speech and not accumulating, just discard the frame.
 
         // Live mode: re-decode the in-progress phrase every PARTIAL_DECODE_STEP
         // new samples so words appear while the user is still talking. Later
         // partials of the same phrase supersede earlier ones — the frontend
         // replaces the partial region — so decode wobble is self-correcting.
         if let Some(tx) = live_tx {
-            if *in_speech && speech_buf.len() >= *last_partial_len + *partial_step {
+            if *in_speech
+                && speech_buf.len() >= *last_partial_len + PARTIAL_DECODE_STEP
+                && std::time::Instant::now() >= *decode_hold_until
+            {
                 *last_partial_len = speech_buf.len();
                 let t0 = std::time::Instant::now();
                 let text = decode_speech(speech_buf, recognizer);
-                // Wait at least 2× this decode's duration (in samples: 16/ms
-                // at 16 kHz) before the next partial, capping decode duty
-                // cycle at ~50% so the worker can't fall behind the mic and
-                // overflow the audio queue (which silently drops samples).
-                // 1× measured at ~100% duty on a 35 s ramble — no headroom.
-                *partial_step =
-                    PARTIAL_DECODE_STEP.max(32 * t0.elapsed().as_millis() as usize);
+                // 2× wall-clock hold (see PARTIAL_DECODE_STEP); 1× measured
+                // at ~100% duty on a 35 s ramble — no headroom.
+                *decode_hold_until = std::time::Instant::now() + t0.elapsed() * 2;
                 if !text.is_empty() {
                     if text.ends_with(['.', '?', '!', ',']) {
                         *punct_partial = Some(text.clone());
@@ -731,16 +756,17 @@ fn flush_to_stt(
     punct_hint: Option<String>,
 ) {
     let text = prefer_punctuated(decode_speech(speech_buf, recognizer), punct_hint.as_deref());
-    if !text.is_empty() {
-        // In live mode finals ride the same channel as partials so the
-        // receiver never sees a stale partial after its final.
-        let send_err = match live_tx {
-            Some(tx) => tx.blocking_send((text, true)).err().map(|e| e.to_string()),
-            None => text_tx.blocking_send(text).err().map(|e| e.to_string()),
-        };
-        if let Some(e) = send_err {
-            eprintln!("buzz-desktop: STT text channel closed: {e}");
-        }
+    // In live mode finals ride the same channel as partials so the receiver
+    // never sees a stale partial after its final — and an EMPTY final is still
+    // sent so the frontend clears the partial shown for a phrase that decoded
+    // to nothing (noise); skipping it strands that partial on screen.
+    let send_err = match live_tx {
+        Some(tx) => tx.blocking_send((text, true)).err().map(|e| e.to_string()),
+        None if text.is_empty() => None,
+        None => text_tx.blocking_send(text).err().map(|e| e.to_string()),
+    };
+    if let Some(e) = send_err {
+        eprintln!("buzz-desktop: STT text channel closed: {e}");
     }
 }
 

@@ -86,8 +86,11 @@ export function useDictation(editor: Editor | null) {
         const editor = editorRef.current;
         if (!editor) return;
         const text = event.payload.text.trim();
-        if (!text) return;
-        const insert = event.payload.final ? `${text} ` : text;
+        // Empty PARTIALS carry no information — skip. An empty FINAL is a
+        // real signal: the phrase decoded to nothing (noise), so fall through
+        // and let the diff delete the partial that was shown for it.
+        if (!text && !event.payload.final) return;
+        const insert = event.payload.final && text ? `${text} ` : text;
 
         const doc = editor.state.doc;
         let stream = streamRef.current;
