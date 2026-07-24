@@ -86,6 +86,17 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Random number generation — full jitter for exponential backoff in with_retry
 rand = { workspace = true }
 
+# Zeroizes the private key string in memory on drop — defense in depth for
+# --private-key / --private-key-fd secret handling
+zeroize = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Closes the raw inherited fd after reading `--private-key-fd` — opening
+# `/dev/fd/<fd>` duplicates the descriptor, so the original must be closed
+# explicitly or it leaks for the process lifetime. `unistd::close` is
+# unconditionally available, so no extra feature flags are needed.
+nix = { version = "0.31", default-features = false }
+
 [dev-dependencies]
 # Scratch files for channel-templates.json fixtures in tests
 tempfile = "3"

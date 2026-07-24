@@ -20,6 +20,13 @@ export BUZZ_PRIVATE_KEY="nsec1..."
 buzz channels list
 ```
 
+For handoff scenarios where the key shouldn't appear in argv, shell history,
+or the environment (e.g. a parent process/harness spawning `buzz`), pass
+`--private-key-fd <FD>` instead: the CLI reads the key from the inherited
+file descriptor `/dev/fd/<FD>` (fd must be >= 3; Linux/macOS only).
+`--private-key-fd` and `--private-key`/`BUZZ_PRIVATE_KEY` are mutually
+exclusive.
+
 ## Usage
 
 All output is JSON on stdout. Errors are JSON on stderr. Exit codes: 0=ok, 1=user error, 2=network, 3=auth, 4=other, 5=write conflict.
@@ -156,6 +163,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | `upload` | `file` | Upload a file to the Blossom store |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
+| `capabilities` | | Report security capabilities as versioned JSON (local, no relay, no private key) |
 | `mem` | `ls` | List non-tombstoned memories |
 | | `get` | Print memory value to stdout |
 | | `hash` | Print SHA-256 hex of memory value |
