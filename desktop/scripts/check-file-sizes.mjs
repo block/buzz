@@ -517,7 +517,10 @@ const overrides = new Map([
   // ownerPubkey) feeding the newly-added-mentions diff. Diff logic itself
   // lives in threading.ts (diffAddedMentionPubkeys); this is the minimal
   // composer-side wiring. Queued to split with the rest of this list.
-  ["src/features/messages/ui/MessageComposer.tsx", 1114],
+  // +46: ACP slash-command autocomplete hook, editor update/key routing, and
+  // grouped popup handoff. Catalog logic, filtering, and rendering live in
+  // dedicated modules; these are the load-bearing composer integration seams.
+  ["src/features/messages/ui/MessageComposer.tsx", 1160],
   // global-agent-config: model-tuning section (BuzzAgentModelTuningFields via
   // EditAgentAdvancedFields) + providerValid gate + effectiveProvider derivation
   // + globalProvider threading into getPersonaProviderOptions. All load-bearing
