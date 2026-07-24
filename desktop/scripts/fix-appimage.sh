@@ -144,6 +144,54 @@ if [[ -f "$WORKDIR/squashfs-root/AppRun" ]] \
   fi
 fi
 
+# Fedora's COLRv1 Noto Color Emoji trips an assertion in WebKitGTK/Skia and
+# aborts the AppImage after a blank window (#2548). Reject that family so
+# emoji fall back to a non-COLRv1 face (or to monochrome glyphs).
+echo "==> Rejecting COLRv1 system color-emoji fonts for AppImage launches"
+FC_DIR="$WORKDIR/squashfs-root/usr/etc/fonts"
+mkdir -p "$FC_DIR"
+cat > "$FC_DIR/fonts.conf" <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "urn:fontconfig:fonts.dtd">
+<fontconfig>
+  <!-- Keep the host fontconfig, then drop COLRv1 color-emoji faces that crash
+       bundled WebKitGTK/Skia on Fedora (#2548). -->
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <selectfont>
+    <rejectfont>
+      <pattern>
+        <patelt name="family"><string>Noto Color Emoji</string></patelt>
+      </pattern>
+    </rejectfont>
+  </selectfont>
+</fontconfig>
+EOF
+cat > "$HOOK_DIR/98-buzz-fontconfig-no-colrv1.sh" <<'EOF'
+# Prefer the AppImage fontconfig that rejects COLRv1 Noto Color Emoji (#2548).
+# Operators can point FONTCONFIG_FILE elsewhere to override.
+if [ -z "${FONTCONFIG_FILE:-}" ] && [ -n "${APPDIR:-}" ] && [ -f "$APPDIR/usr/etc/fonts/fonts.conf" ]; then
+  export FONTCONFIG_FILE="$APPDIR/usr/etc/fonts/fonts.conf"
+fi
+EOF
+if [[ -f "$WORKDIR/squashfs-root/AppRun" ]] \
+  && ! grep -q 'buzz-fontconfig-no-colrv1\|FONTCONFIG_FILE=.*usr/etc/fonts' "$WORKDIR/squashfs-root/AppRun"; then
+  if ! grep -q 'apprun-hooks' "$WORKDIR/squashfs-root/AppRun"; then
+    tmp_apprun="$(mktemp)"
+    {
+      if head -n1 "$WORKDIR/squashfs-root/AppRun" | grep -q '^#!'; then
+        head -n1 "$WORKDIR/squashfs-root/AppRun"
+        echo 'if [ -z "${FONTCONFIG_FILE:-}" ] && [ -n "${APPDIR:-}" ] && [ -f "$APPDIR/usr/etc/fonts/fonts.conf" ]; then export FONTCONFIG_FILE="$APPDIR/usr/etc/fonts/fonts.conf"; fi'
+        tail -n +2 "$WORKDIR/squashfs-root/AppRun"
+      else
+        echo 'if [ -z "${FONTCONFIG_FILE:-}" ] && [ -n "${APPDIR:-}" ] && [ -f "$APPDIR/usr/etc/fonts/fonts.conf" ]; then export FONTCONFIG_FILE="$APPDIR/usr/etc/fonts/fonts.conf"; fi'
+        cat "$WORKDIR/squashfs-root/AppRun"
+      fi
+    } > "$tmp_apprun"
+    mv "$tmp_apprun" "$WORKDIR/squashfs-root/AppRun"
+    chmod +x "$WORKDIR/squashfs-root/AppRun"
+  fi
+fi
+
 echo "==> Repacking AppImage"
 # Pass a pinned type2 runtime when provided (CI sets APPIMAGETOOL_RUNTIME_FILE);
 # without it appimagetool downloads the runtime from its mutable `continuous`
