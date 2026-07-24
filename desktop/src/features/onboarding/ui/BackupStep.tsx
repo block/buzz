@@ -1,7 +1,8 @@
 import { AlertTriangle, Info, RefreshCw } from "lucide-react";
 import * as React from "react";
+import { toast } from "sonner";
 
-import { getNsec } from "@/shared/api/tauriIdentity";
+import { getNsec, saveIdentityBackup } from "@/shared/api/tauriIdentity";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Spinner } from "@/shared/ui/spinner";
@@ -43,7 +44,9 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
   const [nsec, setNsec] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(true);
   const [loadError, setLoadError] = React.useState<string | null>(null);
+  const [isDownloading, setIsDownloading] = React.useState(false);
   const cancelledRef = React.useRef(false);
+  const downloadInFlightRef = React.useRef(false);
 
   const loadNsec = React.useCallback(async () => {
     setIsLoading(true);
@@ -73,6 +76,24 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
       setNsec(null);
     };
   }, [loadNsec]);
+
+  async function handleDownload() {
+    if (downloadInFlightRef.current) return;
+    downloadInFlightRef.current = true;
+    setIsDownloading(true);
+    try {
+      const saved = await saveIdentityBackup();
+      if (saved) toast.success("Private key saved");
+    } catch (error) {
+      toast.error("Failed to save private key", {
+        description:
+          error instanceof Error ? error.message : "Please try again.",
+      });
+    } finally {
+      downloadInFlightRef.current = false;
+      if (!cancelledRef.current) setIsDownloading(false);
+    }
+  }
 
   return (
     <OnboardingSlideTransition
@@ -124,8 +145,13 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           </div>
         ) : nsec ? (
           <Card className="w-full px-8 py-6" variant="textured">
-            <div className="mx-auto w-full max-w-[832px]">
-              <NsecMaskedDisplay nsec={nsec} variant="bare" />
+            <div className="mx-auto w-full max-w-[896px]">
+              <NsecMaskedDisplay
+                isDownloading={isDownloading}
+                nsec={nsec}
+                onDownload={() => void handleDownload()}
+                variant="bare"
+              />
             </div>
           </Card>
         ) : (

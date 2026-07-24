@@ -1,4 +1,4 @@
-import { Check, Copy, Eye, EyeOff } from "lucide-react";
+import { Check, Copy, Download, Eye, EyeOff, LoaderCircle } from "lucide-react";
 import * as React from "react";
 import { Button } from "@/shared/ui/button";
 import { writeTextToClipboard } from "@/shared/lib/clipboard";
@@ -12,6 +12,9 @@ type NsecMaskedDisplayProps = {
    * a backup (e.g. sign-out) gate on actual interaction with the key.
    */
   onKeyInteraction?: () => void;
+  /** Optional native backup action, shown beside reveal and copy. */
+  onDownload?: () => void;
+  isDownloading?: boolean;
 };
 
 export const ONBOARDING_KEY_FRAME_CLASS =
@@ -31,6 +34,8 @@ export function NsecMaskedDisplay({
   nsec,
   variant = "boxed",
   onKeyInteraction,
+  onDownload,
+  isDownloading = false,
 }: NsecMaskedDisplayProps) {
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [isCopied, setIsCopied] = React.useState(false);
@@ -139,6 +144,27 @@ export function NsecMaskedDisplay({
               <Copy className={iconSize} aria-hidden="true" />
             )}
           </Button>
+          {onDownload ? (
+            <Button
+              aria-label="Download private key"
+              className={`${isBare ? "h-10 w-10" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
+              data-testid="nsec-download"
+              disabled={isDownloading}
+              onClick={onDownload}
+              size="icon"
+              type="button"
+              variant="ghost"
+            >
+              {isDownloading ? (
+                <LoaderCircle
+                  className={`${iconSize} animate-spin`}
+                  aria-hidden="true"
+                />
+              ) : (
+                <Download className={iconSize} aria-hidden="true" />
+              )}
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>
