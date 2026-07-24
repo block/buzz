@@ -1074,6 +1074,19 @@ pub(crate) async fn validate_user_group_command(
             default_channels,
             ..
         } => {
+            // Edit/delete/membership commands gate the actor via the
+            // creator-or-admin rule; create has no group to load, so the actor
+            // must pass the same community admission as member arguments.
+            validate_group_members(tenant, state, std::slice::from_ref(&actor_hex))
+                .await
+                .map_err(|error| match error {
+                    UserGroupCommandValidationError::Rejected(_) => {
+                        UserGroupCommandValidationError::Rejected(
+                            "restricted: only community members may create user groups".into(),
+                        )
+                    }
+                    other => other,
+                })?;
             validate_group_members(tenant, state, members).await?;
             validate_group_default_channels(tenant, state, default_channels).await?;
         }
