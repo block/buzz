@@ -434,7 +434,17 @@ class ChannelActions {
     _ref.invalidate(channelMembersProvider(channelId));
   }
 
-  Future<void> addReaction(String eventId, String emoji) async {
+  /// Add a NIP-25 reaction to [eventId], authored by [targetPubkey].
+  ///
+  /// [targetPubkey] becomes the `p` tag. NIP-25 requires it, and it is what
+  /// lets the reacted-to author find the reaction with a
+  /// `{"kinds":[7],"#p":[<self>]}` notification filter — without it a reaction
+  /// is invisible to every notification surface.
+  Future<void> addReaction(
+    String eventId,
+    String targetPubkey,
+    String emoji,
+  ) async {
     final shortcode = normalizeShortcode(emoji);
     final emojiUrl = reactionEmojiUrl(
       emoji,
@@ -445,6 +455,7 @@ class ChannelActions {
       content: emoji,
       tags: [
         ['e', eventId],
+        ['p', targetPubkey.toLowerCase()],
         if (shortcode != null && emojiUrl != null)
           ['emoji', shortcode, emojiUrl],
       ],

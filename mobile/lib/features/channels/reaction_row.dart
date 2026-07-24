@@ -21,7 +21,7 @@ void toggleReaction(WidgetRef ref, TimelineMessage message, String emoji) {
   if (reaction.reactedByCurrentUser && reaction.currentUserReactionId != null) {
     actions.removeReaction(reaction.currentUserReactionId!, emoji);
   } else {
-    actions.addReaction(message.id, emoji);
+    actions.addReaction(message.id, message.pubkey, emoji);
   }
 }
 
