@@ -17,6 +17,19 @@ export const BUZZ_AGENT_MAX_CONTEXT_TOKENS = "BUZZ_AGENT_MAX_CONTEXT_TOKENS";
 /** Env var key for the maximum number of LLM/tool rounds per turn. */
 export const BUZZ_AGENT_MAX_ROUNDS = "BUZZ_AGENT_MAX_ROUNDS";
 
+/** Env var key for the OpenAI request processing tier. */
+export const BUZZ_AGENT_SERVICE_TIER = "BUZZ_AGENT_SERVICE_TIER";
+
+/** OpenAI service tiers accepted by buzz-agent. */
+export const BUZZ_AGENT_SERVICE_TIER_VALUES = [
+  "auto",
+  "default",
+  "flex",
+  "priority",
+] as const;
+
+export type ServiceTierValue = (typeof BUZZ_AGENT_SERVICE_TIER_VALUES)[number];
+
 /**
  * Ordered set of valid thinking-effort values accepted by buzz-agent.
  * Mirrors `parse_thinking_effort` in `crates/buzz-agent/src/config.rs`.
