@@ -227,11 +227,17 @@ export function CommunitySwitcher({
           <div aria-label="Communities" role="menu">
             {communities.map((community) => (
               <div
-                className="group flex min-h-9 items-center rounded-lg transition-colors hover:bg-muted/50 focus-within:bg-muted/50"
+                className={cn(
+                  "group flex min-h-9 items-center rounded-lg transition-colors hover:bg-muted/50 focus-within:bg-muted/50",
+                  activeCommunity?.id === community.id && "bg-muted/60",
+                )}
                 key={community.id}
               >
                 <button
-                  className="flex min-h-9 min-w-0 flex-1 items-center gap-2 py-2 pl-2 pr-1 text-left text-sm outline-hidden focus:outline-none"
+                  className={cn(
+                    "flex min-h-9 min-w-0 flex-1 items-center gap-2 py-2 pl-2 pr-1 text-left text-sm outline-hidden focus:outline-none",
+                    activeCommunity?.id === community.id && "font-medium",
+                  )}
                   onClick={() => {
                     onSwitchCommunity(community.id);
                     setDropdownOpen(false);
@@ -325,7 +331,10 @@ export function CommunitySwitcher({
         {communities.map((community) => (
           <DropdownMenuItem
             key={community.id}
-            className="group flex items-center gap-2 pr-1"
+            className={cn(
+              "group flex items-center gap-2 pr-1",
+              activeCommunity?.id === community.id && "bg-accent font-medium",
+            )}
             onSelect={() => {
               onSwitchCommunity(community.id);
             }}

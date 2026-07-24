@@ -135,11 +135,20 @@ function CommunityButton({
               {...dragAttributes}
               {...dragListeners}
             >
+              {/* Active pill on the icon edge — ring alone is easy to miss when
+                  a community icon covers bg-primary (#2570). */}
+              {isActive ? (
+                <span
+                  aria-hidden="true"
+                  className="absolute left-0 top-1/2 z-10 h-5 w-1 -translate-y-1/2 rounded-full bg-primary"
+                  data-testid={`community-rail-active-${community.id}`}
+                />
+              ) : null}
               <span
                 className={cn(
                   "flex h-9 w-9 items-center justify-center overflow-hidden rounded-2xl text-xs font-semibold transition-all",
                   isActive
-                    ? "rounded-xl bg-primary text-primary-foreground"
+                    ? "rounded-xl bg-primary text-primary-foreground ring-2 ring-primary/35 ring-offset-2 ring-offset-sidebar"
                     : "bg-sidebar-accent/60 text-sidebar-foreground/80 hover:rounded-xl hover:bg-primary/80 hover:text-primary-foreground",
                   pending && "opacity-60",
                 )}
