@@ -1,3 +1,5 @@
+use nostr::PublicKey;
+
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
 use crate::validate::validate_hex64;
@@ -13,6 +15,7 @@ pub async fn cmd_get_users(
     client: &BuzzClient,
     pubkeys: &[String],
     name: Option<&str>,
+    owner: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     if let Some(query) = name {
@@ -21,7 +24,7 @@ pub async fn cmd_get_users(
                 "--name and --pubkey are mutually exclusive".into(),
             ));
         }
-        return search_by_name(client, query, format).await;
+        return search_by_name(client, query, owner, format).await;
     }
 
     for pk in pubkeys {
@@ -38,12 +41,18 @@ pub async fn cmd_get_users(
         pubkeys.iter().map(|s| s.as_str()).collect()
     };
 
+    let owner = resolve_owner(client, owner)?;
     let filter = serde_json::json!({
         "kinds": [0],
         "authors": authors,
-        "limit": authors.len()
+        "limit": authors.len(),
+        "include_agent_owner": true,
+        "agent_owner": owner,
     });
     let resp = client.query(&filter).await?;
+    let my_owner_pubkey = client
+        .auth_tag_owner_hex()
+        .unwrap_or_else(|| client.keys().public_key().to_hex());
     let events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
     let profiles: Vec<serde_json::Value> = events
         .iter()
@@ -55,6 +64,7 @@ pub async fn cmd_get_users(
                     "pubkey".to_string(),
                     serde_json::json!(e.get("pubkey").and_then(|v| v.as_str()).unwrap_or("")),
                 );
+                copy_owner_fields(e, obj, &my_owner_pubkey);
             }
             Some(profile)
         })
@@ -66,6 +76,9 @@ pub async fn cmd_get_users(
                 .map(|p| serde_json::json!({
                     "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
                     "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
+                    "owner_pubkey": p.get("owner_pubkey").cloned().unwrap_or_default(),
+                    "owner_display_name": p.get("owner_display_name").cloned().unwrap_or_default(),
+                    "owned_by_me": p.get("owned_by_me").cloned().unwrap_or_default(),
                 }))
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
@@ -76,23 +89,70 @@ pub async fn cmd_get_users(
     Ok(())
 }
 
+fn copy_owner_fields(
+    event: &serde_json::Value,
+    profile: &mut serde_json::Map<String, serde_json::Value>,
+    my_owner_pubkey: &str,
+) {
+    if let Some(value) = event.get("agent_owner_pubkey") {
+        profile.insert("owner_pubkey".to_string(), value.clone());
+    }
+    if let Some(value) = event.get("agent_owner_display_name") {
+        profile.insert("owner_display_name".to_string(), value.clone());
+    }
+    if let Some(owner) = event
+        .get("agent_owner_pubkey")
+        .and_then(|value| value.as_str())
+    {
+        profile.insert(
+            "owned_by_me".to_string(),
+            serde_json::json!(owner == my_owner_pubkey),
+        );
+    }
+}
+
+fn resolve_owner(client: &BuzzClient, owner: Option<&str>) -> Result<Option<String>, CliError> {
+    owner
+        .map(|owner| {
+            if owner == "me" {
+                Ok(client
+                    .auth_tag_owner_hex()
+                    .unwrap_or_else(|| client.keys().public_key().to_hex()))
+            } else {
+                PublicKey::parse(owner)
+                    .map(|pubkey| pubkey.to_hex())
+                    .map_err(|e| {
+                        CliError::Usage(format!("--owner must be `me`, a pubkey, or npub: {e}"))
+                    })
+            }
+        })
+        .transpose()
+}
+
 /// Search for users by display name via NIP-50 full-text search on kind:0 profiles.
 /// Returns [] if the relay does not implement NIP-50 search.
 async fn search_by_name(
     client: &BuzzClient,
     query: &str,
+    owner: Option<&str>,
     format: &crate::OutputFormat,
 ) -> Result<(), CliError> {
     if query.trim().is_empty() {
         return Err(CliError::Usage("--name cannot be empty".into()));
     }
 
+    let owner = resolve_owner(client, owner)?;
     let filter = serde_json::json!({
         "kinds": [0],
         "search": query,
-        "limit": 100
+        "limit": 100,
+        "include_agent_owner": true,
+        "agent_owner": owner,
     });
     let raw = client.query(&filter).await?;
+    let my_owner_pubkey = client
+        .auth_tag_owner_hex()
+        .unwrap_or_else(|| client.keys().public_key().to_hex());
 
     // Parse and filter client-side for case-insensitive substring match
     // on display_name or name fields (NIP-50 may return broader matches).
@@ -126,6 +186,7 @@ async fn search_by_name(
                     "pubkey".to_string(),
                     serde_json::json!(event.get("pubkey").and_then(|v| v.as_str()).unwrap_or("")),
                 );
+                copy_owner_fields(event, obj, &my_owner_pubkey);
             }
             Some(profile)
         })
@@ -137,6 +198,9 @@ async fn search_by_name(
                 .map(|p| serde_json::json!({
                     "pubkey": p.get("pubkey").cloned().unwrap_or_default(),
                     "display_name": p.get("display_name").or_else(|| p.get("name")).cloned().unwrap_or_default(),
+                    "owner_pubkey": p.get("owner_pubkey").cloned().unwrap_or_default(),
+                    "owner_display_name": p.get("owner_display_name").cloned().unwrap_or_default(),
+                    "owned_by_me": p.get("owned_by_me").cloned().unwrap_or_default(),
                 }))
                 .collect();
             serde_json::to_string(&compact).unwrap_or_default()
@@ -311,9 +375,11 @@ pub async fn dispatch(
 ) -> Result<(), CliError> {
     use crate::UsersCmd;
     match cmd {
-        UsersCmd::Get { pubkeys, name } => {
-            cmd_get_users(client, &pubkeys, name.as_deref(), format).await
-        }
+        UsersCmd::Get {
+            pubkeys,
+            name,
+            owner,
+        } => cmd_get_users(client, &pubkeys, name.as_deref(), owner.as_deref(), format).await,
         UsersCmd::SetProfile {
             name,
             avatar,
@@ -336,8 +402,29 @@ pub async fn dispatch(
 
 #[cfg(test)]
 mod tests {
-    use super::presence_subject;
+    use super::{copy_owner_fields, presence_subject};
     use serde_json::json;
+
+    #[test]
+    fn copy_owner_fields_marks_authenticated_owner() {
+        let owner = "a".repeat(64);
+        let event = json!({
+            "agent_owner_pubkey": owner,
+            "agent_owner_display_name": "John",
+        });
+        let mut profile = serde_json::Map::new();
+        copy_owner_fields(&event, &mut profile, &"a".repeat(64));
+        assert_eq!(profile["owner_display_name"], "John");
+        assert_eq!(profile["owned_by_me"], true);
+    }
+
+    #[test]
+    fn copy_owner_fields_marks_other_owner() {
+        let event = json!({"agent_owner_pubkey": "a".repeat(64)});
+        let mut profile = serde_json::Map::new();
+        copy_owner_fields(&event, &mut profile, &"b".repeat(64));
+        assert_eq!(profile["owned_by_me"], false);
+    }
 
     #[test]
     fn presence_subject_uses_p_tag() {
