@@ -31,6 +31,7 @@ import {
   AUTO_PROVIDER_DROPDOWN_VALUE,
   CUSTOM_PROVIDER_DROPDOWN_VALUE,
   computeLocalModeGate,
+  formatCurrentRuntimeOptionLabel,
   formatRuntimeOptionLabel,
   getDefaultPersonaRuntime,
   getPersonaHiddenProviderIds,
@@ -569,7 +570,7 @@ export function AgentDefinitionDialog({
     !runtimeDropdownOptions.some((option) => option.value === runtime)
   ) {
     runtimeDropdownOptions.push({
-      label: `${runtime.trim()} (current)`,
+      label: formatCurrentRuntimeOptionLabel(runtimes, runtime),
       value: runtime.trim(),
     });
   }

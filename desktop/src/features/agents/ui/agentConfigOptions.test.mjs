@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  formatCurrentRuntimeOptionLabel,
   getDefaultPersonaRuntime,
   getPersonaHiddenProviderIds,
   getPersonaModelOptions,
@@ -33,6 +34,25 @@ function makeRuntime(
     availability,
   };
 }
+
+test("formatCurrentRuntimeOptionLabel uses the catalog display label", () => {
+  const runtime = {
+    ...makeRuntime("goose"),
+    label: "Goose",
+  };
+
+  assert.equal(
+    formatCurrentRuntimeOptionLabel([runtime], "goose"),
+    "Goose (current)",
+  );
+});
+
+test("formatCurrentRuntimeOptionLabel falls back to an unknown runtime id", () => {
+  assert.equal(
+    formatCurrentRuntimeOptionLabel([], " custom-runtime "),
+    "custom-runtime (current)",
+  );
+});
 
 // ── getPersonaProviderOptions — hideProviderIds ───────────────────────────────
 

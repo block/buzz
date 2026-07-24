@@ -489,6 +489,18 @@ export function formatRuntimeOptionLabel(runtime: AcpRuntimeCatalogEntry) {
   return `${runtime.label}${suffix}`;
 }
 
+export function formatCurrentRuntimeOptionLabel(
+  runtimes: readonly AcpRuntimeCatalogEntry[],
+  runtimeId: string,
+) {
+  const trimmedRuntimeId = runtimeId.trim();
+  const runtime = runtimes.find(
+    (candidate) => candidate.id === trimmedRuntimeId,
+  );
+  const label = runtime ? formatRuntimeOptionLabel(runtime) : trimmedRuntimeId;
+  return `${label} (current)`;
+}
+
 function runtimeAvailabilitySortRank(
   availability: AcpRuntimeCatalogEntry["availability"],
 ) {
