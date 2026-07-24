@@ -1,0 +1,96 @@
+asyncapi: 3.0.0
+info:
+  title: Buzz Local Relay WebSocket
+  version: 0.1.0
+  description: NIP-01 subset implemented by the local relay.
+servers:
+  local:
+    host: 127.0.0.1:3000
+    pathname: /
+    protocol: ws
+channels:
+  relay:
+    address: /
+    messages:
+      clientEvent:
+        $ref: "#/components/messages/ClientEvent"
+      request:
+        $ref: "#/components/messages/Request"
+      close:
+        $ref: "#/components/messages/Close"
+      relayEvent:
+        $ref: "#/components/messages/RelayEvent"
+      endOfStoredEvents:
+        $ref: "#/components/messages/EndOfStoredEvents"
+      acknowledgement:
+        $ref: "#/components/messages/Acknowledgement"
+operations:
+  sendToRelay:
+    action: send
+    channel:
+      $ref: "#/channels/relay"
+    messages:
+      - $ref: "#/channels/relay/messages/clientEvent"
+      - $ref: "#/channels/relay/messages/request"
+      - $ref: "#/channels/relay/messages/close"
+  receiveFromRelay:
+    action: receive
+    channel:
+      $ref: "#/channels/relay"
+    messages:
+      - $ref: "#/channels/relay/messages/relayEvent"
+      - $ref: "#/channels/relay/messages/endOfStoredEvents"
+      - $ref: "#/channels/relay/messages/acknowledgement"
+components:
+  messages:
+    ClientEvent:
+      payload:
+        type: array
+        prefixItems:
+          - const: EVENT
+          - type: object
+        minItems: 2
+        maxItems: 2
+    Request:
+      payload:
+        type: array
+        prefixItems:
+          - const: REQ
+          - type: string
+          - type: object
+        minItems: 3
+    Close:
+      payload:
+        type: array
+        prefixItems:
+          - const: CLOSE
+          - type: string
+        minItems: 2
+        maxItems: 2
+    RelayEvent:
+      payload:
+        type: array
+        prefixItems:
+          - const: EVENT
+          - type: string
+          - type: object
+        minItems: 3
+        maxItems: 3
+    EndOfStoredEvents:
+      payload:
+        type: array
+        prefixItems:
+          - const: EOSE
+          - type: string
+        minItems: 2
+        maxItems: 2
+    Acknowledgement:
+      payload:
+        type: array
+        prefixItems:
+          - const: OK
+          - type: string
+          - type: boolean
+          - type: string
+        minItems: 4
+        maxItems: 4

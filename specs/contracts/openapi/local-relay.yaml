@@ -1,0 +1,126 @@
+openapi: 3.1.0
+info:
+  title: Buzz Local Relay HTTP Bridge
+  version: 0.1.0
+  description: Minimal unauthenticated loopback bridge for local experimentation.
+paths:
+  /health:
+    get:
+      operationId: localRelayHealth
+      responses:
+        "200":
+          description: Relay is ready.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    const: ok
+  /events:
+    post:
+      operationId: submitLocalEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NostrEvent"
+      responses:
+        "200":
+          description: Event verification and persistence outcome.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WriteResult"
+        "400":
+          description: Malformed event.
+  /query:
+    post:
+      operationId: queryLocalEvents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+      responses:
+        "200":
+          description: Matching effective events, newest first.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/NostrEvent"
+        "400":
+          description: A filter requests an unsupported hosted-only capability such as NIP-50 search.
+  /count:
+    post:
+      operationId: countLocalEvents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+      responses:
+        "200":
+          description: Number of matching effective events.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [count]
+                properties:
+                  count:
+                    type: integer
+                    minimum: 0
+        "400":
+          description: A filter requests an unsupported hosted-only capability such as NIP-50 search.
+components:
+  schemas:
+    NostrEvent:
+      type: object
+      required: [id, pubkey, created_at, kind, tags, content, sig]
+      properties:
+        id:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        pubkey:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        created_at:
+          type: integer
+        kind:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        tags:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+        content:
+          type: string
+        sig:
+          type: string
+          pattern: "^[0-9a-f]{128}$"
+    WriteResult:
+      type: object
+      required: [event_id, accepted, message]
+      properties:
+        event_id:
+          type: string
+        accepted:
+          type: boolean
+        message:
+          type: string

@@ -1,0 +1,44 @@
+model:
+  name: LocalEventLog
+  type: aggregate
+  purpose: Preserve the effective set of verified signed events across local relay restarts.
+
+entities:
+  - name: SignedEvent
+    identity: event.id
+    attributes:
+      - event.id
+      - event.pubkey
+      - event.created_at
+      - event.kind
+      - event.tags
+      - event.content
+      - event.sig
+
+value_objects:
+  - name: ReplacementKey
+    variants:
+      - regular: event.id
+      - replaceable: [event.pubkey, event.kind]
+      - parameterized_replaceable: [event.pubkey, event.kind, d_tag]
+
+commands:
+  - name: AcceptEvent
+    input: SignedEvent
+    outcomes:
+      - Stored
+      - Duplicate
+      - Superseded
+      - Ephemeral
+      - Rejected
+  - name: QueryEvents
+    input: NostrFilterSet
+    output: EffectiveEventList
+
+invariants:
+  - Only events with a valid computed ID and Schnorr signature enter relay state.
+  - A durable event is appended to the event log before Stored is acknowledged.
+  - Event IDs are idempotent.
+  - A replacement candidate wins by greater created_at, then lexicographically smaller event ID.
+  - Ephemeral kinds 20000 through 29999 are never appended.
+  - Replaying the event log yields the same effective event set as the original process.

@@ -1,0 +1,17 @@
+capability:
+  name: Durable local relay
+  status: implementing
+  telos: ../TELOS.md
+  persona: ../personas/local-first-builder.md
+  journey: ../journeys/start-durable-local-buzz.md
+  story: ../stories/local-relay/run-without-hosted-infrastructure.md
+  model: ../models/local-event-log/local-event-log.model.yaml
+  behavior: ../features/local-relay/durable-local-event-log.feature
+  contracts:
+    - ../contracts/openapi/local-relay.yaml
+    - ../contracts/asyncapi/local-relay.yaml
+  fixtures:
+    - ../fixtures/local-relay/signed-message.json
+  implementation:
+    crate: crates/buzz-local-relay
+    status: implemented
