@@ -17,11 +17,95 @@ use std::time::Duration;
 
 use buzz_test_client::{BuzzTestClient, RelayMessage};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
+use reqwest::Client;
+use serde_json::Value;
 
 const PERSONA_KIND: u16 = 30175;
 
 fn relay_url() -> String {
     std::env::var("RELAY_URL").unwrap_or_else(|_| "ws://localhost:3000".to_string())
+}
+
+fn relay_http_url() -> String {
+    relay_url()
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn http_client() -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .expect("failed to build HTTP client")
+}
+
+/// Submit an event via the NIP-98 HTTP bridge (`POST /events`).
+async fn submit_event_http(client: &Client, keys: &Keys, event: &nostr::Event) -> (bool, String) {
+    let pubkey_hex = keys.public_key().to_hex();
+    let resp = client
+        .post(format!("{}/events", relay_http_url()))
+        .header("X-Pubkey", &pubkey_hex)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(event).unwrap())
+        .send()
+        .await
+        .expect("submit event");
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.expect("parse response");
+    if status == 200 {
+        let accepted = body["accepted"].as_bool().unwrap_or(false);
+        let message = body["message"].as_str().unwrap_or("").to_string();
+        (accepted, message)
+    } else {
+        let message = body["error"].as_str().unwrap_or("").to_string();
+        (false, message)
+    }
+}
+
+/// Query events via the NIP-98 HTTP bridge (`POST /query`).
+async fn query_events_http(client: &Client, pubkey_hex: &str, filters: Vec<Filter>) -> Vec<Value> {
+    let resp = client
+        .post(format!("{}/query", relay_http_url()))
+        .header("X-Pubkey", pubkey_hex)
+        .header("Content-Type", "application/json")
+        .json(&filters)
+        .send()
+        .await
+        .expect("query events");
+    assert!(
+        resp.status().is_success(),
+        "query failed: {}",
+        resp.status()
+    );
+    resp.json::<Vec<Value>>()
+        .await
+        .expect("parse query response")
+}
+
+/// Count events via the NIP-98 HTTP bridge (`POST /count`).
+async fn count_events_http(
+    client: &Client,
+    pubkey_hex: &str,
+    filters: Vec<Filter>,
+) -> Result<u64, (u16, String)> {
+    let resp = client
+        .post(format!("{}/count", relay_http_url()))
+        .header("X-Pubkey", pubkey_hex)
+        .header("Content-Type", "application/json")
+        .json(&filters)
+        .send()
+        .await
+        .expect("count events");
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.expect("parse count response");
+    if status == 200 {
+        Ok(body["count"].as_u64().unwrap_or(0))
+    } else {
+        let msg = body["error"].as_str().unwrap_or("").to_string();
+        Err((status, msg))
+    }
 }
 
 fn sub_id(name: &str) -> String {
@@ -521,6 +605,27 @@ fn persona_event_with_shared(keys: &Keys, d_tag: &str, shared: bool) -> nostr::E
         .unwrap()
 }
 
+/// Build a persona event with an optional `["shared","true"]` tag and an
+/// explicit `created_at` — needed for NIP-33 replacement tests where two
+/// events could otherwise land in the same second and be ordered by event-id
+/// tie-break rather than timestamp.
+fn persona_event_with_shared_at(
+    keys: &Keys,
+    d_tag: &str,
+    shared: bool,
+    created_at: u64,
+) -> nostr::Event {
+    let mut tags = vec![Tag::parse(["d", d_tag]).unwrap()];
+    if shared {
+        tags.push(Tag::parse(["shared", "true"]).unwrap());
+    }
+    EventBuilder::new(Kind::Custom(PERSONA_KIND), r#"{"display_name":"test"}"#)
+        .tags(tags)
+        .custom_created_at(Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+}
+
 /// AC-1: Foreign reader receives ONLY shared heads; author receives all own heads.
 ///
 /// Gate changed: `test_persona_publish_and_query` queries by id (author, always
@@ -718,7 +823,12 @@ async fn test_persona_count_excludes_foreign_unshared() {
 
 /// AC-4a: Unshared persona publish is NOT delivered to foreign live subscription.
 /// AC-4b: Shared persona publish IS delivered to foreign live subscription.
-/// AC-4c: NIP-33 replace shared→unshared makes subsequent foreign REQs return nothing.
+/// AC-4c: NIP-33 replace shared→unshared makes subsequent foreign REQs return nothing,
+///        and the live subscription for the foreign reader receives no event.
+///
+/// Uses explicit monotonic `created_at` timestamps so NIP-33 head ordering is
+/// deterministic — same-second events would otherwise be ordered by event-id
+/// tie-break, making it possible for the "wrong" head to win.
 #[tokio::test]
 #[ignore]
 async fn test_persona_live_fanout_shared_gate() {
@@ -727,6 +837,11 @@ async fn test_persona_live_fanout_shared_gate() {
     let foreign_keys = Keys::generate();
 
     let d_tag = format!("gate-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    // Use strictly increasing timestamps: t0 < t1 < t2.
+    let t0: u64 = 1_700_000_000;
+    let t1: u64 = t0 + 1;
+    let t2: u64 = t1 + 1;
 
     // Foreign subscribes to all kind:30175 events BEFORE the author publishes.
     let mut foreign = BuzzTestClient::connect(&url, &foreign_keys)
@@ -744,11 +859,12 @@ async fn test_persona_live_fanout_shared_gate() {
         .await
         .expect("drain eose");
 
-    // Author publishes an UNSHARED persona — foreign must NOT receive it.
+    // Author publishes an UNSHARED persona (t0) — foreign must NOT receive it.
     let mut author = BuzzTestClient::connect(&url, &author_keys)
         .await
         .expect("connect author");
-    let ev_unshared = persona_event_with_shared(&author_keys, &d_tag, false);
+    let ev_unshared = persona_event_with_shared_at(&author_keys, &d_tag, false, t0);
+    let unshared_id = ev_unshared.id;
     let ok = author.send_event(ev_unshared).await.expect("send unshared");
     assert!(ok.accepted, "unshared rejected: {}", ok.message);
 
@@ -764,8 +880,27 @@ async fn test_persona_live_fanout_shared_gate() {
         _ => {}
     }
 
-    // Author republishes with ["shared","true"] — foreign MUST now receive it.
-    let ev_shared = persona_event_with_shared(&author_keys, &d_tag, true);
+    // Verify the unshared event IS the NIP-33 head for the author (self-query).
+    let sid_head_check = sub_id("head-unshared");
+    let filter_self = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    author
+        .subscribe(&sid_head_check, vec![filter_self])
+        .await
+        .expect("subscribe head-check");
+    let author_events = author
+        .collect_until_eose(&sid_head_check, Duration::from_secs(5))
+        .await
+        .expect("collect head-check");
+    assert!(
+        author_events.iter().any(|e| e.id == unshared_id),
+        "unshared event must be the NIP-33 head visible to author"
+    );
+
+    // Author republishes with ["shared","true"] at t1 — t1 > t0 so it wins.
+    // Foreign MUST receive it via live fan-out.
+    let ev_shared = persona_event_with_shared_at(&author_keys, &d_tag, true, t1);
     let shared_id = ev_shared.id;
     let ok = author.send_event(ev_shared).await.expect("send shared");
     assert!(ok.accepted, "shared rejected: {}", ok.message);
@@ -783,9 +918,29 @@ async fn test_persona_live_fanout_shared_gate() {
         other => panic!("expected shared persona event via fanout, got: {other:?}"),
     }
 
-    // AC-4c: Author republishes WITHOUT shared tag — NIP-33 replaces the head.
-    // A subsequent foreign REQ for this author's personas should return nothing.
-    let ev_unshared2 = persona_event_with_shared(&author_keys, &d_tag, false);
+    // Verify shared event is now the NIP-33 head (self-query sees shared_id).
+    let sid_head_shared = sub_id("head-shared");
+    let filter_self2 = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    author
+        .subscribe(&sid_head_shared, vec![filter_self2])
+        .await
+        .expect("subscribe head-shared");
+    let author_events2 = author
+        .collect_until_eose(&sid_head_shared, Duration::from_secs(5))
+        .await
+        .expect("collect head-shared");
+    assert!(
+        author_events2.iter().any(|e| e.id == shared_id),
+        "shared event must be the NIP-33 head visible to author"
+    );
+
+    // AC-4c: Author republishes WITHOUT shared tag at t2 — NIP-33 replaces the head.
+    // The foreign live subscription must NOT receive any event for this publish
+    // (unshared fan-out is blocked), and a subsequent foreign REQ must return nothing.
+    let ev_unshared2 = persona_event_with_shared_at(&author_keys, &d_tag, false, t2);
+    let unshared2_id = ev_unshared2.id;
     let ok = author
         .send_event(ev_unshared2)
         .await
@@ -794,6 +949,38 @@ async fn test_persona_live_fanout_shared_gate() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    // Foreign live subscription must NOT receive the unshared replacement.
+    let live_result = foreign.recv_event(Duration::from_millis(500)).await;
+    match live_result {
+        Err(buzz_test_client::TestClientError::Timeout) => {}
+        Ok(RelayMessage::Event { event, .. }) if event.kind == Kind::Custom(PERSONA_KIND) => {
+            panic!(
+                "foreign MUST NOT receive unshared replacement via live fan-out (got {:?})",
+                event.id
+            )
+        }
+        _ => {}
+    }
+
+    // Verify unshared2 is now the NIP-33 head for the author.
+    let sid_head_unshared2 = sub_id("head-unshared2");
+    let filter_self3 = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    author
+        .subscribe(&sid_head_unshared2, vec![filter_self3])
+        .await
+        .expect("subscribe head-unshared2");
+    let author_events3 = author
+        .collect_until_eose(&sid_head_unshared2, Duration::from_secs(5))
+        .await
+        .expect("collect head-unshared2");
+    assert!(
+        author_events3.iter().any(|e| e.id == unshared2_id),
+        "unshared2 event must be the NIP-33 head visible to author"
+    );
+
+    // Foreign REQ post-unshare must see nothing for this author's personas.
     let sid2 = sub_id("fanout-gate-post-unshare");
     let filter2 = Filter::new()
         .kind(Kind::Custom(PERSONA_KIND))
@@ -872,6 +1059,44 @@ async fn test_persona_ingest_shared_tag_validation() {
         ok.message
     );
 
+    // Reject: ["shared","x"] — any value other than "true" is malformed.
+    let ev = EventBuilder::new(Kind::Custom(PERSONA_KIND), r#"{"display_name":"x"}"#)
+        .tags(vec![
+            Tag::parse([
+                "d",
+                &format!("shared-x-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            ])
+            .unwrap(),
+            Tag::parse(["shared", "x"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok = client.send_event(ev).await.expect("send shared-x");
+    assert!(
+        !ok.accepted,
+        "shared=x persona must be rejected: {}",
+        ok.message
+    );
+
+    // Reject: ["shared"] — value is missing (tag has only 1 element after the key).
+    let ev = EventBuilder::new(Kind::Custom(PERSONA_KIND), r#"{"display_name":"x"}"#)
+        .tags(vec![
+            Tag::parse([
+                "d",
+                &format!("shared-no-value-{}", &uuid::Uuid::new_v4().to_string()[..8]),
+            ])
+            .unwrap(),
+            Tag::parse(["shared"]).unwrap(),
+        ])
+        .sign_with_keys(&keys)
+        .unwrap();
+    let ok = client.send_event(ev).await.expect("send shared-no-value");
+    assert!(
+        !ok.accepted,
+        "shared tag with missing value must be rejected: {}",
+        ok.message
+    );
+
     // Reject: duplicate shared tags
     let ev = EventBuilder::new(Kind::Custom(PERSONA_KIND), r#"{"display_name":"x"}"#)
         .tags(vec![
@@ -891,8 +1116,10 @@ async fn test_persona_ingest_shared_tag_validation() {
     client.disconnect().await.expect("disconnect");
 }
 
-/// AC-6: Mixed-kind filter {kinds:[30175, 9]} does not leak foreign unshared personas.
-///        The kind:9 events from other authors pass through normally.
+/// AC-6: Mixed-kind filter {kinds:[30175, 9]} does not leak foreign unshared personas,
+///        but DOES pass through kind:9 events from the same author. This pins the
+///        correctness property in both directions — an implementation that silently
+///        drops the whole mixed-kind filter would satisfy only the absence assertion.
 #[tokio::test]
 #[ignore]
 async fn test_persona_mixed_kind_filter_does_not_leak() {
@@ -902,7 +1129,7 @@ async fn test_persona_mixed_kind_filter_does_not_leak() {
 
     let d_tag = format!("mixed-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    // Author publishes an unshared persona.
+    // Author publishes an unshared persona AND a kind:9 message.
     let mut author = BuzzTestClient::connect(&url, &author_keys)
         .await
         .expect("connect author");
@@ -910,6 +1137,15 @@ async fn test_persona_mixed_kind_filter_does_not_leak() {
     let unshared_id = ev.id;
     let ok = author.send_event(ev).await.expect("send unshared");
     assert!(ok.accepted, "unshared persona rejected: {}", ok.message);
+
+    // Publish a kind:9 event so the mixed-kind filter has something to return.
+    let ev9 = EventBuilder::new(Kind::Custom(9), "hello from author")
+        .sign_with_keys(&author_keys)
+        .unwrap();
+    let msg9_id = ev9.id;
+    let ok9 = author.send_event(ev9).await.expect("send kind:9");
+    assert!(ok9.accepted, "kind:9 rejected: {}", ok9.message);
+
     author.disconnect().await.expect("disconnect author");
 
     // Foreign queries with mixed-kind filter.
@@ -929,11 +1165,197 @@ async fn test_persona_mixed_kind_filter_does_not_leak() {
         .await
         .expect("collect");
 
+    // Foreign must NOT see the unshared persona.
     assert!(
         !events.iter().any(|e| e.id == unshared_id),
         "mixed-kind filter must NOT leak foreign unshared persona (id {})",
         unshared_id
     );
+    // Foreign MUST see the kind:9 event — filter is not wholesale dropped.
+    assert!(
+        events.iter().any(|e| e.id == msg9_id),
+        "mixed-kind filter must pass through kind:9 events (id {})",
+        msg9_id
+    );
 
     foreign.disconnect().await.expect("disconnect foreign");
+}
+
+// ─── NIP-98 HTTP bridge persona gate tests ───────────────────────────────────
+//
+// These tests verify that `POST /query` and `POST /count` enforce the same
+// author-only-unless-shared gate as the WebSocket paths.  A foreign
+// authenticated caller must not receive or count unshared kind:30175 events
+// belonging to another author, even via the HTTP bridge.
+
+/// NIP-98 bridge AC-query: `/query` cross-author gate.
+///
+/// - A foreign pubkey posting `{kinds:[30175],authors:[victim]}` receives only
+///   the shared head, not the unshared one.
+/// - A kindless `{ids:[unshared-id]}` returns nothing.
+/// - A `{ids:[shared-id]}` returns the shared event.
+#[tokio::test]
+#[ignore]
+async fn test_persona_http_query_cross_author_gate() {
+    let client = http_client();
+    let author_keys = Keys::generate();
+    let foreign_pubkey_hex = Keys::generate().public_key().to_hex();
+    let author_pubkey_hex = author_keys.public_key().to_hex();
+
+    let d_unshared = format!("priv-http-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let d_shared = format!("pub-http-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    // Publish via HTTP bridge (ingest path is the same).
+    let ev_unshared = persona_event_with_shared(&author_keys, &d_unshared, false);
+    let unshared_id_hex = ev_unshared.id.to_hex();
+    let ev_shared = persona_event_with_shared(&author_keys, &d_shared, true);
+    let shared_id_hex = ev_shared.id.to_hex();
+
+    let (ok, msg) = submit_event_http(&client, &author_keys, &ev_unshared).await;
+    assert!(ok, "unshared ingest rejected: {msg}");
+    let (ok, msg) = submit_event_http(&client, &author_keys, &ev_shared).await;
+    assert!(ok, "shared ingest rejected: {msg}");
+
+    // Foreign queries all author's kind:30175 — only shared must come back.
+    let filter = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    let results = query_events_http(&client, &foreign_pubkey_hex, vec![filter]).await;
+
+    let has_unshared = results.iter().any(|e| {
+        e.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == unshared_id_hex)
+    });
+    let has_shared = results.iter().any(|e| {
+        e.get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == shared_id_hex)
+    });
+
+    assert!(
+        !has_unshared,
+        "/query (authors:[victim]) must NOT return unshared persona to foreign"
+    );
+    assert!(
+        has_shared,
+        "/query (authors:[victim]) must return shared persona to foreign"
+    );
+
+    // Author self-query must see both.
+    let filter_self = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    let self_results = query_events_http(&client, &author_pubkey_hex, vec![filter_self]).await;
+    assert!(
+        self_results.iter().any(|e| e
+            .get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == unshared_id_hex)),
+        "author self-query must see own unshared persona"
+    );
+    assert!(
+        self_results.iter().any(|e| e
+            .get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == shared_id_hex)),
+        "author self-query must see own shared persona"
+    );
+
+    // Kindless ids lookup for unshared event: foreign must get nothing.
+    let unshared_event_id = nostr::EventId::from_hex(&unshared_id_hex).unwrap();
+    let filter_ids = Filter::new().id(unshared_event_id);
+    let id_results = query_events_http(&client, &foreign_pubkey_hex, vec![filter_ids]).await;
+    assert!(
+        id_results.is_empty(),
+        "/query {{ids:[unshared-id]}} must return nothing to foreign, got {}",
+        id_results.len()
+    );
+
+    // Kindless ids lookup for shared event: foreign must get it.
+    let shared_event_id = nostr::EventId::from_hex(&shared_id_hex).unwrap();
+    let filter_shared_ids = Filter::new().id(shared_event_id);
+    let shared_id_results =
+        query_events_http(&client, &foreign_pubkey_hex, vec![filter_shared_ids]).await;
+    assert!(
+        shared_id_results.iter().any(|e| e
+            .get("id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| id == shared_id_hex)),
+        "/query {{ids:[shared-id]}} must return shared event to foreign"
+    );
+}
+
+/// NIP-98 bridge AC-count: `/count` cross-author gate.
+///
+/// A foreign authenticated caller counting `{kinds:[30175],authors:[victim]}`
+/// must count only shared heads — not unshared ones — on both the fast SQL
+/// path (prevented by `needs_persona_filtering`) and the fallback path.
+#[tokio::test]
+#[ignore]
+async fn test_persona_http_count_cross_author_gate() {
+    let client = http_client();
+    let author_keys = Keys::generate();
+    let foreign_pubkey_hex = Keys::generate().public_key().to_hex();
+    let author_pubkey_hex = author_keys.public_key().to_hex();
+
+    // Publish two unshared + one shared persona for the author.
+    let d1 = format!("priv1-cnt-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let d2 = format!("priv2-cnt-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let d_shared = format!("pub-cnt-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+
+    for (d, shared) in [(&d1, false), (&d2, false), (&d_shared, true)] {
+        let ev = persona_event_with_shared(&author_keys, d, shared);
+        let (ok, msg) = submit_event_http(&client, &author_keys, &ev).await;
+        assert!(ok, "ingest rejected for {d}: {msg}");
+    }
+
+    // Foreign counts author's personas — must see only 1 (the shared one).
+    let filter = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    let foreign_count = count_events_http(&client, &foreign_pubkey_hex, vec![filter])
+        .await
+        .expect("count should succeed");
+    assert_eq!(
+        foreign_count, 1,
+        "foreign /count should return 1 (only shared persona), got {foreign_count}"
+    );
+
+    // Author self-count must see all 3.
+    let filter_self = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    let author_count = count_events_http(&client, &author_pubkey_hex, vec![filter_self])
+        .await
+        .expect("author count should succeed");
+    assert_eq!(
+        author_count, 3,
+        "author /count should return 3, got {author_count}"
+    );
+
+    // Wildcard count (no authors filter) for the foreign reader — must not
+    // include foreign unshared personas in the total.
+    let filter_wildcard = Filter::new().kind(Kind::Custom(PERSONA_KIND));
+    let wildcard_count = count_events_http(&client, &foreign_pubkey_hex, vec![filter_wildcard])
+        .await
+        .expect("wildcard count should succeed");
+    // We can't assert the exact number (other tests may have published shared
+    // personas), but we can assert it's ≥ 1 (the shared one) and verify the
+    // unshared ones aren't counted by checking author-scoped again.
+    assert!(
+        wildcard_count >= 1,
+        "wildcard count must include the shared persona"
+    );
+    // The foreign author-scoped count must still be exactly 1.
+    let filter_scoped = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
+    let scoped_count2 = count_events_http(&client, &foreign_pubkey_hex, vec![filter_scoped])
+        .await
+        .expect("scoped count2 should succeed");
+    assert_eq!(
+        scoped_count2, 1,
+        "foreign author-scoped /count must still return 1 after wildcard query, got {scoped_count2}"
+    );
 }

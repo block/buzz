@@ -1284,13 +1284,14 @@ async fn query_events_authed(
                     }
                     // Result-level read auth: never hand a viewer-private snapshot
                     // (kind:30622) to anyone but its owner, even via kindless `ids`.
-                    if !buzz_core::filter::reader_authorized_for_event(
+                    // Also enforces author-only kinds (30300/30350) and the persona
+                    // shared-gate (kind:30175 without ["shared","true"]). Single call
+                    // covers all three gated event classes.
+                    if !crate::handlers::req::event_visible_to_reader(
                         &se.event,
+                        &pubkey_bytes,
                         &authed_pubkey_hex,
                     ) {
-                        continue;
-                    }
-                    if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes) {
                         continue;
                     }
                     if let Ok(v) = serde_json::to_value(&se.event) {
@@ -1439,6 +1440,11 @@ async fn count_events_authed(
                     filter,
                     &authed_pubkey_hex,
                 );
+        // Force per-event fallback for filters that can match kind:30175 —
+        // the fast SQL count_events() path has no per-event gate and would
+        // over-count foreign unshared persona events (existence leak).
+        let needs_persona_filtering =
+            crate::handlers::req::filter_can_match_persona_shared_kinds(filter);
 
         // If filter targets a specific channel, verify access.
         if let Some(ch_id) = extract_channel_from_filter(filter) {
@@ -1462,6 +1468,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_persona_filtering
             {
                 match state.db.count_events(&query).await {
                     Ok(n) => total += n as u64,
@@ -1487,12 +1494,9 @@ async fn count_events_authed(
                             {
                                 continue;
                             }
-                            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
-                            {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
+                            if !crate::handlers::req::event_visible_to_reader(
                                 &se.event,
+                                &pubkey_bytes,
                                 &authed_pubkey_hex,
                             ) {
                                 continue;
@@ -1526,6 +1530,7 @@ async fn count_events_authed(
             if crate::handlers::req::filter_fully_pushable(filter)
                 && (!needs_author_only_filtering || author_is_self)
                 && !needs_result_gated_filtering
+                && !needs_persona_filtering
             {
                 query.limit = None;
                 match state.db.count_events(&query).await {
@@ -1551,12 +1556,9 @@ async fn count_events_authed(
                             {
                                 continue;
                             }
-                            if crate::handlers::req::is_author_only_event(&se.event, &pubkey_bytes)
-                            {
-                                continue;
-                            }
-                            if !buzz_core::filter::reader_authorized_for_event(
+                            if !crate::handlers::req::event_visible_to_reader(
                                 &se.event,
+                                &pubkey_bytes,
                                 &authed_pubkey_hex,
                             ) {
                                 continue;
@@ -1732,7 +1734,18 @@ async fn handle_bridge_search(
             if !search_hit_accepted(filter, stored, accessible_channels, reader_pubkey_hex) {
                 continue;
             }
-            if crate::handlers::req::is_author_only_event(&stored.event, pubkey_bytes) {
+            // Defense-in-depth: apply the full per-event visibility gate, which
+            // covers author-only kinds, the persona shared-gate (kind:30175), and
+            // result-gated kinds. Kind:30175 is not in the FTS positive allowlist
+            // today (migration 8 indexes only 0,9,40002,45001,45003), so this
+            // branch cannot currently return unshared persona content — but the
+            // check here ensures that a future FTS allowlist change cannot silently
+            // reopen the bypass.
+            if !crate::handlers::req::event_visible_to_reader(
+                &stored.event,
+                pubkey_bytes,
+                reader_pubkey_hex,
+            ) {
                 continue;
             }
             // Dedup across filters.

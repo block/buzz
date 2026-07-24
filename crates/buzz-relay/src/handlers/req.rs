@@ -1215,6 +1215,40 @@ pub(crate) fn is_author_only_event(event: &nostr::Event, requester_pubkey_bytes:
     AUTHOR_ONLY_KINDS.contains(&kind_u32) && event.pubkey.to_bytes() != requester_pubkey_bytes
 }
 
+/// Combined per-event result-visibility check for all gated event classes.
+///
+/// Returns `true` if the `event` should be delivered to / counted for the
+/// reader identified by `requester_pubkey_bytes` + `requester_pubkey_hex`.
+/// Returns `false` and the event must be silently omitted if any of the
+/// following hold:
+///
+/// 1. **Author-only kinds** (`AUTHOR_ONLY_KINDS`, e.g. kind 30300/30350): only
+///    the author may read their own events.
+/// 2. **Persona shared-gate** (kind 30175 without `["shared","true"]`): the
+///    event is only visible to the author unless explicitly opted into sharing.
+/// 3. **Result-gated kinds** (kind 44200/30622 etc.): `reader_authorized_for_event`
+///    carries the per-event ownership check.
+///
+/// Call this from every read surface — both WS (REQ/COUNT/fan-out) and HTTP
+/// (NIP-98 `/query`, `/count`, FTS search) — instead of inlining the three
+/// individual predicates at each site.
+pub(crate) fn event_visible_to_reader(
+    event: &nostr::Event,
+    requester_pubkey_bytes: &[u8],
+    requester_pubkey_hex: &str,
+) -> bool {
+    if is_author_only_event(event, requester_pubkey_bytes) {
+        return false;
+    }
+    if is_unshared_persona_event(event, requester_pubkey_bytes) {
+        return false;
+    }
+    if !buzz_core::filter::reader_authorized_for_event(event, requester_pubkey_hex) {
+        return false;
+    }
+    true
+}
+
 /// Pre-filter authorization for filters that exclusively target author-only kinds.
 ///
 /// If a filter targets ONLY author-only kinds (e.g. `{kinds:[30300]}`), the

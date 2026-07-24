@@ -237,19 +237,23 @@ Kind `30175` uses **shared-tag-gated read semantics** to protect system prompts 
 | No `shared` tag | ✅ allowed | ❌ withheld |
 | `["shared", "true"]` tag | ✅ allowed | ✅ allowed |
 
-These rules are enforced at every relay read chokepoint:
+These rules are enforced at the following relay read surfaces (content and event existence are withheld on all of them):
 
 - **REQ historical delivery** — foreign requests silently omit unshared persona events, even in mixed-kind filters (`{kinds:[30175,9]}`).
 - **NIP-01 `ids` lookup** — knowing an event id does NOT grant access to an unshared persona. The result gate returns nothing.
 - **Live fan-out** — unshared personas are delivered only to the author's connections. Shared personas fan out community-wide.
 - **COUNT** — the fast SQL `count_events()` path is bypassed when the filter can match `kind:30175`. A per-event fallback applies the shared-tag check, preventing existence-leak via COUNT.
-- **FTS (NIP-50 search)** — kind `30175` is not in the relay's FTS allowlist; no change needed.
+- **NIP-98 HTTP bridge `/query`** — the same per-event visibility check is applied to the catchall post-processing loop. A foreign caller POSTing `{kinds:[30175],authors:[victim]}` or a kindless `{ids:[...]}` filter to `/query` receives no unshared persona content.
+- **NIP-98 HTTP bridge `/count`** — `needs_persona_filtering` forces the per-event fallback path for any filter that can match `kind:30175`; the fast SQL `count_events()` path is not used. Both the channel-scoped and unconstrained fallback loops apply `event_visible_to_reader`, preventing existence-leak via COUNT over HTTP.
+- **FTS (NIP-50 search) and `/search`** — kind `30175` is not in the relay's FTS allowlist (migration 8 indexes only kinds `0, 9, 40002, 45001, 45003`); no FTS result can contain an unshared persona. A defense-in-depth check is also present in the bridge search result loop so that a future FTS allowlist change cannot silently reopen the bypass.
 
 **Device sync is unaffected.** The sync subscription (`{kinds:[30175], authors:[self]}`) reads the author's own events, which are always returned regardless of shared state.
 
 **Opting in to community sharing.** Publish a NIP-33 replacement head for the persona with a `["shared", "true"]` tag. Unsharing is the reverse: republish without the tag. NIP-33 replacement semantics apply (newest `created_at` wins).
 
 **`shared` is a tag, not a content field.** Content bytes are hash-pinned as the NIP-01 event id and also used as the `source_version` for persona drift detection. A content-field toggle would look like a definition edit; a tag does not affect content bytes.
+
+**Non-goal: side-band existence oracles.** Reaction, report, and event-deletion validation resolves target events by id to check that they exist. These paths intentionally accept arbitrary event references by design — they leak one bit (existence) but never content, and exploiting them requires already possessing a 64-hex event id that unshared personas never expose through any gated read path. Gating these side-band resolvers would require teaching reaction/report validation about persona read semantics with no realistic attack mitigated. If a stricter "zero existence leakage" property is required in future, it is a separate scoped task.
 
 ## Security considerations
 
