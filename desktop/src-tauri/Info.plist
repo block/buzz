@@ -10,5 +10,15 @@
     <string>Buzz needs microphone access for voice huddles.</string>
     <key>NSCameraUsageDescription</key>
     <string>Buzz needs camera access to record animated avatars.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Buzz can read selected calendars to prepare local command brief inputs.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Buzz can read selected calendars to prepare local command brief inputs.</string>
+    <key>NSRemindersUsageDescription</key>
+    <string>Buzz can read selected reminder lists to prepare local command brief inputs.</string>
+    <key>NSRemindersFullAccessUsageDescription</key>
+    <string>Buzz can read selected reminder lists to prepare local command brief inputs.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Buzz can read notes from allowlisted Notes folders for local command brief inputs.</string>
 </dict>
 </plist>

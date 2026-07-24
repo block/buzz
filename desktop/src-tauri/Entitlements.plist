@@ -6,6 +6,10 @@
     <true/>
     <key>com.apple.security.device.camera</key>
     <true/>
+    <key>com.apple.security.personal-information.calendars</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
+    <true/>
     <!-- MeshLLM installs versioned native runtimes outside the app bundle. -->
     <key>com.apple.security.cs.disable-library-validation</key>
     <true/>

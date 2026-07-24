@@ -39,4 +39,9 @@ for bin in "${SIDECARS[@]}"; do
     cp "$SRC_DIR/${bin}${EXE}" "$destination"
     chmod 0755 "$destination"
 done
+
+if [[ "$TARGET" == *-apple-darwin ]]; then
+    DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}" \
+        "$PWD/scripts/build-apple-inputs.sh" "$TARGET"
+fi
 echo "Sidecars bundled for $TARGET"

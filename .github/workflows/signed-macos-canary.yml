@@ -71,6 +71,8 @@ jobs:
           JSON
 
       - name: Build sidecars
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
         run: |
           cargo build --release -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           test -x target/release/buzz-lmstudio-agent
@@ -169,6 +171,9 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$EXTRACT_DIR/Buzz.app"
           spctl --assess --type execute --verbose=4 "$EXTRACT_DIR/Buzz.app"
           desktop/scripts/verify-macos-entitlements.sh "$EXTRACT_DIR/Buzz.app"
+          HELPER="$EXTRACT_DIR/Buzz.app/Contents/MacOS/buzz-apple-inputs"
+          test -x "$HELPER"
+          codesign --verify --strict --verbose=2 "$HELPER"
 
       - name: Stage signed DMG
         id: artifact

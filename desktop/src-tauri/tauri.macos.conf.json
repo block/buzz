@@ -1,0 +1,13 @@
+{
+  "bundle": {
+    "externalBin": [
+      "binaries/buzz-acp",
+      "binaries/buzz-agent",
+      "binaries/buzz-lmstudio-agent",
+      "binaries/buzz-dev-mcp",
+      "binaries/git-credential-nostr",
+      "binaries/buzz",
+      "binaries/buzz-apple-inputs"
+    ]
+  }
+}

@@ -1001,6 +1001,12 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install desktop dependencies
         run: just desktop-install-ci
+      - name: Test and bundle Apple-input helper
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          just apple-inputs-test
+          just apple-inputs-bundle
       - name: Create sidecar placeholders
         run: |
           TARGET=$(rustc -vV | sed -n 's|host: ||p')
@@ -1060,3 +1066,5 @@ jobs:
           LLAMA_STAGE_BACKEND: metal
           LLAMA_STAGE_BUILD_DIR: ${{ github.workspace }}/.cache/mesh-llama/build-stage-abi-metal
           SKIPPY_LLAMA_AUTO_BUILD: "0"
+      - name: Verify packaged Apple-input helper
+        run: test -x desktop/src-tauri/target/release/bundle/macos/Buzz.app/Contents/MacOS/buzz-apple-inputs

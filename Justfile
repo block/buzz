@@ -185,6 +185,29 @@ _ensure-sidecar-stubs:
     for bin in buzz-acp buzz-agent buzz-lmstudio-agent buzz-dev-mcp git-credential-nostr buzz; do
         touch "desktop/src-tauri/binaries/${bin}-${TARGET}"
     done
+    if [[ "$TARGET" == *-apple-darwin ]]; then
+        touch "desktop/src-tauri/binaries/buzz-apple-inputs-${TARGET}"
+    fi
+
+# Build and copy the read-only macOS Apple-input helper into Tauri's sidecar directory.
+apple-inputs-bundle target="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ -n "{{target}}" ]]; then
+      DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+        ./scripts/build-apple-inputs.sh "{{target}}"
+    else
+      DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+        ./scripts/build-apple-inputs.sh
+    fi
+
+# Fixture-only helper tests. These do not request real Calendar/Reminders permissions.
+apple-inputs-test:
+    DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcodebuild test \
+      -project desktop/apple-inputs/BuzzAppleInputs.xcodeproj \
+      -scheme BuzzAppleInputs \
+      -destination 'platform=macOS' \
+      CODE_SIGNING_ALLOWED=NO
 
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
@@ -250,6 +273,10 @@ desktop-release-build target="aarch64-apple-darwin":
     touch "desktop/src-tauri/binaries/buzz-dev-mcp-$TARGET"
     touch "desktop/src-tauri/binaries/git-credential-nostr-$TARGET"
     touch "desktop/src-tauri/binaries/buzz-$TARGET"
+    if [[ "$TARGET" == *-apple-darwin ]]; then
+        DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+          ./scripts/build-apple-inputs.sh "$TARGET"
+    fi
     pnpm install
     cd {{desktop_dir}} && pnpm tauri build --features mesh-llm --target {{target}}
 

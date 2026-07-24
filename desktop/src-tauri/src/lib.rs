@@ -2,6 +2,7 @@
 mod app_state;
 mod archive;
 mod builderlab;
+mod command_services;
 mod commands;
 mod deep_link;
 mod event_sync;
@@ -895,6 +896,7 @@ pub fn run() {
             archive::read_unindexed_observer_rows,
             is_auto_update_supported,
             set_window_vibrancy,
+            command_services::apple_inputs::read_apple_inputs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
