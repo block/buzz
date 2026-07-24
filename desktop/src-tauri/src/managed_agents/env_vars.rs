@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 /// Non-structured knobs (`GOOSE_TEMPERATURE`, `GOOSE_CONTEXT_LIMIT`) are NOT
 /// in this list — they have no structured counterpart and must be preserved.
 pub(crate) const DERIVED_PROVIDER_MODEL_ENV_KEYS: &[&str] = &[
+    "ANTHROPIC_MODEL",
     "GOOSE_MODEL",
     "GOOSE_PROVIDER",
     "BUZZ_AGENT_MODEL",
