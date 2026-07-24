@@ -39,11 +39,21 @@ pub fn apply_relay_mesh_env(
     // and spend that budget on an answer/tool call instead of hidden reasoning.
     // Without both settings Qwen3 either fails the router's fit check at the
     // agent default (32K) or can consume a tight cap before serializing a tool.
-    env.insert(
-        "BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(),
-        "4096".to_string(),
-    );
-    env.insert("BUZZ_AGENT_THINKING_EFFORT".to_string(), "none".to_string());
+    // Defaults only — never clobber a user/record override already present (#2558).
+    insert_default_if_unset(env, "BUZZ_AGENT_MAX_OUTPUT_TOKENS", "4096");
+    insert_default_if_unset(env, "BUZZ_AGENT_THINKING_EFFORT", "none");
+}
+
+/// Insert `value` only when `key` is missing or empty/whitespace.
+fn insert_default_if_unset(
+    env: &mut std::collections::BTreeMap<String, String>,
+    key: &str,
+    value: &str,
+) {
+    let unset = env.get(key).map(|v| v.trim().is_empty()).unwrap_or(true);
+    if unset {
+        env.insert(key.to_string(), value.to_string());
+    }
 }
 
 /// Resolve a record's relay-mesh config, typed field first.
@@ -203,6 +213,27 @@ mod tests {
         assert_eq!(
             env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
             Some("none")
+        );
+    }
+
+    #[test]
+    fn apply_relay_mesh_env_preserves_user_max_output_tokens() {
+        let mut env = BTreeMap::from([
+            ("BUZZ_AGENT_MAX_OUTPUT_TOKENS".to_string(), "1024".to_string()),
+            ("BUZZ_AGENT_THINKING_EFFORT".to_string(), "low".to_string()),
+        ]);
+        apply_relay_mesh_env(
+            &mut env,
+            Some(RELAY_MESH_PROVIDER_ID),
+            Some(RELAY_MESH_AUTO_MODEL_ID),
+        );
+        assert_eq!(
+            env.get("BUZZ_AGENT_MAX_OUTPUT_TOKENS").map(String::as_str),
+            Some("1024")
+        );
+        assert_eq!(
+            env.get("BUZZ_AGENT_THINKING_EFFORT").map(String::as_str),
+            Some("low")
         );
     }
 

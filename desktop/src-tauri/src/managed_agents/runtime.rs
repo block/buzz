@@ -1988,7 +1988,8 @@ pub fn spawn_agent_child(
         &global.env_vars,
         &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
     );
-    for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
+    let user_env = super::env_vars::merged_user_env(&persona_over_global, &record.env_vars);
+    for (key, value) in &user_env {
         command.env(key, value);
     }
     configure_runtime_cli(&mut command, runtime_meta);
@@ -1998,6 +1999,10 @@ pub fn spawn_agent_child(
     #[cfg(feature = "mesh-llm")]
     if effective_provider == Some(super::RELAY_MESH_PROVIDER_ID) {
         let mut mesh_env = std::collections::BTreeMap::new();
+        // Seed with user/record env so mesh defaults cannot clobber UI overrides (#2558).
+        for (key, value) in &user_env {
+            mesh_env.insert(key.clone(), value.clone());
+        }
         super::apply_relay_mesh_env(&mut mesh_env, effective_provider, effective_model);
         command.env_remove("OPENAI_API_KEY");
         for (key, value) in mesh_env {
