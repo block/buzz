@@ -179,15 +179,6 @@ export function useMentions(
       ),
     [relayAgentsQuery.data],
   );
-  const directoryAgentPubkeys = React.useMemo(
-    () =>
-      new Set(
-        (relayAgentsQuery.data ?? []).map((agent) =>
-          normalizePubkey(agent.pubkey),
-        ),
-      ),
-    [relayAgentsQuery.data],
-  );
   const sharedChannelIds = React.useMemo(
     () => getSharedChannelIds(channelsQuery.data),
     [channelsQuery.data],
@@ -199,8 +190,10 @@ export function useMentions(
         managedAgentPubkeys,
         relayAgents: relayAgentsQuery.data,
         sharedChannelIds,
+        activeChannelId: channelId,
       }),
     [
+      channelId,
       currentPubkey,
       managedAgentPubkeys,
       relayAgentsQuery.data,
@@ -220,7 +213,6 @@ export function useMentions(
     }
     return lookup;
   }, [managedAgentsQuery.data, personasQuery.data]);
-  const knownAgentPubkeys = mentionableAgentPubkeys;
   const activePersonas = React.useMemo(
     () => (personasQuery.data ?? []).filter((persona) => persona.isActive),
     [personasQuery.data],
@@ -238,6 +230,25 @@ export function useMentions(
       new Set((members ?? []).map((member) => normalizePubkey(member.pubkey))),
     [members],
   );
+  const memberAgentPubkeys = React.useMemo(
+    () =>
+      new Set(
+        (members ?? [])
+          .filter(
+            (member) => member.isAgent === true || member.role === "bot",
+          )
+          .map((member) => normalizePubkey(member.pubkey)),
+      ),
+    [members],
+  );
+  const knownAgentPubkeys = React.useMemo(
+    () => new Set([...mentionableAgentPubkeys, ...memberAgentPubkeys]),
+    [memberAgentPubkeys, mentionableAgentPubkeys],
+  );
+  const allowedAgentIdentityPubkeys = React.useMemo(
+    () => new Set([...memberPubkeys, ...mentionableAgentPubkeys]),
+    [memberPubkeys, mentionableAgentPubkeys],
+  );
   const mentionCandidates = React.useMemo<MentionCandidate[]>(() => {
     const candidatesByPubkey = new Map<string, MentionCandidate>();
 
@@ -246,7 +257,13 @@ export function useMentions(
       if (isArchivedDiscovery(pubkey)) {
         return;
       }
-      if (!isAgentIdentityInManagedList(candidate, managedAgentPubkeys)) {
+      if (
+        !isAgentIdentityInManagedList(
+          candidate,
+          managedAgentPubkeys,
+          allowedAgentIdentityPubkeys,
+        )
+      ) {
         return;
       }
       if (
@@ -255,7 +272,6 @@ export function useMentions(
           isMember: candidate.isMember === true,
           pubkey,
           mentionableAgentPubkeys,
-          directoryAgentPubkeys,
         })
       ) {
         return;
@@ -412,10 +428,10 @@ export function useMentions(
   }, [
     activePersonaById,
     activePersonas,
+    allowedAgentIdentityPubkeys,
     userSearchResults,
     canSearchGlobalUsers,
     currentPubkey,
-    directoryAgentPubkeys,
     isArchivedDiscovery,
     managedAgentNamesByPubkey,
     managedAgentPersonaIds,
