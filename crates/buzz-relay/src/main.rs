@@ -698,11 +698,16 @@ async fn main() -> anyhow::Result<()> {
     // column: only the pod that wins the atomic claim publishes.
     {
         let scheduler_state = Arc::clone(&state);
-        let scheduler_interval_secs: u64 = std::env::var("SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS")
+        // Legacy SPROUT_-prefixed names still accepted so existing
+        // deployments keep their scheduler tuning across the sprout→buzz
+        // rename.
+        let scheduler_interval_secs: u64 = std::env::var("BUZZ_REMINDER_SCHEDULER_INTERVAL_SECS")
+            .or_else(|_| std::env::var("SPROUT_REMINDER_SCHEDULER_INTERVAL_SECS"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10);
-        let scheduler_batch_limit: i64 = std::env::var("SPROUT_REMINDER_SCHEDULER_BATCH_LIMIT")
+        let scheduler_batch_limit: i64 = std::env::var("BUZZ_REMINDER_SCHEDULER_BATCH_LIMIT")
+            .or_else(|_| std::env::var("SPROUT_REMINDER_SCHEDULER_BATCH_LIMIT"))
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);

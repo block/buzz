@@ -2058,7 +2058,7 @@ async fn handle_a_tag_deletion(
         // separate concern) takes precedence. For every other addressable
         // kind, including kind:30023 (NIP-23 long-form), we soft-delete the
         // live row matching `(kind, pubkey, d_tag)` so REQs stop returning it.
-        // See https://github.com/block/sprout/issues/714.
+        // See https://github.com/block/buzz/issues/714.
         k if is_parameterized_replaceable(k) => {
             let pubkey_bytes = match hex::decode(pubkey_hex) {
                 Ok(b) => b,

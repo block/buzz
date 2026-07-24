@@ -94,7 +94,10 @@ pub struct RelayLimitation {
 /// `AuthState::Authenticated`. This is independent of the REST API token
 /// toggle (`config.require_auth_token`).
 fn relay_limitation(max_message_length: usize) -> RelayLimitation {
-    let max_not_before_delta: u64 = std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA")
+    // Legacy SPROUT_-prefixed name still accepted so existing deployments
+    // keep their configured horizon across the sprout→buzz rename.
+    let max_not_before_delta: u64 = std::env::var("BUZZ_MAX_NOT_BEFORE_DELTA")
+        .or_else(|_| std::env::var("SPROUT_MAX_NOT_BEFORE_DELTA"))
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(31_536_000); // 1 year default
