@@ -49,4 +49,12 @@ export type TimelineMessage = {
   kind?: number;
   tags?: string[][];
   reactions?: TimelineReaction[];
+  /**
+   * Present on history imported from another workspace (bot-signed, carrying
+   * an `import_author` tag). `author`/`avatarUrl` are overridden to the
+   * original person — via an owner-signed identity binding when one exists,
+   * otherwise the name recorded in the import tag. Clients mark these rows so
+   * imported history is never mistaken for a live, self-signed message.
+   */
+  imported?: boolean;
 };

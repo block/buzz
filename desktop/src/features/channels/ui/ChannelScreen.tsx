@@ -55,6 +55,7 @@ import {
   selectTimelineLoadingState,
 } from "@/features/messages/lib/timelineLoadingState";
 import { useFetchOlderMessages } from "@/features/messages/useFetchOlderMessages";
+import { useImportIdentityBindings } from "@/features/messages/useImportIdentityBindings";
 import { useIndependentThreadPanel } from "@/features/messages/useIndependentThreadPanel";
 import { useThreadReplies } from "@/features/messages/useThreadReplies";
 import { useChannelTyping } from "@/features/messages/useChannelTyping";
@@ -304,6 +305,14 @@ export function ChannelScreen({
       mergeChannelKnownAgentPubkeys(channelMembers, managedAgents, relayAgents),
     [channelMembers, managedAgents, relayAgents],
   );
+  // Owner-signed import identity bindings; also fetch the bound people's
+  // profiles so imported history can render under their avatar even when they
+  // never natively authored an event in this channel.
+  const importIdentityBindings = useImportIdentityBindings().data;
+  const boundImportPubkeys = React.useMemo(
+    () => (importIdentityBindings ? [...importIdentityBindings.values()] : []),
+    [importIdentityBindings],
+  );
   const messageProfilePubkeys = React.useMemo(
     () => [
       ...new Set([
@@ -311,6 +320,7 @@ export function ChannelScreen({
         ...activeDmParticipantPubkeys,
         ...knownAgentPubkeys,
         ...typingEntries.map((entry) => entry.pubkey),
+        ...boundImportPubkeys,
       ]),
     ],
     [
@@ -318,6 +328,7 @@ export function ChannelScreen({
       knownAgentPubkeys,
       messageEventProfilePubkeys,
       typingEntries,
+      boundImportPubkeys,
     ],
   );
   const messageProfilesQuery = useUsersBatchQuery(messageProfilePubkeys, {
@@ -398,6 +409,7 @@ export function ChannelScreen({
         respondToLookup,
         relaySelfPubkey,
         messageOwnerProfiles,
+        importIdentityBindings,
       ),
     [
       activeChannel,
@@ -410,6 +422,7 @@ export function ChannelScreen({
       relaySelfPubkey,
       respondToLookup,
       resolvedMessages,
+      importIdentityBindings,
     ],
   );
   const threadSummaries: ReadonlyMap<string, ChannelWindowThreadSummary> =
