@@ -466,6 +466,39 @@ test("appearance picker — dark tab (Buzz Dark)", async ({ page }) => {
   await panel.screenshot({ path: `${SHOTS}/05-picker-dark.png` });
 });
 
+test("Glass is a separate selectable theme", async ({ page }) => {
+  await seedTheme(page, "glass");
+  await installMockBridge(page);
+  const panel = await openAppearance(page, "light");
+
+  await expect(page.getByTestId("theme-option-glass")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByTestId("theme-option-buzz")).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-buzz-theme",
+    "glass",
+  );
+  await expect(page.getByTestId("accent-color-neutral")).toHaveCount(0);
+  await panel.screenshot({ path: `${SHOTS}/06-picker-glass-light.png` });
+
+  await page.getByTestId("appearance-mode-dark").click();
+  await expect(page.getByTestId("theme-option-glass-dark")).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.locator("html")).toHaveAttribute(
+    "data-buzz-theme",
+    "glass-dark",
+  );
+  await waitForAnimations(page);
+  await panel.screenshot({ path: `${SHOTS}/07-picker-glass-dark.png` });
+});
+
 test("settings nav uses Buzz active pill + hover (light)", async ({ page }) => {
   await seedTheme(page, "buzz");
   await installMockBridge(page);

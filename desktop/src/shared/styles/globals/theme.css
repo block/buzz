@@ -562,19 +562,40 @@
 }
 
 /*
- * Translucency (Buzz theme).
+ * Translucency (Glass theme).
  *
- * ThemeProvider toggles `data-buzz-translucent` for Buzz themes. Keep the
+ * ThemeProvider toggles `data-buzz-translucent` only for Glass themes. Keep the
  * frosted layer on the outer canvases only; nested sidebar/header/footer
  * surfaces pass through so the nav reads as one continuous pane.
  */
 :root[data-buzz-translucent] {
-  --buzz-translucency-gradient-alpha: 70%;
-  --buzz-translucency-wash-alpha: 2.4%;
+  --buzz-translucency-gradient-alpha: 0%;
+  --buzz-translucency-wash-alpha: 25%;
+}
+
+/*
+ * Glass Dark must remain a dark surface independently of the macOS appearance.
+ * Layer a smoked neutral over a restrained Buzz tint while preserving enough
+ * transparency for the desktop and native frost to remain visible.
+ */
+:root[data-buzz-translucent].dark {
+  --buzz-translucency-gradient-alpha: 25%;
+  --buzz-translucency-wash-alpha: 90%;
+}
+
+/*
+ * The content surface normally has a top/left inset plus a highlight shadow.
+ * Against translucent chrome those combine into a bright rim, so both Glass
+ * variants remove the highlight and sit flush on those two edges.
+ */
+:root[data-buzz-sidebar][data-buzz-translucent] [data-buzz-content-surface] {
+  box-shadow: none;
+  margin-left: 0;
+  margin-top: 0;
 }
 
 :root[data-buzz-translucent] .buzz-theme-gradient-layer-light {
-  /* Buzz color wash above a neutral frost wash. */
+  /* Optional Buzz color wash above the native frost. */
   background-image:
     linear-gradient(
       to bottom,

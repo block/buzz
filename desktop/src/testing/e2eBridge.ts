@@ -10922,6 +10922,8 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.agentMetricArchiveDefaultEnabled ?? false;
       case "set_prevent_sleep_active":
         return null;
+      case "set_window_vibrancy":
+        return null;
       case "plugin:window|is_fullscreen":
         return false;
       case "merge_save_subscription_kinds": {
