@@ -55,7 +55,7 @@ void showMessageActions({
                       Navigator.of(sheetContext).pop();
                       ref
                           .read(channelActionsProvider)
-                          .addReaction(message.id, emoji);
+                          .addReaction(message.id, message.pubkey, emoji);
                     },
                     child: Container(
                       width: 44,
@@ -76,7 +76,7 @@ void showMessageActions({
                       onSelect: (emoji) {
                         ref
                             .read(channelActionsProvider)
-                            .addReaction(message.id, emoji);
+                            .addReaction(message.id, message.pubkey, emoji);
                       },
                     );
                   },

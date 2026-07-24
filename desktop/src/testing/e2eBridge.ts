@@ -8381,6 +8381,17 @@ function findMockEventChannel(eventId: string): string | undefined {
   return undefined;
 }
 
+/** Author of a stored mock event, for the NIP-25 `p` tag on reactions. */
+function findMockEventAuthor(eventId: string): string | undefined {
+  for (const events of mockMessages.values()) {
+    const match = events.find((event) => event.id === eventId);
+    if (match) {
+      return match.pubkey;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Mock the `add_reaction` Tauri command. Mirrors the real Rust command: a
  * kind:7 whose content is the emoji, plus — for a custom emoji — the NIP-30
@@ -8390,7 +8401,12 @@ function findMockEventChannel(eventId: string): string | undefined {
  * kind:7). Unicode reactions carry no emoji tag, like the real command.
  */
 async function handleAddReaction(
-  args: { eventId: string; emoji: string; emojiUrl?: string | null },
+  args: {
+    eventId: string;
+    emoji: string;
+    emojiUrl?: string | null;
+    targetPubkey?: string;
+  },
   config: E2eConfig | undefined,
 ): Promise<void> {
   const channelId = findMockEventChannel(args.eventId);
@@ -8398,11 +8414,21 @@ async function handleAddReaction(
     throw new Error(`mock add_reaction: unknown target event ${args.eventId}`);
   }
 
+  // The real command is handed the target author by its caller; the mock can
+  // also read it back out of its own event store, so specs that drive
+  // `add_reaction` directly need not thread a pubkey through.
+  const targetPubkey =
+    args.targetPubkey ?? findMockEventAuthor(args.eventId) ?? "";
+
   const emoji = args.emoji.trim();
-  // Real add_reaction events carry only the target `e` tag. Channel live
-  // subscriptions already know which channel matched and restore that context
-  // before merging the event into the timeline cache.
-  const tags: string[][] = [["e", args.eventId]];
+  // Real add_reaction events carry the target `e` tag plus the NIP-25 `p` tag
+  // naming the reacted-to author. Channel live subscriptions already know which
+  // channel matched and restore that context before merging the event into the
+  // timeline cache.
+  const tags: string[][] = [
+    ["e", args.eventId],
+    ["p", targetPubkey],
+  ];
   if (args.emojiUrl) {
     const shortcode = emoji.replace(/^:+/, "").replace(/:+$/, "").toLowerCase();
     tags.push(["emoji", shortcode, args.emojiUrl]);

@@ -2183,6 +2183,10 @@ async fn tokio_main() -> Result<()> {
                             // buzz_event.event (needed for mode gate below).
                             let author_hex = buzz_event.event.pubkey.to_hex();
                             let event_id_hex = buzz_event.event.id.to_hex();
+                            // Captured before `buzz_event.event` moves into the
+                            // queue; the 👀 reaction below needs it for its
+                            // NIP-25 `p` tag.
+                            let event_author = buzz_event.event.pubkey;
                             // Clone for the non-cancelling steer fork, which
                             // needs the event to render the steer body. The
                             // clone is unconditional because we don't know
@@ -2210,7 +2214,7 @@ async fn tokio_main() -> Result<()> {
                                 let rc = ctx.rest_client.clone();
                                 let eid = event_id_hex.clone();
                                 tokio::spawn(async move {
-                                    pool::reaction_add(&rc, &eid, "👀").await;
+                                    pool::reaction_add(&rc, &eid, event_author, "👀").await;
                                 });
                             }
                             // Event is already queued. If mode requires it AND

@@ -326,11 +326,16 @@ export function useChannelPaneHandlers({
   );
 
   const handleToggleReaction = React.useCallback(
-    async (message: { id: string }, emoji: string, remove: boolean) => {
+    async (
+      message: { id: string; pubkey?: string },
+      emoji: string,
+      remove: boolean,
+    ) => {
       await toggleMutateRef.current({
         emoji,
         eventId: message.id,
         remove,
+        targetPubkey: message.pubkey,
       });
     },
     [],

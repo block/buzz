@@ -159,6 +159,7 @@ class NoteCard extends HookConsumerWidget {
                           await toggleNoteUpvote(
                             ref,
                             noteId: note.id,
+                            notePubkey: note.pubkey,
                             isUpvoted: reaction.reactedByCurrentUser,
                             reactionEventId: reaction.currentUserReactionId,
                           );

@@ -460,24 +460,43 @@ pub fn build_vote(
 }
 
 /// Build a NIP-25 reaction event (kind 7). Emoji max 64 chars.
+///
+/// `target_author` is the pubkey of the event being reacted to. NIP-25 requires
+/// the reaction to carry the target's `p` tag; it is what lets the author (and
+/// any NIP-01 client) find the reaction with a `{"kinds":[7],"#p":[<self>]}`
+/// notification filter. Omitting it makes the reaction invisible to every
+/// notification surface, so it is a required argument rather than an option.
+///
+/// `.allow_self_tagging()` is required: reacting to your own message makes the
+/// `p` tag match the signer, and nostr 0.44 strips matching `p` tags by
+/// default. Without it, self-reactions would silently regress to the
+/// no-`p`-tag wire form.
 pub fn build_reaction(
     target_event_id: nostr::EventId,
+    target_author: nostr::PublicKey,
     emoji: &str,
 ) -> Result<EventBuilder, SdkError> {
     if emoji.chars().count() > 64 {
         return Err(SdkError::EmojiTooLong);
     }
-    let tags = vec![tag(&["e", &target_event_id.to_hex()])?];
-    Ok(EventBuilder::new(Kind::Custom(7), emoji).tags(tags))
+    let tags = vec![
+        tag(&["e", &target_event_id.to_hex()])?,
+        tag(&["p", &target_author.to_hex()])?,
+    ];
+    Ok(EventBuilder::new(Kind::Custom(7), emoji)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a NIP-25 reaction event using a NIP-30 custom emoji.
 ///
 /// The reaction content is `:shortcode:` and the event carries exactly one
 /// `["emoji", shortcode, url]` tag, matching NIP-25's custom emoji reaction
-/// guidance.
+/// guidance. `target_author` carries the same NIP-25 `p` tag as
+/// [`build_reaction`], including its `.allow_self_tagging()` requirement.
 pub fn build_custom_emoji_reaction(
     target_event_id: nostr::EventId,
+    target_author: nostr::PublicKey,
     shortcode: &str,
     url: &str,
 ) -> Result<EventBuilder, SdkError> {
@@ -486,9 +505,12 @@ pub fn build_custom_emoji_reaction(
     let content = format!(":{shortcode}:");
     let tags = vec![
         tag(&["e", &target_event_id.to_hex()])?,
+        tag(&["p", &target_author.to_hex()])?,
         tag(&["emoji", &shortcode, url])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(7), content).tags(tags))
+    Ok(EventBuilder::new(Kind::Custom(7), content)
+        .tags(tags)
+        .allow_self_tagging())
 }
 
 /// Build a deletion event targeting a reaction (kind 5).
@@ -2251,9 +2273,28 @@ mod tests {
     #[test]
     fn reaction_happy_path() {
         let eid = event_id();
-        let ev = sign(build_reaction(eid, "👍").unwrap());
+        let author = keys().public_key();
+        let ev = sign(build_reaction(eid, author, "👍").unwrap());
         assert_eq!(ev.kind.as_u16(), 7);
         assert_eq!(ev.content, "👍");
+        assert!(has_tag(&ev, "e", &eid.to_hex()));
+        // NIP-25: the reaction MUST carry the target author's `p` tag so
+        // `{"kinds":[7],"#p":[author]}` notification filters match.
+        assert!(has_tag(&ev, "p", &author.to_hex()));
+    }
+
+    #[test]
+    fn reaction_keeps_p_tag_when_reacting_to_own_message() {
+        // Self-reaction: the `p` tag equals the signer, which nostr 0.44
+        // scrubs unless `.allow_self_tagging()` is set. Pins that the p tag
+        // survives so a self-reaction is still NIP-25 conformant.
+        let k = keys();
+        let eid = event_id();
+        let ev = build_reaction(eid, k.public_key(), "👍")
+            .unwrap()
+            .sign_with_keys(&k)
+            .expect("sign");
+        assert!(has_tag(&ev, "p", &k.public_key().to_hex()));
     }
 
     #[test]
@@ -2261,7 +2302,7 @@ mod tests {
         let eid = event_id();
         let long_emoji = "a".repeat(65);
         assert!(matches!(
-            build_reaction(eid, &long_emoji),
+            build_reaction(eid, keys().public_key(), &long_emoji),
             Err(SdkError::EmojiTooLong)
         ));
     }
@@ -2270,19 +2311,26 @@ mod tests {
     fn reaction_emoji_max_len_ok() {
         let eid = event_id();
         let max_emoji = "a".repeat(64);
-        assert!(build_reaction(eid, &max_emoji).is_ok());
+        assert!(build_reaction(eid, keys().public_key(), &max_emoji).is_ok());
     }
 
     #[test]
     fn custom_emoji_reaction_happy_path() {
         let eid = event_id();
+        let author = keys().public_key();
         let ev = sign(
-            build_custom_emoji_reaction(eid, ":Party_Parrot:", "https://example.com/parrot.png")
-                .unwrap(),
+            build_custom_emoji_reaction(
+                eid,
+                author,
+                ":Party_Parrot:",
+                "https://example.com/parrot.png",
+            )
+            .unwrap(),
         );
         assert_eq!(ev.kind.as_u16(), 7);
         assert_eq!(ev.content, ":party_parrot:");
         assert!(has_tag(&ev, "emoji", "party_parrot"));
+        assert!(has_tag(&ev, "p", &author.to_hex()));
     }
 
     #[test]
