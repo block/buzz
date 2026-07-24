@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 const _fontFamily = 'Inter';
+const _chatLineHeight = 22 / 16;
 
 const textTheme = TextTheme(
   displayLarge: TextStyle(
@@ -63,7 +64,7 @@ const textTheme = TextTheme(
     fontFamily: _fontFamily,
     fontSize: 16,
     fontWeight: FontWeight.w500,
-    height: 1.35,
+    height: _chatLineHeight,
     letterSpacing: 0,
   ),
   labelLarge: TextStyle(
@@ -91,7 +92,7 @@ const textTheme = TextTheme(
     fontFamily: _fontFamily,
     fontSize: 16,
     fontWeight: FontWeight.w400,
-    height: 1.38,
+    height: 20 / 16,
     letterSpacing: 0,
   ),
   bodyMedium: TextStyle(

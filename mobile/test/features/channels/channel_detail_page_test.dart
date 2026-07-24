@@ -11,10 +11,12 @@ import 'package:buzz/features/channels/channel_detail_page.dart';
 import 'package:buzz/features/channels/channel_management_provider.dart';
 import 'package:buzz/features/channels/channel_messages_provider.dart';
 import 'package:buzz/features/channels/channel_typing_provider.dart';
+import 'package:buzz/features/channels/date_formatters.dart';
 import 'package:buzz/features/channels/thread_detail_page.dart';
 import 'package:buzz/features/channels/timeline_message.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/read_state/read_state_provider.dart';
+import 'package:buzz/features/channels/small_avatar.dart';
 import 'package:buzz/features/profile/profile_provider.dart';
 import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
@@ -175,6 +177,21 @@ Finder findRichText(String text) {
     }
     return false;
   }, description: 'RichText containing "$text"');
+}
+
+double? effectiveFontSizeForText(
+  InlineSpan span,
+  String text, [
+  TextStyle? inheritedStyle,
+]) {
+  if (span is! TextSpan) return null;
+  final effectiveStyle = inheritedStyle?.merge(span.style) ?? span.style;
+  if ((span.text ?? '').contains(text)) return effectiveStyle?.fontSize;
+  for (final child in span.children ?? const <InlineSpan>[]) {
+    final size = effectiveFontSizeForText(child, text, effectiveStyle);
+    if (size != null) return size;
+  }
+  return null;
 }
 
 void main() {
@@ -450,6 +467,82 @@ void main() {
       expect(findRichText('Hey Alice!'), findsOneWidget);
       expect(find.text('Alice'), findsOneWidget);
       expect(find.text('Bob'), findsOneWidget);
+      final messageAvatars = find.byType(CircleAvatar);
+      expect(messageAvatars, findsNWidgets(2));
+      for (final avatar in messageAvatars.evaluate()) {
+        expect(
+          tester.getSize(find.byWidget(avatar.widget)),
+          const Size.square(36),
+        );
+      }
+      final aliceName = find.text('Alice');
+      final aliceText = tester.widget<Text>(aliceName);
+      final titleStyle = Theme.of(
+        tester.element(aliceName),
+      ).textTheme.titleSmall;
+      expect(aliceText.style?.fontSize, titleStyle?.fontSize);
+      final helloContent = findRichText('Hello world!');
+      final helloText = tester.widget<RichText>(helloContent);
+      final bodyStyle = Theme.of(
+        tester.element(helloContent),
+      ).textTheme.bodyLarge;
+      expect(
+        effectiveFontSizeForText(helloText.text, 'Hello world!'),
+        bodyStyle?.fontSize,
+      );
+    });
+
+    testWidgets('uses larger participant avatars in reply summaries', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: [
+            _textMsg(
+              id: 'root',
+              pubkey: 'alice',
+              content: 'Thread head',
+              createdAt: 1000,
+            ),
+            _textMsg(
+              id: 'reply-1',
+              pubkey: 'bob',
+              content: 'First reply',
+              createdAt: 1100,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+            _textMsg(
+              id: 'reply-2',
+              pubkey: 'carol',
+              content: 'Second reply',
+              createdAt: 1200,
+              extraTags: const [
+                ['e', 'root', '', 'reply'],
+              ],
+            ),
+          ],
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        findRichText(
+          '2 replies · last reply '
+          '${formatThreadSummaryLastReplyTime(1200)}',
+        ),
+        findsOneWidget,
+      );
+      expect(find.byIcon(LucideIcons.chevronRight), findsNothing);
+      final replyAvatars = find.byType(SmallAvatar);
+      expect(replyAvatars, findsNWidgets(2));
+      for (final avatar in replyAvatars.evaluate()) {
+        expect(
+          tester.getSize(find.byWidget(avatar.widget)),
+          const Size.square(32),
+        );
+      }
     });
 
     testWidgets('can jump back to latest when newer messages are offscreen', (
@@ -605,7 +698,26 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice created this channel'), findsOneWidget);
+      expect(find.text('Alice'), findsOneWidget);
+      final createdAction = findRichText('created this channel');
+      expect(createdAction, findsOneWidget);
+      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      final nameRect = tester.getRect(find.text('Alice'));
+      final nameText = tester.widget<Text>(find.text('Alice'));
+      final nameStyle = Theme.of(
+        tester.element(find.text('Alice')),
+      ).textTheme.titleSmall;
+      expect(nameText.style?.fontSize, nameStyle?.fontSize);
+      final timestampRect = tester.getRect(find.text(formatMessageTime(1000)));
+      expect(timestampRect.left - nameRect.right, Grid.xxs);
+      final createdText = tester.widget<RichText>(createdAction);
+      final bodyStyle = Theme.of(
+        tester.element(createdAction),
+      ).textTheme.bodyLarge;
+      expect(
+        effectiveFontSizeForText(createdText.text, 'created this channel'),
+        bodyStyle?.fontSize,
+      );
     });
 
     testWidgets('renders member_joined (self-join) system event', (
@@ -626,7 +738,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Bob joined the channel'), findsOneWidget);
+      expect(find.text('Bob'), findsOneWidget);
+      expect(findRichText('joined the channel'), findsOneWidget);
+      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
     });
 
     testWidgets('renders member_joined (added by other) system event', (
@@ -650,7 +764,94 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice added Bob to the channel'), findsOneWidget);
+      expect(find.text('Bob'), findsOneWidget);
+      final addedAction = findRichText('was added by Alice');
+      expect(addedAction, findsOneWidget);
+      expect(find.text('Alice added Bob to the channel'), findsNothing);
+      expect(tester.getSize(find.byType(CircleAvatar)), const Size.square(36));
+      final nameRect = tester.getRect(find.text('Bob'));
+      final timestampRect = tester.getRect(find.text(formatMessageTime(1000)));
+      expect(timestampRect.left - nameRect.right, Grid.xxs);
+      final addedText = tester.widget<RichText>(addedAction);
+      final bodyStyle = Theme.of(
+        tester.element(addedAction),
+      ).textTheme.bodyLarge;
+      expect(
+        effectiveFontSizeForText(addedText.text, 'was added by Alice'),
+        bodyStyle?.fontSize,
+      );
+    });
+
+    testWidgets('groups member additions with tappable overflow names', (
+      tester,
+    ) async {
+      final messages = [
+        _systemMsg(
+          id: 'sys1',
+          payload: {'type': 'member_joined', 'actor': 'alice', 'target': 'bob'},
+          createdAt: 1000,
+        ),
+        _systemMsg(
+          id: 'sys2',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'carol',
+          },
+          createdAt: 1060,
+        ),
+        _systemMsg(
+          id: 'sys3',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'dave',
+          },
+          createdAt: 1120,
+        ),
+        _systemMsg(
+          id: 'sys4',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'erin',
+          },
+          createdAt: 1180,
+        ),
+        _systemMsg(
+          id: 'sys5',
+          payload: {
+            'type': 'member_joined',
+            'actor': 'alice',
+            'target': 'frank',
+          },
+          createdAt: 1240,
+        ),
+      ];
+
+      await tester.pumpWidget(
+        _buildTestable(
+          messages: messages,
+          users: {
+            'alice': const UserProfile(pubkey: 'alice', displayName: 'Alice'),
+            'bob': const UserProfile(pubkey: 'bob', displayName: 'Bob'),
+            'carol': const UserProfile(pubkey: 'carol', displayName: 'Carol'),
+            'dave': const UserProfile(pubkey: 'dave', displayName: 'Dave'),
+            'erin': const UserProfile(pubkey: 'erin', displayName: 'Erin'),
+            'frank': const UserProfile(pubkey: 'frank', displayName: 'Frank'),
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Bob'), findsOneWidget);
+      expect(
+        findRichText('was added by Alice, along with Carol, Dave, Erin, and '),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('membership-overflow')), findsOneWidget);
+      expect(find.text('1 others'), findsOneWidget);
+      expect(find.byTooltip('Frank'), findsOneWidget);
     });
 
     testWidgets('renders member_left system event', (tester) async {
@@ -1126,9 +1327,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(find.text('Alice created this channel'), findsOneWidget);
+      expect(find.text('Alice'), findsNWidgets(2));
+      expect(findRichText('created this channel'), findsOneWidget);
       expect(findRichText('Welcome everyone!'), findsOneWidget);
-      expect(find.text('Bob joined the channel'), findsOneWidget);
+      expect(find.text('Bob'), findsNWidgets(2));
+      expect(findRichText('joined the channel'), findsOneWidget);
       expect(findRichText('Thanks for the invite!'), findsOneWidget);
     });
   });
