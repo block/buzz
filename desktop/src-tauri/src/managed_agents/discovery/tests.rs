@@ -7,7 +7,7 @@ use super::{
     effective_agent_command, find_nvm_default_bin, find_via_login_shell,
     is_login_shell_path_uninit, is_safe_nvm_tag, managed_agent_avatar_url, normalize_agent_args,
     parse_semver_tag, probe_codex_acp_major_version, record_agent_command,
-    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL,
+    refresh_login_shell_path, BUZZ_AGENT_AVATAR_URL, CLAUDE_CODE_AVATAR_URL, CODEX_AVATAR_URL, CURSOR_AVATAR_URL,
     GOOSE_AVATAR_URL,
 };
 use crate::managed_agents::AcpAvailabilityStatus;
@@ -71,6 +71,73 @@ fn normalizes_claude_and_codex_args_to_empty() {
         Vec::<String>::new()
     );
 }
+
+
+
+#[test]
+fn normalizes_cursor_args_to_acp_subcommand() {
+    // Cursor speaks ACP natively as `cursor-agent acp` (same shape as goose).
+    // Bare `agent` must NOT get Cursor defaults — Grok owns that PATH name too.
+    assert_eq!(
+        normalize_agent_args("cursor-agent", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor", Vec::new()),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("cursor-agent", vec!["acp".into()]),
+        vec!["acp".to_string()]
+    );
+    assert_eq!(
+        normalize_agent_args("agent", Vec::new()),
+        Vec::<String>::new(),
+        "bare agent must not inherit Cursor acp defaults (Grok collision)"
+    );
+}
+
+#[test]
+fn resolves_cursor_avatar() {
+    assert_eq!(
+        managed_agent_avatar_url("cursor-agent"),
+        Some(CURSOR_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("/Users/me/.local/bin/cursor-agent"),
+        Some(CURSOR_AVATAR_URL.to_string())
+    );
+    assert_eq!(
+        managed_agent_avatar_url("cursor"),
+        Some(CURSOR_AVATAR_URL.to_string())
+    );
+    // Basename-only `agent` is ambiguous (Grok) — no Cursor avatar.
+    assert_eq!(managed_agent_avatar_url("agent"), None);
+}
+
+#[test]
+fn path_qualified_cursor_agent_resolves_to_cursor_runtime() {
+    use super::known_acp_runtime;
+    let rt = known_acp_runtime(
+        "/Users/me/.local/share/cursor-agent/versions/1.0.0/cursor-agent",
+    )
+    .expect("path-qualified cursor-agent should resolve");
+    assert_eq!(rt.id, "cursor");
+
+    // Grok's agent path must not resolve as Cursor.
+    assert!(
+        known_acp_runtime("/Users/me/.grok/bin/agent").is_none()
+            || known_acp_runtime("/Users/me/.grok/bin/agent")
+                .is_some_and(|r| r.id != "cursor"),
+        "Grok agent path must not map to Cursor"
+    );
+    assert!(
+        known_acp_runtime("agent").is_none(),
+        "basename-only agent must not map to Cursor"
+    );
+}
+
+
 
 #[test]
 fn resolves_buzz_agent_avatar() {

@@ -247,6 +247,8 @@ impl AgentReadiness {
 /// * **claude**: a successful `claude auth status` probe.
 /// * **codex**: a successful `codex login status` probe (checks the codex
 ///   credential store — NOT `OPENAI_API_KEY`).
+/// * **cursor**: a successful `agent status` probe (`agent login` / `CURSOR_API_KEY`).
+/// * **grok**: a successful `grok auth status` probe when available, else env `XAI_API_KEY`.
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -289,6 +291,13 @@ fn collect_missing_requirements(
             rt,
         ),
         "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
+        "cursor" => {
+            cli_login::requirements(
+                &["cursor-agent", "status"],
+                "run `cursor-agent login`",
+                rt,
+            )
+        }
         _ => vec![],
     }
 }

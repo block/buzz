@@ -9,7 +9,7 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **cursor** (native `agent acp`), **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
 
 ## Prerequisites
 
@@ -88,6 +88,27 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Cursor
+
+Cursor's Agent CLI speaks ACP natively — no separate `*-acp` adapter.
+
+```bash
+# Install: https://cursor.com/docs/cli (binary lands as `cursor-agent` (+ optional `agent` shim))
+cursor-agent login   # or export CURSOR_API_KEY=...
+# Prefer cursor-agent — bare `agent` collides with Grok Build PATH shim.
+
+export BUZZ_ACP_AGENT_COMMAND="cursor-agent"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+buzz-acp
+```
+
+> **Harness note:** Cursor ACP can emit blocking extension methods
+> (`cursor/ask_question`, `cursor/create_plan`). Headless `buzz-acp` needs an
+> explicit client policy for those (auto-allow vs reject-with-reason) so turns
+> neither hang nor over-permit. That policy is a separate design item from
+> registering the runtime in Desktop's `KNOWN_ACP_RUNTIMES`.
 
 ## Configuration
 
@@ -169,7 +190,28 @@ buzz-acp --respond-to anyone
 buzz-acp --respond-to nobody --heartbeat-interval 300
 ```
 
-### Configuration Examples
+### Running with Cursor
+
+Cursor's Agent CLI speaks ACP natively — no separate `*-acp` adapter.
+
+```bash
+# Install: https://cursor.com/docs/cli (binary lands as `cursor-agent` (+ optional `agent` shim))
+cursor-agent login   # or export CURSOR_API_KEY=...
+# Prefer cursor-agent — bare `agent` collides with Grok Build PATH shim.
+
+export BUZZ_ACP_AGENT_COMMAND="cursor-agent"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+buzz-acp
+```
+
+> **Harness note:** Cursor ACP can emit blocking extension methods
+> (`cursor/ask_question`, `cursor/create_plan`). Headless `buzz-acp` needs an
+> explicit client policy for those (auto-allow vs reject-with-reason) so turns
+> neither hang nor over-permit. That policy is a separate design item from
+> registering the runtime in Desktop's `KNOWN_ACP_RUNTIMES`.
+
+## Configuration Examples
 
 **Single agent, no heartbeat (default):**
 ```bash

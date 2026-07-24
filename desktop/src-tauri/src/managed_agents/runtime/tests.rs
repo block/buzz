@@ -99,6 +99,31 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
+fn cursor_runtime_resolves_native_acp() {
+    use crate::managed_agents::discovery::{known_acp_runtime, normalize_agent_args};
+    let p = known_acp_runtime("cursor-agent").expect("cursor-agent should resolve");
+    assert_eq!(p.id, "cursor");
+    assert!(!p.mcp_hooks);
+    assert_eq!(p.skill_dir, Some(".cursor/skills"));
+    assert_eq!(p.mcp_command, Some("buzz-dev-mcp"));
+    assert!(
+        known_acp_runtime("cursor").is_some_and(|r| r.id == "cursor"),
+        "cursor id/alias should resolve"
+    );
+    // Bare agent is NOT Cursor (Grok collision).
+    assert!(
+        known_acp_runtime("agent").is_none(),
+        "bare agent must not resolve as Cursor"
+    );
+    assert_eq!(
+        normalize_agent_args("cursor-agent", Vec::new()),
+        vec!["acp".to_string()]
+    );
+}
+
+
+
+#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);

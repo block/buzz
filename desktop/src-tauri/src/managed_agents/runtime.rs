@@ -46,6 +46,10 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "codex-acp",
     "codex_acp",
     "goose",
+    // Cursor Agent CLI (native ACP via `cursor-agent acp`).
+    // Do NOT list bare "agent" — Grok Build installs the same process name.
+    "cursor-agent",
+    "cursor_agent",
     // buzz-dev-mcp's multicall personalities (rg, tree, buzz,
     // git-credential-nostr, git-sign-nostr) are short-lived per-tool-call
     // invocations — not listed here.
