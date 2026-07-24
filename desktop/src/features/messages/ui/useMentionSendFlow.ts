@@ -10,9 +10,12 @@ import {
   useProvisionChannelManagedAgentMutation,
   useStartManagedAgentMutation,
 } from "@/features/agents/hooks";
+import { startManagedAgentRuntimeAndWait } from "@/features/agents/managedAgentRuntimeReadiness";
 import { resolvePersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { useAddChannelMembersMutation } from "@/features/channels/hooks";
 import { filterEffectiveExplicitAgentPubkeys } from "@/features/messages/lib/effectiveExplicitAgentPubkeys";
+import { resolveManagedAgentSendAudience } from "@/features/messages/lib/managedAgentSendAudience";
 import type { UseChannelLinksResult } from "@/features/messages/lib/useChannelLinks";
 import type { UseEmojiAutocompleteResult } from "@/features/messages/lib/useEmojiAutocomplete";
 import {
@@ -197,6 +200,7 @@ export function useMentionSendFlow({
   const availableRuntimesQuery = useAvailableAcpRuntimes();
   const managedAgentsQuery = useManagedAgentsQuery();
   const startAgentMutation = useStartManagedAgentMutation();
+  const { activeCommunity } = useCommunities();
 
   const getManagedAgentsByPubkey = React.useCallback(async () => {
     const agents =
@@ -230,14 +234,14 @@ export function useMentionSendFlow({
     availableRuntimesQuery.refetch,
   ]);
 
-  const ensureManagedAgentMentionsReady = React.useCallback(
+  const ensureManagedAgentsReady = React.useCallback(
     async (
-      mentionPubkeys: string[],
+      audiencePubkeys: string[],
       capturedChannelId: string,
       preparedParticipantPubkeys: string[] = [],
       preparedManagedAgents: ManagedAgent[] = [],
     ) => {
-      if (!capturedChannelId || mentionPubkeys.length === 0) {
+      if (!capturedChannelId || audiencePubkeys.length === 0) {
         return {
           errors: [] as string[],
           pubkeys: [] as string[],
@@ -255,7 +259,7 @@ export function useMentionSendFlow({
       const errors: string[] = [];
       const pubkeys: string[] = [];
 
-      for (const pubkey of uniqueNormalizedPubkeys(mentionPubkeys)) {
+      for (const pubkey of uniqueNormalizedPubkeys(audiencePubkeys)) {
         const agent = managedAgentsByPubkey.get(pubkey);
         if (!agent) {
           continue;
@@ -268,7 +272,15 @@ export function useMentionSendFlow({
                 await startAgentMutation.mutateAsync(agent.pubkey);
               }
             } else if (!isManagedAgentRunning(agent)) {
-              await startAgentMutation.mutateAsync(agent.pubkey);
+              const relayUrl = activeCommunity?.relayUrl;
+              if (!relayUrl) {
+                throw new Error("No active community relay is available.");
+              }
+              await startManagedAgentRuntimeAndWait({
+                agentName: agent.name,
+                pubkey: agent.pubkey,
+                relayUrl,
+              });
             }
           } else {
             await attachAgentMutation.mutateAsync({
@@ -295,6 +307,7 @@ export function useMentionSendFlow({
     },
     [
       attachAgentMutation,
+      activeCommunity?.relayUrl,
       getManagedAgentsByPubkey,
       mentions.memberPubkeys,
       startAgentMutation,
@@ -457,6 +470,12 @@ export function useMentionSendFlow({
         const managedMentionPubkeys = normalizedMentionPubkeys.filter(
           (pubkey) => managedAgentsByPubkey.has(pubkey),
         );
+        const managedAudiencePubkeys = resolveManagedAgentSendAudience({
+          channelType,
+          dmParticipantPubkeys: mentions.memberPubkeys,
+          explicitMentionPubkeys: managedMentionPubkeys,
+          managedAgentPubkeys: managedAgentsByPubkey.keys(),
+        });
         const agentMentionPubkeys = uniqueNormalizedPubkeys([
           ...managedMentionPubkeys,
           ...normalizedMentionPubkeys.filter(mentions.isAgentPubkey),
@@ -476,8 +495,8 @@ export function useMentionSendFlow({
           }
         }
 
-        const agentReadiness = await ensureManagedAgentMentionsReady(
-          managedMentionPubkeys.filter(
+        const agentReadiness = await ensureManagedAgentsReady(
+          managedAudiencePubkeys.filter(
             (pubkey) => !readyAgentPubkeys.has(normalizePubkey(pubkey)),
           ),
           sendChannelId ?? "",
@@ -490,10 +509,8 @@ export function useMentionSendFlow({
         if (agentReadiness.errors.length > 0) {
           const message =
             agentReadiness.errors.length === 1
-              ? `Could not start agent mention: ${agentReadiness.errors[0]}`
-              : `Could not start agent mentions: ${agentReadiness.errors.join(
-                  "; ",
-                )}`;
+              ? `Could not prepare agent: ${agentReadiness.errors[0]}`
+              : `Could not prepare agents: ${agentReadiness.errors.join("; ")}`;
           setNonMemberPromptError(message);
           toast.error(message);
           return;
@@ -564,10 +581,12 @@ export function useMentionSendFlow({
     },
     [
       clearComposer,
+      channelType,
       contentRef,
       drafts,
-      ensureManagedAgentMentionsReady,
+      ensureManagedAgentsReady,
       getManagedAgentsByPubkey,
+      mentions.memberPubkeys,
       mentions.isAgentPubkey,
       onPrepareSendChannel,
       onSendRef,

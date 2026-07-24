@@ -324,6 +324,28 @@ async function readCommandPayloadLog(page: import("@playwright/test").Page) {
   });
 }
 
+function outgoingEventIndex(
+  commands: Array<{ command: string; payload: unknown }>,
+  content: string,
+) {
+  return commands.findIndex((entry) => {
+    if (entry.command !== "plugin:websocket|send") {
+      return false;
+    }
+    const data = (entry.payload as { message?: { data?: string } } | undefined)
+      ?.message?.data;
+    if (!data) {
+      return false;
+    }
+    try {
+      const frame = JSON.parse(data) as [string, { content?: string }];
+      return frame[0] === "EVENT" && frame[1]?.content === content;
+    } catch {
+      return false;
+    }
+  });
+}
+
 async function invokeMockCommand<T>(
   page: import("@playwright/test").Page,
   command: string,
@@ -649,6 +671,83 @@ test("sends the first message from the new direct message composer", async ({
 
   await expect(page.getByTestId("chat-title")).toHaveText("charlie");
   await expect(page.getByTestId("message-timeline")).toContainText(message);
+});
+
+test("wakes a stopped local agent before sending the first DM without a mention", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.charlie.pubkey,
+        name: "charlie",
+        status: "stopped",
+      },
+    ],
+  });
+  await page.goto("/");
+  await openNewMessagePage(page);
+
+  await page.getByTestId("new-dm-search").fill("charlie");
+  await page
+    .getByTestId(`new-dm-result-${TEST_IDENTITIES.charlie.pubkey}`)
+    .click();
+
+  const message = "Wake for this first direct message";
+  await page.getByTestId("message-input").fill(message);
+  const baselineCommands = await readCommandPayloadLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  const startIndex = sendCommands.findIndex(
+    (entry) => entry.command === "start_managed_agent_runtime",
+  );
+  const sendIndex = outgoingEventIndex(sendCommands, message);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(sendIndex).toBeGreaterThan(startIndex);
+  expect(sendCommands.map((entry) => entry.command)).not.toContain(
+    "start_managed_agent",
+  );
+});
+
+test("wakes a stopped local agent before sending in an existing DM without a mention", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey: TEST_IDENTITIES.alice.pubkey,
+        name: "alice",
+        status: "stopped",
+        channelNames: ["alice-tyler"],
+      },
+    ],
+  });
+  await page.goto("/");
+  await page.getByTestId("channel-alice-tyler").click();
+  await expect(page.getByTestId("chat-title")).toHaveText("alice-tyler");
+
+  const message = "Wake for this existing direct message";
+  await page.getByTestId("message-input").fill(message);
+  const baselineCommands = await readCommandPayloadLog(page);
+  await page.getByTestId("send-message").click();
+
+  await expect(page.getByTestId("message-timeline")).toContainText(message);
+  const sendCommands = (await readCommandPayloadLog(page)).slice(
+    baselineCommands.length,
+  );
+  const startIndex = sendCommands.findIndex(
+    (entry) => entry.command === "start_managed_agent_runtime",
+  );
+  const sendIndex = outgoingEventIndex(sendCommands, message);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  expect(sendIndex).toBeGreaterThan(startIndex);
+  expect(sendCommands.map((entry) => entry.command)).not.toContain(
+    "start_managed_agent",
+  );
 });
 
 test("creates the DM before preparing a persona mention", async ({ page }) => {
