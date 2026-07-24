@@ -40,6 +40,25 @@ export type NostrBindDeepLinkPayload = {
 };
 
 /**
+ * Payload emitted by the Rust deep-link handler for `buzz://import-claim?…` —
+ * the last step of a zero-touch Slack→Buzz identity migration. Either the
+ * email channel (`token` + `service` present) or the OIDC channel (`via` ===
+ * "oidc") is present; the Rust parser rejects a link that identifies neither.
+ * Field names match the camelCase JSON produced in
+ * `desktop/src-tauri/src/deep_link.rs`.
+ */
+export type ImportClaimDeepLinkPayload = {
+  /** `<source>:<foreign id>`, e.g. `slack:U060976D0QN`. */
+  subject: string;
+  /** Email channel: single-use magic-link token to redeem at `service`. */
+  token?: string;
+  /** Email channel: base URL of the operator claim-service (http/https). */
+  service?: string;
+  /** OIDC channel marker (`"oidc"`); the attestation is already published. */
+  via?: string;
+};
+
+/**
  * Payload emitted by the Rust deep-link handler for `buzz://join?…` —
  * a relay invite from the web landing page (`/invite/<code>`).
  */
@@ -171,4 +190,15 @@ export function listenForNostrBindDeepLinks(
   return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
     onOpen(event.payload);
   });
+}
+
+export function listenForImportClaimDeepLinks(
+  onOpen: (payload: ImportClaimDeepLinkPayload) => void,
+): Promise<UnlistenFn> {
+  return listen<ImportClaimDeepLinkPayload>(
+    "deep-link-import-claim",
+    (event) => {
+      onOpen(event.payload);
+    },
+  );
 }

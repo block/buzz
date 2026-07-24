@@ -20,6 +20,7 @@ import { deriveShellRoute } from "@/app/AppShell.helpers";
 import { ThemeGrainientBackground } from "@/app/ThemeGrainientBackground";
 import { useReloadShortcut } from "@/app/useReloadShortcut";
 import { KnownAgentPubkeysProvider } from "@/features/agents/useKnownAgentPubkeys";
+import { ImportClaimDialog } from "@/features/messages/ui/ImportClaimDialog";
 import { useAppOnboardingState } from "@/features/onboarding/hooks";
 import { useMachineOnboardingState } from "@/features/onboarding/machineOnboarding";
 import {
@@ -691,6 +692,9 @@ export function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <MachineBootstrap sharedIdentity={sharedIdentity} />
+      {/* Completes `buzz://import-claim` migrations; needs the query client to
+          refresh confirmed bindings after publishing the self-claim. */}
+      <ImportClaimDialog />
     </QueryClientProvider>
   );
 }

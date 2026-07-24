@@ -291,6 +291,79 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportClaimDeepLinkPayload {
+    /// `<source>:<foreign id>`, e.g. `slack:U060976D0QN`.
+    subject: String,
+    /// Email channel: the single-use magic-link token to redeem at `service`.
+    token: Option<String>,
+    /// Email channel: base URL of the operator claim-service (POST target for
+    /// `/email/complete`). Always http(s); validated below.
+    service: Option<String>,
+    /// OIDC channel marker (`"oidc"`) — the attestation is already published by
+    /// the service, so the app only needs to publish its self-claim.
+    via: Option<String>,
+}
+
+/// A foreign-identity subject is `<source>:<id>` with both parts present and an
+/// alphanumeric source (e.g. `slack:U060`).
+fn validate_import_claim_subject(subject: &str) -> Result<(), String> {
+    let (source, id) = subject
+        .split_once(':')
+        .ok_or_else(|| "subject must be <source>:<id>".to_string())?;
+    if source.is_empty() || id.is_empty() {
+        return Err("subject must be <source>:<id>".into());
+    }
+    if !source.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("subject source must be alphanumeric".into());
+    }
+    Ok(())
+}
+
+/// The claim-service URL is attacker-influenced (it rides in the link), so pin
+/// it to a plain http(s) origin with no embedded credentials before the app
+/// will POST to it.
+fn validate_import_claim_service(service: &str) -> Result<(), String> {
+    let url = Url::parse(service).map_err(|error| format!("invalid service url: {error}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("service must use http or https".into());
+    }
+    if url.host_str().is_none() {
+        return Err("service missing host".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("service must not include credentials".into());
+    }
+    Ok(())
+}
+
+/// `buzz://import-claim?subject=slack:U060&token=…&service=https://…` (email)
+/// or `buzz://import-claim?subject=slack:U060&via=oidc` (OIDC). Rejects a link
+/// that identifies neither channel so the dialog never sees a half-formed one.
+fn parse_import_claim_deep_link(url: &Url) -> Result<ImportClaimDeepLinkPayload, String> {
+    let subject = non_empty_param(url, "subject")?;
+    validate_import_claim_subject(&subject)?;
+    let token = optional_non_empty_param(url, "token");
+    let service = optional_non_empty_param(url, "service");
+    let via = optional_non_empty_param(url, "via");
+
+    match (token.as_deref(), service.as_deref(), via.as_deref()) {
+        // Email channel: both halves present; the service must be well-formed.
+        (Some(_), Some(service), _) => validate_import_claim_service(service)?,
+        // OIDC channel: attestation already published; self-claim only.
+        (_, _, Some("oidc")) => {}
+        _ => return Err("import-claim requires token+service (email) or via=oidc".into()),
+    }
+
+    Ok(ImportClaimDeepLinkPayload {
+        subject,
+        token,
+        service,
+        via,
+    })
+}
+
 /// Handle an incoming `buzz://` deep link URL.
 ///
 /// Currently supports:
@@ -375,6 +448,15 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
                 eprintln!("buzz-desktop: rejecting nostr-bind deep link: {error}: {url_str}");
             }
         },
+        Some("import-claim") => match parse_import_claim_deep_link(&url) {
+            Ok(payload) => {
+                activate_main_window(app);
+                let _ = app.emit("deep-link-import-claim", payload);
+            }
+            Err(error) => {
+                eprintln!("buzz-desktop: rejecting import-claim deep link: {error}: {url_str}");
+            }
+        },
         Some(action) => {
             eprintln!("buzz-desktop: unknown deep link action: {action}");
         }
@@ -389,9 +471,57 @@ mod tests {
     use url::Url;
 
     use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        parse_add_community_deep_link, parse_import_claim_deep_link, parse_join_deep_link,
+        parse_message_deep_link, parse_nostr_bind_deep_link, PendingCommunityDeepLink,
+        PendingCommunityDeepLinks,
     };
+
+    #[test]
+    fn parse_import_claim_email_channel() {
+        let url = Url::parse(
+            "buzz://import-claim?subject=slack:U060&token=v1.aa.bb.cc.dd&service=https%3A%2F%2Fmig.example",
+        )
+        .unwrap();
+        let p = parse_import_claim_deep_link(&url).unwrap();
+        assert_eq!(p.subject, "slack:U060");
+        assert_eq!(p.token.as_deref(), Some("v1.aa.bb.cc.dd"));
+        assert_eq!(p.service.as_deref(), Some("https://mig.example"));
+        assert_eq!(p.via, None);
+    }
+
+    #[test]
+    fn parse_import_claim_oidc_channel() {
+        let url = Url::parse("buzz://import-claim?subject=slack:U060&via=oidc").unwrap();
+        let p = parse_import_claim_deep_link(&url).unwrap();
+        assert_eq!(p.subject, "slack:U060");
+        assert_eq!(p.via.as_deref(), Some("oidc"));
+        assert_eq!(p.token, None);
+    }
+
+    #[test]
+    fn parse_import_claim_rejects_incomplete_and_malformed() {
+        // Neither channel identifiable (subject only).
+        assert!(parse_import_claim_deep_link(
+            &Url::parse("buzz://import-claim?subject=slack:U060").unwrap()
+        )
+        .is_err());
+        // token without service.
+        assert!(parse_import_claim_deep_link(
+            &Url::parse("buzz://import-claim?subject=slack:U060&token=t").unwrap()
+        )
+        .is_err());
+        // Malformed subject (no source).
+        assert!(parse_import_claim_deep_link(
+            &Url::parse("buzz://import-claim?subject=U060&via=oidc").unwrap()
+        )
+        .is_err());
+        // Non-http service.
+        assert!(parse_import_claim_deep_link(
+            &Url::parse("buzz://import-claim?subject=slack:U060&token=t&service=file%3A%2F%2Fx")
+                .unwrap()
+        )
+        .is_err());
+    }
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
         PendingCommunityDeepLink {

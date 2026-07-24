@@ -19,7 +19,9 @@ import { buildConfirmedImportBindings } from "./lib/confirmImportBindings";
  * agree. So a member can't attest another person's history, and an admin can't
  * make someone appear to author history they never wrote.
  */
-const importIdentityBindingsQueryKey = ["import-identity-bindings"] as const;
+export const importIdentityBindingsQueryKey = [
+  "import-identity-bindings",
+] as const;
 
 const EMPTY_PUBKEYS: string[] = [];
 
