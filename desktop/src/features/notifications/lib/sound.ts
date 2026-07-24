@@ -129,28 +129,47 @@ export function slotForFeedKind(
 }
 
 const cache = new Map<SoundName, HTMLAudioElement>();
+const loading = new Map<SoundName, Promise<HTMLAudioElement>>();
 
-function getAudio(name: SoundName): HTMLAudioElement {
-  let audio = cache.get(name);
-  if (!audio) {
-    audio = new Audio(`/sounds/${name}.mp3`);
-    cache.set(name, audio);
+async function loadAudio(name: SoundName): Promise<HTMLAudioElement> {
+  const cached = cache.get(name);
+  if (cached) {
+    return cached;
   }
-  return audio;
+  const inFlight = loading.get(name);
+  if (inFlight) {
+    return inFlight;
+  }
+
+  // WebKitGTK's media backend cannot load from Tauri's custom URI scheme
+  // (`tauri://…`), so fetch the asset and hand the element a blob: URL (#2562).
+  const promise = (async () => {
+    const response = await fetch(`/sounds/${name}.mp3`);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch notification sound (${response.status})`);
+    }
+    const audio = new Audio(URL.createObjectURL(await response.blob()));
+    cache.set(name, audio);
+    loading.delete(name);
+    return audio;
+  })();
+  loading.set(name, promise);
+  return promise;
 }
 
-export function playNotificationSound(
+/** Play a notification sound. Resolves with the audio element once loaded. */
+export async function playNotificationSound(
   name: SoundName,
-): HTMLAudioElement | null {
+): Promise<HTMLAudioElement | null> {
   try {
-    const audio = getAudio(name);
+    const audio = await loadAudio(name);
     audio.currentTime = 0;
-    audio.play().catch(() => {
-      // Best-effort — user may not have interacted with the page yet.
+    await audio.play().catch((error) => {
+      console.warn("notification sound play failed", name, error);
     });
     return audio;
-  } catch {
-    // Best-effort only.
+  } catch (error) {
+    console.warn("notification sound load failed", name, error);
     return null;
   }
 }
