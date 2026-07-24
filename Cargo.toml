@@ -24,6 +24,7 @@ members = [
     "crates/git-credential-nostr",
     "crates/git-sign-nostr",
     "crates/buzz-pair-relay",
+    "crates/buzz-local-relay",
     "crates/buzz-relay-mesh",
     "crates/buzz-dev-mcp",
     "examples/countdown-bot",

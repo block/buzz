@@ -133,7 +133,31 @@ See **Quick start** below — this is the developer / self-host path.
 
 ## Quick start
 
-You'll need [Docker](https://docs.docker.com/get-docker/) and [Hermit](https://cashapp.github.io/hermit/) (or Rust 1.88+, Node 24+, pnpm 10+, `just`).
+The lightweight relay needs [Hermit](https://cashapp.github.io/hermit/) (or
+Rust 1.88+ and `just`). The full app path also needs
+[Docker](https://docs.docker.com/get-docker/), Node 24+, and pnpm 10+.
+
+### Lightweight relay experiment
+
+To begin with the event substrate alone, run the durable local relay. It needs
+Rust but no Docker, Postgres, Redis, or MinIO:
+
+```bash
+. ./bin/activate-hermit
+just local-relay
+```
+
+It listens on `ws://127.0.0.1:3000` and writes verified signed events to
+`.buzz-local/events.ndjson`. Stop it and run the same command again to recover
+the effective event history. Use `just local-relay --ephemeral` for a disposable
+in-memory run, or `just local-relay --data /path/to/events.ndjson` to place the
+portable log elsewhere.
+
+This mode implements the core Nostr event/query surface for CLI and agent
+experiments. It intentionally omits hosted authorization policy, media,
+full-text search, workflows, and multi-node fan-out. See the
+[local relay guide](crates/buzz-local-relay/README.md) and
+[project telos](specs/TELOS.md).
 
 **Once:**
 ```bash
@@ -213,6 +237,9 @@ A Rust workspace of focused crates. Single source of truth: the relay. See [ARCH
 **Shared** — `buzz-sdk` (typed event builders) · `buzz-media` (Blossom/S3)
 
 **Tooling** — `buzz-admin` (admin CLI) · `buzz-test-client` (E2E)
+
+**Local experiments** — `buzz-local-relay` (verified signed events + portable
+NDJSON persistence, with no external services)
 
 </details>
 

@@ -53,6 +53,7 @@ crates/
   buzz-workflow       # YAML-as-code workflow engine (evalexpr conditions)
   # Clients + interop
   buzz-pair-relay     # Ephemeral sidecar relay for NIP-AB device pairing
+  buzz-local-relay    # Durable single-process relay for laptop experiments
   buzz-pairing-cli    # CLI for NIP-AB device pairing interop testing
   git-sign-nostr      # Sign git objects with a Nostr key
   git-credential-nostr # Git credential helper for Nostr-authed push/fetch

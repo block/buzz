@@ -47,6 +47,9 @@ buzz.db
 buzz.db-wal
 buzz.db-shm
 
+# Lightweight local relay event log
+.buzz-local/
+
 # Docker volumes (if mounted locally)
 mysql-data/
 typesense-data/

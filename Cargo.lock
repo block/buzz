@@ -989,6 +989,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-local-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "buzz-core",
+ "chrono",
+ "futures-util",
+ "nostr",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-media"
 version = "0.1.0"
 dependencies = [

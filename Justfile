@@ -363,6 +363,13 @@ desktop-screenshot *ARGS:
 
 # ─── Run ──────────────────────────────────────────────────────────────────────
 
+# Start the lightweight durable relay (no Docker or external services)
+local-relay *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export PATH="{{justfile_directory()}}/bin:$PATH"
+    cargo run -p buzz-local-relay -- {{ARGS}}
+
 # Start the relay server (auto-starts Docker services if needed)
 relay: bootstrap _ensure-migrations
     #!/usr/bin/env bash
