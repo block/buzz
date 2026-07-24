@@ -847,7 +847,10 @@ impl Config {
             hook_servers: parse_hook_servers_env("MCP_HOOK_SERVERS"),
             hints_enabled: parse_env("BUZZ_AGENT_NO_HINTS", 0u8)? == 0,
             thinking_effort: parse_thinking_effort(env("BUZZ_AGENT_THINKING_EFFORT").as_deref())?,
-            service_tier: parse_service_tier(env("BUZZ_AGENT_SERVICE_TIER").as_deref())?,
+            service_tier: parse_service_tier_for_provider(
+                provider,
+                env("BUZZ_AGENT_SERVICE_TIER").as_deref(),
+            )?,
         };
         cfg.validate()?;
         Ok(cfg)
@@ -989,6 +992,17 @@ pub fn parse_service_tier(raw: Option<&str>) -> Result<Option<OpenAiServiceTier>
                 "config: BUZZ_AGENT_SERVICE_TIER={other} not supported (use auto|default|flex|priority)"
             )),
         },
+    }
+}
+
+fn parse_service_tier_for_provider(
+    provider: Provider,
+    raw: Option<&str>,
+) -> Result<Option<OpenAiServiceTier>, String> {
+    if matches!(provider, Provider::OpenAi) {
+        parse_service_tier(raw)
+    } else {
+        Ok(None)
     }
 }
 
@@ -1399,6 +1413,14 @@ mod tests {
             Some(OpenAiServiceTier::Priority)
         );
         assert_eq!(parse_service_tier(Some(" ")).unwrap(), None);
+    }
+
+    #[test]
+    fn parse_service_tier_is_ignored_for_non_openai_providers() {
+        assert_eq!(
+            parse_service_tier_for_provider(Provider::Anthropic, Some("invalid")).unwrap(),
+            None
+        );
     }
 
     #[test]
