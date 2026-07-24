@@ -544,6 +544,27 @@ pub async fn cmd_search(
     }
     let resp = client.query(&filter).await?;
     let mut events: Vec<serde_json::Value> = serde_json::from_str(&resp).unwrap_or_default();
+
+    // When FTS hits an edit (kind:40003), pull the targeted originals and
+    // overlay so results look like Desktop (edited body on the message row).
+    let edit_targets: Vec<String> = events
+        .iter()
+        .filter(|e| e.get("kind").and_then(|v| v.as_u64()) == Some(KIND_STREAM_MESSAGE_EDIT))
+        .filter_map(|e| first_e_tag_id(e).map(str::to_string))
+        .collect();
+    if !edit_targets.is_empty() {
+        let target_filter = serde_json::json!({
+            "ids": edit_targets,
+            "limit": edit_targets.len().min(100)
+        });
+        if let Ok(target_resp) = client.query(&target_filter).await {
+            let targets: Vec<serde_json::Value> =
+                serde_json::from_str(&target_resp).unwrap_or_default();
+            events.extend(targets);
+        }
+        apply_message_edits(&mut events, false);
+    }
+
     // The full-text path returns relevance order; a pure author/time query has
     // no relevance, so present newest-first like `messages get`.
     if query.is_none() {

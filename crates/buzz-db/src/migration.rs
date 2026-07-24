@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -879,6 +879,14 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
+
+        // FTS allowlist expansion: index kind:40003 edits so NIP-50 search can
+        // find post-edit bodies (0008 is checksum-frozen without 40003).
+        assert_eq!(migrations[24].version, 25);
+        let edit_fts = migrations[24].sql.as_str();
+        assert!(edit_fts.contains("ARRAY[0, 9, 40002, 40003, 45001, 45003]"));
+        assert!(edit_fts.contains("kind IN (0, 9, 40002, 40003, 45001, 45003)"));
+        assert!(edit_fts.contains("events.search_tsv"));
     }
 
     #[test]
@@ -1236,7 +1244,7 @@ mod tests {
         .await
         .expect("read fresh-install search expression");
         assert!(
-            search_expression.contains("ARRAY[0, 9, 40002, 45001, 45003]"),
+            search_expression.contains("ARRAY[0, 9, 40002, 40003, 45001, 45003]"),
             "fresh-install search allowlist has the wrong kinds: {search_expression}"
         );
         assert!(

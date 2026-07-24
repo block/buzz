@@ -10,7 +10,7 @@ SET LOCAL lock_timeout = '5s';
 
 ALTER TABLE events DROP COLUMN search_tsv;
 ALTER TABLE events ADD COLUMN search_tsv TSVECTOR GENERATED ALWAYS AS (
-    CASE WHEN kind IN (0, 9, 40002, 45001, 45003)
+    CASE WHEN kind IN (0, 9, 40002, 40003, 45001, 45003)
          THEN to_tsvector('simple', content)
          ELSE NULL::tsvector
     END
