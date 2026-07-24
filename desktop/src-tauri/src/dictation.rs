@@ -11,7 +11,11 @@
 //! Session model: `start_dictation` marks the session active;
 //! `stop_dictation` marks it inactive and pushes ~1 s of silence into the
 //! pipeline — the mic stops with the key release, so without it the VAD would
-//! never see the silence that closes (and decodes) the trailing phrase.
+//! never see the silence that closes (and decodes) the trailing phrase. A
+//! zero-length sentinel batch follows the silence; the worker echoes it back
+//! and it is emitted as a `dictation-flushed` event, which tells the frontend
+//! the stopped session's transcripts have all arrived (Enter-to-send waits
+//! for it before submitting).
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -21,7 +25,11 @@ use std::sync::{
 use tauri::Emitter;
 
 use crate::app_state::AppState;
-use crate::huddle::{models, stt::SttPipeline, HuddlePhase};
+use crate::huddle::{
+    models,
+    stt::{LiveEvent, SttPipeline},
+    HuddlePhase,
+};
 
 /// Payload for `dictation-transcript` events. Partials (`final: false`)
 /// replace the previous partial of the same phrase; a final commits it.
@@ -101,7 +109,7 @@ pub fn start_dictation(
     }
 
     if guard.is_none() {
-        let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<(String, bool)>(64);
+        let (live_tx, mut live_rx) = tokio::sync::mpsc::channel::<LiveEvent>(64);
         // In live mode all transcripts arrive on live_rx; the pipeline's own
         // text receiver stays silent and is dropped here.
         let (pipeline, _text_rx) = SttPipeline::new(
@@ -116,10 +124,17 @@ pub fn start_dictation(
 
         // Forward transcripts to the webview until the pipeline is dropped.
         tauri::async_runtime::spawn(async move {
-            while let Some((text, is_final)) = live_rx.recv().await {
-                let event = TranscriptEvent { text, is_final };
-                if let Err(e) = app.emit("dictation-transcript", event) {
-                    eprintln!("buzz-desktop: dictation transcript emit failed: {e}");
+            while let Some(event) = live_rx.recv().await {
+                let result = match event {
+                    LiveEvent::Transcript { text, is_final } => {
+                        app.emit("dictation-transcript", TranscriptEvent { text, is_final })
+                    }
+                    // Stop-flush drained: no more transcripts for the stopped
+                    // session. The frontend gates Enter-to-send on this.
+                    LiveEvent::Flushed => app.emit("dictation-flushed", ()),
+                };
+                if let Err(e) = result {
+                    eprintln!("buzz-desktop: dictation event emit failed: {e}");
                 }
             }
         });
@@ -140,6 +155,10 @@ pub fn stop_dictation(state: tauri::State<'_, DictationState>) {
     if let Ok(guard) = state.pipeline.lock() {
         if let Some((_, ref pipeline)) = *guard {
             let _ = pipeline.push_audio(vec![0u8; FLUSH_SILENCE_BYTES]);
+            // Zero-length sentinel — the worker echoes it back as a Flushed
+            // marker once everything before it (including the trailing
+            // phrase's decode) has been processed and delivered.
+            let _ = pipeline.push_audio(Vec::new());
         }
     }
 }

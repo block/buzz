@@ -87,8 +87,9 @@ const overrides = new Map([
   // sticky-punctuation heuristic + unit tests, and two #[ignore]d decode
   // experiments (silence/noise vs punctuation, v3 comparison) that document
   // measured model behavior. Experiments are test-only content; queued to
-  // split into stt/tests.rs with the feature PR review.
-  ["src-tauri/src/huddle/stt.rs", 1200],
+  // split into stt/tests.rs with the feature PR review. +37: LiveEvent enum
+  // and the stop-flush sentinel echo (Enter-to-send flush marker).
+  ["src-tauri/src/huddle/stt.rs", 1240],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports

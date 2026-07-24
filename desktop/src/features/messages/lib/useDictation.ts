@@ -15,20 +15,20 @@ import { transcriptDiff } from "./transcriptDiff";
 export type DictationStatus = "idle" | "starting" | "recording";
 
 /** How long after stop() this hook still claims incoming transcripts.
- *  The Rust worker flushes the trailing phrase after the key is released;
- *  decoding can take a couple of seconds. */
-// ponytail: time-based ownership window; replace with a session id threaded
-// through the Rust event if two composers ever dictate back-to-back within 15s.
+ *  Backstop only — ownership normally releases exactly when the session's
+ *  `dictation-flushed` marker arrives; this covers a marker that never
+ *  comes (pipeline died mid-flush). */
 const OWNERSHIP_DECAY_MS = 15_000;
 
 /** Hold plain Space this long to start dictation. A quick tap still types a
  *  space as normal — only key-repeats during the hold are suppressed. */
 const SPACE_HOLD_MS = 1500;
 
-/** Enter during dictation sends the message — but the trailing phrase is
- *  still being flushed/decoded when the key lands, so the submit waits for
- *  that final. This caps the wait if the final never arrives. */
-const SUBMIT_FLUSH_TIMEOUT_MS = 3000;
+/** Cap on waiting for a session's `dictation-flushed` marker (Enter-to-send
+ *  submits on it; a superseded session's stragglers are discarded until it).
+ *  It normally arrives well under a second after stop(); the cap only fires
+ *  if the pipeline died and the marker never comes. */
+const FLUSH_MARKER_TIMEOUT_MS = 3000;
 
 type Session = { handle: AudioWorkletHandle; stream: MediaStream };
 
@@ -55,8 +55,9 @@ type StreamState = { anchor: number; partialText: string };
  *
  * Triggers: hold plain Space for SPACE_HOLD_MS (quick tap still types a
  * space), hold ⌃Space (instant start), or the toolbar mic button (click
- * toggle). Enter while dictation is live stops it and calls `onSubmit` once
- * the trailing phrase has been flushed into the doc (send-by-voice).
+ * toggle). Enter while dictation is live stops it and calls `onSubmit` when
+ * the session's `dictation-flushed` marker confirms every transcript —
+ * including the trailing phrase — is in the doc (send-by-voice).
  *
  * Multiple composers may mount this hook — only the one that started the
  * session inserts the transcript (ownsRef), and Rust rejects a second
@@ -78,8 +79,12 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
   editorRef.current = editor;
   const onSubmitRef = React.useRef(onSubmit);
   onSubmitRef.current = onSubmit;
-  // Non-null while an Enter-triggered submit waits for the trailing final.
+  // Non-null while an Enter-triggered submit waits for the flush marker.
   const submitTimerRef = React.useRef<number | null>(null);
+  // Non-null while transcripts are dropped because they belong to a session
+  // this composer already replaced (restart before the old session's flush
+  // marker arrived). Cleared by that marker, or by the cap if it never comes.
+  const discardTimerRef = React.useRef<number | null>(null);
 
   // Stream transcripts from the Rust pipeline into the editor: each partial
   // replaces the previous partial of the same phrase in place, and the final
@@ -93,6 +98,8 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
     const unlisten = listen<TranscriptPayload>(
       "dictation-transcript",
       (event) => {
+        // Straggler from a session this composer already replaced.
+        if (discardTimerRef.current !== null) return;
         if (!ownsRef.current) return;
         const editor = editorRef.current;
         if (!editor) return;
@@ -148,17 +155,38 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
         editor.view.dom.style.caretColor = event.payload.final
           ? ""
           : "transparent";
-        // Enter-to-send was waiting for this final — it's in the doc now.
-        if (event.payload.final && submitTimerRef.current !== null) {
-          window.clearTimeout(submitTimerRef.current);
-          submitTimerRef.current = null;
-          ownsRef.current = false; // a stray later final must not land in the sent composer
-          onSubmitRef.current?.();
-        }
       },
     );
+    // The flush marker: every transcript of the stopped session is in the
+    // doc now (the Rust live channel is strictly ordered).
+    const unlistenFlushed = listen("dictation-flushed", () => {
+      // Marker of the session this composer replaced — stop discarding, the
+      // current session's transcripts follow it.
+      if (discardTimerRef.current !== null) {
+        window.clearTimeout(discardTimerRef.current);
+        discardTimerRef.current = null;
+        return;
+      }
+      // A live session's own marker can only arrive after its stop().
+      if (sessionRef.current) return;
+      if (!ownsRef.current && submitTimerRef.current === null) return;
+      // The stopped session is fully drained — release ownership exactly
+      // instead of waiting out the decay backstop.
+      ownsRef.current = false;
+      if (ownershipTimerRef.current !== null) {
+        window.clearTimeout(ownershipTimerRef.current);
+        ownershipTimerRef.current = null;
+      }
+      // Enter-to-send was waiting for this drain.
+      if (submitTimerRef.current !== null) {
+        window.clearTimeout(submitTimerRef.current);
+        submitTimerRef.current = null;
+        onSubmitRef.current?.();
+      }
+    });
     return () => {
       void unlisten.then((fn) => fn());
+      void unlistenFlushed.then((fn) => fn());
     };
   }, []);
 
@@ -199,11 +227,28 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
     // A stream left over from a previous session (final never arrived, or the
     // doc changed) must not swallow this session's first phrase.
     streamRef.current = null;
-    // Restarting dictation supersedes an Enter-to-send still waiting on its
-    // trailing final — don't fire a send under the new session.
+    // An Enter-to-send is still waiting on the previous session's flush
+    // marker. Its message must not be lost to the restart — send what's in
+    // the doc now; the not-yet-decoded tail (if any) is dropped with the
+    // rest of that session's stragglers below.
     if (submitTimerRef.current !== null) {
       window.clearTimeout(submitTimerRef.current);
       submitTimerRef.current = null;
+      onSubmitRef.current?.();
+    }
+    // The previous session hasn't drained yet (its flush marker would have
+    // cleared the ownership timer) — discard its stragglers until the marker
+    // arrives, or they'd be spliced into this session's text.
+    // ponytail: per-composer. Restarting in a DIFFERENT composer within the
+    // drain window can still catch the old session's tail — thread a session
+    // id through the Rust event if it ever bites.
+    if (
+      ownershipTimerRef.current !== null &&
+      discardTimerRef.current === null
+    ) {
+      discardTimerRef.current = window.setTimeout(() => {
+        discardTimerRef.current = null;
+      }, FLUSH_MARKER_TIMEOUT_MS);
     }
     setStatus("starting");
     // Tracks whether the Rust session was started, so cleanup on a later
@@ -260,6 +305,9 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
       if (submitTimerRef.current !== null) {
         window.clearTimeout(submitTimerRef.current);
       }
+      if (discardTimerRef.current !== null) {
+        window.clearTimeout(discardTimerRef.current);
+      }
     };
   }, [teardownSession]);
 
@@ -269,19 +317,11 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
     });
   }, [start]);
 
-  /** Submit now if the doc is settled, else once the trailing final lands.
-   *  A visible partial means a phrase is in flight and its final is coming
-   *  (stop() pushes flush silence); with nothing showing there is usually
-   *  nothing to wait for. */
-  // ponytail: "no partial showing" can also mean speech too fresh to have
-  // decoded yet (<~600 ms) — that tail is dropped. Thread a session-scoped
-  // flush ack through the Rust event if it ever bites.
+  /** Queue the submit to fire when the session's flush marker arrives —
+   *  i.e. once every transcript of the stopped session, including the
+   *  trailing phrase Enter interrupted, is in the doc. The timer only fires
+   *  if the marker never comes. */
   const submitAfterFlush = React.useCallback(() => {
-    if (!streamRef.current?.partialText) {
-      ownsRef.current = false;
-      onSubmitRef.current?.();
-      return;
-    }
     if (submitTimerRef.current !== null) {
       window.clearTimeout(submitTimerRef.current);
     }
@@ -289,7 +329,7 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
       submitTimerRef.current = null;
       ownsRef.current = false;
       onSubmitRef.current?.();
-    }, SUBMIT_FLUSH_TIMEOUT_MS);
+    }, FLUSH_MARKER_TIMEOUT_MS);
   }, []);
 
   /** Mic button click — start when idle, stop otherwise. */
@@ -336,7 +376,7 @@ export function useDictation(editor: Editor | null, onSubmit?: () => void) {
         onSubmitRef.current &&
         (keyHeldRef.current ||
           statusRef.current !== "idle" ||
-          // A send is already queued behind the trailing final — swallow
+          // A send is already queued behind the flush marker — swallow
           // repeat Enters so submitOnEnter can't double-send.
           submitTimerRef.current !== null)
       ) {

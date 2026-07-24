@@ -45,6 +45,20 @@ const AUDIO_QUEUE_DEPTH: usize = 300;
 /// Prevents OOM if VAD stays in speech mode (noisy environment).
 const MAX_SPEECH_SAMPLES: usize = 16_000 * 30;
 
+/// Event on the live-transcript (dictation) channel. Strictly ordered — a
+/// `Flushed` sent after a session's audio guarantees every `Transcript` of
+/// that session was already delivered.
+#[derive(Debug, PartialEq)]
+pub enum LiveEvent {
+    /// Partial (`is_final: false`) re-decodes replace each other; a final
+    /// commits the phrase. An empty final means the phrase decoded to nothing.
+    Transcript { text: String, is_final: bool },
+    /// Echo of a zero-length audio batch (the stop-flush sentinel): all audio
+    /// pushed before it has been processed, so the stopped session has no
+    /// further transcripts coming.
+    Flushed,
+}
+
 /// Handle to the running STT pipeline.
 ///
 /// Not Clone — wrap in `Arc` to share across threads.
@@ -81,10 +95,12 @@ impl SttPipeline {
     ///
     /// `live_tx` (optional) switches the pipeline into live-transcript mode
     /// (used by composer dictation): the in-progress phrase is re-decoded
-    /// every `PARTIAL_DECODE_STEP` new samples and sent as `(text, false)`,
-    /// and finals are sent as `(text, true)` — all on this one channel so
-    /// ordering is preserved. In this mode nothing is sent on the returned
-    /// text receiver. Pass `None` for huddle transcription (finals only).
+    /// every `PARTIAL_DECODE_STEP` new samples and sent as a partial
+    /// `Transcript`, and finals commit it — all on this one channel so
+    /// ordering is preserved. A zero-length audio batch is echoed back as
+    /// `Flushed` (see `LiveEvent`). In this mode nothing is sent on the
+    /// returned text receiver. Pass `None` for huddle transcription (finals
+    /// only).
     ///
     /// Returns `Err` only if the thread cannot be spawned (OS error).
     /// If model files are missing, the worker logs and exits cleanly —
@@ -100,7 +116,7 @@ impl SttPipeline {
         tts_active: Arc<AtomicBool>,
         tts_cancel: Option<Arc<AtomicBool>>,
         ptt_active: Option<Arc<AtomicBool>>,
-        live_tx: Option<tokio_mpsc::Sender<(String, bool)>>,
+        live_tx: Option<tokio_mpsc::Sender<LiveEvent>>,
     ) -> Result<(Self, tokio_mpsc::Receiver<String>), String> {
         let (audio_tx, audio_rx) = mpsc::sync_channel::<Vec<u8>>(AUDIO_QUEUE_DEPTH);
         let (text_tx, text_rx) = tokio_mpsc::channel::<String>(64);
@@ -264,7 +280,7 @@ fn stt_worker(
     tts_active: Arc<AtomicBool>,
     tts_cancel: Option<Arc<AtomicBool>>,
     ptt_active: Option<Arc<AtomicBool>>,
-    live_tx: Option<tokio_mpsc::Sender<(String, bool)>>,
+    live_tx: Option<tokio_mpsc::Sender<LiveEvent>>,
 ) {
     // ── 1. Initialise rubato resampler (48 kHz → 16 kHz, mono) ───────────────
     use rubato::{Fft, FixedSync, Resampler};
@@ -438,6 +454,17 @@ fn stt_worker(
         }
 
         for bytes in batch {
+            // Zero-length batch = stop-flush sentinel (dictation.rs). All
+            // audio pushed before it has been processed by now, so the
+            // stopped session has no further transcripts — tell the frontend.
+            if bytes.is_empty() {
+                if let Some(tx) = live_tx.as_ref() {
+                    if let Err(e) = tx.blocking_send(LiveEvent::Flushed) {
+                        eprintln!("buzz-desktop: STT live channel closed: {e}");
+                    }
+                }
+                continue;
+            }
             // Convert raw bytes to f32 samples (little-endian).
             let samples_48k = bytes_to_f32(&bytes);
             input_buf_48k.extend_from_slice(&samples_48k);
@@ -527,7 +554,7 @@ fn process_16k_samples(
     tts_cancel: Option<&AtomicBool>,
     tts_stopped_at: &mut Option<std::time::Instant>,
     ptt_active: Option<&Arc<AtomicBool>>,
-    live_tx: Option<&tokio_mpsc::Sender<(String, bool)>>,
+    live_tx: Option<&tokio_mpsc::Sender<LiveEvent>>,
     last_partial_len: &mut usize,
     decode_hold_until: &mut std::time::Instant,
     onset_buf: &mut Vec<f32>,
@@ -684,7 +711,11 @@ fn process_16k_samples(
                     if text.ends_with(['.', '?', '!', ',']) {
                         *punct_partial = Some(text.clone());
                     }
-                    if let Err(e) = tx.blocking_send((text, false)) {
+                    let event = LiveEvent::Transcript {
+                        text,
+                        is_final: false,
+                    };
+                    if let Err(e) = tx.blocking_send(event) {
                         eprintln!("buzz-desktop: STT live channel closed: {e}");
                     }
                 }
@@ -752,7 +783,7 @@ fn flush_to_stt(
     speech_buf: &[f32],
     recognizer: &sherpa_onnx::OfflineRecognizer,
     text_tx: &tokio_mpsc::Sender<String>,
-    live_tx: Option<&tokio_mpsc::Sender<(String, bool)>>,
+    live_tx: Option<&tokio_mpsc::Sender<LiveEvent>>,
     punct_hint: Option<String>,
 ) {
     let text = prefer_punctuated(decode_speech(speech_buf, recognizer), punct_hint.as_deref());
@@ -761,7 +792,13 @@ fn flush_to_stt(
     // sent so the frontend clears the partial shown for a phrase that decoded
     // to nothing (noise); skipping it strands that partial on screen.
     let send_err = match live_tx {
-        Some(tx) => tx.blocking_send((text, true)).err().map(|e| e.to_string()),
+        Some(tx) => tx
+            .blocking_send(LiveEvent::Transcript {
+                text,
+                is_final: true,
+            })
+            .err()
+            .map(|e| e.to_string()),
         None if text.is_empty() => None,
         None => text_tx.blocking_send(text).err().map(|e| e.to_string()),
     };
