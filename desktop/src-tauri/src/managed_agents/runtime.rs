@@ -855,7 +855,14 @@ pub(crate) fn collect_same_instance_orphans(
 
 /// Binary names for the Buzz desktop/Tauri process. Used by dead-instance
 /// detection to confirm the owning desktop is still alive.
-const DESKTOP_BINARY_NAMES: &[&str] = &["Buzz", "buzz-desktop", "buzz_desktop"];
+const DESKTOP_BINARY_NAMES: &[&str] = &[
+    "Buzz",
+    "buzz-desktop",
+    "buzz_desktop",
+    // Linux limits /proc/<pid>/comm to 15 visible bytes, truncating the
+    // AppImage shim's real executable name, `buzz-desktop.bin`.
+    "buzz-desktop.bi",
+];
 
 /// Check if a process name matches a known Buzz desktop binary.
 fn is_desktop_binary(name: &str) -> bool {
