@@ -181,9 +181,12 @@ GitHub Release or a stable `mobile-vX.Y.Z` alias.
 
 The release workflow builds **two separate macOS DMGs**: Apple
 Silicon (`darwin-aarch64`, the `release` job) and Intel
-(`darwin-x86_64`, the `release-macos-x64` job), plus Linux `.deb` and
-`.AppImage`. Both macOS DMGs are codesigned, notarized, and attached to
-the same `v<version>` release. Intel users download the `_x64.dmg`.
+(`darwin-x86_64`, the `release-macos-x64` job), plus Linux `.deb`,
+`.rpm`, and `.AppImage`. Both macOS DMGs are codesigned, notarized, and
+attached to the same `v<version>` release. Intel users download the
+`_x64.dmg`. The `.rpm` targets Fedora/RHEL-family distros (`sudo dnf
+install ./Buzz-<version>-1.x86_64.rpm`); like the `.deb` it is not
+auto-updatable (only the AppImage is, a Tauri updater constraint on Linux).
 
 The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
 which strips infra libraries over-bundled by linuxdeploy (they crash on
