@@ -35,6 +35,7 @@ import {
   KIND_HUDDLE_STARTED,
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
+  KIND_PERSONA_CATALOG,
   KIND_REPO_ANNOUNCEMENT,
   KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
@@ -105,6 +106,7 @@ type MockPersonaSeed = {
   displayName: string;
   avatarUrl?: string | null;
   systemPrompt: string;
+  updatedAt?: string;
   isActive?: boolean;
   sourceTeam?: string | null;
   envVars?: Record<string, string>;
@@ -112,6 +114,8 @@ type MockPersonaSeed = {
   model?: string | null;
   provider?: string | null;
   namePool?: string[];
+  respondTo?: "owner-only" | "allowlist" | "anyone";
+  respondToAllowlist?: string[];
 };
 
 type MockTeamSeed = {
@@ -206,6 +210,8 @@ type E2eConfig = {
      *  (`list/start/stop/restart_managed_agent_runtime`). */
     managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
     personas?: MockPersonaSeed[];
+    /** Community catalog replaceable-event heads returned by relay queries. */
+    personaCatalogEvents?: RelayEvent[];
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
     agentListDelayMs?: number;
@@ -2156,12 +2162,17 @@ function resetMockPersonas(config?: E2eConfig) {
       model: persona.model ?? null,
       provider: persona.provider ?? null,
       name_pool: persona.namePool ?? [],
+      respond_to: persona.respondTo ?? null,
+      respond_to_allowlist:
+        persona.respondTo === "allowlist"
+          ? [...(persona.respondToAllowlist ?? [])]
+          : [],
       is_builtin: false,
       is_active: persona.isActive ?? true,
       source_team: persona.sourceTeam ?? null,
       env_vars: { ...(persona.envVars ?? {}) },
       created_at: now,
-      updated_at: now,
+      updated_at: persona.updatedAt ?? now,
     });
   }
 }
@@ -2756,6 +2767,7 @@ const mockChannels: MockChannel[] = [
 const mockMessages = new Map<string, RelayEvent[]>();
 const mockUserStatuses: RelayEvent[] = [];
 const mockReminderEvents: RelayEvent[] = [];
+const mockPersonaCatalogEvents: RelayEvent[] = [];
 let mockRelayMembers: RawRelayMember[] = [];
 const mockSockets = new Map<number, MockSocket>();
 let mockWebsocketSendMutexWedged = false;
@@ -2784,6 +2796,16 @@ function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
   mockSaveSubscriptions = (config?.mock?.saveSubscriptions ?? []).map((s) => ({
     ...s,
   }));
+}
+
+function resetMockPersonaCatalogEvents(config: E2eConfig | undefined) {
+  mockPersonaCatalogEvents.length = 0;
+  for (const event of config?.mock?.personaCatalogEvents ?? []) {
+    mockPersonaCatalogEvents.push({
+      ...event,
+      tags: event.tags.map((tag) => [...tag]),
+    });
+  }
 }
 
 // Mesh-compute mock state — TEST-ONLY.
@@ -7333,6 +7355,9 @@ async function handleUpdatePersona(args: {
   applyMockPersonaBehavior(persona, args.input.behavior);
   persona.updated_at = new Date().toISOString();
 
+  for (const callback of tauriEventListeners.get("agents-data-changed") ?? []) {
+    callback();
+  }
   return { ...persona };
 }
 
@@ -7401,9 +7426,7 @@ function ensureMockPersonaIsActive(personaId: string) {
     throw new Error(`agent ${personaId} not found`);
   }
   if (!persona.is_active) {
-    throw new Error(
-      `${persona.display_name} is not in My Agents. Choose it from Agent Catalog first.`,
-    );
+    throw new Error(`${persona.display_name} is not in My Agents.`);
   }
 }
 
@@ -8090,6 +8113,35 @@ async function resolveMockUploadDescriptors(
       filename: "quarterly-report.pdf",
     },
   ];
+}
+
+async function resolveMockUploadDescriptorForBytes(
+  args: { data: number[]; filename?: string | null },
+  config: E2eConfig | undefined,
+): Promise<RawBlobDescriptor> {
+  const configured = config?.mock?.uploadDescriptors;
+  if (configured !== undefined) {
+    const descriptors = await resolveMockUploadDescriptors(config);
+    const descriptor = descriptors[0];
+    if (!descriptor) throw new Error("mock upload returned no descriptor");
+    return descriptor;
+  }
+
+  const bytes = Uint8Array.from(args.data);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  const sha256 = Array.from(new Uint8Array(digest), (value) =>
+    value.toString(16).padStart(2, "0"),
+  ).join("");
+  const filename = args.filename ?? "upload.bin";
+  const isAgentJson = filename.toLowerCase().endsWith(".agent.json");
+  return {
+    url: `https://mock.relay/media/${sha256}${isAgentJson ? ".json" : ".bin"}`,
+    sha256,
+    size: bytes.length,
+    type: isAgentJson ? "application/json" : "application/octet-stream",
+    uploaded: Math.floor(Date.now() / 1000),
+    filename,
+  };
 }
 
 async function handleSendChannelMessage(
@@ -8779,6 +8831,19 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (filter.kinds?.includes(KIND_PERSONA_CATALOG)) {
+      const authors = filter.authors?.map((author) => author.toLowerCase());
+      const sourceIds = filter["#d"];
+      for (const event of mockPersonaCatalogEvents) {
+        if (authors && !authors.includes(event.pubkey.toLowerCase())) continue;
+        const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+        if (sourceIds && (!sourceId || !sourceIds.includes(sourceId))) continue;
+        sendWsText(socket.handler, ["EVENT", subId, event]);
+      }
+      sendWsText(socket.handler, ["EOSE", subId]);
+      return;
+    }
+
     // Project queries: NIP-34 kinds, or kind:1 comments scoped by repo `a`
     // tag (PR/issue discussions, approvals, review requests).
     if (
@@ -8871,6 +8936,31 @@ function sendToMockSocket(args: {
         if (idx >= 0) mockReminderEvents.splice(idx, 1);
       }
       mockReminderEvents.push(event);
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
+    if (event.kind === KIND_PERSONA_CATALOG) {
+      const sourceId = event.tags.find((tag) => tag[0] === "d")?.[1];
+      if (!sourceId) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "invalid: persona catalog event missing d tag.",
+        ]);
+        return;
+      }
+      const existingIndex = mockPersonaCatalogEvents.findIndex(
+        (candidate) =>
+          candidate.pubkey.toLowerCase() === event.pubkey.toLowerCase() &&
+          candidate.tags.some((tag) => tag[0] === "d" && tag[1] === sourceId),
+      );
+      if (existingIndex >= 0) {
+        mockPersonaCatalogEvents.splice(existingIndex, 1);
+      }
+      mockPersonaCatalogEvents.push(event);
+      emitMockGlobalEvent(event);
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
@@ -8993,6 +9083,7 @@ export function maybeInstallE2eTauriMocks() {
   resetMockWorkflows();
   resetMockMesh();
   resetMockUserStatuses();
+  resetMockPersonaCatalogEvents(config);
   resetMockSaveSubscriptions(config);
   resetMockPendingCommunityDeepLinks(config);
   mockWebsocketSendMutexWedged = false;
@@ -10147,8 +10238,8 @@ export function maybeInstallE2eTauriMocks() {
         // Specs assert invocation via __BUZZ_E2E_COMMANDS__.
         return true;
       case "encode_agent_snapshot_for_send": {
-        // Return a minimal PNG-shaped payload so the send flow can proceed
-        // through upload_media_bytes without a real Rust encode step.
+        // Return the requested wire format so both message sharing (PNG) and
+        // community catalog publication (JSON) exercise their real branches.
         // Optional encodeDelayMs lets specs observe the "preparing" phase before
         // the upload begins.
         const encodeDelayMs = activeConfig?.mock?.encodeDelayMs ?? 0;
@@ -10156,6 +10247,46 @@ export function maybeInstallE2eTauriMocks() {
           await new Promise((resolve) =>
             window.setTimeout(resolve, encodeDelayMs),
           );
+        }
+        const input = payload as {
+          id: string;
+          memoryLevel: "none" | "core" | "everything";
+          format: "json" | "png";
+        };
+        if (input.format === "json") {
+          const persona = mockPersonas.find(
+            (candidate) => candidate.id === input.id,
+          );
+          const snapshot = {
+            format: "buzz-agent-snapshot",
+            version: 1,
+            definition: {
+              name: persona?.display_name ?? "E2E Agent",
+              sourceIsBuiltIn: persona?.is_builtin ?? false,
+              systemPrompt: persona?.system_prompt ?? "",
+              runtime: persona?.runtime ?? null,
+              model: persona?.model ?? null,
+              provider: persona?.provider ?? null,
+              respondTo: persona?.respond_to ?? null,
+              respondToAllowlist: persona?.respond_to_allowlist ?? [],
+              namePool: persona?.name_pool ?? [],
+            },
+            profile: {
+              displayName: persona?.display_name ?? "E2E Agent",
+              avatarUrl: persona?.avatar_url ?? null,
+            },
+            memory: {
+              level: input.memoryLevel,
+              entries: [],
+            },
+          };
+          const fileBytes = Array.from(
+            new TextEncoder().encode(JSON.stringify(snapshot)),
+          );
+          return {
+            fileBytes,
+            fileName: "e2e-agent.agent.json",
+          };
         }
         return {
           fileBytes: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
@@ -10166,6 +10297,9 @@ export function maybeInstallE2eTauriMocks() {
         // Return a minimal preview — no writes performed.
         return {
           displayName: "Imported Agent",
+          isBuiltIn: true,
+          model: "claude-opus-4-5",
+          runtime: "goose",
           systemPrompt: null,
           avatarUrl: null,
           memoryLevel: "none",
@@ -10677,7 +10811,10 @@ export function maybeInstallE2eTauriMocks() {
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
       case "upload_media_bytes":
-        return (await resolveMockUploadDescriptors(activeConfig))[0];
+        return resolveMockUploadDescriptorForBytes(
+          payload as { data: number[]; filename?: string | null },
+          activeConfig,
+        );
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and
         // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In

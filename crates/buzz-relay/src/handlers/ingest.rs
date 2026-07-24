@@ -27,9 +27,9 @@ use buzz_core::kind::{
     KIND_NIP29_CREATE_GROUP, KIND_NIP29_DELETE_EVENT, KIND_NIP29_DELETE_GROUP,
     KIND_NIP29_EDIT_METADATA, KIND_NIP29_JOIN_REQUEST, KIND_NIP29_LEAVE_REQUEST,
     KIND_NIP29_PUT_USER, KIND_NIP29_REMOVE_USER, KIND_NIP43_LEAVE_REQUEST,
-    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PIN_LIST, KIND_PRESENCE_UPDATE,
-    KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE, KIND_REPORT,
-    KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
+    KIND_NIP65_RELAY_LIST_METADATA, KIND_PERSONA, KIND_PERSONA_CATALOG, KIND_PIN_LIST,
+    KIND_PRESENCE_UPDATE, KIND_PRODUCT_FEEDBACK, KIND_PROFILE, KIND_REACTION, KIND_READ_STATE,
+    KIND_REPORT, KIND_STREAM_MESSAGE, KIND_STREAM_MESSAGE_BOOKMARKED, KIND_STREAM_MESSAGE_DIFF,
     KIND_STREAM_MESSAGE_EDIT, KIND_STREAM_MESSAGE_PINNED, KIND_STREAM_MESSAGE_SCHEDULED,
     KIND_STREAM_MESSAGE_V2, KIND_STREAM_REMINDER, KIND_TEAM, KIND_TEXT_NOTE, KIND_USER_STATUS,
     KIND_WORKFLOW_DEF, KIND_WORKFLOW_TRIGGER, RELAY_ADMIN_ADD_MEMBER, RELAY_ADMIN_CHANGE_ROLE,
@@ -200,7 +200,7 @@ fn required_scope_for_kind(kind: u32, event: &Event) -> Result<Scope, &'static s
         KIND_PROFILE => Ok(Scope::UsersWrite),
         KIND_TEXT_NOTE | KIND_LONG_FORM => Ok(Scope::MessagesWrite),
         KIND_CONTACT_LIST | KIND_READ_STATE | KIND_USER_STATUS | KIND_AGENT_ENGRAM
-        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_TEAM | KIND_MANAGED_AGENT
+        | KIND_EVENT_REMINDER | KIND_PERSONA | KIND_PERSONA_CATALOG | KIND_TEAM | KIND_MANAGED_AGENT
         | super::push_lease::KIND_PUSH_LEASE => {
             Ok(Scope::UsersWrite)
         }
@@ -406,6 +406,9 @@ pub(crate) fn is_global_only_kind(kind: u32) -> bool {
             | KIND_AGENT_PROFILE
             // NIP-AP: persona definitions (30175): owner-authored, keyed by (pubkey, kind, d_tag).
             | KIND_PERSONA
+            // Community catalog publications (30178): owner-authored, but read
+            // across all members and keyed by the source persona's stable id.
+            | KIND_PERSONA_CATALOG
             // NIP-AP: team (30176) + managed-agent (30177) definitions: owner-authored,
             // keyed by (pubkey, kind, d_tag). A stray `h` tag must not channel-scope them.
             | KIND_TEAM
@@ -1063,6 +1066,254 @@ fn validate_persona_envelope(event: &Event) -> Result<(), String> {
             "persona event `d` tag must match [a-z0-9_-] after the first character".to_string(),
         );
     }
+    Ok(())
+}
+
+/// Validate the public envelope and plaintext projection of a community catalog
+/// entry before it can replace the current kind:30178 head.
+///
+/// The relay deliberately rejects unknown fields here. This is stricter than
+/// the private owner projection (`kind:30175`) because every catalog entry and
+/// referenced snapshot is readable by the community. The explicit allowlist
+/// prevents accidental additions such as env vars, auth tags, or response
+/// allowlists from silently becoming public metadata.
+fn validate_persona_catalog_envelope(event: &Event) -> Result<(), String> {
+    use serde_json::{Map, Value};
+
+    const MAX_SOURCE_ID_LEN: usize = 128;
+    const MAX_SOURCE_UPDATED_AT_LEN: usize = 64;
+    const MAX_AGENT_SNAPSHOT_JSON_BYTES: u64 = 5 * 1024 * 1024;
+
+    fn one_tag<'a>(event: &'a Event, name: &str) -> Result<&'a str, String> {
+        let values: Vec<&str> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() >= 2 && parts[0].as_str() == name).then(|| parts[1].as_str())
+            })
+            .collect();
+        if values.len() != 1 {
+            return Err(format!(
+                "persona catalog event must have exactly one `{name}` tag (got {})",
+                values.len()
+            ));
+        }
+        Ok(values[0])
+    }
+
+    fn optional_one_tag<'a>(event: &'a Event, name: &str) -> Result<Option<&'a str>, String> {
+        let values: Vec<&str> = event
+            .tags
+            .iter()
+            .filter_map(|tag| {
+                let parts = tag.as_slice();
+                (parts.len() >= 2 && parts[0].as_str() == name).then(|| parts[1].as_str())
+            })
+            .collect();
+        if values.len() > 1 {
+            return Err(format!(
+                "persona catalog event must have at most one `{name}` tag (got {})",
+                values.len()
+            ));
+        }
+        Ok(values.first().copied())
+    }
+
+    fn object<'a>(value: &'a Value, label: &str) -> Result<&'a Map<String, Value>, String> {
+        value
+            .as_object()
+            .ok_or_else(|| format!("persona catalog `{label}` must be an object"))
+    }
+
+    fn reject_unknown(
+        object: &Map<String, Value>,
+        allowed: &[&str],
+        label: &str,
+    ) -> Result<(), String> {
+        if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+            return Err(format!(
+                "persona catalog `{label}` contains unsupported field `{key}`"
+            ));
+        }
+        Ok(())
+    }
+
+    fn required_string<'a>(
+        object: &'a Map<String, Value>,
+        key: &str,
+        label: &str,
+    ) -> Result<&'a str, String> {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("persona catalog `{label}.{key}` must be a non-empty string"))
+    }
+
+    fn optional_string_or_null(
+        object: &Map<String, Value>,
+        key: &str,
+        label: &str,
+    ) -> Result<(), String> {
+        if object
+            .get(key)
+            .is_some_and(|value| !value.is_null() && !value.is_string())
+        {
+            return Err(format!(
+                "persona catalog `{label}.{key}` must be a string or null"
+            ));
+        }
+        Ok(())
+    }
+
+    let source_id = one_tag(event, "d")?;
+    if source_id.is_empty()
+        || source_id.len() > MAX_SOURCE_ID_LEN
+        || source_id.chars().any(char::is_control)
+    {
+        return Err(format!(
+            "persona catalog `d` tag must be 1-{MAX_SOURCE_ID_LEN} non-control characters"
+        ));
+    }
+
+    let status = one_tag(event, "status")?;
+    if status != "published" && status != "unpublished" {
+        return Err("persona catalog `status` must be `published` or `unpublished`".to_string());
+    }
+    let source_updated_at = one_tag(event, "source_updated_at")?;
+    if source_updated_at.is_empty() || source_updated_at.len() > MAX_SOURCE_UPDATED_AT_LEN {
+        return Err(format!(
+            "persona catalog `source_updated_at` must be 1-{MAX_SOURCE_UPDATED_AT_LEN} characters"
+        ));
+    }
+    let memory_tag = optional_one_tag(event, "memory")?;
+
+    let parsed: Value = serde_json::from_str(&event.content)
+        .map_err(|_| "persona catalog content must be valid JSON".to_string())?;
+    let root = object(&parsed, "content")?;
+
+    if root.get("format").and_then(Value::as_str) != Some("buzz-persona-catalog")
+        || root.get("version").and_then(Value::as_u64) != Some(1)
+        || root.get("status").and_then(Value::as_str) != Some(status)
+        || root.get("sourcePersonaId").and_then(Value::as_str) != Some(source_id)
+        || root.get("sourceUpdatedAt").and_then(Value::as_str) != Some(source_updated_at)
+    {
+        return Err("persona catalog content does not match its signed envelope".to_string());
+    }
+
+    if status == "unpublished" {
+        reject_unknown(
+            root,
+            &[
+                "format",
+                "version",
+                "status",
+                "sourcePersonaId",
+                "sourceUpdatedAt",
+            ],
+            "content",
+        )?;
+        if memory_tag.is_some() {
+            return Err(
+                "unpublished persona catalog events must not carry a `memory` tag".to_string(),
+            );
+        }
+        return Ok(());
+    }
+
+    reject_unknown(
+        root,
+        &[
+            "format",
+            "version",
+            "status",
+            "sourcePersonaId",
+            "sourceUpdatedAt",
+            "memoryLevel",
+            "agent",
+            "snapshot",
+        ],
+        "content",
+    )?;
+
+    let memory = memory_tag.ok_or_else(|| {
+        "published persona catalog events must carry exactly one `memory` tag".to_string()
+    })?;
+    if !matches!(memory, "none" | "core" | "everything")
+        || root.get("memoryLevel").and_then(Value::as_str) != Some(memory)
+    {
+        return Err(
+            "persona catalog memory level must be `none`, `core`, or `everything` and match content"
+                .to_string(),
+        );
+    }
+
+    let agent = object(
+        root.get("agent")
+            .ok_or_else(|| "persona catalog content is missing `agent`".to_string())?,
+        "agent",
+    )?;
+    reject_unknown(
+        agent,
+        &[
+            "displayName",
+            "avatarUrl",
+            "systemPrompt",
+            "runtime",
+            "model",
+            "provider",
+        ],
+        "agent",
+    )?;
+    required_string(agent, "displayName", "agent")?;
+    if !agent.get("systemPrompt").is_some_and(Value::is_string) {
+        return Err("persona catalog `agent.systemPrompt` must be a string".to_string());
+    }
+    for key in ["avatarUrl", "runtime", "model", "provider"] {
+        optional_string_or_null(agent, key, "agent")?;
+    }
+
+    let snapshot = object(
+        root.get("snapshot")
+            .ok_or_else(|| "persona catalog content is missing `snapshot`".to_string())?,
+        "snapshot",
+    )?;
+    reject_unknown(
+        snapshot,
+        &["url", "sha256", "size", "type", "fileName"],
+        "snapshot",
+    )?;
+    required_string(snapshot, "url", "snapshot")?;
+    let sha256 = required_string(snapshot, "sha256", "snapshot")?;
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("persona catalog `snapshot.sha256` must be 64 lowercase hex chars".to_string());
+    }
+    snapshot
+        .get("size")
+        .and_then(Value::as_u64)
+        .filter(|size| (1..=MAX_AGENT_SNAPSHOT_JSON_BYTES).contains(size))
+        .ok_or_else(|| {
+            "persona catalog `snapshot.size` must be within the 5 MiB agent JSON limit".to_string()
+        })?;
+    if snapshot.get("type").and_then(Value::as_str) != Some("application/json") {
+        return Err("persona catalog snapshot must use `application/json`".to_string());
+    }
+    let filename = required_string(snapshot, "fileName", "snapshot")?;
+    if !filename.to_ascii_lowercase().ends_with(".agent.json")
+        || filename.contains('/')
+        || filename.contains('\\')
+    {
+        return Err(
+            "persona catalog `snapshot.fileName` must be a plain `.agent.json` filename"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -2025,6 +2276,11 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
     }
 
+    if kind_u32 == KIND_PERSONA_CATALOG {
+        validate_persona_catalog_envelope(&event)
+            .map_err(|e| IngestError::Rejected(format!("invalid: {e}")))?;
+    }
+
     // Track pre-created channel UUID for compensation on insert failure.
     let mut pre_created_channel: Option<Uuid> = None;
 
@@ -2808,6 +3064,7 @@ mod tests {
             KIND_AGENT_ENGRAM,
             KIND_AGENT_PROFILE,
             KIND_PERSONA,
+            KIND_PERSONA_CATALOG,
             KIND_TEAM,
             KIND_MANAGED_AGENT,
             KIND_AGENT_TURN_METRIC,
@@ -2891,6 +3148,17 @@ mod tests {
     fn persona_is_global_only() {
         assert!(is_global_only_kind(KIND_PERSONA));
         assert!(!requires_h_channel_scope(KIND_PERSONA));
+    }
+
+    #[test]
+    fn persona_catalog_is_in_scope_allowlist_and_global_only() {
+        let dummy = make_dummy_event();
+        assert_eq!(
+            required_scope_for_kind(KIND_PERSONA_CATALOG, &dummy).unwrap(),
+            Scope::UsersWrite,
+        );
+        assert!(is_global_only_kind(KIND_PERSONA_CATALOG));
+        assert!(!requires_h_channel_scope(KIND_PERSONA_CATALOG));
     }
 
     #[test]
@@ -3532,6 +3800,89 @@ mod tests {
         let ev = make_persona(&[&["d", "has.dot"]]);
         let err = validate_persona_envelope(&ev).unwrap_err();
         assert!(err.contains("`d` tag"), "got: {err}");
+    }
+
+    fn make_persona_catalog(status: &str, memory: Option<&str>, content: &str) -> Event {
+        let mut tags = vec![
+            vec!["d", "persona-1"],
+            vec!["status", status],
+            vec!["source_updated_at", "2026-07-23T00:00:00Z"],
+        ];
+        if let Some(memory) = memory {
+            tags.push(vec!["memory", memory]);
+        }
+        let tag_refs: Vec<Vec<&str>> = tags;
+        let borrowed: Vec<&[&str]> = tag_refs.iter().map(Vec::as_slice).collect();
+        make_event_with_tags(KIND_PERSONA_CATALOG, content, &borrowed)
+    }
+
+    fn valid_published_catalog_content() -> String {
+        serde_json::json!({
+            "format": "buzz-persona-catalog",
+            "version": 1,
+            "status": "published",
+            "sourcePersonaId": "persona-1",
+            "sourceUpdatedAt": "2026-07-23T00:00:00Z",
+            "memoryLevel": "none",
+            "agent": {
+                "displayName": "Reviewer",
+                "avatarUrl": null,
+                "systemPrompt": "Review changes.",
+                "runtime": "goose",
+                "model": "claude",
+                "provider": null
+            },
+            "snapshot": {
+                "url": "https://relay.example/media/snapshot",
+                "sha256": "a".repeat(64),
+                "size": 512,
+                "type": "application/json",
+                "fileName": "reviewer.agent.json"
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn persona_catalog_accepts_public_allowlist_projection() {
+        let content = valid_published_catalog_content();
+        let event = make_persona_catalog("published", Some("none"), &content);
+        assert!(validate_persona_catalog_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn persona_catalog_rejects_secret_or_allowlist_fields() {
+        let mut content: serde_json::Value =
+            serde_json::from_str(&valid_published_catalog_content()).unwrap();
+        content["agent"]["envVars"] = serde_json::json!({"ANTHROPIC_API_KEY": "secret"});
+        let event = make_persona_catalog("published", Some("none"), &content.to_string());
+        let error = validate_persona_catalog_envelope(&event).unwrap_err();
+        assert!(
+            error.contains("unsupported field `envVars`"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn persona_catalog_accepts_unpublished_replacement() {
+        let content = serde_json::json!({
+            "format": "buzz-persona-catalog",
+            "version": 1,
+            "status": "unpublished",
+            "sourcePersonaId": "persona-1",
+            "sourceUpdatedAt": "2026-07-23T00:00:00Z"
+        })
+        .to_string();
+        let event = make_persona_catalog("unpublished", None, &content);
+        assert!(validate_persona_catalog_envelope(&event).is_ok());
+    }
+
+    #[test]
+    fn persona_catalog_rejects_memory_mismatch() {
+        let content = valid_published_catalog_content();
+        let event = make_persona_catalog("published", Some("everything"), &content);
+        let error = validate_persona_catalog_envelope(&event).unwrap_err();
+        assert!(error.contains("memory level"), "got: {error}");
     }
 
     // ─── agent_turn_metric envelope tests ────────────────────────────────────

@@ -13,6 +13,7 @@ fn member(name: &str) -> AgentSnapshot {
         version: crate::managed_agents::agent_snapshot::FORMAT_VERSION,
         definition: AgentSnapshotDefinition {
             name: name.to_string(),
+            source_is_builtin: false,
             system_prompt: Some(format!("{name} prompt")),
             runtime: Some("goose".to_string()),
             model: None,

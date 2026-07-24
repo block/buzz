@@ -1,6 +1,7 @@
 import * as React from "react";
 import {
   AlertCircle,
+  BookUser,
   Check,
   ChevronRight,
   Download,
@@ -11,6 +12,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { toast } from "sonner";
 
 import { useEncodeAgentSnapshotForSendMutation } from "@/features/agents/hooks";
+import type { CatalogPersonaShareLevel } from "@/features/agents/lib/personaCatalogRelay";
 import {
   useOpenDmMutation,
   useUpsertCachedChannel,
@@ -51,15 +53,20 @@ import { resolveSnapshotAvatarPng } from "./snapshotAvatarPng";
 import { useSnapshotSendController } from "./useSnapshotSendController";
 
 type PersonaShareDialogProps = {
+  catalogShareLevel: CatalogPersonaShareLevel;
+  hasCatalogUpdates: boolean;
   isPending: boolean;
   linkedAgentPubkey: string | null;
+  onCatalogShareLevelChange: (shareLevel: CatalogPersonaShareLevel) => void;
   onExport: () => void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  onPublishCatalogUpdates: () => void;
   persona: AgentPersona;
 };
 
 type SnapshotShareDialogProps = {
+  afterLink?: React.ReactNode;
   displayName: string;
   encodeSnapshot: (
     memoryLevel: SnapshotMemoryLevel,
@@ -108,6 +115,20 @@ type PendingMemoryShare = {
   memoryLevel: Exclude<SnapshotMemoryLevel, "none">;
   recipientNames?: string[];
 };
+
+function buildSnapshotShareLevels(itemLabel: "Agent" | "Team") {
+  return [
+    { value: "none" as const, label: `${itemLabel} only` },
+    {
+      value: "core" as const,
+      label: `${itemLabel} + core memory`,
+    },
+    {
+      value: "everything" as const,
+      label: `${itemLabel} + all memories`,
+    },
+  ];
+}
 
 function formatRecipientAudience(names: readonly string[]): string {
   if (names.length === 0) return "The people you selected";
@@ -231,6 +252,7 @@ function ShareLevelControl({
 }
 
 export function SnapshotShareDialog({
+  afterLink,
   displayName,
   encodeSnapshot,
   hasMemoryOptions,
@@ -298,17 +320,7 @@ export function SnapshotShareDialog({
   const itemLabel = snapshotKind === "team" ? "team" : "agent";
   const itemLabelTitle = snapshotKind === "team" ? "Team" : "Agent";
   const shareLevels = React.useMemo(
-    () => [
-      { value: "none" as const, label: `${itemLabelTitle} only` },
-      {
-        value: "core" as const,
-        label: `${itemLabelTitle} + core memory`,
-      },
-      {
-        value: "everything" as const,
-        label: `${itemLabelTitle} + all memories`,
-      },
-    ],
+    () => buildSnapshotShareLevels(itemLabelTitle),
     [itemLabelTitle],
   );
   const getEncodedSnapshot = React.useCallback(
@@ -611,6 +623,7 @@ export function SnapshotShareDialog({
                   value={linkShareLevel}
                 />
               </div>
+              {afterLink ? <div className="mt-2">{afterLink}</div> : null}
               <Separator
                 className="my-4 bg-input/40"
                 data-testid={`${testIdPrefix}-link-divider`}
@@ -715,14 +728,29 @@ export function SnapshotShareDialog({
 }
 
 export function PersonaShareDialog({
+  catalogShareLevel,
+  hasCatalogUpdates,
   isPending,
   linkedAgentPubkey,
+  onCatalogShareLevelChange,
   onExport,
   onOpenChange,
+  onPublishCatalogUpdates,
   open,
   persona,
 }: PersonaShareDialogProps) {
   const encodeSnapshotMutation = useEncodeAgentSnapshotForSendMutation();
+  const [pendingCatalogMemoryLevel, setPendingCatalogMemoryLevel] =
+    React.useState<Exclude<SnapshotMemoryLevel, "none"> | null>(null);
+  const catalogShareLevels = React.useMemo(
+    () => [
+      { value: "not-shared", label: "Not shared" },
+      ...buildSnapshotShareLevels("Agent").filter(
+        ({ value }) => linkedAgentPubkey || value === "none",
+      ),
+    ],
+    [linkedAgentPubkey],
+  );
   const encodeSnapshot = React.useCallback(
     async (memoryLevel: SnapshotMemoryLevel) =>
       encodeSnapshotMutation.mutateAsync({
@@ -741,17 +769,107 @@ export function PersonaShareDialog({
   );
 
   return (
-    <SnapshotShareDialog
-      displayName={persona.displayName}
-      encodeSnapshot={encodeSnapshot}
-      hasMemoryOptions={linkedAgentPubkey !== null}
-      isPending={isPending}
-      onExport={onExport}
-      onOpenChange={onOpenChange}
-      onReset={encodeSnapshotMutation.reset}
-      open={open}
-      snapshotKind="agent"
-      testIdPrefix="persona-share"
-    />
+    <>
+      <SnapshotShareDialog
+        afterLink={
+          persona.isBuiltIn ? null : (
+            <section
+              className="flex min-h-16 w-full items-center gap-3"
+              data-testid="persona-share-catalog"
+            >
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                <BookUser className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-sm font-medium">Share to catalog</h3>
+                <p className="text-xs text-secondary-foreground/75">
+                  Anyone in this community can find and use a copy. Catalog data
+                  is plaintext; secrets and response allowlists are never
+                  included.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {catalogShareLevel !== "not-shared" && hasCatalogUpdates ? (
+                  <Button
+                    data-testid="persona-share-publish-catalog-updates"
+                    disabled={isPending}
+                    onClick={onPublishCatalogUpdates}
+                    size="sm"
+                    variant="outline"
+                  >
+                    Publish updates
+                  </Button>
+                ) : null}
+                <SnapshotOptionMenu
+                  ariaLabel="What to share in the catalog"
+                  disabled={isPending}
+                  onValueChange={(nextValue) => {
+                    const shareLevel = nextValue as CatalogPersonaShareLevel;
+                    if (shareLevel === "core" || shareLevel === "everything") {
+                      setPendingCatalogMemoryLevel(shareLevel);
+                    } else {
+                      onCatalogShareLevelChange(shareLevel);
+                    }
+                  }}
+                  options={catalogShareLevels}
+                  testId="persona-share-catalog-access"
+                  value={catalogShareLevel}
+                />
+              </div>
+            </section>
+          )
+        }
+        displayName={persona.displayName}
+        encodeSnapshot={encodeSnapshot}
+        hasMemoryOptions={linkedAgentPubkey !== null}
+        isPending={isPending}
+        onExport={onExport}
+        onOpenChange={onOpenChange}
+        onReset={encodeSnapshotMutation.reset}
+        open={open}
+        snapshotKind="agent"
+        testIdPrefix="persona-share"
+      />
+      <AlertDialog
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setPendingCatalogMemoryLevel(null);
+        }}
+        open={pendingCatalogMemoryLevel !== null}
+      >
+        <AlertDialogContent data-testid="persona-catalog-memory-confirmation">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Publish memories to the catalog?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              The selected memory will be stored as plaintext community data.
+              Anyone in this community can read it and keep a copy, even if you
+              stop sharing the agent later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel asChild>
+              <Button type="button" variant="outline">
+                Cancel
+              </Button>
+            </AlertDialogCancel>
+            <AlertDialogAction asChild>
+              <Button
+                data-testid="persona-catalog-memory-confirm"
+                onClick={() => {
+                  if (pendingCatalogMemoryLevel) {
+                    onCatalogShareLevelChange(pendingCatalogMemoryLevel);
+                  }
+                  setPendingCatalogMemoryLevel(null);
+                }}
+                type="button"
+              >
+                Publish
+              </Button>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }

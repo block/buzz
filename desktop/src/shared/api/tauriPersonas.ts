@@ -172,6 +172,10 @@ export async function encodeAgentSnapshotForSend(
 /** Preview returned by `preview_agent_snapshot_import` before any write. */
 export type AgentSnapshotImportPreview = {
   displayName: string;
+  /** Source classification shown in the preview; imports remain custom. */
+  isBuiltIn: boolean;
+  model: string | null;
+  runtime: string | null;
   systemPrompt: string | null;
   /** Effective avatar: data URL if present, source URL fallback otherwise. */
   avatarUrl: string | null;

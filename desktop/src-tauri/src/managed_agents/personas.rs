@@ -254,10 +254,7 @@ pub fn ensure_persona_is_active(
         .ok_or_else(|| format!("agent {persona_id} not found"))?;
 
     if !persona.is_active {
-        return Err(format!(
-            "{} is not in My Agents. Choose it from Agent Catalog first.",
-            persona.display_name
-        ));
+        return Err(format!("{} is not in My Agents.", persona.display_name));
     }
 
     Ok(())

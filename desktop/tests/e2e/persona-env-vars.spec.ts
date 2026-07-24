@@ -267,10 +267,10 @@ test("env vars editor renders in PersonaDialog new-persona form", async ({
 }) => {
   await gotoApp(page);
 
-  // Open the Agents view, click New > New agent to open the persona dialog.
+  // Open the Agents view, then choose Create agent from the new-agent menu.
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
 
   // Scope all env-vars queries to the dialog: AgentDefaultsSettingsCard
   // also renders an EnvVarsEditor in the background settings pane (introduced
@@ -315,7 +315,7 @@ test("persona model options follow the selected LLM provider", async ({
 
   await page.getByTestId("open-agents-view").click();
   await page.getByTestId("new-agent-card").click();
-  await page.getByRole("menuitem", { name: "Create from scratch" }).click();
+  await page.getByRole("menuitem", { name: "Create agent" }).click();
 
   const provider = page.locator("#persona-runtime");
   await page.getByRole("tab", { name: "Customize for this agent" }).click();

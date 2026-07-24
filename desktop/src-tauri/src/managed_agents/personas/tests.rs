@@ -171,10 +171,7 @@ fn ensure_persona_is_active_rejects_inactive_personas() {
 
     let err = ensure_persona_is_active(&[persona], "builtin:fizz").unwrap_err();
 
-    assert_eq!(
-        err,
-        "Fizz is not in My Agents. Choose it from Agent Catalog first."
-    );
+    assert_eq!(err, "Fizz is not in My Agents.");
 }
 
 #[test]

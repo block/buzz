@@ -31,7 +31,11 @@
 //!   - lineage ids: `persona_id`, `team_id`, `source_team`, `source_team_persona_slug`,
 //!     `persona_source_version`
 //!   - internal bookkeeping: `start_on_app_launch`,
-//!     `auto_restart_on_config_change`, `is_builtin`
+//!     `auto_restart_on_config_change`
+//!
+//! The portable `sourceIsBuiltIn` hint preserves how the exported definition
+//! should be described in an import preview. It never grants built-in status
+//! to the newly imported definition.
 //!
 //! These exclusions are enforced by construction (only explicit fields are
 //! placed into `AgentSnapshotDefinition`) and asserted by unit tests.
@@ -87,6 +91,10 @@ pub enum MemoryLevel {
 #[serde(rename_all = "camelCase")]
 pub struct AgentSnapshotDefinition {
     pub name: String,
+    /// Portable source classification for import-preview metadata. Imported
+    /// definitions are still created as custom agents with fresh identities.
+    #[serde(default)]
+    pub source_is_builtin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +199,7 @@ pub fn build_snapshot(
             .display_name
             .clone()
             .unwrap_or_else(|| record.name.clone()),
+        source_is_builtin: record.is_builtin,
         system_prompt: record.system_prompt.clone(),
         runtime: record.runtime.clone(),
         model: record.model.clone(),
@@ -913,6 +922,7 @@ mod tests {
         let snapshot = build_snapshot(&record, MemoryLevel::None, vec![], None);
 
         assert_eq!(snapshot.definition.name, "Test Agent Display");
+        assert!(!snapshot.definition.source_is_builtin);
         assert_eq!(
             snapshot.definition.system_prompt.as_deref(),
             Some("You are a test agent.")

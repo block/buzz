@@ -13,7 +13,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::{
     app_state::AppState,
     managed_agents::{
-        agent_snapshot::{decode_snapshot_json, decode_snapshot_png, MemoryLevel},
+        agent_snapshot::{decode_snapshot_json, decode_snapshot_png, AgentSnapshot, MemoryLevel},
         load_managed_agents, load_personas, save_managed_agents, save_personas, AgentDefinition,
         ManagedAgentRecord, RespondTo,
     },
@@ -50,6 +50,13 @@ pub(super) fn reject_legacy_persona_filename(file_name: &str) -> Result<(), Stri
 pub struct AgentSnapshotImportPreview {
     /// Agent display name from the snapshot.
     pub display_name: String,
+    /// Whether the exported source definition was built in. This is display
+    /// metadata only; confirmed imports are always independent custom agents.
+    pub is_builtin: bool,
+    /// Preferred model from the exported definition.
+    pub model: Option<String>,
+    /// Preferred runtime from the exported definition.
+    pub runtime: Option<String>,
     /// System prompt, if any.
     pub system_prompt: Option<String>,
     /// Effective avatar: data URL if present, otherwise the source URL fallback.
@@ -262,30 +269,39 @@ pub async fn preview_agent_snapshot_import(
         reject_legacy_persona_filename(&file_name)?;
         let snapshot = decode_snapshot_from_bytes(&file_bytes)?;
 
-        let memory_level = match snapshot.memory.level {
-            MemoryLevel::None => "none",
-            MemoryLevel::Core => "core",
-            MemoryLevel::Everything => "everything",
-        }
-        .to_string();
-
-        Ok(AgentSnapshotImportPreview {
-            display_name: snapshot.profile.display_name.clone(),
-            system_prompt: snapshot.definition.system_prompt.clone(),
-            // Effective avatar: data URL wins; URL fallback if no data URL.
-            avatar_url: snapshot
-                .profile
-                .avatar_data_url
-                .clone()
-                .or_else(|| snapshot.profile.avatar_url.clone()),
-            memory_level,
-            memory_entry_count: snapshot.memory.entries.len(),
-            source_allowlist_count: snapshot.definition.respond_to_allowlist.len(),
-            has_source_allowlist: !snapshot.definition.respond_to_allowlist.is_empty(),
-        })
+        Ok(build_agent_snapshot_import_preview(&snapshot))
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+pub(crate) fn build_agent_snapshot_import_preview(
+    snapshot: &AgentSnapshot,
+) -> AgentSnapshotImportPreview {
+    let memory_level = match snapshot.memory.level {
+        MemoryLevel::None => "none",
+        MemoryLevel::Core => "core",
+        MemoryLevel::Everything => "everything",
+    }
+    .to_string();
+
+    AgentSnapshotImportPreview {
+        display_name: snapshot.profile.display_name.clone(),
+        is_builtin: snapshot.definition.source_is_builtin,
+        model: snapshot.definition.model.clone(),
+        runtime: snapshot.definition.runtime.clone(),
+        system_prompt: snapshot.definition.system_prompt.clone(),
+        // Effective avatar: data URL wins; URL fallback if no data URL.
+        avatar_url: snapshot
+            .profile
+            .avatar_data_url
+            .clone()
+            .or_else(|| snapshot.profile.avatar_url.clone()),
+        memory_level,
+        memory_entry_count: snapshot.memory.entries.len(),
+        source_allowlist_count: snapshot.definition.respond_to_allowlist.len(),
+        has_source_allowlist: !snapshot.definition.respond_to_allowlist.is_empty(),
+    }
 }
 
 // ── `confirm_agent_snapshot_import` ──────────────────────────────────────────

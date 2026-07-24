@@ -11,6 +11,7 @@ import {
   SheetTitle,
 } from "@/shared/ui/sheet";
 
+import { AgentDefinitionMetadata } from "./AgentDefinitionMetadata";
 import { PersonaCatalogSelectionBadge } from "./PersonaCatalogSelectionBadge";
 import {
   getPersonaCatalogDetailSelectionCopy,
@@ -121,30 +122,11 @@ export function PersonaCatalogDetailsSheet({
                 </p>
               ) : null}
 
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-border/70 bg-card/70 p-4">
-                  <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Type
-                  </p>
-                  <p className="mt-2 text-sm font-medium">Built-in agent</p>
-                </div>
-                <div className="rounded-xl border border-border/70 bg-card/70 p-4">
-                  <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Preferred model
-                  </p>
-                  <p className="mt-2 text-sm font-medium">
-                    {persona.model ?? "Use app default"}
-                  </p>
-                </div>
-                <div className="rounded-xl border border-border/70 bg-card/70 p-4 sm:col-span-2">
-                  <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
-                    Preferred runtime
-                  </p>
-                  <p className="mt-2 text-sm font-medium">
-                    {persona.runtime ?? "Use app default"}
-                  </p>
-                </div>
-              </div>
+              <AgentDefinitionMetadata
+                isBuiltIn={persona.isBuiltIn}
+                model={persona.model}
+                runtime={persona.runtime}
+              />
 
               <div className="rounded-xl border border-border/70 bg-card/70 p-4">
                 <p className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
