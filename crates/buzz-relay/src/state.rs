@@ -605,6 +605,13 @@ pub struct AppState {
     /// Prevents repeated DB lookups from bursty observer traffic.
     #[allow(clippy::type_complexity)]
     pub observer_owner_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>, Vec<u8>), bool>>,
+    /// Cache for registered-agent authorization on requester-addressed
+    /// observer telemetry. Key: (community_id, agent_pubkey_bytes).
+    ///
+    /// Telemetry recipients are intentionally not part of this decision: a
+    /// registered agent may encrypt its own turn activity to the requester,
+    /// while control authorization continues to use `observer_owner_cache`.
+    pub observer_agent_cache: Arc<moka::sync::Cache<(CommunityId, Vec<u8>), bool>>,
     /// Cache for the `author_type` metric label on the ingest path.
     /// Key: (community_id, author pubkey bytes). Value: is_agent
     /// (`users.agent_owner_pubkey IS NOT NULL`). The mapping is
@@ -780,6 +787,12 @@ impl AppState {
             ),
             media_uploads_in_flight: Arc::new(DashMap::new()),
             observer_owner_cache: Arc::new(
+                moka::sync::Cache::builder()
+                    .max_capacity(1_000)
+                    .time_to_live(std::time::Duration::from_secs(300))
+                    .build(),
+            ),
+            observer_agent_cache: Arc::new(
                 moka::sync::Cache::builder()
                     .max_capacity(1_000)
                     .time_to_live(std::time::Duration::from_secs(300))

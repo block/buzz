@@ -239,9 +239,10 @@ pub fn build_message(
 
 /// Build an encrypted agent observer frame (kind 24200).
 ///
-/// `recipient_pubkey` is the cleartext `p` tag used by the relay for owner-only
-/// routing. `agent_pubkey` identifies the managed agent whose observer stream
-/// this frame belongs to. `encrypted_content` must be NIP-44 v2 ciphertext.
+/// `recipient_pubkey` is the cleartext `p` tag used by the relay for encrypted
+/// recipient routing. `agent_pubkey` identifies the managed agent whose
+/// observer stream this frame belongs to. `encrypted_content` must be NIP-44
+/// v2 ciphertext.
 pub fn build_agent_observer_frame(
     recipient_pubkey: &str,
     agent_pubkey: &str,

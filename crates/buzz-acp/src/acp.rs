@@ -510,6 +510,12 @@ impl AcpClient {
         self.observer_context = context;
     }
 
+    /// Return the current observer routing context for terminal events emitted
+    /// after this client moves back to the harness loop.
+    pub(crate) fn observer_context(&self) -> &ObserverContext {
+        &self.observer_context
+    }
+
     /// Return a clone of the observer handle, if attached.
     pub(crate) fn observer_handle(&self) -> Option<ObserverHandle> {
         self.observer.clone()

@@ -115,6 +115,8 @@ const agentManagementListeners = new Set<
 // recompute the union, so co-mounted callers no longer clobber each other.
 const knownAgentPubkeys = new Set<string>();
 const knownAgentsBySubscription = new Map<string, Set<string>>();
+const ownerFrameAgentPubkeys = new Set<string>();
+const ownerFrameAgentsBySubscription = new Map<string, Set<string>>();
 const pendingUnknownAgentFrames: RelayEvent[] = [];
 
 // Callback invoked when session_config_captured is received, so React Query
@@ -130,9 +132,15 @@ export function setSessionConfigCapturedCallback(
 
 function recomputeKnownAgentPubkeys() {
   knownAgentPubkeys.clear();
+  ownerFrameAgentPubkeys.clear();
   for (const subscriptionAgents of knownAgentsBySubscription.values()) {
     for (const pubkey of subscriptionAgents) {
       knownAgentPubkeys.add(pubkey);
+    }
+  }
+  for (const subscriptionAgents of ownerFrameAgentsBySubscription.values()) {
+    for (const pubkey of subscriptionAgents) {
+      ownerFrameAgentPubkeys.add(pubkey);
     }
   }
 }
@@ -140,10 +148,15 @@ function recomputeKnownAgentPubkeys() {
 function registerKnownAgents(
   subscriptionId: string,
   pubkeys: readonly string[],
+  ownerFramePubkeys: readonly string[],
 ) {
   knownAgentsBySubscription.set(
     subscriptionId,
     new Set(pubkeys.map((pubkey) => normalizePubkey(pubkey))),
+  );
+  ownerFrameAgentsBySubscription.set(
+    subscriptionId,
+    new Set(ownerFramePubkeys.map((pubkey) => normalizePubkey(pubkey))),
   );
   recomputeKnownAgentPubkeys();
   if (knownAgentPubkeys.size > 0 && pendingUnknownAgentFrames.length > 0) {
@@ -157,7 +170,10 @@ function registerKnownAgents(
 }
 
 function unregisterKnownAgents(subscriptionId: string) {
-  if (knownAgentsBySubscription.delete(subscriptionId)) {
+  const removedKnown = knownAgentsBySubscription.delete(subscriptionId);
+  const removedOwnerFrames =
+    ownerFrameAgentsBySubscription.delete(subscriptionId);
+  if (removedKnown || removedOwnerFrames) {
     recomputeKnownAgentPubkeys();
   }
 }
@@ -177,6 +193,15 @@ function notifyListeners() {
 
 function invalidateSnapshot(key: string) {
   snapshotByAgent.delete(key);
+}
+
+function isOwnerOnlyObserverFrame(parsed: ObserverEvent): boolean {
+  return (
+    parsed.kind === "session_config_captured" ||
+    parsed.kind === "control_result" ||
+    parsed.kind === "managed_agent_runtime_lifecycle" ||
+    parseAgentManagementRequest(parsed.payload) !== null
+  );
 }
 
 function setConnectionState(
@@ -372,6 +397,14 @@ async function handleRelayObserverEvent(
     if (activeGeneration !== generation) {
       return;
     }
+    const normalizedAgentPubkey = normalizePubkey(agentPubkey);
+    const managementRequest = parseAgentManagementRequest(parsed.payload);
+    if (
+      isOwnerOnlyObserverFrame(parsed) &&
+      !ownerFrameAgentPubkeys.has(normalizedAgentPubkey)
+    ) {
+      return;
+    }
     // Track the latest-live-session-id per (agent, channel) on the live path.
     // Only set when the parsed event carries both a sessionId and channelId,
     // so we never attribute a session to the wrong channel.
@@ -392,7 +425,6 @@ async function handleRelayObserverEvent(
       }
     }
     appendAgentEvent(agentPubkey, parsed);
-    const managementRequest = parseAgentManagementRequest(parsed.payload);
     if (managementRequest) {
       for (const listener of agentManagementListeners) {
         listener(agentPubkey, managementRequest);
@@ -598,6 +630,7 @@ export function shouldObserveManagedAgents(
 
 export function useManagedAgentObserverBridge(
   agents: readonly Pick<ManagedAgent, "pubkey" | "status">[],
+  ownerFramePubkeys: readonly string[],
 ) {
   const subscriptionId = React.useId();
   const hasManagedAgent = shouldObserveManagedAgents(agents);
@@ -606,16 +639,25 @@ export function useManagedAgentObserverBridge(
     () => agents.map((agent) => agent.pubkey),
     [agents],
   );
+  const normalizedOwnerFramePubkeys = React.useMemo(
+    () => ownerFramePubkeys.map((pubkey) => normalizePubkey(pubkey)),
+    [ownerFramePubkeys],
+  );
 
   // Keep this subscriber's slice of the trusted-pubkey set in sync with its
-  // own agent list. The store recomputes the union across all subscribers, so
-  // a co-mounted caller no longer wipes out this caller's agents.
+  // own agent list and owner-authorized subset. The store recomputes the union
+  // across all subscribers, so a co-mounted caller no longer wipes out this
+  // caller's agents or widens owner-only side effects.
   React.useEffect(() => {
-    registerKnownAgents(subscriptionId, agentPubkeys);
+    registerKnownAgents(
+      subscriptionId,
+      agentPubkeys,
+      normalizedOwnerFramePubkeys,
+    );
     return () => {
       unregisterKnownAgents(subscriptionId);
     };
-  }, [subscriptionId, agentPubkeys]);
+  }, [subscriptionId, agentPubkeys, normalizedOwnerFramePubkeys]);
 
   React.useEffect(() => {
     if (!hasManagedAgent) {
@@ -676,6 +718,12 @@ export async function ingestArchivedObserverEvents(
     }
     try {
       const parsed = (await _decryptFn(event)) as ObserverEvent;
+      if (
+        isOwnerOnlyObserverFrame(parsed) &&
+        !ownerFrameAgentPubkeys.has(normalizePubkey(agentPubkey))
+      ) {
+        continue;
+      }
       // Route archived events to the channel-scoped archive window (no cap)
       // rather than the per-agent live-relay store (MAX_OBSERVER_EVENTS cap).
       // Events without a channelId fall through to the live store so they
@@ -747,6 +795,8 @@ export function resetAgentObserverStore() {
   archiveEventsByChannel.clear();
   knownAgentPubkeys.clear();
   knownAgentsBySubscription.clear();
+  ownerFrameAgentPubkeys.clear();
+  ownerFrameAgentsBySubscription.clear();
   pendingUnknownAgentFrames.length = 0;
   latestLiveSessionByAgentChannel.clear();
   agentManagementListeners.clear();
@@ -765,8 +815,9 @@ export function resetAgentObserverStore() {
 export function _testRegisterKnownAgents(
   subscriptionId: string,
   pubkeys: readonly string[],
+  ownerFramePubkeys: readonly string[] = pubkeys,
 ): void {
-  registerKnownAgents(subscriptionId, pubkeys);
+  registerKnownAgents(subscriptionId, pubkeys, ownerFramePubkeys);
 }
 
 /**

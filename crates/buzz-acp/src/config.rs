@@ -111,6 +111,26 @@ impl std::fmt::Display for RespondTo {
     }
 }
 
+/// Who receives encrypted relay observer telemetry.
+///
+/// The registered owner always receives every frame. `Requester` additionally
+/// sends turn-scoped activity to the authors whose events triggered that turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+pub enum ObserverVisibility {
+    #[default]
+    OwnerOnly,
+    Requester,
+}
+
+impl std::fmt::Display for ObserverVisibility {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OwnerOnly => f.write_str("owner-only"),
+            Self::Requester => f.write_str("requester"),
+        }
+    }
+}
+
 /// Permission mode for agents that support `session/set_config_option` with
 /// `configId: "mode"` (e.g. `claude-agent-acp`).
 ///
@@ -468,6 +488,15 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_RELAY_OBSERVER", default_value_t = false)]
     pub relay_observer: bool,
 
+    /// Observer visibility policy. The owner always receives every frame;
+    /// `requester` additionally sends turn activity to triggering authors.
+    #[arg(
+        long,
+        env = "BUZZ_ACP_OBSERVER_VISIBILITY",
+        default_value_t = ObserverVisibility::OwnerOnly
+    )]
+    pub observer_visibility: ObserverVisibility,
+
     /// Connect and subscribe before starting the ACP/LLM subprocess pool.
     #[arg(long, env = "BUZZ_ACP_LAZY_POOL", default_value_t = false)]
     pub lazy_pool: bool,
@@ -541,6 +570,8 @@ pub struct Config {
     pub has_generated_codex_config: bool,
     /// Whether to publish encrypted observer frames through the relay.
     pub relay_observer: bool,
+    /// Who receives encrypted turn-scoped observer telemetry.
+    pub observer_visibility: ObserverVisibility,
     /// Whether ACP/LLM subprocess initialization is deferred until accepted work arrives.
     pub lazy_pool: bool,
     /// Agent owner pubkey (hex). Used for `--respond-to=owner-only` gate.
@@ -999,6 +1030,7 @@ impl Config {
             persona_env_vars,
             has_generated_codex_config,
             relay_observer: args.relay_observer,
+            observer_visibility: args.observer_visibility,
             lazy_pool: args.lazy_pool,
             agent_owner: args.agent_owner.map(|s| s.trim().to_ascii_lowercase()),
             no_base_prompt: args.no_base_prompt,
@@ -1024,7 +1056,7 @@ impl Config {
             format!(" allowed_respond_to=[{}]", modes.join(","))
         };
         format!(
-            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} {}{}",
+            "relay={} pubkey={} agent_cmd={} {} mcp_cmd={} idle_timeout={}s max_turn={}s agents={} heartbeat={}s subscribe={:?} dedup={:?} meh={:?} ignore_self={} context_limit={} max_turns_per_session={} presence={} typing={} memory={} model={} permission_mode={} observer_visibility={} {}{}",
             self.relay_url,
             self.keys.public_key().to_hex(),
             self.agent_command,
@@ -1045,6 +1077,7 @@ impl Config {
             self.memory_enabled,
             self.model.as_deref().unwrap_or("(agent default)"),
             self.permission_mode,
+            self.observer_visibility,
             respond_to_detail,
             allowed_respond_to_detail,
         )
@@ -1368,6 +1401,7 @@ mod tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            observer_visibility: ObserverVisibility::OwnerOnly,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -2046,6 +2080,26 @@ channels = "ALL"
         let args = CliArgs::try_parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool=true"]);
         assert!(args.is_err(), "bool flags do not take an explicit value");
         assert!(CliArgs::parse_from(["buzz-acp", "--private-key", &key, "--lazy-pool"]).lazy_pool);
+    }
+
+    #[test]
+    fn observer_visibility_defaults_to_owner_only() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from(["buzz-acp", "--private-key", &key]);
+        assert_eq!(args.observer_visibility, ObserverVisibility::OwnerOnly);
+    }
+
+    #[test]
+    fn observer_visibility_accepts_requester() {
+        let key = "0".repeat(64);
+        let args = CliArgs::parse_from([
+            "buzz-acp",
+            "--private-key",
+            &key,
+            "--observer-visibility",
+            "requester",
+        ]);
+        assert_eq!(args.observer_visibility, ObserverVisibility::Requester);
     }
 
     #[test]

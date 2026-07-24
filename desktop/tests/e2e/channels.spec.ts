@@ -22,6 +22,7 @@ const MOCK_IDENTITY_PUBKEY = "deadbeef".repeat(8);
 // view-activity gate (memberIsBot && viewerIsOwner) opens for it.
 const OWNED_RELAY_AGENT_PUBKEY =
   "a1b2c3d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff00";
+const FOREIGN_AGENT_OWNER_PUBKEY = "feedface".repeat(8);
 const DM_RELAY_AGENT_PUBKEY =
   "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
@@ -2012,6 +2013,123 @@ test("profile renders live activity for a viewer-owned relay agent", async ({
   await expect(
     page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
   ).not.toBeVisible();
+});
+
+test("requester can view a foreign relay agent's active turn without owner controls", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    relayAgents: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        name: "nadia",
+        agentType: "goose",
+        channelNames: ["agents"],
+        respondTo: "anyone",
+      },
+    ],
+    searchProfiles: [
+      {
+        pubkey: OWNED_RELAY_AGENT_PUBKEY,
+        displayName: "nadia",
+        ownerPubkey: FOREIGN_AGENT_OWNER_PUBKEY,
+        isAgent: true,
+      },
+    ],
+  });
+  await page.goto("/");
+
+  await openMembersSidebar(page, "agents");
+  await page
+    .getByTestId(`sidebar-member-open-profile-${OWNED_RELAY_AGENT_PUBKEY}`)
+    .click();
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+
+  await waitForMockLiveSubscription(page, "agents", KIND_TYPING_INDICATOR);
+  await page.evaluate((pubkey) => {
+    window.__BUZZ_E2E_EMIT_MOCK_TYPING__?.({
+      channelName: "agents",
+      pubkey,
+    });
+  }, OWNED_RELAY_AGENT_PUBKEY);
+  await expect(
+    page.getByTestId(`user-profile-view-activity-${OWNED_RELAY_AGENT_PUBKEY}`),
+  ).toHaveCount(0);
+
+  await page.waitForFunction(
+    () =>
+      typeof (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__ ===
+        "function" &&
+      typeof (
+        window as MockFeedWindow & {
+          __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: unknown;
+        }
+      ).__BUZZ_E2E_SEED_OBSERVER_EVENTS__ === "function",
+  );
+  await page.evaluate(
+    ({ agentPubkey, channelId }) => {
+      (window as MockFeedWindow).__BUZZ_E2E_SEED_ACTIVE_TURNS__?.({
+        agentPubkey,
+        channelId,
+        turnId: "requester-visible-turn",
+      });
+      (
+        window as MockFeedWindow & {
+          __BUZZ_E2E_SEED_OBSERVER_EVENTS__?: (input: {
+            agentPubkey: string;
+            events: unknown[];
+          }) => void;
+        }
+      ).__BUZZ_E2E_SEED_OBSERVER_EVENTS__?.({
+        agentPubkey,
+        events: [
+          {
+            seq: 1,
+            timestamp: new Date().toISOString(),
+            kind: "acp_read",
+            agentIndex: 0,
+            channelId,
+            sessionId: "requester-session",
+            turnId: "requester-visible-turn",
+            payload: {
+              method: "session/update",
+              params: {
+                sessionId: "requester-session",
+                update: {
+                  sessionUpdate: "agent_message_chunk",
+                  messageId: "requester-progress",
+                  content: {
+                    type: "text",
+                    text: "Checking the shared relay configuration now.",
+                  },
+                },
+              },
+            },
+          },
+        ],
+      });
+    },
+    {
+      agentPubkey: OWNED_RELAY_AGENT_PUBKEY,
+      channelId: AGENTS_CHANNEL_ID,
+    },
+  );
+
+  const liveActivity = page.getByTestId(
+    `user-profile-live-activity-${OWNED_RELAY_AGENT_PUBKEY}`,
+  );
+  await expect(liveActivity).toBeVisible();
+  await liveActivity.getByRole("button").first().click();
+
+  const activityPanel = page.getByTestId("agent-session-thread-panel");
+  await expect(activityPanel).toBeVisible();
+  await expect(activityPanel).toContainText(
+    "Checking the shared relay configuration now.",
+  );
+  await page.getByTestId("agent-session-settings-menu-trigger").click();
+  await expect(page.getByTestId("agent-session-stop-turn")).toBeDisabled();
 });
 
 test("profile activity carousel switches channels via progress dots", async ({

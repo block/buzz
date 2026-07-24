@@ -882,7 +882,7 @@ enum AgentObserverDirection {
 #[derive(Debug, Clone, Copy)]
 struct AgentObserverRoute {
     agent: PublicKey,
-    owner: PublicKey,
+    recipient: PublicKey,
     direction: AgentObserverDirection,
 }
 
@@ -915,8 +915,10 @@ fn observer_frame_rate_limited(
 /// Handle encrypted agent observer frames (kind 24200).
 ///
 /// These frames bypass storage and are routed as global ephemeral events. The
-/// relay gates publication by the existing `agent_owner_pubkey` mapping and
-/// gates subscription in the REQ handler via the cleartext `p` tag.
+/// relay requires telemetry authors to be registered NIP-OA agents and
+/// requires control authors to be the registered owner. Subscription remains
+/// gated by the cleartext `p` tag, so only the encrypted recipient receives
+/// each frame.
 async fn handle_agent_observer_event(
     event: Event,
     conn_id: uuid::Uuid,
@@ -972,60 +974,101 @@ async fn handle_agent_observer_event(
         }
     };
 
-    // Fast path: if this connection authenticated via NIP-OA and the verified
-    // owner matches the observer frame's target owner, skip the DB lookup entirely.
-    let session_owner_match = {
-        let auth = conn.auth_state.read().await;
-        if let crate::connection::AuthState::Authenticated(ctx) = &*auth {
-            ctx.agent_owner_pubkey.as_ref() == Some(&route.owner)
-        } else {
-            false
-        }
-    };
-
     let agent_bytes = route.agent.to_bytes().to_vec();
-    let owner_bytes = route.owner.to_bytes().to_vec();
-    let cache_key = (
-        conn.tenant.community(),
-        agent_bytes.clone(),
-        owner_bytes.clone(),
-    );
-    let is_owner = if session_owner_match {
-        true
-    } else {
-        match state.observer_owner_cache.get(&cache_key) {
-            Some(cached) => cached,
-            None => {
-                let result = state
-                    .db
-                    .is_agent_owner(conn.tenant.community(), &agent_bytes, &owner_bytes)
-                    .await;
-                match result {
-                    Ok(v) => {
-                        state.observer_owner_cache.insert(cache_key, v);
-                        v
-                    }
-                    Err(e) => {
-                        warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer owner check failed: {e}");
-                        conn.send(RelayMessage::ok(
-                            event_id_hex,
-                            false,
-                            "error: internal server error",
-                        ));
-                        return;
+    match route.direction {
+        AgentObserverDirection::Telemetry => {
+            // NIP-OA authentication already proves this event author is a
+            // registered agent. On cache misses (including direct membership
+            // auth), confirm the immutable agent-owner mapping in the DB.
+            let session_agent_match = {
+                let auth = conn.auth_state.read().await;
+                matches!(
+                    &*auth,
+                    crate::connection::AuthState::Authenticated(ctx)
+                        if ctx.pubkey == route.agent && ctx.agent_owner_pubkey.is_some()
+                )
+            };
+            let cache_key = (conn.tenant.community(), agent_bytes.clone());
+            let is_registered_agent = if session_agent_match {
+                true
+            } else {
+                match state.observer_agent_cache.get(&cache_key) {
+                    Some(cached) => cached,
+                    None => {
+                        let result = state
+                            .db
+                            .get_agent_channel_policy(conn.tenant.community(), &agent_bytes)
+                            .await;
+                        match result {
+                            Ok(policy) => {
+                                let registered = policy.is_some_and(|(_, owner)| owner.is_some());
+                                state.observer_agent_cache.insert(cache_key, registered);
+                                registered
+                            }
+                            Err(e) => {
+                                warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer registration check failed: {e}");
+                                conn.send(RelayMessage::ok(
+                                    event_id_hex,
+                                    false,
+                                    "error: internal server error",
+                                ));
+                                return;
+                            }
+                        }
                     }
                 }
+            };
+            if !is_registered_agent {
+                reject("auth");
+                conn.send(RelayMessage::ok(
+                    event_id_hex,
+                    false,
+                    "restricted: observer telemetry author is not a registered agent",
+                ));
+                return;
             }
         }
-    };
-    if !is_owner {
-        reject("auth");
-        conn.send(RelayMessage::ok(
-            event_id_hex,
-            false,
-            "restricted: observer frame is not authorized for this agent owner",
-        ));
-        return;
+        AgentObserverDirection::Control => {
+            let owner_bytes = event.pubkey.to_bytes().to_vec();
+            let cache_key = (
+                conn.tenant.community(),
+                agent_bytes.clone(),
+                owner_bytes.clone(),
+            );
+            let is_owner = match state.observer_owner_cache.get(&cache_key) {
+                Some(cached) => cached,
+                None => {
+                    let result = state
+                        .db
+                        .is_agent_owner(conn.tenant.community(), &agent_bytes, &owner_bytes)
+                        .await;
+                    match result {
+                        Ok(v) => {
+                            state.observer_owner_cache.insert(cache_key, v);
+                            v
+                        }
+                        Err(e) => {
+                            warn!(conn_id = %conn_id, event_id = %event_id_hex, "agent observer owner check failed: {e}");
+                            conn.send(RelayMessage::ok(
+                                event_id_hex,
+                                false,
+                                "error: internal server error",
+                            ));
+                            return;
+                        }
+                    }
+                }
+            };
+            if !is_owner {
+                reject("auth");
+                conn.send(RelayMessage::ok(
+                    event_id_hex,
+                    false,
+                    "restricted: observer control is not authorized for this agent owner",
+                ));
+                return;
+            }
+        }
     }
 
     // Rate limit telemetry frames only (100/sec per agent).
@@ -1059,7 +1102,7 @@ async fn handle_agent_observer_event(
     debug!(
         event_id = %event_id_hex,
         agent = %route.agent.to_hex(),
-        owner = %route.owner.to_hex(),
+        recipient = %route.recipient.to_hex(),
         direction = ?route.direction,
         "Agent observer fan-out"
     );
@@ -1077,21 +1120,13 @@ fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, Str
     let agent = parse_single_pubkey_tag(event, OBSERVER_AGENT_TAG)?;
     let frame = single_tag_content(event, OBSERVER_FRAME_TAG)?;
 
-    let (owner, direction, expected_frame) = if event.pubkey == agent && recipient != agent {
-        (
-            recipient,
-            AgentObserverDirection::Telemetry,
-            OBSERVER_FRAME_TELEMETRY,
-        )
+    let (direction, expected_frame) = if event.pubkey == agent && recipient != agent {
+        (AgentObserverDirection::Telemetry, OBSERVER_FRAME_TELEMETRY)
     } else if recipient == agent && event.pubkey != agent {
-        (
-            event.pubkey,
-            AgentObserverDirection::Control,
-            OBSERVER_FRAME_CONTROL,
-        )
+        (AgentObserverDirection::Control, OBSERVER_FRAME_CONTROL)
     } else {
         return Err(
-            "invalid: observer frame must be agent-to-owner telemetry or owner-to-agent control"
+            "invalid: observer frame must be agent-to-recipient telemetry or owner-to-agent control"
                 .into(),
         );
     };
@@ -1103,7 +1138,7 @@ fn agent_observer_route(event: &Event) -> Result<Option<AgentObserverRoute>, Str
 
     Ok(Some(AgentObserverRoute {
         agent,
-        owner,
+        recipient,
         direction,
     }))
 }
@@ -1216,18 +1251,18 @@ mod tests {
     }
 
     #[test]
-    fn agent_observer_route_accepts_agent_to_owner_telemetry() {
+    fn agent_observer_route_accepts_agent_to_recipient_telemetry() {
         let agent = Keys::generate();
-        let owner = Keys::generate();
+        let recipient = Keys::generate();
         let encrypted = encrypt_observer_payload(
             &agent,
-            &owner.public_key(),
+            &recipient.public_key(),
             &serde_json::json!({"type": "acp_read"}),
         )
         .expect("encrypt observer payload");
         let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
             .tags([
-                Tag::parse(["p", &owner.public_key().to_hex()]).expect("p tag"),
+                Tag::parse(["p", &recipient.public_key().to_hex()]).expect("p tag"),
                 Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
                 Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
             ])
@@ -1238,7 +1273,7 @@ mod tests {
             .expect("observer route")
             .expect("route should be Some");
         assert_eq!(route.agent, agent.public_key());
-        assert_eq!(route.owner, owner.public_key());
+        assert_eq!(route.recipient, recipient.public_key());
         assert_eq!(route.direction, super::AgentObserverDirection::Telemetry);
     }
 
@@ -1265,7 +1300,7 @@ mod tests {
             .expect("observer route")
             .expect("route should be Some");
         assert_eq!(route.agent, agent.public_key());
-        assert_eq!(route.owner, owner.public_key());
+        assert_eq!(route.recipient, agent.public_key());
         assert_eq!(route.direction, super::AgentObserverDirection::Control);
     }
 
@@ -1287,6 +1322,138 @@ mod tests {
 
         let err = super::agent_observer_route(&event).expect_err("route should reject plaintext");
         assert!(err.contains("NIP-44"));
+    }
+
+    fn observer_test_connection(
+        community: buzz_core::CommunityId,
+        pubkey: nostr::PublicKey,
+        agent_owner_pubkey: Option<nostr::PublicKey>,
+    ) -> (
+        Arc<crate::connection::ConnectionState>,
+        mpsc::Receiver<axum::extract::ws::Message>,
+    ) {
+        let (send_tx, send_rx) = mpsc::channel(4);
+        let (ctrl_tx, _ctrl_rx) = mpsc::channel(1);
+        let conn = Arc::new(crate::connection::ConnectionState {
+            conn_id: Uuid::new_v4(),
+            tenant: buzz_core::TenantContext::resolved(community, "observer.example"),
+            remote_addr: "127.0.0.1:1234".parse().expect("socket addr"),
+            auth_state: RwLock::new(crate::connection::AuthState::Authenticated(
+                buzz_auth::AuthContext {
+                    pubkey,
+                    scopes: vec![],
+                    channel_ids: None,
+                    auth_method: buzz_auth::AuthMethod::Nip42,
+                    agent_owner_pubkey,
+                },
+            )),
+            subscriptions: Arc::new(Mutex::new(HashMap::new())),
+            send_tx,
+            ctrl_tx,
+            cancel: CancellationToken::new(),
+            backpressure_count: Arc::new(AtomicU8::new(0)),
+            grace_limit: 3,
+        });
+        (conn, send_rx)
+    }
+
+    #[tokio::test]
+    async fn registered_agent_telemetry_can_target_a_non_owner_recipient() {
+        let state = fanout_access::test_state().await;
+        let agent = Keys::generate();
+        let owner = Keys::generate();
+        let requester = Keys::generate();
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        state
+            .observer_agent_cache
+            .insert((community, agent.public_key().to_bytes().to_vec()), true);
+        let encrypted = encrypt_observer_payload(
+            &agent,
+            &requester.public_key(),
+            &serde_json::json!({"type": "turn_started"}),
+        )
+        .expect("encrypt observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &requester.public_key().to_hex()]).expect("p tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_TELEMETRY]).expect("frame tag"),
+            ])
+            .sign_with_keys(&agent)
+            .expect("sign event");
+        let (conn, mut send_rx) =
+            observer_test_connection(community, agent.public_key(), Some(owner.public_key()));
+
+        super::handle_agent_observer_event(
+            event.clone(),
+            conn.conn_id,
+            &event.id.to_hex(),
+            conn,
+            state,
+        )
+        .await;
+
+        let axum::extract::ws::Message::Text(text) =
+            send_rx.try_recv().expect("observer acceptance sent")
+        else {
+            panic!("expected text relay message");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("relay frame JSON");
+        assert_eq!(frame[0], "OK");
+        assert_eq!(frame[2], true);
+    }
+
+    #[tokio::test]
+    async fn non_owner_control_stays_rejected() {
+        let state = fanout_access::test_state().await;
+        let agent = Keys::generate();
+        let attacker = Keys::generate();
+        let community = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
+        state.observer_owner_cache.insert(
+            (
+                community,
+                agent.public_key().to_bytes().to_vec(),
+                attacker.public_key().to_bytes().to_vec(),
+            ),
+            false,
+        );
+        let encrypted = encrypt_observer_payload(
+            &attacker,
+            &agent.public_key(),
+            &serde_json::json!({"type": "cancel_turn"}),
+        )
+        .expect("encrypt observer payload");
+        let event = EventBuilder::new(Kind::Custom(KIND_AGENT_OBSERVER_FRAME as u16), encrypted)
+            .tags([
+                Tag::parse(["p", &agent.public_key().to_hex()]).expect("p tag"),
+                Tag::parse([OBSERVER_AGENT_TAG, &agent.public_key().to_hex()]).expect("agent tag"),
+                Tag::parse([OBSERVER_FRAME_TAG, OBSERVER_FRAME_CONTROL]).expect("frame tag"),
+            ])
+            .sign_with_keys(&attacker)
+            .expect("sign event");
+        let (conn, mut send_rx) = observer_test_connection(community, attacker.public_key(), None);
+
+        super::handle_agent_observer_event(
+            event.clone(),
+            conn.conn_id,
+            &event.id.to_hex(),
+            conn,
+            state,
+        )
+        .await;
+
+        let axum::extract::ws::Message::Text(text) =
+            send_rx.try_recv().expect("observer rejection sent")
+        else {
+            panic!("expected text relay message");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&text).expect("relay frame JSON");
+        assert_eq!(frame[0], "OK");
+        assert_eq!(frame[2], false);
+        assert_eq!(
+            frame[3],
+            "restricted: observer control is not authorized for this agent owner"
+        );
     }
 
     #[tokio::test]
@@ -1315,32 +1482,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn observer_owner_cache_is_scoped_to_community() {
+    async fn observer_agent_cache_is_scoped_to_community() {
         let state = fanout_access::test_state().await;
         let agent = Keys::generate();
         let owner = Keys::generate();
         let agent_bytes = agent.public_key().to_bytes().to_vec();
-        let owner_bytes = owner.public_key().to_bytes().to_vec();
         let community_a = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
         let community_b = buzz_core::CommunityId::from_uuid(Uuid::new_v4());
 
-        state.observer_owner_cache.insert(
-            (community_a, agent_bytes.clone(), owner_bytes.clone()),
-            true,
-        );
+        state
+            .observer_agent_cache
+            .insert((community_a, agent_bytes.clone()), true);
         assert_eq!(
-            state.observer_owner_cache.get(&(
-                community_b,
-                agent_bytes.clone(),
-                owner_bytes.clone()
-            )),
+            state
+                .observer_agent_cache
+                .get(&(community_b, agent_bytes.clone())),
             None,
             "A cached allow must not populate B's observer authorization key"
         );
-        state.observer_owner_cache.insert(
-            (community_b, agent_bytes.clone(), owner_bytes.clone()),
-            false,
-        );
+        state
+            .observer_agent_cache
+            .insert((community_b, agent_bytes.clone()), false);
 
         let encrypted = encrypt_observer_payload(
             &agent,
@@ -1399,7 +1561,7 @@ mod tests {
         assert_eq!(frame[2], false);
         assert_eq!(
             frame[3],
-            "restricted: observer frame is not authorized for this agent owner"
+            "restricted: observer telemetry author is not a registered agent"
         );
     }
 

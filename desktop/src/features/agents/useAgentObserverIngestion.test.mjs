@@ -21,7 +21,13 @@ describe("combineObserverIngestionAgents", () => {
       new Map(),
       ME,
     );
-    assert.deepEqual(result, [{ pubkey: AGENT_LOCAL, status: "running" }]);
+    assert.deepEqual(result, [
+      {
+        pubkey: AGENT_LOCAL,
+        status: "running",
+        canProcessOwnerFrames: true,
+      },
+    ]);
   });
 
   it("adds declared-owned relay agents as deployed", () => {
@@ -31,27 +37,45 @@ describe("combineObserverIngestionAgents", () => {
       new Map([[AGENT_REMOTE, ME]]),
       ME,
     );
-    assert.deepEqual(result, [{ pubkey: AGENT_REMOTE, status: "deployed" }]);
+    assert.deepEqual(result, [
+      {
+        pubkey: AGENT_REMOTE,
+        status: "deployed",
+        canProcessOwnerFrames: true,
+      },
+    ]);
   });
 
-  it("excludes relay agents owned by someone else", () => {
+  it("includes relay agents owned by someone else without owner-frame privileges", () => {
     const result = combineObserverIngestionAgents(
       [],
       [AGENT_FOREIGN],
       new Map([[AGENT_FOREIGN, OTHER]]),
       ME,
     );
-    assert.deepEqual(result, []);
+    assert.deepEqual(result, [
+      {
+        pubkey: AGENT_FOREIGN,
+        status: "deployed",
+        canProcessOwnerFrames: false,
+      },
+    ]);
   });
 
-  it("excludes relay agents with no declared owner", () => {
+  it("includes relay agents with no declared owner for requester telemetry", () => {
     const result = combineObserverIngestionAgents(
       [],
       [AGENT_REMOTE],
       new Map(),
       ME,
     );
-    assert.deepEqual(result, []);
+    assert.deepEqual(result, [
+      {
+        pubkey: AGENT_REMOTE,
+        status: "deployed",
+        canProcessOwnerFrames: false,
+      },
+    ]);
   });
 
   it("does not duplicate an agent that is both managed and on the relay", () => {
@@ -61,7 +85,13 @@ describe("combineObserverIngestionAgents", () => {
       new Map([[AGENT_LOCAL, ME]]),
       ME,
     );
-    assert.deepEqual(result, [{ pubkey: AGENT_LOCAL, status: "stopped" }]);
+    assert.deepEqual(result, [
+      {
+        pubkey: AGENT_LOCAL,
+        status: "stopped",
+        canProcessOwnerFrames: true,
+      },
+    ]);
   });
 
   it("matches ownership case-insensitively", () => {
@@ -72,17 +102,32 @@ describe("combineObserverIngestionAgents", () => {
       ME,
     );
     assert.deepEqual(result, [
-      { pubkey: AGENT_REMOTE.toUpperCase(), status: "deployed" },
+      {
+        pubkey: AGENT_REMOTE.toUpperCase(),
+        status: "deployed",
+        canProcessOwnerFrames: true,
+      },
     ]);
   });
 
-  it("returns only managed agents when identity is not resolved yet", () => {
+  it("registers relay agents without owner privileges before identity resolves", () => {
     const result = combineObserverIngestionAgents(
       [{ pubkey: AGENT_LOCAL, status: "running" }],
       [AGENT_REMOTE],
       new Map([[AGENT_REMOTE, ME]]),
       undefined,
     );
-    assert.deepEqual(result, [{ pubkey: AGENT_LOCAL, status: "running" }]);
+    assert.deepEqual(result, [
+      {
+        pubkey: AGENT_LOCAL,
+        status: "running",
+        canProcessOwnerFrames: true,
+      },
+      {
+        pubkey: AGENT_REMOTE,
+        status: "deployed",
+        canProcessOwnerFrames: false,
+      },
+    ]);
   });
 });

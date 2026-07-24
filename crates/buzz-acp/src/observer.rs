@@ -28,6 +28,11 @@ pub struct ObserverContext {
     pub turn_id: Option<String>,
     /// RFC3339 timestamp at which the current turn began, when known.
     pub started_at: Option<String>,
+    /// Authors whose triggering events started this turn.
+    ///
+    /// Internal routing metadata only. It is never serialized into the
+    /// encrypted observer payload.
+    pub requester_pubkeys: Vec<String>,
 }
 
 /// Handle used by the harness to publish local observer events.
@@ -74,6 +79,9 @@ pub struct ObserverEvent {
     /// RFC3339 timestamp at which the current turn began, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
+    /// Per-turn requester recipients. Internal publisher metadata only.
+    #[serde(skip)]
+    pub requester_pubkeys: Vec<String>,
     /// Raw or semantic event payload.
     pub payload: serde_json::Value,
 }
@@ -117,6 +125,7 @@ impl ObserverHandle {
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
             started_at: context.started_at.clone(),
+            requester_pubkeys: context.requester_pubkeys.clone(),
             payload,
         };
 
@@ -147,6 +156,7 @@ pub fn context_for(
         session_id,
         turn_id,
         started_at: None,
+        requester_pubkeys: Vec::new(),
     }
 }
 
@@ -162,5 +172,42 @@ pub fn context_for_turn(
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
+        requester_pubkeys: Vec::new(),
+    }
+}
+
+impl ObserverContext {
+    /// Attach the normalized, de-duplicated authors whose events triggered
+    /// this turn. The list remains process-local and is used only to select
+    /// NIP-44 recipients.
+    pub fn with_requester_pubkeys(mut self, requester_pubkeys: Vec<String>) -> Self {
+        self.requester_pubkeys = requester_pubkeys
+            .into_iter()
+            .map(|pubkey| pubkey.to_ascii_lowercase())
+            .collect();
+        self.requester_pubkeys.sort();
+        self.requester_pubkeys.dedup();
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requester_routing_metadata_is_normalized_but_not_serialized() {
+        let context = context_for_turn(None, None, "turn-1".into(), "2026-07-24T10:00:00Z".into())
+            .with_requester_pubkeys(vec!["BBBB".into(), "aaaa".into(), "AAAA".into()]);
+        let observer = ObserverHandle::in_process();
+        observer.emit("turn_started", Some(0), &context, serde_json::json!({}));
+        let event = observer.snapshot().pop().expect("observer event");
+
+        assert_eq!(event.requester_pubkeys, ["aaaa", "bbbb"]);
+        let serialized = serde_json::to_value(&event).expect("serialize observer event");
+        assert!(
+            serialized.get("requesterPubkeys").is_none(),
+            "requester routing metadata must stay outside encrypted payloads"
+        );
     }
 }

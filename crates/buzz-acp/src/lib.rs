@@ -31,7 +31,7 @@ use buzz_core::observer::{
 use clap::Parser;
 use config::{
     AuthAgentArgs, AuthMethodsArgs, AuthenticateArgs, Config, DedupMode, ModelsArgs,
-    MultipleEventHandling, RespondTo, SubscribeMode,
+    MultipleEventHandling, ObserverVisibility, RespondTo, SubscribeMode,
 };
 use filter::SubscriptionRule;
 use futures_util::FutureExt;
@@ -408,13 +408,18 @@ impl ObserverPublishPacer {
     }
 }
 
+struct ObserverPublishTarget {
+    agent_pubkey_hex: String,
+    owner_pubkey_hex: String,
+    owner_pubkey: PublicKey,
+    visibility: ObserverVisibility,
+}
+
 fn spawn_relay_observer_publisher(
     observer: observer::ObserverHandle,
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
-    owner_pubkey: PublicKey,
+    target: ObserverPublishTarget,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Subscribe BEFORE snapshotting so an event emitted between the two
@@ -423,16 +428,7 @@ fn spawn_relay_observer_publisher(
         // high-water `seq` (monotonic, assigned at emit).
         let rx = observer.subscribe();
         let snapshot = observer.snapshot();
-        run_relay_observer_publisher(
-            snapshot,
-            rx,
-            publisher,
-            keys,
-            agent_pubkey_hex,
-            owner_pubkey_hex,
-            owner_pubkey,
-        )
-        .await;
+        run_relay_observer_publisher(snapshot, rx, publisher, keys, target).await;
     })
 }
 
@@ -441,25 +437,14 @@ async fn run_relay_observer_publisher(
     mut rx: tokio::sync::broadcast::Receiver<observer::ObserverEvent>,
     publisher: RelayEventPublisher,
     keys: nostr::Keys,
-    agent_pubkey_hex: String,
-    owner_pubkey_hex: String,
-    owner_pubkey: PublicKey,
+    target: ObserverPublishTarget,
 ) {
     let mut coalescer = ObserverChunkCoalescer::default();
     let mut pacer = ObserverPublishPacer::new();
     let max_snapshot_seq = snapshot.iter().map(|event| event.seq).max().unwrap_or(0);
     for event in snapshot {
         for event in coalescer.ingest(event) {
-            publish_relay_observer_event(
-                &publisher,
-                &keys,
-                &agent_pubkey_hex,
-                &owner_pubkey_hex,
-                &owner_pubkey,
-                &mut pacer,
-                event,
-            )
-            .await;
+            publish_relay_observer_event(&publisher, &keys, &target, &mut pacer, event).await;
         }
     }
 
@@ -477,16 +462,14 @@ async fn run_relay_observer_publisher(
                         }
                         for event in coalescer.ingest(event) {
                             publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                                &publisher, &keys, &target, &mut pacer, event,
                             ).await;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         for event in coalescer.flush() {
                             publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                                &publisher, &keys, &target, &mut pacer, event,
                             ).await;
                         }
                         tracing::warn!(dropped = count, "relay observer publisher lagged");
@@ -494,8 +477,7 @@ async fn run_relay_observer_publisher(
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         for event in coalescer.flush() {
                             publish_relay_observer_event(
-                                &publisher, &keys, &agent_pubkey_hex,
-                                &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                                &publisher, &keys, &target, &mut pacer, event,
                             ).await;
                         }
                         break;
@@ -506,15 +488,13 @@ async fn run_relay_observer_publisher(
                 // Periodic flush ensures live streaming even during continuous chunk delivery.
                 for event in coalescer.flush() {
                     publish_relay_observer_event(
-                        &publisher, &keys, &agent_pubkey_hex,
-                        &owner_pubkey_hex, &owner_pubkey, &mut pacer, event,
+                        &publisher, &keys, &target, &mut pacer, event,
                     ).await;
                 }
             }
         }
     }
 }
-
 #[derive(Default)]
 struct ObserverChunkCoalescer {
     pending: Vec<PendingObserverChunk>,
@@ -534,6 +514,7 @@ struct ObserverChunkKey {
     session_id: Option<String>,
     turn_id: Option<String>,
     agent_index: Option<usize>,
+    requester_pubkeys: Vec<String>,
 }
 
 /// Flush coalesced chunks before they exceed the NIP-44 plaintext limit (65,535 bytes).
@@ -606,6 +587,7 @@ fn observer_chunk_key_and_text(
             session_id: event.session_id.clone(),
             turn_id: event.turn_id.clone(),
             agent_index: event.agent_index,
+            requester_pubkeys: event.requester_pubkeys.clone(),
         },
         text,
     ))
@@ -790,45 +772,86 @@ fn ceil_char_boundary(s: &str, mut i: usize) -> usize {
 async fn publish_relay_observer_event(
     publisher: &RelayEventPublisher,
     keys: &nostr::Keys,
-    agent_pubkey_hex: &str,
-    owner_pubkey_hex: &str,
-    owner_pubkey: &PublicKey,
+    target: &ObserverPublishTarget,
     pacer: &mut ObserverPublishPacer,
     mut event: observer::ObserverEvent,
 ) {
-    pacer.wait().await;
     // Trim oversized frames to fit the plaintext cap rather than letting
     // encrypt_observer_payload reject and drop them whole (silent telemetry loss).
     fit_observer_event_to_budget(&mut event);
-    let encrypted = match encrypt_observer_payload(keys, owner_pubkey, &event) {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            tracing::warn!("failed to encrypt relay observer event: {error}");
-            return;
+    let mut recipients = vec![(target.owner_pubkey_hex.clone(), target.owner_pubkey)];
+    if target.visibility == ObserverVisibility::Requester
+        && requester_visible_observer_event(&event)
+    {
+        for requester_hex in &event.requester_pubkeys {
+            if requester_hex.eq_ignore_ascii_case(&target.owner_pubkey_hex) {
+                continue;
+            }
+            match PublicKey::from_hex(requester_hex) {
+                Ok(requester_pubkey) => {
+                    recipients.push((requester_hex.clone(), requester_pubkey));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        requester = requester_hex,
+                        "skipping invalid observer requester pubkey: {error}"
+                    );
+                }
+            }
         }
-    };
-    let builder = match buzz_sdk::build_agent_observer_frame(
-        owner_pubkey_hex,
-        agent_pubkey_hex,
-        OBSERVER_FRAME_TELEMETRY,
-        &encrypted,
-    ) {
-        Ok(builder) => builder,
-        Err(error) => {
-            tracing::warn!("failed to build relay observer event: {error}");
-            return;
-        }
-    };
-    let signed = match builder.sign_with_keys(keys) {
-        Ok(event) => event,
-        Err(error) => {
-            tracing::warn!("failed to sign relay observer event: {error}");
-            return;
-        }
-    };
-    if let Err(error) = publisher.publish_event(signed).await {
-        tracing::warn!("relay observer event dropped: {error}");
     }
+
+    for (recipient_hex, recipient_pubkey) in recipients {
+        // Every encrypted recipient copy consumes the same pacing budget. This
+        // keeps requester mode inside the existing 6/s and 90/min ceilings.
+        pacer.wait().await;
+        let encrypted = match encrypt_observer_payload(keys, &recipient_pubkey, &event) {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                tracing::warn!(
+                    recipient = recipient_hex,
+                    "failed to encrypt relay observer event: {error}"
+                );
+                continue;
+            }
+        };
+        let builder = match buzz_sdk::build_agent_observer_frame(
+            &recipient_hex,
+            &target.agent_pubkey_hex,
+            OBSERVER_FRAME_TELEMETRY,
+            &encrypted,
+        ) {
+            Ok(builder) => builder,
+            Err(error) => {
+                tracing::warn!(
+                    recipient = recipient_hex,
+                    "failed to build relay observer event: {error}"
+                );
+                continue;
+            }
+        };
+        let signed = match builder.sign_with_keys(keys) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::warn!("failed to sign relay observer event: {error}");
+                continue;
+            }
+        };
+        if let Err(error) = publisher.publish_event(signed).await {
+            tracing::warn!(
+                recipient = recipient_hex,
+                "relay observer event dropped: {error}"
+            );
+        }
+    }
+}
+
+fn requester_visible_observer_event(event: &observer::ObserverEvent) -> bool {
+    event.turn_id.is_some()
+        && !matches!(
+            event.kind.as_str(),
+            "control_result" | "session_config_captured" | "managed_agent_runtime_lifecycle"
+        )
 }
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
@@ -917,6 +940,7 @@ fn handle_cancel_turn_control(
                 session_id: None,
                 turn_id: None,
                 started_at: None,
+                requester_pubkeys: Vec::new(),
             },
             serde_json::json!({
                 "type": "cancel_turn",
@@ -994,6 +1018,7 @@ fn handle_switch_model_control(
                 session_id: None,
                 turn_id: None,
                 started_at: None,
+                requester_pubkeys: Vec::new(),
             },
             serde_json::json!({
                 "type": "switch_model",
@@ -1310,6 +1335,7 @@ async fn tokio_main() -> Result<()> {
                 "agentArgs": config.agent_args,
                 "parallelism": config.agents,
                 "relayObserver": config.relay_observer,
+                "observerVisibility": config.observer_visibility.to_string(),
             }),
         );
     }
@@ -1408,6 +1434,7 @@ async fn tokio_main() -> Result<()> {
                         pubkey_hex.clone(),
                         owner_pubkey_hex,
                         owner_pubkey,
+                        config.observer_visibility,
                     ));
                     relay
                         .subscribe_observer_controls()
@@ -1487,16 +1514,19 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
-    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
+    if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner, visibility)) =
         relay_observer_publisher.take()
     {
         relay_observer_publisher_task = Some(spawn_relay_observer_publisher(
             observer,
             publisher,
             keys,
-            agent_pubkey,
-            owner_pubkey,
-            owner,
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_pubkey,
+                owner_pubkey_hex: owner_pubkey,
+                owner_pubkey: owner,
+                visibility,
+            },
         ));
     }
 
@@ -2920,6 +2950,7 @@ fn dispatch_pending(
             DedupMode::Queue => Some(batch.clone()),
             DedupMode::Drop => None,
         };
+        let requester_pubkeys = pool::batch_requester_pubkeys(Some(&batch));
 
         let result_tx = pool.result_tx();
         let ctx_clone = Arc::clone(ctx);
@@ -2963,6 +2994,7 @@ fn dispatch_pending(
                 agent_index,
                 channel_id: Some(channel_id),
                 turn_id,
+                requester_pubkeys,
                 recoverable_batch,
                 control_tx: Some(control_tx),
                 steer_tx,
@@ -3203,11 +3235,12 @@ fn handle_prompt_result(
         .to_string();
     let harness_pid = std::process::id();
 
-    let channel_id = match &result.source {
-        PromptSource::Channel(ch) => Some(*ch),
+    let mut terminal_observer_context = result.agent.acp.observer_context().clone();
+    terminal_observer_context.channel_id = match &result.source {
+        PromptSource::Channel(channel_id) => Some(channel_id.to_string()),
         PromptSource::Heartbeat => None,
     };
-    let turn_id = result.turn_id.clone();
+    terminal_observer_context.turn_id = Some(result.turn_id.clone());
     let emit_turn_error = |error_msg: &str, error_code: Option<i64>| {
         if let Some(ref observer) = observer {
             let mut payload = serde_json::json!({
@@ -3220,7 +3253,7 @@ fn handle_prompt_result(
             observer.emit(
                 "turn_error",
                 Some(agent_index),
-                &observer::context_for(channel_id, None, Some(turn_id.clone())),
+                &terminal_observer_context,
                 payload,
             );
         }
@@ -3446,10 +3479,12 @@ fn recover_panicked_agent(
     }
 
     if let Some(ref observer) = observer {
+        let context = observer::context_for(meta.channel_id, None, Some(meta.turn_id))
+            .with_requester_pubkeys(meta.requester_pubkeys);
         observer.emit(
             "agent_panic",
             Some(i),
-            &observer::context_for(meta.channel_id, None, Some(meta.turn_id)),
+            &context,
             serde_json::json!({
                 "outcome": "panic",
                 "error": format!("Agent task panicked: {join_error}"),
@@ -3576,6 +3611,7 @@ fn dispatch_heartbeat(
             agent_index,
             channel_id: None,
             turn_id,
+            requester_pubkeys: Vec::new(),
             recoverable_batch: None,
             control_tx: None,
             steer_tx: None,
@@ -4318,6 +4354,7 @@ mod owner_control_command_tests {
                 agent_index: 0,
                 channel_id: Some(channel_id),
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: Some(control_tx),
                 steer_tx: None,
@@ -4780,9 +4817,12 @@ mod observer_snapshot_race_tests {
             rx,
             publisher,
             agent_keys.clone(),
-            agent_keys.public_key().to_hex(),
-            owner_keys.public_key().to_hex(),
-            owner_keys.public_key(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::OwnerOnly,
+            },
         )
         .await;
 
@@ -4800,6 +4840,93 @@ mod observer_snapshot_race_tests {
             ["before", "overlap", "after"],
             "each event must be published exactly once, in order"
         );
+    }
+}
+
+#[cfg(test)]
+mod observer_visibility_publisher_tests {
+    use super::*;
+    use nostr::Keys;
+
+    #[tokio::test(start_paused = true)]
+    async fn requester_visibility_encrypts_turn_frames_to_each_batch_author() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let requester_a = Keys::generate();
+        let requester_b = Keys::generate();
+        let context = observer::context_for_turn(
+            Some(Uuid::new_v4()),
+            Some("session-1".into()),
+            "turn-1".into(),
+            "2026-07-24T10:00:00Z".into(),
+        )
+        .with_requester_pubkeys(vec![
+            requester_b.public_key().to_hex(),
+            requester_a.public_key().to_hex(),
+            requester_a.public_key().to_hex(),
+        ]);
+        observer.emit("turn_started", Some(0), &context, serde_json::json!({}));
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        drop(observer);
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::Requester,
+            },
+        )
+        .await;
+
+        let mut owner_frames = 0;
+        let mut requester_a_frames = 0;
+        let mut requester_b_frames = 0;
+        while let Some(event) = published_rx.recv().await {
+            if decrypt_observer_payload::<serde_json::Value>(&owner_keys, &event).is_ok() {
+                owner_frames += 1;
+            }
+            if decrypt_observer_payload::<serde_json::Value>(&requester_a, &event).is_ok() {
+                requester_a_frames += 1;
+            }
+            if decrypt_observer_payload::<serde_json::Value>(&requester_b, &event).is_ok() {
+                requester_b_frames += 1;
+            }
+        }
+
+        assert_eq!(owner_frames, 1);
+        assert_eq!(requester_a_frames, 1);
+        assert_eq!(requester_b_frames, 1);
+    }
+
+    #[test]
+    fn owner_only_frame_kinds_never_fan_out_to_requesters() {
+        for kind in [
+            "control_result",
+            "session_config_captured",
+            "managed_agent_runtime_lifecycle",
+        ] {
+            let event = observer::ObserverEvent {
+                seq: 1,
+                timestamp: "2026-07-24T10:00:00Z".into(),
+                kind: kind.into(),
+                agent_index: Some(0),
+                channel_id: Some(Uuid::new_v4().to_string()),
+                session_id: Some("session-1".into()),
+                turn_id: Some("turn-1".into()),
+                started_at: Some("2026-07-24T10:00:00Z".into()),
+                requester_pubkeys: vec![Keys::generate().public_key().to_hex()],
+                payload: serde_json::json!({}),
+            };
+            assert!(!requester_visible_observer_event(&event), "{kind}");
+        }
     }
 }
 
@@ -4856,6 +4983,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload: serde_json::json!({
                 "jsonrpc": "2.0",
                 "method": "session/update",
@@ -4884,6 +5012,7 @@ mod observer_chunk_coalescer_tests {
             session_id: Some("session-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload: serde_json::json!({ "type": "turn_started" }),
         }
     }
@@ -4980,6 +5109,7 @@ mod build_mcp_servers_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            observer_visibility: config::ObserverVisibility::OwnerOnly,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -5146,6 +5276,7 @@ mod error_outcome_emission_tests {
             persona_env_vars: vec![],
             has_generated_codex_config: false,
             relay_observer: false,
+            observer_visibility: config::ObserverVisibility::OwnerOnly,
             lazy_pool: false,
             agent_owner: None,
             no_base_prompt: false,
@@ -5207,6 +5338,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -5283,6 +5415,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: Some(channel_id),
                 turn_id: "panic-turn-id".to_string(),
+                requester_pubkeys: vec!["requester".to_string()],
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -5330,6 +5463,7 @@ mod error_outcome_emission_tests {
             Some(channel_id.to_string().as_str())
         );
         assert_eq!(panic.turn_id.as_deref(), Some("panic-turn-id"));
+        assert_eq!(panic.requester_pubkeys, ["requester"]);
     }
 
     #[tokio::test]
@@ -5375,6 +5509,7 @@ mod error_outcome_emission_tests {
                     agent_index: 0,
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
+                    requester_pubkeys: Vec::new(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -5466,6 +5601,7 @@ mod error_outcome_emission_tests {
                     agent_index: 0,
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
+                    requester_pubkeys: Vec::new(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -5571,6 +5707,7 @@ mod error_outcome_emission_tests {
                     agent_index: 0,
                     channel_id: None,
                     turn_id: "test-turn-id".to_string(),
+                    requester_pubkeys: Vec::new(),
                     recoverable_batch: None,
                     control_tx: None,
                     steer_tx: None,
@@ -5647,6 +5784,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -5741,6 +5879,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -5857,6 +5996,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -5996,6 +6136,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -6184,6 +6325,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -6269,6 +6411,7 @@ mod error_outcome_emission_tests {
                 agent_index: 0,
                 channel_id: None,
                 turn_id: "test-turn-id".to_string(),
+                requester_pubkeys: Vec::new(),
                 recoverable_batch: None,
                 control_tx: None,
                 steer_tx: None,
@@ -6334,6 +6477,7 @@ mod observer_payload_trim_tests {
             session_id: Some("sess-1".to_string()),
             turn_id: Some("turn-1".to_string()),
             started_at: None,
+            requester_pubkeys: Vec::new(),
             payload,
         }
     }

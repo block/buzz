@@ -22,6 +22,7 @@ import {
   useManagedAgentsQuery,
 } from "@/features/agents/hooks";
 import { useIsManagedAgent } from "@/features/agent-memory/hooks";
+import { useActiveAgentTurns } from "@/features/agents/activeAgentTurnsStore";
 import { useIdentityQuery } from "@/shared/api/hooks";
 import { useAgentWorking } from "@/features/agents/agentWorkingSignal";
 import {
@@ -265,15 +266,18 @@ export function UserProfilePopover({
     !isAgentClassificationPending &&
     (!isBotProfile || viewerIsOwner);
   const showAnyProfileActions = showHumanProfileActions || showMessageAction;
+  const activeTurns = useAgentWorking(isBotProfile ? pubkey : null).channels;
+  const observableTurns = useActiveAgentTurns(isBotProfile ? pubkey : null);
   const canViewActivity =
-    isBotProfile && viewerIsOwner && canOpenAgentActivity(pubkey);
+    isBotProfile &&
+    (viewerIsOwner || observableTurns.length > 0) &&
+    canOpenAgentActivity(pubkey);
   const presenceStatus = presenceQuery.data?.[pubkey.toLowerCase()];
   const userStatus = userStatusQuery.data?.[pubkey.toLowerCase()];
   const userStatusText = userStatus?.text.trim() ?? "";
   const hasUserStatus = Boolean(userStatusText || userStatus?.emoji);
   const profileDescription = profile?.about?.trim() ?? "";
   const profileSubheader = profileDescription || profile?.nip05Handle?.trim();
-  const activeTurns = useAgentWorking(isBotProfile ? pubkey : null).channels;
   const channelsQuery = useChannelsQuery();
   const channelIdToName = React.useMemo(() => {
     const map: Record<string, string> = {};
