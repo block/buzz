@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use reqwest::Url;
 use serde::Deserialize;
@@ -14,6 +14,7 @@ const MAX_TOOLS_PER_INTEGRATION: usize = 64;
 const MAX_TOTAL_ALLOWED_TOOLS: usize = 256;
 const MAX_TOOL_NAME_BYTES: usize = 128;
 const MAX_API_TOKEN_BYTES: usize = 4 * 1024;
+const MAX_MCP_BEARER_TOKEN_BYTES: usize = 256;
 
 /// Information-handling classification enforced at the model egress boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +59,7 @@ impl LmStudioEndpoint {
             || url.fragment().is_some()
             || url.query().is_some()
             || !matches!(url.path(), "" | "/")
-            || url.port().is_none()
+            || url.port().is_none_or(|port| port == 0)
             || !matches!(url.host_str(), Some("127.0.0.1" | "::1" | "[::1]"))
         {
             return Err(
@@ -107,11 +108,24 @@ fn validate_literal_loopback_authority(raw: &str) -> Result<(), String> {
 }
 
 /// A validated explicit native MCP integration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct NativeMcpIntegration {
     server_label: String,
     endpoint: LoopbackMcpEndpoint,
     allowed_tools: Vec<String>,
+    authorization: String,
+}
+
+impl std::fmt::Debug for NativeMcpIntegration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeMcpIntegration")
+            .field("server_label", &self.server_label)
+            .field("endpoint", &self.endpoint)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("authorization", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,10 +146,11 @@ impl LoopbackMcpEndpoint {
             || url.fragment().is_some()
             || url.query().is_some()
             || url.port().is_none()
-            || !matches!(url.host_str(), Some("127.0.0.1" | "::1" | "[::1]"))
+            || url.host_str() != Some("127.0.0.1")
+            || url.path() != "/mcp"
         {
             return Err(
-                "config: MCP server URL must be literal loopback HTTP with a bounded path".into(),
+                "config: MCP server URL must be literal http://127.0.0.1:<port>/mcp".into(),
             );
         }
         Ok(Self(url))
@@ -159,6 +174,7 @@ impl NativeMcpIntegration {
             self.server_label.clone(),
             self.endpoint.0.as_str(),
             self.allowed_tools.clone(),
+            BTreeMap::from([("Authorization".to_string(), self.authorization.clone())]),
         )
     }
 }
@@ -359,7 +375,7 @@ impl LmStudioRuntimeConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawIntegration {
     #[serde(rename = "type")]
@@ -367,6 +383,7 @@ struct RawIntegration {
     server_label: String,
     server_url: String,
     allowed_tools: Vec<String>,
+    headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -442,10 +459,35 @@ fn parse_integrations(
                 ));
             }
         }
+        if integration.headers.len() != 1 {
+            return Err(format!(
+                "config: MCP integration {:?} requires exactly one Authorization header",
+                integration.server_label
+            ));
+        }
+        let authorization = integration
+            .headers
+            .get("Authorization")
+            .filter(|value| {
+                value.strip_prefix("Bearer ").is_some_and(|token| {
+                    (16..=MAX_MCP_BEARER_TOKEN_BYTES).contains(&token.len())
+                        && !token
+                            .bytes()
+                            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "config: MCP integration {:?} requires a bounded Bearer Authorization header",
+                    integration.server_label
+                )
+            })?
+            .clone();
         integrations.push(NativeMcpIntegration {
             server_label: integration.server_label,
             endpoint: LoopbackMcpEndpoint::parse(&integration.server_url)?,
             allowed_tools: integration.allowed_tools,
+            authorization,
         });
     }
     Ok(integrations)
@@ -596,13 +638,15 @@ mod tests {
             "type":"ephemeral_mcp",
             "server_label":"memory",
             "server_url":"http://127.0.0.1:9100/mcp",
-            "allowed_tools":["search_events","record_event"]
+            "allowed_tools":["search_events","record_event"],
+            "headers":{"Authorization":"Bearer fixture-token-123456"}
           },
           {
             "type":"ephemeral_mcp",
             "server_label":"rag",
-            "server_url":"http://[::1]:9200/mcp",
-            "allowed_tools":["search"]
+            "server_url":"http://127.0.0.1:9200/mcp",
+            "allowed_tools":["search"],
+            "headers":{"Authorization":"Bearer fixture-token-654321"}
           }
         ]"#;
         let cfg = LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(valid))
@@ -617,18 +661,22 @@ mod tests {
     }
 
     #[test]
-    fn mcp_endpoint_allows_a_bounded_path_but_no_ambient_url_fields() {
-        let valid = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp/v1","allowed_tools":["search"]}]"#;
+    fn mcp_endpoint_requires_authenticated_literal_ipv4_loopback() {
+        let valid = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"],"headers":{"Authorization":"Bearer fixture-token-123456"}}]"#;
         assert!(
             LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(valid)).is_ok()
         );
         for url in [
+            "http://[::1]:9100/mcp",
+            "http://127.0.0.1:0/mcp",
+            "http://127.0.0.1:9100/mcp/v1",
+            "http://127.0.0.1:9100/",
             "http://127.0.0.1:9100/mcp?token=secret",
             "http://127.0.0.1:9100/mcp#fragment",
             "http://user@127.0.0.1:9100/mcp",
         ] {
             let raw = format!(
-                r#"[{{"type":"ephemeral_mcp","server_label":"memory","server_url":"{url}","allowed_tools":["search"]}}]"#
+                r#"[{{"type":"ephemeral_mcp","server_label":"memory","server_url":"{url}","allowed_tools":["search"],"headers":{{"Authorization":"Bearer fixture-token-123456"}}}}]"#
             );
             assert!(
                 LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(&raw))
@@ -636,10 +684,22 @@ mod tests {
                 "{url} must be rejected"
             );
         }
-        let root = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/","allowed_tools":["search"]}]"#;
-        assert!(
-            LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(root)).is_ok()
-        );
+        for headers in [
+            r#"{}"#,
+            r#"{"Authorization":"secret"}"#,
+            r#"{"authorization":"Bearer fixture-token-123456"}"#,
+            r#"{"Authorization":"Bearer short"}"#,
+            r#"{"Authorization":"Bearer fixture-token-123456","X-Unsafe":"value"}"#,
+        ] {
+            let raw = format!(
+                r#"[{{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"],"headers":{headers}}}]"#
+            );
+            assert!(
+                LmStudioRuntimeConfig::parse(None, "http://127.0.0.1:1234", None, Some(&raw))
+                    .is_err(),
+                "{headers} must be rejected"
+            );
+        }
     }
 
     #[test]
@@ -690,6 +750,7 @@ mod tests {
             "server_label": max_label,
             "server_url": "http://127.0.0.1:9100/mcp",
             "allowed_tools": [max_tool],
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }]);
         assert!(parse_integrations(Some(&one.to_string()), Classification::Official).is_ok());
 
@@ -699,6 +760,7 @@ mod tests {
             "server_label": too_long_label,
             "server_url": "http://127.0.0.1:9100/mcp",
             "allowed_tools": ["search"],
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }]);
         assert!(
             parse_integrations(Some(&invalid_label.to_string()), Classification::Official).is_err()
@@ -710,6 +772,7 @@ mod tests {
             "server_label": "memory",
             "server_url": "http://127.0.0.1:9100/mcp",
             "allowed_tools": [too_long_tool],
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }]);
         assert!(
             parse_integrations(Some(&invalid_tool.to_string()), Classification::Official).is_err()
@@ -722,6 +785,7 @@ mod tests {
                     "server_label": format!("server_{index}"),
                     "server_url": format!("http://127.0.0.1:{}/mcp", 9100 + index),
                     "allowed_tools": ["search"],
+                    "headers": {"Authorization": "Bearer fixture-token-123456"},
                 })
             })
             .collect();
@@ -732,17 +796,6 @@ mod tests {
         .is_ok());
 
         let prefix = "http://127.0.0.1:9100/";
-        let max_url = format!("{prefix}{}", "a".repeat(MAX_MCP_URL_BYTES - prefix.len()));
-        assert_eq!(max_url.len(), MAX_MCP_URL_BYTES);
-        let max_url_config = serde_json::json!([{
-            "type": "ephemeral_mcp",
-            "server_label": "memory",
-            "server_url": max_url,
-            "allowed_tools": ["search"],
-        }]);
-        assert!(
-            parse_integrations(Some(&max_url_config.to_string()), Classification::Official).is_ok()
-        );
         let too_long_url = format!(
             "{prefix}{}",
             "a".repeat(MAX_MCP_URL_BYTES + 1 - prefix.len())
@@ -752,6 +805,7 @@ mod tests {
             "server_label": "memory",
             "server_url": too_long_url,
             "allowed_tools": ["search"],
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }]);
         assert!(parse_integrations(
             Some(&too_long_url_config.to_string()),
@@ -765,6 +819,7 @@ mod tests {
                     "server_label": format!("server_{index}"),
                     "server_url": format!("http://127.0.0.1:{}/mcp", 9100 + index),
                     "allowed_tools": ["search"],
+                    "headers": {"Authorization": "Bearer fixture-token-123456"},
                 })
             })
             .collect();
@@ -782,6 +837,7 @@ mod tests {
             "server_label": "memory",
             "server_url": "http://127.0.0.1:9100/mcp",
             "allowed_tools": max_tools,
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }]);
         assert!(
             parse_integrations(Some(&max_tool_count.to_string()), Classification::Official).is_ok()
@@ -794,6 +850,7 @@ mod tests {
             "server_label": "memory",
             "server_url": "http://127.0.0.1:9100/mcp",
             "allowed_tools": too_many_tools,
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }]);
         assert!(parse_integrations(
             Some(&invalid_tool_count.to_string()),
@@ -811,6 +868,7 @@ mod tests {
                     "server_label": format!("server_{server}"),
                     "server_url": format!("http://127.0.0.1:{}/mcp", 9200 + server),
                     "allowed_tools": tools,
+                    "headers": {"Authorization": "Bearer fixture-token-123456"},
                 })
             })
             .collect();
@@ -826,6 +884,7 @@ mod tests {
             "server_label": "server_extra",
             "server_url": "http://127.0.0.1:9300/mcp",
             "allowed_tools": ["tool_extra"],
+            "headers": {"Authorization": "Bearer fixture-token-123456"},
         }));
         assert!(parse_integrations(
             Some(&serde_json::to_string(&too_many_total).expect("test JSON")),

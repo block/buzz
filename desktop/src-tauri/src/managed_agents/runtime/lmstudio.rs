@@ -30,10 +30,11 @@ pub(crate) fn runtime_inherited_env_keys_to_remove(
 /// Replaces all LM Studio-native security policy keys with catalog-owned
 /// values after every user-configurable environment layer.
 ///
-/// `LM_STUDIO_BASE_URL` and `LM_STUDIO_MCP_INTEGRATIONS` may be supplied only
-/// by the trusted desktop process environment. The native Rust egress parser
-/// validates both before any network request. The API token is intentionally
-/// excluded here and loaded separately from the OS Keychain.
+/// `LM_STUDIO_BASE_URL` is projected from the trusted desktop process
+/// environment. `LM_STUDIO_MCP_INTEGRATIONS` is never read from ambient or
+/// user-controlled layers: it is built from the short-lived native
+/// Memory/RAG admission cache. The API token is intentionally excluded here
+/// and loaded separately from the OS Keychain.
 pub(crate) fn apply_runtime_security_env(
     env: &mut BTreeMap<String, String>,
     runtime: Option<&KnownAcpRuntime>,
@@ -67,10 +68,9 @@ pub(crate) fn apply_runtime_security_env(
         env.insert(key.to_string(), base_url);
     }
     if let Some(key) = runtime.integrations_env_var {
-        let integrations = std::env::var(key)
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "[]".to_string());
+        let integrations = crate::command_services::policy::catalog_integrations_json(
+            crate::command_services::policy::CommandKnowledgeWorkflow::Adviser,
+        );
         env.insert(key.to_string(), integrations);
     }
 }

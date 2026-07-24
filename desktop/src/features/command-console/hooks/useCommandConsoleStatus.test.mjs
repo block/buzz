@@ -22,6 +22,81 @@ function meshClientStatus() {
   };
 }
 
+function knowledgeStatus(overrides = {}) {
+  return {
+    kind: "command-knowledge-status",
+    version: 1,
+    classification: "OFFICIAL",
+    observedAt: "2026-07-24T04:30:00Z",
+    memory: {
+      status: "ready",
+      serverIdentity: "memory",
+      nodeId: "node:command",
+      revisionCount: 42,
+      conflictCount: 2,
+      replicationCursor: 41,
+      lastSuccessfulSync: "2026-07-24T04:20:00Z",
+      freshness: "fresh",
+      validation: "verified",
+      toolAllowlist: ["get_entity", "recall_for_entity", "search_events"],
+      error: null,
+    },
+    rag: {
+      status: "ready",
+      serverIdentity: "rag",
+      activeSnapshotId: "f".repeat(64),
+      signatureFingerprint: "e".repeat(64),
+      snapshotTime: "2026-07-24T03:30:00Z",
+      lastSuccessfulActivation: "2026-07-24T04:00:00Z",
+      freshness: "fresh",
+      validation: "verified",
+      toolAllowlist: [
+        "get_document",
+        "get_snapshot_status",
+        "list_collections",
+        "search_knowledge_base",
+      ],
+      error: null,
+    },
+    appleInputs: [
+      {
+        source: "calendar",
+        permission: "authorized",
+        observedAt: "2026-07-24T04:30:00Z",
+        recordCount: 0,
+        truncated: false,
+        error: null,
+      },
+      {
+        source: "reminders",
+        permission: "denied",
+        observedAt: "2026-07-24T04:30:00Z",
+        recordCount: 0,
+        truncated: false,
+        error: "permission_denied",
+      },
+      {
+        source: "notes",
+        permission: "authorized",
+        observedAt: "2026-07-24T04:30:00Z",
+        recordCount: 0,
+        truncated: false,
+        error: null,
+      },
+      {
+        source: "files",
+        permission: "authorized",
+        observedAt: "2026-07-24T04:30:00Z",
+        recordCount: 0,
+        truncated: false,
+        error: null,
+      },
+    ],
+    degradedSections: ["apple-reminders", "memory-conflicts"],
+    ...overrides,
+  };
+}
+
 test("reports connected only after successful relay and local-compute probes", () => {
   const viewModel = createCommandConsoleStatusViewModel({
     localCompute: {
@@ -150,37 +225,86 @@ test("does not treat daemon reachability without serve mode as local compute", (
   assert.match(viewModel.liveServices[1].detail, /did not verify/i);
 });
 
-test("marks later-phase capabilities as not configured instead of probing or simulating them", () => {
+test("reports live verified Memory, RAG, and Apple status without content or secrets", () => {
   const viewModel = createCommandConsoleStatusViewModel({
+    knowledge: { error: null, status: knowledgeStatus() },
     lmStudio: { error: null, status: null },
     localCompute: { error: null, status: null },
     relayConnection: "connecting",
   });
 
-  assert.deepEqual(
-    viewModel.laterCapabilities.map(({ label, state, statusLabel }) => ({
-      label,
-      state,
-      statusLabel,
-    })),
-    [
-      {
-        label: "Memory",
-        state: "not_configured",
-        statusLabel: "Not configured",
-      },
-      {
-        label: "RAG",
-        state: "not_configured",
-        statusLabel: "Not configured",
-      },
-      {
-        label: "Apple inputs",
-        state: "not_configured",
-        statusLabel: "Not configured",
-      },
-    ],
+  const memory = viewModel.liveServices.find(({ id }) => id === "memory");
+  assert.equal(memory?.state, "degraded");
+  assert.match(memory?.detail ?? "", /2 unresolved conflicts/i);
+  assert.deepEqual(memory?.facts, [
+    { label: "Node", value: "node:command" },
+    { label: "Replication cursor", value: "41" },
+    {
+      label: "Last successful sync",
+      value: "2026-07-24T04:20:00Z",
+    },
+    { label: "Revisions", value: "42" },
+    { label: "Conflicts", value: "2" },
+    { label: "Freshness", value: "Fresh" },
+    { label: "Validation", value: "Verified" },
+    {
+      label: "Permissions",
+      value: "get_entity, recall_for_entity, search_events",
+    },
+  ]);
+
+  const rag = viewModel.liveServices.find(({ id }) => id === "rag");
+  assert.equal(rag?.state, "connected");
+  assert.match(rag?.detail ?? "", /signed active snapshot/i);
+  assert.ok(
+    rag?.facts?.some(
+      ({ label, value }) =>
+        label === "Active snapshot" && value === "f".repeat(64),
+    ),
   );
+  assert.ok(
+    rag?.facts?.some(
+      ({ label, value }) => label === "Validation" && value === "Verified",
+    ),
+  );
+
+  const apple = viewModel.liveServices.find(({ id }) => id === "apple-inputs");
+  assert.equal(apple?.state, "degraded");
+  assert.deepEqual(apple?.facts, [
+    { label: "Calendar", value: "Authorized" },
+    { label: "Reminders", value: "Denied" },
+    { label: "Notes", value: "Authorized" },
+    { label: "Files", value: "Authorized" },
+  ]);
+  assert.deepEqual(viewModel.degradedSections, [
+    "apple-reminders",
+    "memory-conflicts",
+  ]);
+
+  const rendered = JSON.stringify(viewModel);
+  assert.doesNotMatch(rendered, /fixture-token|private|quoted_text|records/i);
+});
+
+test("fails closed when native knowledge status is unavailable", () => {
+  const viewModel = createCommandConsoleStatusViewModel({
+    knowledge: {
+      error: "Bearer secret-token leaked by transport",
+      status: knowledgeStatus(),
+    },
+    localCompute: { error: null, status: null },
+    relayConnection: "connected",
+  });
+
+  for (const id of ["memory", "rag", "apple-inputs"]) {
+    const service = viewModel.liveServices.find((item) => item.id === id);
+    assert.equal(service?.state, "unavailable");
+    assert.match(
+      service?.detail ?? "",
+      /native knowledge status probe failed/i,
+    );
+    assert.doesNotMatch(service?.detail ?? "", /secret-token|bearer/i);
+  }
+  assert.deepEqual(viewModel.degradedSections, ["knowledge-status"]);
 });
 
 test("reports LM Studio from its own native readiness probe, never mesh", () => {

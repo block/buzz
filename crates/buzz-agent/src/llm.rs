@@ -3483,7 +3483,7 @@ mod tests {
             }),
         );
         let base = spawn_native_router(router).await;
-        let mcp = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"]}]"#;
+        let mcp = r#"[{"type":"ephemeral_mcp","server_label":"memory","server_url":"http://127.0.0.1:9100/mcp","allowed_tools":["search"],"headers":{"Authorization":"Bearer fixture-token-123456"}}]"#;
         let runtime = crate::egress::LmStudioRuntimeConfig::parse(None, &base, None, Some(mcp))
             .expect("runtime policy");
         let client =

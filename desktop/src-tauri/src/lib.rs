@@ -899,6 +899,8 @@ pub fn run() {
             command_services::apple_inputs::read_apple_inputs,
             command_services::memory::get_memory_service_readiness,
             command_services::memory::sync_memory_service,
+            command_services::policy::status::get_command_knowledge_status,
+            command_services::rag::get_rag_service_readiness,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -906,6 +908,16 @@ pub fn run() {
     let shutdown_done = Arc::new(AtomicBool::new(false));
     let memory_sync_scheduler =
         command_services::memory::start_memory_sync_scheduler(app.handle().clone());
+    let knowledge_status_app = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            command_services::policy::status::refresh_knowledge_admissions(
+                knowledge_status_app.clone(),
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
 
     #[cfg(unix)]
     shutdown::install_signal_handler(app.handle().clone(), Arc::clone(&shutdown_done));

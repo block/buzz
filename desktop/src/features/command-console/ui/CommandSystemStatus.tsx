@@ -51,8 +51,30 @@ function ServiceCard({ service }: { service: CommandServiceStatus }) {
         </div>
         <CardTitle className="text-base">{service.label}</CardTitle>
       </CardHeader>
-      <CardContent>
+      <CardContent className="space-y-4">
         <CardDescription>{service.detail}</CardDescription>
+        {service.facts && service.facts.length > 0 ? (
+          <dl className="space-y-2 border-t pt-3 text-sm">
+            {service.facts.map((fact) => (
+              <div
+                className="flex items-start justify-between gap-4"
+                key={`${fact.label}-${fact.value}`}
+              >
+                <dt className="text-muted-foreground">{fact.label}</dt>
+                <dd className="break-all text-right font-medium">
+                  {fact.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        ) : null}
+        {service.diagnostics && service.diagnostics.length > 0 ? (
+          <ul className="space-y-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm">
+            {service.diagnostics.map((diagnostic) => (
+              <li key={diagnostic}>{diagnostic}</li>
+            ))}
+          </ul>
+        ) : null}
       </CardContent>
     </Card>
   );
@@ -77,25 +99,22 @@ export function CommandSystemStatus({
         </h2>
         <p className="text-sm text-muted-foreground">
           Read-only status from the active Buzz relay, local compute, and the
-          native LM Studio probe.
+          native LM Studio and knowledge-service probes.
         </p>
       </div>
+
+      {status.degradedSections.length > 0 ? (
+        <p
+          className="mb-4 rounded-lg border border-warning/30 bg-warning/10 p-3 text-sm"
+          data-testid="command-degraded-sections"
+        >
+          <span className="font-medium">Degraded sections:</span>{" "}
+          {status.degradedSections.join(", ")}
+        </p>
+      ) : null}
 
       <div className="grid gap-4 sm:grid-cols-2">
         {status.liveServices.map((service) => (
-          <ServiceCard key={service.id} service={service} />
-        ))}
-      </div>
-
-      <div className="mb-4 mt-6">
-        <h3 className="text-base font-semibold">Later capabilities</h3>
-        <p className="text-sm text-muted-foreground">
-          These integrations are intentionally not connected yet.
-        </p>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {status.laterCapabilities.map((service) => (
           <ServiceCard key={service.id} service={service} />
         ))}
       </div>

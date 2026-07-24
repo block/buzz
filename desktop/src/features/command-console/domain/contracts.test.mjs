@@ -19,6 +19,10 @@ import {
   parseReplicationEnvelope,
   parseSourceReference,
 } from "./contracts.ts";
+import {
+  createCommandKnowledgeStatus,
+  parseCommandKnowledgeStatus,
+} from "./knowledgeStatus.ts";
 
 const NOW = "2026-07-24T04:30:00.000Z";
 const OFFSET_NOW = "2026-07-24T14:30:00+10:00";
@@ -476,4 +480,217 @@ test("__proto__ keys remain inert own JSON data at every nesting level", () => {
   assert.equal(parsed.content.nested.__proto__, "inert");
   assert.equal(JSON.stringify(parsed.content), JSON.stringify(content));
   assert.equal({}.polluted, undefined);
+});
+
+test("command knowledge status preserves only bounded readiness metadata", () => {
+  const status = createCommandKnowledgeStatus({
+    observedAt: NOW,
+    memory: {
+      status: "ready",
+      serverIdentity: "memory",
+      nodeId: "node:command",
+      revisionCount: 42,
+      conflictCount: 2,
+      replicationCursor: 41,
+      lastSuccessfulSync: NOW,
+      freshness: "fresh",
+      validation: "verified",
+      toolAllowlist: ["get_entity", "recall_for_entity", "search_events"],
+      error: null,
+    },
+    rag: {
+      status: "ready",
+      serverIdentity: "rag",
+      activeSnapshotId: "f".repeat(64),
+      signatureFingerprint: "e".repeat(64),
+      snapshotTime: NOW,
+      lastSuccessfulActivation: NOW,
+      freshness: "fresh",
+      validation: "verified",
+      toolAllowlist: [
+        "get_document",
+        "get_snapshot_status",
+        "list_collections",
+        "search_knowledge_base",
+      ],
+      error: null,
+    },
+    appleInputs: [
+      {
+        source: "calendar",
+        permission: "authorized",
+        observedAt: NOW,
+        recordCount: 0,
+        truncated: false,
+        error: null,
+      },
+      {
+        source: "reminders",
+        permission: "denied",
+        observedAt: NOW,
+        recordCount: 0,
+        truncated: false,
+        error: "permission_denied",
+      },
+      {
+        source: "notes",
+        permission: "authorized",
+        observedAt: NOW,
+        recordCount: 0,
+        truncated: false,
+        error: null,
+      },
+      {
+        source: "files",
+        permission: "authorized",
+        observedAt: NOW,
+        recordCount: 0,
+        truncated: false,
+        error: null,
+      },
+    ],
+    degradedSections: ["apple-reminders", "memory-conflicts"],
+  });
+
+  assert.deepEqual(
+    parseCommandKnowledgeStatus(JSON.parse(JSON.stringify(status))),
+    status,
+  );
+  assert.deepEqual(Object.keys(status), [
+    "kind",
+    "version",
+    "classification",
+    "observedAt",
+    "memory",
+    "rag",
+    "appleInputs",
+    "degradedSections",
+  ]);
+  assert.equal(Object.isFrozen(status), true);
+  assert.doesNotMatch(
+    JSON.stringify(status),
+    /content|credential|token|record fields/i,
+  );
+});
+
+test("command knowledge status rejects asserted crypto state and unsafe metadata", () => {
+  const base = createCommandKnowledgeStatus({
+    observedAt: NOW,
+    memory: {
+      status: "unavailable",
+      serverIdentity: null,
+      nodeId: null,
+      revisionCount: 0,
+      conflictCount: 0,
+      replicationCursor: null,
+      lastSuccessfulSync: null,
+      freshness: "unknown",
+      validation: "failed",
+      toolAllowlist: [],
+      error: "authentication_failed",
+    },
+    rag: {
+      status: "unavailable",
+      serverIdentity: null,
+      activeSnapshotId: null,
+      signatureFingerprint: null,
+      snapshotTime: null,
+      lastSuccessfulActivation: null,
+      freshness: "unknown",
+      validation: "failed",
+      toolAllowlist: [],
+      error: "snapshot_hash_mismatch",
+    },
+    appleInputs: ["calendar", "reminders", "notes", "files"].map((source) => ({
+      source,
+      permission: "authorized",
+      observedAt: NOW,
+      recordCount: 0,
+      truncated: false,
+      error: null,
+    })),
+    degradedSections: ["memory-readiness", "rag-readiness"],
+  });
+
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      rag: {
+        ...base.rag,
+        validation: "cryptographically-verified-by-renderer",
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      memory: { ...base.memory, bearerToken: "secret" },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      appleInputs: [
+        {
+          source: "files",
+          permission: "authorized",
+          observedAt: NOW,
+          recordCount: 1,
+          truncated: false,
+          error: null,
+          records: [{ fields: { text: "private" } }],
+        },
+      ],
+    }),
+    null,
+  );
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      memory: { ...base.memory, replicationCursor: -1 },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      degradedSections: ["Bearer secret-token"],
+    }),
+    null,
+  );
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      memory: {
+        ...base.memory,
+        status: "ready",
+        serverIdentity: "memory",
+        nodeId: "node:command",
+        freshness: "unknown",
+        validation: "verified",
+        error: null,
+      },
+    }),
+    null,
+  );
+  assert.equal(
+    parseCommandKnowledgeStatus({
+      ...base,
+      rag: {
+        ...base.rag,
+        status: "ready",
+        serverIdentity: "rag",
+        activeSnapshotId: "not-a-sha256-digest",
+        signatureFingerprint: "e".repeat(64),
+        snapshotTime: NOW,
+        lastSuccessfulActivation: NOW,
+        freshness: "fresh",
+        validation: "verified",
+        error: null,
+      },
+    }),
+    null,
+  );
 });

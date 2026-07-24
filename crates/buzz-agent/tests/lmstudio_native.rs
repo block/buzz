@@ -343,7 +343,8 @@ async fn native_outputs_remain_ordered_and_tools_are_completed_evidence_only() {
         "type":"ephemeral_mcp",
         "server_label":"memory",
         "server_url":"http://127.0.0.1:9/mcp",
-        "allowed_tools":["recall_for_entity"]
+        "allowed_tools":["recall_for_entity"],
+        "headers":{"Authorization":"Bearer fixture-token-123456"}
     }])
     .to_string();
     let mut harness = Harness::spawn(&base_url, Some(&integrations)).await;
@@ -821,7 +822,8 @@ async fn native_tool_evidence_is_bounded_once_before_acp_output() {
         "type":"ephemeral_mcp",
         "server_label":"memory",
         "server_url":"http://127.0.0.1:9/mcp",
-        "allowed_tools":["search_events"]
+        "allowed_tools":["search_events"],
+        "headers":{"Authorization":"Bearer fixture-token-123456"}
     }])
     .to_string();
     let mut harness = Harness::spawn_with_env(
@@ -901,7 +903,8 @@ async fn high_operator_evidence_limit_cannot_exceed_acp_frame_budget() {
         "type":"ephemeral_mcp",
         "server_label":"memory",
         "server_url":"http://127.0.0.1:9/mcp",
-        "allowed_tools":["search_events"]
+        "allowed_tools":["search_events"],
+        "headers":{"Authorization":"Bearer fixture-token-123456"}
     }])
     .to_string();
     let mut harness = Harness::spawn_with_env(

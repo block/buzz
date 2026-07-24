@@ -61,3 +61,11 @@ export function getMemoryServiceReadiness(): Promise<MemoryServiceReadiness> {
 export function syncMemoryService(): Promise<MemorySyncResponse> {
   return invokeTauri<MemorySyncResponse>("sync_memory_service");
 }
+
+/**
+ * Reads the metadata-only native knowledge admission snapshot. Rust owns all
+ * service authentication and integrity checks; this parser is shape-only.
+ */
+export function getCommandKnowledgeStatus(): Promise<unknown> {
+  return invokeTauri<unknown>("get_command_knowledge_status");
+}

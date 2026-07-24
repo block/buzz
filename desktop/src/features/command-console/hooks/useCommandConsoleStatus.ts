@@ -1,7 +1,14 @@
 import * as React from "react";
 
-import { useMeshNodeStatus } from "@/features/mesh-compute/hooks/useMeshNodeStatus";
+import {
+  parseCommandKnowledgeStatus,
+  type AppleKnowledgeStatus,
+  type CommandKnowledgeStatus,
+  type KnowledgeValidation,
+} from "@/features/command-console/domain/knowledgeStatus";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
+import { useMeshNodeStatus } from "@/features/mesh-compute/hooks/useMeshNodeStatus";
+import { getCommandKnowledgeStatus } from "@/shared/api/tauriCommandServices";
 import type { MeshNodeStatus } from "@/shared/api/tauriMesh";
 import {
   getLmStudioReadiness,
@@ -33,11 +40,16 @@ export type CommandServiceStatus = {
     | "Offline"
     | "Not configured";
   readonly detail: string;
+  readonly facts?: readonly {
+    readonly label: string;
+    readonly value: string;
+  }[];
+  readonly diagnostics?: readonly string[];
 };
 
 export type CommandConsoleStatusViewModel = {
+  readonly degradedSections: readonly string[];
   readonly liveServices: readonly CommandServiceStatus[];
-  readonly laterCapabilities: readonly CommandServiceStatus[];
 };
 
 type LocalComputeProbe = {
@@ -56,31 +68,11 @@ type CommandConsoleStatusSources = {
     readonly status: LmStudioReadiness | null;
     readonly error: string | null;
   };
+  readonly knowledge?: {
+    readonly status: CommandKnowledgeStatus | null;
+    readonly error: string | null;
+  };
 };
-
-const LATER_CAPABILITIES: readonly CommandServiceStatus[] = [
-  {
-    detail: "No memory integration is configured in Phase 1.",
-    id: "memory",
-    label: "Memory",
-    state: "not_configured",
-    statusLabel: "Not configured",
-  },
-  {
-    detail: "No retrieval integration is configured in Phase 1.",
-    id: "rag",
-    label: "RAG",
-    state: "not_configured",
-    statusLabel: "Not configured",
-  },
-  {
-    detail: "No Calendar, Reminders, or Notes access is configured.",
-    id: "apple-inputs",
-    label: "Apple inputs",
-    state: "not_configured",
-    statusLabel: "Not configured",
-  },
-];
 
 const LOCAL_COMPUTE_FRESHNESS_MS = 10_000;
 
@@ -297,17 +289,243 @@ function localComputeStatus({
   };
 }
 
+function titleCase(value: string): string {
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function validationFact(value: KnowledgeValidation) {
+  return { label: "Validation", value: titleCase(value) };
+}
+
+function unavailableKnowledgeStatus(
+  id: "memory" | "rag" | "apple-inputs",
+  label: string,
+): CommandServiceStatus {
+  return {
+    id,
+    label,
+    state: "unavailable",
+    statusLabel: "Unavailable",
+    detail:
+      "Native knowledge status probe failed. Check the local service and its protected configuration.",
+    diagnostics: [
+      "Retry the local status probe after checking the service and Keychain-backed credential.",
+    ],
+  };
+}
+
+function memoryStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
+  const memory = status.memory;
+  const base = { id: "memory" as const, label: "Memory" };
+  if (memory.status === "not_configured") {
+    return {
+      ...base,
+      detail: "Command Memory has no protected local configuration.",
+      state: "not_configured",
+      statusLabel: "Not configured",
+    };
+  }
+  if (memory.status === "unavailable") {
+    return {
+      ...base,
+      detail: "Authenticated local Memory readiness was not verified.",
+      state: "unavailable",
+      statusLabel: "Unavailable",
+      facts: [
+        { label: "Freshness", value: titleCase(memory.freshness) },
+        validationFact(memory.validation),
+      ],
+      diagnostics: [
+        "Check the local Memory service, protected node identity, and Keychain credential.",
+      ],
+    };
+  }
+  const conflicts = memory.conflictCount;
+  const degraded = conflicts > 0;
+  return {
+    ...base,
+    detail: degraded
+      ? `${conflicts} unresolved conflicts are excluded from unattended adviser context.`
+      : "Authenticated local Memory is ready for approved adviser reads.",
+    state: degraded ? "degraded" : "connected",
+    statusLabel: degraded ? "Degraded" : "Connected",
+    facts: [
+      { label: "Node", value: memory.nodeId ?? "Unknown" },
+      {
+        label: "Replication cursor",
+        value: memory.replicationCursor?.toString() ?? "Unknown",
+      },
+      {
+        label: "Last successful sync",
+        value: memory.lastSuccessfulSync ?? "Unknown",
+      },
+      { label: "Revisions", value: memory.revisionCount.toString() },
+      { label: "Conflicts", value: conflicts.toString() },
+      { label: "Freshness", value: titleCase(memory.freshness) },
+      validationFact(memory.validation),
+      {
+        label: "Permissions",
+        value:
+          memory.toolAllowlist.length > 0
+            ? memory.toolAllowlist.join(", ")
+            : "None",
+      },
+    ],
+    diagnostics: degraded
+      ? ["Resolve Memory conflicts before unattended brief generation."]
+      : [],
+  };
+}
+
+function ragStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
+  const rag = status.rag;
+  const base = { id: "rag" as const, label: "RAG" };
+  if (rag.status === "not_configured") {
+    return {
+      ...base,
+      detail: "Command RAG has no protected local configuration.",
+      state: "not_configured",
+      statusLabel: "Not configured",
+    };
+  }
+  if (
+    rag.status === "unavailable" ||
+    rag.validation !== "verified" ||
+    rag.freshness !== "fresh"
+  ) {
+    return {
+      ...base,
+      detail:
+        "The local RAG service did not prove a fresh signed active snapshot.",
+      state: "unavailable",
+      statusLabel: "Unavailable",
+      facts: [
+        {
+          label: "Active snapshot",
+          value: rag.activeSnapshotId ?? "Unknown",
+        },
+        { label: "Freshness", value: titleCase(rag.freshness) },
+        validationFact(rag.validation),
+      ],
+      diagnostics: [
+        "Restore the expected signed snapshot or re-run its staging validation.",
+      ],
+    };
+  }
+  return {
+    ...base,
+    detail:
+      "A fresh signed active snapshot is verified for read-only retrieval.",
+    state: "connected",
+    statusLabel: "Connected",
+    facts: [
+      { label: "Active snapshot", value: rag.activeSnapshotId ?? "Unknown" },
+      {
+        label: "Signer fingerprint",
+        value: rag.signatureFingerprint ?? "Unknown",
+      },
+      { label: "Snapshot time", value: rag.snapshotTime ?? "Unknown" },
+      {
+        label: "Last activation",
+        value: rag.lastSuccessfulActivation ?? "Unknown",
+      },
+      { label: "Freshness", value: titleCase(rag.freshness) },
+      validationFact(rag.validation),
+      {
+        label: "Permissions",
+        value:
+          rag.toolAllowlist.length > 0 ? rag.toolAllowlist.join(", ") : "None",
+      },
+    ],
+  };
+}
+
+const APPLE_LABELS: Record<AppleKnowledgeStatus["source"], string> = {
+  calendar: "Calendar",
+  reminders: "Reminders",
+  notes: "Notes",
+  files: "Files",
+};
+
+function appleStatus(status: CommandKnowledgeStatus): CommandServiceStatus {
+  const base = { id: "apple-inputs" as const, label: "Apple inputs" };
+  const sources = status.appleInputs;
+  if (sources.length === 0) {
+    return {
+      ...base,
+      detail: "No Apple input permission status is available.",
+      state: "not_configured",
+      statusLabel: "Not configured",
+    };
+  }
+  const facts = sources.map((source) => ({
+    label: APPLE_LABELS[source.source],
+    value: titleCase(source.permission),
+  }));
+  if (sources.every(({ permission }) => permission === "unavailable")) {
+    return {
+      ...base,
+      detail: "The signed Apple input helper is unavailable.",
+      state: "unavailable",
+      statusLabel: "Unavailable",
+      facts,
+      diagnostics: ["Check the bundled helper and macOS privacy settings."],
+    };
+  }
+  const degraded = sources.some(
+    ({ permission, error }) => permission !== "authorized" || error !== null,
+  );
+  return {
+    ...base,
+    detail: degraded
+      ? "Some read-only Apple input sections are unavailable and will degrade independently."
+      : "All configured read-only Apple input permissions are authorized.",
+    state: degraded ? "degraded" : "connected",
+    statusLabel: degraded ? "Degraded" : "Connected",
+    facts,
+    diagnostics: degraded
+      ? [
+          "Review denied or restricted sources in macOS System Settings; other sources remain usable.",
+        ]
+      : [],
+  };
+}
+
 export function createCommandConsoleStatusViewModel({
+  knowledge,
   lmStudio,
   localCompute,
   relayConnection,
 }: CommandConsoleStatusSources): CommandConsoleStatusViewModel {
+  const knowledgeServices =
+    knowledge === undefined
+      ? []
+      : knowledge.error !== null || knowledge.status === null
+        ? [
+            unavailableKnowledgeStatus("memory", "Memory"),
+            unavailableKnowledgeStatus("rag", "RAG"),
+            unavailableKnowledgeStatus("apple-inputs", "Apple inputs"),
+          ]
+        : [
+            memoryStatus(knowledge.status),
+            ragStatus(knowledge.status),
+            appleStatus(knowledge.status),
+          ];
   return {
-    laterCapabilities: LATER_CAPABILITIES,
+    degradedSections:
+      knowledge === undefined
+        ? []
+        : knowledge.error !== null || knowledge.status === null
+          ? ["knowledge-status"]
+          : knowledge.status.degradedSections,
     liveServices: [
       relayStatus(relayConnection),
       localComputeStatus(localCompute),
       ...(lmStudio ? [lmStudioStatus(lmStudio)] : []),
+      ...knowledgeServices,
     ],
   };
 }
@@ -339,6 +557,49 @@ function useLmStudioReadiness(): {
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+    };
+  }, []);
+
+  return { status, error };
+}
+
+function useCommandKnowledgeStatus(): {
+  status: CommandKnowledgeStatus | null;
+  error: string | null;
+} {
+  const [status, setStatus] = React.useState<CommandKnowledgeStatus | null>(
+    null,
+  );
+  const [error, setError] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    let retry: number | undefined;
+    const probe = async () => {
+      try {
+        const value = parseCommandKnowledgeStatus(
+          await getCommandKnowledgeStatus(),
+        );
+        if (!value) throw new Error("invalid_knowledge_status");
+        if (!cancelled) {
+          setStatus(value);
+          setError(null);
+        }
+      } catch {
+        if (!cancelled) {
+          setStatus(null);
+          setError("knowledge_status_unavailable");
+        }
+      } finally {
+        if (!cancelled) {
+          retry = window.setTimeout(() => void probe(), 15_000);
+        }
+      }
+    };
+    void probe();
+    return () => {
+      cancelled = true;
+      if (retry !== undefined) window.clearTimeout(retry);
     };
   }, []);
 
@@ -382,14 +643,16 @@ export function useCommandConsoleStatus(): CommandConsoleStatusViewModel {
   const localComputeProbe = useMeshNodeStatus();
   const localCompute = useFreshCommandConsoleLocalCompute(localComputeProbe);
   const lmStudio = useLmStudioReadiness();
+  const knowledge = useCommandKnowledgeStatus();
 
   return React.useMemo(
     () =>
       createCommandConsoleStatusViewModel({
         localCompute,
         lmStudio,
+        knowledge,
         relayConnection,
       }),
-    [lmStudio, localCompute, relayConnection],
+    [knowledge, lmStudio, localCompute, relayConnection],
   );
 }

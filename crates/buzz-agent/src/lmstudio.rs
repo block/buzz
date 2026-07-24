@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 use crate::types::{clamp, AgentError, ExecutedToolCall, ExecutedToolProvider};
 
@@ -34,13 +35,27 @@ pub enum LmStudioReasoning {
 }
 
 /// An ephemeral MCP integration supplied directly to LM Studio for one request.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 pub struct EphemeralMcpIntegration {
     #[serde(rename = "type")]
     integration_type: EphemeralMcpType,
     server_label: String,
     server_url: String,
     allowed_tools: Vec<String>,
+    headers: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for EphemeralMcpIntegration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EphemeralMcpIntegration")
+            .field("integration_type", &self.integration_type)
+            .field("server_label", &self.server_label)
+            .field("server_url", &self.server_url)
+            .field("allowed_tools", &self.allowed_tools)
+            .field("headers", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,12 +70,14 @@ impl EphemeralMcpIntegration {
         server_label: impl Into<String>,
         server_url: impl Into<String>,
         allowed_tools: Vec<String>,
+        headers: BTreeMap<String, String>,
     ) -> Self {
         Self {
             integration_type: EphemeralMcpType::EphemeralMcp,
             server_label: server_label.into(),
             server_url: server_url.into(),
             allowed_tools,
+            headers,
         }
     }
 }
@@ -375,6 +392,7 @@ fn parse_error(message: String) -> AgentError {
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use std::collections::BTreeMap;
 
     use super::{
         parse_chat_response, EphemeralMcpIntegration, LmStudioChatRequest, LmStudioOutput,
@@ -392,6 +410,10 @@ mod tests {
                 "memory",
                 "http://127.0.0.1:8765/mcp",
                 vec!["recall_for_entity".into(), "search_events".into()],
+                BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer fixture-token-123456".to_string(),
+                )]),
             )],
             LmStudioReasoning::On,
             MAX_OUTPUT_TOKENS,
@@ -411,7 +433,10 @@ mod tests {
                     "type": "ephemeral_mcp",
                     "server_label": "memory",
                     "server_url": "http://127.0.0.1:8765/mcp",
-                    "allowed_tools": ["recall_for_entity", "search_events"]
+                    "allowed_tools": ["recall_for_entity", "search_events"],
+                    "headers": {
+                        "Authorization": "Bearer fixture-token-123456"
+                    }
                 }],
                 "stream": false,
                 "reasoning": "on",

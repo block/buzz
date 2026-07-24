@@ -109,6 +109,10 @@ with a TypeScript lookup table or an id comparison in a component.
     are reserved from user env configuration and trusted values are applied
     after all user layers. The optional API token comes only from the OS
     Keychain; `default_env` is never a security boundary or readiness signal.
+    `LM_STUDIO_MCP_INTEGRATIONS` is likewise never copied from ambient env: Rust
+    builds it from the short-lived authenticated Memory/RAG admission cache,
+    with exact literal-loopback endpoints, bearer headers, and workflow-scoped
+    tool allowlists.
 
 ## The tests that enforce this
 
