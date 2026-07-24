@@ -15,10 +15,13 @@ struct CalendarRecord: Equatable {
 }
 struct ReminderRecord: Equatable {
     let identifier, listIdentifier, title, recurrenceIdentifier: String
+    let dueDate, completionDate: Date?
     let isCompleted, isDeleted, isStale: Bool
     func output() -> AppleInputRecord { .init(fields: [
         "identifier": identifier, "list_identifier": listIdentifier, "title": title,
         "is_completed": isCompleted.description, "recurrence_identifier": recurrenceIdentifier,
+        "due_date": dueDate.map { ISO8601DateFormatter().string(from: $0) } ?? "",
+        "completion_date": completionDate.map { ISO8601DateFormatter().string(from: $0) } ?? "",
         "is_deleted": isDeleted.description, "is_stale": isStale.description,
     ]) }
 }
@@ -85,29 +88,45 @@ final class EventKitReader: @unchecked Sendable {
         }
         return .init(records: Array(source.prefix(maximum)), truncated: source.count > maximum)
     }
-    func readReminders(listIdentifiers: [String], maximum: Int) throws -> Page<ReminderRecord> {
+    func readReminders(listIdentifiers: [String], start: Date, end: Date, maximum: Int) throws -> Page<ReminderRecord> {
+        guard start < end, end.timeIntervalSince(start) <= ProtocolLimits.maximumWindow else { throw AppleInputFailure.invalidRequest("invalid reminder window") }
         if store == nil {
-            let selected = reminderFixture.filter { listIdentifiers.contains($0.listIdentifier) }
-            return .init(records: Array(selected.prefix(maximum)), truncated: selected.count > maximum)
+            let selected = reminderFixture.filter {
+                guard listIdentifiers.contains($0.listIdentifier) else { return false }
+                let relevant = $0.isCompleted ? $0.completionDate : $0.dueDate
+                return relevant.map { $0 >= start && $0 < end } ?? false
+            }
+            var seen = Set<String>()
+            let unique = selected.filter { seen.insert($0.identifier).inserted }
+            return .init(records: Array(unique.prefix(maximum)), truncated: unique.count > maximum)
         }
         guard permissionStatus(source: .reminders) == .authorized, let store else { return .init(records: [], truncated: false) }
         let lists = store.calendars(for: .reminder).filter { listIdentifiers.contains($0.calendarIdentifier) }
+        let incomplete = try fetch(store: store, predicate: store.predicateForIncompleteReminders(withDueDateStarting: start, ending: end, calendars: lists))
+        let completed = try fetch(store: store, predicate: store.predicateForCompletedReminders(withCompletionDateStarting: start, ending: end, calendars: lists))
+        var seen = Set<String>()
+        let snapshot = (incomplete + completed).filter { seen.insert($0.calendarItemIdentifier).inserted }.prefix(maximum + 1)
+        let values = snapshot.map { reminder in
+            ReminderRecord(identifier: reminder.calendarItemIdentifier, listIdentifier: reminder.calendar.calendarIdentifier,
+                           title: String((reminder.title ?? "").prefix(512)), recurrenceIdentifier: reminder.calendarItemExternalIdentifier,
+                           dueDate: reminder.dueDateComponents?.date, completionDate: reminder.completionDate,
+                           isCompleted: reminder.isCompleted, isDeleted: false, isStale: false)
+        }
+        return .init(records: Array(values.prefix(maximum)), truncated: values.count > maximum)
+    }
+
+    private func fetch(store: EKEventStore, predicate: NSPredicate) throws -> [EKReminder] {
         let semaphore = DispatchSemaphore(value: 0)
         let lock = NSLock()
         var fetched: [EKReminder] = []
-        let token = store.fetchReminders(matching: store.predicateForReminders(in: lists)) { reminders in
+        let token = store.fetchReminders(matching: predicate) { reminders in
             lock.lock(); fetched = reminders ?? []; lock.unlock(); semaphore.signal()
         }
         guard semaphore.wait(timeout: .now() + 5) == .success else {
             store.cancelFetchRequest(token)
             throw AppleInputFailure.invalidRequest("reminder query timed out")
         }
-        lock.lock(); let snapshot = fetched; lock.unlock()
-        let values = snapshot.prefix(maximum + 1).map { reminder in
-            ReminderRecord(identifier: reminder.calendarItemIdentifier, listIdentifier: reminder.calendar.calendarIdentifier,
-                           title: String((reminder.title ?? "").prefix(512)), recurrenceIdentifier: reminder.calendarItemExternalIdentifier,
-                           isCompleted: reminder.isCompleted, isDeleted: false, isStale: false)
-        }
-        return .init(records: Array(values.prefix(maximum)), truncated: values.count > maximum)
+        lock.lock(); defer { lock.unlock() }
+        return fetched
     }
 }

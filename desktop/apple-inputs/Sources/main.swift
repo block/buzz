@@ -27,7 +27,7 @@ func response(for request: AppleInputRequest) async -> AppleInputResponse {
             return .init(source: "calendar", permission: eventKit.permissionStatus(source: .calendar),
                          records: page.records.map { $0.output() }, truncated: page.truncated)
         case .readReminders(let payload):
-            let page = try eventKit.readReminders(listIdentifiers: payload.listIdentifiers, maximum: payload.maximum)
+            let page = try eventKit.readReminders(listIdentifiers: payload.listIdentifiers, start: payload.start, end: payload.end, maximum: payload.maximum)
             return .init(source: "reminders", permission: eventKit.permissionStatus(source: .reminders),
                          records: page.records.map { $0.output() }, truncated: page.truncated)
         case .readNotes(let payload):

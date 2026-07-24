@@ -28,7 +28,7 @@ enum AppleInputFailure: LocalizedError {
 
 struct PermissionPayload { let source: PermissionSource }
 struct CalendarPayload { let calendarIdentifiers: [String]; let start: Date; let end: Date; let maximum: Int }
-struct ReminderPayload { let listIdentifiers: [String]; let maximum: Int }
+struct ReminderPayload { let listIdentifiers: [String]; let start: Date; let end: Date; let maximum: Int }
 struct NotesPayload { let folderIdentifiers: [String]; let maximum: Int }
 struct FilesPayload { let paths: [String] }
 enum AppleInputPayload {
@@ -67,8 +67,12 @@ struct AppleInputRequest {
             }
             return .init(operation: operation, payload: .readCalendar(.init(calendarIdentifiers: ids, start: start, end: end, maximum: try maximum(arguments["maximum"]))))
         case .readReminders:
-            try exact(arguments, keys: ["list_ids", "maximum"])
-            return .init(operation: operation, payload: .readReminders(.init(listIdentifiers: try stringArray(arguments["list_ids"], name: "list_ids"), maximum: try maximum(arguments["maximum"]))))
+            try exact(arguments, keys: ["list_ids", "start", "end", "maximum"])
+            let start = try date(arguments["start"], name: "start"), end = try date(arguments["end"], name: "end")
+            guard start < end, end.timeIntervalSince(start) <= ProtocolLimits.maximumWindow else {
+                throw AppleInputFailure.invalidRequest("reminder window must be ascending and at most 366 days")
+            }
+            return .init(operation: operation, payload: .readReminders(.init(listIdentifiers: try stringArray(arguments["list_ids"], name: "list_ids"), start: start, end: end, maximum: try maximum(arguments["maximum"]))))
         case .readNotes:
             try exact(arguments, keys: ["folder_ids", "maximum"])
             return .init(operation: operation, payload: .readNotes(.init(folderIdentifiers: try stringArray(arguments["folder_ids"], name: "folder_ids"), maximum: try maximum(arguments["maximum"]))))

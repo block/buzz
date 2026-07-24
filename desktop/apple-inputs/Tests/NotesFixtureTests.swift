@@ -22,4 +22,11 @@ final class NotesFixtureTests: XCTestCase {
         XCTAssertTrue(script.contains("maximumTitleCharacters"))
         XCTAssertTrue(script.contains("maximumBodyCharacters"))
     }
+
+    func testEmptyNotesDescriptorReturnsNoRecordsWithoutTrapping() throws {
+        let reader = NotesReader(allowedFolders: ["work"])
+        let page = try reader.records(from: NSAppleEventDescriptor.list(), maximum: 2)
+        XCTAssertTrue(page.records.isEmpty)
+        XCTAssertFalse(page.truncated)
+    }
 }

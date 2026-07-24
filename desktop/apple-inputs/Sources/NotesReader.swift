@@ -24,11 +24,16 @@ final class NotesReader {
         guard let descriptor = NSAppleScript(source: source)?.executeAndReturnError(&error), error == nil else {
             throw AppleInputFailure.invalidRequest("Notes read failed")
         }
+        return try records(from: descriptor, maximum: maximum)
+    }
+
+    func records(from descriptor: NSAppleEventDescriptor, maximum: Int) throws -> Page<NoteRecord> {
         let count = descriptor.numberOfItems
         var records: [NoteRecord] = []
         records.reserveCapacity(min(count, maximum))
-        for index in 1...min(count, maximum) {
-            guard let row = descriptor.atIndex(index), row.numberOfItems == 4,
+        for index in 0..<min(count, maximum) {
+            let descriptorIndex = index + 1
+            guard let row = descriptor.atIndex(descriptorIndex), row.numberOfItems == 4,
                   let identifier = row.atIndex(1)?.stringValue,
                   let folder = row.atIndex(2)?.stringValue,
                   let title = row.atIndex(3)?.stringValue,

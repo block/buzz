@@ -20,6 +20,13 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(payload.maximum, 25)
     }
 
+    func testReminderPayloadRequiresBoundedRFC3339Window() throws {
+        let request = try AppleInputRequest.decode(line: #"{"operation":"read_reminders","arguments":{"list_ids":["work"],"start":"2026-07-01T00:00:00Z","end":"2026-07-02T00:00:00Z","maximum":2}}"#)
+        guard case .readReminders(let payload) = request.payload else { return XCTFail("wrong payload") }
+        XCTAssertLessThan(payload.start, payload.end)
+        XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_reminders","arguments":{"list_ids":["work"],"maximum":2}}"#))
+    }
+
     func testRejectsWrongTypesUnknownPayloadKeysAndOversizedIdentifiers() {
         XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_files","arguments":{"paths":"nope"}}"#))
         XCTAssertThrowsError(try AppleInputRequest.decode(line: #"{"operation":"read_notes","arguments":{"folder_ids":["work"],"maximum":1,"script":"bad"}}"#))
