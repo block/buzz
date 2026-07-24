@@ -321,6 +321,36 @@ test("existing Welcome starter keeps its runtime when that harness is hidden", (
   );
 });
 
+test("existing Welcome starter keeps an aliased runtime when that harness is hidden", () => {
+  const existing = makeAgent({
+    personaId: WELCOME_GUIDE_PERSONA_ID,
+    agentCommand: "claude-code-acp",
+    agentArgs: [],
+  });
+
+  assert.equal(
+    welcomeStarterRuntimeUpdate(
+      existing,
+      {
+        name: "Fizz",
+        agentCommand: "goose",
+        agentArgs: [],
+        mcpCommand: "",
+        model: null,
+        provider: null,
+      },
+      {
+        runtimes: [
+          { id: "claude", command: "claude-agent-acp" },
+          { id: "goose", command: "goose" },
+        ],
+        disabledRuntimeIds: ["claude"],
+      },
+    ),
+    null,
+  );
+});
+
 test("welcome team starter definitions and role identities are stable", () => {
   assert.equal(WELCOME_TEAM_ID, "builtin-team:welcome");
   assert.deepEqual(WELCOME_TEAM_STARTERS, [

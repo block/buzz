@@ -1,3 +1,4 @@
+import { commandsMatch } from "@/features/agents/agentReuse";
 import {
   buildInstanceInputForDefinition,
   resolveStartRuntimeForDefinition,
@@ -246,8 +247,9 @@ export function welcomeStarterRuntimeUpdate(
 
   const existingRuntime = visibility?.runtimes.find(
     (runtime) =>
-      runtime.command?.trim() === existing.agentCommand.trim() ||
-      runtime.id.trim() === existing.agentCommand.trim(),
+      (runtime.command
+        ? commandsMatch(existing.agentCommand, runtime.command)
+        : false) || commandsMatch(existing.agentCommand, runtime.id),
   );
   if (
     existingRuntime &&
