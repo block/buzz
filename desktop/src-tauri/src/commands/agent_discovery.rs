@@ -1665,6 +1665,32 @@ mod tests {
         );
     }
 
+    /// Goose Windows catalog command (discovery.rs:78) must dequote to a bare pipeline
+    /// with a literal `$env:` prefix — no backslash before the dollar sign.
+    /// This proves the `\$` → `$` escape fix: post-#2750 the spawn is native and
+    /// PowerShell receives the body verbatim, so a residual `\` would produce
+    /// `\$env:CONFIGURE='false'` which is a malformed statement.
+    #[cfg(windows)]
+    #[test]
+    fn test_powershell_command_goose_catalog_dequoted() {
+        let cmd = super::install_powershell_command(
+            r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex""#,
+        );
+        assert_eq!(
+            cmd.get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            vec![
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "$env:CONFIGURE='false'; irm https://raw.githubusercontent.com/aaif-goose/goose/main/download_cli.ps1 | iex",
+            ],
+            "Goose catalog command must dequote with bare $env: (no backslash before $)"
+        );
+    }
+
     // ── install retry ─────────────────────────────────────────────────────────
 
     /// Build an `InstallStepResult` with just the fields the retry loop reads.
