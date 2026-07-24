@@ -225,7 +225,8 @@ test.describe("agent readiness gate screenshots", () => {
     });
   });
 
-  // Shot 05: claude runtime (CLI-login) — provider/model not required, submit enabled.
+  // Shot 05: claude runtime (CLI-login) — provider not required; an explicit
+  // model completes the custom configuration and enables submit.
   // Override the catalog to make claude fully available so it appears in the dropdown.
   test("05-create-cli-login-runtime-no-provider-required", async ({ page }) => {
     await installMockBridge(page, {
@@ -263,6 +264,7 @@ test.describe("agent readiness gate screenshots", () => {
     });
 
     await openCreateDialog(page);
+    await page.getByRole("tab", { name: "Customize for this agent" }).click();
 
     // Switch the auto-selected buzz-agent runtime to Claude Code.
     await selectDropdownOption(
@@ -271,9 +273,10 @@ test.describe("agent readiness gate screenshots", () => {
       "Claude Code",
     );
 
-    // Provider/model fields hidden for CLI-login runtimes.
+    // Provider stays hidden for CLI-login runtimes. Customize still requires
+    // an explicit model choice.
     await expect(page.locator("#persona-llm-provider")).not.toBeVisible();
-    // Submit enabled without provider/model.
+    await setCustomModel(page, "claude-opus-4-6");
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled({
       timeout: 5_000,
     });
