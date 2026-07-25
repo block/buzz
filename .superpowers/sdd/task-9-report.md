@@ -17,7 +17,11 @@ three actionable gaps:
   assertions and animation races without changing the profile editor or mock
   event-routing production code.
 
-The correction remains local and has not been pushed.
+Independent review approved the final post-review delta at `d50cc1a6` with no
+Critical, Important, or Minor findings. Phase 4 code and fixture acceptance is
+complete without a waiver. The controlled live commissioning exercise remains
+separately deferred because its production-shaped services and protected test
+assets do not yet exist; this report does not claim live operational proof.
 
 ## Corrected acceptance surface
 
@@ -118,8 +122,12 @@ cancel-and-join boundary; synchronous application shutdown behavior is
 unchanged. The corrected test passed 100/100 repetitions, and the replacement
 `just ci` run passed, including all 541 mobile tests with one skip.
 
-Phase 4 approval still remains open on the controlled live/offline exercise and
-independent-review acceptance.
+Independent review passed the exact `b563d3b0..d50cc1a6` delta. Its fresh
+checks passed the E2E build, the link-preview replacement and channel-browser
+readiness scenarios 30/30, the observer lifecycle correction 20/20, and the
+in-flight cancellation case. Together with the committed 700-pass desktop
+smoke and replacement aggregate `just ci`, this closes Phase 4 code and fixture
+acceptance.
 
 ## Closed baseline debt `PHASE4-SMOKE-001`
 
@@ -174,6 +182,16 @@ listener on port 18006, no RAG listener on port 8005, and no
 controlled OFFICIAL exercise as passed. No network interface was disabled.
 Resource figures remain explicitly `unmeasured`; no values were inferred.
 
+`PHASE4-COMMISSION-001` is the retained operational commissioning record.
+NavigatorRAN/buzz has GitHub Issues disabled, so the draft Phase 4 PR and this
+committed report are its tracking surface. It requires production-shaped
+loopback Memory and RAG services, a signed RAG mirror and navigation golden
+cases, protected configuration and Apple allowlists, a signed/notarised app, a
+reviewed live driver, a disposable macOS test profile, and a local operator for
+timed-rollback packet-filter isolation. Until it passes, the project must not
+claim live offline operation, egress isolation, production retrieval, measured
+resource behaviour, signed-app provenance, or signed-history recovery.
+
 The live runner requires explicit loopback service endpoints, model, and an
 absolute non-symlink driver before it will run. This prevents hermetic fixture
 proof from being presented as a live/offline acceptance result. Its LM Studio
@@ -190,3 +208,6 @@ operator inspection of retained evidence.
   navigation fix.
 - `01KYC3PH6SR9ZX6HVKAMCV7QDB` — exact smoke result, base attribution, relay
   synchronization correction, and no-waiver disposition.
+- `01KYCRKXQYVVRRYGK6F2CV4K8M` — independent approval of the final
+  `b563d3b0..d50cc1a6` delta and the explicit code-versus-commissioning
+  acceptance boundary.

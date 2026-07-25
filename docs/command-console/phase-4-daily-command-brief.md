@@ -180,8 +180,9 @@ scenarios passed 15/15 across five repetitions and passed in the aggregate run.
 
 `PHASE4-SMOKE-001` is closed on draft PR #4 by deterministic RED/GREEN evidence,
 focused repetition, and the green 700-pass aggregate. No acceptance waiver was
-used. Phase 4 itself remains open pending the controlled live/offline exercise
-and independent review.
+used. Independent review then approved the exact post-review delta at
+`d50cc1a6` with no findings after fresh focused verification. Phase 4 code and
+fixture acceptance is complete.
 
 ## Controlled live offline exercise
 
@@ -208,6 +209,14 @@ limits, or signed-history reload. Those claims belong to the reviewed driver
 and its retained evidence. A zero driver exit means only that the reviewed
 driver completed; the operator must still inspect its evidence before recording
 the controlled live exercise as passed.
+
+The exercise is tracked as `PHASE4-COMMISSION-001` in this runbook, the Task 9
+report, and draft PR #4 because NavigatorRAN/buzz has GitHub Issues disabled.
+It is deferred until the production-shaped loopback Memory and RAG services,
+signed mirror and golden cases, protected app configuration and Apple
+allowlists, signed/notarised application, reviewed driver, disposable macOS
+profile, and local packet-filter operator are available. The completed Phase 4
+code gate must not be described as live operational proof.
 
 The reviewed driver and operator procedure must:
 
