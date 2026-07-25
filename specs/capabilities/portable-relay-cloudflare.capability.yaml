@@ -1,0 +1,65 @@
+capability:
+  id: portable-relay-cloudflare
+  type: capability
+  name: Portable relay Cloudflare adapter
+  status: specified
+  version: portable-relay-cloudflare-v0.1
+  description: |
+    Prove that one stable portable relay node preserves its signed-event,
+    durability, query, and WebSocket behavior when implemented with a Worker
+    and a SQLite-backed Durable Object.
+  telos: ../TELOS.md
+  persona: ../personas/local-first-builder.md
+  journey: ../journeys/promote-portable-relay-to-cloudflare.md
+  story: ../stories/portable-relay/prove-cloudflare-portability.md
+  architecture: ../architecture/portable-relay-cloudflare-v0.1.md
+  model: ../models/portable-relay/portable-relay-cloudflare.model.yaml
+  behavior: ../features/portable-relay/cloudflare-conformance.feature
+  contracts:
+    - ../contracts/openapi/local-relay.yaml
+    - ../contracts/asyncapi/local-relay.yaml
+  fixtures:
+    - ../fixtures/portable-relay/cloudflare-v0.1.json
+    - ../fixtures/portable-relay/core-v0.1.json
+    - ../fixtures/local-relay/signed-message.json
+
+  conformance:
+    boundary: ./portable-relay.capability.yaml
+    required_profiles:
+      - portable-relay-core-v0.1
+    adapter_profile: portable-relay-cloudflare-v0.1
+    tiers:
+      - deterministic-kernel
+      - local-workers-runtime
+      - deployed-preview
+    completion_rule: |
+      All tiers pass against the shared fixtures. Local Workers-runtime tests
+      alone may report local-runtime-conformant but not implemented.
+
+  runtime:
+    ingress: Cloudflare Worker
+    coordination_atom: one stable relay node/community
+    state_boundary: SQLite-backed Durable Object
+    subscriptions: Durable Object WebSocket hibernation API
+    signature_verification: nostr-tools backed by @noble/curves
+    implementation_language: TypeScript reference shell
+    optional_kernel_language: Rust compiled to WebAssembly
+
+  profile_phases:
+    core:
+      profile: portable-relay-core-v0.1
+      status: required-first-slice
+    identity:
+      profile: portable-relay-identity-v0.1
+      status: deferred-until-core-conformance
+    replication:
+      profile: portable-relay-replication-v0.1
+      status: deferred
+    effects:
+      profile: portable-relay-effects-v0.1
+      status: deferred
+
+  implementation:
+    planned_path: cloudflare/portable-relay
+    status: not-started
+    production_ready: false

@@ -1,0 +1,109 @@
+{
+  "_meta": {
+    "id": "portable-relay-cloudflare-v0.1",
+    "type": "fixture",
+    "description": "Stable-node routing, eviction, hibernation, and environment-tier expectations for the Cloudflare adapter.",
+    "story": "specs/stories/portable-relay/prove-cloudflare-portability.md",
+    "feature": "specs/features/portable-relay/cloudflare-conformance.feature",
+    "scenario": "Preserve the portable signed event through Cloudflare"
+  },
+  "capability": "portable-relay-cloudflare-v0.1",
+  "required_profiles": [
+    "portable-relay-core-v0.1"
+  ],
+  "shared_vectors": {
+    "core": "./core-v0.1.json",
+    "event": "../local-relay/signed-message.json"
+  },
+  "stable_nodes": {
+    "primary": {
+      "configured_authority": "Coherence.Example.:443",
+      "transport_scheme": "wss",
+      "normalized_key": "coherence.example",
+      "test_identifier": "relay-node-primary"
+    },
+    "isolated": {
+      "configured_authority": "identity.example",
+      "transport_scheme": "wss",
+      "normalized_key": "identity.example",
+      "test_identifier": "relay-node-isolated"
+    }
+  },
+  "routing_expectations": {
+    "equivalent_urls_share_state": [
+      "https://coherence.example",
+      "https://COHERENCE.EXAMPLE",
+      "https://coherence.example.",
+      "wss://coherence.example:443"
+    ],
+    "scheme_aware_examples": [
+      {
+        "url": "http://coherence.example:443",
+        "normalized_key": "coherence.example:443"
+      },
+      {
+        "url": "https://coherence.example:8443",
+        "normalized_key": "coherence.example:8443"
+      }
+    ],
+    "different_normalized_keys_share_state": false,
+    "default_port_is_scheme_aware": true,
+    "non_default_port_is_preserved": true,
+    "request_body_can_select_node": false,
+    "event_tag_can_select_node": false
+  },
+  "durability_expectations": {
+    "acknowledge_before_storage_commit": false,
+    "recover_after_eviction": true,
+    "recover_after_compatible_deployment": true,
+    "duplicate_journal_records": 1,
+    "ephemeral_events_in_sqlite": false,
+    "exact_signed_envelope": true
+  },
+  "websocket_expectations": {
+    "hibernation_enabled": true,
+    "history_before_eose": true,
+    "resume_live_delivery": true,
+    "close_stops_delivery": true,
+    "subscription_filters_in_sqlite": true,
+    "subscription_filters_in_attachment": false,
+    "attachment_contains_reusable_credentials": false
+  },
+  "identity_phase": {
+    "required_for_core_claim": false,
+    "cloudflare_route_is_principal": false,
+    "access_header_is_portable_principal": false,
+    "replay_state_survives_eviction_when_declared": true,
+    "declared_replay_state_scope": "durable-object-scoped",
+    "security_state_in_event_journal": false
+  },
+  "conformance_tiers": [
+    {
+      "name": "deterministic-kernel",
+      "required": true
+    },
+    {
+      "name": "local-workers-runtime",
+      "required": true,
+      "minimum_vitest_pool_workers": "0.16.20",
+      "faults": [
+        "storage transaction failure",
+        "durable object eviction",
+        "websocket hibernation"
+      ]
+    },
+    {
+      "name": "deployed-preview",
+      "required": true,
+      "faults": [
+        "new worker isolate",
+        "compatible code deployment"
+      ]
+    }
+  ],
+  "completion": {
+    "local_runtime_only_status": "local-runtime-conformant",
+    "all_tiers_status": "implemented",
+    "production_ready": false
+  }
+}

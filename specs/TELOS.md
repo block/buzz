@@ -76,3 +76,9 @@ preserves the separation between event author, caller, relay peer, and local
 authorization across those runtimes. Storage, server runtimes, authentication
 methods, replication transport, topology, policy, and asynchronous effects
 remain replaceable adapters.
+
+The first promotion proof is
+[`portable-relay-cloudflare-v0.1`](architecture/portable-relay-cloudflare-v0.1.md):
+one stable relay node/community routed through a Worker to one SQLite-backed
+Durable Object. Its purpose is to test the portable boundary under eviction,
+WebSocket hibernation, and deployment—not to skip ahead to hosted parity.

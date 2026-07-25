@@ -92,6 +92,22 @@ Authentication events, challenges, bearer material, session secrets, and
 private keys are never appended to the relay event journal. An implementation
 may keep a separate security audit record that contains no reusable secret.
 
+### Replay-state durability
+
+Every adapter declares the lifetime of its consumed-proof state:
+
+- the laptop adapter uses a process-scoped security epoch; restarting the
+  process ends that epoch, and persistent replay state is a later promotion
+  boundary;
+- a durable adapter persists consumed proof identifiers outside event history
+  for at least the authentication evidence freshness window; and
+- the Cloudflare identity phase denies replay across Durable Object eviction
+  and compatible deployment.
+
+Capability evidence names the replay-state scope it proves. Durable replay
+protection is therefore an explicit adapter capability, not an accidental
+property of an in-memory implementation.
+
 ### Authenticated principal
 
 An authenticated principal is an ephemeral result containing:

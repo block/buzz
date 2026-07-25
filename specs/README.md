@@ -16,7 +16,9 @@ The first vertical slice is the local relay: a single-process Buzz node that
 preserves signed events on a laptop without Postgres, Redis, MinIO, or Docker.
 The portable relay boundary separates that observable behavior from its
 runtime adapters so the same signed-event vocabulary can later run on a
-cloud-native node or the hosted relay.
+cloud-native node or the hosted relay. The first independent cloud adapter is
+specified for a Worker and one SQLite-backed Durable Object per stable relay
+node.
 
 ## Index
 
@@ -39,3 +41,10 @@ cloud-native node or the hosted relay.
 - [Identity conformance behavior](features/portable-relay/identity-conformance.feature)
 - [Identity conformance vector](fixtures/portable-relay/identity-v0.1.json)
 - [Portable relay capability](capabilities/portable-relay.capability.yaml)
+- [Promote a relay to Cloudflare journey](journeys/promote-portable-relay-to-cloudflare.md)
+- [Cloudflare portability story](stories/portable-relay/prove-cloudflare-portability.md)
+- [Portable relay Cloudflare architecture](architecture/portable-relay-cloudflare-v0.1.md)
+- [Cloudflare adapter model](models/portable-relay/portable-relay-cloudflare.model.yaml)
+- [Cloudflare conformance behavior](features/portable-relay/cloudflare-conformance.feature)
+- [Cloudflare conformance vector](fixtures/portable-relay/cloudflare-v0.1.json)
+- [Cloudflare adapter capability](capabilities/portable-relay-cloudflare.capability.yaml)

@@ -1,8 +1,18 @@
 openapi: 3.1.0
 info:
-  title: Buzz Local Relay HTTP Bridge
+  title: Buzz Portable Relay HTTP Bridge
   version: 0.1.0
-  description: Minimal unauthenticated loopback bridge for local experimentation.
+  description: |
+    Minimal HTTP bridge shared by portable relay adapters. Listener placement
+    and authentication policy are adapter-specific.
+servers:
+  - url: http://127.0.0.1:8787
+    description: Local adapter
+  - url: https://{relayHost}
+    description: Deployed adapter
+    variables:
+      relayHost:
+        default: relay.example
 paths:
   /health:
     get:
@@ -10,6 +20,10 @@ paths:
       x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
       x-feature: specs/features/local-relay/durable-local-event-log.feature
       x-journey: specs/journeys/start-durable-local-buzz.md
+      x-adapter-conformance:
+        - story: specs/stories/portable-relay/prove-cloudflare-portability.md
+          feature: specs/features/portable-relay/cloudflare-conformance.feature
+          journey: specs/journeys/promote-portable-relay-to-cloudflare.md
       responses:
         "200":
           description: Relay is ready.
@@ -27,6 +41,10 @@ paths:
       x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
       x-feature: specs/features/portable-relay/adapter-conformance.feature
       x-journey: specs/journeys/start-durable-local-buzz.md
+      x-adapter-conformance:
+        - story: specs/stories/portable-relay/prove-cloudflare-portability.md
+          feature: specs/features/portable-relay/cloudflare-conformance.feature
+          journey: specs/journeys/promote-portable-relay-to-cloudflare.md
       requestBody:
         required: true
         content:
@@ -48,6 +66,10 @@ paths:
       x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
       x-feature: specs/features/portable-relay/adapter-conformance.feature
       x-journey: specs/journeys/start-durable-local-buzz.md
+      x-adapter-conformance:
+        - story: specs/stories/portable-relay/prove-cloudflare-portability.md
+          feature: specs/features/portable-relay/cloudflare-conformance.feature
+          journey: specs/journeys/promote-portable-relay-to-cloudflare.md
       requestBody:
         required: true
         content:
@@ -74,6 +96,10 @@ paths:
       x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
       x-feature: specs/features/portable-relay/adapter-conformance.feature
       x-journey: specs/journeys/start-durable-local-buzz.md
+      x-adapter-conformance:
+        - story: specs/stories/portable-relay/prove-cloudflare-portability.md
+          feature: specs/features/portable-relay/cloudflare-conformance.feature
+          journey: specs/journeys/promote-portable-relay-to-cloudflare.md
       requestBody:
         required: true
         content:

@@ -280,19 +280,33 @@ Optional:
 - replay is idempotent at the destination;
 - checkpoint-safe receipts distinguish terminal outcomes from rejections.
 
+### `portable-relay-cloudflare-v0.1`
+
+Adapter-specific:
+
+- the adapter also conforms to `portable-relay-core-v0.1`;
+- one normalized stable node key deterministically selects one isolated
+  SQLite-backed Durable Object;
+- durable acknowledgements survive object eviction and compatible deployment;
+- hibernatable WebSockets preserve subscription meaning and
+  historical-to-live ordering;
+- local Workers-runtime and deployed-preview evidence are reported separately;
+- Cloudflare deployment does not imply identity, replication, effects, or
+  production-readiness claims.
+
 ## Adapter map
 
 | Concern | Laptop reference | Cloud-native target | Hosted Buzz |
 | --- | --- | --- | --- |
 | Transport | Axum HTTP/WebSocket | Worker ingress/WebSocket | Axum HTTP/WebSocket |
-| Journal | append-only NDJSON | per-node durable SQLite | Postgres |
-| Effective query | in-memory replay | local SQL projection | Postgres queries |
-| Live subscriptions | Tokio broadcast | stateful coordination object | connection registry + Redis |
-| Identity | opt-in NIP-42/NIP-98 + configured node binding | node/DID proof + edge authentication | NIP-42/NIP-98 + `buzz-auth` |
-| Policy | caller-author + result disclosure policy | explicit edge policy | `buzz-auth` + membership |
-| Effects | in-process or absent | queue/workflow consumers | audit/search/workflow subsystems |
-| Replication | NDJSON cursor + source allowlist | durable-state cursor + edge policy | not yet implemented |
-| Portable archive | NDJSON copy | object-storage snapshot | event export |
+| Journal | append-only NDJSON | per-node Durable Object SQLite | Postgres |
+| Effective query | in-memory replay | object-local SQL projection | Postgres queries |
+| Live subscriptions | Tokio broadcast | hibernatable Durable Object WebSockets | connection registry + Redis |
+| Identity | opt-in NIP-42/NIP-98 + configured node binding | phase-two NIP-42/NIP-98 + durable replay state | NIP-42/NIP-98 + `buzz-auth` |
+| Policy | caller-author + result disclosure policy | explicit object-local policy | `buzz-auth` + membership |
+| Effects | in-process or absent | deferred Queue/Workflow consumers | audit/search/workflow subsystems |
+| Replication | NDJSON cursor + source allowlist | deferred durable-state cursor + edge policy | not yet implemented |
+| Portable archive | NDJSON copy | deferred R2 snapshot | event export |
 
 These mappings are informative. Conformance is judged only at the protocol and
 behavioral boundary.
@@ -325,6 +339,14 @@ boundaries. Hosted Buzz provides relevant NIP-42, NIP-98, NIP-OA, scope,
 membership, and result-level read mechanisms, but has not yet been measured
 against the portable identity conformance vector.
 
+The Cloudflare reference adapter is specified by
+[`portable-relay-cloudflare-v0.1`](portable-relay-cloudflare-v0.1.md) but is not
+yet implemented. Its first claim is the portable core only: stateless Worker
+ingress routes one stable relay node/community to one SQLite-backed Durable
+Object, with hibernatable WebSockets and both local-runtime and deployed-preview
+conformance evidence. Identity, replication, effects, and production readiness
+remain separate later claims.
+
 The OpenAPI paths and NIP-01 frames are normative. Listener addresses, host
 names, TLS termination, authentication headers, storage schemas, and operational
 health metadata remain adapter-specific.
@@ -351,6 +373,10 @@ health metadata remain adapter-specific.
   [`../features/portable-relay/adapter-conformance.feature`](../features/portable-relay/adapter-conformance.feature)
 - Identity profile:
   [`portable-relay-identity-v0.1.md`](portable-relay-identity-v0.1.md)
+- Cloudflare adapter:
+  [`portable-relay-cloudflare-v0.1.md`](portable-relay-cloudflare-v0.1.md)
+- Cloudflare behavior:
+  [`../features/portable-relay/cloudflare-conformance.feature`](../features/portable-relay/cloudflare-conformance.feature)
 - Identity behavior:
   [`../features/portable-relay/identity-conformance.feature`](../features/portable-relay/identity-conformance.feature)
 - HTTP contract:

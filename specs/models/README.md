@@ -27,3 +27,8 @@
 | Peer binding | Destination-controlled configuration binding one replication source to an authenticated relay node principal. |
 | Delegation | A cryptographically verified, scoped grant allowing a principal to act under explicitly stated conditions. |
 | Read authorization | Request-level and per-event policy applied consistently to query, count, historical, and live delivery. |
+| Stable node key | A normalized operator-controlled routing identifier selecting one logical relay state boundary; it is not a credential. |
+| Coordination atom | The smallest logical unit whose ordering and mutable state meet in one stateful runtime instance. |
+| Cloudflare relay adapter | A portable relay implementation using Worker ingress and one SQLite-backed Durable Object per stable node. |
+| Conformance tier | One evidence environment: deterministic kernel, local Workers runtime, or deployed preview. |
+| Object eviction | Removal of a Durable Object's in-memory instance while its durable storage remains available for reconstruction. |

@@ -46,6 +46,7 @@ value_objects:
       - portable-relay-identity-v0.1
       - portable-relay-effects-v0.1
       - portable-relay-replication-v0.1
+      - portable-relay-cloudflare-v0.1
   - name: ReplicationCursor
     attributes:
       - source_id

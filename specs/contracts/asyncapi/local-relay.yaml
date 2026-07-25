@@ -1,13 +1,23 @@
 asyncapi: 3.0.0
 info:
-  title: Buzz Local Relay WebSocket
+  title: Buzz Portable Relay WebSocket
   version: 0.1.0
-  description: NIP-01 subset implemented by the local relay.
+  description: |
+    NIP-01 subset shared by portable relay adapters. Server placement,
+    authentication policy, and connection hibernation are adapter-specific.
 servers:
   local:
     host: 127.0.0.1:3000
     pathname: /
     protocol: ws
+  cloudflarePreview:
+    host: "{relayHost}"
+    pathname: /
+    protocol: wss
+    variables:
+      relayHost:
+        default: relay-preview.example.invalid
+        description: Adapter-specific non-production preview hostname.
 channels:
   relay:
     address: /
@@ -30,6 +40,10 @@ operations:
     x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
     x-feature: specs/features/portable-relay/adapter-conformance.feature
     x-journey: specs/journeys/start-durable-local-buzz.md
+    x-adapter-conformance:
+      - story: specs/stories/portable-relay/prove-cloudflare-portability.md
+        feature: specs/features/portable-relay/cloudflare-conformance.feature
+        journey: specs/journeys/promote-portable-relay-to-cloudflare.md
     channel:
       $ref: "#/channels/relay"
     messages:
@@ -41,6 +55,10 @@ operations:
     x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
     x-feature: specs/features/portable-relay/adapter-conformance.feature
     x-journey: specs/journeys/start-durable-local-buzz.md
+    x-adapter-conformance:
+      - story: specs/stories/portable-relay/prove-cloudflare-portability.md
+        feature: specs/features/portable-relay/cloudflare-conformance.feature
+        journey: specs/journeys/promote-portable-relay-to-cloudflare.md
     channel:
       $ref: "#/channels/relay"
     messages:

@@ -1,0 +1,210 @@
+id: portable-relay-cloudflare
+type: model
+model:
+  name: CloudflareRelayNodeAdapter
+  type: aggregate
+  purpose: |
+    Preserve one portable relay node's protocol behavior and durable memory
+    across Cloudflare isolates, Durable Object eviction, WebSocket hibernation,
+    and preview deployments.
+
+sources:
+  telos: specs/TELOS.md
+  persona: specs/personas/local-first-builder.md
+  journey: specs/journeys/promote-portable-relay-to-cloudflare.md
+  story: specs/stories/portable-relay/prove-cloudflare-portability.md
+  architecture: specs/architecture/portable-relay-cloudflare-v0.1.md
+  portable_model: specs/models/portable-relay/portable-relay-boundary.model.yaml
+
+entities:
+  - name: CloudflareRelayNode
+    identity: StableNodeKey
+    aggregate_root: true
+    description: |
+      One logical relay/community and its private durable state boundary.
+      It is the v0.1 atom of coordination.
+    owns:
+      - DurableEventJournal
+      - EffectiveEventProjection
+      - SubscriptionSet
+      - AdapterSecurityState
+
+  - name: DurableEventJournal
+    identity: [StableNodeKey, JournalSequence]
+    description: Ordered accepted durable signed-event history.
+    attributes:
+      - JournalSequence
+      - SignedEvent
+
+  - name: EffectiveEventProjection
+    identity: [StableNodeKey, ReplacementKey]
+    description: Current query-visible event selected from durable history.
+    attributes:
+      - ReplacementKey
+      - SignedEventId
+
+  - name: Subscription
+    identity: [ConnectionId, SubscriptionId]
+    description: Historical-then-live filter selection for one WebSocket.
+    attributes:
+      - NostrFilterSet
+      - DeliveryPhase
+      - AuthenticatedPrincipal
+
+value_objects:
+  - name: StableNodeKey
+    description: |
+      Normalized operator-controlled identifier selecting one relay node.
+      It is a routing value, not a credential or event claim.
+    equality: Exact equality after canonical normalization.
+    rules:
+      - same normalized key selects the same node across requests and deployments
+      - different normalized keys select isolated nodes
+      - request bodies and event tags cannot override the selected key
+
+  - name: JournalSequence
+    type: monotonically_increasing_integer
+    rules:
+      - scoped to one StableNodeKey
+      - assigned only to accepted durable history
+      - preserves append order
+
+  - name: CloudflareConformanceTier
+    values:
+      - deterministic-kernel
+      - local-workers-runtime
+      - deployed-preview
+
+  - name: ObjectRecoveryEvent
+    values:
+      - eviction
+      - hibernation
+      - isolate-restart
+      - code-deployment
+
+  - name: CapabilityClaim
+    attributes:
+      - adapter_version
+      - portable_profiles
+      - conformance_tier
+      - environment
+      - evidence
+
+commands:
+  - name: RouteToStableNode
+    input: [RequestAuthority, DeploymentNodeConfiguration]
+    output: StableNodeKey
+
+  - name: SubmitEvent
+    input: [StableNodeKey, SignedEvent, AppendContext]
+    output: RelayDecision
+
+  - name: QueryEvents
+    input: [StableNodeKey, NostrFilterSet, ReadContext]
+    output: EffectiveEventList
+
+  - name: CountEvents
+    input: [StableNodeKey, NostrFilterSet, ReadContext]
+    output: EventCount
+
+  - name: OpenSubscription
+    input: [StableNodeKey, ConnectionId, SubscriptionId, NostrFilterSet]
+    output: HistoricalThenLiveEventStream
+
+  - name: RecoverNode
+    input: [StableNodeKey, ObjectRecoveryEvent]
+    output: RecoveredRelayState
+
+  - name: RecordConformanceEvidence
+    input: [CapabilityClaim, FixtureResultSet]
+    output: ConformanceReport
+
+ports:
+  - name: WorkerIngress
+    responsibility: |
+      Terminate public HTTP/WebSocket ingress, normalize the node boundary,
+      apply protocol input limits, and route stateful work without owning state.
+
+  - name: SQLiteEventJournal
+    responsibility: |
+      Preserve exact durable signed-event history and the acceptance barrier
+      inside the selected relay node.
+    implements: EventJournal
+
+  - name: SQLiteEffectiveQuery
+    responsibility: |
+      Query and count the effective event set without changing portable filter
+      results.
+    implements: EffectiveEventQuery
+
+  - name: HibernatingSubscriptionHub
+    responsibility: |
+      Preserve subscription filters in SQLite keyed by connection and
+      subscription, keep serialized WebSocket attachments to bounded connection
+      and principal references, and preserve historical-to-live ordering across
+      Durable Object hibernation.
+    implements: SubscriptionHub
+
+  - name: DurableAuthenticationReplayStore
+    responsibility: |
+      Persist consumed proof identifiers outside event history when the
+      identity profile is enabled.
+    required_profile: portable-relay-identity-v0.1
+
+  - name: DurableReplicationCheckpointStore
+    responsibility: |
+      Persist source-owned cursors only after checkpoint-safe destination
+      receipts when replication is enabled.
+    required_profile: portable-relay-replication-v0.1
+
+invariants:
+  - id: stable-node-routing-is-deterministic
+    description: One normalized stable node key always selects one durable state boundary.
+
+  - id: stable-nodes-are-isolated
+    description: Operations for one stable node cannot observe or mutate another node.
+
+  - id: worker-ingress-is-stateless
+    description: Recoverable relay state is never authoritative in Worker module globals.
+
+  - id: durable-before-cloud-ack
+    description: A successful durable acknowledgement cannot leave the node before recoverable storage completes.
+
+  - id: eviction-preserves-effective-state
+    description: Eviction and isolate restart reconstruct the same effective set from durable history.
+
+  - id: hibernation-preserves-subscription-meaning
+    description: WebSocket hibernation does not change filters, disclosure policy, or historical-to-live ordering.
+
+  - id: attachments-are-bounded-references
+    description: Serialized WebSocket attachments contain bounded references, never complete subscription filters.
+
+  - id: exact-event-envelope-is-portable
+    description: The Cloudflare adapter never rewrites event ID, author, timestamp, kind, tags, content, or signature.
+
+  - id: ephemeral-state-is-not-durable
+    description: Ephemeral events may be delivered live but do not enter SQLite history or recovery.
+
+  - id: security-state-is-not-event-history
+    description: Authentication proofs, replay markers, trust bindings, and credentials are not journal events.
+
+  - id: local-emulation-is-not-deployed-proof
+    description: Local Workers-runtime success cannot by itself satisfy the deployed-preview conformance tier.
+
+boundaries:
+  inside:
+    - deterministic stable node selection
+    - Worker routing to one relay node boundary
+    - object-local durable journal and effective projection
+    - hibernatable WebSocket subscription coordination
+    - recovery after object eviction
+    - local-runtime and deployed-preview conformance evidence
+
+  outside:
+    - production SLO and capacity certification
+    - cross-node queries and global indexing
+    - automatic node discovery
+    - laptop journal migration
+    - search, media, git, huddles, and workflows
+    - replication transport before the replication profile
+    - effects delivery before the effects profile
