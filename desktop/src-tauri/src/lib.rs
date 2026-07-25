@@ -914,6 +914,7 @@ pub fn run() {
     let shutdown_done = Arc::new(AtomicBool::new(false));
     let memory_sync_scheduler =
         command_services::memory::start_memory_sync_scheduler(app.handle().clone());
+    let model_readiness_observer = startup::start_model_readiness_observer(app.handle().clone());
     #[cfg(target_os = "macos")]
     let _ = startup::install_system_wake_source(app.handle().clone());
     let schedule_startup_app = app.handle().clone();
@@ -951,6 +952,7 @@ pub fn run() {
                 restart_requested.store(true, Ordering::SeqCst);
             }
             command_services::memory::cancel_active_memory_sync();
+            model_readiness_observer.stop();
             if let Some(scheduler) = &memory_sync_scheduler {
                 let _ = scheduler.stop_and_join();
             }
@@ -958,6 +960,7 @@ pub fn run() {
         }
         RunEvent::Exit => {
             command_services::memory::cancel_active_memory_sync();
+            model_readiness_observer.stop();
             if let Some(scheduler) = &memory_sync_scheduler {
                 let _ = scheduler.stop_and_join();
             }

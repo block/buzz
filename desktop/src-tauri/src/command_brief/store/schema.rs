@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 pub(super) const SPOOL_TABLE_SQL: &str = "
 CREATE TABLE command_brief_spool (
@@ -73,12 +73,16 @@ CREATE TABLE command_brief_schedule_claims (
         transition_token IS NULL
         OR (
             length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
+            AND instr(transition_token,char(0)) = 0
             AND transition_token NOT GLOB '*[^!-~]*'
         )
     ),
     CHECK (
         (state = 'deferred'
-         AND deferred_reason IN ('identity_locked','model_unavailable','local_state_unavailable')
+         AND deferred_reason IN (
+             'identity_locked','model_unavailable',
+             'admission_unavailable','local_state_unavailable'
+         )
          AND transition_token IS NOT NULL)
         OR
         (state <> 'deferred'
@@ -314,7 +318,12 @@ fn validate_claim_rows(conn: &Connection) -> Result<(), String> {
             || deferred
                 != (matches!(
                     reason.as_deref(),
-                    Some("identity_locked" | "model_unavailable" | "local_state_unavailable")
+                    Some(
+                        "identity_locked"
+                            | "model_unavailable"
+                            | "admission_unavailable"
+                            | "local_state_unavailable"
+                    )
                 ) && token.as_deref().is_some_and(valid_transition_token))
             || (!deferred
                 && (reason.is_some()

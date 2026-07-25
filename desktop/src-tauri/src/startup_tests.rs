@@ -1,18 +1,23 @@
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    observe_readiness_transition, timer_claim_fast_path, CommandBriefReadinessTransitions,
-    CommandBriefRuntimeSet, InstalledCommandBriefRuntime, ReadinessSignalSource,
-    RuntimeConfigIdentity, RuntimeReadiness,
+    observe_readiness_transition, readiness_transition_token,
+    start_model_readiness_observer_with_poll, timer_claim_fast_path,
+    CommandBriefReadinessTransitions, CommandBriefRuntimeSet, InstalledCommandBriefRuntime,
+    ReadinessSignalSource, RuntimeConfigIdentity, RuntimeReadiness,
 };
 use crate::command_brief::audit::{PersistedTerminal, TerminalAuditInput};
 use crate::command_brief::orchestrator::{
     BriefAdviserError, BriefAdviserProvider, BriefFuture, BriefPersistence, BriefPersistenceError,
     BriefSourceProvider, CommandBriefOrchestrator, CommandBriefRequest, OrchestratorAdmissionState,
+    OrchestratorStartError,
 };
 use crate::command_brief::provenance::ValidatedSource;
 use crate::command_brief::schedule::{
@@ -25,6 +30,14 @@ use crate::command_brief::sources::{FrozenSourceContext, SourceCollectionError};
 use crate::command_brief::types::{AdviserContribution, AdviserId};
 
 struct UnusedProvider;
+
+struct DropSignal(Arc<AtomicUsize>);
+
+impl Drop for DropSignal {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[derive(Default)]
 struct RecordingStarter {
@@ -252,6 +265,222 @@ fn actual_knowledge_and_model_observers_recover_once_without_unchanged_dispatch(
 }
 
 #[test]
+fn timer_checks_admission_only_for_admission_unavailable_claims() {
+    for reason in [
+        DeferredReason::IdentityLocked,
+        DeferredReason::ModelUnavailable,
+        DeferredReason::LocalStateUnavailable,
+    ] {
+        let conn = Connection::open_in_memory().expect("memory");
+        crate::command_brief::store::migrate_command_brief_store(&conn).expect("migrate");
+        let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+        let now = utc("2026-07-25T01:00:00Z");
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Startup,
+            &ReadinessSnapshot::deferred(reason, "stable:non-admission"),
+            &RecordingStarter::default(),
+        )
+        .expect("deferred");
+
+        for _ in 0..10 {
+            assert_eq!(
+                timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || panic!(
+                    "non-admission deferral must not inspect runtime admission"
+                ),)
+                .expect("timer fast path"),
+                Some(ScheduleRunOutcome::AlreadyClaimed)
+            );
+        }
+        let retry_count: i64 = conn
+            .query_row(
+                "SELECT retry_count FROM command_brief_schedule_claims",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retry count");
+        assert_eq!(retry_count, 0);
+    }
+
+    let conn = Connection::open_in_memory().expect("memory");
+    crate::command_brief::store::migrate_command_brief_store(&conn).expect("migrate");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    process_due_schedule(
+        &conn,
+        &schedule,
+        now,
+        ScheduleTrigger::Startup,
+        &ReadinessSnapshot::deferred(
+            DeferredReason::AdmissionUnavailable,
+            "admission:generation-7:64/64",
+        ),
+        &RecordingStarter::default(),
+    )
+    .expect("admission deferred");
+    assert_eq!(
+        timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || Some(
+            "admission:generation-7:64/64".to_string(),
+        ))
+        .expect("unchanged admission"),
+        Some(ScheduleRunOutcome::AlreadyClaimed)
+    );
+    assert_eq!(
+        timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || Some(
+            "admission:generation-7:63/64".to_string(),
+        ))
+        .expect("changed admission"),
+        None
+    );
+}
+
+#[tokio::test]
+async fn app_owned_model_observer_recovers_without_ui_and_dedupes_unchanged_polls() {
+    let directory = tempfile::tempdir().expect("temp");
+    let store_path = directory.path().join("brief.db");
+    let conn = crate::command_brief::store::open_command_brief_store(&store_path).expect("store");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    let unavailable_token = readiness_transition_token(b"model:no-loaded-model");
+    process_due_schedule(
+        &conn,
+        &schedule,
+        now,
+        ScheduleTrigger::Startup,
+        &ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, &unavailable_token),
+        &RecordingStarter::default(),
+    )
+    .expect("initial model deferral");
+    drop(conn);
+
+    let observations = Arc::new(Mutex::new(VecDeque::from([
+        "model:no-loaded-model",
+        "model:no-loaded-model",
+        "model:qwen-ready",
+        "model:qwen-ready",
+    ])));
+    let transitions = Arc::new(Mutex::new(CommandBriefReadinessTransitions::default()));
+    let starter = Arc::new(RecordingStarter::default());
+    let polls = Arc::new(AtomicUsize::new(0));
+    let schedule_dispatches = Arc::new(AtomicUsize::new(0));
+    let rag_preflights = Arc::new(AtomicUsize::new(0));
+
+    let observer = start_model_readiness_observer_with_poll(Duration::from_millis(5), {
+        let observations = Arc::clone(&observations);
+        let transitions = Arc::clone(&transitions);
+        let starter = Arc::clone(&starter);
+        let polls = Arc::clone(&polls);
+        let schedule_dispatches = Arc::clone(&schedule_dispatches);
+        let rag_preflights = Arc::clone(&rag_preflights);
+        let store_path = store_path.clone();
+        move || {
+            let observations = Arc::clone(&observations);
+            let transitions = Arc::clone(&transitions);
+            let starter = Arc::clone(&starter);
+            let polls = Arc::clone(&polls);
+            let schedule_dispatches = Arc::clone(&schedule_dispatches);
+            let rag_preflights = Arc::clone(&rag_preflights);
+            let store_path = store_path.clone();
+            async move {
+                polls.fetch_add(1, Ordering::SeqCst);
+                let observation = observations
+                    .lock()
+                    .expect("observations")
+                    .pop_front()
+                    .unwrap_or("model:qwen-ready");
+                let token = readiness_transition_token(observation.as_bytes());
+                let changed = observe_readiness_transition(
+                    &mut transitions.lock().expect("transitions"),
+                    ReadinessSignalSource::Model,
+                    &token,
+                );
+                if !changed {
+                    return;
+                }
+                schedule_dispatches.fetch_add(1, Ordering::SeqCst);
+                let conn = crate::command_brief::store::open_command_brief_store(&store_path)
+                    .expect("reopen");
+                let schedule =
+                    load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+                let readiness = if observation == "model:qwen-ready" {
+                    rag_preflights.fetch_add(1, Ordering::SeqCst);
+                    ReadinessSnapshot::ready(&token)
+                } else {
+                    ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, &token)
+                };
+                process_due_schedule(
+                    &conn,
+                    &schedule,
+                    now,
+                    ScheduleTrigger::Readiness,
+                    &readiness,
+                    starter.as_ref(),
+                )
+                .expect("observer dispatch");
+            }
+        }
+    });
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while polls.load(Ordering::SeqCst) < 6 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    observer.stop();
+    let stopped_at = polls.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    assert!(stopped_at >= 4, "observer must poll without a mounted UI");
+    assert_eq!(polls.load(Ordering::SeqCst), stopped_at);
+    assert_eq!(schedule_dispatches.load(Ordering::SeqCst), 2);
+    assert_eq!(rag_preflights.load(Ordering::SeqCst), 1);
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+    let conn = crate::command_brief::store::open_command_brief_store(&store_path).expect("reopen");
+    let (state, retry_count): (String, i64) = conn
+        .query_row(
+            "SELECT state,retry_count FROM command_brief_schedule_claims",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("claim");
+    assert_eq!(state, "started");
+    assert_eq!(retry_count, 1);
+}
+
+#[tokio::test]
+async fn model_observer_stop_cancels_an_inflight_probe() {
+    let started = Arc::new(AtomicUsize::new(0));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let observer = start_model_readiness_observer_with_poll(Duration::from_secs(30), {
+        let started = Arc::clone(&started);
+        let dropped = Arc::clone(&dropped);
+        move || {
+            let started = Arc::clone(&started);
+            let dropped = Arc::clone(&dropped);
+            async move {
+                let _drop_signal = DropSignal(dropped);
+                started.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+        }
+    });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while started.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+
+    observer.stop();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    while dropped.load(Ordering::SeqCst) == 0 && tokio::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(started.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn trusted_runtime_token_changes_only_for_generation_relevant_configuration() {
     let baseline = identity("qwen", "snapshot-a", "apple-a", 1);
     let empty = OrchestratorAdmissionState::Available {
@@ -315,7 +544,12 @@ async fn orchestrator_admission_transition_is_exact_and_scheduler_churn_is_irrel
             .start_exact(&format!("capacity-{index}"), request())
             .expect("admitted run");
     }
-    assert!(orchestrator.start_exact("capacity-64", request()).is_err());
+    assert_eq!(
+        orchestrator
+            .start_exact("capacity-64", request())
+            .expect_err("full registry"),
+        OrchestratorStartError::AdmissionUnavailable
+    );
     let full = orchestrator.admission_state();
     assert_eq!(
         full,
@@ -407,12 +641,12 @@ async fn deferred_full_admission_settlement_causes_one_real_timer_retry() {
             &schedule,
             now,
             ScheduleTrigger::Startup,
-            &ReadinessSnapshot::deferred(DeferredReason::LocalStateUnavailable, &full_token,),
+            &ReadinessSnapshot::deferred(DeferredReason::AdmissionUnavailable, &full_token,),
             &starter,
         )
         .expect("full deferred"),
         ScheduleRunOutcome::Deferred {
-            reason: DeferredReason::LocalStateUnavailable,
+            reason: DeferredReason::AdmissionUnavailable,
         }
     );
     assert_eq!(

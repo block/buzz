@@ -1,6 +1,7 @@
 //! Startup, wake, and readiness-transition wiring for the Daily Command Brief.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,12 +29,13 @@ use crate::command_brief::store::{
 #[cfg(target_os = "macos")]
 use crate::command_brief::wake::{MacWorkspaceWakeSource, WakeEventSource};
 use crate::command_services::apple_inputs::{bundled_helper_identity, AppleBriefSelection};
-use crate::commands::LmStudioReadinessState;
+use crate::commands::{LmStudioReadiness, LmStudioReadinessState};
 use tokio_util::sync::CancellationToken;
 
 const SCHEDULED_CO_REQUEST: &str =
     "Prepare the Daily Command Brief from the admitted current local sources.";
 const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
+const MODEL_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const COMMAND_BRIEF_POLICY_REVISION: &str = "command-brief-policy-v1";
 
 #[cfg(target_os = "macos")]
@@ -147,7 +149,7 @@ pub(crate) fn notify_command_brief_readiness(
     source: ReadinessSignalSource,
     basis: &[u8],
 ) {
-    let token = format!("signal:{}", hex::encode(Sha256::digest(basis)));
+    let token = readiness_transition_token(basis);
     let transitions = app.state::<Mutex<CommandBriefReadinessTransitions>>();
     let changed = transitions.lock().is_ok_and(|mut transitions| {
         observe_readiness_transition(&mut transitions, source, &token)
@@ -158,6 +160,93 @@ pub(crate) fn notify_command_brief_readiness(
             let _ = run_command_brief_schedule(transition_app, ScheduleTrigger::Readiness).await;
         });
     }
+}
+
+fn readiness_transition_token(basis: &[u8]) -> String {
+    format!("signal:{}", hex::encode(Sha256::digest(basis)))
+}
+
+fn lmstudio_readiness_basis(readiness: &Result<LmStudioReadiness, String>) -> Vec<u8> {
+    readiness
+        .as_ref()
+        .ok()
+        .and_then(|value| {
+            serde_json::to_vec(&(
+                value.status,
+                &value.configured_model,
+                &value.loaded_models,
+                &value.security_warnings,
+                value.bind_exposure,
+            ))
+            .ok()
+        })
+        .unwrap_or_else(|| b"model:probe-unavailable".to_vec())
+}
+
+pub(crate) fn notify_lmstudio_readiness(
+    app: &AppHandle,
+    readiness: &Result<LmStudioReadiness, String>,
+) {
+    notify_command_brief_readiness(
+        app,
+        ReadinessSignalSource::Model,
+        &lmstudio_readiness_basis(readiness),
+    );
+}
+
+fn lmstudio_readiness_transition_token(readiness: &Result<LmStudioReadiness, String>) -> String {
+    readiness_transition_token(&lmstudio_readiness_basis(readiness))
+}
+
+pub(crate) struct CommandBriefModelReadinessObserver {
+    cancellation: CancellationToken,
+}
+
+impl CommandBriefModelReadinessObserver {
+    pub(crate) fn stop(&self) {
+        self.cancellation.cancel();
+    }
+}
+
+impl Drop for CommandBriefModelReadinessObserver {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+    }
+}
+
+fn start_model_readiness_observer_with_poll<Poll, PollFuture>(
+    interval: Duration,
+    mut poll: Poll,
+) -> CommandBriefModelReadinessObserver
+where
+    Poll: FnMut() -> PollFuture + Send + 'static,
+    PollFuture: Future<Output = ()> + Send + 'static,
+{
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::select! {
+                () = task_cancellation.cancelled() => break,
+                () = poll() => {}
+            }
+            tokio::select! {
+                () = task_cancellation.cancelled() => break,
+                () = tokio::time::sleep(interval) => {}
+            }
+        }
+    });
+    CommandBriefModelReadinessObserver { cancellation }
+}
+
+pub(crate) fn start_model_readiness_observer(app: AppHandle) -> CommandBriefModelReadinessObserver {
+    start_model_readiness_observer_with_poll(MODEL_READINESS_POLL_INTERVAL, move || {
+        let app = app.clone();
+        async move {
+            let readiness = crate::commands::read_lmstudio_readiness(app.clone()).await;
+            notify_lmstudio_readiness(&app, &readiness);
+        }
+    })
 }
 
 pub(crate) struct InstalledCommandBriefRuntime {
@@ -262,10 +351,17 @@ impl ScheduledRunStarter for OrchestratorStarter<'_> {
         observed_at: &str,
     ) -> Result<String, ScheduledStartError> {
         let request = CommandBriefRequest::new(schedule_id, SCHEDULED_CO_REQUEST, observed_at)
-            .map_err(|_| ScheduledStartError)?;
+            .map_err(|_| ScheduledStartError::Unavailable)?;
         self.current
             .start_exact(run_id, request)
-            .map_err(|_| ScheduledStartError)
+            .map_err(|error| match error {
+                crate::command_brief::orchestrator::OrchestratorStartError::AdmissionUnavailable => {
+                    ScheduledStartError::AdmissionUnavailable
+                }
+                crate::command_brief::orchestrator::OrchestratorStartError::Rejected => {
+                    ScheduledStartError::Unavailable
+                }
+            })
     }
 
     fn presence(&self, run_id: &str) -> ScheduledRunPresence {
@@ -317,22 +413,21 @@ pub(crate) async fn run_command_brief_schedule(
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
 
-    let model_readiness = match crate::commands::read_lmstudio_readiness(app.clone()).await {
+    let model_readiness_result = crate::commands::read_lmstudio_readiness(app.clone()).await;
+    let model_transition_token = lmstudio_readiness_transition_token(&model_readiness_result);
+    let model_readiness = match model_readiness_result {
         Ok(readiness) => readiness,
         Err(_) => {
             let readiness = ReadinessSnapshot::deferred(
                 DeferredReason::ModelUnavailable,
-                "identity:ready|model:probe_failed|local:unknown",
+                &model_transition_token,
             );
             return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
         }
     };
     if model_readiness.status != LmStudioReadinessState::Ready {
-        let token = format!(
-            "identity:ready|model:{:?}|local:unknown",
-            model_readiness.status
-        );
-        let readiness = ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, &token);
+        let readiness =
+            ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, &model_transition_token);
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
     let model = model_readiness
@@ -386,7 +481,7 @@ pub(crate) async fn run_command_brief_schedule(
         } if tracked_nonterminal < capacity => ReadinessSnapshot::ready(local.transition_token()),
         OrchestratorAdmissionState::Available { .. } | OrchestratorAdmissionState::Unavailable => {
             ReadinessSnapshot::deferred(
-                DeferredReason::LocalStateUnavailable,
+                DeferredReason::AdmissionUnavailable,
                 local.transition_token(),
             )
         }
@@ -423,17 +518,23 @@ fn timer_claim_fast_path(
     let key = idempotency_key(schedule, date);
     let claim = conn
         .query_row(
-            "SELECT state,transition_token
+            "SELECT state,deferred_reason,transition_token
              FROM command_brief_schedule_claims WHERE idempotency_key=?1",
             [key],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
         .optional()
         .map_err(|_| "command brief schedule unavailable".to_string())?;
-    let Some((state, stored_token)) = claim else {
+    let Some((state, deferred_reason, stored_token)) = claim else {
         return Ok(None);
     };
-    if state == "deferred" {
+    if state == "deferred" && deferred_reason.as_deref() == Some("admission_unavailable") {
         let stored_token =
             stored_token.ok_or_else(|| "command brief schedule unavailable".to_string())?;
         if current_admission_token()
@@ -565,7 +666,7 @@ impl ScheduledRunStarter for NoStarter {
         _schedule_id: &str,
         _observed_at: &str,
     ) -> Result<String, ScheduledStartError> {
-        Err(ScheduledStartError)
+        Err(ScheduledStartError::Unavailable)
     }
 
     fn presence(&self, _run_id: &str) -> ScheduledRunPresence {

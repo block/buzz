@@ -327,13 +327,15 @@ CREATE TABLE command_brief_schedule_claims (
     transition_token IS NULL
     OR (
       length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
+      AND instr(transition_token,char(0)) = 0
       AND transition_token NOT GLOB '*[^!-~]*'
     )
   ),
   CHECK (
     (state = 'deferred'
       AND deferred_reason IN
-        ('identity_locked','model_unavailable','local_state_unavailable')
+        ('identity_locked','model_unavailable',
+         'admission_unavailable','local_state_unavailable')
       AND transition_token IS NOT NULL)
     OR
     (state <> 'deferred'
@@ -349,7 +351,7 @@ INSERT INTO command_brief_schedule_claims
 VALUES ('daily-command-brief:2026-07-25','daily-command-brief','2026-07-25',
         'Australia/Sydney','started',NULL,0,NULL,1,1,
         'scheduled-7df2f1c8a188345d60cb98a3aad7e88c0a572dc8ae29f10c084c0ebddbd42ed8');
-PRAGMA user_version=5;
+PRAGMA user_version=6;
 SQL
 chmod 600 "$BUZZ_COMMAND_BRIEF_STORE_PATH"
 
@@ -451,6 +453,16 @@ mutate_command_brief_backup \
 assert_command_brief_backup_rejected_pre_mutation \
   "restore rejects an empty command brief transition token" \
   "$test_tmp/invalid-token-backup"
+
+mutate_command_brief_backup \
+  "$backup_dir" "$test_tmp/nul-token-backup" \
+  "PRAGMA ignore_check_constraints=ON;
+   UPDATE command_brief_schedule_claims
+   SET state='deferred',deferred_reason='local_state_unavailable',
+       transition_token='local:' || char(0) || 'abc';"
+assert_command_brief_backup_rejected_pre_mutation \
+  "restore rejects an embedded-NUL command brief transition token" \
+  "$test_tmp/nul-token-backup"
 
 mutate_command_brief_backup \
   "$backup_dir" "$test_tmp/nel-token-backup" \

@@ -1,5 +1,22 @@
 use super::*;
 
+/// A redacted start error for invalid or capacity-exhausted run requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OrchestratorStartError {
+    /// The request or protected run registry could not be admitted safely.
+    Rejected,
+    /// All bounded nonterminal command-run slots are occupied.
+    AdmissionUnavailable,
+}
+
+impl fmt::Display for OrchestratorStartError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("command brief run rejected")
+    }
+}
+
+impl std::error::Error for OrchestratorStartError {}
+
 /// Redacted capacity state for admitting another top-level command run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OrchestratorAdmissionState {
@@ -54,7 +71,7 @@ impl CommandBriefOrchestrator {
         request: CommandBriefRequest,
     ) -> Result<String, OrchestratorStartError> {
         if !valid_bounded_text(run_id, 256) {
-            return Err(OrchestratorStartError);
+            return Err(OrchestratorStartError::Rejected);
         }
         let run_id = run_id.to_string();
         let cancellation = CancellationToken::new();
@@ -65,9 +82,13 @@ impl CommandBriefOrchestrator {
             &[],
             None,
         )
-        .map_err(|_| OrchestratorStartError)?;
+        .map_err(|_| OrchestratorStartError::Rejected)?;
         {
-            let mut runs = self.inner.runs.lock().map_err(|_| OrchestratorStartError)?;
+            let mut runs = self
+                .inner
+                .runs
+                .lock()
+                .map_err(|_| OrchestratorStartError::Rejected)?;
             if runs.contains_key(&run_id) {
                 return Ok(run_id);
             }
@@ -79,7 +100,7 @@ impl CommandBriefOrchestrator {
                 if let Some(removable) = removable {
                     runs.remove(&removable);
                 } else {
-                    return Err(OrchestratorStartError);
+                    return Err(OrchestratorStartError::AdmissionUnavailable);
                 }
             }
             runs.insert(

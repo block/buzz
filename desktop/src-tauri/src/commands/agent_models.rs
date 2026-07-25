@@ -6,10 +6,10 @@ use tauri::{AppHandle, State};
 
 mod lmstudio;
 use lmstudio::discover_lmstudio_native_models;
-pub(crate) use lmstudio::read_lmstudio_readiness;
 pub use lmstudio::{get_lmstudio_readiness, LmStudioReadinessState};
 #[cfg(test)]
 use lmstudio::{lmstudio_readiness_from_models, normalize_lmstudio_models};
+pub(crate) use lmstudio::{read_lmstudio_readiness, LmStudioReadiness};
 mod discovery_config;
 use discovery_config::{saved_agent_model_discovery_config, DiscoverAgentModelsInput};
 

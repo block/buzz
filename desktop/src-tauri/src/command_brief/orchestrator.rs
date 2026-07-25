@@ -34,6 +34,7 @@ use crate::command_services::apple_inputs::AppleBriefSelection;
 mod lifecycle;
 mod runtime;
 pub(crate) use runtime::OrchestratorAdmissionState;
+pub use runtime::OrchestratorStartError;
 const MAX_CO_REQUEST_BYTES: usize = 1024;
 const MAX_SCHEDULE_ID_BYTES: usize = 256;
 const MAX_STATUS_HISTORY: usize = 32;
@@ -418,7 +419,7 @@ impl CommandBriefRequest {
             || !valid_bounded_text(co_request, MAX_CO_REQUEST_BYTES)
             || DateTime::parse_from_rfc3339(observed_at).is_err()
         {
-            return Err(OrchestratorStartError);
+            return Err(OrchestratorStartError::Rejected);
         }
         Ok(Self {
             schedule_id: schedule_id.to_string(),
@@ -427,18 +428,6 @@ impl CommandBriefRequest {
         })
     }
 }
-
-/// A redacted start error for invalid or capacity-exhausted run requests.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OrchestratorStartError;
-
-impl fmt::Display for OrchestratorStartError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("command brief run rejected")
-    }
-}
-
-impl std::error::Error for OrchestratorStartError {}
 
 struct RunRecord {
     cancellation: CancellationToken,

@@ -21,7 +21,7 @@ fn current_store_schema_is_exact_and_rejects_weakened_claim_invariants() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert!(conn
         .execute(
             "INSERT INTO command_brief_schedule_claims(
@@ -81,6 +81,7 @@ fn transition_token_constraint_is_ascii_graphic_and_bounded() {
         String::new(),
         "x".repeat(257),
         "line\nbreak".to_string(),
+        "embedded\0nul".to_string(),
         "\u{0085}".to_string(),
         "\u{00a0}".to_string(),
         " leading".to_string(),
@@ -125,7 +126,7 @@ fn operational_reopen_is_cheap_while_explicit_validation_remains_fail_closed() {
 }
 
 #[test]
-fn version_three_store_is_migrated_and_accepted_as_exact_version_five() {
+fn version_three_store_is_migrated_and_accepted_as_exact_version_six() {
     let conn = Connection::open_in_memory().expect("memory");
     super::store::migrate_command_brief_store(&conn).expect("initial schema");
     conn.execute_batch(
@@ -154,7 +155,7 @@ fn version_three_store_is_migrated_and_accepted_as_exact_version_five() {
     .expect("version three claims");
     conn.pragma_update(None, "user_version", 3)
         .expect("simulate prior version");
-    super::store::migrate_command_brief_store(&conn).expect("v3 to v5");
+    super::store::migrate_command_brief_store(&conn).expect("v3 to v6");
     validate_command_brief_store_schema(&conn).expect("accepted current schema");
     let run_id: String = conn
         .query_row(
@@ -170,11 +171,11 @@ fn version_three_store_is_migrated_and_accepted_as_exact_version_five() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
 }
 
 #[test]
-fn version_four_store_is_rebuilt_with_ascii_graphic_token_constraints() {
+fn version_four_store_is_rebuilt_with_exact_version_six_token_constraints() {
     let conn = Connection::open_in_memory().expect("memory");
     super::store::migrate_command_brief_store(&conn).expect("initial schema");
     conn.execute_batch(
@@ -213,8 +214,8 @@ fn version_four_store_is_rebuilt_with_ascii_graphic_token_constraints() {
     )
     .expect("version four claims");
 
-    super::store::migrate_command_brief_store(&conn).expect("v4 to v5");
-    validate_command_brief_store_schema(&conn).expect("exact v5");
+    super::store::migrate_command_brief_store(&conn).expect("v4 to v6");
+    validate_command_brief_store_schema(&conn).expect("exact v6");
     let (version, token): (i64, String) = (
         conn.pragma_query_value(None, "user_version", |row| row.get(0))
             .expect("version"),
@@ -225,11 +226,75 @@ fn version_four_store_is_rebuilt_with_ascii_graphic_token_constraints() {
         )
         .expect("token"),
     );
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert_eq!(token, "local:abc");
     assert!(conn
         .execute(
             "UPDATE command_brief_schedule_claims SET transition_token=char(133)",
+            [],
+        )
+        .is_err());
+}
+
+#[test]
+fn version_five_store_is_rebuilt_to_reject_embedded_nul() {
+    let conn = Connection::open_in_memory().expect("memory");
+    super::store::migrate_command_brief_store(&conn).expect("initial schema");
+    conn.execute_batch(
+        "DROP INDEX command_brief_schedule_deferred;
+         DROP TABLE command_brief_schedule_claims;
+         CREATE TABLE command_brief_schedule_claims (
+             idempotency_key TEXT PRIMARY KEY,
+             schedule_id TEXT NOT NULL CHECK (schedule_id = 'daily-command-brief'),
+             local_date TEXT NOT NULL CHECK (length(local_date) = 10),
+             timezone TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
+             state TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
+             deferred_reason TEXT,
+             retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
+             transition_token TEXT,
+             claimed_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             run_id TEXT NOT NULL CHECK (
+                 length(run_id) = 74 AND substr(run_id,1,10) = 'scheduled-'
+             ),
+             CHECK (idempotency_key = schedule_id || ':' || local_date),
+             CHECK (
+                 transition_token IS NULL
+                 OR (
+                     length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
+                     AND transition_token NOT GLOB '*[^!-~]*'
+                 )
+             ),
+             CHECK (
+                 (state = 'deferred'
+                  AND deferred_reason IN
+                    ('identity_locked','model_unavailable','local_state_unavailable')
+                  AND transition_token IS NOT NULL)
+                 OR
+                 (state <> 'deferred' AND deferred_reason IS NULL)
+             ),
+             UNIQUE (schedule_id,local_date)
+         );
+         CREATE INDEX command_brief_schedule_deferred
+         ON command_brief_schedule_claims(state,retry_count,updated_at);
+         INSERT INTO command_brief_schedule_claims VALUES(
+             'daily-command-brief:2026-07-25','daily-command-brief','2026-07-25',
+             'UTC','deferred','local_state_unavailable',0,'local:abc',1,2,
+             'scheduled-7df2f1c8a188345d60cb98a3aad7e88c0a572dc8ae29f10c084c0ebddbd42ed8');
+         PRAGMA user_version=5;",
+    )
+    .expect("version five claims");
+
+    super::store::migrate_command_brief_store(&conn).expect("v5 to v6");
+    validate_command_brief_store_schema(&conn).expect("exact v6");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 6);
+    assert!(conn
+        .execute(
+            "UPDATE command_brief_schedule_claims
+             SET transition_token='local:' || char(0) || 'abc'",
             [],
         )
         .is_err());

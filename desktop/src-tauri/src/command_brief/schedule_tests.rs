@@ -415,7 +415,7 @@ impl ScheduledRunStarter for FakeStarter {
         _observed_at: &str,
     ) -> Result<String, ScheduledStartError> {
         if self.fail {
-            Err(ScheduledStartError)
+            Err(ScheduledStartError::Unavailable)
         } else {
             assert_eq!(run_id, deterministic_run_id(idempotency_key));
             assert_eq!(schedule_id, DEFAULT_SCHEDULE_ID);
@@ -439,6 +439,24 @@ impl ScheduledRunStarter for FakeStarter {
         } else {
             ScheduledRunPresence::Absent
         }
+    }
+}
+
+struct AdmissionRejectingStarter;
+
+impl ScheduledRunStarter for AdmissionRejectingStarter {
+    fn start_scheduled(
+        &self,
+        _run_id: &str,
+        _idempotency_key: &str,
+        _schedule_id: &str,
+        _observed_at: &str,
+    ) -> Result<String, ScheduledStartError> {
+        Err(ScheduledStartError::AdmissionUnavailable)
+    }
+
+    fn presence(&self, _run_id: &str) -> ScheduledRunPresence {
+        ScheduledRunPresence::Absent
     }
 }
 
@@ -675,7 +693,7 @@ fn full_orchestrator_admission_retries_once_when_one_slot_becomes_available() {
     let starter = FakeStarter::default();
     let now = utc("2026-07-25T01:00:00Z");
     let full = ReadinessSnapshot::deferred(
-        DeferredReason::LocalStateUnavailable,
+        DeferredReason::AdmissionUnavailable,
         "admission:generation-9:64/64",
     );
     assert_eq!(
@@ -689,7 +707,7 @@ fn full_orchestrator_admission_retries_once_when_one_slot_becomes_available() {
         )
         .expect("capacity deferred"),
         ScheduleRunOutcome::Deferred {
-            reason: DeferredReason::LocalStateUnavailable,
+            reason: DeferredReason::AdmissionUnavailable,
         }
     );
     assert_eq!(
@@ -726,6 +744,37 @@ fn full_orchestrator_admission_retries_once_when_one_slot_becomes_available() {
         .expect("claim state");
     assert_eq!(state, "started");
     assert_eq!(retries, 1);
+}
+
+#[test]
+fn start_capacity_failure_persists_the_closed_admission_reason() {
+    let conn = migrated_store();
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    let ready = ReadinessSnapshot::ready("admission:generation-9:63/64");
+
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Timer,
+            &ready,
+            &AdmissionRejectingStarter,
+        )
+        .expect("capacity deferral"),
+        ScheduleRunOutcome::Deferred {
+            reason: DeferredReason::AdmissionUnavailable,
+        }
+    );
+    let reason: String = conn
+        .query_row(
+            "SELECT deferred_reason FROM command_brief_schedule_claims",
+            [],
+            |row| row.get(0),
+        )
+        .expect("persisted reason");
+    assert_eq!(reason, "admission_unavailable");
 }
 
 #[test]

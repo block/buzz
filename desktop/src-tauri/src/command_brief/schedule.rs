@@ -54,6 +54,8 @@ pub enum DeferredReason {
     IdentityLocked,
     /// LM Studio or the selected local model is unavailable.
     ModelUnavailable,
+    /// The protected top-level command-run registry has no available slot.
+    AdmissionUnavailable,
     /// The protected orchestrator or mandatory local state is unavailable.
     LocalStateUnavailable,
 }
@@ -63,6 +65,7 @@ impl DeferredReason {
         match self {
             Self::IdentityLocked => "identity_locked",
             Self::ModelUnavailable => "model_unavailable",
+            Self::AdmissionUnavailable => "admission_unavailable",
             Self::LocalStateUnavailable => "local_state_unavailable",
         }
     }
@@ -155,7 +158,12 @@ pub trait ScheduledRunStarter {
 
 /// Redacted native orchestrator start failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ScheduledStartError;
+pub enum ScheduledStartError {
+    /// The top-level run registry is at its bounded capacity.
+    AdmissionUnavailable,
+    /// The start failed for another closed local reason.
+    Unavailable,
+}
 
 /// Observable result of one startup, wake, timer, or readiness check.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -509,8 +517,19 @@ pub fn process_due_schedule(
             mark_claim_started(conn, &claim, claim.run_id(), now.timestamp())?;
             Ok(ScheduleRunOutcome::Started { run_id })
         }
-        Ok(_) | Err(ScheduledStartError) => {
+        Ok(_) | Err(ScheduledStartError::Unavailable) => {
             let reason = DeferredReason::LocalStateUnavailable;
+            record_deferred(
+                conn,
+                &claim,
+                reason,
+                &readiness.transition_token,
+                now.timestamp(),
+            )?;
+            Ok(ScheduleRunOutcome::Deferred { reason })
+        }
+        Err(ScheduledStartError::AdmissionUnavailable) => {
+            let reason = DeferredReason::AdmissionUnavailable;
             record_deferred(
                 conn,
                 &claim,

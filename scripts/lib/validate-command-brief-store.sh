@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-COMMAND_BRIEF_SCHEMA_V5_SHA256="c2b6113e18724ca14e530d844dc6315b07eeba24fdc17ed0f2412dde78f97513"
+COMMAND_BRIEF_SCHEMA_V6_SHA256="493e44de10fb896f8421e550100eb40b83d10347e61ae9c235fd5cd5cf78d349"
 
 command_brief_store_schema_digest() {
   local store_file="$1"
@@ -42,23 +42,23 @@ validate_command_brief_store() {
     local_workspace_die "command brief store must be a regular file" || return
   [[ "$(sqlite3 "$store_file" 'PRAGMA integrity_check;')" == "ok" ]] ||
     local_workspace_die "command brief store failed integrity validation" || return
-  [[ "$(sqlite3 "$store_file" 'PRAGMA user_version;')" == "5" ]] ||
+  [[ "$(sqlite3 "$store_file" 'PRAGMA user_version;')" == "6" ]] ||
     local_workspace_die "command brief store schema version is not current" || return
   [[ "$(command_brief_store_schema_digest "$store_file")" == \
-    "$COMMAND_BRIEF_SCHEMA_V5_SHA256" ]] ||
-    local_workspace_die "command brief store schema is not exact v5" || return
+    "$COMMAND_BRIEF_SCHEMA_V6_SHA256" ]] ||
+    local_workspace_die "command brief store schema is not exact v6" || return
   [[ "$(command_brief_table_signature "$store_file" command_brief_spool)" == \
     "$expected_spool" ]] ||
-    local_workspace_die "command brief spool columns are not exact v5" || return
+    local_workspace_die "command brief spool columns are not exact v6" || return
   [[ "$(command_brief_table_signature "$store_file" command_brief_heads)" == \
     "$expected_heads" ]] ||
-    local_workspace_die "command brief heads columns are not exact v5" || return
+    local_workspace_die "command brief heads columns are not exact v6" || return
   [[ "$(command_brief_table_signature "$store_file" command_brief_schedule)" == \
     "$expected_schedule" ]] ||
-    local_workspace_die "command brief schedule columns are not exact v5" || return
+    local_workspace_die "command brief schedule columns are not exact v6" || return
   [[ "$(command_brief_table_signature \
     "$store_file" command_brief_schedule_claims)" == "$expected_claims" ]] ||
-    local_workspace_die "command brief claim columns are not exact v5" || return
+    local_workspace_die "command brief claim columns are not exact v6" || return
 
   [[ "$(sqlite3 "$store_file" \
     "SELECT COUNT(*) FROM command_brief_schedule
@@ -80,14 +80,17 @@ validate_command_brief_store() {
         OR state NOT IN ('claimed','deferred','started','completed')
         OR (state = 'deferred' AND
             (deferred_reason NOT IN
-               ('identity_locked','model_unavailable','local_state_unavailable')
+               ('identity_locked','model_unavailable',
+                'admission_unavailable','local_state_unavailable')
              OR transition_token IS NULL
              OR length(CAST(transition_token AS BLOB)) NOT BETWEEN 1 AND 256
+             OR instr(transition_token,char(0)) <> 0
              OR transition_token GLOB '*[^!-~]*'))
         OR (state <> 'deferred' AND
             (deferred_reason IS NOT NULL
              OR (transition_token IS NOT NULL AND
                  (length(CAST(transition_token AS BLOB)) NOT BETWEEN 1 AND 256
+                  OR instr(transition_token,char(0)) <> 0
                   OR transition_token GLOB '*[^!-~]*'))));")" == "0" ]] ||
     local_workspace_die "command brief claim validation failed" || return
 
