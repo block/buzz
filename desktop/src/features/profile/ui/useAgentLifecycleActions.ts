@@ -71,10 +71,8 @@ export function useAgentLifecycleActions({
         agent: managedAgent,
         startManagedAgent,
         stopManagedAgent,
+        onStopped: () => clearActiveTurnsForAgentOnStop(managedAgent.pubkey),
       });
-      if (managedAgent.backend.type === "local") {
-        clearActiveTurnsForAgentOnStop(managedAgent.pubkey);
-      }
       toast.success(`Restarted ${managedAgent.name}.`);
     } catch (error) {
       toast.error(

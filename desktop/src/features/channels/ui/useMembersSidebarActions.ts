@@ -177,6 +177,9 @@ export function useMembersSidebarActions({
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
         });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
         setActionNoticeMessage(
           agent.backend.type === "provider"
             ? `Shutdown command sent to ${agent.name}.`
@@ -206,10 +209,8 @@ export function useMembersSidebarActions({
           agent,
           startManagedAgent: startManagedAgentMutation.mutateAsync,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
+          onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
         });
-        if (agent.backend.type === "local") {
-          clearActiveTurnsForAgentOnStop(agent.pubkey);
-        }
         return undefined;
       },
       actionKey: "bulk-respawn",

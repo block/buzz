@@ -1877,4 +1877,77 @@ describe("clearActiveTurnsForAgent", () => {
     assert.equal(turns.length, 1, "new turn after clear must be tracked");
     assert.ok(channelIdsOf(turns).has("c1"), "new turn must surface c1");
   });
+
+  it("badge is gone when stop succeeds even if start subsequently fails (stop-boundary clear)", () => {
+    // Arrange: agent has an active turn.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+    ]);
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      1,
+      "turn must be active before stop",
+    );
+
+    // Act: simulate what onStopped does — clear at the stop-success boundary,
+    // before start is called.  Start fails (not called here).
+    clearActiveTurnsForAgent(AGENT);
+
+    // Assert: the badge is gone regardless of what happens to start.
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "badge must clear at stop-success boundary, not waiting for start to resolve",
+    );
+  });
+
+  it("new frame arriving while start is pending does not resurrect the cleared badge (tombstone boundary)", () => {
+    // Simulate: agent was active, stop succeeded and clear ran (onStopped
+    // fired), start is now in-flight.  A stale liveness frame for the OLD
+    // turn arrives on the wire during the start-pending window.  It must NOT
+    // resurrect the badge — the clear tombstoned it.
+    mock.timers.enable({ apis: ["Date"], now: EPOCH });
+
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+    ]);
+
+    // onStopped fires: clear at stop boundary (agent-host clock = EPOCH).
+    clearActiveTurnsForAgent(AGENT);
+
+    // Stale liveness for t1 arrives with timestamp ≤ clear time (on-wire
+    // frame from before the kill).  Must be blocked by the tombstone.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 2,
+        kind: "turn_liveness",
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: at(0),
+      }),
+    ]);
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "stale liveness during start-pending must not resurrect the cleared badge",
+    );
+
+    // Genuine new turn from the restarted agent arrives later with a new id
+    // and strictly newer timestamp — must be tracked normally.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 3,
+        turnId: "t2-new",
+        channelId: "c1",
+        timestamp: at(3_000),
+      }),
+    ]);
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      1,
+      "genuine new turn from restarted agent must be tracked",
+    );
+
+    mock.timers.reset();
+  });
 });

@@ -167,6 +167,18 @@ export function useManagedAgentRuntimeAction() {
       return startManagedAgentRuntime(pubkey, relayUrl);
     },
     onSuccess: (runtime, { action }) => {
+      // Clear stale working badges immediately when Desktop stops or restarts
+      // an agent pair — no ambiguity when Desktop itself issued the kill.
+      // Done first, before the cache update, so re-renders triggered by the
+      // cache update already see the cleared store.
+      // For restart: the Tauri command is stop+start in one round-trip; by
+      // the time onSuccess fires the new runtime is already started but its
+      // harness needs seconds to boot and emit turn_started — the clear
+      // window is effectively zero.
+      if (action === "stop" || action === "restart") {
+        clearActiveTurnsForAgentOnStop(runtime.pubkey, runtime.relayUrl);
+      }
+
       queryClient.setQueryData<ManagedAgentRuntimeStatus[]>(
         managedAgentRuntimesQueryKey,
         (current = []) => {
@@ -181,13 +193,6 @@ export function useManagedAgentRuntimeAction() {
           );
         },
       );
-
-      // Clear stale working badges immediately when Desktop stops or restarts
-      // an agent pair — no ambiguity when Desktop itself issued the kill.
-      // The relay-scope gate lives inside clearActiveTurnsForAgentOnStop.
-      if (action === "stop" || action === "restart") {
-        clearActiveTurnsForAgentOnStop(runtime.pubkey, runtime.relayUrl);
-      }
     },
   });
 }
