@@ -398,6 +398,12 @@ fn command_search_dirs() -> Vec<PathBuf> {
             .ok()
             .and_then(|path| path.parent().map(Path::to_path_buf)),
     );
+
+    // Tauri-bundled sidecars are staged here by scripts/bundle-sidecars.sh.
+    // Include the directory so local dev builds can resolve them even though
+    // they carry the host target-triple suffix (e.g. buzz-agent-aarch64-apple-darwin).
+    dirs.push(workspace_root_dir().join("desktop/src-tauri/binaries"));
+
     dirs.into_iter().fold(Vec::new(), |mut unique, dir| {
         if !unique.contains(&dir) {
             unique.push(dir);
@@ -433,10 +439,21 @@ fn resolve_workspace_command(command: &str) -> Option<PathBuf> {
     }
 
     let file_name = executable_basename(command);
-    command_search_dirs()
-        .into_iter()
-        .map(|dir| dir.join(&file_name))
-        .find(|candidate| is_executable_file(candidate))
+    let triple = host_target_triple();
+    let mut basenames = vec![file_name];
+    if triple != "unknown" {
+        basenames.push(format!("{command}-{triple}"));
+    }
+
+    for dir in command_search_dirs() {
+        for basename in &basenames {
+            let candidate = dir.join(basename);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn resolve_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<PathBuf>>>
@@ -546,6 +563,20 @@ pub(crate) fn availability_drift(
     match (stamped, current) {
         (Some(s), Some(c)) => *s != c,
         _ => false,
+    }
+}
+
+/// Host target triple used by Tauri-bundled sidecars (e.g. `buzz-agent-aarch64-apple-darwin`).
+fn host_target_triple() -> &'static str {
+    // ponytail: stdlib env::consts gives OS/ARCH; vendor is apple on macOS and unknown on Linux.
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+        _ => "unknown",
     }
 }
 
