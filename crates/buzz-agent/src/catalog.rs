@@ -37,8 +37,11 @@ pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
 /// This is the list of models advertised by `session/new` when
 /// `discover_databricks_models` returns an error (e.g., no token available).
 ///
-/// - `DatabricksV2` falls back to [`DATABRICKS_V2_KNOWN_MODELS`] so the
-///   model-picker is always populated for AI Gateway v2 users.
+/// - `DatabricksV2` falls back to the configured model plus
+///   [`DATABRICKS_V2_KNOWN_MODELS`] so the model-picker is always populated for
+///   AI Gateway v2 users. The configured model leads: without it a fallback
+///   catalog can omit the very model the agent is running, leaving the picker
+///   unable to represent the current selection.
 /// - Legacy `Databricks` falls back to only the configured model — the
 ///   `DATABRICKS_V2_KNOWN_MODELS` IDs are AI Gateway v2 endpoints that the
 ///   `/serving-endpoints/{model}/invocations` API may not serve.
@@ -46,23 +49,56 @@ pub const DATABRICKS_V2_KNOWN_MODELS: &[&str] =
 /// Extracting this as a pure function makes the split testable without
 /// spawning an async runtime or making network calls.
 pub fn discovery_failure_fallback(provider: Provider, configured_model: &str) -> Vec<ModelEntry> {
+    let configured = ModelEntry {
+        id: configured_model.to_string(),
+        name: configured_model.to_string(),
+    };
     match provider {
-        Provider::DatabricksV2 => DATABRICKS_V2_KNOWN_MODELS
-            .iter()
-            .map(|id| ModelEntry {
-                id: id.to_string(),
-                name: id.to_string(),
-            })
-            .collect(),
-        Provider::Databricks => vec![ModelEntry {
-            id: configured_model.to_string(),
-            name: configured_model.to_string(),
-        }],
-        _ => vec![ModelEntry {
-            id: configured_model.to_string(),
-            name: configured_model.to_string(),
-        }],
+        Provider::DatabricksV2 => {
+            let mut entries = Vec::with_capacity(DATABRICKS_V2_KNOWN_MODELS.len() + 1);
+            if !configured_model.trim().is_empty() {
+                entries.push(configured);
+            }
+            entries.extend(
+                DATABRICKS_V2_KNOWN_MODELS
+                    .iter()
+                    .filter(|id| **id != configured_model)
+                    .map(|id| ModelEntry {
+                        id: id.to_string(),
+                        name: id.to_string(),
+                    }),
+            );
+            entries
+        }
+        Provider::Databricks => vec![configured],
+        _ => vec![configured],
     }
+}
+
+/// Heuristic: `true` when a v2 AI Gateway endpoint name looks like it serves
+/// chat/completions traffic.
+///
+/// The v1 `serving-endpoints` payload carries `task`, so [`parse_v1_endpoints`]
+/// can filter on it directly. The v2 `ai-gateway/v2/endpoints` payload carries
+/// no task or readiness field at all, so the only signal available here is the
+/// endpoint name. Embedding endpoints are the one family that reliably cannot
+/// serve a chat request — they reject it with
+/// `API type 'mlflow/v1/chat/completions' is not supported by '<name>'` — so
+/// they are dropped rather than offered as selectable models.
+///
+/// Deliberately narrow: image-capable endpoints (e.g.
+/// `databricks-gemini-3-pro-image`) do answer chat requests, so they stay. Any
+/// name this heuristic does not recognise is kept — preferring to include over
+/// silently dropping, matching [`parse_v1_endpoints`].
+pub(crate) fn is_chat_capable_endpoint(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.contains("embedding") {
+        return false;
+    }
+    // Segment match so `bge`/`gte` cannot fire on a substring of a longer word.
+    !lower
+        .split('-')
+        .any(|segment| matches!(segment, "bge" | "gte"))
 }
 
 /// Discover available models for a Databricks provider.
@@ -261,7 +297,9 @@ async fn fetch_v2_models(
 /// Parse one page of a `GET api/ai-gateway/v2/endpoints` response.
 ///
 /// Returns `(models, next_page_token)`. An empty or absent `next_page_token`
-/// signals the last page.
+/// signals the last page. Endpoints that cannot serve chat traffic are dropped
+/// (see [`is_chat_capable_endpoint`]) so the model picker only offers models the
+/// agent can actually run.
 pub(crate) fn parse_v2_endpoints_page(
     json: &serde_json::Value,
 ) -> Result<(Vec<ModelEntry>, Option<String>), AgentError> {
@@ -279,6 +317,9 @@ pub(crate) fn parse_v2_endpoints_page(
         .iter()
         .filter_map(|endpoint| {
             let name = endpoint.get("name")?.as_str()?.to_string();
+            if !is_chat_capable_endpoint(&name) {
+                return None;
+            }
             Some(ModelEntry {
                 id: name.clone(),
                 name,
@@ -398,5 +439,70 @@ mod tests {
             err.to_string().contains("missing 'endpoints' array"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn v2_parse_drops_embedding_endpoints() {
+        // The v2 payload carries no `task`, so embedding endpoints are only
+        // recognisable by name. They reject chat requests, so offering them in
+        // the picker can only produce a 400 at send time.
+        let json = serde_json::json!({
+            "endpoints": [
+                {"name": "databricks-bge-large-en"},
+                {"name": "databricks-gte-large-en"},
+                {"name": "databricks-qwen3-embedding-0-6b"},
+                {"name": "databricks-claude-opus-5"},
+                {"name": "databricks-gemini-3-pro-image"},
+            ]
+        });
+
+        let (models, _) = parse_v2_endpoints_page(&json).unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        // Image endpoints DO answer chat requests, so they are retained.
+        assert_eq!(
+            ids,
+            vec!["databricks-claude-opus-5", "databricks-gemini-3-pro-image"]
+        );
+    }
+
+    #[test]
+    fn is_chat_capable_endpoint_keeps_unrecognised_names() {
+        // Prefer including over silently dropping — an unknown family is kept.
+        assert!(is_chat_capable_endpoint("databricks-glm-5-2"));
+        assert!(is_chat_capable_endpoint("some-teams-custom-endpoint"));
+        // `bge`/`gte` match as whole segments only, never as substrings.
+        assert!(is_chat_capable_endpoint("databricks-budget-gtex-model"));
+        assert!(!is_chat_capable_endpoint("databricks-bge-large-en"));
+        assert!(!is_chat_capable_endpoint("databricks-gte-large-en"));
+        assert!(!is_chat_capable_endpoint("databricks-qwen3-embedding-0-6b"));
+    }
+
+    #[test]
+    fn v2_discovery_failure_fallback_leads_with_configured_model() {
+        let result = discovery_failure_fallback(Provider::DatabricksV2, "databricks-claude-opus-5");
+        let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
+
+        // The running model must be representable in the picker even when
+        // discovery failed, so it leads the fallback catalog.
+        assert_eq!(ids.first(), Some(&"databricks-claude-opus-5"));
+        for known in DATABRICKS_V2_KNOWN_MODELS {
+            assert!(ids.contains(known), "fallback must retain '{known}'");
+        }
+    }
+
+    #[test]
+    fn v2_discovery_failure_fallback_does_not_duplicate_configured_model() {
+        let configured = DATABRICKS_V2_KNOWN_MODELS[0];
+        let result = discovery_failure_fallback(Provider::DatabricksV2, configured);
+        let occurrences = result.iter().filter(|m| m.id == configured).count();
+        assert_eq!(occurrences, 1, "got: {result:?}");
+        assert_eq!(result.len(), DATABRICKS_V2_KNOWN_MODELS.len());
+    }
+
+    #[test]
+    fn v2_discovery_failure_fallback_tolerates_blank_configured_model() {
+        let result = discovery_failure_fallback(Provider::DatabricksV2, "");
+        let ids: Vec<&str> = result.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, DATABRICKS_V2_KNOWN_MODELS.to_vec());
     }
 }

@@ -210,6 +210,84 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
         Some("record-key")
     );
     assert!(!config.env.contains_key("BUZZ_PRIVATE_KEY"));
+    assert_eq!(config.provider_env_var, Some("GOOSE_PROVIDER"));
+}
+
+// ---------------------------------------------------------------------------
+// Provider resolution for discovery
+// ---------------------------------------------------------------------------
+
+#[test]
+fn effective_discovery_provider_prefers_the_explicit_provider() {
+    let env = BTreeMap::from([(
+        "BUZZ_AGENT_PROVIDER".to_string(),
+        "databricks_v2".to_string(),
+    )]);
+
+    // A saved/selected provider is a deliberate choice and must win over the
+    // build-provided default, so discovery matches what spawn will use.
+    assert_eq!(
+        effective_discovery_provider(Some("anthropic"), Some("BUZZ_AGENT_PROVIDER"), &env)
+            .as_deref(),
+        Some("anthropic")
+    );
+}
+
+#[test]
+fn effective_discovery_provider_recovers_baked_provider_when_record_has_none() {
+    let env = BTreeMap::from([(
+        "BUZZ_AGENT_PROVIDER".to_string(),
+        "databricks_v2".to_string(),
+    )]);
+
+    // The regression this guards: records predating provider persistence carry
+    // `provider: null`, so every discovery gate saw None and no live Databricks
+    // catalog was ever fetched on builds that bake the provider in.
+    for provider in [None, Some(""), Some("   ")] {
+        assert_eq!(
+            effective_discovery_provider(provider, Some("BUZZ_AGENT_PROVIDER"), &env).as_deref(),
+            Some("databricks_v2"),
+            "provider input {provider:?} must fall back to the env value"
+        );
+    }
+}
+
+#[test]
+fn effective_discovery_provider_is_none_without_an_explicit_or_env_provider() {
+    let env = BTreeMap::new();
+    assert_eq!(
+        effective_discovery_provider(None, Some("BUZZ_AGENT_PROVIDER"), &env),
+        None
+    );
+    // A runtime that takes no provider env var has nothing to recover from.
+    assert_eq!(
+        effective_discovery_provider(
+            None,
+            None,
+            &BTreeMap::from([(
+                "BUZZ_AGENT_PROVIDER".to_string(),
+                "databricks_v2".to_string()
+            )])
+        ),
+        None
+    );
+}
+
+#[test]
+fn effective_discovery_provider_reads_the_runtimes_own_env_var() {
+    // goose keys its provider off GOOSE_PROVIDER, so a BUZZ_AGENT_PROVIDER in
+    // the env must not be mistaken for this runtime's provider.
+    let env = BTreeMap::from([
+        ("GOOSE_PROVIDER".to_string(), "databricks".to_string()),
+        (
+            "BUZZ_AGENT_PROVIDER".to_string(),
+            "databricks_v2".to_string(),
+        ),
+    ]);
+    assert_eq!(
+        effective_discovery_provider(None, Some("GOOSE_PROVIDER"), &env).as_deref(),
+        Some("databricks")
+    );
 }
 
 // ---------------------------------------------------------------------------
