@@ -163,75 +163,158 @@ pub fn open_archive_db(path: &Path) -> Result<Connection, String> {
 ///
 /// Each migration is guarded by a `SELECT 1 FROM archive_migrations WHERE
 /// name = '...'` check so it is safe to call on every open — a migration
-/// that already ran is a no-op. `ALTER TABLE ... ADD COLUMN` is also itself
-/// idempotent on SQLite ≥ 3.37 (the column already exists → error, so we
-/// guard with the migrations table instead of relying on that).
+/// that already ran is a no-op.
 fn apply_schema_migrations(conn: &Connection) -> Result<(), String> {
-    // Migration M1: add `harness` column to `agent_metric_index`.
-    //
-    // Pre-existing rows land with `harness = NULL` (TEXT nullable). The
-    // backfill path in `metric_store::backfill_agent_metric_index` re-parses
-    // `archived_events.raw_json` — but that anti-join only inserts NEW rows;
-    // rows already in the index are never re-parsed. To populate `harness` for
-    // existing valid rows we use the index-rebuild migration below, which
-    // DELETE-then-reinserts every row so the shared `from_payload` parser
-    // populates the new column uniformly. `DELETE + reinsert` inside one
-    // transaction is safe: `archived_events` is the canonical store; the index
-    // is always fully rebuildable from it.
+    migrate_add_harness_to_metric_index(conn)
+}
+
+/// M1: add `harness TEXT` column to `agent_metric_index` and rebuild index
+/// rows so pre-existing rows gain harness populated from `archived_events`.
+///
+/// The entire migration — column addition, full DELETE of stale index rows,
+/// fresh re-insertion from `archived_events.raw_json`, and the
+/// `archive_migrations` marker — is wrapped in a single `unchecked_transaction`
+/// (BEGIN DEFERRED). A crash anywhere before COMMIT leaves the DB in its
+/// pre-migration state and the marker absent, so the next open re-runs the
+/// migration from scratch.
+///
+/// The worklist is built from `archived_events` (the canonical store) rather
+/// than from `agent_metric_index` so that a partially-rebuilt or entirely
+/// empty index never causes us to forget which (identity, relay) scopes exist.
+fn migrate_add_harness_to_metric_index(conn: &Connection) -> Result<(), String> {
     let already_run: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM archive_migrations WHERE name = 'add_harness_to_metric_index'",
             [],
             |r| r.get::<_, i64>(0),
         )
-        .map_err(|e| format!("migration guard check failed: {e}"))?
+        .map_err(|e| format!("migration M1: guard check: {e}"))?
         > 0;
 
-    if !already_run {
-        // 1. Add the nullable column (safe no-op on brand-new DBs where SCHEMA
-        //    already included the column — SQLite returns "duplicate column name"
-        //    which we ignore; new DBs have no rows to migrate anyway).
-        let _ = conn.execute_batch("ALTER TABLE agent_metric_index ADD COLUMN harness TEXT");
+    if already_run {
+        return Ok(());
+    }
 
-        // 2. Rebuild the entire index so existing valid rows get harness
-        //    populated from the retained raw_json. We delete all existing index
-        //    rows and re-run the backfill anti-join; `backfill_agent_metric_index`
-        //    is the canonical rebuild path shared by ingest and backfill.
-        //    We collect all (identity, relay) pairs present in the index first.
-        let pairs: Vec<(String, String)> = {
-            let mut stmt = conn
-                .prepare("SELECT DISTINCT identity_pubkey, relay_url FROM agent_metric_index")
-                .map_err(|e| format!("migration M1: prepare pairs query: {e}"))?;
-            let pairs = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(|e| format!("migration M1: query pairs: {e}"))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| format!("migration M1: read pairs: {e}"))?;
-            pairs
-        };
+    // All steps run inside one transaction so a crash before COMMIT leaves the
+    // DB fully pre-migration and the marker absent — the next open re-runs.
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("migration M1: begin transaction: {e}"))?;
 
-        if !pairs.is_empty() {
-            // Delete all existing index rows; backfill will re-insert them with
-            // harness populated.
-            conn.execute_batch("DELETE FROM agent_metric_index")
-                .map_err(|e| format!("migration M1: delete index rows: {e}"))?;
+    // 1. Add the `harness` column only when it is genuinely absent, so we
+    //    propagate unexpected DDL errors instead of swallowing them.
+    let harness_exists: bool = {
+        let mut stmt = tx
+            .prepare("PRAGMA table_info(agent_metric_index)")
+            .map_err(|e| format!("migration M1: PRAGMA table_info prepare: {e}"))?;
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .map_err(|e| format!("migration M1: PRAGMA table_info query: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M1: PRAGMA table_info read: {e}"))?;
+        names.iter().any(|n| n == "harness")
+    };
+    if !harness_exists {
+        tx.execute_batch("ALTER TABLE agent_metric_index ADD COLUMN harness TEXT")
+            .map_err(|e| format!("migration M1: ALTER TABLE failed: {e}"))?;
+    }
 
-            for (identity, relay) in &pairs {
-                super::metric_store::backfill_agent_metric_index(conn, identity, relay)?;
-            }
+    // 2. Collect all (identity, relay) scopes from `archived_events` — the
+    //    canonical store — so the worklist is correct even if the index was
+    //    partially rebuilt or empty before this migration runs.
+    let scopes: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT DISTINCT identity_pubkey, relay_url
+                 FROM archived_events
+                 WHERE kind = 44200",
+            )
+            .map_err(|e| format!("migration M1: prepare scope query: {e}"))?;
+        let result = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| format!("migration M1: query scopes: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("migration M1: read scopes: {e}"))?;
+        result
+    };
+
+    if !scopes.is_empty() {
+        // 3. Delete all stale index rows; re-insert them with harness populated
+        //    from the shared `from_payload` parser below.  Both the DELETE and
+        //    all inserts run inside the same outer transaction — no intermediate
+        //    commit, so readers never observe an empty index.
+        tx.execute_batch("DELETE FROM agent_metric_index")
+            .map_err(|e| format!("migration M1: delete index rows: {e}"))?;
+
+        for (identity, relay) in &scopes {
+            rebuild_metric_index_in_tx(&tx, identity, relay)?;
         }
+    }
 
-        // 3. Record migration as applied.
-        conn.execute(
-            "INSERT OR IGNORE INTO archive_migrations (name, applied_at) VALUES ('add_harness_to_metric_index', ?1)",
-            params![
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs() as i64
-            ],
+    // 4. Record migration as applied — written last so the marker is only
+    //    present in a fully committed transaction.
+    tx.execute(
+        "INSERT OR IGNORE INTO archive_migrations (name, applied_at) \
+         VALUES ('add_harness_to_metric_index', ?1)",
+        params![std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64],
+    )
+    .map_err(|e| format!("migration M1: record marker: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("migration M1: commit: {e}"))?;
+
+    Ok(())
+}
+
+/// Re-insert all kind-44200 rows for `(identity, relay)` from
+/// `archived_events.raw_json` through the shared `from_payload` parser.
+///
+/// Unlike `metric_store::backfill_agent_metric_index`, this function runs
+/// entirely inside the caller's transaction — no nested `BEGIN`/`COMMIT`.
+/// It is used exclusively by M1 where the outer transaction provides atomicity.
+fn rebuild_metric_index_in_tx(
+    conn: &Connection,
+    identity_pubkey: &str,
+    relay_url: &str,
+) -> Result<(), String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, pubkey, created_at, archived_at, raw_json
+             FROM archived_events
+             WHERE identity_pubkey = ?1
+               AND relay_url       = ?2
+               AND kind            = 44200",
         )
-        .map_err(|e| format!("migration M1: record applied: {e}"))?;
+        .map_err(|e| format!("migration M1: prepare rebuild select: {e}"))?;
+
+    let rows: Vec<(String, String, i64, i64, String)> = stmt
+        .query_map(params![identity_pubkey, relay_url], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|e| format!("migration M1: query rebuild rows: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("migration M1: read rebuild row: {e}"))?;
+    drop(stmt);
+
+    for (id, pubkey, created_at, archived_at, raw_json) in &rows {
+        let parsed = super::metric_store::AgentMetricIndexRow::from_payload(
+            raw_json,
+            id,
+            pubkey,
+            *created_at,
+            *archived_at,
+        );
+        super::metric_store::insert_metric_index_row(conn, identity_pubkey, relay_url, &parsed)
+            .map_err(|e| format!("migration M1: insert rebuilt row: {e}"))?;
     }
 
     Ok(())

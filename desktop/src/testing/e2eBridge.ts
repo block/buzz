@@ -147,6 +147,7 @@ type RawAgentUsageSeriesBucket = {
 };
 
 type RawAgentUsageModel = {
+  harness: string | null;
   model: string | null;
   usage: RawReportedUsage;
   reportCount: number;
