@@ -18,8 +18,10 @@ services:
       BUZZ_GIT_REPO_PATH: /data/git
       BUZZ_AUTO_MIGRATE: ${BUZZ_AUTO_MIGRATE:-false}
       BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
+    # Loopback-only: TLS termination and access control live in nginx, so the
+    # relay port must not be reachable from off-box.
     ports:
-      - "${BUZZ_HTTP_PORT:-3000}:3000"
+      - "127.0.0.1:${BUZZ_HTTP_PORT:-3000}:3000"
     volumes:
       - buzz-git-data:/data/git
     depends_on:
@@ -42,6 +44,39 @@ services:
       timeout: 3s
       retries: 12
       start_period: 30s
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+  # NIP-AB device-pairing sidecar. An unpaired phone only has an ephemeral key,
+  # so it cannot pass the main relay's membership gate at NIP-42 AUTH time —
+  # the pairing handshake has to happen on this separate unauthenticated relay.
+  # Clients discover it from the NIP-11 `pairing_relay_url` field, which the
+  # main relay advertises from BUZZ_PAIRING_RELAY_URL in .env.
+  #
+  # The binary ships in the same image; ENTRYPOINT is buzz-relay, so override
+  # `entrypoint` (not `command`, which is what the Helm chart uses — in Compose
+  # `command` would just be appended as args to buzz-relay).
+  #
+  # No env_file here on purpose: this service needs no DB, Redis, S3, or relay
+  # private key, so it should not be handed the secrets in .env.
+  pairing:
+    image: ${BUZZ_IMAGE:-ghcr.io/block/buzz:main}
+    entrypoint: ["/usr/local/bin/buzz-pair-relay"]
+    environment:
+      # Defaults to loopback inside the container, which the port publish below
+      # could not reach — bind all interfaces in the container namespace and let
+      # the host-side 127.0.0.1 publish do the actual confinement.
+      BUZZ_PAIR_RELAY_BIND_ADDR: 0.0.0.0:5000
+    ports:
+      - "127.0.0.1:${BUZZ_PAIR_PORT:-5000}:5000"
+    # Runtime image has bash but no curl/wget, so probe the TCP port directly.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/5000'"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
     restart: unless-stopped
     networks:
       - buzz-net
