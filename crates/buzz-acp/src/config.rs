@@ -115,6 +115,7 @@ impl std::fmt::Display for RespondTo {
 /// `configId: "mode"` (e.g. `claude-agent-acp`).
 ///
 /// - `default` — agent's built-in behaviour (permission requests per tool call).
+/// - `auto` — auto-approve with a classifier reviewing each tool call.
 /// - `acceptEdits` — auto-approve file edits, still ask for other tools.
 /// - `bypassPermissions` — skip the permission flow entirely.
 /// - `dontAsk` — never prompt; reject anything that would require permission.
@@ -124,6 +125,13 @@ pub enum PermissionMode {
     /// Agent default — permission requests per tool call.
     #[value(alias = "default")]
     Default,
+    /// Auto-approve tool calls, with a classifier reviewing each one.
+    ///
+    /// Unlike `bypassPermissions`, which skips the permission flow outright,
+    /// `auto` keeps a safety check in the loop without needing a human to
+    /// answer a prompt — the shape a headless harness actually wants.
+    #[value(alias = "auto")]
+    Auto,
     /// Auto-approve file edits, still ask for other tools.
     #[value(alias = "acceptEdits")]
     AcceptEdits,
@@ -144,6 +152,7 @@ impl PermissionMode {
     pub fn as_wire_str(&self) -> &'static str {
         match self {
             Self::Default => "default",
+            Self::Auto => "auto",
             Self::AcceptEdits => "acceptEdits",
             Self::BypassPermissions => "bypassPermissions",
             Self::DontAsk => "dontAsk",
@@ -428,7 +437,8 @@ pub struct CliArgs {
     ///
     /// Defaults to `bypassPermissions` which skips the per-tool-call
     /// permission flow. Set to `default` to restore the agent's built-in
-    /// behaviour.
+    /// behaviour, or `auto` to keep a classifier reviewing each tool call
+    /// without requiring a human to answer a prompt.
     #[arg(
         long,
         env = "BUZZ_ACP_PERMISSION_MODE",
@@ -2111,6 +2121,7 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_wire_strings() {
         assert_eq!(PermissionMode::Default.as_wire_str(), "default");
+        assert_eq!(PermissionMode::Auto.as_wire_str(), "auto");
         assert_eq!(PermissionMode::AcceptEdits.as_wire_str(), "acceptEdits");
         assert_eq!(
             PermissionMode::BypassPermissions.as_wire_str(),
@@ -2123,6 +2134,7 @@ channels = "ALL"
     #[test]
     fn test_permission_mode_is_default() {
         assert!(PermissionMode::Default.is_default());
+        assert!(!PermissionMode::Auto.is_default());
         assert!(!PermissionMode::BypassPermissions.is_default());
         assert!(!PermissionMode::AcceptEdits.is_default());
         assert!(!PermissionMode::DontAsk.is_default());
@@ -2173,6 +2185,7 @@ channels = "ALL"
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("accept-edits", PermissionMode::AcceptEdits),
             ("bypass-permissions", PermissionMode::BypassPermissions),
             ("dont-ask", PermissionMode::DontAsk),
@@ -2195,6 +2208,7 @@ channels = "ALL"
         use clap::ValueEnum;
         let cases = [
             ("default", PermissionMode::Default),
+            ("auto", PermissionMode::Auto),
             ("acceptEdits", PermissionMode::AcceptEdits),
             ("bypassPermissions", PermissionMode::BypassPermissions),
             ("dontAsk", PermissionMode::DontAsk),
