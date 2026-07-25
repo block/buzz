@@ -237,18 +237,20 @@ export function useInstallAcpRuntimeMutation() {
       // invalidation in onSettled left a gap where onboarding reverted to
       // UPDATE CLI / INSTALL on stale `unknown` catalog data.
       await queryClient.invalidateQueries({ queryKey: acpRuntimesQueryKey });
-      if (result.success && runtimeId === "claude") {
+      if (result.success) {
         const catalog =
           queryClient.getQueryData<AcpRuntimeCatalogEntry[]>(
             acpRuntimesQueryKey,
           );
-        const claude = catalog?.find((entry) => entry.id === "claude");
+        const entry = catalog?.find((item) => item.id === runtimeId);
+        // CLI repair can exit before the replacement binary is visible to the
+        // next auth probe. Retry once when discovery still reports an update
+        // diagnostic (catalog-driven — not a harness-id special case).
         if (
-          claude?.availability === "available" &&
-          claude.authStatus.status === "unknown"
+          entry?.availability === "available" &&
+          entry.authStatus.status === "unknown" &&
+          entry.authStatus.diagnostic
         ) {
-          // `claude update` can exit before the replacement binary is fully
-          // visible to the next auth probe — retry once after a short wait.
           await new Promise<void>((resolve) => {
             window.setTimeout(resolve, 1_500);
           });

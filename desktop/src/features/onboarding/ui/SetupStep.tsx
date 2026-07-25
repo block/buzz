@@ -201,9 +201,7 @@ function RuntimeStatus({
   }
 
   if (isInstalling) {
-    const isUpdating =
-      runtime.availability === "available" &&
-      runtime.authStatus.status === "unknown";
+    const isUpdating = runtimeNeedsCliUpdate(runtime);
     return (
       <div
         aria-label={
@@ -245,8 +243,9 @@ function RuntimeStatus({
     runtime.availability === "available" &&
     runtime.authStatus.status === "unknown"
   ) {
-    // Outdated Claude Code (etc.): Install repairs the CLI via `claude update`.
-    if (runtime.canAutoInstall) {
+    // Only offer UPDATE CLI when discovery attached an update diagnostic
+    // (e.g. outdated Claude Code). Generic unknown stays on CHECK AGAIN.
+    if (runtimeNeedsCliUpdate(runtime) && runtime.canAutoInstall) {
       return (
         <Button
           aria-label={`Update ${runtime.label} CLI`}
@@ -462,12 +461,12 @@ function getOnboardingAuthMethods(
   return supported;
 }
 
-function runtimeAuthUnknownDetail(runtime: AcpRuntimeCatalogEntry): string {
-  if (runtime.authStatus.status !== "unknown") return "";
+/** True when discovery identified a repairable outdated/incompatible CLI. */
+function runtimeNeedsCliUpdate(runtime: AcpRuntimeCatalogEntry): boolean {
   return (
-    runtime.authStatus.diagnostic ??
-    runtime.loginHint ??
-    "Update this CLI, then try again."
+    runtime.availability === "available" &&
+    runtime.authStatus.status === "unknown" &&
+    Boolean(runtime.authStatus.diagnostic)
   );
 }
 
@@ -481,7 +480,7 @@ function RuntimeAuthError({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
       />
     );
   }
-  // Unknown auth (e.g. outdated Claude Code) is rendered inline under the CTA
+  // Unknown auth with an update diagnostic is rendered inline under the CTA
   // in RuntimeCard — keep this slot for bottom-pinned errors only.
   return null;
 }
@@ -563,13 +562,14 @@ function RuntimeCard({
           onInstall={handleInstall}
           runtime={runtime}
         />
-        {isAvailable &&
+        {runtimeNeedsCliUpdate(runtime) &&
         runtime.authStatus.status === "unknown" &&
+        runtime.authStatus.diagnostic &&
         !installError &&
         !isInstalling ? (
           <RuntimeErrorTooltip
             className="max-w-[13rem] text-2xs leading-4 text-muted-foreground"
-            detail={runtimeAuthUnknownDetail(runtime)}
+            detail={runtime.authStatus.diagnostic}
             label="Update required"
             testId={`onboarding-runtime-update-hint-${runtime.id}`}
           />

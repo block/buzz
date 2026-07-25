@@ -220,21 +220,13 @@ test("unknown authentication offers UPDATE CLI when auto-install is available", 
   );
 });
 
-test("unknown authentication can be checked again without auto-install", async ({
+test("unknown authentication without diagnostic can be checked again", async ({
   page,
 }) => {
-  const unknown = runtime(
-    "claude",
-    "available",
-    { status: "unknown" },
-    { can_auto_install: false },
-  );
-  const loggedIn = runtime(
-    "claude",
-    "available",
-    { status: "logged_in" },
-    { can_auto_install: false },
-  );
+  // can_auto_install stays true — UPDATE CLI is gated on a diagnostic, not
+  // installability alone, so a bare unknown must keep CHECK AGAIN.
+  const unknown = runtime("claude", "available", { status: "unknown" });
+  const loggedIn = runtime("claude", "available", { status: "logged_in" });
   await installMockBridge(
     page,
     { acpRuntimesCatalogSequence: [[unknown], [loggedIn]] },
