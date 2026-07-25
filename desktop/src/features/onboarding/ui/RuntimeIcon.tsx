@@ -8,11 +8,13 @@ import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import chatgptLogoUrl from "../assets/harness-logos/chatgpt.png?inline";
 import claudeLogoUrl from "../assets/harness-logos/claude.png?inline";
 import gooseLogoUrl from "../assets/harness-logos/goose.png?inline";
+import kiroLogoUrl from "../assets/harness-logos/kiro.svg?inline";
 
 const RUNTIME_LOGOS: Record<string, string> = {
   claude: claudeLogoUrl,
   codex: chatgptLogoUrl,
   goose: gooseLogoUrl,
+  kiro: kiroLogoUrl,
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {

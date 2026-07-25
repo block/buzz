@@ -25,6 +25,7 @@ mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
+mod runtime_avatars;
 mod runtime_commands;
 mod runtime_types;
 pub(crate) mod spawn_hash;
@@ -68,6 +69,7 @@ pub use repos::{
 };
 pub use restore::*;
 pub use runtime::*;
+pub(crate) use runtime_avatars::{normalize_avatars, KIRO_AVATAR_URL};
 pub use runtime_commands::*;
 pub use runtime_types::*;
 pub use storage::*;

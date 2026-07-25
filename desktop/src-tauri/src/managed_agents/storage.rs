@@ -199,7 +199,7 @@ fn load_agent_store(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> 
 pub fn load_managed_agents(app: &AppHandle) -> Result<Vec<ManagedAgentRecord>, String> {
     let mut records = load_agent_store(app)?;
     records.retain(|record| !record.pubkey.is_empty());
-    hydrate_keys(&mut records);
+    hydrate_keys(crate::managed_agents::normalize_avatars(&mut records));
     Ok(records)
 }
 

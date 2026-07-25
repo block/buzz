@@ -1,11 +1,12 @@
 use super::KnownAcpRuntime;
+use crate::managed_agents::KIRO_AVATAR_URL;
 
 pub(super) const RUNTIME: KnownAcpRuntime = KnownAcpRuntime {
     id: "kiro",
     label: "Kiro CLI",
     commands: &["kiro-cli"],
     aliases: &[],
-    avatar_url: "https://kiro.dev/images/kiro-wordmark.png",
+    avatar_url: KIRO_AVATAR_URL,
     mcp_command: Some("buzz-dev-mcp"),
     mcp_hooks: false,
     underlying_cli: Some("kiro-cli"),

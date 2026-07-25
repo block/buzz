@@ -7019,7 +7019,7 @@ async function handleDiscoverAcpRuntimes(
     {
       id: "kiro",
       label: "Kiro CLI",
-      avatar_url: "https://kiro.dev/images/kiro-wordmark.png",
+      avatar_url: "https://kiro.dev/icon.svg?fe599162bb293ea0",
       availability: "not_installed",
       command: null,
       binary_path: null,
