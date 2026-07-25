@@ -33,7 +33,7 @@ use crate::command_services::apple_inputs::AppleBriefSelection;
 
 mod lifecycle;
 mod runtime;
-
+pub(crate) use runtime::OrchestratorAdmissionState;
 const MAX_CO_REQUEST_BYTES: usize = 1024;
 const MAX_SCHEDULE_ID_BYTES: usize = 256;
 const MAX_STATUS_HISTORY: usize = 32;

@@ -1,11 +1,8 @@
 //! Protected append-only SQLite spool for signed NIP-CB lifecycle events.
 
 use std::path::Path;
-use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
-use chrono_tz::Tz;
 use nostr::{Event, JsonUtil};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -13,77 +10,13 @@ use sha2::{Digest, Sha256};
 use buzz_core_pkg::command_brief::MAX_EVENT_CONTENT_BYTES;
 use buzz_core_pkg::kind::KIND_COMMAND_BRIEF;
 
-const SCHEMA_VERSION: i64 = 4;
+mod schema;
+
+pub use schema::validate_command_brief_store_schema;
+use schema::{create_current_schema, CLAIMS_DEFERRED_INDEX_SQL, CLAIMS_TABLE_SQL, SCHEMA_VERSION};
 const MAX_RETRIES: i64 = 8;
 const MAX_RETRY_DELAY_SECONDS: i64 = 3_600;
 const MAX_DUE_ROWS: usize = 64;
-
-const SCHEMA: &str = "
-CREATE TABLE command_brief_spool (
-    owner_pubkey       TEXT NOT NULL,
-    run_id             TEXT NOT NULL,
-    event_id           TEXT NOT NULL,
-    status             TEXT NOT NULL,
-    previous_event_id  TEXT,
-    encrypted_payload  TEXT NOT NULL,
-    raw_event           TEXT NOT NULL,
-    publish_state       TEXT NOT NULL CHECK (publish_state IN ('queued','published')),
-    retry_count         INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
-    next_retry_at       INTEGER NOT NULL DEFAULT 0,
-    last_error_code     TEXT,
-    created_at          INTEGER NOT NULL,
-    append_sequence     INTEGER NOT NULL,
-    published_at        INTEGER,
-    PRIMARY KEY (owner_pubkey, run_id, event_id),
-    UNIQUE (owner_pubkey, event_id),
-    UNIQUE (owner_pubkey, run_id, append_sequence)
-);
-CREATE TABLE command_brief_heads (
-    owner_pubkey       TEXT NOT NULL,
-    run_id             TEXT NOT NULL,
-    head_event_id      TEXT NOT NULL,
-    head_sequence      INTEGER NOT NULL,
-    PRIMARY KEY (owner_pubkey, run_id)
-);
-CREATE INDEX command_brief_spool_due
-ON command_brief_spool(owner_pubkey, publish_state, next_retry_at, append_sequence);
-CREATE TABLE command_brief_schedule (
-    schedule_id       TEXT PRIMARY KEY,
-    classification    TEXT NOT NULL CHECK (classification = 'OFFICIAL'),
-    enabled           INTEGER NOT NULL CHECK (enabled IN (0,1)),
-    local_time        TEXT NOT NULL,
-    timezone          TEXT NOT NULL,
-    catch_up_same_day INTEGER NOT NULL CHECK (catch_up_same_day IN (0,1)),
-    concurrency       INTEGER NOT NULL CHECK (concurrency IN (1,2)),
-    updated_at        INTEGER NOT NULL
-);
-CREATE TABLE command_brief_schedule_claims (
-    idempotency_key   TEXT PRIMARY KEY,
-    schedule_id       TEXT NOT NULL CHECK (schedule_id = 'daily-command-brief'),
-    local_date        TEXT NOT NULL CHECK (length(local_date) = 10),
-    timezone          TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
-    state             TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
-    deferred_reason   TEXT,
-    retry_count       INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
-    transition_token  TEXT,
-    claimed_at        INTEGER NOT NULL,
-    updated_at        INTEGER NOT NULL,
-    run_id            TEXT NOT NULL CHECK (
-        length(run_id) = 74 AND substr(run_id,1,10) = 'scheduled-'
-    ),
-    CHECK (idempotency_key = schedule_id || ':' || local_date),
-    CHECK (
-        (state = 'deferred'
-         AND deferred_reason IN ('identity_locked','model_unavailable','local_state_unavailable')
-         AND transition_token IS NOT NULL)
-        OR
-        (state <> 'deferred' AND deferred_reason IS NULL)
-    ),
-    UNIQUE (schedule_id, local_date)
-);
-CREATE INDEX command_brief_schedule_deferred
-ON command_brief_schedule_claims(state, retry_count, updated_at);
-";
 
 const MIGRATE_V1_TO_V2: &str = "
 ALTER TABLE command_brief_spool ADD COLUMN append_sequence INTEGER;
@@ -125,33 +58,6 @@ CREATE TABLE command_brief_schedule_claims (
 );
 CREATE INDEX command_brief_schedule_deferred
 ON command_brief_schedule_claims(state, retry_count, updated_at);
-";
-
-const CLAIMS_V4: &str = "
-CREATE TABLE command_brief_schedule_claims_v4 (
-    idempotency_key   TEXT PRIMARY KEY,
-    schedule_id       TEXT NOT NULL CHECK (schedule_id = 'daily-command-brief'),
-    local_date        TEXT NOT NULL CHECK (length(local_date) = 10),
-    timezone          TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
-    state             TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
-    deferred_reason   TEXT,
-    retry_count       INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
-    transition_token  TEXT,
-    claimed_at        INTEGER NOT NULL,
-    updated_at        INTEGER NOT NULL,
-    run_id            TEXT NOT NULL CHECK (
-        length(run_id) = 74 AND substr(run_id,1,10) = 'scheduled-'
-    ),
-    CHECK (idempotency_key = schedule_id || ':' || local_date),
-    CHECK (
-        (state = 'deferred'
-         AND deferred_reason IN ('identity_locked','model_unavailable','local_state_unavailable')
-         AND transition_token IS NOT NULL)
-        OR
-        (state <> 'deferred' AND deferred_reason IS NULL)
-    ),
-    UNIQUE (schedule_id, local_date)
-);
 ";
 
 /// Closed local relay-publication state.
@@ -209,7 +115,10 @@ pub struct DueSpoolEvent {
     pub next_retry_at: i64,
 }
 
-/// Open the protected spool with WAL and apply its atomic schema migration.
+/// Open the protected spool with WAL and apply any required atomic migration.
+///
+/// Full integrity and exact-schema validation belongs to startup, migration,
+/// backup, and restore boundaries rather than each operational connection.
 pub fn open_command_brief_store(path: &Path) -> Result<Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|_| "command brief store unavailable")?;
@@ -220,7 +129,6 @@ pub fn open_command_brief_store(path: &Path) -> Result<Connection, String> {
         .map_err(|_| "command brief store unavailable")?;
     set_wal(&conn)?;
     migrate_command_brief_store(&conn)?;
-    validate_command_brief_store_schema(&conn)?;
     protect_path(path, false)?;
     Ok(conn)
 }
@@ -253,8 +161,7 @@ pub fn migrate_command_brief_store(conn: &Connection) -> Result<(), String> {
     if version == 0 {
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Exclusive)
             .map_err(|_| "command brief store migration failed")?;
-        tx.execute_batch(SCHEMA)
-            .map_err(|_| "command brief store migration failed")?;
+        create_current_schema(&tx).map_err(|_| "command brief store migration failed")?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)
             .map_err(|_| "command brief store migration failed")?;
         tx.commit()
@@ -269,134 +176,11 @@ pub fn migrate_command_brief_store(conn: &Connection) -> Result<(), String> {
     } else if version == 3 {
         migrate_v3_to_v4(conn)?;
     }
-    Ok(())
-}
-
-/// Verify the current command-brief schema and semantic row invariants exactly.
-pub fn validate_command_brief_store_schema(conn: &Connection) -> Result<(), String> {
-    let version: i64 = conn
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|_| "command brief store schema rejected")?;
-    let integrity: String = conn
-        .pragma_query_value(None, "integrity_check", |row| row.get(0))
-        .map_err(|_| "command brief store schema rejected")?;
-    if version != SCHEMA_VERSION || integrity != "ok" {
-        return Err("command brief store schema rejected".into());
-    }
-    let columns = {
-        let mut statement = conn
-            .prepare("PRAGMA table_info(command_brief_schedule_claims)")
-            .map_err(|_| "command brief store schema rejected")?;
-        let mapped = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, i64>(5)?,
-                ))
-            })
-            .map_err(|_| "command brief store schema rejected")?;
-        mapped
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| "command brief store schema rejected")?
-    };
-    let expected = vec![
-        ("idempotency_key", "TEXT", 0, 1),
-        ("schedule_id", "TEXT", 1, 0),
-        ("local_date", "TEXT", 1, 0),
-        ("timezone", "TEXT", 1, 0),
-        ("state", "TEXT", 1, 0),
-        ("deferred_reason", "TEXT", 0, 0),
-        ("retry_count", "INTEGER", 1, 0),
-        ("transition_token", "TEXT", 0, 0),
-        ("claimed_at", "INTEGER", 1, 0),
-        ("updated_at", "INTEGER", 1, 0),
-        ("run_id", "TEXT", 1, 0),
-    ];
-    if columns
-        != expected
-            .into_iter()
-            .map(|(name, kind, required, primary)| {
-                (name.to_string(), kind.to_string(), required, primary)
-            })
-            .collect::<Vec<_>>()
-    {
-        return Err("command brief store schema rejected".into());
-    }
-    let table_sql: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master
-             WHERE type='table' AND name='command_brief_schedule_claims'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| "command brief store schema rejected")?;
-    let table_sql = normalize_sql(&table_sql);
-    for required in [
-        "check (schedule_id = 'daily-command-brief')",
-        "check (retry_count between 0 and 8)",
-        "check (idempotency_key = schedule_id || ':' || local_date)",
-        "state in ('claimed','deferred','started','completed')",
-        "deferred_reason in ('identity_locked','model_unavailable','local_state_unavailable')",
-    ] {
-        if !table_sql.contains(required) {
-            return Err("command brief store schema rejected".into());
-        }
-    }
-    let index_sql: String = conn
-        .query_row(
-            "SELECT sql FROM sqlite_master
-             WHERE type='index' AND name='command_brief_schedule_deferred'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|_| "command brief store schema rejected")?;
-    if normalize_sql(&index_sql)
-        != "create index command_brief_schedule_deferred on command_brief_schedule_claims(state, retry_count, updated_at)"
-    {
-        return Err("command brief store schema rejected".into());
-    }
-    let mut statement = conn
-        .prepare(
-            "SELECT idempotency_key,schedule_id,local_date,timezone,run_id,claimed_at,updated_at
-             FROM command_brief_schedule_claims",
-        )
-        .map_err(|_| "command brief store schema rejected")?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-            ))
-        })
-        .map_err(|_| "command brief store schema rejected")?;
-    for row in rows {
-        let (key, schedule, date, timezone, run_id, claimed, updated) =
-            row.map_err(|_| "command brief store schema rejected")?;
-        let expected_run = format!("scheduled-{}", hex::encode(Sha256::digest(key.as_bytes())));
-        if key != format!("{schedule}:{date}")
-            || run_id != expected_run
-            || NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err()
-            || Tz::from_str(&timezone).is_err()
-            || claimed > updated
-        {
-            return Err("command brief store schema rejected".into());
-        }
+    if version != SCHEMA_VERSION {
+        validate_command_brief_store_schema(conn)
+            .map_err(|_| "command brief store migration failed")?;
     }
     Ok(())
-}
-
-fn normalize_sql(sql: &str) -> String {
-    sql.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
 }
 
 fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
@@ -472,8 +256,11 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<(), String> {
 fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Exclusive)
         .map_err(|_| "command brief store migration failed")?;
-    tx.execute_batch(CLAIMS_V4)
-        .map_err(|_| "command brief store migration failed")?;
+    tx.execute_batch(&CLAIMS_TABLE_SQL.replace(
+        "command_brief_schedule_claims",
+        "command_brief_schedule_claims_v4",
+    ))
+    .map_err(|_| "command brief store migration failed")?;
     let rows = {
         let mut statement = tx
             .prepare(
@@ -524,10 +311,11 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
          DROP TABLE command_brief_schedule_claims;
          ALTER TABLE command_brief_schedule_claims_v4
              RENAME TO command_brief_schedule_claims;
-         CREATE INDEX command_brief_schedule_deferred
-         ON command_brief_schedule_claims(state, retry_count, updated_at);",
+         ",
     )
     .map_err(|_| "command brief store migration failed")?;
+    tx.execute_batch(CLAIMS_DEFERRED_INDEX_SQL)
+        .map_err(|_| "command brief store migration failed")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|_| "command brief store migration failed")?;
     tx.commit()

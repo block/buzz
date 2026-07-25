@@ -658,7 +658,7 @@ fn locked_model_and_local_state_defer_visibly_until_relevant_transition() {
                 &conn,
                 &schedule,
                 now,
-                ScheduleTrigger::Timer,
+                ScheduleTrigger::Readiness,
                 &transitioned,
                 &starter
             )
@@ -666,6 +666,66 @@ fn locked_model_and_local_state_defer_visibly_until_relevant_transition() {
             ScheduleRunOutcome::Started { .. }
         ));
     }
+}
+
+#[test]
+fn full_orchestrator_admission_retries_once_when_one_slot_becomes_available() {
+    let conn = migrated_store();
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let starter = FakeStarter::default();
+    let now = utc("2026-07-25T01:00:00Z");
+    let full = ReadinessSnapshot::deferred(
+        DeferredReason::LocalStateUnavailable,
+        "admission:generation-9:64/64",
+    );
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Startup,
+            &full,
+            &starter,
+        )
+        .expect("capacity deferred"),
+        ScheduleRunOutcome::Deferred {
+            reason: DeferredReason::LocalStateUnavailable,
+        }
+    );
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Readiness,
+            &full,
+            &starter,
+        )
+        .expect("unchanged admission"),
+        ScheduleRunOutcome::AlreadyClaimed
+    );
+    let one_free = ReadinessSnapshot::ready("admission:generation-9:63/64");
+    assert!(matches!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Readiness,
+            &one_free,
+            &starter,
+        )
+        .expect("one admission transition"),
+        ScheduleRunOutcome::Started { .. }
+    ));
+    let (state, retries): (String, i64) = conn
+        .query_row(
+            "SELECT state,retry_count FROM command_brief_schedule_claims",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("claim state");
+    assert_eq!(state, "started");
+    assert_eq!(retries, 1);
 }
 
 #[test]

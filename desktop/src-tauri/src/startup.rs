@@ -5,22 +5,25 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 use crate::app_state::AppState;
 use crate::command_brief::audit::{EncryptedBriefAudit, RelayBriefAuditPublisher};
 use crate::command_brief::orchestrator::{
-    BriefPersistence, CommandBriefOrchestrator, CommandBriefRequest,
+    BriefPersistence, CommandBriefOrchestrator, CommandBriefRequest, OrchestratorAdmissionState,
 };
 use crate::command_brief::schedule::{
-    current_macos_timezone, due_local_date, load_or_create_schedule, process_due_schedule,
-    DeferredReason, ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger, ScheduledRunPresence,
-    ScheduledRunStarter, ScheduledStartError,
+    current_macos_timezone, due_local_date, idempotency_key, load_or_create_schedule,
+    process_due_schedule, DeferredReason, ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger,
+    ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError,
 };
 use crate::command_brief::scheduler::LocalModelScheduler;
 use crate::command_brief::sources::{ProductionSourceBackend, SourceBackend};
-use crate::command_brief::store::{has_spooled_terminal, open_command_brief_store};
+use crate::command_brief::store::{
+    has_spooled_terminal, open_command_brief_store, validate_command_brief_store_schema,
+};
 #[cfg(target_os = "macos")]
 use crate::command_brief::wake::{MacWorkspaceWakeSource, WakeEventSource};
 use crate::command_services::apple_inputs::{bundled_helper_identity, AppleBriefSelection};
@@ -113,7 +116,6 @@ pub(crate) struct RuntimeReadiness {
 pub(crate) struct InstalledCommandBriefRuntime {
     config: RuntimeConfigIdentity,
     generation: u64,
-    scheduler: LocalModelScheduler,
     orchestrator: CommandBriefOrchestrator,
 }
 
@@ -164,9 +166,20 @@ struct ProductionPreflight {
 }
 
 impl RuntimeReadiness {
-    fn ready(identity: &RuntimeConfigIdentity, generation: u64, active_jobs: usize) -> Self {
+    fn ready(
+        identity: &RuntimeConfigIdentity,
+        generation: u64,
+        admission: OrchestratorAdmissionState,
+    ) -> Self {
+        let admission = match admission {
+            OrchestratorAdmissionState::Available {
+                tracked_nonterminal,
+                capacity,
+            } => format!("available:{tracked_nonterminal}/{capacity}"),
+            OrchestratorAdmissionState::Unavailable => "unavailable".to_string(),
+        };
         Self::from_basis(&format!(
-            "ready|{}|generation:{generation}|active:{active_jobs}",
+            "ready|{}|generation:{generation}|admission:{admission}",
             identity.token
         ))
     }
@@ -233,11 +246,14 @@ pub(crate) async fn run_command_brief_schedule(
 ) -> Result<ScheduleRunOutcome, String> {
     let store_path = command_brief_store_path()?;
     let conn = open_command_brief_store(&store_path)?;
+    if trigger == ScheduleTrigger::Startup {
+        validate_command_brief_store_schema(&conn)?;
+    }
     let timezone = current_macos_timezone()?;
     let schedule = load_or_create_schedule(&conn, &timezone, Utc::now().timestamp())?;
     let now = Utc::now();
-    if due_local_date(&schedule, now, trigger).is_none() {
-        return Ok(ScheduleRunOutcome::NotDue);
+    if let Some(outcome) = timer_claim_fast_path(&conn, &schedule, now, trigger)? {
+        return Ok(outcome);
     }
 
     let state = app.state::<AppState>();
@@ -312,12 +328,20 @@ pub(crate) async fn run_command_brief_schedule(
         );
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
-    let local = RuntimeReadiness::ready(
-        &runtime.config,
-        runtime.generation,
-        runtime.scheduler.active_job_count(),
-    );
-    let readiness = ReadinessSnapshot::ready(local.transition_token());
+    let admission = runtime.orchestrator.admission_state();
+    let local = RuntimeReadiness::ready(&runtime.config, runtime.generation, admission);
+    let readiness = match admission {
+        OrchestratorAdmissionState::Available {
+            tracked_nonterminal,
+            capacity,
+        } if tracked_nonterminal < capacity => ReadinessSnapshot::ready(local.transition_token()),
+        OrchestratorAdmissionState::Available { .. } | OrchestratorAdmissionState::Unavailable => {
+            ReadinessSnapshot::deferred(
+                DeferredReason::LocalStateUnavailable,
+                local.transition_token(),
+            )
+        }
+    };
     let owner_pubkey = state.signing_keys()?.public_key().to_hex();
     process_due_schedule(
         &conn,
@@ -332,6 +356,30 @@ pub(crate) async fn run_command_brief_schedule(
             owner_pubkey: &owner_pubkey,
         },
     )
+}
+
+fn timer_claim_fast_path(
+    conn: &rusqlite::Connection,
+    schedule: &crate::command_brief::types::BriefSchedule,
+    now: chrono::DateTime<Utc>,
+    trigger: ScheduleTrigger,
+) -> Result<Option<ScheduleRunOutcome>, String> {
+    let Some(date) = due_local_date(schedule, now, trigger) else {
+        return Ok(Some(ScheduleRunOutcome::NotDue));
+    };
+    if trigger != ScheduleTrigger::Timer {
+        return Ok(None);
+    }
+    let key = idempotency_key(schedule, date);
+    let state = conn
+        .query_row(
+            "SELECT state FROM command_brief_schedule_claims WHERE idempotency_key=?1",
+            [key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|_| "command brief schedule unavailable".to_string())?;
+    Ok(state.map(|_| ScheduleRunOutcome::AlreadyClaimed))
 }
 
 async fn production_preflight(
@@ -414,7 +462,6 @@ async fn ensure_production_runtime(
     let runtime = Arc::new(InstalledCommandBriefRuntime {
         config: preflight.config.clone(),
         generation,
-        scheduler,
         orchestrator,
     });
     runtimes.install(Arc::clone(&runtime));

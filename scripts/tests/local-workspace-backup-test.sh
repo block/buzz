@@ -49,6 +49,41 @@ assert_processes_gone() {
   printf 'ok - %s\n' "$description"
 }
 
+mutate_command_brief_backup() {
+  local source_backup="$1"
+  local target_backup="$2"
+  local mutation="$3"
+  local plaintext_store="$test_tmp/mutated-command-brief.db"
+  local checksum
+
+  cp -R "$source_backup" "$target_backup"
+  openssl enc -d -aes-256-cbc -pbkdf2 -md sha256 \
+    -pass "file:${BUZZ_MEMORY_BACKUP_KEY_FILE}" \
+    -in "$target_backup/command-brief.db.enc" \
+    -out "$plaintext_store"
+  sqlite3 "$plaintext_store" "$mutation"
+  openssl enc -aes-256-cbc -pbkdf2 -salt -md sha256 \
+    -pass "file:${BUZZ_MEMORY_BACKUP_KEY_FILE}" \
+    -in "$plaintext_store" \
+    -out "$target_backup/command-brief.db.enc"
+  rm -f "$plaintext_store"
+  checksum="$(shasum -a 256 "$target_backup/command-brief.db.enc" | awk '{print $1}')"
+  awk -v checksum="$checksum" \
+    '$2 == "command-brief.db.enc" {print checksum "  " $2; next} {print}' \
+    "$target_backup/manifest.sha256" >"$target_backup/manifest.sha256.next"
+  mv "$target_backup/manifest.sha256.next" "$target_backup/manifest.sha256"
+}
+
+assert_command_brief_backup_rejected_pre_mutation() {
+  local description="$1"
+  local candidate="$2"
+  : >"$MOCK_LOG"
+  assert_fails "$description" "$restore_script" "$candidate" --confirm
+  if grep -Eq 'down|stop|pg_restore .*--clean|migrate|ready' "$MOCK_LOG"; then
+    fail "$description must precede external mutation"
+  fi
+}
+
 test_tmp="$(mktemp -d)"
 trap 'rm -rf "$test_tmp"' EXIT
 mkdir -p \
@@ -235,6 +270,34 @@ printf 'test-only-memory-backup-passphrase-32-bytes\n' \
 chmod 600 "$BUZZ_MEMORY_BACKUP_KEY_FILE"
 export BUZZ_COMMAND_BRIEF_STORE_PATH="$test_tmp/command-brief.db"
 sqlite3 "$BUZZ_COMMAND_BRIEF_STORE_PATH" <<'SQL'
+CREATE TABLE command_brief_spool (
+  owner_pubkey TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  previous_event_id TEXT,
+  encrypted_payload TEXT NOT NULL,
+  raw_event TEXT NOT NULL,
+  publish_state TEXT NOT NULL CHECK (publish_state IN ('queued','published')),
+  retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
+  next_retry_at INTEGER NOT NULL DEFAULT 0,
+  last_error_code TEXT,
+  created_at INTEGER NOT NULL,
+  append_sequence INTEGER NOT NULL,
+  published_at INTEGER,
+  PRIMARY KEY (owner_pubkey,run_id,event_id),
+  UNIQUE (owner_pubkey,event_id),
+  UNIQUE (owner_pubkey,run_id,append_sequence)
+);
+CREATE TABLE command_brief_heads (
+  owner_pubkey TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  head_event_id TEXT NOT NULL,
+  head_sequence INTEGER NOT NULL,
+  PRIMARY KEY (owner_pubkey,run_id)
+);
+CREATE INDEX command_brief_spool_due
+ON command_brief_spool(owner_pubkey,publish_state,next_retry_at,append_sequence);
 CREATE TABLE command_brief_schedule (
   schedule_id TEXT PRIMARY KEY,
   classification TEXT NOT NULL CHECK (classification = 'OFFICIAL'),
@@ -252,7 +315,7 @@ CREATE TABLE command_brief_schedule_claims (
   timezone TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
   state TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
   deferred_reason TEXT,
-  retry_count INTEGER NOT NULL CHECK (retry_count BETWEEN 0 AND 8),
+  retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
   transition_token TEXT,
   claimed_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -264,14 +327,44 @@ CREATE TABLE command_brief_schedule_claims (
     (state = 'deferred'
       AND deferred_reason IN
         ('identity_locked','model_unavailable','local_state_unavailable')
-      AND transition_token IS NOT NULL)
+      AND transition_token IS NOT NULL
+      AND length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
+      AND instr(transition_token,char(0)) = 0
+      AND transition_token NOT GLOB (
+        '*[' ||
+        char(1) || char(2) || char(3) || char(4) || char(5) ||
+        char(6) || char(7) || char(8) || char(9) || char(10) ||
+        char(11) || char(12) || char(13) || char(14) || char(15) ||
+        char(16) || char(17) || char(18) || char(19) || char(20) ||
+        char(21) || char(22) || char(23) || char(24) || char(25) ||
+        char(26) || char(27) || char(28) || char(29) || char(30) ||
+        char(31) || char(127) || ']*'
+      ))
     OR
-    (state <> 'deferred' AND deferred_reason IS NULL)
-  )
+    (state <> 'deferred'
+      AND deferred_reason IS NULL
+      AND (
+        transition_token IS NULL
+        OR (
+          length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
+          AND instr(transition_token,char(0)) = 0
+          AND transition_token NOT GLOB (
+            '*[' ||
+            char(1) || char(2) || char(3) || char(4) || char(5) ||
+            char(6) || char(7) || char(8) || char(9) || char(10) ||
+            char(11) || char(12) || char(13) || char(14) || char(15) ||
+            char(16) || char(17) || char(18) || char(19) || char(20) ||
+            char(21) || char(22) || char(23) || char(24) || char(25) ||
+            char(26) || char(27) || char(28) || char(29) || char(30) ||
+            char(31) || char(127) || ']*'
+          )
+        )
+      ))
+  ),
+  UNIQUE (schedule_id,local_date)
 );
 CREATE INDEX command_brief_schedule_deferred
 ON command_brief_schedule_claims(state, retry_count, updated_at);
-CREATE TABLE command_brief_spool (event_id TEXT PRIMARY KEY);
 INSERT INTO command_brief_schedule
 VALUES ('daily-command-brief','OFFICIAL',1,'06:00','Australia/Sydney',1,1,1);
 INSERT INTO command_brief_schedule_claims
@@ -335,6 +428,59 @@ assert_contains "$MOCK_LOG" "stop memory" \
   "backup quiesces the Memory writer before snapshot"
 assert_contains "$MOCK_LOG" "up -d --wait" \
   "backup proves readiness after restarting a previously running Memory writer"
+
+mutate_command_brief_backup \
+  "$backup_dir" "$test_tmp/missing-heads-backup" \
+  "DROP TABLE command_brief_heads;"
+assert_command_brief_backup_rejected_pre_mutation \
+  "restore rejects a command brief store missing heads" \
+  "$test_tmp/missing-heads-backup"
+
+mutate_command_brief_backup \
+  "$backup_dir" "$test_tmp/malformed-spool-backup" \
+  "DROP INDEX command_brief_spool_due;
+   DROP TABLE command_brief_spool;
+   CREATE TABLE command_brief_spool(event_id TEXT PRIMARY KEY);"
+assert_command_brief_backup_rejected_pre_mutation \
+  "restore rejects an event-id-only command brief spool" \
+  "$test_tmp/malformed-spool-backup"
+
+mutate_command_brief_backup \
+  "$backup_dir" "$test_tmp/weakened-schedule-backup" \
+  "ALTER TABLE command_brief_schedule RENAME TO weakened_schedule_old;
+   CREATE TABLE command_brief_schedule (
+     schedule_id TEXT PRIMARY KEY,
+     classification TEXT NOT NULL,
+     enabled INTEGER NOT NULL,
+     local_time TEXT NOT NULL,
+     timezone TEXT NOT NULL,
+     catch_up_same_day INTEGER NOT NULL,
+     concurrency INTEGER NOT NULL,
+     updated_at INTEGER NOT NULL
+   );
+   INSERT INTO command_brief_schedule SELECT * FROM weakened_schedule_old;
+   DROP TABLE weakened_schedule_old;"
+assert_command_brief_backup_rejected_pre_mutation \
+  "restore rejects weakened command brief schedule constraints" \
+  "$test_tmp/weakened-schedule-backup"
+
+mutate_command_brief_backup \
+  "$backup_dir" "$test_tmp/invalid-token-backup" \
+  "PRAGMA ignore_check_constraints=ON;
+   UPDATE command_brief_schedule_claims
+   SET state='deferred',deferred_reason='local_state_unavailable',
+       transition_token='';"
+assert_command_brief_backup_rejected_pre_mutation \
+  "restore rejects an empty command brief transition token" \
+  "$test_tmp/invalid-token-backup"
+
+mutate_command_brief_backup \
+  "$backup_dir" "$test_tmp/utc-timezone-backup" \
+  "UPDATE command_brief_schedule SET timezone='UTC';
+   UPDATE command_brief_schedule_claims SET timezone='UTC';"
+: >"$MOCK_LOG"
+"$restore_script" "$test_tmp/utc-timezone-backup" --confirm
+printf 'ok - restore accepts the chrono_tz UTC identifier\n'
 
 sqlite3 "$BUZZ_COMMAND_BRIEF_STORE_PATH" \
   "DELETE FROM command_brief_schedule_claims;"

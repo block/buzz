@@ -43,6 +43,8 @@ pub enum ScheduleTrigger {
     Startup,
     /// Verified macOS workspace wake notification.
     Wake,
+    /// Explicit trusted readiness, admission, or protected-config transition.
+    Readiness,
 }
 
 /// Closed reason a claimed run is visible but deferred.

@@ -5,6 +5,9 @@ umask 077
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/lib/local-workspace-backup.sh
 source "${script_dir}/lib/local-workspace-backup.sh"
+# shellcheck source=scripts/lib/validate-command-brief-store.sh
+source "${script_dir}/lib/validate-command-brief-store.sh"
+command_brief_timezone_catalog="${script_dir}/data/chrono-tz-0.10.4-identifiers.txt"
 
 if [[ $# -lt 1 || $# -gt 2 || ($# -eq 2 && "$2" != "--confirm") ]]; then
   printf 'Usage: %s /absolute/backup-directory [--confirm]\n' "$0" >&2
@@ -118,67 +121,9 @@ local_workspace_run_bounded \
     -pass "file:${memory_key_file}" \
     -in "${backup_dir}/command-brief.db.enc" \
     -out "${command_brief_plaintext_store}"
-[[ "$(sqlite3 "${command_brief_plaintext_store}" 'PRAGMA integrity_check;')" == "ok" ]] ||
-  local_workspace_die "command brief store failed integrity validation"
-[[ "$(sqlite3 "${command_brief_plaintext_store}" 'PRAGMA user_version;')" == "4" ]] ||
-  local_workspace_die "command brief store schema version is not current"
-for required_table in \
-  command_brief_spool command_brief_schedule command_brief_schedule_claims; do
-  [[ "$(sqlite3 "${command_brief_plaintext_store}" \
-    "SELECT COUNT(*) FROM sqlite_master
-     WHERE type='table' AND name='${required_table}';")" == "1" ]] ||
-    local_workspace_die \
-      "command brief store is missing ${required_table}"
-done
-[[ "$(sqlite3 "${command_brief_plaintext_store}" \
-  "SELECT COUNT(*) FROM command_brief_schedule
-   WHERE classification <> 'OFFICIAL'
-      OR schedule_id <> 'daily-command-brief'
-      OR concurrency NOT IN (1,2);")" == "0" ]] ||
-  local_workspace_die "command brief schedule validation failed"
-[[ "$(sqlite3 "${command_brief_plaintext_store}" \
-  "SELECT COUNT(*) FROM command_brief_schedule_claims
-   WHERE idempotency_key <> schedule_id || ':' || local_date
-      OR retry_count NOT BETWEEN 0 AND 8
-      OR length(local_date) <> 10
-      OR claimed_at > updated_at
-      OR (state = 'deferred' AND
-          (deferred_reason NOT IN
-             ('identity_locked','model_unavailable','local_state_unavailable')
-           OR transition_token IS NULL))
-      OR (state <> 'deferred' AND deferred_reason IS NOT NULL)
-      OR state NOT IN ('claimed','deferred','started','completed');")" == "0" ]] ||
-  local_workspace_die "command brief claim validation failed"
-while IFS='|' read -r idempotency_key run_id; do
-  expected_run_id="scheduled-$(
-    printf '%s' "${idempotency_key}" | shasum -a 256 | awk '{print $1}'
-  )"
-  [[ "${run_id}" == "${expected_run_id}" ]] ||
-    local_workspace_die "command brief deterministic run identity is invalid"
-done < <(
-  sqlite3 "${command_brief_plaintext_store}" \
-    "SELECT idempotency_key,run_id FROM command_brief_schedule_claims;"
-)
-claim_columns="$(sqlite3 "${command_brief_plaintext_store}" \
-  "SELECT group_concat(name || ':' || type || ':' || \"notnull\" || ':' || pk, ',')
-   FROM pragma_table_info('command_brief_schedule_claims');")"
-[[ "${claim_columns}" == "idempotency_key:TEXT:0:1,schedule_id:TEXT:1:0,local_date:TEXT:1:0,timezone:TEXT:1:0,state:TEXT:1:0,deferred_reason:TEXT:0:0,retry_count:INTEGER:1:0,transition_token:TEXT:0:0,claimed_at:INTEGER:1:0,updated_at:INTEGER:1:0,run_id:TEXT:1:0" ]] ||
-  local_workspace_die "command brief claim columns are not current"
-claim_index="$(sqlite3 "${command_brief_plaintext_store}" \
-  "SELECT replace(replace(lower(sql),char(10),' '),'  ',' ')
-   FROM sqlite_master WHERE type='index'
-     AND name='command_brief_schedule_deferred';")"
-[[ "${claim_index}" == "create index command_brief_schedule_deferred on command_brief_schedule_claims(state, retry_count, updated_at)" ]] ||
-  local_workspace_die "command brief claim index is not current"
-while IFS= read -r timezone; do
-  [[ "${timezone}" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)+$ &&
-    -f "/usr/share/zoneinfo/${timezone}" ]] ||
-    local_workspace_die "command brief claim timezone is invalid"
-done < <(
-  sqlite3 "${command_brief_plaintext_store}" \
-    "SELECT DISTINCT timezone FROM command_brief_schedule_claims
-     UNION SELECT DISTINCT timezone FROM command_brief_schedule;"
-)
+validate_command_brief_store \
+  "${command_brief_plaintext_store}" \
+  "${command_brief_timezone_catalog}"
 (
   cd "${repo_root}"
   local_workspace_run_bounded \

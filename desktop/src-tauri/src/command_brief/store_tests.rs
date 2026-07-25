@@ -42,6 +42,100 @@ fn current_store_schema_is_exact_and_rejects_weakened_claim_invariants() {
 }
 
 #[test]
+fn exact_schema_rejects_malformed_spool_missing_heads_and_weakened_schedule_or_indexes() {
+    for mutation in [
+        "DROP INDEX command_brief_spool_due;
+         DROP TABLE command_brief_spool;
+         CREATE TABLE command_brief_spool(event_id TEXT PRIMARY KEY);",
+        "DROP TABLE command_brief_heads;",
+        "DROP TABLE command_brief_schedule;
+         CREATE TABLE command_brief_schedule (
+             schedule_id TEXT PRIMARY KEY,
+             classification TEXT NOT NULL,
+             enabled INTEGER NOT NULL,
+             local_time TEXT NOT NULL,
+             timezone TEXT NOT NULL,
+             catch_up_same_day INTEGER NOT NULL,
+             concurrency INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL
+         );",
+        "DROP INDEX command_brief_spool_due;
+         CREATE INDEX command_brief_spool_due
+         ON command_brief_spool(next_retry_at);",
+    ] {
+        let conn = Connection::open_in_memory().expect("memory");
+        super::store::migrate_command_brief_store(&conn).expect("migrate");
+        conn.execute_batch(mutation).expect("weaken schema");
+        assert!(
+            validate_command_brief_store_schema(&conn).is_err(),
+            "weakened production schema was accepted: {mutation}"
+        );
+    }
+}
+
+#[test]
+fn transition_token_constraint_is_bounded_nonempty_and_control_free() {
+    let conn = Connection::open_in_memory().expect("memory");
+    super::store::migrate_command_brief_store(&conn).expect("migrate");
+    for token in ["", &"x".repeat(257), "line\nbreak"] {
+        assert!(
+            conn.execute(
+                "INSERT INTO command_brief_schedule_claims(
+                    idempotency_key,schedule_id,local_date,timezone,state,deferred_reason,
+                    retry_count,transition_token,claimed_at,updated_at,run_id
+                 ) VALUES(?1,'daily-command-brief',?2,'UTC','deferred',
+                          'local_state_unavailable',0,?3,1,1,?4)",
+                (
+                    format!(
+                        "daily-command-brief:{}",
+                        if token.is_empty() {
+                            "2026-07-25"
+                        } else if token.len() > 256 {
+                            "2026-07-26"
+                        } else {
+                            "2026-07-27"
+                        }
+                    ),
+                    if token.is_empty() {
+                        "2026-07-25"
+                    } else if token.len() > 256 {
+                        "2026-07-26"
+                    } else {
+                        "2026-07-27"
+                    },
+                    token,
+                    super::schedule::deterministic_run_id(&format!(
+                        "daily-command-brief:{}",
+                        if token.is_empty() {
+                            "2026-07-25"
+                        } else if token.len() > 256 {
+                            "2026-07-26"
+                        } else {
+                            "2026-07-27"
+                        }
+                    )),
+                ),
+            )
+            .is_err(),
+            "invalid transition token reached durable state"
+        );
+    }
+}
+
+#[test]
+fn operational_reopen_is_cheap_while_explicit_validation_remains_fail_closed() {
+    let directory = tempdir().expect("temp");
+    let path = directory.path().join("brief.db");
+    let conn = open_command_brief_store(&path).expect("create");
+    conn.execute_batch("DROP TABLE command_brief_heads;")
+        .expect("weaken after startup validation");
+    drop(conn);
+
+    let reopened = open_command_brief_store(&path).expect("cheap operational reopen");
+    assert!(validate_command_brief_store_schema(&reopened).is_err());
+}
+
+#[test]
 fn version_three_store_is_migrated_and_accepted_as_exact_version_four() {
     let conn = Connection::open_in_memory().expect("memory");
     super::store::migrate_command_brief_store(&conn).expect("initial schema");

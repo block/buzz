@@ -1,6 +1,46 @@
 use super::*;
 
+/// Redacted capacity state for admitting another top-level command run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OrchestratorAdmissionState {
+    /// The run registry is readable and exposes only bounded counters.
+    Available {
+        /// Number of queued or running command runs.
+        tracked_nonterminal: usize,
+        /// Maximum number of tracked nonterminal command runs.
+        capacity: usize,
+    },
+    /// The run registry cannot be inspected safely.
+    Unavailable,
+}
+
 impl CommandBriefOrchestrator {
+    /// Return the trusted, metadata-only top-level run admission state.
+    pub(crate) fn admission_state(&self) -> OrchestratorAdmissionState {
+        self.inner
+            .runs
+            .lock()
+            .map_or(OrchestratorAdmissionState::Unavailable, |runs| {
+                OrchestratorAdmissionState::Available {
+                    tracked_nonterminal: runs
+                        .values()
+                        .filter(|record| !is_terminal(record.state))
+                        .count(),
+                    capacity: MAX_TRACKED_RUNS,
+                }
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_admission_lock_for_test(&self, detail: &str) {
+        let inner = Arc::clone(&self.inner);
+        let detail = detail.to_string();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = inner.runs.lock().expect("test run registry");
+            std::panic::panic_any(detail);
+        }));
+    }
+
     /// Starts a unique trusted run and returns immediately with its UUID.
     pub fn start(&self, request: CommandBriefRequest) -> Result<String, OrchestratorStartError> {
         let run_id = uuid::Uuid::new_v4().to_string();

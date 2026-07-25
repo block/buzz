@@ -5,6 +5,9 @@ umask 077
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=scripts/lib/local-workspace-backup.sh
 source "${script_dir}/lib/local-workspace-backup.sh"
+# shellcheck source=scripts/lib/validate-command-brief-store.sh
+source "${script_dir}/lib/validate-command-brief-store.sh"
+command_brief_timezone_catalog="${script_dir}/data/chrono-tz-0.10.4-identifiers.txt"
 
 if [[ $# -ne 1 ]]; then
   printf 'Usage: %s /absolute/existing/backup-parent\n' "$0" >&2
@@ -127,6 +130,9 @@ local_workspace_run_bounded \
 [[ "$(sqlite3 "${command_brief_tmp}/command-brief.db" \
   'PRAGMA integrity_check;')" == "ok" ]] ||
   local_workspace_die "command brief SQLite snapshot failed validation"
+validate_command_brief_store \
+  "${command_brief_tmp}/command-brief.db" \
+  "${command_brief_timezone_catalog}"
 local_workspace_run_bounded \
   "command brief store encryption" \
   "${database_timeout_seconds}" \
