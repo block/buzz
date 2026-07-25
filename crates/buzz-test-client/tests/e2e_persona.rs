@@ -861,12 +861,16 @@ async fn test_persona_live_fanout_shared_gate() {
     let t1: u64 = now.saturating_sub(1);
     let t2: u64 = now;
 
-    // Foreign subscribes to all kind:30175 events BEFORE the author publishes.
+    // Foreign subscribes to the test author's kind:30175 events BEFORE the author
+    // publishes. Scoped to this author so concurrent persona tests publishing their
+    // own 30175s don't trip the leak-panic (parallel suite interference).
     let mut foreign = BuzzTestClient::connect(&url, &foreign_keys)
         .await
         .expect("connect foreign");
     let sid = sub_id("fanout-gate");
-    let filter = Filter::new().kind(Kind::Custom(PERSONA_KIND));
+    let filter = Filter::new()
+        .kind(Kind::Custom(PERSONA_KIND))
+        .author(author_keys.public_key());
     foreign
         .subscribe(&sid, vec![filter])
         .await
@@ -893,7 +897,11 @@ async fn test_persona_live_fanout_shared_gate() {
     match result {
         Err(buzz_test_client::TestClientError::Timeout) => {}
         Ok(RelayMessage::Event { event, .. }) if event.kind == Kind::Custom(PERSONA_KIND) => {
-            panic!("foreign MUST NOT receive unshared persona via live fan-out")
+            panic!(
+                "foreign MUST NOT receive unshared persona via live fan-out \
+                 (got event id={} author={})",
+                event.id, event.pubkey
+            )
         }
         _ => {}
     }
@@ -973,8 +981,9 @@ async fn test_persona_live_fanout_shared_gate() {
         Err(buzz_test_client::TestClientError::Timeout) => {}
         Ok(RelayMessage::Event { event, .. }) if event.kind == Kind::Custom(PERSONA_KIND) => {
             panic!(
-                "foreign MUST NOT receive unshared replacement via live fan-out (got {:?})",
-                event.id
+                "foreign MUST NOT receive unshared replacement via live fan-out \
+                 (got event id={} author={})",
+                event.id, event.pubkey
             )
         }
         _ => {}
