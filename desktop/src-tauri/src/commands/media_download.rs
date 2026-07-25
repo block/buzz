@@ -931,7 +931,7 @@ mod tests {
         });
 
         // Drive the exact client the command path uses, not an ad-hoc one.
-        let client = crate::app_state::build_media_fetch_client()
+        let client = crate::app_state::construction::build_media_fetch_client()
             .expect("media fetch client must build with no-redirect policy");
         let resp = client
             .get(format!("http://{addr}/media/clip.mp4"))
@@ -969,7 +969,7 @@ mod tests {
         // panics loudly (see `build_app_state`) rather than substituting an
         // insecure client.
         assert!(
-            crate::app_state::build_media_fetch_client().is_ok(),
+            crate::app_state::construction::build_media_fetch_client().is_ok(),
             "media fetch client must build; a redirect-following fallback is forbidden",
         );
     }

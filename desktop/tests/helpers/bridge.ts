@@ -127,6 +127,16 @@ export type MockAgentMemoryListing = {
 };
 
 type MockBridgeOptions = {
+  /** Native Daily Command Brief status view returned by the mock Tauri bridge. */
+  commandBriefStatus?: unknown;
+  /** Latest immutable Daily Command Brief publication returned by the bridge. */
+  commandBriefLatest?: unknown;
+  /** Daily Command Brief schedule returned by the bridge. */
+  commandBriefSchedule?: unknown;
+  /** Optional start result for lifecycle-control E2E scenarios. */
+  commandBriefStart?: unknown;
+  /** Optional cancel result for lifecycle-control E2E scenarios. */
+  commandBriefCancel?: unknown;
   /** Advertised HEAD for the first mock project without adding that branch. */
   projectHeadBranch?: string;
   /** Relay NIP-11 identity used to sign authoritative repository state. */

@@ -308,12 +308,6 @@ const overrides = new Map([
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
   // Managed-path resolution test split to discovery/tests/managed_path_resolution.rs.
   ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
-  // identity-import-keyring: the identity resolution state machine's behavioral
-  // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
-  // adoption / read-back-corruption / marker-failure arms, recovery-mode
-  // gating). Load-bearing regression coverage for silent identity rotation,
-  // not generic debt growth. Approved override; split if the matrix grows.
-  ["src-tauri/src/app_state_tests.rs", 1420],
   // migration_tests.rs carries the harness-sync migration coverage plus the
   // patch_json_records owner-only writeback regression test (SECURITY.md:90
   // crash-safe 0o600 fallback). Load-bearing security + feature coverage, not
@@ -382,25 +376,6 @@ const overrides = new Map([
   // observable (propagate real errors); verify_fully_wiped checks all three
   // keychain shapes (main blob, DPK blob, per-key "identity"). +73 lines.
   ["src-tauri/src/secret_store.rs", 1307],
-  // keyring-dev-isolation: keyring_service() fn (7 lines) replaces the const
-  // to return "buzz-desktop-dev" in debug builds. Load-bearing isolation fix.
-  // +10 (1042 -> 1052): media_fetch_client with redirect::Policy::none() so a
-  // relay 3xx cannot forward the minted auth header cross-origin (SSRF fix).
-  // +16 (1052 -> 1068): extracted that client into `build_media_fetch_client()`
-  // -> Result so the fail-closed invariant is testable (no silent redirect-
-  // following fallback; startup panics loudly instead). The function belongs
-  // here beside `build_app_state` and its sibling client; its doc comment
-  // carries the load-bearing SSRF rationale. Extraction would only relocate,
-  // not reduce, the security-critical code.
-  // +5 (1068 -> 1073): merge with main, which independently added the
-  // managed_agent_profile_reconcile_enabled flag (field + doc + init) under
-  // its own 1042-line override. Union of two separately approved additions.
-  // +8 (1073 -> 1081): agents-everywhere pair re-key — managed_agent_processes
-  // and session_config_cache re-keyed by ManagedAgentRuntimeKey, the runtime
-  // transition lock doc broadened to cover all protected-PID transitions, and
-  // clear_agent_session_caches (per-pubkey retain) added alongside the
-  // per-key clear. Load-bearing identity-contract change; queued to split.
-  ["src-tauri/src/app_state.rs", 1081],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,

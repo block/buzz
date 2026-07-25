@@ -116,6 +116,7 @@ export default defineConfig({
         "**/inbox-live-update.spec.ts",
         "**/mesh-compute.spec.ts",
         "**/command-console.spec.ts",
+        "**/daily-command-brief.spec.ts",
         "**/observer-archive-policy.spec.ts",
       ],
       use: {

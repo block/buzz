@@ -213,6 +213,12 @@ apple-inputs-test:
 check-command-knowledge:
     ./scripts/check-command-knowledge.sh
 
+# Run the hermetic Phase 4 Daily Command Brief fixture acceptance gates.
+# Pass `--live` directly to the script only after supplying the documented
+# literal-loopback endpoints and an operator-approved signed-app driver.
+check-daily-command-brief:
+    ./scripts/check-daily-command-brief.sh
+
 # Ensure Docker dev services (Postgres, Redis, etc.) are running and healthy
 _ensure-services:
     #!/usr/bin/env bash

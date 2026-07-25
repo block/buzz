@@ -3,20 +3,11 @@ import { expect, test } from "@playwright/test";
 import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 
-const ADVISERS = [
-  "Chief of Staff",
-  "Operations",
-  "Navigation",
-  "Daily Routine",
-  "Reporting",
-  "Plans",
-] as const;
-
 type CommandConsoleE2eWindow = Window & {
   __BUZZ_E2E_SET_RELAY_CONNECTION_STATE__?: (state: string) => void;
 };
 
-test("Command Console opens from the sidebar with truthful Phase 2 boundaries", async ({
+test("Command Console opens from the sidebar with truthful local-first boundaries", async ({
   page,
 }) => {
   await installMockBridge(page);
@@ -41,14 +32,16 @@ test("Command Console opens from the sidebar with truthful Phase 2 boundaries", 
     consoleScreen.getByTestId("command-console-official-banner"),
   ).toContainText("OFFICIAL");
 
-  for (const adviser of ADVISERS) {
-    await expect(
-      consoleScreen.getByText(adviser, { exact: true }),
-    ).toBeVisible();
-  }
-  await expect(consoleScreen.getByText("Not yet operational")).toHaveCount(
-    ADVISERS.length,
-  );
+  await expect(
+    consoleScreen.getByRole("heading", {
+      name: "Daily Command Brief",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(
+    consoleScreen.getByText("No Daily Command Brief has been generated."),
+  ).toBeVisible();
+  await expect(consoleScreen.getByText("Not yet operational")).toHaveCount(0);
 
   await expect(consoleScreen.getByTestId("command-status-relay")).toContainText(
     "Unavailable",
@@ -59,7 +52,11 @@ test("Command Console opens from the sidebar with truthful Phase 2 boundaries", 
   await expect(
     consoleScreen.getByTestId("command-status-lm-studio"),
   ).toContainText("Unavailable");
-  await expect(consoleScreen.getByText("Not configured")).toHaveCount(3);
+  for (const service of ["memory", "rag", "apple-inputs"]) {
+    await expect(
+      consoleScreen.getByTestId(`command-status-${service}`),
+    ).toContainText("Unavailable");
+  }
   await expect(
     consoleScreen.getByText("Connected", { exact: true }),
   ).toHaveCount(0);
@@ -67,6 +64,6 @@ test("Command Console opens from the sidebar with truthful Phase 2 boundaries", 
   await waitForAnimations(page);
   await page.screenshot({
     fullPage: true,
-    path: "test-results/command-console/phase-2-local-runtime.png",
+    path: "test-results/command-console/phase-4-local-runtime.png",
   });
 });

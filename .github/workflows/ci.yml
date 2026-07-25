@@ -167,6 +167,8 @@ jobs:
           restore-keys: pnpm-${{ runner.os }}-
       - name: Install desktop dependencies
         run: just desktop-install-ci
+      - name: Daily Command Brief acceptance-runner contract
+        run: bash scripts/tests/check-daily-command-brief-test.sh
       - name: Desktop lint and format
         run: just desktop-check
       - name: Desktop unit tests

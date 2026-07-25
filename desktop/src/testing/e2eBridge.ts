@@ -134,6 +134,16 @@ type MockSearchProfileSeed = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Native Daily Command Brief status view returned by the mock Tauri bridge. */
+    commandBriefStatus?: unknown;
+    /** Latest immutable Daily Command Brief publication returned by the bridge. */
+    commandBriefLatest?: unknown;
+    /** Daily Command Brief schedule returned by the bridge. */
+    commandBriefSchedule?: unknown;
+    /** Optional start result for lifecycle-control E2E scenarios. */
+    commandBriefStart?: unknown;
+    /** Optional cancel result for lifecycle-control E2E scenarios. */
+    commandBriefCancel?: unknown;
     /** Advertised HEAD for the first mock project without adding that branch. */
     projectHeadBranch?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
@@ -9346,6 +9356,56 @@ export function maybeInstallE2eTauriMocks() {
       }
       case "recover_command_brief_publications":
         return 0;
+      case "get_command_brief_status":
+        return (
+          activeConfig?.mock?.commandBriefStatus ?? {
+            classification: "OFFICIAL",
+            current: null,
+            history: [],
+          }
+        );
+      case "get_latest_command_brief":
+        return activeConfig?.mock?.commandBriefLatest ?? null;
+      case "get_command_brief_schedule":
+      case "set_command_brief_schedule":
+        return (
+          activeConfig?.mock?.commandBriefSchedule ?? {
+            classification: "OFFICIAL",
+            scheduleId: "daily-command-brief",
+            enabled: true,
+            localTime: "06:00",
+            timezone: "Australia/Sydney",
+            catchUpSameDay: true,
+            concurrency: 1,
+          }
+        );
+      case "start_command_brief":
+        return (
+          activeConfig?.mock?.commandBriefStart ?? {
+            classification: "OFFICIAL",
+            runId: "manual:e2e",
+            scheduleId: "manual",
+            sequence: 0,
+            state: "queued",
+            updatedAt: "2026-07-25T06:00:00Z",
+            degradedSections: [],
+            error: null,
+          }
+        );
+      case "cancel_command_brief":
+        return (
+          activeConfig?.mock?.commandBriefCancel ?? {
+            classification: "OFFICIAL",
+            runId:
+              (payload as { runId?: string } | null)?.runId ?? "manual:e2e",
+            scheduleId: "manual",
+            sequence: 1,
+            state: "cancelled",
+            updatedAt: "2026-07-25T06:01:00Z",
+            degradedSections: [],
+            error: null,
+          }
+        );
       case "get_profile":
         return handleGetProfile(activeConfig);
       case "update_profile":
