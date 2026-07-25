@@ -46,7 +46,25 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   @override
   void markContextUnread(String contextId) {
     markedUnread.add(contextId);
+    state = _withForced({...state.locallyForcedChannelIds, contextId});
   }
+
+  @override
+  void clearContextForcedUnread(String contextId) {
+    if (!state.locallyForcedChannelIds.contains(contextId)) return;
+    state = _withForced({
+      for (final id in state.locallyForcedChannelIds)
+        if (id != contextId) id,
+    });
+  }
+
+  ReadStateState _withForced(Set<String> forced) => ReadStateState(
+    isReady: state.isReady,
+    pubkey: state.pubkey,
+    contexts: state.contexts,
+    version: state.version + 1,
+    locallyForcedChannelIds: Set.unmodifiable(forced),
+  );
 }
 
 ReadStateState _readState(Map<String, int> contexts, {bool isReady = true}) =>
@@ -190,6 +208,45 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(notifier.markedUnread, [_channelId]);
+    });
+
+    testWidgets('Mark read after a forced unread clears the force flag so '
+        'the toggle round-trips', (tester) async {
+      final prefs = await _mockPrefs();
+      final notifier = _FakeReadStateNotifier(
+        _readState(const {_channelId: 2000}),
+      );
+      await _pumpSheet(
+        tester,
+        message: _message(createdAt: 900),
+        prefs: prefs,
+        readStateOverride: () => notifier,
+      );
+
+      // Force the channel unread; the row flips to Mark read.
+      await tester.tap(find.text('Mark unread'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Mark read'), findsOneWidget);
+
+      // Mark read must clear the channel-level force flag, not just the
+      // message marker — otherwise the row sticks on "Mark read".
+      await tester.tap(find.text('Mark read'));
+      await tester.pumpAndSettle();
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('open')),
+      );
+      expect(
+        container.read(readStateProvider).locallyForcedChannelIds,
+        isEmpty,
+      );
+
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+      expect(find.text('Mark unread'), findsOneWidget);
+      expect(find.text('Mark read'), findsNothing);
     });
 
     testWidgets('hides read-state row while read state is not ready', (

@@ -274,6 +274,10 @@ class _MarkReadUnreadTile extends ConsumerWidget {
             msgContextKey(message.id),
             message.createdAt,
           );
+          // The forced-unread flag is channel-level, so advancing the `msg:`
+          // marker alone can't clear it — drop it here so Mark read/unread
+          // round-trips instead of sticking on "Mark read".
+          notifier.clearContextForcedUnread(channelId);
         } else {
           // Read markers are monotonic and cannot move backward, so mark
           // unread forces the channel unread locally — the same semantic as

@@ -146,6 +146,21 @@ class ReadStateNotifier extends Notifier<ReadStateState> {
     );
   }
 
+  /// Clear a locally forced unread flag without advancing any read marker.
+  /// Used when a message-level "Mark read" should undo a channel-level
+  /// forced unread (the force flag is keyed by channel id, so advancing a
+  /// `msg:` marker alone cannot clear it).
+  void clearContextForcedUnread(String contextId) {
+    if (!_locallyForcedChannelIds.remove(contextId)) return;
+    final manager = _manager;
+    if (manager == null) return;
+    state = _stateFromManager(
+      manager,
+      isReady: _isInitialized,
+      previousVersion: state.version,
+    );
+  }
+
   void seedContextRead(String contextId, int unixTimestamp) {
     _manager?.seedContextRead(contextId, unixTimestamp);
   }
