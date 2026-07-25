@@ -60,7 +60,12 @@ fn is_subcommand(name: &str) -> bool {
 }
 
 /// Timeout for lightweight helper subcommands (spawn + initialize + model/method probes).
-const MODELS_TIMEOUT: Duration = Duration::from_secs(10);
+///
+/// 30s rather than 10s: some agents boot every user-configured MCP server
+/// during `session/new` (observed with Grok Build, where a handful of stdio
+/// MCP servers pushed session creation past 10s on a real machine). The
+/// happy path is unaffected — fast agents still return in ~2-5s.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Timeout for `buzz-acp authenticate`. Browser-based vendor auth can require
 /// human interaction, so it must not share the short probe timeout.
