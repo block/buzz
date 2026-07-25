@@ -652,8 +652,9 @@ export function useToggleReactionMutation() {
       emoji: string;
       remove: boolean;
       /**
-       * Resolved author of the message being reacted to. Becomes the kind:7
-       * NIP-25 `p` tag so the author's notification filter can match.
+       * Signer of the message being reacted to. Becomes the kind:7 NIP-25 `p`
+       * tag so the author's notification filter can match. Pass the timeline's
+       * `signerPubkey`, not its display author.
        */
       targetPubkey: string | undefined;
     }
@@ -664,9 +665,9 @@ export function useToggleReactionMutation() {
         return;
       }
 
-      // NIP-25 requires the target author's `p` tag, so a message whose author
-      // we could not resolve cannot produce a conformant reaction. Every
-      // timeline row carries a resolved author, so this is a guard, not a
+      // NIP-25 recommends the target author's `p` tag, so without a resolved
+      // signer we would emit a reaction no notification filter can match.
+      // Every timeline row carries a signer, so this is a guard, not a
       // reachable UI state.
       if (!targetPubkey) {
         throw new Error("Cannot react: the message author is unknown.");

@@ -822,12 +822,11 @@ pub async fn send_managed_agent_channel_message(
     })
 }
 
-/// `target_pubkey` is the *displayed* author of the reacted-to message — the
-/// pubkey the timeline resolved via `resolveEventAuthorPubkey`, not the raw
-/// signer. For relay-signed agent messages those differ, and the person who
-/// should see the notification is the resolved author. Callers already hold
-/// this on the message they are reacting to, so it is passed in rather than
-/// re-derived here from a second relay round trip.
+/// `target_pubkey` is the signer of the reacted-to event — the pubkey NIP-25's
+/// `p` tag names. Callers pass the timeline's `signerPubkey` (not the resolved
+/// display author, which a relay-signed agent message rewrites), so the tag
+/// matches what every other Buzz surface emits for the same target. It is
+/// passed in rather than re-derived here from a second relay round trip.
 #[tauri::command]
 pub async fn add_reaction(
     event_id: String,
