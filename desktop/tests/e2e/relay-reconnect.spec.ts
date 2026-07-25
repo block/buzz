@@ -103,6 +103,14 @@ test("failed initial relay dial retries automatically", async ({ page }) => {
   // App-shell preconnect owns a keep-alive request. The first native dial is
   // rejected before a socket ID exists; the session must still enter its
   // backoff loop and recover without a click, query, or reload.
+  await page.waitForFunction(
+    () =>
+      typeof (
+        window as Window & {
+          __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: unknown;
+        }
+      ).__BUZZ_E2E_GET_RELAY_CONNECTION_STATE__ === "function",
+  );
   await expect
     .poll(
       () =>

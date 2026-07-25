@@ -1,5 +1,6 @@
 import { expect, test, type Locator } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge, TEST_IDENTITIES } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 import { openSettings } from "../helpers/settings";
@@ -652,8 +653,12 @@ test("shows your avatar on your own message when profile avatar is set", async (
   await page.goto("/");
   await openSettings(page, "profile");
   await page.getByTestId("profile-avatar-edit").click();
+  await waitForAnimations(page);
   await page.getByTestId("profile-avatar-url").fill(avatarUrl);
   await page.getByTestId("profile-avatar-done").click();
+  await expect(
+    page.locator("[data-sonner-toast]").filter({ hasText: "Profile saved" }),
+  ).toBeVisible();
   await page.getByTestId("settings-back-to-app").click();
 
   await page.getByTestId("channel-general").click();

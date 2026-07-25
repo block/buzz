@@ -118,10 +118,10 @@ The orchestration contract itself is checked with:
 bash scripts/tests/check-daily-command-brief-test.sh
 ```
 
-That test proves the Just entrypoint, exact child gates, failed-child
-propagation, success-claim suppression, and fail-closed live configuration.
-The child binaries are mocked there; the default gate above runs their real
-production fixture suites.
+That test proves the Just entrypoint, exact authoritative child suites,
+non-zero Rust test selection, failed-child propagation, success-claim
+suppression, and fail-closed live configuration. The child binaries are mocked
+there; the default gate above runs their real production fixture suites.
 
 The wider regression gates are:
 
@@ -146,21 +146,38 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
 
 ### Task 9 verification record
 
-On 25 July 2026, the Task 9 hermetic runner, command-knowledge gate, aggregate
-`just ci`, 18-test Apple-input suite, and the two new Daily Command Brief E2E
-scenarios passed. The Daily Brief scenarios also passed beside an unrelated
-activity baseline (4/4).
+On 25 July 2026, the corrected Task 9 hermetic runner and aggregate `just ci`
+passed. The runner's authoritative Rust filters all selected non-zero tests,
+including the provenance, strict brief-wire, and agent evidence-admission
+suites omitted by the original gate. It also passed 3544 desktop tests and the
+18-test Apple-input suite. The two Daily Command Brief E2E scenarios passed
+with assertions for the visible advisory limitation, pending proposal, and
+citation-to-ledger focus, retrieval timestamp, and page location.
 
-The full desktop smoke run is not recorded as green: 694 passed, 1 skipped, and
-3 failed. The image-gallery and messaging failures passed on immediate isolated
-rerun. The remaining long video-review scenario reproduced on untouched base
-commit `7cbab960` (2/2 repetitions) as well as the Task 9 tree (3/3 before any
-diagnostic edit). Its failure snapshot showed the injected event queued behind
-the visible new-message pill while the test expected an offscreen virtualized
-row to be mounted. Diagnostic changes to that unrelated test were reverted;
-Task 9 does not alter its file or mock event routing. A future acceptance record
-must rerun the full suite and must not treat this base attribution as a passing
-gate.
+The fresh full desktop smoke run remains non-green and therefore does not
+approve Phase 4: 697 passed, 1 skipped, and 2 failed in 17.5 minutes. The
+supported-link-preview failure measured a detached optimistic card once; the
+exact test passed 10/10 on focused repeat, and its test, CSS helper, and
+production component are unchanged from base `7cbab960`. The failed-initial-
+relay-dial scenario failed 5/10 focused repeats because its state poll threw
+before the E2E seam was installed. That test was also unchanged from base; a
+narrow wait for the seam then passed 20/20 repeats.
+
+The inherited video-review test now asserts its durable `1 new message`
+affordance when the virtualized row is intentionally offscreen. Playback-rate
+and thread-comment responsibilities were retained in focused scenarios instead
+of being hidden inside the 543-line review path. The original and two extracted
+scenarios passed 15/15 across five repetitions and passed in the aggregate run.
+
+`PHASE4-SMOKE-001` tracks the remaining baseline debt on draft PR #4 because
+GitHub issue creation is unavailable. Evidence: the link-preview aggregate
+failure occurred in the 697-passed, 1-skipped, 2-failed run; its exact scenario
+then passed 10/10 and its test, CSS helper, and production component are
+unchanged from base. Closure requires a deterministic reproduction or
+root-cause fix, RED/GREEN focused repetitions, and a fresh green full smoke run.
+The relay seam race is included in the audit trail as 5/10 failing before its
+narrow synchronization fix and 20/20 passing afterward. There is no acceptance
+waiver yet.
 
 ## Controlled live offline exercise
 
@@ -178,8 +195,15 @@ BUZZ_DAILY_BRIEF_LIVE_DRIVER=/absolute/path/to/reviewed-live-driver \
 
 The runner rejects missing values, hostnames, LAN addresses, invalid ports,
 wrong MCP paths, symlinks, and non-executable or relative drivers. It first
-runs the real LM Studio native structured-output smoke, then invokes the
-reviewed driver with only the three validated loopback URLs.
+runs a tool-free LM Studio native API health smoke, then invokes the reviewed
+driver with the three validated loopback URLs and the validated model ID.
+
+The runner does not itself prove structured MCP calls, five specialist
+executions, signed-application provenance, offline egress isolation, resource
+limits, or signed-history reload. Those claims belong to the reviewed driver
+and its retained evidence. A zero driver exit means only that the reviewed
+driver completed; the operator must still inspect its evidence before recording
+the controlled live exercise as passed.
 
 The reviewed driver and operator procedure must:
 

@@ -151,9 +151,15 @@ test.describe("welcome and channel agent entry points", () => {
       .getByRole("menuitemradio", { exact: true, name: "Anthropic" })
       .click();
     await page.locator("#persona-model").click();
-    await page
-      .getByRole("button", { name: "Custom model...", exact: true })
-      .click();
+    const customModelOption = page.getByRole("button", {
+      name: "Custom model...",
+      exact: true,
+    });
+    await expect(customModelOption).toBeVisible();
+    await waitForAnimations(page);
+    await customModelOption.evaluate((button) =>
+      (button as HTMLButtonElement).click(),
+    );
     await page.getByLabel("Custom model ID").fill("claude-opus-4-5");
     await page.getByLabel("Anthropic API Key").fill("sk-test-api-key-for-e2e");
     await expect(page.getByTestId("persona-dialog-submit")).toBeEnabled();

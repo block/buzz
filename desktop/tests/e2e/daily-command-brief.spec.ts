@@ -187,11 +187,25 @@ test("renders a complete degraded brief with retained evidence boundaries", asyn
   await expect(
     brief.getByText("Chart update age requires review."),
   ).toBeVisible();
+  await expect(brief.getByText(ADVISORY_LIMITATION)).toBeVisible();
+  await expect(
+    brief.getByText("Prepare a workspace checklist proposal.").first(),
+  ).toBeVisible();
+  await expect(brief.getByText("Pending proposal").first()).toBeVisible();
   await expect(brief.getByText("snapshot-verified").first()).toBeVisible();
   await expect(brief.getByText("Stale source")).toBeVisible();
+  const citation = brief
+    .locator('a[href="#command-brief-source-ledger-1"]')
+    .first();
+  await expect(citation).toBeVisible();
+  await citation.click();
+
+  const citedSource = brief.locator("#command-brief-source-ledger-1");
+  await expect(citedSource).toBeFocused();
   await expect(
-    brief.locator('a[href="#command-brief-source-ledger-1"]'),
-  ).not.toHaveCount(0);
+    citedSource.locator('time[datetime="2026-07-25T05:55:00Z"]'),
+  ).toBeVisible();
+  await expect(citedSource.getByText("page 7", { exact: true })).toBeVisible();
   await expect(brief.getByText("hidden evidence")).toHaveCount(0);
   await expect(brief.getByText(/approve|execute action/i)).toHaveCount(0);
 });

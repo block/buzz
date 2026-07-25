@@ -5,6 +5,8 @@ import { Badge } from "@/shared/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Progress } from "@/shared/ui/progress";
 
+import { SourceCitationLink } from "./SourceCitationLink";
+
 const ADVISER_LABELS: Record<AdviserContribution["adviser"], string> = {
   operations: "Operations",
   navigation: "Navigation",
@@ -49,13 +51,7 @@ export function AdviserContributionCard({
                   <span>
                     <span className="sr-only">Citations: </span>
                     {finding.sourceIds.map((sourceId) => (
-                      <a
-                        className="font-medium text-primary underline underline-offset-2"
-                        href={`#command-brief-source-${sourceId}`}
-                        key={sourceId}
-                      >
-                        [{sourceId}]
-                      </a>
+                      <SourceCitationLink key={sourceId} sourceId={sourceId} />
                     ))}
                   </span>
                 </li>

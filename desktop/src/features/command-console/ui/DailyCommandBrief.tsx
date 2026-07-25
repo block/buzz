@@ -16,6 +16,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Progress } from "@/shared/ui/progress";
 import { AdviserContributionCard } from "./AdviserContributionCard";
 import { BriefScheduleControls } from "./BriefScheduleControls";
+import { SourceCitationLink } from "./SourceCitationLink";
 import { SourceLedger } from "./SourceLedger";
 
 const SECTION_LABELS: Record<BriefSection, string> = {
@@ -146,13 +147,10 @@ function BriefSections({ published }: { published: PublishedCommandBrief }) {
                     <li key={`${finding.text}-${finding.sourceIds.join("-")}`}>
                       {finding.text}{" "}
                       {finding.sourceIds.map((sourceId) => (
-                        <a
-                          className="font-medium text-primary underline underline-offset-2"
-                          href={`#command-brief-source-${sourceId}`}
+                        <SourceCitationLink
                           key={sourceId}
-                        >
-                          [{sourceId}]
-                        </a>
+                          sourceId={sourceId}
+                        />
                       ))}
                     </li>
                   ))}
