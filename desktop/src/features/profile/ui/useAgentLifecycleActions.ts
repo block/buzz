@@ -7,6 +7,7 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import type { Channel, ManagedAgent, RelayAgent } from "@/shared/api/types";
 
 export function useAgentLifecycleActions({
@@ -33,6 +34,9 @@ export function useAgentLifecycleActions({
           relayAgents: relayAgents ?? [],
           stopManagedAgent,
         });
+        if (managedAgent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(managedAgent.pubkey);
+        }
         toast.success(result.noticeMessage ?? `Stopped ${managedAgent.name}.`);
         return;
       }
@@ -68,6 +72,9 @@ export function useAgentLifecycleActions({
         startManagedAgent,
         stopManagedAgent,
       });
+      if (managedAgent.backend.type === "local") {
+        clearActiveTurnsForAgentOnStop(managedAgent.pubkey);
+      }
       toast.success(`Restarted ${managedAgent.name}.`);
     } catch (error) {
       toast.error(

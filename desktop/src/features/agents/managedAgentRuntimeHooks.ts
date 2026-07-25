@@ -5,7 +5,11 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 
-import { loadCommunities } from "@/features/communities/communityStorage";
+import { clearActiveTurnsForAgent } from "@/features/agents/activeAgentTurnsStore";
+import {
+  loadActiveCommunityId,
+  loadCommunities,
+} from "@/features/communities/communityStorage";
 import {
   listManagedAgentRuntimes,
   reconcileManagedAgentRuntimes,
@@ -14,6 +18,7 @@ import {
   stopManagedAgentRuntime,
 } from "@/shared/api/tauriManagedAgents";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
+import { canonicalRelayUrl } from "./managedAgentRuntimeStatus";
 
 export const managedAgentRuntimesQueryKey = ["managed-agent-runtimes"] as const;
 
@@ -101,6 +106,48 @@ export function useManagedAgentRuntimesQuery(options?: { enabled?: boolean }) {
   });
 }
 
+/**
+ * Clear the active community's working badges for an agent when Desktop
+ * performs an agent-wide stop or restart that does not go through the
+ * pair-scoped `useManagedAgentRuntimeAction` mutation.  Applies the same
+ * relay-scope gate: only wipes the store when the active community relay
+ * matches `relayUrl`, or — for agent-wide operations with no known relay —
+ * when any of the agent's configured pairs is in the active community.
+ *
+ * Pass `relayUrl` when a specific pair relay is known (preferred).  Omit it
+ * (pass null/undefined) for agent-wide operations: the function then clears
+ * whenever the active community is configured, since the agent-wide stop
+ * affects all pairs, including the one in the active community.
+ */
+export function clearActiveTurnsForAgentOnStop(
+  pubkey: string,
+  relayUrl?: string | null,
+): void {
+  const activeId = loadActiveCommunityId();
+  if (!activeId) return;
+  const activeCommunity = loadCommunities().find((c) => c.id === activeId);
+  if (!activeCommunity) return;
+
+  if (relayUrl != null) {
+    // Pair-scoped: only clear when the stopped pair's relay matches the active
+    // community.  A mismatch means the stop targets a different community's
+    // store — leave it alone.
+    const activeCanonical = canonicalRelayUrl(activeCommunity.relayUrl);
+    const stoppedCanonical = canonicalRelayUrl(relayUrl);
+    if (
+      activeCanonical === null ||
+      stoppedCanonical === null ||
+      activeCanonical !== stoppedCanonical
+    ) {
+      return;
+    }
+  }
+  // Agent-wide (relayUrl omitted): active community is confirmed to exist, so
+  // the stop affects the active pair among others — clear.
+
+  clearActiveTurnsForAgent(pubkey);
+}
+
 export function useManagedAgentRuntimeAction() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -119,7 +166,7 @@ export function useManagedAgentRuntimeAction() {
       }
       return startManagedAgentRuntime(pubkey, relayUrl);
     },
-    onSuccess: (runtime) => {
+    onSuccess: (runtime, { action }) => {
       queryClient.setQueryData<ManagedAgentRuntimeStatus[]>(
         managedAgentRuntimesQueryKey,
         (current = []) => {
@@ -134,6 +181,13 @@ export function useManagedAgentRuntimeAction() {
           );
         },
       );
+
+      // Clear stale working badges immediately when Desktop stops or restarts
+      // an agent pair — no ambiguity when Desktop itself issued the kill.
+      // The relay-scope gate lives inside clearActiveTurnsForAgentOnStop.
+      if (action === "stop" || action === "restart") {
+        clearActiveTurnsForAgentOnStop(runtime.pubkey, runtime.relayUrl);
+      }
     },
   });
 }

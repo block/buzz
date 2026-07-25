@@ -11,6 +11,7 @@ import {
   saveActiveAgentTurnsForCommunity,
   restoreActiveAgentTurnsForCommunity,
   clearSavedCommunitySnapshot,
+  clearActiveTurnsForAgent,
 } from "./activeAgentTurnsStore.ts";
 import {
   injectObserverEventsForE2E,
@@ -1735,5 +1736,145 @@ describe("community-switch save / restore", () => {
       0,
       "restore must be no-op after clearSavedCommunitySnapshot",
     );
+  });
+});
+
+describe("clearActiveTurnsForAgent", () => {
+  const EPOCH = Date.parse("2024-01-01T00:00:00Z");
+  const at = (ms) => new Date(EPOCH + ms).toISOString();
+
+  beforeEach(() => {
+    resetActiveAgentTurnsStore();
+  });
+
+  it("clear removes the agent turns and notifies subscribers; other agents untouched", () => {
+    // Give AGENT two turns and AGENT_2 one turn.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1" }),
+      makeEvent({ seq: 2, turnId: "t2", channelId: "c2" }),
+    ]);
+    syncAgentTurnsFromEvents(AGENT_2, [
+      makeEvent({ seq: 1, turnId: "t3", channelId: "c3" }),
+    ]);
+
+    let notified = 0;
+    const unsub = subscribeActiveAgentTurns(() => {
+      notified++;
+    });
+    clearActiveTurnsForAgent(AGENT);
+    unsub();
+
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "cleared agent must have no turns",
+    );
+    assert.equal(notified, 1, "must notify listeners exactly once");
+
+    // AGENT_2 is unaffected.
+    const a2channels = channelIdsOf(getActiveTurnsForAgent(AGENT_2));
+    assert.ok(a2channels.has("c3"), "other agent's turns must survive clear");
+  });
+
+  it("full-buffer replay after clear is a no-op (watermark preserved — badge stays gone)", () => {
+    // Process initial events to set the watermark at seq 2.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      makeEvent({
+        seq: 2,
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: at(1_000),
+      }),
+    ]);
+    clearActiveTurnsForAgent(AGENT);
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "should be empty after clear",
+    );
+
+    // Replay the identical buffer — every event is at or below the watermark.
+    let notified = 0;
+    const unsub = subscribeActiveAgentTurns(() => {
+      notified++;
+    });
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+      makeEvent({
+        seq: 2,
+        turnId: "t2",
+        channelId: "c2",
+        timestamp: at(1_000),
+      }),
+    ]);
+    unsub();
+
+    assert.equal(
+      notified,
+      0,
+      "replay must not notify — watermark must be preserved",
+    );
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "badge must stay gone",
+    );
+  });
+
+  it("late turn_liveness frame with timestamp ≤ clear time does not resurrect (tombstone)", () => {
+    mock.timers.enable({ apis: ["Date"], now: EPOCH });
+
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+    ]);
+
+    // Clear at EPOCH (t=0 in agent-host clock).
+    clearActiveTurnsForAgent(AGENT);
+    assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+    // A liveness frame whose timestamp is at or before the clear time must not
+    // resurrect the badge (tombstone blocks it).  Advance seq past the
+    // watermark by using a higher seq than the initial turn_started.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 2,
+        kind: "turn_liveness",
+        turnId: "t1",
+        channelId: "c1",
+        timestamp: at(0), // equal to clear time — must NOT resurrect
+      }),
+    ]);
+
+    assert.equal(
+      getActiveTurnsForAgent(AGENT).length,
+      0,
+      "liveness at or before clear time must not resurrect the cleared turn",
+    );
+
+    mock.timers.reset();
+  });
+
+  it("new turn_started after clear (restart picked up new work) is tracked normally", () => {
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({ seq: 1, turnId: "t1", channelId: "c1", timestamp: at(0) }),
+    ]);
+    clearActiveTurnsForAgent(AGENT);
+    assert.equal(getActiveTurnsForAgent(AGENT).length, 0);
+
+    // A genuinely new turn arrives after the clear with a later timestamp and
+    // a new turnId — it must be tracked normally.
+    syncAgentTurnsFromEvents(AGENT, [
+      makeEvent({
+        seq: 2,
+        turnId: "t2",
+        channelId: "c1",
+        timestamp: at(5_000), // strictly newer than the cleared turn's timestamp
+      }),
+    ]);
+
+    const turns = getActiveTurnsForAgent(AGENT);
+    assert.equal(turns.length, 1, "new turn after clear must be tracked");
+    assert.ok(channelIdsOf(turns).has("c1"), "new turn must surface c1");
   });
 });

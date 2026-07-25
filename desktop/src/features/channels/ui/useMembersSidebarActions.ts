@@ -11,7 +11,10 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
-import { useManagedAgentRuntimeAction } from "@/features/agents/managedAgentRuntimeHooks";
+import {
+  clearActiveTurnsForAgentOnStop,
+  useManagedAgentRuntimeAction,
+} from "@/features/agents/managedAgentRuntimeHooks";
 import { managedAgentPairAction } from "@/features/agents/managedAgentRuntimeStatus";
 import {
   channelsQueryKey,
@@ -204,6 +207,9 @@ export function useMembersSidebarActions({
           startManagedAgent: startManagedAgentMutation.mutateAsync,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
         });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
         return undefined;
       },
       actionKey: "bulk-respawn",
@@ -216,13 +222,18 @@ export function useMembersSidebarActions({
 
   async function handleStopAll() {
     await runBulkAgentAction({
-      action: (agent) =>
-        stopManagedAgentWithRules({
+      action: async (agent) => {
+        const result = await stopManagedAgentWithRules({
           agent,
           ...EMPTY_AGENT_CONTEXT,
           preferredChannelId: channelId,
           stopManagedAgent: stopManagedAgentMutation.mutateAsync,
-        }),
+        });
+        if (agent.backend.type === "local") {
+          clearActiveTurnsForAgentOnStop(agent.pubkey);
+        }
+        return result;
+      },
       actionKey: "bulk-stop",
       agents: stoppableManagedBots,
       failureMessage: "Failed to stop agent.",

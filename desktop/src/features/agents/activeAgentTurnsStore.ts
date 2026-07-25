@@ -575,6 +575,36 @@ export function useActiveAgentTurnsBridge(
 }
 
 /**
+ * Immediately clear all active turns for a specific agent — called when
+ * Desktop itself stops or restarts the agent, so the turn store doesn't
+ * have to wait for the 3-minute prune-pause backstop.
+ *
+ * Preserves `lastProcessed` (the watermark) so a full-buffer replay after
+ * the clear is still a no-op — without the watermark a replayed
+ * `turn_started` would immediately resurrect the badge.  Preserves
+ * `clockOffsetByAgent` — the offset remains valid and harmless.
+ *
+ * Tombstones every cleared turn (C) so an in-flight `turn_liveness` frame
+ * already on the wire at kill time cannot resurrect the badge via
+ * `resurrectTurn`.  A restarted agent's genuinely new turns carry new
+ * turnIds / newer timestamps, so the tombstones don't block them.
+ */
+export function clearActiveTurnsForAgent(agentPubkey: string): void {
+  const key = normalizePubkey(agentPubkey);
+  const agentTurns = activeTurnsByAgent.get(key);
+  if (!agentTurns || agentTurns.size === 0) return;
+
+  const agentClockNow = Date.now() - (clockOffsetByAgent.get(key) ?? 0);
+  for (const turnId of agentTurns.keys()) {
+    recordTerminal(key, turnId, agentClockNow);
+  }
+
+  activeTurnsByAgent.delete(key);
+  invalidateCache(key);
+  notifyListeners();
+}
+
+/**
  * Clears all live turn state (active turns, offsets, watermarks, tombstones).
  * Intentionally preserves `savedByCommunity` — community-switch snapshots
  * must survive the reset that runs between save and restore.
