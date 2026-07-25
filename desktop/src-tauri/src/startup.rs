@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use rusqlite::OptionalExtension;
@@ -36,6 +36,7 @@ const SCHEDULED_CO_REQUEST: &str =
     "Prepare the Daily Command Brief from the admitted current local sources.";
 const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
+const READINESS_DISPATCH_BACKOFF: Duration = Duration::from_millis(250);
 const COMMAND_BRIEF_POLICY_REVISION: &str = "command-brief-policy-v1";
 
 #[cfg(target_os = "macos")]
@@ -123,25 +124,125 @@ pub(crate) enum ReadinessSignalSource {
 }
 
 #[derive(Default)]
-pub(crate) struct CommandBriefReadinessTransitions {
-    observed: BTreeMap<ReadinessSignalSource, String>,
+struct ReadinessTransitionState {
+    handled: Option<String>,
+    in_flight: Option<String>,
+    retry_not_before: Option<Instant>,
 }
 
+#[derive(Default)]
+pub(crate) struct CommandBriefReadinessTransitions {
+    sources: BTreeMap<ReadinessSignalSource, ReadinessTransitionState>,
+}
+
+impl CommandBriefReadinessTransitions {
+    fn try_begin(&mut self, source: ReadinessSignalSource, token: &str, now: Instant) -> bool {
+        if !valid_readiness_token(token) {
+            return false;
+        }
+        let transition = self.sources.entry(source).or_default();
+        if transition.handled.as_deref() == Some(token)
+            || transition.in_flight.is_some()
+            || transition
+                .retry_not_before
+                .is_some_and(|deadline| deadline > now)
+        {
+            return false;
+        }
+        transition.in_flight = Some(token.to_string());
+        true
+    }
+
+    fn complete(
+        &mut self,
+        source: ReadinessSignalSource,
+        token: &str,
+        handled: bool,
+        retry_not_before: Option<Instant>,
+    ) {
+        let Some(transition) = self.sources.get_mut(&source) else {
+            return;
+        };
+        if transition.in_flight.as_deref() != Some(token) {
+            return;
+        }
+        transition.in_flight = None;
+        if handled {
+            transition.handled = Some(token.to_string());
+            transition.retry_not_before = None;
+        } else {
+            transition.retry_not_before = retry_not_before;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_handled(&self, source: ReadinessSignalSource, token: &str) -> bool {
+        self.sources
+            .get(&source)
+            .and_then(|transition| transition.handled.as_deref())
+            == Some(token)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_in_flight(&self, source: ReadinessSignalSource, token: &str) -> bool {
+        self.sources
+            .get(&source)
+            .and_then(|transition| transition.in_flight.as_deref())
+            == Some(token)
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn observe_readiness_transition(
     transitions: &mut CommandBriefReadinessTransitions,
     source: ReadinessSignalSource,
     token: &str,
 ) -> bool {
-    if !valid_readiness_token(token)
-        || transitions
-            .observed
-            .get(&source)
-            .is_some_and(|observed| observed == token)
-    {
+    if !transitions.try_begin(source, token, Instant::now()) {
         return false;
     }
-    transitions.observed.insert(source, token.to_string());
+    transitions.complete(source, token, true, None);
     true
+}
+
+pub(crate) async fn dispatch_readiness_with_retry<Dispatch, DispatchFuture>(
+    transitions: Arc<Mutex<CommandBriefReadinessTransitions>>,
+    source: ReadinessSignalSource,
+    token: String,
+    backoff: Duration,
+    mut dispatch: Dispatch,
+) -> bool
+where
+    Dispatch: FnMut() -> DispatchFuture,
+    DispatchFuture: Future<Output = Result<ScheduleRunOutcome, &'static str>>,
+{
+    for attempt in 0..2 {
+        let began = transitions
+            .lock()
+            .is_ok_and(|mut state| state.try_begin(source, &token, Instant::now()));
+        if !began {
+            return false;
+        }
+
+        match dispatch().await {
+            Ok(_) => {
+                if let Ok(mut state) = transitions.lock() {
+                    state.complete(source, &token, true, None);
+                }
+                return true;
+            }
+            Err(_) => {
+                let retry_at = Instant::now().checked_add(backoff);
+                if let Ok(mut state) = transitions.lock() {
+                    state.complete(source, &token, false, retry_at);
+                }
+                if attempt == 0 {
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+    false
 }
 
 pub(crate) fn notify_command_brief_readiness(
@@ -150,16 +251,28 @@ pub(crate) fn notify_command_brief_readiness(
     basis: &[u8],
 ) {
     let token = readiness_transition_token(basis);
-    let transitions = app.state::<Mutex<CommandBriefReadinessTransitions>>();
-    let changed = transitions.lock().is_ok_and(|mut transitions| {
-        observe_readiness_transition(&mut transitions, source, &token)
+    let transitions = Arc::clone(
+        app.state::<Arc<Mutex<CommandBriefReadinessTransitions>>>()
+            .inner(),
+    );
+    let transition_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        dispatch_readiness_with_retry(
+            transitions,
+            source,
+            token,
+            READINESS_DISPATCH_BACKOFF,
+            move || {
+                let transition_app = transition_app.clone();
+                async move {
+                    run_command_brief_schedule(transition_app, ScheduleTrigger::Readiness)
+                        .await
+                        .map_err(|_| "command brief readiness dispatch unavailable")
+                }
+            },
+        )
+        .await;
     });
-    if changed {
-        let transition_app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = run_command_brief_schedule(transition_app, ScheduleTrigger::Readiness).await;
-        });
-    }
 }
 
 fn readiness_transition_token(basis: &[u8]) -> String {
@@ -183,15 +296,79 @@ fn lmstudio_readiness_basis(readiness: &Result<LmStudioReadiness, String>) -> Ve
         .unwrap_or_else(|| b"model:probe-unavailable".to_vec())
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TrustedModelReadinessObservation {
+    readiness: Option<LmStudioReadiness>,
+    transition_token: String,
+}
+
+impl TrustedModelReadinessObservation {
+    pub(crate) fn readiness(&self) -> Option<&LmStudioReadiness> {
+        self.readiness.as_ref()
+    }
+
+    pub(crate) fn transition_token(&self) -> &str {
+        &self.transition_token
+    }
+}
+
+pub(crate) fn trusted_model_readiness_observation(
+    readiness: Result<LmStudioReadiness, String>,
+) -> TrustedModelReadinessObservation {
+    let transition_token = lmstudio_readiness_transition_token(&readiness);
+    TrustedModelReadinessObservation {
+        readiness: readiness.ok(),
+        transition_token,
+    }
+}
+
+pub(crate) async fn model_readiness_for_schedule<Probe, ProbeFuture>(
+    supplied: Option<TrustedModelReadinessObservation>,
+    probe: Probe,
+) -> TrustedModelReadinessObservation
+where
+    Probe: FnOnce() -> ProbeFuture,
+    ProbeFuture: Future<Output = Result<LmStudioReadiness, String>>,
+{
+    match supplied {
+        Some(observation) => observation,
+        None => trusted_model_readiness_observation(probe().await),
+    }
+}
+
 pub(crate) fn notify_lmstudio_readiness(
     app: &AppHandle,
     readiness: &Result<LmStudioReadiness, String>,
 ) {
-    notify_command_brief_readiness(
-        app,
-        ReadinessSignalSource::Model,
-        &lmstudio_readiness_basis(readiness),
+    let observation = trusted_model_readiness_observation(readiness.clone());
+    let token = observation.transition_token.clone();
+    let transitions = Arc::clone(
+        app.state::<Arc<Mutex<CommandBriefReadinessTransitions>>>()
+            .inner(),
     );
+    let transition_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        dispatch_readiness_with_retry(
+            transitions,
+            ReadinessSignalSource::Model,
+            token,
+            READINESS_DISPATCH_BACKOFF,
+            move || {
+                let transition_app = transition_app.clone();
+                let observation = observation.clone();
+                async move {
+                    run_command_brief_schedule_with_model_observation(
+                        transition_app,
+                        ScheduleTrigger::Readiness,
+                        Some(observation),
+                    )
+                    .await
+                    .map_err(|_| "command brief readiness dispatch unavailable")
+                }
+            },
+        )
+        .await;
+    });
 }
 
 fn lmstudio_readiness_transition_token(readiness: &Result<LmStudioReadiness, String>) -> String {
@@ -387,6 +564,14 @@ pub(crate) async fn run_command_brief_schedule(
     app: AppHandle,
     trigger: ScheduleTrigger,
 ) -> Result<ScheduleRunOutcome, String> {
+    run_command_brief_schedule_with_model_observation(app, trigger, None).await
+}
+
+async fn run_command_brief_schedule_with_model_observation(
+    app: AppHandle,
+    trigger: ScheduleTrigger,
+    supplied_model_readiness: Option<TrustedModelReadinessObservation>,
+) -> Result<ScheduleRunOutcome, String> {
     let store_path = command_brief_store_path()?;
     let conn = open_command_brief_store(&store_path)?;
     if trigger == ScheduleTrigger::Startup {
@@ -413,26 +598,30 @@ pub(crate) async fn run_command_brief_schedule(
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
 
-    let model_readiness_result = crate::commands::read_lmstudio_readiness(app.clone()).await;
-    let model_transition_token = lmstudio_readiness_transition_token(&model_readiness_result);
-    let model_readiness = match model_readiness_result {
-        Ok(readiness) => readiness,
-        Err(_) => {
+    let model_observation = model_readiness_for_schedule(supplied_model_readiness, || {
+        crate::commands::read_lmstudio_readiness(app.clone())
+    })
+    .await;
+    let model_transition_token = model_observation.transition_token();
+    let model_readiness = match model_observation.readiness() {
+        Some(readiness) => readiness,
+        None => {
             let readiness = ReadinessSnapshot::deferred(
                 DeferredReason::ModelUnavailable,
-                &model_transition_token,
+                model_transition_token,
             );
             return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
         }
     };
     if model_readiness.status != LmStudioReadinessState::Ready {
         let readiness =
-            ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, &model_transition_token);
+            ReadinessSnapshot::deferred(DeferredReason::ModelUnavailable, model_transition_token);
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
     let model = model_readiness
         .configured_model
-        .or_else(|| model_readiness.loaded_models.into_iter().next())
+        .clone()
+        .or_else(|| model_readiness.loaded_models.first().cloned())
         .ok_or_else(|| "command brief model unavailable".to_string())?;
 
     let preflight = match production_preflight(&app, &schedule, &model).await {

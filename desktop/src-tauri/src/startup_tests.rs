@@ -8,10 +8,10 @@ use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    observe_readiness_transition, readiness_transition_token,
-    start_model_readiness_observer_with_poll, timer_claim_fast_path,
-    CommandBriefReadinessTransitions, CommandBriefRuntimeSet, InstalledCommandBriefRuntime,
-    ReadinessSignalSource, RuntimeConfigIdentity, RuntimeReadiness,
+    dispatch_readiness_with_retry, model_readiness_for_schedule, observe_readiness_transition,
+    readiness_transition_token, start_model_readiness_observer_with_poll, timer_claim_fast_path,
+    trusted_model_readiness_observation, CommandBriefReadinessTransitions, CommandBriefRuntimeSet,
+    InstalledCommandBriefRuntime, ReadinessSignalSource, RuntimeConfigIdentity, RuntimeReadiness,
 };
 use crate::command_brief::audit::{PersistedTerminal, TerminalAuditInput};
 use crate::command_brief::orchestrator::{
@@ -28,6 +28,7 @@ use crate::command_brief::schedule::{
 use crate::command_brief::scheduler::LocalModelScheduler;
 use crate::command_brief::sources::{FrozenSourceContext, SourceCollectionError};
 use crate::command_brief::types::{AdviserContribution, AdviserId};
+use crate::commands::{LmStudioReadiness, LmStudioReadinessState};
 
 struct UnusedProvider;
 
@@ -446,6 +447,123 @@ async fn app_owned_model_observer_recovers_without_ui_and_dedupes_unchanged_poll
         .expect("claim");
     assert_eq!(state, "started");
     assert_eq!(retry_count, 1);
+}
+
+#[tokio::test]
+async fn supplied_trusted_model_observation_starts_once_without_a_second_probe() {
+    let probes = Arc::new(AtomicUsize::new(1));
+    let observation = trusted_model_readiness_observation(Ok(LmStudioReadiness {
+        status: LmStudioReadinessState::Ready,
+        detail: "ready".to_string(),
+        configured_model: Some("qwen-command".to_string()),
+        loaded_models: vec!["qwen-command".to_string()],
+        security_warnings: vec!["bind exposure unverified".to_string()],
+        bind_exposure: "unknown",
+    }));
+    let selected = model_readiness_for_schedule(Some(observation.clone()), {
+        let probes = Arc::clone(&probes);
+        move || {
+            let probes = Arc::clone(&probes);
+            async move {
+                probes.fetch_add(1, Ordering::SeqCst);
+                Err("second probe must stay unreachable".to_string())
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+    assert_eq!(selected.transition_token(), observation.transition_token());
+    assert_eq!(
+        selected
+            .readiness()
+            .and_then(|readiness| readiness.configured_model.as_deref()),
+        Some("qwen-command")
+    );
+
+    let conn = Connection::open_in_memory().expect("memory");
+    crate::command_brief::store::migrate_command_brief_store(&conn).expect("migrate");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let starter = RecordingStarter::default();
+    assert!(matches!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            utc("2026-07-25T01:00:00Z"),
+            ScheduleTrigger::Readiness,
+            &ReadinessSnapshot::ready(selected.transition_token()),
+            &starter,
+        )
+        .expect("start from supplied observation"),
+        ScheduleRunOutcome::Started { .. }
+    ));
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+}
+
+#[tokio::test]
+async fn dispatch_marks_handled_after_success_and_retries_one_infrastructure_failure() {
+    let transitions = Arc::new(Mutex::new(CommandBriefReadinessTransitions::default()));
+    let token = readiness_transition_token(b"model:qwen-ready");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let second_started = Arc::new(tokio::sync::Notify::new());
+    let release_second = Arc::new(tokio::sync::Notify::new());
+    let dispatch = tokio::spawn(dispatch_readiness_with_retry(
+        Arc::clone(&transitions),
+        ReadinessSignalSource::Model,
+        token.clone(),
+        Duration::from_millis(5),
+        {
+            let attempts = Arc::clone(&attempts);
+            let second_started = Arc::clone(&second_started);
+            let release_second = Arc::clone(&release_second);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                let second_started = Arc::clone(&second_started);
+                let release_second = Arc::clone(&release_second);
+                async move {
+                    if attempt == 0 {
+                        return Err("dispatch unavailable");
+                    }
+                    second_started.notify_one();
+                    release_second.notified().await;
+                    Ok(ScheduleRunOutcome::Started {
+                        run_id: "scheduled-test".to_string(),
+                    })
+                }
+            }
+        },
+    ));
+
+    second_started.notified().await;
+    {
+        let transitions = transitions.lock().expect("transitions");
+        assert!(!transitions.is_handled(ReadinessSignalSource::Model, &token));
+        assert!(transitions.is_in_flight(ReadinessSignalSource::Model, &token));
+    }
+    release_second.notify_one();
+    assert!(dispatch.await.expect("join"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    {
+        let transitions = transitions.lock().expect("transitions");
+        assert!(transitions.is_handled(ReadinessSignalSource::Model, &token));
+        assert!(!transitions.is_in_flight(ReadinessSignalSource::Model, &token));
+        assert!(!transitions.is_handled(ReadinessSignalSource::Knowledge, &token));
+    }
+
+    let repeated = dispatch_readiness_with_retry(
+        Arc::clone(&transitions),
+        ReadinessSignalSource::Model,
+        token,
+        Duration::from_millis(5),
+        || async {
+            panic!("handled observation must not retry or run heavy probes");
+            #[allow(unreachable_code)]
+            Ok(ScheduleRunOutcome::NotDue)
+        },
+    )
+    .await;
+    assert!(!repeated);
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

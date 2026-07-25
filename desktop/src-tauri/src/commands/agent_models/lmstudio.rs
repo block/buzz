@@ -326,7 +326,7 @@ pub enum LmStudioReadinessState {
     Ready,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 /// Reader-facing facts from the native LM Studio readiness probe.
 pub struct LmStudioReadiness {

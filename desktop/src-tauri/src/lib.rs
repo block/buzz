@@ -354,9 +354,9 @@ pub fn run() {
             });
         })
         .manage(build_app_state())
-        .manage(std::sync::Mutex::new(
+        .manage(std::sync::Arc::new(std::sync::Mutex::new(
             startup::CommandBriefReadinessTransitions::default(),
-        ))
+        )))
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
         .manage(BuilderlabSession::default())
