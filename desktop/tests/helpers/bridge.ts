@@ -213,6 +213,8 @@ type MockBridgeOptions = {
   personas?: MockPersonaSeed[];
   teams?: MockTeamSeed[];
   relayAgents?: MockRelayAgentSeed[];
+  /** Current presence by pubkey for mention/lifecycle single-writer tests. */
+  presence?: Record<string, "online" | "away" | "offline">;
   agentListDelayMs?: number;
   createManagedAgentDelayMs?: number;
   channelTemplates?: ChannelTemplate[];
