@@ -6,7 +6,7 @@ export const POOF_POINTER_ORIGIN_CLASS = "buzz-poof-pointer-origin";
 
 export const POOF_DURATION_MS = 430;
 
-const POOF_SOUND_URL = "/pow/plop.m4a";
+const POOF_SOUND_URL = "/pow/plop.mp3";
 const POOF_SIZE_SCALE = 0.6375;
 const POOF_FRAMES = [
   { id: "poof-1", src: "/pow/poof1@3x.png" },
