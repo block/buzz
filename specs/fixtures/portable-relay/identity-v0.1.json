@@ -1,0 +1,111 @@
+{
+  "_meta": {
+    "id": "portable-relay-identity-v0.1",
+    "type": "fixture",
+    "description": "Shared principal separation, peer binding, and read/write denial expectations for portable relay identity adapters.",
+    "story": "specs/stories/portable-relay/control-attributable-access.md",
+    "feature": "specs/features/portable-relay/identity-conformance.feature",
+    "scenario": "Admit a direct event from its authenticated author"
+  },
+  "profile": "portable-relay-identity-v0.1",
+  "authentication_evidence": {
+    "method": "nip42",
+    "evaluation_time": 1713956400,
+    "audience": "ws://127.0.0.1:3000",
+    "challenge": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "event": {
+      "kind": 22242,
+      "id": "8cd4d2628675a6398954a118c84ecf2a6dd067c188355f165b9a0e667f684b7a",
+      "pubkey": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "created_at": 1713956400,
+      "tags": [
+        [
+          "challenge",
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        [
+          "relay",
+          "ws://127.0.0.1:3000"
+        ]
+      ],
+      "content": "",
+      "sig": "518c273e70b43e16abba3820229cc32f92659bbaa6fba93c9e4282e5aade2ee829b8bd814e4200fe97b3a7f887166774b47674c580a6244d49821f45572d9eef"
+    },
+    "expected": {
+      "principal_type": "nostr",
+      "principal_id": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "authenticated": true,
+      "append_authentication_event": false
+    }
+  },
+  "event_fixture": "../local-relay/signed-message.json",
+  "event": {
+    "id": "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b",
+    "author_principal": {
+      "type": "nostr",
+      "id": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5"
+    },
+    "attesting_controller": {
+      "type": "nostr",
+      "id": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    }
+  },
+  "replication_peer": {
+    "source_id": "laptop-a/coherence",
+    "principal": {
+      "type": "relay_node",
+      "id": "did:example:buzz-relay-a"
+    },
+    "verification_method": "did:example:buzz-relay-a#node-key-1",
+    "audience": "did:example:buzz-relay-b"
+  },
+  "append_cases": [
+    {
+      "name": "matching direct author",
+      "origin": "direct",
+      "caller_principal": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "expected": "allowed"
+    },
+    {
+      "name": "mismatched direct author",
+      "origin": "direct",
+      "caller_principal": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "delegation": null,
+      "privacy_envelope_rule": null,
+      "expected": "denied",
+      "code": "author_mismatch"
+    },
+    {
+      "name": "bound replication peer",
+      "origin": "replication",
+      "caller_principal": "did:example:buzz-relay-a",
+      "source_id": "laptop-a/coherence",
+      "expected": "eligible_for_destination_policy"
+    },
+    {
+      "name": "self-asserted replication source",
+      "origin": "replication",
+      "caller_principal": "did:example:unknown-relay",
+      "source_id": "laptop-a/coherence",
+      "expected": "denied",
+      "code": "source_mismatch"
+    }
+  ],
+  "read_expectations": {
+    "authorize_requested_filter": true,
+    "authorize_each_candidate": true,
+    "known_event_id_bypass": false,
+    "count_only_readable_events": true,
+    "historical_and_live_equivalent": true
+  },
+  "security_expectations": {
+    "authentication_evidence_in_event_journal": false,
+    "source_id_is_credential": false,
+    "did_is_credential": false,
+    "peer_authentication_grants_authority": false,
+    "destination_reverifies_event": true,
+    "denial_mutates_state": false,
+    "authorization_provides_confidentiality": false,
+    "stable_principal_survives_key_rotation": true
+  }
+}

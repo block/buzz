@@ -45,6 +45,7 @@ not an internet deployment.
 - Append-before-acknowledgement NDJSON persistence
 - Strict verified replay on restart
 - Live in-process subscription fan-out
+- Portable durable-history replication source and policy-gated sink ports
 
 HTTP auth headers sent by existing Buzz clients are tolerated but not enforced.
 The local relay represents one trusted local community.
@@ -54,6 +55,7 @@ The local relay represents one trusted local community.
 - NIP-42/NIP-98 authorization and NIP-29 membership policy
 - Postgres FTS or indexed search filters
 - Redis or multi-node fan-out
+- automatic peer discovery or a continuous relay-to-relay transport
 - MinIO/S3 media
 - audit chains, workflows, git hosting, huddles, and administrative APIs
 - production hardening or availability guarantees
@@ -78,10 +80,13 @@ Ephemeral kinds (`20000..29999`) are delivered live and never written.
 
 ```bash
 cargo test -p buzz-local-relay
+cargo test -p buzz-local-relay --test portable_conformance
+cargo test -p buzz-local-relay --test replication_port
 cargo clippy -p buzz-local-relay --all-targets -- -D warnings
 ```
 
 The intent and acceptance behavior live under [`specs/`](../../specs/README.md).
 This crate is the laptop reference adapter for the
 [`portable-relay-core-v0.1`](../../specs/architecture/portable-relay-boundary.md)
-behavioral boundary.
+behavioral boundary. Its first protocol-level conformance test consumes the
+shared signed-event vector without querying relay internals.

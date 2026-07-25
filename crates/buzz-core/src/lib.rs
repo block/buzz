@@ -30,8 +30,12 @@ pub mod observer;
 pub mod pairing;
 /// Presence status types shared across crates.
 pub mod presence;
+/// I/O-free relay event classification and effective-state reduction.
+pub mod ingest;
 /// Canonical relay runtime identities.
 pub mod relay;
+/// Durable relay-to-relay replication records and port contracts.
+pub mod replication;
 /// Tenant identity — the server-resolved community key carried on scoped paths.
 pub mod tenant;
 /// Schnorr signature and event ID verification.

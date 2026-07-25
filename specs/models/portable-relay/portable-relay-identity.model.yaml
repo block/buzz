@@ -1,0 +1,175 @@
+id: portable-relay-identity
+type: model
+model:
+  name: PortableRelayIdentityBoundary
+  type: aggregate
+  purpose: |
+    Bind fresh cryptographic evidence to a caller principal and make append,
+    replication, and read authorization explicit without changing signed event
+    identity.
+
+sources:
+  telos: specs/TELOS.md
+  story: specs/stories/portable-relay/control-attributable-access.md
+  journey: specs/journeys/start-durable-local-buzz.md
+  architecture: specs/architecture/portable-relay-identity-v0.1.md
+
+entities:
+  - name: SignedEvent
+    identity: event.id
+    immutable: true
+    author_identity: event.pubkey
+  - name: PeerBinding
+    identity: [destination_id, source_id]
+    attributes:
+      - relay_node_principal
+      - active_verification_methods
+      - allowed_destination_scopes
+      - status
+    status_values:
+      - active
+      - revoked
+
+value_objects:
+  - name: Principal
+    variants:
+      - nostr_principal: nostr_public_key
+      - relay_node_principal: stable_uri
+      - system_principal: deployment_verification_key
+    rules:
+      - an identifier is not proof of key control
+      - anonymous is not an authenticated principal
+  - name: AuthenticationEvidence
+    variants:
+      - nip42_challenge_response
+      - nip98_http_request
+      - relay_node_challenge
+      - mutually_authenticated_peer_channel
+    required_properties:
+      - cryptographic_proof
+      - audience_binding
+      - freshness_or_nonce
+      - authorized_verification_method
+    durability: never_event_history
+  - name: AuthenticatedPrincipal
+    attributes:
+      - principal
+      - proof_method
+      - audience
+      - authenticated_at
+      - expires_at
+      - grants
+      - restrictions
+      - verified_delegation
+    lifecycle: request_connection_or_peer_channel_scoped
+  - name: AppendContext
+    variants:
+      - direct
+      - replication
+      - system
+  - name: AuthorizationDecision
+    variants:
+      - allowed
+      - denied
+    denial_codes:
+      - authentication_required
+      - invalid_evidence
+      - evidence_expired
+      - audience_mismatch
+      - replay_detected
+      - author_mismatch
+      - delegation_invalid
+      - peer_unbound
+      - source_mismatch
+      - scope_denied
+      - event_disclosure_denied
+  - name: ReadOperation
+    values:
+      - query
+      - count
+      - historical_subscription
+      - live_delivery
+
+commands:
+  - name: Authenticate
+    input: [AuthenticationEvidence, Audience, EvaluationTime]
+    output: [AuthenticatedPrincipal, AuthorizationDecision]
+  - name: AuthorizeAppend
+    input: [AuthenticatedPrincipal, AppendContext, SignedEvent, DestinationScope]
+    output: AuthorizationDecision
+  - name: AuthorizeQuery
+    input: [AuthenticatedPrincipalOrAnonymous, ReadOperation, NostrFilterSet, DestinationScope]
+    output: [AuthorizedFilterSet, AuthorizationDecision]
+  - name: AuthorizeEventDelivery
+    input: [AuthenticatedPrincipalOrAnonymous, ReadOperation, SignedEvent, DestinationScope]
+    output: AuthorizationDecision
+  - name: BindReplicationPeer
+    input: [AuthenticationEvidence, Audience, SourceId, PeerTrustConfiguration]
+    output: [PeerBinding, AuthorizationDecision]
+
+ports:
+  - name: Authenticator
+    responsibility: Verify fresh audience-bound evidence and return an ephemeral principal context.
+    required_profile: portable-relay-identity-v0.1
+  - name: AppendAuthorizer
+    responsibility: Decide whether a principal and origin may submit an exact signed event.
+    required_profile: portable-relay-identity-v0.1
+  - name: ReadAuthorizer
+    responsibility: Gate both requested filters and every candidate event delivered or counted.
+    required_profile: portable-relay-identity-v0.1
+  - name: ReplicationPeerAuthenticator
+    responsibility: Bind an authenticated relay node principal to a destination-configured source.
+    required_profile: portable-relay-identity-v0.1
+  - name: IdentityResolver
+    responsibility: Resolve currently authorized verification methods for stable principals.
+    required_profile: adapter_specific
+
+rules:
+  - id: direct-author-binding
+    description: Direct append requires author equality, a verified scoped delegation, or a declared kind-specific privacy-envelope rule.
+  - id: replication-is-transport
+    description: A relay peer transports author-signed events but never acquires author authority.
+  - id: system-events-are-signed
+    description: A system-originated durable event has an authorized accountable signing key.
+  - id: read-authorization-is-two-stage
+    description: Both the requested filter and every returned, counted, or live event are authorized.
+  - id: did-is-not-a-credential
+    description: A DID or other stable identifier requires fresh proof through an authorized verification method.
+
+invariants:
+  - id: claims-remain-distinct
+    description: Event authorship, caller identity, transport provenance, and authorization never imply one another.
+  - id: auth-evidence-is-not-journaled
+    description: Authentication events, challenges, bearer material, session secrets, and private keys never enter event history.
+  - id: proof-is-context-bound
+    description: Accepted authentication evidence is audience-bound, fresh, and replay-resistant.
+  - id: identity-denial-has-no-effects
+    description: Authentication or authorization denial mutates neither durable history nor live state.
+  - id: source-is-cryptographically-bound
+    description: A destination accepts a replication source only after its configured relay principal authenticates.
+  - id: destination-retains-authority
+    description: Peer authentication never bypasses destination event verification or policy.
+  - id: protected-events-have-no-read-bypass
+    description: Known IDs, broad filters, counts, historical delivery, and live delivery all enforce per-event disclosure.
+  - id: key-rotation-preserves-principal
+    description: Active verification methods may rotate without changing the stable node principal or historical event authors.
+  - id: authorization-is-not-confidentiality
+    description: Sensitive event content is recipient-encrypted and its ciphertext envelope is preserved exactly.
+
+boundaries:
+  inside:
+    - principal and append-context vocabulary
+    - proof validation result semantics
+    - direct author binding
+    - replication peer and source binding
+    - request-level and result-level read decisions
+    - denial codes and no-effect guarantees
+    - stable-principal key-rotation semantics
+  outside:
+    - DID method and resolver implementation
+    - key generation custody recovery and user experience
+    - deployment membership roles grants and rate limits
+    - encryption key distribution
+    - replication discovery transport topology and scheduling
+    - authentication security-audit storage
+    - identity proofing for legal or biometric identity

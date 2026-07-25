@@ -92,3 +92,34 @@ Feature: Portable relay adapter conformance
     Then the decision is rejected before journal mutation
     And no live subscription receives the event
 
+  @replication @identity
+  Scenario: Replicate durable signed history without transferring authority
+    Given a source and destination declare the "portable-relay-replication-v0.1" profile
+    And the destination policy admits the configured source stream
+    And source durable history contains the portable signed-event vector
+    When the orchestrator reads and ingests that replication record
+    Then the destination stores the exact signed event envelope
+    And the destination returns a checkpoint-safe receipt
+    And replaying the record produces a checkpoint-safe duplicate receipt
+
+  @replication @resume
+  Scenario: Resume replication from an opaque durable cursor
+    Given a source journal contains multiple durable events
+    And the orchestrator persisted a checkpoint-safe source cursor
+    When the source restarts and reads after that cursor
+    Then it returns only later records in original journal order
+    And the orchestrator does not interpret or increment the cursor
+
+  @replication @policy
+  Scenario: Deny an unconfigured replication source without advancing
+    Given replication is disabled by default at the destination
+    When an unconfigured source submits a valid signed replication record
+    Then the destination rejects it before journal mutation
+    And no live subscription receives the event
+    And the rejection receipt is not checkpoint-safe
+
+  @replication @ephemeral
+  Scenario: Exclude ephemeral events from replication history
+    Given a source accepts a valid ephemeral event
+    When the orchestrator reads the source replication stream
+    Then the ephemeral event is absent from every replication batch

@@ -19,6 +19,11 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use buzz_core::event::StoredEvent;
 use buzz_core::filter::filters_match;
+use buzz_core::relay::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
+use buzz_core::replication::{
+    ReplicationBatch, ReplicationCursor, ReplicationIngestOutcome, ReplicationReceipt,
+    ReplicationRecord, ReplicationSinkPort, ReplicationSourceId, ReplicationSourcePort,
+};
 use buzz_core::verification::verify_event;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
@@ -36,6 +41,8 @@ const MAX_QUERY_LIMIT: usize = 5_000;
 const EVENT_CHANNEL_CAPACITY: usize = 1_024;
 const MAX_SUBSCRIPTIONS_PER_CONNECTION: usize = 128;
 const MAX_SUBSCRIPTION_ID_LENGTH: usize = 128;
+const MAX_REPLICATION_BATCH_SIZE: usize = 1_000;
+const LOCAL_REPLICATION_CURSOR_PREFIX: &str = "local-ndjson-v1:";
 
 /// Persistent or in-memory storage selection for a local relay.
 #[derive(Debug, Clone)]
@@ -117,8 +124,39 @@ pub enum QueryError {
     SearchUnsupported,
 }
 
+/// Errors returned while reading the laptop relay's replication stream.
+#[derive(Debug, Error)]
+pub enum ReplicationSourceError {
+    /// A zero-sized page cannot make progress.
+    #[error("replication batch limit must be greater than zero")]
+    ZeroBatchLimit,
+    /// The cursor was not issued by this source adapter.
+    #[error("invalid local replication cursor: {0}")]
+    InvalidCursor(String),
+    /// The cursor points beyond the current durable journal.
+    #[error("replication cursor position {position} exceeds journal length {journal_len}")]
+    CursorOutOfRange {
+        /// Parsed source position.
+        position: usize,
+        /// Current number of durable source records.
+        journal_len: usize,
+    },
+}
+
+/// Errors that prevent a replication destination from completing ingest.
+#[derive(Debug, Error)]
+pub enum ReplicationSinkError {
+    /// Normal relay ingest failed operationally.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// The relay returned an accepted result unknown to the portable mapping.
+    #[error("unexpected accepted relay outcome: {0}")]
+    UnexpectedAcceptedOutcome(String),
+}
+
 struct StoreInner {
     events: Vec<StoredEvent>,
+    journal: Vec<Event>,
     seen_ids: HashSet<nostr::EventId>,
     writer: Option<tokio::fs::File>,
 }
@@ -157,6 +195,7 @@ impl EventStore {
         Ok(Self {
             inner: Mutex::new(StoreInner {
                 events: replayed.events,
+                journal: replayed.journal,
                 seen_ids: replayed.seen_ids,
                 writer,
             }),
@@ -177,28 +216,19 @@ impl EventStore {
         }
 
         let mut inner = self.inner.lock().await;
-        if inner.seen_ids.contains(&event.id) {
-            return Ok(WriteResult::accepted(&event, "duplicate", false));
-        }
-
-        let kind = event.kind.as_u16();
-        if is_ephemeral_kind(kind) {
-            inner.seen_ids.insert(event.id);
-            return Ok(WriteResult::accepted(&event, "ephemeral", true));
-        }
-
-        let replacement_index = replacement_key(&event).and_then(|candidate_key| {
-            inner
-                .events
-                .iter()
-                .position(|stored| replacement_key(&stored.event).as_ref() == Some(&candidate_key))
-        });
-
-        if let Some(index) = replacement_index {
-            if !candidate_wins(&event, &inner.events[index].event) {
+        match decide_event(&inner.events, inner.seen_ids.contains(&event.id), &event) {
+            EventDecision::Duplicate => {
+                return Ok(WriteResult::accepted(&event, "duplicate", false));
+            }
+            EventDecision::Ephemeral => {
+                inner.seen_ids.insert(event.id);
+                return Ok(WriteResult::accepted(&event, "ephemeral", true));
+            }
+            EventDecision::Superseded => {
                 inner.seen_ids.insert(event.id);
                 return Ok(WriteResult::accepted(&event, "superseded", false));
             }
+            EventDecision::Stored => {}
         }
 
         if let Some(writer) = inner.writer.as_mut() {
@@ -210,11 +240,8 @@ impl EventStore {
         }
 
         let stored = stored_event(event.clone());
-        if let Some(index) = replacement_index {
-            inner.events[index] = stored;
-        } else {
-            inner.events.push(stored);
-        }
+        apply_effective_event(&mut inner.events, stored);
+        inner.journal.push(event.clone());
         inner.seen_ids.insert(event.id);
 
         Ok(WriteResult::accepted(&event, "stored", true))
@@ -279,18 +306,146 @@ impl EventStore {
     }
 }
 
+/// Laptop reference implementation of the ordered replication source port.
+pub struct LocalReplicationSource {
+    source: ReplicationSourceId,
+    store: Arc<EventStore>,
+}
+
+impl LocalReplicationSource {
+    /// Binds an operator-assigned source identity to a local event store.
+    pub fn new(source: ReplicationSourceId, store: Arc<EventStore>) -> Self {
+        Self { source, store }
+    }
+}
+
+impl ReplicationSourcePort for LocalReplicationSource {
+    type Error = ReplicationSourceError;
+
+    async fn read_batch(
+        &self,
+        cursor: Option<ReplicationCursor>,
+        limit: usize,
+    ) -> Result<ReplicationBatch, Self::Error> {
+        if limit == 0 {
+            return Err(ReplicationSourceError::ZeroBatchLimit);
+        }
+
+        let start = match cursor.as_ref() {
+            Some(cursor) => parse_local_replication_cursor(cursor)?,
+            None => 0,
+        };
+        let inner = self.store.inner.lock().await;
+        if start > inner.journal.len() {
+            return Err(ReplicationSourceError::CursorOutOfRange {
+                position: start,
+                journal_len: inner.journal.len(),
+            });
+        }
+
+        let page_size = limit.min(MAX_REPLICATION_BATCH_SIZE);
+        let end = start.saturating_add(page_size).min(inner.journal.len());
+        let records = inner.journal[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, event)| ReplicationRecord {
+                source: self.source.clone(),
+                cursor: local_replication_cursor(start + offset + 1),
+                event: event.clone(),
+            })
+            .collect();
+        Ok(ReplicationBatch {
+            records,
+            next_cursor: local_replication_cursor(end),
+            caught_up: end == inner.journal.len(),
+        })
+    }
+}
+
+fn local_replication_cursor(position: usize) -> ReplicationCursor {
+    ReplicationCursor::new(format!("{LOCAL_REPLICATION_CURSOR_PREFIX}{position}"))
+}
+
+fn parse_local_replication_cursor(
+    cursor: &ReplicationCursor,
+) -> Result<usize, ReplicationSourceError> {
+    cursor
+        .as_str()
+        .strip_prefix(LOCAL_REPLICATION_CURSOR_PREFIX)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| ReplicationSourceError::InvalidCursor(cursor.as_str().to_string()))
+}
+
+/// Destination admission policy for replicated events.
+///
+/// This source-level gate is independent of signature validity and event
+/// authorship. Hosted adapters should additionally apply their normal
+/// community, membership, and event-kind authorization. A future network
+/// transport must authenticate its peer and bind the configured source ID
+/// before invoking this application port.
+pub trait ReplicationPolicy: Send + Sync {
+    /// Admits or denies one source/event pair before destination mutation.
+    fn admit(&self, source: &ReplicationSourceId, event: &Event) -> Result<(), String>;
+}
+
+/// Explicit replication policy that admits only configured source streams.
+#[derive(Debug, Clone, Default)]
+pub struct ReplicationSourceAllowlist {
+    sources: HashSet<ReplicationSourceId>,
+}
+
+impl ReplicationSourceAllowlist {
+    /// Builds an allowlist from operator-assigned source identities.
+    pub fn new(sources: impl IntoIterator<Item = ReplicationSourceId>) -> Self {
+        Self {
+            sources: sources.into_iter().collect(),
+        }
+    }
+}
+
+impl ReplicationPolicy for ReplicationSourceAllowlist {
+    fn admit(&self, source: &ReplicationSourceId, _event: &Event) -> Result<(), String> {
+        if self.sources.contains(source) {
+            Ok(())
+        } else {
+            Err(format!("replication source denied: {}", source.as_str()))
+        }
+    }
+}
+
+struct ReplicationDisabled;
+
+impl ReplicationPolicy for ReplicationDisabled {
+    fn admit(&self, _source: &ReplicationSourceId, _event: &Event) -> Result<(), String> {
+        Err("replication is disabled".to_string())
+    }
+}
+
 /// Shared state for the HTTP and WebSocket relay surfaces.
 pub struct LocalRelay {
     store: Arc<EventStore>,
     live_events: broadcast::Sender<Event>,
+    replication_policy: Arc<dyn ReplicationPolicy>,
 }
 
 impl LocalRelay {
-    /// Opens a relay using the selected storage mode.
+    /// Opens a relay using the selected storage mode with replication disabled.
     pub async fn open(mode: StorageMode) -> Result<Arc<Self>, StoreError> {
+        Self::open_with_replication_policy(mode, Arc::new(ReplicationDisabled)).await
+    }
+
+    /// Opens a relay with an explicit source admission policy for replication.
+    pub async fn open_with_replication_policy(
+        mode: StorageMode,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+    ) -> Result<Arc<Self>, StoreError> {
         let store = Arc::new(EventStore::open(mode).await?);
         let (live_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        Ok(Arc::new(Self { store, live_events }))
+        Ok(Arc::new(Self {
+            store,
+            live_events,
+            replication_policy,
+        }))
     }
 
     /// Returns the relay's event store.
@@ -304,6 +459,56 @@ impl LocalRelay {
             let _ = self.live_events.send(event);
         }
         Ok(result)
+    }
+}
+
+impl ReplicationSinkPort for LocalRelay {
+    type Error = ReplicationSinkError;
+
+    async fn ingest_replication(
+        &self,
+        record: ReplicationRecord,
+    ) -> Result<ReplicationReceipt, Self::Error> {
+        let event_id = record.event.id.to_hex();
+        let rejected = |reason| ReplicationReceipt {
+            source: record.source.clone(),
+            cursor: record.cursor.clone(),
+            event_id: event_id.clone(),
+            outcome: ReplicationIngestOutcome::Rejected { reason },
+        };
+
+        if let Err(reason) = self.replication_policy.admit(&record.source, &record.event) {
+            return Ok(rejected(reason));
+        }
+        if is_ephemeral_kind(record.event.kind.as_u16()) {
+            return Ok(rejected(
+                "ephemeral events are not part of durable replication".to_string(),
+            ));
+        }
+
+        let result = self.submit(record.event).await?;
+        let outcome = if !result.accepted {
+            ReplicationIngestOutcome::Rejected {
+                reason: result.message,
+            }
+        } else {
+            match result.message.as_str() {
+                "stored" => ReplicationIngestOutcome::Stored,
+                "duplicate" => ReplicationIngestOutcome::Duplicate,
+                "superseded" => ReplicationIngestOutcome::Superseded,
+                other => {
+                    return Err(ReplicationSinkError::UnexpectedAcceptedOutcome(
+                        other.to_string(),
+                    ));
+                }
+            }
+        };
+        Ok(ReplicationReceipt {
+            source: record.source,
+            cursor: record.cursor,
+            event_id,
+            outcome,
+        })
     }
 }
 
@@ -606,6 +811,7 @@ impl IntoResponse for ApiError {
 #[derive(Default)]
 struct ReplayedLog {
     events: Vec<StoredEvent>,
+    journal: Vec<Event>,
     seen_ids: HashSet<nostr::EventId>,
 }
 
@@ -632,28 +838,11 @@ fn replay_log(path: &Path) -> Result<ReplayedLog, StoreError> {
             reason: error.to_string(),
         })?;
         replayed.seen_ids.insert(event.id);
-        apply_effective(&mut replayed.events, event);
+        replayed.journal.push(event.clone());
+        apply_effective_event(&mut replayed.events, stored_event(event));
     }
 
     Ok(replayed)
-}
-
-fn apply_effective(events: &mut Vec<StoredEvent>, event: Event) {
-    if events.iter().any(|stored| stored.event.id == event.id) {
-        return;
-    }
-    let replacement_index = replacement_key(&event).and_then(|candidate_key| {
-        events
-            .iter()
-            .position(|stored| replacement_key(&stored.event).as_ref() == Some(&candidate_key))
-    });
-    if let Some(index) = replacement_index {
-        if candidate_wins(&event, &events[index].event) {
-            events[index] = stored_event(event);
-        }
-    } else {
-        events.push(stored_event(event));
-    }
 }
 
 fn stored_event(event: Event) -> StoredEvent {
@@ -665,35 +854,6 @@ fn stored_event(event: Event) -> StoredEvent {
         .filter_map(|tag| tag.content())
         .find_map(|value| value.parse::<Uuid>().ok());
     StoredEvent::with_received_at(event, Utc::now(), channel_id, true)
-}
-
-fn is_ephemeral_kind(kind: u16) -> bool {
-    (20_000..30_000).contains(&kind)
-}
-
-fn replacement_key(event: &Event) -> Option<String> {
-    let kind = event.kind.as_u16();
-    let author = event.pubkey.to_hex();
-    if kind == 0 || kind == 3 || (10_000..20_000).contains(&kind) {
-        return Some(format!("r:{author}:{kind}"));
-    }
-    if (30_000..40_000).contains(&kind) {
-        let d_tag = event
-            .tags
-            .filter(TagKind::SingleLetter(SingleLetterTag::lowercase(
-                Alphabet::D,
-            )))
-            .find_map(|tag| tag.content())
-            .unwrap_or_default();
-        return Some(format!("a:{author}:{kind}:{d_tag}"));
-    }
-    None
-}
-
-fn candidate_wins(candidate: &Event, current: &Event) -> bool {
-    candidate.created_at > current.created_at
-        || (candidate.created_at == current.created_at
-            && candidate.id.to_hex() < current.id.to_hex())
 }
 
 fn validate_filters(filters: &[Filter]) -> Result<(), QueryError> {

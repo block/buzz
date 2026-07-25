@@ -12,9 +12,11 @@ client move unchanged between a laptop node, a cloud-native node, and the
 hosted Buzz relay. An adapter conforms when the same signed events, filters,
 and protocol messages produce the same normative outcomes.
 
-This boundary is an identity-integrity and continuity boundary. It is not, by
-itself, an authorization, confidentiality, search, media, workflow, or
-distributed-availability boundary.
+This boundary is an event-identity, integrity, and continuity boundary. It is
+not, by itself, an authentication, authorization, confidentiality, search,
+media, workflow, or distributed-availability boundary. The optional
+[`portable-relay-identity-v0.1`](portable-relay-identity-v0.1.md) profile
+defines the cryptographic caller and access boundary around the core.
 
 ## Architectural shape
 
@@ -31,11 +33,11 @@ NIP-01 / Buzz HTTP clients
    | match filters        |
    +----------+-----------+
               |
-       declared ports
-     +--------+---------+----------------+
-     |                  |                |
- event journal     subscription hub   policy gate
-     |                  |                |
+                    declared ports
+     +----------+----------+----------+----------+-------------+
+     |          |          |          |          |             |
+  journal   subscriptions identity  policy   replication   effects
+     |          |          |          |       source/sink      |
  runtime-specific adapters and managed services
 ```
 
@@ -46,9 +48,9 @@ those effects are performed.
 
 ### Signed event
 
-The immutable NIP-01 event envelope is the unit of identity, transport, and
-storage. Its event ID and Schnorr signature must verify before it can alter
-relay state.
+The immutable NIP-01 event envelope is the unit of event identity and storage,
+and the payload carried unchanged across transports. Its event ID and Schnorr
+signature must verify before it can alter relay state.
 
 The relay must not rewrite an accepted event when moving it between adapters.
 The same event therefore retains the same event ID, author, kind, tags,
@@ -136,6 +138,11 @@ The `portable-relay-core-v0.1` profile does not require a particular policy.
 Deployments that claim `portable-relay-policy-v0.1` must declare and test their
 admission rules.
 
+Cryptographic authentication and read/write principal binding are specified by
+[`portable-relay-identity-v0.1`](portable-relay-identity-v0.1.md). Identity
+adapters produce an ephemeral authenticated principal; policy adapters decide
+what that principal may do. Authentication evidence is never event history.
+
 ### Committed-event effects
 
 Observers, audit writers, workflow engines, search indexers, and report
@@ -146,14 +153,58 @@ disappear.
 Effects must be idempotent by event ID because adapters may provide at-least-once
 delivery.
 
+### Replication source and sink
+
+Replication is durable synchronization between independent relay journals. It
+is not subscription fan-out, Redis distribution between replicas of one logical
+relay, peer discovery, or a grant of destination authority.
+
+The source port returns bounded records in journal order. Each record contains:
+
+- an operator-assigned source stream ID;
+- an opaque cursor issued by that source;
+- the exact signed event envelope.
+
+Only durable journal events are exportable. Ephemeral events and transient live
+signals never enter a replication batch. A cursor is meaningful only for its
+issuing source stream; orchestrators persist and return it unchanged rather than
+parsing, incrementing, or comparing it.
+
+The source stream ID is a policy label, not a credential. A network transport
+must authenticate its peer and bind that identity from trusted configuration;
+it must not accept a source ID merely because an incoming record asserts it.
+
+The sink port is disabled by default. For every record it:
+
+1. applies destination policy to the source stream and destination scope;
+2. independently verifies the event ID and signature;
+3. invokes the destination's normal duplicate, replacement, durability,
+   projection, publication, and effect pipeline;
+4. returns a receipt bound to the source cursor and event ID.
+
+`stored`, `duplicate`, and `superseded` are terminal checkpoint-safe outcomes.
+`rejected` is not checkpoint-safe unless an operator makes and durably records a
+separate skip or dead-letter decision. This fail-closed rule prevents a temporary
+policy or verification failure from silently creating a permanent gap.
+
+Source acceptance proves neither destination membership nor authorization.
+Private-event selection, community mapping, trust relationships, checkpoint
+storage, retry scheduling, loop topology, retention, and transport encryption
+belong to the replication orchestrator or deployment policy.
+
+The v0.1 port is an application boundary, not a new unauthenticated HTTP route.
+An orchestrator may carry records over NIP-01, HTTP, a queue, direct method calls,
+or another authenticated transport without changing their semantics.
+
 ## Ingest ordering
 
 A conforming durable submission follows this partial order:
 
 ```text
 decode
-  -> policy decision, when configured
+  -> authenticate caller and apply preliminary admission, when configured
   -> event ID and signature verification
+  -> authorize claims that depend on the verified event, when configured
   -> duplicate / replacement / ephemeral classification
   -> durable journal append and durability barrier
   -> effective-state update
@@ -193,6 +244,22 @@ Optional:
 - denied operations do not mutate the journal or publish live events;
 - admission behavior is consistent across HTTP and WebSocket transports.
 
+### `portable-relay-identity-v0.1`
+
+Optional:
+
+- fresh, audience-bound evidence produces an ephemeral authenticated principal;
+- event authorship, caller identity, transport provenance, and authorization
+  remain distinct;
+- direct append binds the caller to the event author, a verified scoped
+  delegation, or a declared kind-specific privacy-envelope rule;
+- relay peers are cryptographically bound to destination-configured source
+  streams;
+- denied identity and access decisions have no durable or live effects;
+- query, count, historical subscriptions, and live delivery enforce equivalent
+  per-event disclosure;
+- stable relay principals survive authorized verification-key rotation.
+
 ### `portable-relay-effects-v0.1`
 
 Optional:
@@ -200,6 +267,18 @@ Optional:
 - committed events can trigger idempotent asynchronous observers;
 - retry does not duplicate durable domain outcomes;
 - effect lag and failure are observable.
+
+### `portable-relay-replication-v0.1`
+
+Optional:
+
+- durable records retain exact signed envelopes and source journal order;
+- opaque cursors resume after a source restart;
+- ephemeral events are never exported;
+- destinations deny replication until a source is explicitly admitted;
+- source acceptance never bypasses destination verification or policy;
+- replay is idempotent at the destination;
+- checkpoint-safe receipts distinguish terminal outcomes from rejections.
 
 ## Adapter map
 
@@ -209,8 +288,10 @@ Optional:
 | Journal | append-only NDJSON | per-node durable SQLite | Postgres |
 | Effective query | in-memory replay | local SQL projection | Postgres queries |
 | Live subscriptions | Tokio broadcast | stateful coordination object | connection registry + Redis |
+| Identity | not yet implemented | node/DID proof + edge authentication | NIP-42/NIP-98 + `buzz-auth` |
 | Policy | trusted loopback | explicit edge policy | `buzz-auth` + membership |
 | Effects | in-process or absent | queue/workflow consumers | audit/search/workflow subsystems |
+| Replication | NDJSON cursor + source allowlist | durable-state cursor + edge policy | not yet implemented |
 | Portable archive | NDJSON copy | object-storage snapshot | event export |
 
 These mappings are informative. Conformance is judged only at the protocol and
@@ -218,16 +299,27 @@ behavioral boundary.
 
 ## Reference implementation alignment
 
-The current Rust implementation already contains the boundary in two layers:
+The Rust reference implementation contains the boundary in two layers:
 
-- `buzz-core` owns I/O-free event verification and filter matching;
-- `buzz-local-relay` owns event classification, effective-state reduction,
-  NDJSON persistence, Axum transport, and Tokio live fan-out.
+- `buzz-core` owns I/O-free event verification, event classification,
+  effective-state reduction, filter matching, and replication port types;
+- `buzz-local-relay` owns NDJSON persistence, Axum transport, and Tokio live
+  fan-out, and implements the laptop replication source/sink adapters.
 
-The next implementation refactor should move deterministic classification and
-reduction beside the existing `buzz-core` behavior, while keeping the event
-journal and subscription hub behind adapter-facing interfaces. It should not
-introduce a Cloudflare dependency into the portable layer.
+The laptop adapter runs the shared signed-event vector through its public HTTP
+and WebSocket surfaces in `crates/buzz-local-relay/tests/portable_conformance.rs`.
+A second adapter should consume the same vector and preserve the same observable
+outcomes. Runtime dependencies, including Cloudflare APIs, must remain outside
+the portable layer.
+
+The reference replication adapter is deliberately transport-neutral. It proves
+cursor resume and policy-gated destination ingest without exposing a public peer
+endpoint or implying automatic federation.
+
+The identity profile is specified but not yet implemented by the laptop
+adapter. Hosted Buzz provides relevant NIP-42, NIP-98, NIP-OA, scope, membership,
+and result-level read mechanisms, but has not yet been measured against the
+portable identity conformance vector.
 
 The OpenAPI paths and NIP-01 frames are normative. Listener addresses, host
 names, TLS termination, authentication headers, storage schemas, and operational
@@ -253,6 +345,10 @@ health metadata remain adapter-specific.
   [`../models/portable-relay/portable-relay-boundary.model.yaml`](../models/portable-relay/portable-relay-boundary.model.yaml)
 - Behavior:
   [`../features/portable-relay/adapter-conformance.feature`](../features/portable-relay/adapter-conformance.feature)
+- Identity profile:
+  [`portable-relay-identity-v0.1.md`](portable-relay-identity-v0.1.md)
+- Identity behavior:
+  [`../features/portable-relay/identity-conformance.feature`](../features/portable-relay/identity-conformance.feature)
 - HTTP contract:
   [`../contracts/openapi/local-relay.yaml`](../contracts/openapi/local-relay.yaml)
 - WebSocket contract:

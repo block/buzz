@@ -48,6 +48,17 @@ It does not initially promise hosted-relay parity, multi-node fan-out, full
 authorization policy, full-text search, media storage, workflows, or production
 operations.
 
+## Identity horizon
+
+The next portable boundary separates an event's cryptographic author from the
+person, agent, system, or relay node currently carrying out an operation.
+Authentication proves control of a key in a fresh context; destination policy
+still decides whether that principal may append, replicate, or read.
+
+A DID Beacon may anchor the stable identity and verification-key rotation of a
+relay node without replacing Nostr event authorship. Authentication evidence,
+private keys, and reusable credentials never become event history.
+
 ## Promotion path
 
 An experiment should be able to begin against the local relay and later move to
@@ -58,5 +69,10 @@ meaning of the work.
 The [portable relay boundary](architecture/portable-relay-boundary.md) names
 the behavior that survives promotion: signed-event identity, verification,
 classification, effective-state reduction, filter semantics, durable
-acceptance ordering, and historical-to-live subscriptions. Storage, server
-runtimes, policy, and asynchronous effects remain replaceable adapters.
+acceptance ordering, historical-to-live subscriptions, and an optional
+policy-gated durable replication port. The
+[portable identity profile](architecture/portable-relay-identity-v0.1.md)
+preserves the separation between event author, caller, relay peer, and local
+authorization across those runtimes. Storage, server runtimes, authentication
+methods, replication transport, topology, policy, and asynchronous effects
+remain replaceable adapters.

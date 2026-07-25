@@ -43,7 +43,22 @@ value_objects:
     values:
       - portable-relay-core-v0.1
       - portable-relay-policy-v0.1
+      - portable-relay-identity-v0.1
       - portable-relay-effects-v0.1
+      - portable-relay-replication-v0.1
+  - name: ReplicationCursor
+    attributes:
+      - source_id
+      - opaque_position
+    rules:
+      - interpreted only by the issuing source
+      - persisted only after a checkpoint-safe receipt
+  - name: ReplicationIngestOutcome
+    values:
+      - stored
+      - duplicate
+      - superseded
+      - rejected
 
 commands:
   - name: SubmitEvent
@@ -61,6 +76,12 @@ commands:
   - name: CloseSubscription
     input: SubscriptionId
     output: SubscriptionClosed
+  - name: ReadReplicationBatch
+    input: [SourceId, ReplicationCursor, BatchLimit]
+    output: OrderedDurableReplicationRecords
+  - name: IngestReplicatedEvent
+    input: [SourceId, ReplicationCursor, SignedEvent]
+    output: ReplicationReceipt
 
 ports:
   - name: EventJournal
@@ -77,9 +98,33 @@ ports:
   - name: PolicyGate
     responsibility: Decide actor admission before state mutation.
     required_profile: portable-relay-policy-v0.1
+  - name: IdentityBoundary
+    responsibility: Authenticate principals and gate append, replication, and every read surface.
+    required_profile: portable-relay-identity-v0.1
+    model: specs/models/portable-relay/portable-relay-identity.model.yaml
+    required_semantics:
+      - authentication-evidence-is-not-event-history
+      - direct-author-delegation-or-privacy-envelope-binding
+      - replication-peer-source-binding
+      - request-and-result-read-authorization
   - name: CommittedEventEffects
     responsibility: Trigger idempotent observers after durable acceptance.
     required_profile: portable-relay-effects-v0.1
+  - name: ReplicationSource
+    responsibility: Export ordered durable history with source-owned opaque cursors.
+    required_profile: portable-relay-replication-v0.1
+    required_semantics:
+      - exact-signed-event-preservation
+      - durable-events-only
+      - cursor-resume-after-restart
+  - name: ReplicationSink
+    responsibility: Apply destination policy and normal ingest to replicated records.
+    required_profile: portable-relay-replication-v0.1
+    required_semantics:
+      - replication-disabled-by-default
+      - destination-policy-before-mutation
+      - destination-verification
+      - idempotent-replay
 
 invariants:
   - id: verified-before-state
@@ -98,6 +143,20 @@ invariants:
     description: Moving between adapters never rewrites the signed event envelope.
   - id: unsupported-fails-explicitly
     description: Unsupported protocol extensions fail rather than degrade to broader behavior.
+  - id: replication-preserves-envelope
+    description: Replication never rewrites event identity, author, kind, tags, content, or signature.
+  - id: source-acceptance-grants-no-authority
+    description: A destination independently authorizes and verifies every replicated event.
+  - id: rejected-replication-does-not-checkpoint
+    description: A rejection is not checkpoint-safe without an explicit durable operator decision.
+  - id: ephemeral-is-not-replicated
+    description: Replication sources export durable history only.
+  - id: identity-claims-remain-distinct
+    description: Event author, authenticated caller, replication peer, and authorization are independent claims.
+  - id: identity-denial-has-no-effects
+    description: Authentication or authorization denial changes neither durable history nor live state.
+  - id: every-read-is-authorized
+    description: Query, count, historical subscription, direct ID lookup, and live delivery apply per-event disclosure policy.
 
 boundaries:
   inside:
@@ -107,13 +166,17 @@ boundaries:
     - NIP-01 filter semantics
     - durable acceptance ordering
     - historical and live subscription ordering
+    - replication record, cursor, receipt, source, and sink semantics
+    - optional identity port and denial semantics
   outside:
     - storage representation
     - server framework and async runtime
-    - authentication and authorization policy
+    - authentication proof implementations and deployment authorization policy
     - full-text and semantic search
     - media and object storage
     - workflows and agent execution
     - audit implementation
-    - multi-node replication and availability
-
+    - replication transport and peer discovery
+    - replication topology and community mapping
+    - checkpoint storage and dead-letter policy
+    - distributed availability

@@ -25,6 +25,13 @@
       }
     },
     "query": {
+      "http": {
+        "method": "POST",
+        "path": "/query"
+      },
+      "websocket": {
+        "message_type": "REQ"
+      },
       "filters": [
         {
           "ids": [
@@ -37,6 +44,10 @@
       ]
     },
     "count": {
+      "http": {
+        "method": "POST",
+        "path": "/count"
+      },
       "expected": 1
     },
     "restart": {
@@ -46,4 +57,3 @@
     }
   }
 }
-

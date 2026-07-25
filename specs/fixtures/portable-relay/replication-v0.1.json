@@ -1,0 +1,22 @@
+{
+  "_meta": {
+    "id": "portable-relay-replication-v0.1",
+    "type": "fixture",
+    "description": "Shared exact-envelope and destination-policy expectations for relay replication adapters.",
+    "feature": "specs/features/portable-relay/adapter-conformance.feature",
+    "scenario": "Replicate durable signed history without transferring authority"
+  },
+  "profile": "portable-relay-replication-v0.1",
+  "source_id": "laptop-a/coherence",
+  "event_fixture": "../local-relay/signed-message.json",
+  "event_id": "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b",
+  "expectations": {
+    "first_ingest": "stored",
+    "replayed_ingest": "duplicate",
+    "unconfigured_source": "rejected",
+    "terminal_checkpoint_safe": true,
+    "rejected_checkpoint_safe": false,
+    "preserve_exact_envelope": true,
+    "export_ephemeral_events": false
+  }
+}
