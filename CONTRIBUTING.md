@@ -167,7 +167,7 @@ Before opening a PR, run the full CI gate locally:
 
 ```bash
 just ci
-# Runs: check + unit tests + desktop build + Tauri check + mobile tests
+# Runs: check + unit tests + desktop tests/build + Tauri check/tests + web build + mobile tests
 ```
 
 This is the same check that runs in CI. PRs that fail `just ci` will not be
@@ -278,7 +278,7 @@ required. The scope (in parentheses) is optional but encouraged.
 ### PR Checklist
 
 ```
-- [ ] `just ci` passes (fmt + clippy + unit tests + mobile)
+- [ ] `just ci` passes (fmt + clippy + unit tests + desktop/Tauri + web build + mobile)
 - [ ] Integration tests pass (`just test`)
 - [ ] New public APIs / tools / endpoints are documented
 - [ ] No new `unwrap()` in production code paths
