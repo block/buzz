@@ -27,6 +27,7 @@ jobs:
       desktop-rust: ${{ steps.filter.outputs.desktop-rust }}
       web: ${{ steps.filter.outputs.web }}
       mobile: ${{ steps.filter.outputs.mobile }}
+      schema: ${{ steps.filter.outputs.schema }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -56,6 +57,12 @@ jobs:
             web:
               - 'web/**'
               - 'pnpm-lock.yaml'
+            schema:
+              - 'migrations/**'
+              - 'schema/**'
+              - 'scripts/check-schema-drift.sh'
+              - 'scripts/attach-schema-partitions.sql'
+              - '.github/workflows/ci.yml'
             mobile:
               - 'mobile/**'
               - 'scripts/mobile-release.sh'
@@ -71,6 +78,24 @@ jobs:
         run: |
           scripts/test-mobile-release-contract.sh
           scripts/test-mobile-release-candidate-publisher.sh
+
+  schema-drift:
+    name: Schema Drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [changes]
+    if: github.event_name == 'push' || needs.changes.outputs.schema == 'true'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: cashapp/activate-hermit@cea9af7913204a965fd488637a8d1811bba2e616 # v1
+      # Applies migrations/*.sql to an ephemeral Postgres and fails if
+      # `pgschema plan schema/schema.sql` against that database is non-empty —
+      # i.e. the declarative snapshot no longer describes the schema the
+      # migrations build (#1322).
+      - name: Assert schema/schema.sql matches migrations/
+        run: just check-schema-drift
 
   rust-lint:
     name: Rust Lint
