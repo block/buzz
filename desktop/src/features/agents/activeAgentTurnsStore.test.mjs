@@ -154,25 +154,88 @@ describe("activeAgentTurnsStore", () => {
   });
 
   describe("eviction at MAX_TURNS_PER_AGENT", () => {
-    it("evicts oldest turn when exceeding 4 concurrent turns", () => {
+    // Mirrors the store's private cap: the harness's hard upper bound on
+    // parallel agent subprocesses (`--agents` accepts 1..=32).
+    const CAP = 32;
+    /** Desktop's default harness parallelism (DEFAULT_AGENT_PARALLELISM). */
+    const DEFAULT_PARALLELISM = 24;
+    const EPOCH = Date.parse("2024-01-01T00:00:00Z");
+    const at = (ms) => new Date(EPOCH + ms).toISOString();
+
+    /** One turn_started per channel, minute apart so start order is unambiguous. */
+    function startTurns(count, firstSeq = 1) {
       const events = [];
-      for (let i = 1; i <= 5; i++) {
+      for (let i = 1; i <= count; i++) {
         events.push(
           makeEvent({
-            seq: i,
+            seq: firstSeq + i - 1,
             turnId: `t${i}`,
             channelId: `c${i}`,
-            timestamp: `2024-01-01T00:0${i}:00Z`,
+            timestamp: at(i * 60_000),
           }),
         );
       }
-      syncAgentTurnsFromEvents(AGENT, events);
+      return events;
+    }
+
+    it("evicts oldest turn when exceeding the cap", () => {
+      syncAgentTurnsFromEvents(AGENT, startTurns(CAP + 1));
       const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
-      // Should have evicted c1 (oldest) to make room for c5
-      assert.equal(channels.size, 4);
+      // c1 (oldest) evicted to make room for the 33rd turn.
+      assert.equal(channels.size, CAP);
       assert.ok(!channels.has("c1"), "oldest turn should be evicted");
       assert.ok(channels.has("c2"));
-      assert.ok(channels.has("c5"));
+      assert.ok(channels.has(`c${CAP + 1}`));
+    });
+
+    it("tracks every turn of a default-parallelism agent working in 24 channels", () => {
+      // DEFAULT_AGENT_PARALLELISM is 24, so a single agent legitimately runs 24
+      // concurrent turns. Every one must keep its working badge.
+      syncAgentTurnsFromEvents(AGENT, startTurns(DEFAULT_PARALLELISM));
+      const channels = channelIdsOf(getActiveTurnsForAgent(AGENT));
+      assert.equal(
+        channels.size,
+        DEFAULT_PARALLELISM,
+        "all 24 concurrently-worked channels must be tracked",
+      );
+      for (let i = 1; i <= DEFAULT_PARALLELISM; i++) {
+        assert.ok(channels.has(`c${i}`), `c${i} must be tracked`);
+      }
+    });
+
+    it("keeps the tracked channel set stable as liveness arrives for every turn", () => {
+      // The flicker: with the cap below real parallelism, turns above it are
+      // evicted while still alive, and their 10s turn_liveness frames land on
+      // resurrectTurn — which evicts one of the survivors to make room. The set
+      // then rotates forever. Under a cap at the harness maximum, liveness for
+      // any live turn is a plain refresh and the set never moves.
+      const TURNS = 6;
+      syncAgentTurnsFromEvents(AGENT, startTurns(TURNS));
+      const expected = channelIdsOf(getActiveTurnsForAgent(AGENT));
+
+      // Liveness for the two earliest-started turns — the first to be evicted
+      // under the old cap, hence the first to trigger a resurrection swap.
+      for (const [i, turnId] of ["t1", "t2"].entries()) {
+        syncAgentTurnsFromEvents(AGENT, [
+          makeEvent({
+            seq: TURNS + i + 1,
+            kind: "turn_liveness",
+            turnId,
+            channelId: turnId.replace("t", "c"),
+            timestamp: at((TURNS + i + 1) * 60_000),
+          }),
+        ]);
+        assert.deepEqual(
+          [...channelIdsOf(getActiveTurnsForAgent(AGENT))].sort(),
+          [...expected].sort(),
+          `liveness for ${turnId} must not change the tracked channel set`,
+        );
+      }
+      assert.equal(
+        expected.size,
+        TURNS,
+        "all six live turns must be tracked, not a rotating subset",
+      );
     });
   });
 
@@ -1343,16 +1406,17 @@ describe("activeAgentTurnsStore", () => {
     });
 
     it("evicts the oldest tombstone once past the cap so the map stays bounded", () => {
-      // The tombstone map is capped at MAX_TERMINAL_TOMBSTONES (16). Complete
-      // 18 distinct turns so eviction fires twice, dropping the two oldest by
-      // insertion order (t0, t1). Probe via the ONE behavior a tombstone gates
-      // that a strictly-newer frame cannot mask: an EQUAL-timestamp liveness
-      // (frameAt == terminalAt). All completions share timestamp T with rising
-      // seq, so the probe clears the per-agent watermark on the seq tiebreak
-      // (compareObserverEvents is timestamp-primary, seq-secondary) yet stays
-      // equal to the recorded terminal — reaching resurrectTurn's tombstone
-      // check rather than being shadowed by the watermark.
-      const CAP = 16;
+      // The tombstone map is capped at MAX_TERMINAL_TOMBSTONES (MAX_TURNS_PER_AGENT
+      // * 4 = 128). Complete 130 distinct turns so eviction fires twice, dropping
+      // the two oldest by insertion order (t0, t1). Probe via the ONE behavior a
+      // tombstone gates that a strictly-newer frame cannot mask: an
+      // EQUAL-timestamp liveness (frameAt == terminalAt). All completions share
+      // timestamp T with rising seq, so the probe clears the per-agent watermark
+      // on the seq tiebreak (compareObserverEvents is timestamp-primary,
+      // seq-secondary) yet stays equal to the recorded terminal — reaching
+      // resurrectTurn's tombstone check rather than being shadowed by the
+      // watermark.
+      const CAP = 128;
       const TOTAL = CAP + 2;
       const T = at(0);
       const completions = [];
