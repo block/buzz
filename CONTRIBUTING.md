@@ -4,7 +4,7 @@ Welcome, and thank you for your interest in contributing! Buzz is an
 open-source project and we're glad you're here. This guide will help you
 get from zero to a merged pull request.
 
-If you have questions that aren't answered here, [open a question issue](https://github.com/block/buzz/issues/new?template=question.yml).
+If you have questions that aren't answered here, [open an issue](https://github.com/block/buzz/issues/new).
 
 ---
 
@@ -35,52 +35,15 @@ unacceptable behavior to **conduct@buzz-relay.org**.
 
 ## Before You Open a PR
 
-A two-minute search can save you from building something that's already in
-review. Since launch we've had several people independently build the same
-fix — a quick look at open PRs and issues first makes everyone's time count.
+Before starting, search [open PRs](https://github.com/block/buzz/pulls) and [open issues](https://github.com/block/buzz/issues) for duplicates — someone may already be working on the same thing. When you open your PR, link the closest existing one in the description (or say "none found").
 
-### Check for duplicates first
+For anything beyond a small fix, opening an issue first is strongly recommended. Describe the problem and proposed solution so a maintainer can acknowledge the approach before you build — it avoids two people building the same thing in parallel.
 
-Search [open PRs](https://github.com/block/buzz/pulls) and
-[open issues](https://github.com/block/buzz/issues) before you start.
-When you open your PR, name the closest existing one in the description
-(or "none found"). When two PRs address the same thing, we keep the earlier
-one unless the later one is clearly more complete, and close the other with
-a pointer.
+Buzz is an agent platform, so AI-assisted PRs are welcome. No need to disclose the tools you used, but you own and must have reviewed the final code. Submissions that are clearly unreviewed may be closed with a pointer here.
 
-### Features: open an issue first (strongly recommended)
+We squash-merge, so your PR title becomes the commit subject in `main`. Use [Conventional Commits](https://www.conventionalcommits.org/) format: `feat(mcp): add get_feed_actions tool`. The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is required. See the [Commit Messages](#commit-messages) section for the full reference.
 
-For anything beyond a typo fix, doc improvement, or obvious bug, opening
-an issue first is the best way to avoid spending a weekend on something
-someone else is already building. Describe the problem and proposed
-solution, and comment to claim it once a maintainer has acknowledged the
-approach — that way two people don't build the same thing in parallel.
-
-Small fixes (typos, doc improvements, obvious bugs with clear fixes) can
-go straight to a PR.
-
-### AI / agent-assisted contributions
-
-Buzz is an agent platform — AI-assisted PRs are welcome and encouraged.
-The **human submitter is accountable**: you personally verified the change
-builds and behaves as described, you searched for duplicates, and you will
-respond to review feedback. PRs that don't meet this bar may be closed
-with a pointer to this section.
-
-### PR titles follow Conventional Commits
-
-We squash-merge, so your PR title becomes the commit subject in `main`.
-Follow the same format as commit messages:
-
-```
-feat(mcp): add get_feed_actions tool
-fix(auth): reject expired NIP-42 challenges
-docs(contributing): add duplicate-check policy
-```
-
-The type prefix (`feat`, `fix`, `docs`, `refactor`, `test`, `chore`) is
-required. See the [Commit Messages](#commit-messages) section for the
-full reference.
+We review as capacity allows — focused PRs that follow this guide move fastest.
 
 ---
 
