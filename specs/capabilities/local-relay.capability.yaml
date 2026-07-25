@@ -12,6 +12,10 @@ capability:
     - ../contracts/asyncapi/local-relay.yaml
   fixtures:
     - ../fixtures/local-relay/signed-message.json
+  conformance:
+    boundary: ./portable-relay.capability.yaml
+    profile: portable-relay-core-v0.1
+    role: laptop-reference
   implementation:
     crate: crates/buzz-local-relay
     status: implemented

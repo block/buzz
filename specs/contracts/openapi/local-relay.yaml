@@ -7,6 +7,9 @@ paths:
   /health:
     get:
       operationId: localRelayHealth
+      x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+      x-feature: specs/features/local-relay/durable-local-event-log.feature
+      x-journey: specs/journeys/start-durable-local-buzz.md
       responses:
         "200":
           description: Relay is ready.
@@ -21,6 +24,9 @@ paths:
   /events:
     post:
       operationId: submitLocalEvent
+      x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+      x-feature: specs/features/portable-relay/adapter-conformance.feature
+      x-journey: specs/journeys/start-durable-local-buzz.md
       requestBody:
         required: true
         content:
@@ -39,6 +45,9 @@ paths:
   /query:
     post:
       operationId: queryLocalEvents
+      x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+      x-feature: specs/features/portable-relay/adapter-conformance.feature
+      x-journey: specs/journeys/start-durable-local-buzz.md
       requestBody:
         required: true
         content:
@@ -62,6 +71,9 @@ paths:
   /count:
     post:
       operationId: countLocalEvents
+      x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+      x-feature: specs/features/portable-relay/adapter-conformance.feature
+      x-journey: specs/journeys/start-durable-local-buzz.md
       requestBody:
         required: true
         content:

@@ -82,3 +82,6 @@ cargo clippy -p buzz-local-relay --all-targets -- -D warnings
 ```
 
 The intent and acceptance behavior live under [`specs/`](../../specs/README.md).
+This crate is the laptop reference adapter for the
+[`portable-relay-core-v0.1`](../../specs/architecture/portable-relay-boundary.md)
+behavioral boundary.

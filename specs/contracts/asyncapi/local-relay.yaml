@@ -27,6 +27,9 @@ channels:
 operations:
   sendToRelay:
     action: send
+    x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+    x-feature: specs/features/portable-relay/adapter-conformance.feature
+    x-journey: specs/journeys/start-durable-local-buzz.md
     channel:
       $ref: "#/channels/relay"
     messages:
@@ -35,6 +38,9 @@ operations:
       - $ref: "#/channels/relay/messages/close"
   receiveFromRelay:
     action: receive
+    x-story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+    x-feature: specs/features/portable-relay/adapter-conformance.feature
+    x-journey: specs/journeys/start-durable-local-buzz.md
     channel:
       $ref: "#/channels/relay"
     messages:

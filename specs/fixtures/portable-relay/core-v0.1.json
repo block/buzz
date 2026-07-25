@@ -1,0 +1,49 @@
+{
+  "_meta": {
+    "id": "portable-relay-core-v0.1",
+    "type": "fixture",
+    "description": "Minimum signed-event vector shared by every portable relay adapter.",
+    "story": "specs/stories/local-relay/run-without-hosted-infrastructure.md",
+    "feature": "specs/features/portable-relay/adapter-conformance.feature",
+    "scenario": "Preserve a signed event across adapters"
+  },
+  "profile": "portable-relay-core-v0.1",
+  "event_fixture": "../local-relay/signed-message.json",
+  "event_id": "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b",
+  "operations": {
+    "submit": {
+      "http": {
+        "method": "POST",
+        "path": "/events"
+      },
+      "websocket": {
+        "message_type": "EVENT"
+      },
+      "expected": {
+        "accepted": true,
+        "event_id": "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b"
+      }
+    },
+    "query": {
+      "filters": [
+        {
+          "ids": [
+            "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b"
+          ]
+        }
+      ],
+      "expected_event_ids": [
+        "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b"
+      ]
+    },
+    "count": {
+      "expected": 1
+    },
+    "restart": {
+      "expected_event_ids": [
+        "d892a65e7677e0554ebb70ee16deeb6a0727dba46450fb4bc001291d7bff971b"
+      ]
+    }
+  }
+}
+

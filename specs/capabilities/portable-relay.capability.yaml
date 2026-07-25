@@ -1,0 +1,34 @@
+capability:
+  name: Portable relay boundary
+  status: specified
+  version: portable-relay-core-v0.1
+  telos: ../TELOS.md
+  persona: ../personas/local-first-builder.md
+  journey: ../journeys/start-durable-local-buzz.md
+  story: ../stories/local-relay/run-without-hosted-infrastructure.md
+  architecture: ../architecture/portable-relay-boundary.md
+  model: ../models/portable-relay/portable-relay-boundary.model.yaml
+  behavior: ../features/portable-relay/adapter-conformance.feature
+  contracts:
+    - ../contracts/openapi/local-relay.yaml
+    - ../contracts/asyncapi/local-relay.yaml
+  fixtures:
+    - ../fixtures/portable-relay/core-v0.1.json
+    - ../fixtures/local-relay/signed-message.json
+  profiles:
+    required:
+      - portable-relay-core-v0.1
+    optional:
+      - portable-relay-policy-v0.1
+      - portable-relay-effects-v0.1
+  adapters:
+    - name: laptop-reference
+      implementation: crates/buzz-local-relay
+      status: implemented
+    - name: cloud-native
+      implementation: unassigned
+      status: planned
+    - name: hosted-buzz
+      implementation: crates/buzz-relay
+      status: conformance-not-yet-measured
+

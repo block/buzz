@@ -1,0 +1,119 @@
+id: portable-relay-boundary
+type: model
+model:
+  name: PortableRelayNode
+  type: aggregate
+  purpose: |
+    Preserve signed event identity and relay continuity while allowing
+    transport, storage, policy, and effect adapters to vary by runtime.
+
+sources:
+  telos: specs/TELOS.md
+  story: specs/stories/local-relay/run-without-hosted-infrastructure.md
+  journey: specs/journeys/start-durable-local-buzz.md
+  architecture: specs/architecture/portable-relay-boundary.md
+
+entities:
+  - name: SignedEvent
+    identity: event.id
+    immutable: true
+    attributes:
+      - event.id
+      - event.pubkey
+      - event.created_at
+      - event.kind
+      - event.tags
+      - event.content
+      - event.sig
+
+value_objects:
+  - name: RelayDecision
+    values:
+      - stored
+      - duplicate
+      - superseded
+      - ephemeral
+      - rejected
+  - name: ReplacementKey
+    variants:
+      - regular: event.id
+      - replaceable: [event.pubkey, event.kind]
+      - parameterized_replaceable: [event.pubkey, event.kind, d_tag]
+  - name: ConformanceProfile
+    values:
+      - portable-relay-core-v0.1
+      - portable-relay-policy-v0.1
+      - portable-relay-effects-v0.1
+
+commands:
+  - name: SubmitEvent
+    input: SignedEvent
+    output: RelayDecision
+  - name: QueryEvents
+    input: NostrFilterSet
+    output: EffectiveEventList
+  - name: CountEvents
+    input: NostrFilterSet
+    output: EventCount
+  - name: OpenSubscription
+    input: [SubscriptionId, NostrFilterSet]
+    output: HistoricalThenLiveEventStream
+  - name: CloseSubscription
+    input: SubscriptionId
+    output: SubscriptionClosed
+
+ports:
+  - name: EventJournal
+    responsibility: Append verified durable events and replay accepted history.
+    required_semantics:
+      - append-before-acceptance
+      - durability-barrier
+      - exact-signed-event-preservation
+      - idempotency-by-event-id
+  - name: EffectiveEventQuery
+    responsibility: Query and count the effective event set using NIP-01 filters.
+  - name: SubscriptionHub
+    responsibility: Deliver historical events, EOSE, and matching live events.
+  - name: PolicyGate
+    responsibility: Decide actor admission before state mutation.
+    required_profile: portable-relay-policy-v0.1
+  - name: CommittedEventEffects
+    responsibility: Trigger idempotent observers after durable acceptance.
+    required_profile: portable-relay-effects-v0.1
+
+invariants:
+  - id: verified-before-state
+    description: Only events with a valid computed ID and Schnorr signature alter relay state.
+  - id: durable-before-observable-acceptance
+    description: A durable event is recoverable before acceptance is observable.
+  - id: rejected-has-no-effects
+    description: A rejected event changes neither durable state nor live subscriptions.
+  - id: duplicate-is-idempotent
+    description: Re-submitting an accepted event ID creates no additional durable record.
+  - id: ephemeral-is-live-only
+    description: Ephemeral kinds 20000 through 29999 may publish live but never replay.
+  - id: replay-is-deterministic
+    description: Replaying accepted history yields the original effective event set.
+  - id: adapter-preserves-identity
+    description: Moving between adapters never rewrites the signed event envelope.
+  - id: unsupported-fails-explicitly
+    description: Unsupported protocol extensions fail rather than degrade to broader behavior.
+
+boundaries:
+  inside:
+    - signed event verification
+    - event classification
+    - replacement and duplicate reduction
+    - NIP-01 filter semantics
+    - durable acceptance ordering
+    - historical and live subscription ordering
+  outside:
+    - storage representation
+    - server framework and async runtime
+    - authentication and authorization policy
+    - full-text and semantic search
+    - media and object storage
+    - workflows and agent execution
+    - audit implementation
+    - multi-node replication and availability
+

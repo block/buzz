@@ -54,3 +54,9 @@ An experiment should be able to begin against the local relay and later move to
 the hosted architecture without changing its event vocabulary or identity.
 Promotion means changing operational adapters and policy, not rewriting the
 meaning of the work.
+
+The [portable relay boundary](architecture/portable-relay-boundary.md) names
+the behavior that survives promotion: signed-event identity, verification,
+classification, effective-state reduction, filter semantics, durable
+acceptance ordering, and historical-to-live subscriptions. Storage, server
+runtimes, policy, and asynchronous effects remain replaceable adapters.
