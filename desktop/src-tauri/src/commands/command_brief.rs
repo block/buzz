@@ -41,6 +41,12 @@ fn require_active_owner(state: &AppState) -> Result<Keys, &'static str> {
         .map_err(|_| "command brief identity unavailable")
 }
 
+fn active_owner_matches(state: &AppState, expected_owner: &str) -> bool {
+    require_active_owner(state)
+        .map(|keys| keys.public_key().to_hex() == expected_owner)
+        .unwrap_or(false)
+}
+
 fn validate_schedule_update(update: &CommandBriefScheduleUpdate) -> Result<(), &'static str> {
     let bytes = update.local_time.as_bytes();
     let valid_time = bytes.len() == 5
@@ -82,32 +88,83 @@ fn emit_status(app: &AppHandle, status: &BriefRunStatus) {
     let _ = app.emit("command-brief-status-changed", status);
 }
 
+async fn status_view_for_owner(
+    state: &AppState,
+    owner_pubkey: &str,
+) -> Result<CommandBriefStatusView, &'static str> {
+    let (current, history) = state
+        .command_brief_runtimes
+        .read()
+        .await
+        .latest_status_and_history(owner_pubkey)
+        .map_or((None, Vec::new()), |(current, history)| {
+            (Some(current), history)
+        });
+    if !active_owner_matches(state, owner_pubkey) {
+        return Err("command brief identity unavailable");
+    }
+    Ok(CommandBriefStatusView {
+        classification: "OFFICIAL",
+        current,
+        history,
+    })
+}
+
+async fn history_for_owner_emit(
+    state: &AppState,
+    owner_pubkey: &str,
+    run_id: &str,
+    cursor: Option<u64>,
+) -> Option<Vec<BriefRunStatus>> {
+    if !active_owner_matches(state, owner_pubkey) {
+        return None;
+    }
+    let history =
+        state
+            .command_brief_runtimes
+            .read()
+            .await
+            .history_after(owner_pubkey, run_id, cursor);
+    active_owner_matches(state, owner_pubkey).then_some(history)
+}
+
+fn unseen_status_batch(history: Vec<BriefRunStatus>, cursor: Option<u64>) -> Vec<BriefRunStatus> {
+    history
+        .into_iter()
+        .filter(|status| cursor.is_none_or(|cursor| status.sequence() > cursor))
+        .collect()
+}
+
 pub(crate) fn watch_command_brief_status(
     app: AppHandle,
+    owner_pubkey: String,
     run_id: String,
     initial_status: Option<&BriefRunStatus>,
 ) {
-    let initial_key =
-        initial_status.map(|status| (status.state(), status.updated_at().to_string()));
+    let initial_cursor = initial_status.map(BriefRunStatus::sequence);
     tauri::async_runtime::spawn(async move {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(4 * 60 * 60);
-        let mut last = initial_key;
+        let mut cursor = initial_cursor;
         let mut emitted = 0_usize;
         while tokio::time::Instant::now() < deadline && emitted < 32 {
-            let status = {
-                let state = app.state::<AppState>();
-                let status = state.command_brief_runtimes.read().await.status(&run_id);
-                status
+            let Some(history) =
+                history_for_owner_emit(&app.state::<AppState>(), &owner_pubkey, &run_id, cursor)
+                    .await
+            else {
+                break;
             };
-            if let Some(status) = status {
-                let key = (status.state(), status.updated_at().to_string());
-                if last.as_ref() != Some(&key) {
-                    emit_status(&app, &status);
-                    emitted += 1;
-                    last = Some(key);
+            for status in unseen_status_batch(history, cursor) {
+                if !active_owner_matches(&app.state::<AppState>(), &owner_pubkey) {
+                    return;
                 }
+                emit_status(&app, &status);
+                emitted += 1;
+                cursor = Some(status.sequence());
                 if terminal(status.state()) {
-                    break;
+                    return;
+                }
+                if emitted == 32 {
+                    return;
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -120,20 +177,11 @@ pub(crate) fn watch_command_brief_status(
 pub async fn get_command_brief_status(
     state: State<'_, AppState>,
 ) -> Result<CommandBriefStatusView, String> {
-    require_active_owner(&state).map_err(str::to_string)?;
-    let (current, history) = state
-        .command_brief_runtimes
-        .read()
+    let owner = require_active_owner(&state).map_err(str::to_string)?;
+    let owner_pubkey = owner.public_key().to_hex();
+    status_view_for_owner(&state, &owner_pubkey)
         .await
-        .latest_status_and_history()
-        .map_or((None, Vec::new()), |(current, history)| {
-            (Some(current), history)
-        });
-    Ok(CommandBriefStatusView {
-        classification: "OFFICIAL",
-        current,
-        history,
-    })
+        .map_err(str::to_string)
 }
 
 /// Start the fixed native OFFICIAL Daily Command Brief request.
@@ -142,11 +190,24 @@ pub async fn start_command_brief(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BriefRunStatus, String> {
-    require_active_owner(&state).map_err(str::to_string)?;
-    let status = crate::startup::start_manual_command_brief(app.clone())
+    let owner_pubkey = require_active_owner(&state)
+        .map_err(str::to_string)?
+        .public_key()
+        .to_hex();
+    let status = crate::startup::start_manual_command_brief(app.clone(), &owner_pubkey)
         .await
         .map_err(|_| command_error())?;
-    watch_command_brief_status(app, status.run_id().to_string(), Some(&status));
+    if !active_owner_matches(&state, &owner_pubkey) {
+        let runtimes = state.command_brief_runtimes.read().await;
+        runtimes.cancel(&owner_pubkey, status.run_id());
+        return Err("command brief identity unavailable".to_string());
+    }
+    watch_command_brief_status(
+        app,
+        owner_pubkey,
+        status.run_id().to_string(),
+        Some(&status),
+    );
     Ok(status)
 }
 
@@ -156,16 +217,22 @@ pub async fn cancel_command_brief(
     state: State<'_, AppState>,
     run_id: String,
 ) -> Result<BriefRunStatus, String> {
-    require_active_owner(&state).map_err(str::to_string)?;
+    let owner = require_active_owner(&state).map_err(str::to_string)?;
+    let owner_pubkey = owner.public_key().to_hex();
     if !valid_run_id(&run_id) {
         return Err("command brief input invalid".to_string());
     }
     let runtimes = state.command_brief_runtimes.read().await;
-    if !runtimes.cancel(&run_id) {
+    if !active_owner_matches(&state, &owner_pubkey) || !runtimes.cancel(&owner_pubkey, &run_id) {
         return Err(command_error());
     }
-    let status = runtimes.status(&run_id).ok_or_else(command_error)?;
+    let status = runtimes
+        .status(&owner_pubkey, &run_id)
+        .ok_or_else(command_error)?;
     drop(runtimes);
+    if !active_owner_matches(&state, &owner_pubkey) {
+        return Err("command brief identity unavailable".to_string());
+    }
     Ok(status)
 }
 
@@ -175,19 +242,31 @@ pub fn get_latest_command_brief(
     state: State<'_, AppState>,
 ) -> Result<Option<PublishedCommandBrief>, String> {
     let owner = require_active_owner(&state).map_err(str::to_string)?;
+    let owner_pubkey = owner.public_key().to_hex();
     let path = crate::startup::command_brief_store_path().map_err(|_| command_error())?;
-    load_latest_published_brief(&path, &owner).map_err(|_| command_error())
+    let latest = load_latest_published_brief(&path, &owner).map_err(|_| command_error())?;
+    if !active_owner_matches(&state, &owner_pubkey) {
+        return Err("command brief identity unavailable".to_string());
+    }
+    Ok(latest)
 }
 
 /// Read the fixed local Daily Command Brief schedule.
 #[tauri::command]
 pub fn get_command_brief_schedule(state: State<'_, AppState>) -> Result<BriefSchedule, String> {
-    require_active_owner(&state).map_err(str::to_string)?;
+    let owner_pubkey = require_active_owner(&state)
+        .map_err(str::to_string)?
+        .public_key()
+        .to_hex();
     let path = crate::startup::command_brief_store_path().map_err(|_| command_error())?;
     let conn = open_command_brief_store(&path).map_err(|_| command_error())?;
     let timezone = current_macos_timezone().map_err(|_| command_error())?;
-    load_or_create_schedule(&conn, &timezone, chrono::Utc::now().timestamp())
-        .map_err(|_| command_error())
+    let schedule = load_or_create_schedule(&conn, &timezone, chrono::Utc::now().timestamp())
+        .map_err(|_| command_error())?;
+    if !active_owner_matches(&state, &owner_pubkey) {
+        return Err("command brief identity unavailable".to_string());
+    }
+    Ok(schedule)
 }
 
 /// Update only renderer-safe schedule controls; identity and timezone stay native-owned.
@@ -196,14 +275,20 @@ pub fn set_command_brief_schedule(
     state: State<'_, AppState>,
     update: CommandBriefScheduleUpdate,
 ) -> Result<BriefSchedule, String> {
-    require_active_owner(&state).map_err(str::to_string)?;
+    let owner_pubkey = require_active_owner(&state)
+        .map_err(str::to_string)?
+        .public_key()
+        .to_hex();
     validate_schedule_update(&update).map_err(str::to_string)?;
     let path = crate::startup::command_brief_store_path().map_err(|_| command_error())?;
     let conn = open_command_brief_store(&path).map_err(|_| command_error())?;
     let timezone = current_macos_timezone().map_err(|_| command_error())?;
     let current = load_or_create_schedule(&conn, &timezone, chrono::Utc::now().timestamp())
         .map_err(|_| command_error())?;
-    save_schedule_update(
+    if !active_owner_matches(&state, &owner_pubkey) {
+        return Err("command brief identity unavailable".to_string());
+    }
+    let updated = save_schedule_update(
         &conn,
         ScheduleUpdate {
             enabled: update.enabled,
@@ -214,7 +299,11 @@ pub fn set_command_brief_schedule(
         },
         chrono::Utc::now().timestamp(),
     )
-    .map_err(|_| command_error())
+    .map_err(|_| command_error())?;
+    if !active_owner_matches(&state, &owner_pubkey) {
+        return Err("command brief identity unavailable".to_string());
+    }
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -350,6 +439,70 @@ mod tests {
                 .expect("owner scoped query")
                 .is_none(),
             "a different unlocked identity must not learn another owner's history"
+        );
+    }
+
+    #[tokio::test]
+    async fn status_reconciliation_rejects_an_identity_switch_while_awaiting_runtime_state() {
+        let state = Arc::new(build_app_state());
+        let owner_a = state.signing_keys().expect("owner A").public_key().to_hex();
+        let runtime_guard = state.command_brief_runtimes.write().await;
+        let read_state = Arc::clone(&state);
+        let read_owner = owner_a.clone();
+        let pending =
+            tokio::spawn(async move { status_view_for_owner(&read_state, &read_owner).await });
+        tokio::task::yield_now().await;
+        *state.keys.lock().expect("identity") = Keys::generate();
+        drop(runtime_guard);
+
+        assert!(matches!(
+            pending.await.expect("status task"),
+            Err("command brief identity unavailable")
+        ));
+    }
+
+    #[tokio::test]
+    async fn watcher_history_terminates_without_an_existence_signal_after_identity_switch() {
+        let state = build_app_state();
+        let owner_a = state.signing_keys().expect("owner A").public_key().to_hex();
+        *state.keys.lock().expect("identity") = Keys::generate();
+
+        assert!(
+            history_for_owner_emit(&state, &owner_a, "owner-a-run", None)
+                .await
+                .is_none(),
+            "identity mismatch must terminate the watcher instead of returning an empty existence signal"
+        );
+    }
+
+    #[test]
+    fn watcher_batch_keeps_every_unseen_fast_transition_in_sequence_order() {
+        let make = |sequence, state| {
+            BriefRunStatus::try_from(json!({
+                "classification": "OFFICIAL",
+                "runId": "run-fast",
+                "scheduleId": "daily-command-brief",
+                "sequence": sequence,
+                "state": state,
+                "updatedAt": "2026-07-25T06:00:00Z",
+                "degradedSections": [],
+                "error": null
+            }))
+            .expect("status")
+        };
+        let history = vec![
+            make(0, "queued"),
+            make(1, "collecting_sources"),
+            make(2, "completed"),
+        ];
+
+        let unseen = unseen_status_batch(history, Some(0));
+        assert_eq!(
+            unseen
+                .iter()
+                .map(BriefRunStatus::sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 }

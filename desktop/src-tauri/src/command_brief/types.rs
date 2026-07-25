@@ -4,6 +4,10 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+mod status;
+
+pub use status::BriefRunStatus;
+
 /// The only permitted classification for Daily Command Brief material.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Classification {
@@ -339,19 +343,6 @@ pub struct PublishedCommandBrief {
     publication_state: PublicationState,
 }
 
-/// Current bounded status for one run.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BriefRunStatus {
-    classification: Classification,
-    run_id: String,
-    schedule_id: String,
-    state: BriefRunState,
-    updated_at: String,
-    degraded_sections: Vec<BriefSection>,
-    error: Option<String>,
-}
-
 /// The persisted local Daily Command Brief schedule contract.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -466,18 +457,6 @@ struct RawPublishedCommandBrief {
     brief: Value,
     lifecycle_audit_event_id: String,
     publication_state: PublicationState,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RawBriefRunStatus {
-    classification: Classification,
-    run_id: String,
-    schedule_id: String,
-    state: BriefRunState,
-    updated_at: String,
-    degraded_sections: Vec<BriefSection>,
-    error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -852,50 +831,6 @@ impl TryFrom<Value> for PublishedCommandBrief {
             lifecycle_audit_event_id: raw.lifecycle_audit_event_id,
             publication_state: raw.publication_state,
         })
-    }
-}
-
-impl TryFrom<Value> for BriefRunStatus {
-    type Error = ContractError;
-
-    fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let raw: RawBriefRunStatus = serde_json::from_value(value).map_err(|_| ContractError)?;
-        if !valid_text(&raw.run_id)
-            || !valid_text(&raw.schedule_id)
-            || !valid_time(&raw.updated_at)
-            || raw.degraded_sections.len() > MAX_ARRAY_ITEMS
-            || raw.degraded_sections.iter().collect::<BTreeSet<_>>().len()
-                != raw.degraded_sections.len()
-            || raw.error.as_deref().is_some_and(|error| !valid_text(error))
-        {
-            return Err(ContractError);
-        }
-        Ok(Self {
-            classification: raw.classification,
-            run_id: raw.run_id,
-            schedule_id: raw.schedule_id,
-            state: raw.state,
-            updated_at: raw.updated_at,
-            degraded_sections: raw.degraded_sections,
-            error: raw.error,
-        })
-    }
-}
-
-impl BriefRunStatus {
-    /// Return the native-owned run identity.
-    pub fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
-    /// Return the closed lifecycle state.
-    pub const fn state(&self) -> BriefRunState {
-        self.state
-    }
-
-    /// Return the trusted status timestamp used for bounded ordering.
-    pub fn updated_at(&self) -> &str {
-        &self.updated_at
     }
 }
 

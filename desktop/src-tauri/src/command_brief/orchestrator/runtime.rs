@@ -101,6 +101,7 @@ impl CommandBriefOrchestrator {
         let queued = status_value(
             &run_id,
             &request.schedule_id,
+            0,
             BriefRunState::Queued,
             &[],
             None,

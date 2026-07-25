@@ -319,6 +319,7 @@ test("requires OFFICIAL classification for schedule, run, and lifecycle records"
     classification: "OFFICIAL",
     runId: "run-1",
     scheduleId: "daily-command-brief",
+    sequence: 0,
     state: "completed",
     updatedAt: NOW,
     degradedSections: [],
@@ -327,6 +328,8 @@ test("requires OFFICIAL classification for schedule, run, and lifecycle records"
   assert.ok(parseBriefRunStatus(run));
   const { classification: _, ...missingRunClassification } = run;
   assert.equal(parseBriefRunStatus(missingRunClassification), null);
+  const { sequence: __, ...missingRunSequence } = run;
+  assert.equal(parseBriefRunStatus(missingRunSequence), null);
 
   const lifecycle = {
     classification: "OFFICIAL",

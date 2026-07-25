@@ -1,5 +1,5 @@
 import type { BriefSchedule } from "@/features/command-console/domain/briefContracts";
-import type { CommandBriefScheduleUpdate } from "@/shared/api/tauriCommandBrief";
+import type { CommandBriefSchedulePatch } from "../hooks/useDailyCommandBrief";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
 import { Switch } from "@/shared/ui/switch";
@@ -11,16 +11,8 @@ export function BriefScheduleControls({
 }: {
   schedule: BriefSchedule;
   disabled: boolean;
-  onChange: (update: CommandBriefScheduleUpdate) => void;
+  onChange: (patch: CommandBriefSchedulePatch) => void;
 }) {
-  const update = (patch: Partial<CommandBriefScheduleUpdate>) =>
-    onChange({
-      enabled: schedule.enabled,
-      localTime: schedule.localTime,
-      concurrency: schedule.concurrency,
-      ...patch,
-    });
-
   return (
     <Card>
       <CardHeader>
@@ -36,7 +28,7 @@ export function BriefScheduleControls({
             checked={schedule.enabled}
             disabled={disabled}
             id="daily-command-brief-enabled"
-            onCheckedChange={(checked) => update({ enabled: checked })}
+            onCheckedChange={(checked) => onChange({ enabled: checked })}
           />
           <span>Enabled</span>
         </label>
@@ -46,7 +38,7 @@ export function BriefScheduleControls({
             aria-label="Daily Command Brief local time"
             disabled={disabled}
             id="daily-command-brief-time"
-            onChange={(event) => update({ localTime: event.target.value })}
+            onChange={(event) => onChange({ localTime: event.target.value })}
             type="time"
             value={schedule.localTime}
           />
@@ -62,7 +54,9 @@ export function BriefScheduleControls({
             disabled={disabled}
             id="daily-command-brief-concurrency"
             onChange={(event) =>
-              update({ concurrency: Number(event.target.value) as 1 | 2 })
+              onChange({
+                concurrency: Number(event.target.value) as 1 | 2,
+              })
             }
             value={schedule.concurrency}
           >

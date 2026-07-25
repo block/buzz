@@ -8,7 +8,7 @@ import {
   type BriefSection,
   type PublishedCommandBrief,
 } from "@/features/command-console/domain/briefContracts";
-import type { CommandBriefScheduleUpdate } from "@/shared/api/tauriCommandBrief";
+import type { CommandBriefSchedulePatch } from "../hooks/useDailyCommandBrief";
 import { Alert, AlertDescription, AlertTitle } from "@/shared/ui/alert";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
@@ -180,7 +180,7 @@ export type DailyCommandBriefProps = {
   readonly error: string | null;
   readonly onGenerate: () => void;
   readonly onCancel: () => void;
-  readonly onScheduleChange: (update: CommandBriefScheduleUpdate) => void;
+  readonly onScheduleChange: (patch: CommandBriefSchedulePatch) => void;
 };
 
 export function DailyCommandBrief({
@@ -250,7 +250,7 @@ export function DailyCommandBrief({
               {history.map((entry) => (
                 <li
                   className="flex items-center justify-between gap-3 rounded-lg border p-3 text-sm"
-                  key={`${entry.runId}-${entry.updatedAt}-${entry.state}`}
+                  key={`${entry.runId}-${entry.sequence}`}
                 >
                   <span>{STATE_LABELS[entry.state]}</span>
                   <time
@@ -309,6 +309,23 @@ export function DailyCommandBrief({
               </Badge>
             </CardContent>
           </Card>
+
+          {latest.brief.degradedSections.length > 0 ? (
+            <Alert className="border border-warning/30 bg-warning/10">
+              <AlertTitle className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" aria-hidden="true" />
+                Complete with limitations
+              </AlertTitle>
+              <AlertDescription>
+                <p>Degraded sections</p>
+                <ul className="mt-1 list-disc pl-5">
+                  {latest.brief.degradedSections.map((section) => (
+                    <li key={section}>{SECTION_LABELS[section]}</li>
+                  ))}
+                </ul>
+              </AlertDescription>
+            </Alert>
+          ) : null}
 
           <Alert>
             <AlertTitle className="flex items-center gap-2">

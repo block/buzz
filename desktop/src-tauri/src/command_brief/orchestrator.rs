@@ -985,11 +985,20 @@ impl CommandBriefOrchestrator {
         degraded: &[BriefSection],
         error: Option<&str>,
     ) {
-        let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
-            return;
-        };
         if let Ok(mut runs) = self.inner.runs.lock() {
             if let Some(record) = runs.get_mut(run_id) {
+                let Some(sequence) = record
+                    .history
+                    .back()
+                    .and_then(|status| status.sequence().checked_add(1))
+                else {
+                    return;
+                };
+                let Ok(status) =
+                    status_value(run_id, schedule_id, sequence, state, degraded, error)
+                else {
+                    return;
+                };
                 if record.history.len() == MAX_STATUS_HISTORY {
                     record.history.pop_front();
                 }
@@ -1013,7 +1022,16 @@ impl CommandBriefOrchestrator {
                 if is_terminal(record.state) {
                     return;
                 }
-                let Ok(status) = status_value(run_id, schedule_id, state, degraded, error) else {
+                let Some(sequence) = record
+                    .history
+                    .back()
+                    .and_then(|status| status.sequence().checked_add(1))
+                else {
+                    return;
+                };
+                let Ok(status) =
+                    status_value(run_id, schedule_id, sequence, state, degraded, error)
+                else {
                     return;
                 };
                 if record.history.len() == MAX_STATUS_HISTORY {
@@ -1235,6 +1253,7 @@ fn source_error_code(error: &SourceCollectionError) -> CommandBriefFailureCode {
 fn status_value(
     run_id: &str,
     schedule_id: &str,
+    sequence: u64,
     state: BriefRunState,
     degraded: &[BriefSection],
     error: Option<&str>,
@@ -1243,6 +1262,7 @@ fn status_value(
         "classification": "OFFICIAL",
         "runId": run_id,
         "scheduleId": schedule_id,
+        "sequence": sequence,
         "state": state,
         "updatedAt": timestamp(),
         "degradedSections": degraded,

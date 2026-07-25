@@ -859,6 +859,7 @@ async fn runtime_swap_handles_both_capacities_and_model_change_while_old_runs_fi
     let make = |config: RuntimeConfigIdentity, generation| {
         let scheduler = LocalModelScheduler::new(config.capacity).expect("scheduler");
         Arc::new(InstalledCommandBriefRuntime {
+            owner_pubkey: "owner-pubkey".to_string(),
             config,
             generation,
             orchestrator: CommandBriefOrchestrator::new(
@@ -910,4 +911,8 @@ async fn runtime_swap_handles_both_capacities_and_model_change_while_old_runs_fi
     assert!(first.orchestrator.cancel("runtime-one"));
     assert!(second.orchestrator.cancel("runtime-two"));
     assert!(third.orchestrator.cancel("runtime-three"));
+}
+
+mod owner_tests {
+    include!("startup_owner_tests.rs");
 }

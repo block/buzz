@@ -168,6 +168,7 @@ fn accepts_only_the_closed_run_state_vocabulary() {
             "classification": "OFFICIAL",
             "runId": "run-1",
             "scheduleId": "daily-command-brief",
+            "sequence": 0,
             "state": state,
             "updatedAt": NOW,
             "degradedSections": [],
@@ -179,7 +180,18 @@ fn accepts_only_the_closed_run_state_vocabulary() {
         "classification": "OFFICIAL",
         "runId": "run-1",
         "scheduleId": "daily-command-brief",
+        "sequence": 0,
         "state": "invented",
+        "updatedAt": NOW,
+        "degradedSections": [],
+        "error": null
+    }))
+    .is_err());
+    assert!(BriefRunStatus::try_from(json!({
+        "classification": "OFFICIAL",
+        "runId": "run-1",
+        "scheduleId": "daily-command-brief",
+        "state": "queued",
         "updatedAt": NOW,
         "degradedSections": [],
         "error": null

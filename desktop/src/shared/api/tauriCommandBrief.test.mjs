@@ -7,6 +7,7 @@ const status = {
   classification: "OFFICIAL",
   runId: "run-1",
   scheduleId: "daily-command-brief",
+  sequence: 0,
   state: "queued",
   updatedAt: "2026-07-25T06:00:00Z",
   degradedSections: [],
@@ -21,12 +22,16 @@ const schedule = {
   catchUpSameDay: true,
   concurrency: 1,
 };
+let statusView = {
+  classification: "OFFICIAL",
+  current: status,
+  history: [status],
+};
 globalThis.__TAURI_INTERNALS__ = {
   invoke: async (command, args) => {
     calls.push({ command, args });
     if (command === "start_command_brief") return status;
-    if (command === "get_command_brief_status")
-      return { classification: "OFFICIAL", current: status, history: [status] };
+    if (command === "get_command_brief_status") return statusView;
     if (
       command === "get_command_brief_schedule" ||
       command === "set_command_brief_schedule"
@@ -84,4 +89,26 @@ test("cancel sends only the bounded run identity and schedule update sends only 
       },
     },
   ]);
+});
+
+test("status reconciliation rejects mixed runs and nonmonotonic lifecycle histories", async () => {
+  statusView = {
+    classification: "OFFICIAL",
+    current: { ...status, runId: "run-two", sequence: 1 },
+    history: [status, { ...status, runId: "run-two", sequence: 1 }],
+  };
+  await assert.rejects(getCommandBriefStatus(), /invalid response/);
+
+  statusView = {
+    classification: "OFFICIAL",
+    current: { ...status, sequence: 1 },
+    history: [{ ...status, sequence: 1 }, status],
+  };
+  await assert.rejects(getCommandBriefStatus(), /invalid response/);
+
+  statusView = {
+    classification: "OFFICIAL",
+    current: status,
+    history: [status],
+  };
 });

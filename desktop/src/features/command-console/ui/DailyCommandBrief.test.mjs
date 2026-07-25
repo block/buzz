@@ -126,6 +126,7 @@ test("renders no-brief and queued/running/failed lifecycle states with truthful 
       classification: "OFFICIAL",
       runId: "run-1",
       scheduleId: "daily-command-brief",
+      sequence: 1,
       state: "running_specialists",
       updatedAt: "2026-07-25T06:00:00Z",
       degradedSections: [],
@@ -141,6 +142,7 @@ test("renders no-brief and queued/running/failed lifecycle states with truthful 
       classification: "OFFICIAL",
       runId: "run-1",
       scheduleId: "daily-command-brief",
+      sequence: 2,
       state: "failed",
       updatedAt: "2026-07-25T06:00:00Z",
       degradedSections: ["navigation"],
@@ -157,6 +159,7 @@ test("renders the bounded native lifecycle history as metadata only", () => {
       classification: "OFFICIAL",
       runId: "run-1",
       scheduleId: "daily-command-brief",
+      sequence: 1,
       state: "running_specialists",
       updatedAt: "2026-07-25T06:02:00Z",
       degradedSections: [],
@@ -167,6 +170,7 @@ test("renders the bounded native lifecycle history as metadata only", () => {
         classification: "OFFICIAL",
         runId: "run-1",
         scheduleId: "daily-command-brief",
+        sequence: 0,
         state: "queued",
         updatedAt: "2026-07-25T06:00:00Z",
         degradedSections: [],
@@ -176,6 +180,7 @@ test("renders the bounded native lifecycle history as metadata only", () => {
         classification: "OFFICIAL",
         runId: "run-1",
         scheduleId: "daily-command-brief",
+        sequence: 1,
         state: "running_specialists",
         updatedAt: "2026-07-25T06:02:00Z",
         degradedSections: [],
@@ -196,6 +201,7 @@ test("renders complete degraded queued-offline brief with all nine sections and 
       classification: "OFFICIAL",
       runId: "run-1",
       scheduleId: "daily-command-brief",
+      sequence: 7,
       state: "degraded",
       updatedAt: "2026-07-25T06:10:00Z",
       degradedSections: ["navigation"],
@@ -236,6 +242,14 @@ test("renders complete degraded queued-offline brief with all nine sections and 
   assert.match(html, /Stale source/);
   assert.doesNotMatch(html, /hidden evidence/);
   assert.doesNotMatch(html, /approve|execute action/i);
+});
+
+test("restart view derives prominent degraded status and exact section labels from the immutable brief", () => {
+  const html = render({ latest: published, status: null, history: [] });
+
+  assert.match(html, />Complete with limitations</);
+  assert.match(html, />Degraded sections</);
+  assert.match(html, />Navigation considerations</);
 });
 
 test("renders accessible schedule enable, time, and capacity controls with timezone context", () => {

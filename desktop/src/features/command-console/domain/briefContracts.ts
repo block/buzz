@@ -137,6 +137,7 @@ export type BriefRunStatus = {
   readonly classification: "OFFICIAL";
   readonly runId: string;
   readonly scheduleId: string;
+  readonly sequence: number;
   readonly state: BriefRunState;
   readonly updatedAt: string;
   readonly degradedSections: readonly BriefSection[];
@@ -587,6 +588,7 @@ export function parseBriefRunStatus(value: unknown): BriefRunStatus | null {
       "classification",
       "runId",
       "scheduleId",
+      "sequence",
       "state",
       "updatedAt",
       "degradedSections",
@@ -595,6 +597,8 @@ export function parseBriefRunStatus(value: unknown): BriefRunStatus | null {
     value.classification !== "OFFICIAL" ||
     !isBoundedText(value.runId) ||
     !isBoundedText(value.scheduleId) ||
+    !Number.isSafeInteger(value.sequence) ||
+    (value.sequence as number) < 0 ||
     !isOneOf(value.state, RUN_STATES) ||
     !isRfc3339(value.updatedAt) ||
     (value.error !== null && !isBoundedText(value.error))
@@ -606,6 +610,7 @@ export function parseBriefRunStatus(value: unknown): BriefRunStatus | null {
         classification: value.classification,
         runId: value.runId,
         scheduleId: value.scheduleId,
+        sequence: value.sequence as number,
         state: value.state,
         updatedAt: value.updatedAt,
         degradedSections,

@@ -47,10 +47,26 @@ function parseStatusView(value: unknown): CommandBriefStatusView {
   ) {
     return invalidResponse();
   }
+  const statuses = history as BriefRunStatus[];
+  if (
+    (current === null && statuses.length !== 0) ||
+    (current !== null &&
+      (statuses.length === 0 ||
+        statuses.some(
+          (entry, index) =>
+            entry.runId !== current.runId ||
+            (index > 0 && entry.sequence <= statuses[index - 1].sequence),
+        ) ||
+        statuses.at(-1)?.sequence !== current.sequence ||
+        statuses.at(-1)?.state !== current.state ||
+        statuses.at(-1)?.updatedAt !== current.updatedAt))
+  ) {
+    return invalidResponse();
+  }
   return Object.freeze({
     classification: "OFFICIAL",
     current,
-    history: Object.freeze(history as BriefRunStatus[]),
+    history: Object.freeze(statuses),
   });
 }
 

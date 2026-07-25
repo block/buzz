@@ -427,6 +427,7 @@ pub(crate) fn start_model_readiness_observer(app: AppHandle) -> CommandBriefMode
 }
 
 pub(crate) struct InstalledCommandBriefRuntime {
+    owner_pubkey: String,
     config: RuntimeConfigIdentity,
     generation: u64,
     orchestrator: CommandBriefOrchestrator,
@@ -474,12 +475,14 @@ impl CommandBriefRuntimeSet {
 
     pub(crate) fn latest_status_and_history(
         &self,
+        owner_pubkey: &str,
     ) -> Option<(
         crate::command_brief::types::BriefRunStatus,
         Vec<crate::command_brief::types::BriefRunStatus>,
     )> {
         self.all()
             .into_iter()
+            .filter(|runtime| runtime.owner_pubkey == owner_pubkey)
             .filter_map(|runtime| runtime.orchestrator.latest_status_history_result())
             .max_by(|left, right| {
                 left.0
@@ -492,16 +495,38 @@ impl CommandBriefRuntimeSet {
 
     pub(crate) fn status(
         &self,
+        owner_pubkey: &str,
         run_id: &str,
     ) -> Option<crate::command_brief::types::BriefRunStatus> {
         self.all()
             .into_iter()
+            .filter(|runtime| runtime.owner_pubkey == owner_pubkey)
             .find_map(|runtime| runtime.orchestrator.status(run_id))
     }
 
-    pub(crate) fn cancel(&self, run_id: &str) -> bool {
+    pub(crate) fn history_after(
+        &self,
+        owner_pubkey: &str,
+        run_id: &str,
+        cursor: Option<u64>,
+    ) -> Vec<crate::command_brief::types::BriefRunStatus> {
         self.all()
             .into_iter()
+            .filter(|runtime| runtime.owner_pubkey == owner_pubkey)
+            .find_map(|runtime| {
+                (runtime.orchestrator.status(run_id).is_some())
+                    .then(|| runtime.orchestrator.history(run_id))
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|status| cursor.is_none_or(|cursor| status.sequence() > cursor))
+            .collect()
+    }
+
+    pub(crate) fn cancel(&self, owner_pubkey: &str, run_id: &str) -> bool {
+        self.all()
+            .into_iter()
+            .filter(|runtime| runtime.owner_pubkey == owner_pubkey)
             .find(|runtime| runtime.orchestrator.status(run_id).is_some())
             .is_some_and(|runtime| runtime.orchestrator.cancel(run_id))
     }
@@ -548,10 +573,10 @@ impl RuntimeReadiness {
 
 struct OrchestratorStarter<'a> {
     app: AppHandle,
+    owner_pubkey: &'a str,
     current: &'a CommandBriefOrchestrator,
     runtimes: &'a [Arc<InstalledCommandBriefRuntime>],
     store_path: &'a std::path::Path,
-    owner_pubkey: &'a str,
 }
 
 impl ScheduledRunStarter for OrchestratorStarter<'_> {
@@ -575,7 +600,12 @@ impl ScheduledRunStarter for OrchestratorStarter<'_> {
                     ScheduledStartError::Unavailable
                 }
             })?;
-        crate::commands::watch_command_brief_status(self.app.clone(), started.clone(), None);
+        crate::commands::watch_command_brief_status(
+            self.app.clone(),
+            self.owner_pubkey.to_string(),
+            started.clone(),
+            None,
+        );
         Ok(started)
     }
 
@@ -713,7 +743,6 @@ async fn run_command_brief_schedule_with_model_observation(
             )
         }
     };
-    let owner_pubkey = state.signing_keys()?.public_key().to_hex();
     process_due_schedule(
         &conn,
         &schedule,
@@ -722,10 +751,10 @@ async fn run_command_brief_schedule_with_model_observation(
         &readiness,
         &OrchestratorStarter {
             app: app.clone(),
+            owner_pubkey: &runtime.owner_pubkey,
             current: &runtime.orchestrator,
             runtimes: &runtimes,
             store_path: &store_path,
-            owner_pubkey: &owner_pubkey,
         },
     )
 }
@@ -870,6 +899,7 @@ async fn ensure_production_runtime(
         .fetch_add(1, Ordering::AcqRel)
         + 1;
     let runtime = Arc::new(InstalledCommandBriefRuntime {
+        owner_pubkey: preflight.owner_keys.public_key().to_hex(),
         config: preflight.config.clone(),
         generation,
         orchestrator,
@@ -891,6 +921,7 @@ const MANUAL_CO_REQUEST: &str =
 /// persona, tool, model, endpoint, or classification input.
 pub(crate) async fn start_manual_command_brief(
     app: AppHandle,
+    expected_owner_pubkey: &str,
 ) -> Result<crate::command_brief::types::BriefRunStatus, String> {
     let store_path = command_brief_store_path()?;
     let conn = open_command_brief_store(&store_path)?;
@@ -910,9 +941,21 @@ pub(crate) async fn start_manual_command_brief(
     let preflight = production_preflight(&app, &schedule, &model)
         .await
         .map_err(|_| "command brief runtime unavailable".to_string())?;
+    if preflight.owner_keys.public_key().to_hex() != expected_owner_pubkey {
+        return Err("command brief identity unavailable".to_string());
+    }
     let runtime = ensure_production_runtime(&app, &preflight, store_path)
         .await
         .map_err(|_| "command brief runtime unavailable".to_string())?;
+    let active_owner = app
+        .state::<AppState>()
+        .signing_keys()
+        .map_err(|_| "command brief identity unavailable".to_string())?
+        .public_key()
+        .to_hex();
+    if active_owner != expected_owner_pubkey {
+        return Err("command brief identity unavailable".to_string());
+    }
     let observed_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let request = CommandBriefRequest::new(DEFAULT_SCHEDULE_ID, MANUAL_CO_REQUEST, &observed_at)
         .map_err(|_| "command brief runtime unavailable".to_string())?;
