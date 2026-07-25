@@ -341,6 +341,192 @@ async fn timer_admission_token_uses_only_the_active_owners_runtime() {
 }
 
 #[tokio::test]
+async fn owner_transition_without_runtime_reopens_timer_once_then_stabilizes() {
+    let state = crate::app_state::build_app_state();
+    let owner_a = state.signing_keys().expect("owner A").public_key().to_hex();
+    let token_a =
+        super::super::current_runtime_admission_token(&state).expect("owner A no-runtime token");
+    assert!(token_a.len() <= 256);
+    assert_eq!(
+        super::super::current_runtime_admission_token(&state).as_deref(),
+        Some(token_a.as_str()),
+        "an unchanged owner without a runtime must have a stable token"
+    );
+
+    let directory = tempfile::tempdir().expect("temp");
+    let store_path = directory.path().join("brief.db");
+    let conn =
+        crate::command_brief::store::open_command_brief_store(&store_path).expect("store");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Startup,
+            &ReadinessSnapshot::deferred(DeferredReason::AdmissionUnavailable, &token_a),
+            &RecordingStarter::default(),
+        )
+        .expect("owner A deferral"),
+        ScheduleRunOutcome::Deferred {
+            reason: DeferredReason::AdmissionUnavailable,
+        }
+    );
+
+    *state.keys.lock().expect("identity") = nostr::Keys::generate();
+    let owner_b = state.signing_keys().expect("owner B").public_key().to_hex();
+    assert_ne!(owner_a, owner_b);
+    let token_b =
+        super::super::current_runtime_admission_token(&state).expect("owner B no-runtime token");
+    assert_ne!(
+        token_b, token_a,
+        "a new active owner must be a readiness transition even before runtime installation"
+    );
+
+    let preflight_attempts = AtomicUsize::new(0);
+    let first_b_timer = timer_claim_fast_path(
+        &conn,
+        &schedule,
+        now,
+        ScheduleTrigger::Timer,
+        || super::super::current_runtime_admission_token(&state),
+    )
+    .expect("owner B timer");
+    if first_b_timer.is_none() {
+        preflight_attempts.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            process_due_schedule(
+                &conn,
+                &schedule,
+                now,
+                ScheduleTrigger::Timer,
+                &ReadinessSnapshot::deferred(DeferredReason::AdmissionUnavailable, &token_b),
+                &RecordingStarter::default(),
+            )
+            .expect("owner B retry"),
+            ScheduleRunOutcome::Deferred {
+                reason: DeferredReason::AdmissionUnavailable,
+            }
+        );
+    }
+    assert_eq!(
+        preflight_attempts.load(Ordering::SeqCst),
+        1,
+        "the owner transition must reach preflight"
+    );
+
+    for _ in 0..3 {
+        let unchanged_b_timer = timer_claim_fast_path(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Timer,
+            || super::super::current_runtime_admission_token(&state),
+        )
+        .expect("unchanged owner B timer");
+        if unchanged_b_timer.is_none() {
+            preflight_attempts.fetch_add(1, Ordering::SeqCst);
+        }
+        assert_eq!(
+            unchanged_b_timer,
+            Some(ScheduleRunOutcome::AlreadyClaimed)
+        );
+    }
+    assert_eq!(
+        preflight_attempts.load(Ordering::SeqCst),
+        1,
+        "an unchanged owner B no-runtime state must not hot-loop preflight"
+    );
+}
+
+#[tokio::test]
+async fn owner_transition_timer_fallthrough_builds_b_runtime_and_retries_claim() {
+    let state = crate::app_state::build_app_state();
+    let token_a =
+        super::super::current_runtime_admission_token(&state).expect("owner A no-runtime token");
+    let directory = tempfile::tempdir().expect("temp");
+    let store_path = directory.path().join("brief.db");
+    let conn =
+        crate::command_brief::store::open_command_brief_store(&store_path).expect("store");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Startup,
+            &ReadinessSnapshot::deferred(DeferredReason::AdmissionUnavailable, &token_a),
+            &RecordingStarter::default(),
+        )
+        .expect("owner A deferral"),
+        ScheduleRunOutcome::Deferred {
+            reason: DeferredReason::AdmissionUnavailable,
+        }
+    );
+
+    let owner_b_keys = nostr::Keys::generate();
+    let owner_b = owner_b_keys.public_key().to_hex();
+    *state.keys.lock().expect("identity") = owner_b_keys;
+    assert_eq!(
+        timer_claim_fast_path(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Timer,
+            || super::super::current_runtime_admission_token(&state),
+        )
+        .expect("owner B timer"),
+        None,
+        "the owner transition must fall through to preflight"
+    );
+
+    let runtime_builds = AtomicUsize::new(0);
+    let runtime_b = owner_runtime(
+        &owner_b,
+        2,
+        Arc::new(ScheduledEffects::default()),
+    );
+    let runtime_for_build = Arc::clone(&runtime_b);
+    let outcome = super::super::process_scheduled_runtime(
+        super::super::ScheduledRuntimeRequest {
+            state: &state,
+            expected_owner_pubkey: &owner_b,
+            conn: crate::command_brief::store::open_command_brief_store(&store_path)
+                .expect("retry store"),
+            schedule: &schedule,
+            now,
+            trigger: ScheduleTrigger::Timer,
+            store_path: &store_path,
+        },
+        async {
+            runtime_builds.fetch_add(1, Ordering::SeqCst);
+            state
+                .command_brief_runtimes
+                .write()
+                .await
+                .install(Arc::clone(&runtime_for_build));
+            Ok(runtime_for_build)
+        },
+        |_| {},
+    )
+    .await
+    .expect("owner B retry");
+    let scheduled_run =
+        crate::command_brief::schedule::deterministic_run_id("daily-command-brief:2026-07-25");
+    assert_eq!(
+        outcome,
+        ScheduleRunOutcome::Started {
+            run_id: scheduled_run.clone(),
+        }
+    );
+    assert_eq!(runtime_builds.load(Ordering::SeqCst), 1);
+    assert!(runtime_b.orchestrator.status(&scheduled_run).is_some());
+    assert!(runtime_b.orchestrator.cancel(&scheduled_run));
+}
+
+#[tokio::test]
 async fn starter_rechecks_owner_immediately_before_presence_and_start_exact() {
     let state = crate::app_state::build_app_state();
     let owner_a = state.signing_keys().expect("owner A").public_key().to_hex();
@@ -387,12 +573,11 @@ async fn starter_rechecks_owner_immediately_before_presence_and_start_exact() {
 }
 
 #[tokio::test]
-async fn retired_owner_a_presence_and_full_admission_do_not_affect_owner_b() {
+async fn scheduled_terminal_presence_is_global_but_reveals_no_owner_details() {
     let state = crate::app_state::build_app_state();
-    let owner_a = "owner-a";
     let owner_b = state.signing_keys().expect("owner B").public_key().to_hex();
     let runtime_a = owner_runtime(
-        owner_a,
+        "owner-a",
         1,
         Arc::new(ScheduledEffects::default()),
     );
@@ -414,42 +599,209 @@ async fn retired_owner_a_presence_and_full_admission_do_not_affect_owner_b() {
             )
             .expect("request"),
         )
-        .expect("owner A active");
-    {
-        let mut runtimes = state.command_brief_runtimes.write().await;
-        runtimes.install(Arc::clone(&runtime_a));
-        runtimes.install(Arc::clone(&runtime_b));
-    }
+        .expect("owner A run");
+    assert!(runtime_a.orchestrator.cancel(&scheduled_run));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let terminal = runtime_a
+                .orchestrator
+                .status(&scheduled_run)
+                .is_some_and(|status| {
+                    matches!(
+                        status.state(),
+                        crate::command_brief::types::BriefRunState::Cancelled
+                            | crate::command_brief::types::BriefRunState::Failed
+                    )
+                });
+            if terminal {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owner A terminal runtime");
     let directory = tempfile::tempdir().expect("temp");
     let store_path = directory.path().join("brief.db");
     let conn =
         crate::command_brief::store::open_command_brief_store(&store_path).expect("store");
+    let callbacks = AtomicUsize::new(0);
+    let on_started = |_: &str| {
+        callbacks.fetch_add(1, Ordering::SeqCst);
+    };
+    {
+        let runtimes = vec![Arc::clone(&runtime_a), Arc::clone(&runtime_b)];
+        let starter = super::super::OrchestratorStarter {
+            state: &state,
+            owner_pubkey: &owner_b,
+            current: &runtime_b.orchestrator,
+            runtimes: &runtimes,
+            store_path: &store_path,
+            on_started: &on_started,
+        };
+        assert_eq!(
+            starter.presence(&scheduled_run),
+            ScheduledRunPresence::Terminal,
+            "another owner's terminal in-memory run must close the global date claim"
+        );
+    }
+    conn.execute(
+        "INSERT INTO command_brief_spool(
+            owner_pubkey,run_id,event_id,status,previous_event_id,
+            encrypted_payload,raw_event,publish_state,retry_count,next_retry_at,
+            last_error_code,created_at,append_sequence,published_at
+         ) VALUES (?1,?2,'event-a','completed',NULL,'ciphertext','{}','queued',0,0,NULL,1,0,NULL)",
+        rusqlite::params!["owner-a", scheduled_run],
+    )
+    .expect("owner A terminal");
+
+    {
+        let runtimes = vec![Arc::clone(&runtime_b)];
+        let starter = super::super::OrchestratorStarter {
+            state: &state,
+            owner_pubkey: &owner_b,
+            current: &runtime_b.orchestrator,
+            runtimes: &runtimes,
+            store_path: &store_path,
+            on_started: &on_started,
+        };
+        assert_eq!(
+            starter.presence(&scheduled_run),
+            ScheduledRunPresence::Terminal,
+            "another owner's durable terminal must close the global date claim"
+        );
+        let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+        assert_eq!(
+            process_due_schedule(
+                &conn,
+                &schedule,
+                utc("2026-07-25T01:00:00Z"),
+                ScheduleTrigger::Startup,
+                &ReadinessSnapshot::ready("global-terminal"),
+                &starter,
+            )
+            .expect("terminal reconciliation"),
+            ScheduleRunOutcome::AlreadyClaimed
+        );
+        assert_eq!(claim_state(&store_path), ("completed".to_string(), None));
+    }
+    assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+    assert!(runtime_b.orchestrator.status(&scheduled_run).is_none());
+}
+
+#[tokio::test]
+async fn owner_a_started_daily_claim_blocks_owner_b_duplicate_without_leaking_status() {
+    let state = crate::app_state::build_app_state();
+    let owner_a = state.signing_keys().expect("owner A").public_key().to_hex();
+    let owner_b_keys = nostr::Keys::generate();
+    let owner_b = owner_b_keys.public_key().to_hex();
+    let effects_a = Arc::new(ScheduledEffects::default());
+    let effects_b = Arc::new(ScheduledEffects::default());
+    let runtime_a = owner_runtime(
+        &owner_a,
+        1,
+        Arc::clone(&effects_a),
+    );
+    let runtime_b = owner_runtime(
+        &owner_b,
+        2,
+        Arc::clone(&effects_b),
+    );
+    let scheduled_run =
+        crate::command_brief::schedule::deterministic_run_id("daily-command-brief:2026-07-25");
+    let directory = tempfile::tempdir().expect("temp");
+    let store_path = directory.path().join("brief.db");
+    let conn = crate::command_brief::store::open_command_brief_store(&store_path)
+        .expect("owner A store");
     let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
 
-    let outcome = super::super::process_scheduled_runtime(
+    let owner_a_outcome = super::super::process_scheduled_runtime(
         super::super::ScheduledRuntimeRequest {
             state: &state,
-            expected_owner_pubkey: &owner_b,
+            expected_owner_pubkey: &owner_a,
             conn,
             schedule: &schedule,
             now: utc("2026-07-25T01:00:00Z"),
             trigger: ScheduleTrigger::Startup,
             store_path: &store_path,
         },
-        async { Ok(runtime_b.clone()) },
+        {
+            let runtime_a = Arc::clone(&runtime_a);
+            async {
+                state
+                    .command_brief_runtimes
+                    .write()
+                    .await
+                    .install(Arc::clone(&runtime_a));
+                Ok(runtime_a)
+            }
+        },
         |_| {},
     )
     .await
-    .expect("owner B schedule");
+    .expect("owner A schedule");
     assert_eq!(
-        outcome,
+        owner_a_outcome,
         ScheduleRunOutcome::Started {
             run_id: scheduled_run.clone(),
         }
     );
-    assert!(runtime_b.orchestrator.status(&scheduled_run).is_some());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while effects_a.sources.load(Ordering::SeqCst) != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("owner A source collection started");
+
+    *state.keys.lock().expect("identity") = owner_b_keys;
+    let owner_b_outcome = super::super::process_scheduled_runtime(
+        super::super::ScheduledRuntimeRequest {
+            state: &state,
+            expected_owner_pubkey: &owner_b,
+            conn: crate::command_brief::store::open_command_brief_store(&store_path)
+                .expect("owner B store"),
+            schedule: &schedule,
+            now: utc("2026-07-25T01:00:00Z"),
+            trigger: ScheduleTrigger::Readiness,
+            store_path: &store_path,
+        },
+        {
+            let runtime_b = Arc::clone(&runtime_b);
+            async {
+                state
+                    .command_brief_runtimes
+                    .write()
+                    .await
+                    .install(Arc::clone(&runtime_b));
+                Ok(runtime_b)
+            }
+        },
+        |_| {},
+    )
+    .await
+    .expect("owner B reconciliation");
+    assert_eq!(owner_b_outcome, ScheduleRunOutcome::AlreadyClaimed);
+    assert_eq!(claim_state(&store_path), ("started".to_string(), None));
+    assert_eq!(effects_a.sources.load(Ordering::SeqCst), 1);
+    assert_eq!(effects_a.advisers.load(Ordering::SeqCst), 0);
+    assert_eq!(effects_a.audits.load(Ordering::SeqCst), 0);
+    assert_eq!(effects_a.publications.load(Ordering::SeqCst), 0);
+    assert_eq!(effects_b.sources.load(Ordering::SeqCst), 0);
+    assert_eq!(effects_b.advisers.load(Ordering::SeqCst), 0);
+    assert_eq!(effects_b.audits.load(Ordering::SeqCst), 0);
+    assert_eq!(effects_b.publications.load(Ordering::SeqCst), 0);
+    assert!(runtime_b.orchestrator.status(&scheduled_run).is_none());
+    {
+        let runtimes = state.command_brief_runtimes.read().await;
+        assert!(runtimes.status(&owner_b, &scheduled_run).is_none());
+        assert!(runtimes.latest_status_and_history(&owner_b).is_none());
+        assert!(runtimes
+            .history_after(&owner_b, &scheduled_run, None)
+            .is_empty());
+        assert!(!runtimes.cancel(&owner_b, &scheduled_run));
+    }
     assert!(runtime_a.orchestrator.cancel(&scheduled_run));
-    assert!(runtime_b.orchestrator.cancel(&scheduled_run));
 }
 
 #[tokio::test]

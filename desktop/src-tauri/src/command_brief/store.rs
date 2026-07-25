@@ -143,18 +143,17 @@ pub fn open_command_brief_store(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Return whether the owner-bound audit spool has a durable terminal for a run.
-pub fn has_spooled_terminal(
-    conn: &Connection,
-    owner_pubkey: &str,
-    run_id: &str,
-) -> Result<bool, String> {
+/// Return whether any audit spool has a durable terminal for an exact run.
+///
+/// Scheduled run identifiers are global per local date. This deliberately
+/// returns only a closed boolean and never identifies which owner wrote it.
+pub fn has_spooled_terminal_for_run(conn: &Connection, run_id: &str) -> Result<bool, String> {
     conn.query_row(
         "SELECT EXISTS(
              SELECT 1 FROM command_brief_spool
-             WHERE owner_pubkey=?1 AND run_id=?2
+             WHERE run_id=?1
          )",
-        params![owner_pubkey, run_id],
+        [run_id],
         |row| row.get(0),
     )
     .map_err(|_| "command brief spool unavailable".to_string())

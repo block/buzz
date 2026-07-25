@@ -12,7 +12,7 @@ use crate::command_brief::schedule::{
     process_due_schedule, DeferredReason, ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger,
     ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError,
 };
-use crate::command_brief::store::{has_spooled_terminal, open_command_brief_store};
+use crate::command_brief::store::{has_spooled_terminal_for_run, open_command_brief_store};
 
 const SCHEDULED_CO_REQUEST: &str =
     "Prepare the Daily Command Brief from the admitted current local sources.";
@@ -66,16 +66,31 @@ impl ScheduledRunStarter for OrchestratorStarter<'_> {
 
     fn presence(&self, run_id: &str) -> ScheduledRunPresence {
         if !active_owner_matches(self.state, self.owner_pubkey) {
-            ScheduledRunPresence::IdentityUnavailable
-        } else if open_command_brief_store(self.store_path)
-            .and_then(|conn| has_spooled_terminal(&conn, self.owner_pubkey, run_id))
+            return ScheduledRunPresence::IdentityUnavailable;
+        }
+        if open_command_brief_store(self.store_path)
+            .and_then(|conn| has_spooled_terminal_for_run(&conn, run_id))
             .unwrap_or(false)
         {
-            ScheduledRunPresence::Terminal
-        } else if self.runtimes.iter().any(|runtime| {
-            runtime.owner_pubkey == self.owner_pubkey
-                && runtime.orchestrator.status(run_id).is_some()
-        }) {
+            return ScheduledRunPresence::Terminal;
+        }
+        let mut active = false;
+        for runtime in self.runtimes {
+            let Some(status) = runtime.orchestrator.status(run_id) else {
+                continue;
+            };
+            if matches!(
+                status.state(),
+                crate::command_brief::types::BriefRunState::Completed
+                    | crate::command_brief::types::BriefRunState::Degraded
+                    | crate::command_brief::types::BriefRunState::Cancelled
+                    | crate::command_brief::types::BriefRunState::Failed
+            ) {
+                return ScheduledRunPresence::Terminal;
+            }
+            active = true;
+        }
+        if active {
             ScheduledRunPresence::Active
         } else {
             ScheduledRunPresence::Absent
@@ -145,9 +160,12 @@ where
             &identity_transition_token(expected_owner_pubkey),
         );
     }
-    let runtimes = runtime_guard.all_for_owner(expected_owner_pubkey);
+    let runtimes = runtime_guard.all();
     drop(runtime_guard);
-    if runtimes.is_empty() {
+    if !runtimes
+        .iter()
+        .any(|candidate| candidate.owner_pubkey == expected_owner_pubkey)
+    {
         let readiness = ReadinessSnapshot::deferred(
             DeferredReason::LocalStateUnavailable,
             RuntimeReadiness::unavailable("runtime_unavailable", runtime.generation)
@@ -233,12 +251,23 @@ pub(super) fn defer_identity_claim(
 pub(super) fn current_runtime_admission_token(state: &AppState) -> Option<String> {
     let owner_pubkey = active_owner_pubkey(state)?;
     let runtimes = state.command_brief_runtimes.try_read().ok()?;
-    let runtime = runtimes.all_for_owner(&owner_pubkey).into_iter().next()?;
-    let token = RuntimeReadiness::ready(
-        &runtime.config,
-        runtime.generation,
-        runtime.orchestrator.admission_state(),
-    )
-    .transition_token;
+    let token = runtimes
+        .all_for_owner(&owner_pubkey)
+        .into_iter()
+        .next()
+        .map_or_else(
+            || {
+                RuntimeReadiness::from_basis(&format!("owner:{owner_pubkey}|runtime:none"))
+                    .transition_token
+            },
+            |runtime| {
+                RuntimeReadiness::ready(
+                    &runtime.config,
+                    runtime.generation,
+                    runtime.orchestrator.admission_state(),
+                )
+                .transition_token
+            },
+        );
     active_owner_matches(state, &owner_pubkey).then_some(token)
 }
