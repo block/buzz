@@ -147,6 +147,37 @@ export function clearActiveTurnsForAgentOnStop(
   clearActiveTurnsForAgent(pubkey);
 }
 
+/**
+ * Execute a pair restart as stop → relay-scoped badge clear → start.
+ *
+ * Extracted from `useManagedAgentRuntimeAction`'s `mutationFn` so the
+ * three-step lifecycle boundary can be tested directly without a hook-render
+ * harness.  All three operations are injected, keeping this function free of
+ * React and Tauri imports.
+ *
+ * Guarantees:
+ * - Clear fires only when stop succeeds.
+ * - A failed start occurs after the clear — the badge is already gone.
+ * - No clear can fire after start begins, so genuinely-new turns are safe.
+ */
+export async function restartManagedAgentPair(
+  pubkey: string,
+  relayUrl: string,
+  stop: (
+    pubkey: string,
+    relayUrl: string,
+  ) => Promise<ManagedAgentRuntimeStatus>,
+  clear: (pubkey: string, relayUrl: string) => void,
+  start: (
+    pubkey: string,
+    relayUrl: string,
+  ) => Promise<ManagedAgentRuntimeStatus>,
+): Promise<ManagedAgentRuntimeStatus> {
+  await stop(pubkey, relayUrl);
+  clear(pubkey, relayUrl);
+  return start(pubkey, relayUrl);
+}
+
 export function useManagedAgentRuntimeAction() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -161,16 +192,13 @@ export function useManagedAgentRuntimeAction() {
     }) => {
       if (action === "stop") return stopManagedAgentRuntime(pubkey, relayUrl);
       if (action === "restart") {
-        // Split the restart into stop → clear → start so the badge clears at
-        // the successful-stop boundary, before the new process is spawned.
-        // Using the combined restartManagedAgentRuntime command would clear
-        // only in onSuccess, after the new process is already running — too
-        // late if start fails (badge stays stale) or if the new harness emits
-        // frames before the command resolves (genuine turn would be cleared).
-        return stopManagedAgentRuntime(pubkey, relayUrl).then(() => {
-          clearActiveTurnsForAgentOnStop(pubkey, relayUrl);
-          return startManagedAgentRuntime(pubkey, relayUrl);
-        });
+        return restartManagedAgentPair(
+          pubkey,
+          relayUrl,
+          stopManagedAgentRuntime,
+          clearActiveTurnsForAgentOnStop,
+          startManagedAgentRuntime,
+        );
       }
       return startManagedAgentRuntime(pubkey, relayUrl);
     },
