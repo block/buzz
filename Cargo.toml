@@ -27,6 +27,7 @@ members = [
     "crates/buzz-relay-mesh",
     "crates/buzz-dev-mcp",
     "examples/countdown-bot",
+    "examples/slack-connect-bridge",
 ]
 exclude = ["desktop/src-tauri"]
 resolver = "2"

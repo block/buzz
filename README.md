@@ -158,6 +158,11 @@ Want a single-node / VPS relay instead of the local-dev stack? Use the productio
 
 For agents, set `BUZZ_PRIVATE_KEY` and use [`buzz-cli`](crates/buzz-cli) — JSON in, JSON out, designed for LLM tool calls.
 
+Need to keep a customer or partner channel in Slack Connect during adoption?
+The operator-run [Slack Connect bridge](examples/slack-connect-bridge) mirrors
+live text messages and threads across explicit channel pairs without putting
+Slack credentials in the relay.
+
 ---
 
 ## Windows prerequisites

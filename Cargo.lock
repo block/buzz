@@ -1231,6 +1231,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "buzz-slack-connect-bridge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "buzz-sdk",
+ "buzz-ws-client",
+ "hex",
+ "hmac 0.13.0",
+ "nostr",
+ "reqwest 0.13.4",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "buzz-test-client"
 version = "0.1.0"
 dependencies = [
