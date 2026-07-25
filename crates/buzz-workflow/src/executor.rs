@@ -65,6 +65,11 @@ impl TriggerContext {
 /// - `| truncate(N)` — truncate to N characters
 /// - `| npub` — encode a hex pubkey as its full bech32 `npub` (non-pubkey
 ///   values pass through unchanged); `truncate_pubkey` is a legacy alias
+/// - `| json(PATH)` — parse the value as JSON and extract the field at the
+///   dot-separated PATH (`json(body)`, `json(user.login)`, `json(labels.0.name)`).
+///   Missing fields resolve to an empty string; a value that is not JSON at
+///   all is a template error. Webhook payloads stringify nested objects
+///   whole, so this is how a template reaches inside them.
 ///
 /// Unknown `{{keys}}` are left as literal text (no error, no substitution).
 pub fn resolve_template(
@@ -185,6 +190,43 @@ fn apply_filter(value: String, filter: &str) -> Result<String, WorkflowError> {
         })?;
         let truncated: String = value.chars().take(n).collect();
         return Ok(truncated);
+    }
+
+    // `json(PATH)`: parse the value as JSON and walk the dot-separated path.
+    // Missing fields resolve to "" (webhook payload shapes vary across
+    // providers and event types); a value that isn't JSON at all is a
+    // template error since that means the template targets the wrong field.
+    if let Some(inner) = filter
+        .strip_prefix("json(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let path = inner.trim();
+        if path.is_empty() {
+            return Err(WorkflowError::TemplateError(
+                "json() requires a field path, e.g. json(body)".into(),
+            ));
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&value).map_err(|e| {
+            WorkflowError::TemplateError(format!("json({path}): value is not valid JSON: {e}"))
+        })?;
+        let mut current = &parsed;
+        for segment in path.split('.') {
+            let next = match current {
+                serde_json::Value::Array(items) => {
+                    segment.parse::<usize>().ok().and_then(|i| items.get(i))
+                }
+                _ => current.get(segment),
+            };
+            match next {
+                Some(v) => current = v,
+                None => return Ok(String::new()),
+            }
+        }
+        return Ok(match current {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        });
     }
 
     // `npub` (alias `truncate_pubkey`): full bech32 npub — truncated prefixes are grindable.
@@ -1270,6 +1312,80 @@ mod tests {
             resolve_template("{{trigger.text | truncate(5)}}", &ctx, &HashMap::new()).unwrap();
         assert_eq!(out, "P1 in");
         assert_eq!(out.chars().count(), 5);
+    }
+
+    /// Trigger context whose `issue` webhook field carries a stringified
+    /// GitHub-style issue object, as the webhook bridge produces.
+    fn make_webhook_trigger() -> TriggerContext {
+        let mut ctx = make_trigger();
+        ctx.webhook_fields.insert(
+            "issue".to_owned(),
+            json!({
+                "title": "Fix the flux capacitor",
+                "number": 41,
+                "html_url": "https://github.com/org/repo/issues/41",
+                "body": "It broke.\n\nSteps to reproduce: drive at 88 mph.",
+                "user": { "login": "docbrown" },
+                "labels": [{ "name": "bug" }],
+                "milestone": null
+            })
+            .to_string(),
+        );
+        ctx
+    }
+
+    #[test]
+    fn resolve_json_filter_extracts_string_field_unquoted() {
+        let ctx = make_webhook_trigger();
+        let out =
+            resolve_template("{{trigger.issue | json(title)}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "Fix the flux capacitor");
+    }
+
+    #[test]
+    fn resolve_json_filter_extracts_non_string_field() {
+        let ctx = make_webhook_trigger();
+        let out =
+            resolve_template("#{{trigger.issue | json(number)}}", &ctx, &HashMap::new()).unwrap();
+        assert_eq!(out, "#41");
+    }
+
+    #[test]
+    fn resolve_json_filter_walks_nested_path_and_array_index() {
+        let ctx = make_webhook_trigger();
+        let out = resolve_template(
+            "{{trigger.issue | json(user.login)}} / {{trigger.issue | json(labels.0.name)}}",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "docbrown / bug");
+    }
+
+    #[test]
+    fn resolve_json_filter_missing_field_and_null_are_empty() {
+        let ctx = make_webhook_trigger();
+        let out = resolve_template(
+            "[{{trigger.issue | json(assignee)}}][{{trigger.issue | json(milestone)}}]",
+            &ctx,
+            &HashMap::new(),
+        )
+        .unwrap();
+        assert_eq!(out, "[][]");
+    }
+
+    #[test]
+    fn resolve_json_filter_on_non_json_value_errors() {
+        let ctx = make_trigger();
+        let err = resolve_template("{{trigger.text | json(body)}}", &ctx, &HashMap::new());
+        assert!(matches!(err, Err(WorkflowError::TemplateError(_))));
+    }
+
+    #[test]
+    fn resolve_json_filter_empty_path_errors() {
+        let ctx = make_webhook_trigger();
+        let err = resolve_template("{{trigger.issue | json()}}", &ctx, &HashMap::new());
+        assert!(matches!(err, Err(WorkflowError::TemplateError(_))));
     }
 
     #[test]
