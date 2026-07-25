@@ -209,6 +209,29 @@ test("stale suspend completion resumes a newer active playback", async () => {
   assert.equal(audio.context.state, "running");
 });
 
+test("graph creation failure re-arms idle suspension after cancelling it", async () => {
+  const scheduler = createScheduler();
+  const audio = createAudioHarness();
+  const player = createPlayer(scheduler);
+
+  player.play(audio.context, audio.buffer, audio.fallback);
+  audio.sources[0].finish();
+  assert.equal(scheduler.pendingCount(), 1);
+
+  audio.context.createGain = () => {
+    throw new Error("gain creation failed");
+  };
+  player.play(audio.context, audio.buffer, audio.fallback);
+
+  assert.equal(audio.calls.fallback, 1);
+  assert.equal(audio.sources[1].disconnectCalls, 1);
+  assert.equal(scheduler.pendingCount(), 1);
+
+  scheduler.runAll();
+  await Promise.resolve();
+  assert.equal(audio.calls.suspend, 1);
+});
+
 test("resume failure cleans up the graph and falls back", async () => {
   const scheduler = createScheduler();
   const audio = createAudioHarness({

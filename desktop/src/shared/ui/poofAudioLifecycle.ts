@@ -80,6 +80,7 @@ export function createPoofAudioPlayer({
     } catch {
       disconnectQuietly(source);
       disconnectQuietly(gain);
+      if (activePlaybacks === 0) scheduleSuspend(context);
       playFallback();
       return;
     }
