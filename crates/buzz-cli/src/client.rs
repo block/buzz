@@ -61,12 +61,21 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
 }
 
 /// MIME types accepted for upload.
+///
+/// Includes `text/plain` and `application/octet-stream` because the relay's
+/// `upload_blob` routes non-media attachments (docs, archives, text, data)
+/// through its generic-file path. Without them this allowlist is stricter than
+/// the endpoint it posts to, and the CLI rejects files the relay would store.
+/// `infer` cannot identify plain text, so text files arrive here as
+/// `application/octet-stream`.
 const ALLOWED_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
     "image/gif",
     "image/webp",
     "video/mp4",
+    "text/plain",
+    "application/octet-stream",
 ];
 
 /// Maximum file size for image uploads (50 MB).
@@ -1429,6 +1438,21 @@ pub fn normalize_write_response(raw: &str) -> String {
         }
     }
     raw.to_string()
+}
+
+#[cfg(test)]
+mod upload_mime_tests {
+    use super::ALLOWED_MIMES;
+
+    // The allowlist must accept text and the generic octet-stream fallback, or
+    // the CLI rejects files the relay's generic-file path would store. `infer`
+    // returns no type for plain text, so a text file reaches the check as
+    // `application/octet-stream` — both entries are needed.
+    #[test]
+    fn allowlist_accepts_text_and_octet_stream() {
+        assert!(ALLOWED_MIMES.contains(&"text/plain"));
+        assert!(ALLOWED_MIMES.contains(&"application/octet-stream"));
+    }
 }
 
 #[cfg(test)]
