@@ -8,6 +8,7 @@ mod observer;
 mod pool;
 mod pool_lifecycle;
 mod queue;
+mod redact;
 mod relay;
 mod setup_mode;
 mod usage;
