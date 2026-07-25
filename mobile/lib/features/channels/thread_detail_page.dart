@@ -144,6 +144,13 @@ class ThreadDetailPage extends HookConsumerWidget {
         channelNamesMap[ch.name.toLowerCase()] = ch.id;
       }
     });
+    final loadedChannels = channelsAsync.asData?.value;
+    final currentChannel = loadedChannels
+        ?.where((candidate) => candidate.id == channelId)
+        .firstOrNull;
+    final dmParticipantPubkeys = currentChannel?.isDm == true
+        ? currentChannel!.participantPubkeys
+        : null;
 
     return FrostedScaffold(
       appBar: const FrostedAppBar(title: Text('Thread')),
@@ -275,6 +282,7 @@ class ThreadDetailPage extends HookConsumerWidget {
                         channelId: channelId,
                         content: content,
                         mentionPubkeys: mentionPubkeys,
+                        dmParticipantPubkeys: dmParticipantPubkeys,
                         parentEventId: threadHead.id,
                         rootEventId: effectiveRootId,
                         mediaTags: mediaTags,

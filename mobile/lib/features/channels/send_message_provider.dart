@@ -27,19 +27,25 @@ class SendMessage {
   /// If [rootEventId] is null it defaults to [parentEventId] (direct reply to
   /// thread head). Tags are built to match the desktop's `buildReplyTags`
   /// convention with `root` / `reply` markers. Pass [mediaTags] to append
-  /// relay-validated `imeta` tags and NIP-30 `emoji` tags.
+  /// relay-validated `imeta` tags and NIP-30 `emoji` tags. For a DM, pass
+  /// [dmParticipantPubkeys] so every counterparty receives a `p` tag.
   Future<void> call({
     required String channelId,
     required String content,
     String? parentEventId,
     String? rootEventId,
     List<String>? mentionPubkeys,
+    List<String>? dmParticipantPubkeys,
     List<List<String>> mediaTags = const [],
   }) async {
     // Use explicitly passed pubkeys, or resolve @mentions against
     // channel members to avoid matching the wrong user.
     final resolvedMentions =
         mentionPubkeys ?? await _resolveMentions(content, channelId);
+    final allMentionPubkeys = <String>[
+      ...resolvedMentions,
+      ...?dmParticipantPubkeys,
+    ];
     final authorPubkey = _signedEventRelay.pubkey;
 
     // Normalize mentions: lowercase, deduplicate, exclude self (matching
@@ -47,7 +53,7 @@ class SendMessage {
     final selfLower = authorPubkey?.toLowerCase();
     final seenMentions = <String>{?selfLower};
     final normalizedMentions = <String>[
-      for (final pk in resolvedMentions)
+      for (final pk in allMentionPubkeys)
         if (seenMentions.add(pk.toLowerCase())) pk,
     ];
 
