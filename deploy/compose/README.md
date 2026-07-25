@@ -43,6 +43,12 @@ keypair.
   `<bucket>.minio`. It is not configurable for an external S3 provider through
   `.env`; use the Helm chart or a custom Compose configuration for providers
   such as new Railway Storage Buckets that require `virtual` addressing.
+- `BUZZ_CORS_ORIGINS` must match the *client's* origin, not `BUZZ_DOMAIN`. If
+  the desktop/mobile app's "join a community" flow fails with a generic
+  browser "Load failed" while `curl`ing the relay directly works fine, this is
+  almost always why — see the comment above `BUZZ_CORS_ORIGINS` in
+  `.env.example`. Leaving it empty (permissive CORS) is the simplest fix for
+  a single-operator or closed-relay deployment.
 
 Run `./run.sh backup-hint` for the backup checklist.
 
