@@ -23,21 +23,28 @@ use crate::command_brief::schedule::{
 };
 use crate::command_brief::scheduler::LocalModelScheduler;
 use crate::command_brief::sources::{ProductionSourceBackend, SourceBackend};
-use crate::command_brief::store::{
-    has_spooled_terminal, open_command_brief_store, validate_command_brief_store_schema,
-};
+use crate::command_brief::store::{open_command_brief_store, validate_command_brief_store_schema};
 #[cfg(target_os = "macos")]
 use crate::command_brief::wake::{MacWorkspaceWakeSource, WakeEventSource};
 use crate::command_services::apple_inputs::{bundled_helper_identity, AppleBriefSelection};
 use crate::commands::{LmStudioReadiness, LmStudioReadinessState};
 use tokio_util::sync::CancellationToken;
 
-const SCHEDULED_CO_REQUEST: &str =
-    "Prepare the Daily Command Brief from the admitted current local sources.";
 const MODEL_TIMEOUT: Duration = Duration::from_secs(120);
 const MODEL_READINESS_POLL_INTERVAL: Duration = Duration::from_secs(15);
 const READINESS_DISPATCH_BACKOFF: Duration = Duration::from_millis(250);
 const COMMAND_BRIEF_POLICY_REVISION: &str = "command-brief-policy-v1";
+const IDENTITY_UNAVAILABLE: &str = "identity_unavailable";
+
+mod scheduled_owner;
+
+#[cfg(test)]
+use scheduled_owner::OrchestratorStarter;
+use scheduled_owner::{
+    active_owner_matches, active_owner_pubkey, current_runtime_admission_token,
+    defer_identity_claim, identity_transition_token, process_scheduled_runtime,
+    ScheduledRuntimeRequest,
+};
 
 #[cfg(target_os = "macos")]
 pub(crate) fn install_system_wake_source(app: AppHandle) -> Result<(), &'static str> {
@@ -447,11 +454,12 @@ impl CommandBriefRuntimeSet {
 
     fn matching(
         &self,
+        owner_pubkey: &str,
         config: &RuntimeConfigIdentity,
     ) -> Option<Arc<InstalledCommandBriefRuntime>> {
         self.current
             .as_ref()
-            .filter(|runtime| runtime.config == *config)
+            .filter(|runtime| runtime.owner_pubkey == owner_pubkey && runtime.config == *config)
             .cloned()
     }
 
@@ -470,6 +478,13 @@ impl CommandBriefRuntimeSet {
             .iter()
             .chain(self.retired.iter())
             .cloned()
+            .collect()
+    }
+
+    fn all_for_owner(&self, owner_pubkey: &str) -> Vec<Arc<InstalledCommandBriefRuntime>> {
+        self.all()
+            .into_iter()
+            .filter(|runtime| runtime.owner_pubkey == owner_pubkey)
             .collect()
     }
 
@@ -571,62 +586,6 @@ impl RuntimeReadiness {
     }
 }
 
-struct OrchestratorStarter<'a> {
-    app: AppHandle,
-    owner_pubkey: &'a str,
-    current: &'a CommandBriefOrchestrator,
-    runtimes: &'a [Arc<InstalledCommandBriefRuntime>],
-    store_path: &'a std::path::Path,
-}
-
-impl ScheduledRunStarter for OrchestratorStarter<'_> {
-    fn start_scheduled(
-        &self,
-        run_id: &str,
-        _idempotency_key: &str,
-        schedule_id: &str,
-        observed_at: &str,
-    ) -> Result<String, ScheduledStartError> {
-        let request = CommandBriefRequest::new(schedule_id, SCHEDULED_CO_REQUEST, observed_at)
-            .map_err(|_| ScheduledStartError::Unavailable)?;
-        let started = self
-            .current
-            .start_exact(run_id, request)
-            .map_err(|error| match error {
-                crate::command_brief::orchestrator::OrchestratorStartError::AdmissionUnavailable => {
-                    ScheduledStartError::AdmissionUnavailable
-                }
-                crate::command_brief::orchestrator::OrchestratorStartError::Rejected => {
-                    ScheduledStartError::Unavailable
-                }
-            })?;
-        crate::commands::watch_command_brief_status(
-            self.app.clone(),
-            self.owner_pubkey.to_string(),
-            started.clone(),
-            None,
-        );
-        Ok(started)
-    }
-
-    fn presence(&self, run_id: &str) -> ScheduledRunPresence {
-        if open_command_brief_store(self.store_path)
-            .and_then(|conn| has_spooled_terminal(&conn, self.owner_pubkey, run_id))
-            .unwrap_or(false)
-        {
-            ScheduledRunPresence::Terminal
-        } else if self
-            .runtimes
-            .iter()
-            .any(|runtime| runtime.orchestrator.status(run_id).is_some())
-        {
-            ScheduledRunPresence::Active
-        } else {
-            ScheduledRunPresence::Absent
-        }
-    }
-}
-
 /// Evaluate the protected schedule after startup, wake, or readiness refresh.
 pub(crate) async fn run_command_brief_schedule(
     app: AppHandle,
@@ -665,11 +624,26 @@ async fn run_command_brief_schedule_with_model_observation(
         );
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
+    let expected_owner_pubkey = match active_owner_pubkey(&state) {
+        Some(owner_pubkey) => owner_pubkey,
+        None => {
+            return defer_identity_claim(&conn, &schedule, now, trigger, "identity:unavailable");
+        }
+    };
 
     let model_observation = model_readiness_for_schedule(supplied_model_readiness, || {
         crate::commands::read_lmstudio_readiness(app.clone())
     })
     .await;
+    if !active_owner_matches(&state, &expected_owner_pubkey) {
+        return defer_identity_claim(
+            &conn,
+            &schedule,
+            now,
+            trigger,
+            &identity_transition_token(&expected_owner_pubkey),
+        );
+    }
     let model_transition_token = model_observation.transition_token();
     let model_readiness = match model_observation.readiness() {
         Some(readiness) => readiness,
@@ -692,8 +666,19 @@ async fn run_command_brief_schedule_with_model_observation(
         .or_else(|| model_readiness.loaded_models.first().cloned())
         .ok_or_else(|| "command brief model unavailable".to_string())?;
 
-    let preflight = match production_preflight(&app, &schedule, &model).await {
+    let preflight = match production_preflight(&app, &schedule, &model, &expected_owner_pubkey)
+        .await
+    {
         Ok(preflight) => preflight,
+        Err(IDENTITY_UNAVAILABLE) => {
+            return defer_identity_claim(
+                &conn,
+                &schedule,
+                now,
+                trigger,
+                &identity_transition_token(&expected_owner_pubkey),
+            );
+        }
         Err(reason) => {
             let generation = state
                 .command_brief_runtime_generation
@@ -706,57 +691,39 @@ async fn run_command_brief_schedule_with_model_observation(
             return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
         }
     };
-    let runtime = match ensure_production_runtime(&app, &preflight, store_path.clone()).await {
-        Ok(runtime) => runtime,
-        Err(reason) => {
-            let generation = state
-                .command_brief_runtime_generation
-                .load(Ordering::Acquire);
-            let local = RuntimeReadiness::unavailable(reason, generation);
-            let readiness = ReadinessSnapshot::deferred(
-                DeferredReason::LocalStateUnavailable,
-                local.transition_token(),
-            );
-            return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
-        }
-    };
-    let runtimes = state.command_brief_runtimes.read().await.all();
-    if runtimes.is_empty() {
-        let readiness = ReadinessSnapshot::deferred(
-            DeferredReason::LocalStateUnavailable,
-            RuntimeReadiness::unavailable("runtime_unavailable", runtime.generation)
-                .transition_token(),
+    if !active_owner_matches(&state, &expected_owner_pubkey) {
+        return defer_identity_claim(
+            &conn,
+            &schedule,
+            now,
+            trigger,
+            &identity_transition_token(&expected_owner_pubkey),
         );
-        return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
-    let admission = runtime.orchestrator.admission_state();
-    let local = RuntimeReadiness::ready(&runtime.config, runtime.generation, admission);
-    let readiness = match admission {
-        OrchestratorAdmissionState::Available {
-            tracked_nonterminal,
-            capacity,
-        } if tracked_nonterminal < capacity => ReadinessSnapshot::ready(local.transition_token()),
-        OrchestratorAdmissionState::Available { .. } | OrchestratorAdmissionState::Unavailable => {
-            ReadinessSnapshot::deferred(
-                DeferredReason::AdmissionUnavailable,
-                local.transition_token(),
-            )
-        }
-    };
-    process_due_schedule(
-        &conn,
-        &schedule,
-        now,
-        trigger,
-        &readiness,
-        &OrchestratorStarter {
-            app: app.clone(),
-            owner_pubkey: &runtime.owner_pubkey,
-            current: &runtime.orchestrator,
-            runtimes: &runtimes,
+
+    let watcher_app = app.clone();
+    let watcher_owner = expected_owner_pubkey.clone();
+    process_scheduled_runtime(
+        ScheduledRuntimeRequest {
+            state: &state,
+            expected_owner_pubkey: &expected_owner_pubkey,
+            conn,
+            schedule: &schedule,
+            now,
+            trigger,
             store_path: &store_path,
         },
+        ensure_production_runtime(&app, &preflight, store_path.clone(), &expected_owner_pubkey),
+        move |started| {
+            crate::commands::watch_command_brief_status(
+                watcher_app.clone(),
+                watcher_owner.clone(),
+                started.to_string(),
+                None,
+            );
+        },
     )
+    .await
 }
 
 fn timer_claim_fast_path(
@@ -804,19 +771,6 @@ fn timer_claim_fast_path(
     Ok(Some(ScheduleRunOutcome::AlreadyClaimed))
 }
 
-fn current_runtime_admission_token(state: &AppState) -> Option<String> {
-    let runtimes = state.command_brief_runtimes.try_read().ok()?;
-    let runtime = runtimes.current.as_ref()?;
-    Some(
-        RuntimeReadiness::ready(
-            &runtime.config,
-            runtime.generation,
-            runtime.orchestrator.admission_state(),
-        )
-        .transition_token,
-    )
-}
-
 fn valid_readiness_token(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
@@ -825,13 +779,20 @@ async fn production_preflight(
     app: &AppHandle,
     schedule: &crate::command_brief::types::BriefSchedule,
     model: &str,
+    expected_owner_pubkey: &str,
 ) -> Result<ProductionPreflight, &'static str> {
     let state = app.state::<AppState>();
     let owner_keys = state.signing_keys().map_err(|_| "identity_unavailable")?;
     let owner_pubkey = owner_keys.public_key().to_hex();
+    if owner_pubkey != expected_owner_pubkey {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
     let backend = ProductionSourceBackend::from_app(app.clone())
         .await
         .map_err(|_| "rag_unavailable")?;
+    if !active_owner_matches(&state, expected_owner_pubkey) {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
     let snapshot = backend
         .verify_active_rag_snapshot()
         .map_err(|_| "rag_invalid")?;
@@ -842,6 +803,9 @@ async fn production_preflight(
     .await
     .map_err(|_| "rag_unavailable")?
     .map_err(|_| "rag_unavailable")?;
+    if !active_owner_matches(&state, expected_owner_pubkey) {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
     let config_path = app
         .path()
         .app_config_dir()
@@ -855,6 +819,9 @@ async fn production_preflight(
     })
     .await
     .map_err(|_| "apple_config_unavailable")??;
+    if !active_owner_matches(&state, expected_owner_pubkey) {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
     let apple_identity = format!("{apple_config_id}:{helper_id}");
     let config = RuntimeConfigIdentity::new(
         &owner_pubkey,
@@ -872,10 +839,17 @@ async fn ensure_production_runtime(
     app: &AppHandle,
     preflight: &ProductionPreflight,
     store_path: std::path::PathBuf,
+    expected_owner_pubkey: &str,
 ) -> Result<Arc<InstalledCommandBriefRuntime>, &'static str> {
     let state = app.state::<AppState>();
+    if preflight.owner_keys.public_key().to_hex() != expected_owner_pubkey {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
     let mut runtimes = state.command_brief_runtimes.write().await;
-    if let Some(runtime) = runtimes.matching(&preflight.config) {
+    if !active_owner_matches(&state, expected_owner_pubkey) {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
+    if let Some(runtime) = runtimes.matching(expected_owner_pubkey, &preflight.config) {
         return Ok(runtime);
     }
     let scheduler =
@@ -894,6 +868,9 @@ async fn ensure_production_runtime(
     )
     .await
     .map_err(|_| "orchestrator_unavailable")?;
+    if !active_owner_matches(&state, expected_owner_pubkey) {
+        return Err(IDENTITY_UNAVAILABLE);
+    }
     let generation = state
         .command_brief_runtime_generation
         .fetch_add(1, Ordering::AcqRel)
@@ -938,13 +915,13 @@ pub(crate) async fn start_manual_command_brief(
         .clone()
         .or_else(|| readiness.loaded_models.first().cloned())
         .ok_or_else(|| "command brief model unavailable".to_string())?;
-    let preflight = production_preflight(&app, &schedule, &model)
+    let preflight = production_preflight(&app, &schedule, &model, expected_owner_pubkey)
         .await
         .map_err(|_| "command brief runtime unavailable".to_string())?;
     if preflight.owner_keys.public_key().to_hex() != expected_owner_pubkey {
         return Err("command brief identity unavailable".to_string());
     }
-    let runtime = ensure_production_runtime(&app, &preflight, store_path)
+    let runtime = ensure_production_runtime(&app, &preflight, store_path, expected_owner_pubkey)
         .await
         .map_err(|_| "command brief runtime unavailable".to_string())?;
     let active_owner = app

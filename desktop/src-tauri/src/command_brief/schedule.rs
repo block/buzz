@@ -133,6 +133,8 @@ impl ReadinessSnapshot {
 /// Durable/in-process reconciliation state for one exact scheduled run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScheduledRunPresence {
+    /// The captured owner is no longer the active unlocked identity.
+    IdentityUnavailable,
     /// No current process or durable terminal knows the run.
     Absent,
     /// The current orchestrator has already accepted the exact run ID.
@@ -159,6 +161,8 @@ pub trait ScheduledRunStarter {
 /// Redacted native orchestrator start failure.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScheduledStartError {
+    /// The captured owner is no longer the active unlocked identity.
+    IdentityUnavailable,
     /// The top-level run registry is at its bounded capacity.
     AdmissionUnavailable,
     /// The start failed for another closed local reason.
@@ -481,6 +485,17 @@ pub fn process_due_schedule(
         }
     };
     match starter.presence(claim.run_id()) {
+        ScheduledRunPresence::IdentityUnavailable => {
+            let reason = DeferredReason::IdentityLocked;
+            record_deferred(
+                conn,
+                &claim,
+                reason,
+                &readiness.transition_token,
+                now.timestamp(),
+            )?;
+            return Ok(ScheduleRunOutcome::Deferred { reason });
+        }
         ScheduledRunPresence::Terminal => {
             mark_claim_completed(conn, &claim, now.timestamp())?;
             return Ok(ScheduleRunOutcome::AlreadyClaimed);
@@ -516,6 +531,17 @@ pub fn process_due_schedule(
         Ok(run_id) if run_id == claim.run_id() => {
             mark_claim_started(conn, &claim, claim.run_id(), now.timestamp())?;
             Ok(ScheduleRunOutcome::Started { run_id })
+        }
+        Err(ScheduledStartError::IdentityUnavailable) => {
+            let reason = DeferredReason::IdentityLocked;
+            record_deferred(
+                conn,
+                &claim,
+                reason,
+                &readiness.transition_token,
+                now.timestamp(),
+            )?;
+            Ok(ScheduleRunOutcome::Deferred { reason })
         }
         Ok(_) | Err(ScheduledStartError::Unavailable) => {
             let reason = DeferredReason::LocalStateUnavailable;
