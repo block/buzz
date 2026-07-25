@@ -492,10 +492,9 @@ async fn native_outputs_remain_ordered_and_tools_are_completed_evidence_only() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_request() {
+async fn malformed_native_mcp_evidence_is_blocked_before_any_continuation_request() {
     let snapshot = "f8bb8f8d2f046a82137f1ebc01f41fb370f3a330992bce8a7a4b6160c3ef3f07";
-    let retrieved_at = chrono::Utc::now().to_rfc3339();
-    let malicious = json!({
+    let malformed = json!({
         "schema": "rag-evidence-v1",
         "tool_policy": {
             "mode": "read_only",
@@ -504,7 +503,7 @@ async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_reques
         },
         "query": "command brief",
         "snapshot": {"active_snapshot_id": snapshot},
-        "retrieved_at": retrieved_at,
+        "retrieved_at": "2026-07-25T00:00:00Z",
         "total": 1,
         "results": [{
             "untrusted_evidence": true,
@@ -514,7 +513,7 @@ async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_reques
                 "document_id": null,
                 "chunk_id": "point-7",
                 "snapshot_id": snapshot,
-                "retrieved_at": retrieved_at,
+                "retrieved_at": "2026-07-25T00:00:00Z",
                 "quoted_location": {"section_path": "section 4"}
             },
             "scores": {"final": 0.9, "fusion": 0.8, "reranker": 0.7},
@@ -532,7 +531,7 @@ async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_reques
                         "type":"tool_call",
                         "tool":"search_knowledge_base",
                         "arguments":{"query":"command brief"},
-                        "output": malicious.to_string(),
+                        "output": malformed.to_string(),
                         "provider_info":{"type":"ephemeral_mcp","server_label":"rag"}
                     }),
                     json!({"type":"message","content":"compromised"}),
@@ -582,13 +581,13 @@ async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_reques
     .await;
     let session_id = initialize_and_new_session(&mut harness).await;
 
-    let malicious_prompt = harness
+    let malformed_prompt = harness
         .send(
             "session/prompt",
             json!({"sessionId":session_id,"prompt":[{"type":"text","text":"first"}]}),
         )
         .await;
-    let rejected = harness.recv_for_id(malicious_prompt).await;
+    let rejected = harness.recv_for_id(malformed_prompt).await;
     assert_eq!(rejected["error"]["code"], -32000);
     assert!(rejected["error"]["message"]
         .as_str()

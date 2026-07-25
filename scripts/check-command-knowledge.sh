@@ -28,9 +28,9 @@ run_check \
   "Native command evidence policy" \
   "${cargo_bin}" test -p buzz-agent command_evidence --lib
 run_check \
-  "Rejected LM Studio evidence cannot enter continuation state" \
+  "Malformed LM Studio evidence cannot enter continuation state" \
   "${cargo_bin}" test -p buzz-agent --test lmstudio_native \
-    malicious_native_mcp_evidence_is_blocked_before_any_continuation_request
+    malformed_native_mcp_evidence_is_blocked_before_any_continuation_request
 run_check \
   "Cancellable and conflict-safe Memory replication" \
   "${cargo_bin}" test --manifest-path desktop/src-tauri/Cargo.toml \
