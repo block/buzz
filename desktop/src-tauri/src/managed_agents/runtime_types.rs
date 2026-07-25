@@ -31,6 +31,29 @@ impl ManagedAgentRuntimeKey {
     }
 }
 
+/// Validated routing target for one managed-agent harness.
+///
+/// `key` is canonical identity used for maps, receipts, status correlation, and
+/// deduplication. `requested_relay_url` preserves the configured authority used
+/// for network I/O; these may intentionally differ for loopback spellings whose
+/// Host value selects different Buzz communities.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManagedAgentRuntimeTarget {
+    pub key: ManagedAgentRuntimeKey,
+    pub requested_relay_url: String,
+}
+
+impl ManagedAgentRuntimeTarget {
+    pub fn new(pubkey: impl Into<String>, relay_url: &str) -> Result<Self, String> {
+        let requested_relay_url = relay_url.trim().to_string();
+        let key = ManagedAgentRuntimeKey::new(pubkey, &requested_relay_url)?;
+        Ok(Self {
+            key,
+            requested_relay_url,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ManagedAgentRuntimeLifecycle {
@@ -47,6 +70,9 @@ pub struct ManagedAgentPairRuntime {
     pub process: ManagedAgentProcess,
     pub lifecycle: ManagedAgentRuntimeLifecycle,
     pub error: Option<String>,
+    /// Configured relay authority used by this process for network I/O. This is
+    /// deliberately distinct from the canonical relay URL in its map key.
+    pub requested_relay_url: String,
     /// Unpredictable identity for this exact harness generation. Lifecycle
     /// frames from prior processes are rejected even when the pair is live.
     pub start_nonce: String,
@@ -67,12 +93,13 @@ impl std::ops::DerefMut for ManagedAgentPairRuntime {
 }
 
 impl ManagedAgentPairRuntime {
-    pub fn starting(process: ManagedAgentProcess) -> Self {
+    pub fn starting(process: ManagedAgentProcess, requested_relay_url: String) -> Self {
         let start_nonce = process.start_nonce.clone();
         Self {
             process,
             lifecycle: ManagedAgentRuntimeLifecycle::Starting,
             error: None,
+            requested_relay_url,
             start_nonce,
         }
     }
@@ -83,8 +110,8 @@ impl ManagedAgentPairRuntime {
 pub struct ManagedAgentRuntimeStatus {
     pub pubkey: String,
     pub relay_url: String,
-    /// Exact descriptor URL echoed only by reconcile result rows so callers can
-    /// correlate a canonical response without normalizing on the frontend.
+    /// Configured relay authority used for network I/O. Live runtime rows keep
+    /// this across status refreshes while `relay_url` remains canonical identity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_relay_url: Option<String>,
     pub local_setup: bool,

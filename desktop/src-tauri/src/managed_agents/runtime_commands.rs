@@ -9,7 +9,7 @@ use super::{
     spawn_agent_child, terminate_process, terminate_untracked_pair_runtime,
     write_agent_runtime_receipt, AgentReadiness, BackendKind, ManagedAgentPairRuntime,
     ManagedAgentRuntimeKey, ManagedAgentRuntimeLifecycle, ManagedAgentRuntimeReceipt,
-    ManagedAgentRuntimeStatus,
+    ManagedAgentRuntimeStatus, ManagedAgentRuntimeTarget,
 };
 use crate::app_state::AppState;
 
@@ -44,6 +44,13 @@ struct StatusInputs<'a> {
     global: &'a super::GlobalAgentConfig,
 }
 
+fn requested_relay_url_for_status(
+    runtime_requested_relay_url: Option<&str>,
+    fallback: Option<String>,
+) -> Option<String> {
+    runtime_requested_relay_url.map(str::to_owned).or(fallback)
+}
+
 fn status_for_with(
     app: &AppHandle,
     record: &super::ManagedAgentRecord,
@@ -60,7 +67,10 @@ fn status_for_with(
     ManagedAgentRuntimeStatus {
         pubkey: key.pubkey.clone(),
         relay_url: key.relay_url.clone(),
-        requested_relay_url,
+        requested_relay_url: requested_relay_url_for_status(
+            runtime.map(|runtime| runtime.requested_relay_url.as_str()),
+            requested_relay_url,
+        ),
         local_setup,
         lifecycle: runtime
             .map(|runtime| runtime.lifecycle.clone())
@@ -160,16 +170,16 @@ pub fn list_managed_agent_runtimes(
         .managed_agent_processes
         .lock()
         .map_err(|e| e.to_string())?;
-    let exited_keys: Vec<_> = runtimes
+    let exited_runtimes: Vec<_> = runtimes
         .iter_mut()
         .filter_map(|(key, runtime)| match runtime.child.try_wait() {
-            Ok(Some(_)) | Err(_) => Some(key.clone()),
+            Ok(Some(_)) | Err(_) => Some((key.clone(), runtime.requested_relay_url.clone())),
             Ok(None) => None,
         })
         .collect();
-    let records_changed = !exited_keys.is_empty();
+    let records_changed = !exited_runtimes.is_empty();
     let mut statuses = Vec::new();
-    for key in exited_keys {
+    for (key, requested_relay_url) in exited_runtimes {
         runtimes.remove(&key);
         super::remove_agent_runtime_receipt(&app, &key);
         state.clear_agent_session_cache(&key);
@@ -184,7 +194,7 @@ pub fn list_managed_agent_runtimes(
                 record,
                 &key,
                 None,
-                None,
+                Some(requested_relay_url),
                 StatusInputs {
                     personas: &personas,
                     global: &global,
@@ -263,7 +273,8 @@ fn start_pair(
     if expected_updated_at.is_some_and(|expected| record.updated_at != expected) {
         return Err("managed agent changed while runtime reconciliation was in flight".into());
     }
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let target = ManagedAgentRuntimeTarget::new(pubkey, &relay_url)?;
+    let key = target.key.clone();
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -283,7 +294,13 @@ fn start_pair(
         .lock()
         .ok()
         .map(|keys| keys.public_key().to_hex());
-    let mut process = spawn_agent_child(&app, record, &key.relay_url, lazy, owner.as_deref())?;
+    let mut process = spawn_agent_child(
+        &app,
+        record,
+        &target.requested_relay_url,
+        lazy,
+        owner.as_deref(),
+    )?;
     let now = crate::util::now_iso();
     let receipt = ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -301,7 +318,10 @@ fn start_pair(
     record.last_started_at = Some(now);
     record.last_stopped_at = None;
     record.last_error = None;
-    runtimes.insert(key.clone(), ManagedAgentPairRuntime::starting(process));
+    runtimes.insert(
+        key.clone(),
+        ManagedAgentPairRuntime::starting(process, target.requested_relay_url.clone()),
+    );
     let status = status_for(&app, record, &key, runtimes.get(&key), None);
     drop(runtimes);
     save_managed_agents(&app, &records)?;
@@ -326,7 +346,8 @@ pub fn stop_managed_agent_runtime(
         .map_err(|e| e.to_string())?;
     let mut records = load_managed_agents(&app)?;
     let record = find_managed_agent_mut(&mut records, &pubkey)?;
-    let key = ManagedAgentRuntimeKey::new(pubkey, &relay_url)?;
+    let target = ManagedAgentRuntimeTarget::new(pubkey, &relay_url)?;
+    let key = target.key.clone();
     let mut runtimes = state
         .managed_agent_processes
         .lock()
@@ -369,7 +390,7 @@ pub fn stop_managed_agent_runtime(
     record.runtime_pid = None;
     record.updated_at = crate::util::now_iso();
     record.last_stopped_at = Some(record.updated_at.clone());
-    let status = status_for(&app, record, &key, None, None);
+    let status = status_for(&app, record, &key, None, Some(target.requested_relay_url));
     drop(runtimes);
     save_managed_agents(&app, &records)?;
     emit_status(&app, &status);
@@ -399,11 +420,11 @@ async fn probe_agent_relay_access(
     state: &AppState,
     record: super::ManagedAgentRecord,
     requested_relay_url: String,
-) -> Result<(super::ManagedAgentRecord, ManagedAgentRuntimeKey, String), String> {
-    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &requested_relay_url)?;
+) -> Result<(super::ManagedAgentRecord, ManagedAgentRuntimeTarget), String> {
+    let target = ManagedAgentRuntimeTarget::new(record.pubkey.clone(), &requested_relay_url)?;
     let keys = nostr::Keys::parse(record.private_key_nsec.trim())
         .map_err(|error| format!("invalid managed-agent key: {error}"))?;
-    let api_base = crate::relay::relay_http_base_url(&key.relay_url);
+    let api_base = crate::relay::relay_http_base_url(&target.requested_relay_url);
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
         crate::relay::query_relay_at_with_keys(
@@ -416,7 +437,7 @@ async fn probe_agent_relay_access(
     )
     .await
     .map_err(|_| "relay access probe timed out".to_string())??;
-    Ok((record, key, requested_relay_url))
+    Ok((record, target))
 }
 
 /// Build the `Failed` status row for a probe failure whose requested relay URL
@@ -501,23 +522,21 @@ pub async fn reconcile_managed_agent_runtimes(
         let mut rows = Vec::new();
         for probe in probes {
             match probe {
-                Ok((record, key, requested)) => {
+                Ok((record, target)) => {
+                    let requested = target.requested_relay_url.clone();
                     match start_pair(
                         record.pubkey.clone(),
-                        key.relay_url.clone(),
+                        requested.clone(),
                         true,
                         Some(&record.updated_at),
                         app.clone(),
                     ) {
-                        Ok(mut status) => {
-                            status.requested_relay_url = Some(requested);
-                            rows.push(status);
-                        }
+                        Ok(status) => rows.push(status),
                         Err(error) => {
                             let mut status = status_for_with(
                                 &app,
                                 &record,
-                                &key,
+                                &target.key,
                                 None,
                                 Some(requested),
                                 StatusInputs {
@@ -604,6 +623,28 @@ mod tests {
             "aa".repeat(32)
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn runtime_target_keeps_configured_authority_separate_from_pair_identity() {
+        let target =
+            super::super::ManagedAgentRuntimeTarget::new("aa".repeat(32), "ws://localhost:3000")
+                .unwrap();
+
+        assert_eq!(target.key.relay_url, "ws://127.0.0.1:3000");
+        assert_eq!(target.requested_relay_url, "ws://localhost:3000");
+    }
+
+    #[test]
+    fn status_requested_relay_survives_refresh_without_callsite_fallback() {
+        assert_eq!(
+            requested_relay_url_for_status(Some("ws://localhost:3000"), None),
+            Some("ws://localhost:3000".to_string())
+        );
+        assert_eq!(
+            requested_relay_url_for_status(None, Some("wss://relay.example".to_string())),
+            Some("wss://relay.example".to_string())
+        );
     }
 
     #[test]

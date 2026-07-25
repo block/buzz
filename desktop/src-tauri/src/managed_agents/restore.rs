@@ -20,7 +20,7 @@ use tauri::Manager;
 /// restore would kill reconcile's lazy child by its receipt and replace it with
 /// an eager one, flipping the pair's laziness on a startup race.
 enum SpawnOutcome {
-    Spawned(super::ManagedAgentRuntimeKey, ManagedAgentProcess),
+    Spawned(super::ManagedAgentRuntimeTarget, ManagedAgentProcess),
     Skipped,
     Failed(String),
 }
@@ -290,51 +290,52 @@ pub async fn restore_managed_agents_on_launch(
                         &record.relay_url,
                         &workspace_relay,
                     );
-                    let outcome =
-                        match super::ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)
-                        {
-                            Ok(key) => {
-                                // F2: if a concurrent startup reconcile already
-                                // tracked a live child for this exact pair during
-                                // the Phase A window, leave it alone. Mirrors the
-                                // live-child guard in `start_pair`.
-                                let already_live = app
-                                    .state::<AppState>()
-                                    .managed_agent_processes
-                                    .lock()
-                                    .ok()
-                                    .and_then(|mut runtimes| {
-                                        runtimes.get_mut(&key).map(|runtime| {
-                                            runtime.child.try_wait().ok().flatten().is_none()
-                                        })
+                    let outcome = match super::ManagedAgentRuntimeTarget::new(
+                        record.pubkey.clone(),
+                        &relay_url,
+                    ) {
+                        Ok(target) => {
+                            // F2: if a concurrent startup reconcile already
+                            // tracked a live child for this exact pair during
+                            // the Phase A window, leave it alone. Mirrors the
+                            // live-child guard in `start_pair`.
+                            let already_live = app
+                                .state::<AppState>()
+                                .managed_agent_processes
+                                .lock()
+                                .ok()
+                                .and_then(|mut runtimes| {
+                                    runtimes.get_mut(&target.key).map(|runtime| {
+                                        runtime.child.try_wait().ok().flatten().is_none()
                                     })
-                                    .unwrap_or(false);
-                                if already_live {
-                                    SpawnOutcome::Skipped
-                                } else {
-                                    match super::terminate_untracked_pair_runtime(app, &key)
-                                        .and_then(|()| {
-                                            // F1: restore spawns lazy, matching
-                                            // reconcile and manual start. Eager on
-                                            // restore buys nothing — a crashed
-                                            // mid-turn session is not resumed by an
-                                            // eager child — and silently reintroduces
-                                            // N idle brains on every launch.
-                                            spawn_agent_child(
-                                                app,
-                                                record,
-                                                &key.relay_url,
-                                                true,
-                                                owner_hex_ref,
-                                            )
-                                        }) {
-                                        Ok(process) => SpawnOutcome::Spawned(key, process),
-                                        Err(error) => SpawnOutcome::Failed(error),
-                                    }
+                                })
+                                .unwrap_or(false);
+                            if already_live {
+                                SpawnOutcome::Skipped
+                            } else {
+                                match super::terminate_untracked_pair_runtime(app, &target.key)
+                                    .and_then(|()| {
+                                        // F1: restore spawns lazy, matching
+                                        // reconcile and manual start. Eager on
+                                        // restore buys nothing — a crashed
+                                        // mid-turn session is not resumed by an
+                                        // eager child — and silently reintroduces
+                                        // N idle brains on every launch.
+                                        spawn_agent_child(
+                                            app,
+                                            record,
+                                            &target.requested_relay_url,
+                                            true,
+                                            owner_hex_ref,
+                                        )
+                                    }) {
+                                    Ok(process) => SpawnOutcome::Spawned(target, process),
+                                    Err(error) => SpawnOutcome::Failed(error),
                                 }
                             }
-                            Err(error) => SpawnOutcome::Failed(error),
-                        };
+                        }
+                        Err(error) => SpawnOutcome::Failed(error),
+                    };
                     (record.pubkey.clone(), outcome)
                 });
                 handle
@@ -366,13 +367,13 @@ pub async fn restore_managed_agents_on_launch(
             // Skipped means a concurrent reconcile already owns a live child for
             // this pair; leave its runtime and record state untouched.
             SpawnOutcome::Skipped => continue,
-            SpawnOutcome::Spawned(key, mut process) => {
+            SpawnOutcome::Spawned(target, mut process) => {
                 let Ok(record) = find_managed_agent_mut(&mut records, &pubkey) else {
                     continue;
                 };
                 let now = util::now_iso();
                 let receipt = super::ManagedAgentRuntimeReceipt {
-                    key: key.clone(),
+                    key: target.key.clone(),
                     pid: process.child.id(),
                     desktop_instance_id: super::current_instance_id(app),
                     started_at: now.clone(),
@@ -390,7 +391,10 @@ pub async fn restore_managed_agents_on_launch(
                 record.last_stopped_at = None;
                 record.last_exit_code = None;
                 record.last_error = None;
-                runtimes.insert(key, super::ManagedAgentPairRuntime::starting(process));
+                runtimes.insert(
+                    target.key,
+                    super::ManagedAgentPairRuntime::starting(process, target.requested_relay_url),
+                );
                 successfully_spawned.push(pubkey);
             }
             SpawnOutcome::Failed(error) => {

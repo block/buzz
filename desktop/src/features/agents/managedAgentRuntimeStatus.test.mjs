@@ -6,6 +6,7 @@ import {
   agentCommunityStatusDetail,
   canonicalRelayUrl,
   findManagedAgentRuntime,
+  managedAgentRuntimeActionRelayUrl,
   managedAgentRuntimeKey,
 } from "./managedAgentRuntimeStatus.ts";
 
@@ -109,5 +110,23 @@ test("matches a stored community URL against canonical backend rows", () => {
   assert.equal(
     findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3001"),
     undefined,
+  );
+});
+
+test("lifecycle actions dial the configured authority after status refresh", () => {
+  assert.equal(
+    managedAgentRuntimeActionRelayUrl(
+      runtime({
+        relayUrl: "ws://127.0.0.1:3000",
+        requestedRelayUrl: "ws://localhost:3000",
+      }),
+    ),
+    "ws://localhost:3000",
+  );
+  assert.equal(
+    managedAgentRuntimeActionRelayUrl(
+      runtime({ relayUrl: "wss://relay.example" }),
+    ),
+    "wss://relay.example",
   );
 });

@@ -41,6 +41,12 @@ export function managedAgentRuntimeKey(
   return JSON.stringify([runtime.pubkey, runtime.relayUrl]);
 }
 
+export function managedAgentRuntimeActionRelayUrl(
+  runtime: Pick<ManagedAgentRuntimeStatus, "relayUrl" | "requestedRelayUrl">,
+): string {
+  return runtime.requestedRelayUrl ?? runtime.relayUrl;
+}
+
 export type ManagedAgentPairAction = "start" | "stop" | "restart";
 
 /** Menu action for one agent+community pair. A missing runtime row means the

@@ -8,6 +8,7 @@ import {
 import {
   agentCommunityAvailability,
   agentCommunityStatusDetail,
+  managedAgentRuntimeActionRelayUrl,
   managedAgentRuntimeKey,
 } from "@/features/agents/managedAgentRuntimeStatus";
 import type { ManagedAgentRuntimeStatus } from "@/shared/api/types";
@@ -50,7 +51,7 @@ export function ActiveAgentCommunitiesSettingsCard() {
               ? "start"
               : "restart",
         pubkey: runtime.pubkey,
-        relayUrl: runtime.relayUrl,
+        relayUrl: managedAgentRuntimeActionRelayUrl(runtime),
       });
     } finally {
       setPendingRuntimeKey(null);

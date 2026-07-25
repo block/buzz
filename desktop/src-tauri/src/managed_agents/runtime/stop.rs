@@ -19,15 +19,27 @@ pub(crate) fn managed_agent_runtime_keys<T>(
         .collect()
 }
 
-#[cfg(test)]
-pub(crate) fn managed_agent_runtime_relay_urls<T>(
-    runtimes: &HashMap<ManagedAgentRuntimeKey, T>,
+fn requested_relay_urls_for_entries<'a>(
+    entries: impl IntoIterator<Item = (&'a ManagedAgentRuntimeKey, &'a str)>,
     pubkey: &str,
 ) -> Vec<String> {
-    managed_agent_runtime_keys(runtimes, pubkey)
+    entries
         .into_iter()
-        .map(|key| key.relay_url)
+        .filter(|(key, _)| key.pubkey.eq_ignore_ascii_case(pubkey))
+        .map(|(_, requested_relay_url)| requested_relay_url.to_string())
         .collect()
+}
+
+pub(crate) fn managed_agent_runtime_requested_relay_urls(
+    runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
+    pubkey: &str,
+) -> Vec<String> {
+    requested_relay_urls_for_entries(
+        runtimes
+            .iter()
+            .map(|(key, runtime)| (key, runtime.requested_relay_url.as_str())),
+        pubkey,
+    )
 }
 
 /// Stop the single tracked runtime pair at `key`, if present.
@@ -190,23 +202,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pair_preserving_restart_targets_exact_original_relays() {
+    fn pair_preserving_restart_targets_requested_relay_authorities() {
         let agent = "aa".repeat(32);
         let other = "bb".repeat(32);
-        let first = ManagedAgentRuntimeKey::new(&agent, "wss://one.example").unwrap();
+        let first = ManagedAgentRuntimeKey::new(&agent, "ws://localhost:3000").unwrap();
         let second = ManagedAgentRuntimeKey::new(&agent, "wss://two.example").unwrap();
         let unrelated = ManagedAgentRuntimeKey::new(other, "wss://fallback.example").unwrap();
-        let runtimes = HashMap::from([(first, ()), (second, ()), (unrelated, ())]);
 
-        let mut relays = managed_agent_runtime_relay_urls(&runtimes, &agent);
+        let mut relays = requested_relay_urls_for_entries(
+            [
+                (&first, "ws://localhost:3000"),
+                (&second, "wss://two.example"),
+                (&unrelated, "wss://fallback.example"),
+            ],
+            &agent,
+        );
         relays.sort();
         assert_eq!(
             relays,
             vec![
-                "wss://one.example".to_string(),
+                "ws://localhost:3000".to_string(),
                 "wss://two.example".to_string()
             ]
         );
+        assert_eq!(first.relay_url, "ws://127.0.0.1:3000");
     }
 
     #[test]
