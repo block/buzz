@@ -274,8 +274,10 @@ pub fn resolve_effective_model_provider_pair(
 
 /// The relay-mesh preflight decision for `record`, resolved the same way
 /// spawn resolves its mesh env: through `resolve_effective_config` (which
-/// folds in the definition → global fallback), never through the record's
-/// own `provider`/`model`/`relay_mesh` bytes.
+/// folds in the definition → global fallback). A linked instance's own
+/// `provider`/`model`/`relay_mesh` bytes never contribute; a definition-less
+/// legacy record may fall back to them via `legacy_record_mesh_model_id`,
+/// which is confined to `resolve_definition_less`.
 ///
 /// `None` covers both "not a mesh agent" and "orphaned instance" — an orphan
 /// never spawns (see `require_resolved`), so it never needs a mesh preflight

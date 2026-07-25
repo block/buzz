@@ -417,8 +417,8 @@ pub(super) async fn start_local_agent_with_preflight(
     }
 
     // Preflight against the same resolution spawn uses — `resolve_effective_config`
-    // (definition → global fallback) — never the record's own `provider`/`model`/
-    // `relay_mesh` bytes. For a linked instance this reads the CURRENT definition
+    // (definition → global fallback). A linked instance's own `provider`/`model`/
+    // `relay_mesh` bytes never contribute: this reads the CURRENT definition
     // directly, so a definition edit that flips `provider` to/from relay-mesh
     // between saves is reflected here without needing a prospective re-snapshot;
     // for a global-inherited blank definition, it also folds in the global

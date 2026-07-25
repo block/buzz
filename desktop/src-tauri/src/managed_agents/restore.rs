@@ -241,9 +241,9 @@ pub async fn restore_managed_agents_on_launch(
     #[cfg(feature = "mesh-llm")]
     let agents_to_start = {
         // Preflight against the same resolution spawn uses — `resolve_effective_config`
-        // (definition → global fallback) — never the record's own `provider`/`model`/
-        // `relay_mesh` bytes. See `start_local_agent_with_preflight` in `commands/agents.rs`
-        // for the identical rationale on the interactive path.
+        // (definition → global fallback). A linked instance's own `provider`/`model`/
+        // `relay_mesh` bytes never contribute. See `start_local_agent_with_preflight`
+        // in `commands/agents.rs` for the identical rationale on the interactive path.
         let personas = load_personas(app).unwrap_or_default();
         let global = super::load_global_agent_config(app).unwrap_or_default();
         let mut mesh_preflight_failures = std::collections::HashSet::new();
