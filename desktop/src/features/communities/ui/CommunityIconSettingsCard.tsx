@@ -58,12 +58,17 @@ export function CommunityIconSettingsCard({
 
       isSavingRef.current = true;
       const drainQueue = async () => {
+        let confirmedIcon = persistedIcon;
+        let lastAttemptFailed = false;
         while (queuedIconRef.current !== undefined) {
           const nextIcon = queuedIconRef.current;
           queuedIconRef.current = undefined;
           try {
             await mutateIcon(nextIcon);
+            confirmedIcon = nextIcon;
+            lastAttemptFailed = false;
           } catch (error) {
+            lastAttemptFailed = true;
             toast.error(
               error instanceof Error
                 ? error.message
@@ -71,11 +76,13 @@ export function CommunityIconSettingsCard({
             );
           }
         }
+        if (lastAttemptFailed) setDraftIcon(confirmedIcon);
+        hasLocalEditRef.current = false;
         isSavingRef.current = false;
       };
       void drainQueue();
     },
-    [mutateIcon],
+    [mutateIcon, persistedIcon],
   );
 
   function previewIcon(icon: string) {

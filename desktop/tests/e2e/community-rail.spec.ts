@@ -85,6 +85,7 @@ test.describe("community rail", () => {
     await expect(
       page.getByRole("dialog", { name: "Edit Community" }),
     ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toBeVisible();
     await page.mouse.click(0, 0);
 
     await expect(
@@ -168,6 +169,11 @@ test.describe("community rail", () => {
     await expect(
       page.getByRole("menuitem", { name: "Invite to community" }),
     ).toHaveCount(0);
+    await page.getByRole("menuitem", { name: "Community settings" }).click();
+    await expect(
+      page.getByRole("dialog", { name: "Edit Community" }),
+    ).toBeVisible();
+    await expect(page.getByTestId("community-icon-settings")).toHaveCount(0);
   });
 
   test("shows active community actions instead of another switcher in the profile menu", async ({

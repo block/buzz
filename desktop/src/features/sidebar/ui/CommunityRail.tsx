@@ -443,6 +443,7 @@ export function CommunityRail({
         onSave={onUpdateCommunity}
         open={editingCommunity !== null}
         community={editingCommunity}
+        showIconEditor={editingCommunity?.id === activeCommunityId}
       />
     </nav>
   );

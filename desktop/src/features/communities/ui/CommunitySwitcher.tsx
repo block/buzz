@@ -399,6 +399,7 @@ export function CommunitySwitcher({
         onSave={onUpdateCommunity}
         open={editingCommunity !== null}
         community={editingCommunity}
+        showIconEditor={editingCommunity?.id === activeCommunity?.id}
       />
     </>
   );
