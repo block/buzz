@@ -259,7 +259,9 @@ who is already a community member; it deliberately does **not** grant
 membership. Only a workspace-verified Slack OIDC join performs automatic
 member admission. `buzz-migrate` currently has no production email-delivery
 backend, so this channel is only useful in `--dev` or after integrating a
-mailer.
+mailer: outside `--dev`, `POST /email/start` answers `503` for every address
+rather than reporting a link it cannot send (the answer is identical for known
+and unknown addresses, so it still reveals no workspace membership).
 
 ## Relay requirements
 

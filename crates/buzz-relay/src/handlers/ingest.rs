@@ -1599,18 +1599,25 @@ async fn ingest_event_inner(
     }
     let event = std::sync::Arc::try_unwrap(event).unwrap_or_else(|arc| (*arc).clone());
 
-    // Whether the authenticated caller is a community owner/admin. Looked up
-    // once and reused for the import carve-out and the identity-binding gate.
-    let caller_is_community_admin = matches!(
-        state
-            .db
-            .get_relay_member(tenant.community(), &auth.pubkey().to_hex())
-            .await
-            .map_err(|e| IngestError::Internal(format!("error: {e}")))?
-            .as_ref()
-            .map(|m| m.role.as_str()),
-        Some("owner") | Some("admin")
-    );
+    // Whether the authenticated caller is a community owner/admin. Only the two
+    // import paths below need it, and `relay_members` is an uncached query, so
+    // the lookup is gated on them: ordinary message ingest keeps its previous
+    // round-trip count.
+    let import_tagged = has_import_tag(&event);
+    let caller_is_community_admin = if import_tagged || kind_u32 == KIND_IMPORT_IDENTITY_BINDING {
+        matches!(
+            state
+                .db
+                .get_relay_member(tenant.community(), &auth.pubkey().to_hex())
+                .await
+                .map_err(|e| IngestError::Internal(format!("error: {e}")))?
+                .as_ref()
+                .map(|m| m.role.as_str()),
+            Some("owner") | Some("admin")
+        )
+    } else {
+        false
+    };
 
     // Authorized-import carve-out: an event carrying an `import` provenance
     // tag, submitted by an authenticated community owner/admin, may be
@@ -1622,7 +1629,7 @@ async fn ingest_event_inner(
     // is carried by `import_author` tags plus a two-party binding (an
     // owner/admin KIND_IMPORT_IDENTITY_BINDING attestation AND the subject's
     // own KIND_IMPORT_IDENTITY_CLAIM), never by third-party signatures.
-    let import_exempt = has_import_tag(&event) && caller_is_community_admin;
+    let import_exempt = import_tagged && caller_is_community_admin;
 
     // Identity bindings are owner/admin-only: this is what stops a member from
     // claiming someone else's imported history (`d = slack:<id>` → their own

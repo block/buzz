@@ -1423,9 +1423,10 @@ impl Db {
         thread_meta: Option<event::ThreadMetadataParams<'_>>,
         backfill: bool,
     ) -> Result<(StoredEvent, bool)> {
-        if backfill {
-            self.fence.backfill_begin();
-        }
+        // RAII: the guard ends the backfill even if this future is dropped
+        // mid-insert (a cancelled request), which would otherwise leave the
+        // fence closed forever.
+        let backfill_guard = backfill.then(|| self.fence.backfill());
         let result = event::insert_event_with_thread_metadata(
             &self.pool,
             community_id,
@@ -1435,9 +1436,7 @@ impl Db {
             backfill,
         )
         .await;
-        if backfill {
-            self.fence.backfill_end();
-        }
+        drop(backfill_guard);
         let result = result?;
         if result.1 {
             if let Err(e) = insert_mentions(&self.pool, community_id, event, channel_id).await {
@@ -1464,9 +1463,7 @@ impl Db {
         emoji: &str,
         backfill: bool,
     ) -> Result<event::ReactionEventInsertOutcome> {
-        if backfill {
-            self.fence.backfill_begin();
-        }
+        let backfill_guard = backfill.then(|| self.fence.backfill());
         let outcome = event::insert_reaction_event_with_thread_metadata(
             &self.pool,
             community_id,
@@ -1479,9 +1476,7 @@ impl Db {
             backfill,
         )
         .await;
-        if backfill {
-            self.fence.backfill_end();
-        }
+        drop(backfill_guard);
         let outcome = outcome?;
         if let event::ReactionEventInsertOutcome::Inserted {
             was_inserted: true, ..

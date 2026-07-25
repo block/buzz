@@ -124,6 +124,18 @@ impl ReplicaFence {
         self.backfill_inflight.fetch_sub(1, Ordering::SeqCst);
     }
 
+    /// Scope a backfill insert: [`Self::backfill_begin`] now,
+    /// [`Self::backfill_end`] when the returned guard drops.
+    ///
+    /// Prefer this over the raw pair: an ingest future can be dropped
+    /// mid-insert (an HTTP client disconnecting cancels the request future),
+    /// and a missed `backfill_end` leaks the in-flight count, leaving the
+    /// fence permanently closed for the rest of the process's life.
+    pub fn backfill(&self) -> BackfillGuard<'_> {
+        self.backfill_begin();
+        BackfillGuard(self)
+    }
+
     /// Whether a probe sample taken at `sampled_at` may advance the fence.
     fn sample_admissible(&self, sampled_at: DateTime<Utc>) -> bool {
         if self.backfill_inflight.load(Ordering::SeqCst) > 0 {
@@ -172,6 +184,17 @@ impl ReplicaFence {
 impl Default for ReplicaFence {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// RAII scope for one backfill (floor-exempt) insert — see
+/// [`ReplicaFence::backfill`]. Ends the backfill on drop, including when the
+/// enclosing future is cancelled instead of completing.
+pub struct BackfillGuard<'a>(&'a ReplicaFence);
+
+impl Drop for BackfillGuard<'_> {
+    fn drop(&mut self) {
+        self.0.backfill_end();
     }
 }
 
@@ -601,6 +624,21 @@ mod tests {
         assert!(!fence.sample_admissible(before));
         let after = Utc::now() + chrono::Duration::seconds(1);
         assert!(fence.sample_admissible(after));
+    }
+
+    #[test]
+    fn dropping_the_backfill_guard_reopens_admissibility() {
+        // A cancelled insert drops the guard without running any explicit
+        // end call; the in-flight count must still return to zero, or the
+        // fence never advances again.
+        let fence = ReplicaFence::new();
+        let before = Utc::now();
+        {
+            let _guard = fence.backfill();
+            assert!(!fence.sample_admissible(Utc::now()));
+        }
+        assert!(!fence.sample_admissible(before), "watermark still applies");
+        assert!(fence.sample_admissible(Utc::now() + chrono::Duration::seconds(1)));
     }
 
     #[test]

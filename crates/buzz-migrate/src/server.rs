@@ -73,8 +73,10 @@ pub struct OidcSessions {
 /// How the service delivers magic links.
 #[derive(Clone)]
 pub enum Mailer {
-    /// Production-safe placeholder until an actual email delivery backend is
-    /// configured. `/email/start` stays enumeration-safe and sends nothing.
+    /// No delivery backend configured — `/email/start` reports the channel as
+    /// unavailable instead of claiming to have sent a link it cannot send.
+    /// The answer is identical for every address, so it still cannot be used
+    /// to enumerate the workspace.
     Disabled,
     /// Development: don't send anything; the link is logged and returned in the
     /// `/email/start` response so a local tester can follow it by hand.
@@ -169,7 +171,7 @@ struct EmailStartReq {
     email: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct EmailStartResp {
     /// Always the same generic message, regardless of whether the email is
     /// known — do not leak workspace membership.
@@ -187,6 +189,15 @@ async fn email_start(
     Json(req): Json<EmailStartReq>,
 ) -> Result<Json<EmailStartResp>, ApiError> {
     let inner = state.i();
+    if matches!(inner.mailer, Mailer::Disabled) {
+        // Same answer for every address (no enumeration), but an honest one:
+        // pretending to have mailed a link the operator cannot send strands
+        // the claimant waiting for an email that never arrives.
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "email migration links are not configured on this service".into(),
+        });
+    }
     let dev_link = match (&inner.mailer, inner.roster.subject_for_email(&req.email)) {
         (Mailer::Dev, Some(subject)) => {
             let tok = token::mint(
@@ -837,7 +848,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabled_mailer_does_not_expose_known_addresses() {
+    async fn disabled_mailer_reports_unavailable_without_exposing_addresses() {
         let mut inner = test_inner();
         inner.mailer = Mailer::Disabled;
         let state = AppState(Arc::new(inner));
@@ -849,7 +860,7 @@ mod tests {
             }),
         )
         .await
-        .expect("generic response");
+        .expect_err("channel is unavailable");
         let unknown = email_start(
             State(state),
             Json(EmailStartReq {
@@ -857,10 +868,37 @@ mod tests {
             }),
         )
         .await
+        .expect_err("channel is unavailable");
+
+        // A known and an unknown address are answered identically — no
+        // enumeration — and neither is told a link was sent.
+        assert_eq!(known.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(known.status, unknown.status);
+        assert_eq!(known.message, unknown.message);
+    }
+
+    #[tokio::test]
+    async fn dev_mailer_answers_known_and_unknown_addresses_alike() {
+        let state = AppState(Arc::new(test_inner()));
+        let unknown = email_start(
+            State(state.clone()),
+            Json(EmailStartReq {
+                email: "nobody@corp.com".into(),
+            }),
+        )
+        .await
+        .expect("generic response");
+        let known = email_start(
+            State(state),
+            Json(EmailStartReq {
+                email: "alice@corp.com".into(),
+            }),
+        )
+        .await
         .expect("generic response");
 
-        assert!(known.0.dev_link.is_none());
         assert!(unknown.0.dev_link.is_none());
+        assert!(known.0.dev_link.is_some(), "dev mode surfaces the link");
         assert_eq!(known.0.message, unknown.0.message);
     }
 

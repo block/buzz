@@ -93,7 +93,11 @@ impl Roster {
         self.email_to_subject.get(&email).map(String::as_str)
     }
 
-    /// The display name for a subject, for personalizing the email.
+    /// The display name for a subject, for personalizing the email. Held for
+    /// the pending mail-delivery backend — [`Mailer::Disabled`] and the dev
+    /// mailer send no copy, so nothing calls it yet.
+    ///
+    /// [`Mailer::Disabled`]: crate::server::Mailer::Disabled
     pub fn name_for_subject(&self, subject: &str) -> Option<&str> {
         self.subject_to_name.get(subject).map(String::as_str)
     }

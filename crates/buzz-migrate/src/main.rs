@@ -173,6 +173,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.dev {
         tracing::warn!("--dev enabled: /oidc/dev-complete is active; do NOT use in production");
+    } else {
+        tracing::warn!(
+            "email channel disabled: no delivery backend is configured, so /email/start \
+             answers 503. Use the Slack OIDC channel, or `buzz import bind` for manual \
+             attribution"
+        );
     }
 
     let relay_url = to_ws_url(&args.relay_url);

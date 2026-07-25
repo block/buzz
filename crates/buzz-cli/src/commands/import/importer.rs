@@ -23,6 +23,17 @@ use crate::error::CliError;
 /// of individually bad messages.
 const MAX_CONSECUTIVE_FAILURES: usize = 5;
 
+/// Persist the state ledger at most every N successful writes.
+///
+/// The ledger is serialized whole on every save, so saving per message costs
+/// O(n²) bytes over a large workspace. Batching is safe because every import
+/// write is deterministic and idempotent: a crash loses at most the last N
+/// ledger entries, and re-running rebuilds byte-identical events that the relay
+/// reports as duplicates (which [`submit`] treats as success), repopulating the
+/// ledger. Channel creation, archival, and end-of-channel state are still
+/// flushed immediately.
+const STATE_CHECKPOINT_WRITES: usize = 50;
+
 #[derive(Default)]
 struct Summary {
     channels_created: u64,
@@ -53,6 +64,9 @@ pub(super) struct Importer<'a> {
     state_path: PathBuf,
     summary: Summary,
     skip_reactions: bool,
+    /// Writes recorded since the last state flush (see
+    /// [`STATE_CHECKPOINT_WRITES`]).
+    unsaved: usize,
 }
 
 impl<'a> Importer<'a> {
@@ -75,12 +89,30 @@ impl<'a> Importer<'a> {
             state_path,
             summary: Summary::default(),
             skip_reactions,
+            unsaved: 0,
         }
     }
 
     /// Persist the running state ledger.
     fn save(&self) -> Result<(), CliError> {
         self.state.save(&self.state_path)
+    }
+
+    /// Persist immediately and clear the checkpoint counter.
+    fn flush(&mut self) -> Result<(), CliError> {
+        self.save()?;
+        self.unsaved = 0;
+        Ok(())
+    }
+
+    /// Record one completed write, persisting once a checkpoint's worth has
+    /// accumulated (see [`STATE_CHECKPOINT_WRITES`]).
+    fn checkpoint(&mut self) -> Result<(), CliError> {
+        self.unsaved += 1;
+        if self.unsaved >= STATE_CHECKPOINT_WRITES {
+            self.flush()?;
+        }
+        Ok(())
     }
 
     /// Create a channel once and independently resume its topic metadata.
@@ -122,7 +154,7 @@ impl<'a> Importer<'a> {
                         archived_done: false,
                     },
                 );
-                self.save()?;
+                self.flush()?;
                 self.summary.channels_created += 1;
                 (uuid, false)
             }
@@ -142,7 +174,7 @@ impl<'a> Importer<'a> {
                     if let Some(state) = self.state.channels.get_mut(&channel.id) {
                         state.metadata_done = true;
                     }
-                    self.save()?;
+                    self.flush()?;
                 }
                 Err(e) => self
                     .summary
@@ -243,7 +275,7 @@ impl<'a> Importer<'a> {
                 Ok(event_id) => {
                     consecutive_failures = 0;
                     self.state.messages.insert(key.clone(), event_id);
-                    self.save()?;
+                    self.checkpoint()?;
                     self.summary.messages_imported += 1;
                     imported_in_channel += 1;
                     if imported_in_channel.is_multiple_of(50) {
@@ -256,7 +288,7 @@ impl<'a> Importer<'a> {
                     self.summary.warn(format!("message {key} failed: {e}"));
                     self.summary.skipped += 1;
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                        self.save()?;
+                        self.flush()?;
                         return Err(CliError::Other(format!(
                             "{MAX_CONSECUTIVE_FAILURES} consecutive submit failures — aborting; \
                              re-run to resume from the state file"
@@ -286,14 +318,14 @@ impl<'a> Importer<'a> {
                     if let Some(state) = self.state.channels.get_mut(&channel.id) {
                         state.archived_done = true;
                     }
-                    self.save()?;
+                    self.flush()?;
                 }
                 Err(e) => self
                     .summary
                     .warn(format!("archive failed for #{}: {e}", channel.name)),
             }
         }
-        self.save()?;
+        self.flush()?;
         Ok(())
     }
 
@@ -341,7 +373,7 @@ impl<'a> Importer<'a> {
             match submit(client, builder).await {
                 Ok(_) => {
                     self.state.reactions.insert(dedupe);
-                    self.save()?;
+                    self.checkpoint()?;
                     self.summary.reactions_imported += 1;
                 }
                 Err(e) => self.summary.warn(format!(

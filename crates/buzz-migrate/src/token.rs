@@ -181,9 +181,9 @@ pub fn verify(secret: &[u8], token: &MagicToken, now: u64) -> Result<VerifiedTok
 /// cannot grow without bound.
 ///
 /// This is process-local. A single claim-service instance is the intended
-/// deployment; a multi-instance operator must back single use with shared
-/// storage (documented in the service README) or the same token could be
-/// redeemed once per instance.
+/// deployment (`docs/slack-import.md` § Configure the claim service); a
+/// multi-instance operator must back single use with shared storage, or the
+/// same token could be redeemed once per instance.
 #[derive(Debug, Default)]
 pub struct ConsumedNonces {
     /// nonce -> reservation/consumption state and token expiry.
