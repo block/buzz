@@ -21,7 +21,11 @@
 /// - IPv6 link-local     fe80::/10
 /// - IPv6 multicast      ff00::/8
 /// - IPv6 documentation  2001:db8::/32 (RFC 3849) — should never appear in production
-/// - IPv4-mapped IPv6    ::ffff:0:0/96 (checked recursively against IPv4 rules)
+/// - IPv4-compatible and mapped IPv6 (checked recursively against IPv4 rules)
+/// - NAT64 well-known    64:ff9b::/96 (embedded IPv4 checked recursively)
+/// - NAT64 local-use     64:ff9b:1::/48 (RFC 8215)
+/// - Teredo              2001::/32 (RFC 4380)
+/// - 6to4                2002::/16 (RFC 3056)
 pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
@@ -38,17 +42,37 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
                 || (octets[0] == 198 && (octets[1] & 0xFE) == 18)
         }
         std::net::IpAddr::V6(v6) => {
-            // Check IPv4-mapped IPv6 addresses (::ffff:x.x.x.x) against IPv4 rules.
-            if let Some(v4) = v6.to_ipv4_mapped() {
+            // Check IPv4-compatible and mapped addresses against IPv4 rules.
+            if let Some(v4) = v6.to_ipv4() {
                 return is_private_ip(&std::net::IpAddr::V4(v4));
             }
+
+            let segments = v6.segments();
+
+            // NAT64 well-known prefix (RFC 6052). Preserve access to public IPv4
+            // destinations while rejecting embedded private/reserved addresses.
+            if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                let v4 = std::net::Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    segments[6] as u8,
+                    (segments[7] >> 8) as u8,
+                    segments[7] as u8,
+                );
+                return is_private_ip(&std::net::IpAddr::V4(v4));
+            }
+
             v6.is_loopback()
                 || v6.is_unspecified()
-                || v6.segments()[0] & 0xfe00 == 0xfc00 // fc00::/7 ULA
-                || v6.segments()[0] & 0xffc0 == 0xfe80 // fe80::/10 link-local
-                || v6.segments()[0] & 0xff00 == 0xff00 // ff00::/8 multicast
+                || segments[0] & 0xfe00 == 0xfc00 // fc00::/7 ULA
+                || segments[0] & 0xffc0 == 0xfe80 // fe80::/10 link-local
+                || segments[0] & 0xff00 == 0xff00 // ff00::/8 multicast
+                || (segments[0] == 0x0064
+                    && segments[1] == 0xff9b
+                    && segments[2] == 1) // 64:ff9b:1::/48 local-use NAT64
+                || (segments[0] == 0x2001 && segments[1] == 0) // 2001::/32 Teredo
+                || segments[0] == 0x2002 // 2002::/16 6to4
                 // RFC 3849 — documentation range, should never appear in production
-                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0db8)
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
         }
     }
 }
@@ -132,6 +156,40 @@ mod tests {
     #[test]
     fn test_ipv4_mapped_v6_public() {
         assert!(!is_private_ip(&"::ffff:8.8.8.8".parse::<IpAddr>().unwrap()));
+    }
+    #[test]
+    fn test_ipv4_compatible_v6_private() {
+        assert!(is_private_ip(&"::10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"::127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"::169.254.169.254".parse::<IpAddr>().unwrap()
+        ));
+    }
+    #[test]
+    fn test_nat64_well_known_prefix() {
+        assert!(is_private_ip(
+            &"64:ff9b::10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"64:ff9b::127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"64:ff9b::169.254.169.254".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_private_ip(
+            &"64:ff9b::8.8.8.8".parse::<IpAddr>().unwrap()
+        ));
+    }
+    #[test]
+    fn test_ipv6_transition_ranges() {
+        assert!(is_private_ip(&"64:ff9b:1::1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(&"2001::1".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"2002:0a00:0001::".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"2002:a9fe:a9fe::".parse::<IpAddr>().unwrap()
+        ));
     }
 
     // CGNAT (RFC 6598) — 100.64.0.0/10
