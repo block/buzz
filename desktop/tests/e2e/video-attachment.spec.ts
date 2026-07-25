@@ -1,5 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { waitForAnimations } from "../helpers/animations";
 import { installMockBridge } from "../helpers/bridge";
 import { expectCornerRadiusPx, expectSmoothCorners } from "../helpers/css";
 
@@ -368,19 +369,19 @@ test("video upload previews use poster frames and inline videos open review mode
   await expect(reviewDialog.getByLabel("Video timeline")).toBeVisible();
 
   const reviewVideo = reviewDialog.locator("video");
-  await expect(reviewVideo).not.toHaveAttribute("controls", "");
-  await reviewDialog.getByRole("button", { name: "Play review video" }).click();
-  await expect(
-    reviewDialog.getByRole("button", { name: "Pause review video" }),
-  ).toBeVisible();
   const progressThumb = page.getByTestId("video-review-progress-thumb");
+  await expect(reviewVideo).not.toHaveAttribute("controls", "");
   await reviewVideo.evaluate((video) => {
     const el = video as HTMLVideoElement;
     el.currentTime = 10;
   });
-  await reviewVideo.evaluate((video) => {
-    (video as HTMLVideoElement).pause();
+  await waitForAnimations(page);
+  await reviewDialog.getByRole("button", { name: "Play review video" }).click();
+  const pauseReviewButton = reviewDialog.getByRole("button", {
+    name: "Pause review video",
   });
+  await expect(pauseReviewButton).toBeVisible();
+  await pauseReviewButton.click();
   await expect
     .poll(() =>
       reviewVideo.evaluate((video) => (video as HTMLVideoElement).paused),

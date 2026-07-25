@@ -61,7 +61,7 @@ GREEN evidence:
 - The corrected Daily Command Brief E2E passes both scenarios and verifies the
   visible proposal, advisory limitation, and source-ledger interaction.
 - The original video review scenario plus the two extracted playback/thread
-  scenarios passed 15/15 across five repetitions.
+  scenarios passed 30/30 across ten repetitions.
 - The messaging and welcome-modal animation-race corrections each passed 5/5
   repetitions.
 - Aggregate `just ci` and a fresh E2E build pass.
@@ -73,9 +73,14 @@ The inherited video-review scenario had three unrelated responsibilities in
 one 543-line test. Its live-message assertion expected an offscreen virtualized
 row even though the product correctly exposed `1 new message`; the assertion
 now targets that durable user-visible signal. Playback synchronization and
-thread comment retention were moved, not deleted, into focused tests. Atomic
-video pause and current-DOM menu clicks avoid animation-detachment races while
-retaining the same product behavior.
+thread comment retention were moved, not deleted, into focused tests. The
+review pause assertion now activates the visible current-DOM
+`Pause review video` control through Playwright after settling pre-play
+animations, then proves both native paused state and the visible
+`Play review video` state. A targeted mutation that disabled only the
+production pause branch left the control visible and clickable but failed the
+native paused-state assertion, proving the test does not bypass the UI
+contract.
 
 The messaging test now waits for the avatar editor's animation before filling
 and requires the real `Profile saved` toast. The welcome-modal screenshot test
