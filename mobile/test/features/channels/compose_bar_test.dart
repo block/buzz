@@ -18,6 +18,8 @@ import 'package:buzz/features/channels/compose_bar.dart';
 import 'package:buzz/features/channels/channels_provider.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates.dart';
 import 'package:buzz/features/channels/mentions/mention_candidates_provider.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji.dart';
+import 'package:buzz/features/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
 
@@ -41,16 +43,58 @@ final _pngBytes = Uint8List.fromList([
 ]);
 
 final _gifBytes = Uint8List.fromList([
-  0x47,
-  0x49,
-  0x46,
-  0x38,
-  0x39,
-  0x61,
+  ...ascii.encode('GIF89a'),
+  0x02,
+  0x00,
+  0x02,
+  0x00,
+  0x80,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0xff,
+  0xff,
+  0xff,
+  0x21,
+  0xfe,
+  0x05,
+  ...ascii.encode('hello'),
+  0x00,
+  0x21,
+  0xff,
+  0x0b,
+  ...ascii.encode('NETSCAPE2.0'),
+  0x03,
   0x01,
   0x00,
+  0x00,
+  0x00,
+  0x21,
+  0xf9,
+  0x04,
+  0x00,
+  0x0a,
+  0x00,
+  0x00,
+  0x00,
+  0x2c,
+  0x00,
+  0x00,
+  0x00,
+  0x00,
+  0x02,
+  0x00,
+  0x02,
+  0x00,
+  0x00,
+  0x02,
+  0x02,
+  0x44,
   0x01,
   0x00,
+  0x3b,
 ]);
 
 final _apngBytes = Uint8List.fromList([
@@ -62,44 +106,24 @@ final _apngBytes = Uint8List.fromList([
   0x0a,
   0x1a,
   0x0a,
-  0x00,
-  0x00,
-  0x00,
-  0x08,
-  0x61,
-  0x63,
-  0x54,
-  0x4c,
-  0x00,
-  0x00,
-  0x00,
-  0x02,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
-  0x49,
-  0x45,
-  0x4e,
-  0x44,
-  0x00,
-  0x00,
-  0x00,
-  0x00,
+  ..._testPngChunk('acTL', [0, 0, 0, 2, 0, 0, 0, 0]),
+  ..._testPngChunk('IEND', const []),
 ]);
+
+List<int> _testPngChunk(String type, List<int> payload) {
+  return [
+    payload.length >> 24 & 0xff,
+    payload.length >> 16 & 0xff,
+    payload.length >> 8 & 0xff,
+    payload.length & 0xff,
+    ...ascii.encode(type),
+    ...payload,
+    0,
+    0,
+    0,
+    0,
+  ];
+}
 
 const _mediaUploadPlatformChannel = MethodChannel('buzz/media_upload');
 
@@ -119,9 +143,11 @@ Widget _buildComposeBar({
   List<Channel> channels = const <Channel>[],
   String? currentPubkey,
   bool? supportsShowingSystemContextMenu,
+  List<CustomEmoji> customEmoji = const <CustomEmoji>[],
 }) {
   return ProviderScope(
     overrides: [
+      customEmojiListProvider.overrideWithValue(customEmoji),
       mediaUploadServiceProvider.overrideWithValue(uploadService),
       currentPubkeyProvider.overrideWith((ref) => currentPubkey),
       channelMembersProvider(
@@ -148,7 +174,10 @@ Widget _buildComposeBar({
             ),
       home: Scaffold(
         body: SafeArea(
-          child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          child: Align(
+            alignment: Alignment.bottomCenter,
+            child: ComposeBar(channelId: 'channel-1', onSend: onSend),
+          ),
         ),
       ),
     ),
@@ -233,6 +262,42 @@ void main() {
   });
 
   group('ComposeBar', () {
+    testWidgets('inserts a community emoji at the cursor from the action row', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          customEmoji: const [
+            CustomEmoji(shortcode: 'meow', url: 'https://example.com/meow.png'),
+          ],
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(find.byType(TextField), 'hello world');
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      textField.controller!.selection = const TextSelection.collapsed(
+        offset: 6,
+      );
+
+      await tester.tap(find.byIcon(LucideIcons.smilePlus));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byIcon(LucideIcons.sparkles));
+      await tester.pump();
+      await tester.tap(find.byTooltip(':meow:'));
+      await tester.pumpAndSettle();
+
+      expect(textField.controller!.text, 'hello :meow:world');
+      expect(textField.controller!.selection.baseOffset, 12);
+    });
+
     testWidgets('uploads an image and sends markdown plus imeta tags', (
       tester,
     ) async {
@@ -277,14 +342,14 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
       await tester.pumpAndSettle();
 
@@ -296,6 +361,150 @@ void main() {
         contains('url https://relay.example/media/test.png'),
       );
       expect(find.byTooltip('Remove attachment'), findsNothing);
+    });
+
+    testWidgets('keeps upload progress visible after the picker closes', (
+      tester,
+    ) async {
+      final pickedImage = Completer<XFile?>();
+      final uploadService = MediaUploadService(
+        baseUrl: 'https://relay.example',
+        nsec: nostr.Keys.generate().nsec,
+        pickGalleryVideo: () async => null,
+        pickGalleryImage: () => pickedImage.future,
+      );
+
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: uploadService,
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
+      await tester.pump();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsOneWidget,
+      );
+      expect(find.text('Uploading attachment…'), findsOneWidget);
+
+      pickedImage.complete(null);
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('compose-upload-progress')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('renders markdown formatting without visible delimiters', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.enterText(
+        find.byType(TextField),
+        '**bold** _italic_ ~~strike~~ `code`',
+      );
+
+      final textField = tester.widget<TextField>(find.byType(TextField));
+      final textSpan = textField.controller!.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: tester.element(find.byType(TextField)).textTheme.bodyLarge,
+        withComposing: false,
+      );
+      final spans = _flattenStyledTextSpans(textSpan);
+
+      expect(textSpan.toPlainText(), '**bold** _italic_ ~~strike~~ `code`');
+      expect(
+        spans.singleWhere((span) => span.text == 'bold').style.fontWeight,
+        FontWeight.w700,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'italic').style.fontStyle,
+        FontStyle.italic,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'strike').style.decoration,
+        TextDecoration.lineThrough,
+      );
+      expect(
+        spans.singleWhere((span) => span.text == 'code').style.fontFamily,
+        'GeistMono',
+      );
+      expect(
+        spans
+            .where((span) => {'**', '_', '~~', '`'}.contains(span.text))
+            .every((span) => (span.style.fontSize ?? 1) < 1),
+        isTrue,
+      );
+
+      textField.controller!.value = textField.controller!.value.copyWith(
+        composing: const TextRange(start: 2, end: 6),
+      );
+      final composingSpan = textField.controller!.buildTextSpan(
+        context: tester.element(find.byType(TextField)),
+        style: tester.element(find.byType(TextField)).textTheme.bodyLarge,
+        withComposing: true,
+      );
+      final composingSpans = _flattenStyledTextSpans(composingSpan);
+      expect(
+        composingSpans
+            .where((span) => span.text == '**')
+            .every((span) => (span.style.fontSize ?? 1) < 1),
+        isTrue,
+      );
+      expect(
+        composingSpans
+            .singleWhere((span) => span.text == 'bold')
+            .style
+            .decoration,
+        TextDecoration.underline,
+      );
+    });
+
+    testWidgets('uses the primary color for formatting actions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        _buildComposeBar(
+          uploadService: _testUploadService(nostr.Keys.generate().nsec),
+          onSend:
+              (
+                content,
+                mentionPubkeys, {
+                mediaTags = const <List<String>>[],
+              }) async {},
+        ),
+      );
+
+      await _expandComposer(tester);
+      await tester.tap(find.byIcon(LucideIcons.aLargeSmall));
+      await tester.pumpAndSettle();
+
+      final boldFinder = find.byIcon(LucideIcons.bold);
+      final boldIcon = tester.widget<Icon>(boldFinder);
+      final colors = tester.element(boldFinder).colors;
+      expect(boldIcon.color, colors.primary);
     });
 
     testWidgets('pasted image follows the attachment preview and send path', (
@@ -348,6 +557,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final insertionConfiguration = textField.contentInsertionConfiguration;
       expect(insertionConfiguration, isNotNull);
@@ -378,7 +588,7 @@ void main() {
       );
       expect(find.byTooltip('Remove attachment'), findsOneWidget);
 
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, '\n![image](https://relay.example/media/pasted.png)');
@@ -428,6 +638,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -491,6 +702,7 @@ void main() {
         );
         await tester.pump();
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -559,6 +771,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -609,6 +822,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       textField.contentInsertionConfiguration!.onContentInserted(
         const KeyboardInsertedContent(
@@ -647,6 +861,7 @@ void main() {
           ),
         );
 
+        await _expandComposer(tester);
         final textField = tester.widget<TextField>(find.byType(TextField));
         final editableTextState = tester.state<EditableTextState>(
           find.byType(EditableText),
@@ -690,6 +905,7 @@ void main() {
         ),
       );
 
+      await _expandComposer(tester);
       final textField = tester.widget<TextField>(find.byType(TextField));
       final editableTextState = tester.state<EditableTextState>(
         find.byType(EditableText),
@@ -745,9 +961,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       final attachmentFinder = find.byKey(
@@ -802,9 +1017,8 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(find.textContaining('upload failed'), findsOneWidget);
@@ -844,9 +1058,8 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Photo'));
+        await _openAttachmentMenu(tester);
+        await tester.tap(find.text('Photos'));
         await tester.pumpAndSettle();
 
         expect(
@@ -858,12 +1071,25 @@ void main() {
       });
     }
 
-    testWidgets('shows a clean error when a GIF is picked', (tester) async {
+    testWidgets('adds a sanitized GIF attachment', (tester) async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nsec,
+        httpClient: http_testing.MockClient((request) async {
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/animated.gif',
+              'sha256':
+                  '4444444444444444444444444444444444444444444444444444444444444444',
+              'size': request.bodyBytes.length,
+              'type': 'image/gif',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
             XFile.fromData(_gifBytes, name: 'animated.gif'),
@@ -881,13 +1107,16 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('GIF uploads are not supported on mobile yet'),
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/animated.gif',
+          ),
+        ),
         findsOneWidget,
       );
     });
@@ -942,12 +1171,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pumpAndSettle();
 
       expect(sentContent, 'hello @Helper Bot');
@@ -1043,12 +1273,13 @@ void main() {
       );
       session.debugAttachSocketForTest(socket);
 
+      await _expandComposer(tester);
       await tester.enterText(find.byType(TextField), '@hel');
       await tester.pumpAndSettle();
       await tester.tap(find.text('Helper Bot'));
       await tester.pumpAndSettle();
       await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-      await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+      await tester.tap(find.byIcon(LucideIcons.arrowUp));
       await tester.pump();
 
       expect(didSend, isFalse);
@@ -1067,14 +1298,25 @@ void main() {
       expect(publishedEvents.where((event) => event['kind'] == 9000), isEmpty);
     });
 
-    testWidgets('shows a clean error when an animated PNG is picked', (
-      tester,
-    ) async {
+    testWidgets('adds a sanitized animated PNG attachment', (tester) async {
       final keychain = nostr.Keys.generate();
       final nsec = keychain.nsec;
       final uploadService = MediaUploadService(
         baseUrl: 'https://relay.example',
         nsec: nsec,
+        httpClient: http_testing.MockClient((request) async {
+          return http.Response(
+            jsonEncode({
+              'url': 'https://relay.example/media/animated.png',
+              'sha256':
+                  '5555555555555555555555555555555555555555555555555555555555555555',
+              'size': request.bodyBytes.length,
+              'type': 'image/png',
+              'uploaded': 1,
+            }),
+            200,
+          );
+        }),
         pickGalleryVideo: () async => null,
         pickGalleryImage: () async =>
             XFile.fromData(_apngBytes, name: 'animated.png'),
@@ -1092,13 +1334,16 @@ void main() {
         ),
       );
 
-      await tester.tap(find.byIcon(LucideIcons.paperclip));
-      await tester.pumpAndSettle();
-      await tester.tap(find.text('Photo'));
+      await _openAttachmentMenu(tester);
+      await tester.tap(find.text('Photos'));
       await tester.pumpAndSettle();
 
       expect(
-        find.textContaining('Animated PNG uploads are not supported on mobile'),
+        find.byKey(
+          const ValueKey(
+            'compose-attachment:https://relay.example/media/animated.png',
+          ),
+        ),
         findsOneWidget,
       );
     });
@@ -1162,8 +1407,7 @@ void main() {
           ),
         );
 
-        await tester.tap(find.byIcon(LucideIcons.paperclip));
-        await tester.pumpAndSettle();
+        await _openAttachmentMenu(tester);
         await tester.tap(find.text('Video'));
         // Pump enough frames for the async file read + upload to complete.
         // Can't use pumpAndSettle here — the upload spinner's animation
@@ -1175,7 +1419,7 @@ void main() {
         // Video attachment should show a video icon (not a broken image).
         expect(find.byIcon(LucideIcons.video), findsOneWidget);
 
-        await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+        await tester.tap(find.byIcon(LucideIcons.arrowUp));
         await tester.pump();
         await tester.pumpAndSettle();
 
@@ -1400,14 +1644,46 @@ AgentDirectoryEntry _testAgent(String pubkey) {
   );
 }
 
+Future<void> _expandComposer(WidgetTester tester) async {
+  if (find.byType(TextField).evaluate().isNotEmpty) return;
+  await tester.tap(find.text('Message\u2026'));
+  await tester.pumpAndSettle();
+}
+
+Future<void> _openAttachmentMenu(WidgetTester tester) async {
+  await tester.tap(find.byTooltip('Add attachment').hitTestable());
+  await tester.pumpAndSettle();
+}
+
 Future<void> _selectAndSendAgentMention(WidgetTester tester) async {
+  await _expandComposer(tester);
   await tester.enterText(find.byType(TextField), '@hel');
   await tester.pumpAndSettle();
   await tester.tap(find.text('Helper Bot'));
   await tester.pumpAndSettle();
   await tester.enterText(find.byType(TextField), 'hello @Helper Bot');
-  await tester.tap(find.byIcon(LucideIcons.sendHorizontal));
+  await tester.tap(find.byIcon(LucideIcons.arrowUp));
   await tester.pumpAndSettle();
+}
+
+List<({String text, TextStyle style})> _flattenStyledTextSpans(
+  InlineSpan root,
+) {
+  final result = <({String text, TextStyle style})>[];
+
+  void visit(InlineSpan span, TextStyle inheritedStyle) {
+    if (span is! TextSpan) return;
+    final effectiveStyle = inheritedStyle.merge(span.style);
+    if (span.text case final text?) {
+      result.add((text: text, style: effectiveStyle));
+    }
+    for (final child in span.children ?? const <InlineSpan>[]) {
+      visit(child, effectiveStyle);
+    }
+  }
+
+  visit(root, const TextStyle());
+  return result;
 }
 
 Channel _makeCurrentChannel({String channelType = 'stream'}) {

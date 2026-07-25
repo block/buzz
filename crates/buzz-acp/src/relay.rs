@@ -135,6 +135,29 @@ pub struct ChannelInfo {
     pub channel_type: String,
 }
 
+pub(crate) fn channel_type_from_tags(tags: &[serde_json::Value]) -> String {
+    let mut is_hidden = false;
+    let mut is_private = false;
+    let mut declared_type = None;
+    for tag in tags {
+        if let Some(arr) = tag.as_array() {
+            match arr.first().and_then(|v| v.as_str()) {
+                Some("hidden") => is_hidden = true,
+                Some("private") => is_private = true,
+                Some("t") => declared_type = arr.get(1).and_then(|v| v.as_str()),
+                _ => {}
+            }
+        }
+    }
+    if declared_type == Some("dm") || is_hidden {
+        "dm".to_string()
+    } else if declared_type == Some("private") || is_private {
+        "private".to_string()
+    } else {
+        "stream".to_string()
+    }
+}
+
 /// Build the discovered-channel subscribe set from the membership UUIDs and the
 /// kind:39000 metadata events, **skipping any channel flagged `archived=true`**.
 ///
@@ -143,9 +166,9 @@ pub struct ChannelInfo {
 /// re-form the reconnect loop. Dropping them here is the defense-in-depth
 /// backstop to the relay-side live-subscription eviction — it covers a client
 /// that was offline when the channel was reaped and so missed the CLOSED.
-/// A channel with no metadata event defaults to a `stream` named `unknown`,
-/// preserving prior behavior for non-archived channels.
-fn merge_discovered_channels(
+/// A channel with no metadata event is preserved as `unknown`; security
+/// consumers must lazy-resolve it or fail closed rather than assuming stream.
+pub(crate) fn merge_discovered_channels(
     channel_uuids: Vec<Uuid>,
     meta_events: &serde_json::Value,
 ) -> HashMap<Uuid, ChannelInfo> {
@@ -159,16 +182,12 @@ fn merge_discovered_channels(
             };
             let mut d_val = None;
             let mut name = None;
-            let mut is_hidden = false;
-            let mut is_private = false;
             let mut is_archived = false;
             for tag in tags {
                 if let Some(arr) = tag.as_array() {
                     match arr.first().and_then(|v| v.as_str()) {
                         Some("d") => d_val = arr.get(1).and_then(|v| v.as_str()),
                         Some("name") => name = arr.get(1).and_then(|v| v.as_str()),
-                        Some("hidden") => is_hidden = true,
-                        Some("private") => is_private = true,
                         Some("archived") => {
                             is_archived = arr.get(1).and_then(|v| v.as_str()) == Some("true")
                         }
@@ -183,14 +202,7 @@ fn merge_discovered_channels(
                         continue;
                     }
                     let ch_name = name.unwrap_or("unknown").to_string();
-                    // DMs have the "hidden" tag; private channels have "private".
-                    let ch_type = if is_hidden {
-                        "dm".to_string()
-                    } else if is_private {
-                        "private".to_string()
-                    } else {
-                        "stream".to_string()
-                    };
+                    let ch_type = channel_type_from_tags(tags);
                     meta_map.insert(uuid, (ch_name, ch_type));
                 }
             }
@@ -204,7 +216,7 @@ fn merge_discovered_channels(
         }
         let (name, channel_type) = meta_map
             .remove(&uuid)
-            .unwrap_or_else(|| ("unknown".to_string(), "stream".to_string()));
+            .unwrap_or_else(|| ("unknown".to_string(), "unknown".to_string()));
         map.insert(uuid, ChannelInfo { name, channel_type });
     }
     map
@@ -4069,6 +4081,21 @@ mod tests {
             }
         }
         serde_json::json!({ "tags": tags })
+    }
+
+    #[test]
+    fn merge_discovered_channels_preserves_missing_metadata_as_unknown() {
+        let channel = Uuid::new_v4();
+        let map = merge_discovered_channels(vec![channel], &serde_json::json!([]));
+        assert_eq!(map[&channel].channel_type, "unknown");
+    }
+
+    #[test]
+    fn merge_discovered_channels_uses_declared_dm_type_without_hidden_hint() {
+        let channel = Uuid::new_v4();
+        let meta = serde_json::json!([meta_event(channel, "dm", &["t", "dm"])]);
+        let map = merge_discovered_channels(vec![channel], &meta);
+        assert_eq!(map[&channel].channel_type, "dm");
     }
 
     #[test]

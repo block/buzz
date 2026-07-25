@@ -63,6 +63,7 @@ class AppTheme {
     return ThemeData(
       useMaterial3: true,
       colorScheme: scheme,
+      splashFactory: NoSplash.splashFactory,
       scaffoldBackgroundColor: scheme.surface,
       extensions: [appColors],
       fontFamily: 'Inter',

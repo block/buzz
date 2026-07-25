@@ -11,12 +11,18 @@ import {
   startManagedAgentWithRules,
   stopManagedAgentWithRules,
 } from "@/features/agents/lib/managedAgentControlActions";
+import { useManagedAgentRuntimeAction } from "@/features/agents/managedAgentRuntimeHooks";
+import { managedAgentPairAction } from "@/features/agents/managedAgentRuntimeStatus";
 import {
   channelsQueryKey,
   useRemoveChannelMemberMutation,
 } from "@/features/channels/hooks";
 import { removeChannelMember } from "@/shared/api/tauri";
-import type { ChannelMember, ManagedAgent } from "@/shared/api/types";
+import type {
+  ChannelMember,
+  ManagedAgent,
+  ManagedAgentRuntimeStatus,
+} from "@/shared/api/types";
 
 type UseMembersSidebarActionsOptions = {
   channelId: string | null;
@@ -24,6 +30,9 @@ type UseMembersSidebarActionsOptions = {
   removableManagedBots: readonly ManagedAgent[];
   currentPubkey?: string;
   onOpenChange: (open: boolean) => void;
+  /** Active community relay. When set, local-agent lifecycle actions are
+   * scoped to this agent+community pair instead of the whole agent. */
+  relayUrl?: string;
 };
 
 type BulkAgentActionResult = {
@@ -41,11 +50,13 @@ export function useMembersSidebarActions({
   removableManagedBots,
   currentPubkey,
   onOpenChange,
+  relayUrl,
 }: UseMembersSidebarActionsOptions) {
   const queryClient = useQueryClient();
   const removeMemberMutation = useRemoveChannelMemberMutation(channelId);
   const startManagedAgentMutation = useStartManagedAgentMutation();
   const stopManagedAgentMutation = useStopManagedAgentMutation();
+  const runtimeActionMutation = useManagedAgentRuntimeAction();
   const [actionNoticeMessage, setActionNoticeMessage] = React.useState<
     string | null
   >(null);
@@ -66,7 +77,8 @@ export function useMembersSidebarActions({
     activeActionKey !== null ||
     removeMemberMutation.isPending ||
     startManagedAgentMutation.isPending ||
-    stopManagedAgentMutation.isPending;
+    stopManagedAgentMutation.isPending ||
+    runtimeActionMutation.isPending;
 
   const clearActionFeedback = React.useCallback(() => {
     setActionNoticeMessage(null);
@@ -126,11 +138,35 @@ export function useMembersSidebarActions({
     }
   }
 
-  async function handleLifecycleAction(agent: ManagedAgent) {
+  async function handleLifecycleAction(
+    agent: ManagedAgent,
+    runtime?: ManagedAgentRuntimeStatus,
+  ) {
     clearActionFeedback();
     setActiveActionKey(`agent:${agent.pubkey}`);
 
     try {
+      // Local agents run one harness per agent+community pair. Scope the
+      // action to the active community so stopping the agent here never
+      // touches its runtimes in other communities. Provider agents keep the
+      // agent-wide deploy/!shutdown flow below.
+      if (agent.backend.type === "local" && relayUrl) {
+        const action = managedAgentPairAction(runtime);
+        await runtimeActionMutation.mutateAsync({
+          action,
+          pubkey: agent.pubkey,
+          relayUrl,
+        });
+        setActionNoticeMessage(
+          action === "stop"
+            ? `Stopped ${agent.name} in this community.`
+            : action === "restart"
+              ? `Restarted ${agent.name} in this community.`
+              : `Started ${agent.name} in this community.`,
+        );
+        return;
+      }
+
       if (isManagedAgentActive(agent)) {
         await stopManagedAgentWithRules({
           agent,

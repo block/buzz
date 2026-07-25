@@ -475,13 +475,16 @@ class instances, cached promises) survive across remounts. Every community-scope
 singleton needs a reset function wired into `resetCommunityState()` in
 `desktop/src/features/communities/useCommunityInit.ts`.
 
-Current singletons that are reset on community switch:
+Current singletons that are reset on relay boundary changes (same-relay
+reconnects preserve pending avatar verification work):
 - `relayClient.disconnect()` — WebSocket teardown + promise rejection
 - `resetRateLimitGate()` — clears any active rate-limit window from the old relay
 - `clearAllDrafts()` — message draft cache
 - `resetAgentObserverStore()` — agent observer relay store
 - `resetActiveAgentTurnsStore()` — active agent turn timers
 - `resetAgentWorkingSignal()` — agent working indicator signal
+- `resetAvatarProfileSync()` — pending verified-avatar profile writes
+- `resetAvatarPresentations()` — avatar probes, previews, and Retry toasts
 - `resetSidebarRelayConnectionCardState()` — sidebar relay card dismiss state
 - `resetMediaCaches()` — proxy port and relay origin caches
 - `resetVideoPlayerState()` — video player singleton
@@ -566,5 +569,5 @@ just mobile-dev
 - [CONTRIBUTING.md](CONTRIBUTING.md) — setup, code style, PR process, how to add event kinds / CLI subcommands / HTTP endpoints
 - [TESTING.md](TESTING.md) — multi-agent E2E test guide
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
-- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `release-mobile`, auto-tag, internal builds
+- [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start

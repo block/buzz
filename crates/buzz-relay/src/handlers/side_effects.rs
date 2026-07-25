@@ -445,6 +445,22 @@ pub async fn validate_admin_event(
                 }
             }
 
+            // Validate channel names before storage. A name made entirely of
+            // display-prefix hashes becomes empty after canonicalization.
+            for t in event.tags.iter() {
+                if t.kind().to_string() == "name" {
+                    match t.content() {
+                        Some(v)
+                            if !buzz_core::channel::canonical_channel_name(v)
+                                .trim()
+                                .is_empty() => {}
+                        _ => {
+                            return Err(anyhow::anyhow!("channel name is required"));
+                        }
+                    }
+                }
+            }
+
             // Validate visibility values before storage.
             for t in event.tags.iter() {
                 if t.kind().to_string() == "visibility" {

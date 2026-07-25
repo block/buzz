@@ -14,7 +14,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::huddle::HuddleState;
 use crate::managed_agents::config_bridge::SessionConfigCache;
-use crate::managed_agents::ManagedAgentProcess;
+use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
@@ -40,12 +40,13 @@ pub struct AppState {
     pub managed_agent_profile_reconcile_enabled: AtomicBool,
     /// Shared shutdown signal checked by launch-time agent restoration.
     pub shutdown_started: AtomicBool,
-    /// Serializes the restore spawn/register transition with shutdown cleanup,
-    /// preventing an agent from spawning after shutdown has swept processes.
-    pub managed_agent_restore_transition: Mutex<()>,
+    /// Serializes every managed-runtime transition that changes the protected
+    /// PID set: spawn/register, adoption, stop, shutdown, and sweep snapshots.
+    /// Never perform network I/O while holding this lock.
+    pub managed_agent_runtime_transition: Mutex<()>,
     pub managed_agents_store_lock: Mutex<()>,
     pub channel_templates_store_lock: Mutex<()>,
-    pub managed_agent_processes: Mutex<HashMap<String, ManagedAgentProcess>>,
+    pub managed_agent_processes: Mutex<HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>>,
     pub huddle_state: Mutex<HuddleState>,
     /// Tauri app handle — stored after setup so huddle commands can emit
     /// `huddle-state-changed` events without needing the handle threaded
@@ -98,9 +99,10 @@ pub struct AppState {
     /// Ordering: written once in `setup()` with `Ordering::Release`; read in
     /// `get_identity` with `Ordering::Acquire`.
     pub reset_failed: AtomicBool,
-    /// Cached ACP session config from running agents, keyed by agent pubkey.
+    /// Cached ACP session config from running agents, keyed by canonical
+    /// `(agent pubkey, relay URL)` runtime identity.
     /// Populated when the harness emits `session_config_captured` observer events.
-    pub session_config_cache: Mutex<HashMap<String, SessionConfigCache>>,
+    pub session_config_cache: Mutex<HashMap<ManagedAgentRuntimeKey, SessionConfigCache>>,
     /// IOKit power assertion state — prevents idle sleep while agents run.
     pub prevent_sleep: Arc<Mutex<crate::prevent_sleep::PreventSleepState>>,
     /// In-process mesh-llm node started by Buzz Desktop.
@@ -202,7 +204,7 @@ pub fn build_app_state() -> AppState {
         managed_agent_restore_pending: AtomicBool::new(false),
         managed_agent_profile_reconcile_enabled: AtomicBool::new(true),
         shutdown_started: AtomicBool::new(false),
-        managed_agent_restore_transition: Mutex::new(()),
+        managed_agent_runtime_transition: Mutex::new(()),
         identity_mutation: Mutex::new(()),
         managed_agents_store_lock: Mutex::new(()),
         channel_templates_store_lock: Mutex::new(()),
@@ -236,19 +238,25 @@ impl AppState {
         self.huddle_state.lock().map_err(|e| e.to_string())
     }
 
-    pub fn get_session_cache(&self, pubkey: &str) -> Option<SessionConfigCache> {
-        self.session_config_cache.lock().ok()?.get(pubkey).cloned()
+    pub fn get_session_cache(&self, key: &ManagedAgentRuntimeKey) -> Option<SessionConfigCache> {
+        self.session_config_cache.lock().ok()?.get(key).cloned()
     }
 
-    pub fn put_session_cache(&self, pubkey: &str, cache: SessionConfigCache) {
+    pub fn put_session_cache(&self, key: ManagedAgentRuntimeKey, cache: SessionConfigCache) {
         if let Ok(mut map) = self.session_config_cache.lock() {
-            map.insert(pubkey.to_string(), cache);
+            map.insert(key, cache);
         }
     }
 
-    pub fn clear_session_cache(&self, pubkey: &str) {
+    pub fn clear_agent_session_cache(&self, key: &ManagedAgentRuntimeKey) {
         if let Ok(mut map) = self.session_config_cache.lock() {
-            map.remove(pubkey);
+            map.remove(key);
+        }
+    }
+
+    pub fn clear_agent_session_caches(&self, pubkey: &str) {
+        if let Ok(mut map) = self.session_config_cache.lock() {
+            map.retain(|key, _| key.pubkey != pubkey);
         }
     }
 

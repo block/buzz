@@ -2,15 +2,10 @@ import * as React from "react";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
-  getGlobalAgentConfig,
-  setGlobalAgentConfig,
-} from "@/shared/api/tauriGlobalAgentConfig";
-import {
   getIdentity,
   importIdentity,
   persistCurrentIdentity,
 } from "@/shared/api/tauriIdentity";
-import { resetConfigForHarnessChange } from "@/features/agents/ui/agentConfigOptions";
 import { Button } from "@/shared/ui/button";
 import { StartupWindowDragRegion } from "@/shared/ui/StartupWindowDragRegion";
 import { BackupStep } from "./BackupStep";
@@ -23,10 +18,6 @@ import {
   OnboardingChrome,
 } from "./OnboardingChrome";
 import { OnboardingFooterProvider } from "./OnboardingFooter";
-import {
-  getPreferredRuntimeIdForSelection,
-  runtimeSelectionNeedsDefaultsStep,
-} from "./onboardingRuntimeSelection";
 import { OnboardingSlideTransition } from "./OnboardingSlideTransition";
 import { SetupStep } from "./SetupStep";
 
@@ -59,63 +50,10 @@ export function MachineOnboardingFlow({
   const [selectedPubkey, setSelectedPubkey] = React.useState<string | null>(
     null,
   );
-  const [selectedRuntimeIds, setSelectedRuntimeIds] = React.useState<string[]>(
-    [],
-  );
-  const [isRuntimeSelectionSaving, setIsRuntimeSelectionSaving] =
-    React.useState(false);
-  const [runtimeSelectionError, setRuntimeSelectionError] = React.useState<
-    string | null
-  >(null);
-  const runtimeSaveSequence = React.useRef(0);
-  const runtimeSaveChain = React.useRef<Promise<void>>(Promise.resolve());
-
-  const persistHarnessSelection = React.useCallback(
+  const [readyRuntimeIds, setReadyRuntimeIds] = React.useState<string[]>([]);
+  const handleReadyRuntimeIdsChange = React.useCallback(
     (runtimeIds: readonly string[]) => {
-      const nextRuntimeIds = Array.from(new Set(runtimeIds));
-      const preferredRuntimeId =
-        getPreferredRuntimeIdForSelection(nextRuntimeIds);
-      const sequence = runtimeSaveSequence.current + 1;
-      runtimeSaveSequence.current = sequence;
-      setSelectedRuntimeIds(nextRuntimeIds);
-      setRuntimeSelectionError(null);
-      setIsRuntimeSelectionSaving(true);
-
-      const save = runtimeSaveChain.current.then(async () => {
-        const current = await getGlobalAgentConfig();
-        const selectedHarnessChanged =
-          current.preferred_runtime !== preferredRuntimeId;
-        if (!selectedHarnessChanged) {
-          await setGlobalAgentConfig({
-            ...current,
-            preferred_runtime: preferredRuntimeId,
-          });
-          return;
-        }
-
-        await setGlobalAgentConfig(
-          resetConfigForHarnessChange(current, preferredRuntimeId ?? ""),
-        );
-      });
-      runtimeSaveChain.current = save.then(
-        () => undefined,
-        () => undefined,
-      );
-      void save
-        .catch((cause) => {
-          if (runtimeSaveSequence.current === sequence) {
-            setRuntimeSelectionError(
-              cause instanceof Error
-                ? cause.message
-                : "Couldn’t save your harness selection.",
-            );
-          }
-        })
-        .finally(() => {
-          if (runtimeSaveSequence.current === sequence) {
-            setIsRuntimeSelectionSaving(false);
-          }
-        });
+      setReadyRuntimeIds(Array.from(new Set(runtimeIds)));
     },
     [],
   );
@@ -276,9 +214,12 @@ export function MachineOnboardingFlow({
               actions={{
                 back: () =>
                   setPage(identityWasImported ? "key-import" : "backup"),
-                next: () => {
-                  if (selectedRuntimeIds.length === 0) return;
-                  if (!runtimeSelectionNeedsDefaultsStep(selectedRuntimeIds)) {
+                next: (runtimeIds) => {
+                  const ids = Array.from(runtimeIds);
+                  setReadyRuntimeIds(ids);
+                  // Harness install can fail (Windows/PATH/network). Don't soft-lock
+                  // onboarding — users can finish setup later in Settings → Agents.
+                  if (ids.length === 0) {
                     complete(selectedPubkey ?? undefined);
                     return;
                   }
@@ -286,12 +227,7 @@ export function MachineOnboardingFlow({
                 },
               }}
               direction="forward"
-              isSelectionSaving={isRuntimeSelectionSaving}
-              onSelectedRuntimeIdsChange={(runtimeIds) => {
-                void persistHarnessSelection(runtimeIds);
-              }}
-              selectionError={runtimeSelectionError}
-              selectedRuntimeIds={selectedRuntimeIds}
+              onReadyRuntimeIdsChange={handleReadyRuntimeIdsChange}
             />
           ) : (
             <DefaultConfigStep
@@ -300,7 +236,7 @@ export function MachineOnboardingFlow({
                 complete: () => complete(selectedPubkey ?? undefined),
               }}
               direction="forward"
-              selectedRuntimeIds={selectedRuntimeIds}
+              readyRuntimeIds={readyRuntimeIds}
             />
           )}
         </div>

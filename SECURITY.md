@@ -5,7 +5,7 @@
 **Please do not report security vulnerabilities through public GitHub issues.**
 
 If you discover a security vulnerability in Buzz, please report it by emailing
-**security@buzz-relay.org**. Include as much detail as possible:
+**buzz@block.xyz**. Include as much detail as possible:
 
 - A description of the vulnerability and its potential impact
 - Steps to reproduce or a proof-of-concept (if available)

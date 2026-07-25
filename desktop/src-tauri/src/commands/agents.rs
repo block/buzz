@@ -8,10 +8,11 @@ use crate::{
         ensure_persona_is_active, find_managed_agent_mut, load_managed_agents, load_personas,
         load_teams, managed_agent_avatar_url, managed_agents_base_dir, normalize_agent_args,
         provider_deploy, resolve_provider_binary, save_managed_agents, start_managed_agent_process,
-        stop_managed_agent_process, sync_managed_agent_processes, try_regenerate_nest,
-        validate_provider_config, BackendKind, CreateManagedAgentRequest,
-        CreateManagedAgentResponse, ManagedAgentRecord, ManagedAgentSummary, RelayMeshConfig,
-        DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM, DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
+        stop_managed_agent_process, stop_managed_agent_workspace_pair,
+        sync_managed_agent_processes, try_regenerate_nest, validate_provider_config, BackendKind,
+        CreateManagedAgentRequest, CreateManagedAgentResponse, ManagedAgentRecord,
+        ManagedAgentSummary, RelayMeshConfig, DEFAULT_ACP_COMMAND, DEFAULT_AGENT_PARALLELISM,
+        DEFAULT_AGENT_TURN_TIMEOUT_SECONDS,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
     util::now_iso,
@@ -307,6 +308,81 @@ async fn ensure_relay_mesh_for_record(
     Ok(())
 }
 
+pub(super) async fn start_local_agent_pairs_with_preflight(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+    relay_urls: &[String],
+) -> Result<ManagedAgentSummary, String> {
+    let record_snapshot = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        load_managed_agents(app)?
+            .into_iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?
+    };
+    if record_snapshot.backend != BackendKind::Local {
+        return Err(format!("agent {pubkey} is not a local agent"));
+    }
+    ensure_relay_mesh_for_record(app, &record_snapshot, false).await?;
+
+    {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let mut records = load_managed_agents(app)?;
+        let record = find_managed_agent_mut(&mut records, pubkey)?;
+        let personas = load_personas(app).unwrap_or_default();
+        if let Some(persona_id) = record.persona_id.clone() {
+            if let Some(persona) = personas.iter().find(|persona| persona.id == persona_id) {
+                crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
+                record.updated_at = crate::util::now_iso();
+            }
+        }
+        save_managed_agents(app, &records)?;
+        if let Some(saved_record) = records.iter().find(|record| record.pubkey == pubkey) {
+            retain_managed_agent_pending(app, state, saved_record);
+        }
+    }
+
+    let mut errors = Vec::new();
+    for relay_url in relay_urls {
+        if let Err(error) = crate::managed_agents::start_managed_agent_runtime_pair_lazy(
+            pubkey.to_string(),
+            relay_url.clone(),
+            app.clone(),
+        ) {
+            errors.push(format!("{relay_url}: {error}"));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(format!(
+            "failed to restart one or more managed-agent runtime pairs: {}",
+            errors.join("; ")
+        ));
+    }
+
+    let _store_guard = state
+        .managed_agents_store_lock
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let records = load_managed_agents(app)?;
+    let runtimes = state
+        .managed_agent_processes
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let personas = load_personas(app).unwrap_or_default();
+    let record = records
+        .iter()
+        .find(|record| record.pubkey == pubkey)
+        .ok_or_else(|| format!("agent {pubkey} not found"))?;
+    build_managed_agent_summary(app, record, &runtimes, &personas)
+}
+
 pub(super) async fn start_local_agent_with_preflight(
     app: &AppHandle,
     state: &AppState,
@@ -466,7 +542,7 @@ pub async fn list_managed_agents(app: AppHandle) -> Result<Vec<ManagedAgentSumma
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         let personas = load_personas(&app).unwrap_or_default();
@@ -541,7 +617,7 @@ pub async fn create_managed_agent(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
         if let Some(persona_id) = requested_persona_id.as_deref() {
             let personas = load_personas(&app)?;
@@ -612,7 +688,7 @@ pub async fn create_managed_agent(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         // Guard against a duplicate pubkey appearing between phase 1 and phase 3
@@ -997,7 +1073,7 @@ pub async fn start_managed_agent(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         let record = find_managed_agent_mut(&mut records, &pubkey)?;
@@ -1128,7 +1204,7 @@ pub async fn stop_managed_agent(
             save_managed_agents(&app, &records)?;
         }
         for pubkey in &exited_pubkeys {
-            state.clear_session_cache(pubkey);
+            state.clear_agent_session_caches(pubkey);
         }
 
         {
@@ -1140,9 +1216,10 @@ pub async fn stop_managed_agent(
                     "remote agents are stopped via !shutdown message, not this command".to_string(),
                 );
             }
-            stop_managed_agent_process(&app, record, &mut runtimes)?;
+            // Pair-scoped: stops only the active workspace's pair; delete and
+            // the config-restart flows still drain every pair.
+            stop_managed_agent_workspace_pair(&app, record, &mut runtimes)?;
         }
-        state.clear_session_cache(&pubkey);
         save_managed_agents(&app, &records)?;
         let record = records
             .iter()
@@ -1186,7 +1263,7 @@ pub async fn delete_managed_agent(
                 save_managed_agents(&app, &records)?;
             }
             for pubkey in &exited_pubkeys {
-                state.clear_session_cache(pubkey);
+                state.clear_agent_session_caches(pubkey);
             }
 
             // Guard: reject deletion of deployed remote agents unless explicitly forced.
@@ -1209,7 +1286,7 @@ pub async fn delete_managed_agent(
             if let Some(record) = records.iter_mut().find(|record| record.pubkey == pubkey) {
                 stop_managed_agent_process(&app, record, &mut runtimes)?;
             }
-            state.clear_session_cache(&pubkey);
+            state.clear_agent_session_caches(&pubkey);
             let initial_len = records.len();
             records.retain(|record| record.pubkey != pubkey);
             if records.len() == initial_len {

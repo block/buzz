@@ -478,6 +478,25 @@ pub fn apply_persona_snapshot(record: &mut ManagedAgentRecord, persona: &AgentDe
     record.model = snapshot.model;
     record.provider = snapshot.provider;
     record.runtime = snapshot.runtime;
+    // Drop a stale create-time harness pin when the definition names a
+    // different known runtime; custom commands stay pinned.
+    if let Some(def_runtime) = persona
+        .runtime
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .and_then(crate::managed_agents::known_acp_runtime_exact)
+    {
+        if let Some(pin_runtime) = record
+            .agent_command_override
+            .as_deref()
+            .and_then(crate::managed_agents::known_acp_runtime)
+        {
+            if !std::ptr::eq(pin_runtime, def_runtime) {
+                record.agent_command_override = None;
+            }
+        }
+    }
     // env_vars stay overrides-only. Self-heal records written before the env
     // refresh: persona env used to be baked into `record.env_vars`, turning
     // inherited values into pseudo-overrides that shadow later persona edits.

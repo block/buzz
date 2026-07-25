@@ -17,6 +17,7 @@ use buzz_relay::config::Config;
 use buzz_relay::metrics as relay_metrics;
 use buzz_relay::router::{build_health_router, build_router};
 use buzz_relay::state::AppState;
+use buzz_relay::storage_sweep;
 use buzz_relay::telemetry;
 use buzz_workflow::WorkflowEngine;
 use tokio_util::sync::CancellationToken;
@@ -333,7 +334,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let redis_pool = {
-        let cfg = deadpool_redis::Config::from_url(&config.redis_url);
+        let mut cfg = deadpool_redis::Config::from_url(&config.redis_url);
+        cfg.pool = Some(deadpool_redis::PoolConfig::new(config.redis_pool_size));
         cfg.create_pool(Some(deadpool_redis::Runtime::Tokio1))
             .map_err(|e| anyhow::anyhow!("Redis pool creation failed: {e}"))?
     };
@@ -1125,6 +1127,7 @@ async fn serve(
 
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     let shutdown_flag = Arc::clone(&state.shutting_down);
+    let drain_conn_manager = Arc::clone(&state.conn_manager);
     let tx = shutdown_tx.clone();
     tokio::spawn(async move {
         shutdown_signal().await;
@@ -1134,6 +1137,16 @@ async fn serve(
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         info!("Starting graceful drain (30s timeout)");
         let _ = tx.send(true);
+        // Tell every connected client to reconnect NOW. Without this, upgraded
+        // WebSocket connections outlive the listener drain: clients ride the
+        // dying pod until the forced exit below and only learn about the
+        // restart from a TCP reset. The 1012 close frame turns a 35s silent
+        // death into an immediate, well-attributed reconnect.
+        let closed = drain_conn_manager.drain_all();
+        info!(
+            connections = closed,
+            "Sent restart close frame to all live WebSocket connections"
+        );
         // Hard timeout: force exit if connections don't drain within 30s.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         tracing::error!("Drain timeout exceeded — forcing exit");
@@ -1413,9 +1426,55 @@ async fn run_usage_metrics_tick(
             *leader = None;
             return Err(error);
         }
+        run_storage_sweep_tick(state, emission_scope, &host_map).await;
     }
 
     Ok(())
+}
+
+/// Storage-sweep half of the leader-only tick: harvest/spawn (never awaits
+/// the sweep itself) then re-emit whatever snapshot is cached. Split out of
+/// [`run_usage_metrics_tick`] because it has its own always-on config
+/// (independent of `EmissionScope`) and a hard kill switch — a disabled
+/// sweep must never touch a single storage-family gauge, including the
+/// health ones, so a relay without `s3:ListBucket` can turn the whole
+/// feature off cleanly.
+async fn run_storage_sweep_tick(
+    state: &AppState,
+    emission_scope: &EmissionScope,
+    host_map: &HashMap<Uuid, String>,
+) {
+    static SWEEP_CONFIG: std::sync::OnceLock<storage_sweep::StorageSweepConfig> =
+        std::sync::OnceLock::new();
+    // SWEEP_CONFIG is a function-local OnceLock by design: it is localized
+    // feature config consumed only by this code path, read once on the first
+    // leader tick, and stable for the process lifetime (env is immutable).
+    // Keeping it here avoids widening Config/AppState for a single consumer.
+    let config = *SWEEP_CONFIG.get_or_init(storage_sweep::StorageSweepConfig::from_env);
+    if !config.enabled {
+        return;
+    }
+
+    let media_storage = Arc::clone(&state.media_storage);
+    let max_objects = config.max_objects;
+    storage_sweep::maybe_spawn_sweep(
+        &state.storage_sweep,
+        config.interval,
+        config.timeout,
+        async move {
+            buzz_media::fold_bucket_listing(max_objects, move |token| {
+                let media_storage = Arc::clone(&media_storage);
+                async move { media_storage.list_page(token, 1000).await }
+            })
+            .await
+        },
+    )
+    .await;
+
+    storage_sweep::emit_storage_metrics(&state.storage_sweep, host_map, |id| {
+        emission_scope.allows(id)
+    })
+    .await;
 }
 
 /// Emit the database-derived usage snapshot from the stable leader only.

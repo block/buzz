@@ -7,6 +7,7 @@ import type {
   InboxReply,
 } from "@/features/home/lib/inbox";
 import { ChannelMembersBar } from "@/features/channels/ui/ChannelMembersBar";
+import { useCommunities } from "@/features/communities/useCommunities";
 import { formatInboxTypeLabel } from "@/features/home/lib/inbox";
 import {
   type InboxDisplayMessage,
@@ -128,6 +129,7 @@ export function InboxDetailPane({
   onToggleReaction,
 }: InboxDetailPaneProps) {
   const detailPaneRef = React.useRef<HTMLElement | null>(null);
+  const { activeCommunity } = useCommunities();
   // Refs for the shared anchored-scroll hook's container and content roots.
   const scrollContainerRef = React.useRef<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -583,6 +585,7 @@ export function InboxDetailPane({
             currentPubkey={currentPubkey}
             onOpenChange={setIsMembersSidebarOpen}
             open={isMembersSidebarOpen}
+            relayUrl={activeCommunity?.relayUrl}
           />
         </React.Suspense>
       ) : null}

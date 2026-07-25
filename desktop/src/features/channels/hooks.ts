@@ -148,7 +148,7 @@ export function reconcileRefreshedCachedChannel(
   return upsertCachedChannel(refreshed, refreshedChannel ?? channel);
 }
 
-async function invalidateChannelState(
+export async function invalidateChannelState(
   queryClient: ReturnType<typeof useQueryClient>,
   channelId: string | null | undefined,
 ) {
@@ -348,13 +348,10 @@ export function useUpdateChannelMutation(channelId: string | null) {
 
       return updateChannel({ ...input, channelId });
     },
+    onMutate: () => ({ channelId }),
     onSuccess: (updatedChannel) => {
-      if (!channelId) {
-        return;
-      }
-
       queryClient.setQueryData<ChannelDetail>(
-        channelDetailQueryKey(channelId),
+        channelDetailQueryKey(updatedChannel.id),
         updatedChannel,
       );
       queryClient.setQueryData<Channel[]>(channelsQueryKey, (current = []) =>
@@ -365,7 +362,7 @@ export function useUpdateChannelMutation(channelId: string | null) {
         ),
       );
     },
-    onSettled: () => {
+    onSettled: (_data, _error, _variables, context) => {
       // refetchType "none": onSuccess already cached the relay-returned detail;
       // awaiting the full channel-list refetch kept the edit dialog stuck on
       // "Saving..." (same failure #1360 fixed for create).
@@ -373,9 +370,9 @@ export function useUpdateChannelMutation(channelId: string | null) {
         queryKey: channelsQueryKey,
         refetchType: "none",
       });
-      if (channelId) {
+      if (context?.channelId) {
         void queryClient.invalidateQueries({
-          queryKey: channelDetailQueryKey(channelId),
+          queryKey: channelDetailQueryKey(context.channelId),
           refetchType: "none",
         });
       }

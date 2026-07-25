@@ -17,10 +17,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         agent_readiness, current_instance_id, find_managed_agent_mut, known_acp_runtime,
-        load_global_agent_config, load_managed_agents, load_personas, process_is_running,
-        record_agent_command, resolve_effective_agent_env, save_global_agent_config,
-        save_managed_agents, stop_managed_agent_process, sync_managed_agent_processes,
-        validate_global_config, AgentReadiness, BackendKind, GlobalAgentConfig,
+        load_global_agent_config, load_managed_agents, load_personas, record_agent_command,
+        resolve_effective_agent_env, save_global_agent_config, save_managed_agents,
+        stop_managed_agent_process, sync_managed_agent_processes, validate_global_config,
+        AgentReadiness, BackendKind, GlobalAgentConfig,
     },
 };
 
@@ -64,8 +64,6 @@ pub async fn set_global_agent_config(
     config: GlobalAgentConfig,
     app: AppHandle,
 ) -> Result<GlobalAgentConfigSaveResult, String> {
-    use tauri::Manager;
-
     // ── Phase 1: disk write (sync, spawn_blocking) ────────────────────────
     //
     // Validate, snapshot old config, write new config, collect pre-filter
@@ -108,26 +106,10 @@ pub async fn set_global_agent_config(
     let mut restarted_count: u32 = 0;
     let mut failed_restart_count: u32 = 0;
     if !candidates.is_empty() {
-        let state = app.state::<AppState>();
-        let owner_hex = match super::agents::workspace_owner_hex(&state) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!(
-                    "buzz-desktop: set_global_agent_config: failed to compute owner_hex for restart: {e}"
-                );
-                return Ok(GlobalAgentConfigSaveResult {
-                    config: new_global,
-                    restarted_count: 0,
-                    failed_restart_count: 0,
-                });
-            }
-        };
-
         for pubkey in &candidates {
             let outcome = restart_local_agent_on_config_change(
                 &app,
                 pubkey,
-                &owner_hex,
                 &old_global,
                 &new_global,
                 &personas_snapshot,
@@ -196,6 +178,12 @@ fn collect_restart_candidates(
             return (Vec::new(), Vec::new());
         }
     };
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let mut runtimes = state
+        .managed_agent_processes
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
 
     let candidates = records
         .iter()
@@ -203,10 +191,13 @@ fn collect_restart_candidates(
             if record.backend != BackendKind::Local {
                 return false;
             }
-            // Quick pre-check: must have a recorded PID (may still be alive).
-            let Some(pid) = record.runtime_pid else {
+            let has_live_runtime = runtimes.iter_mut().any(|(key, runtime)| {
+                key.pubkey.eq_ignore_ascii_case(&record.pubkey)
+                    && runtime.child.try_wait().ok().flatten().is_none()
+            });
+            if !has_live_runtime {
                 return false;
-            };
+            }
             let effective_cmd = record_agent_command(record, &all_personas);
             let runtime_meta = known_acp_runtime(&effective_cmd);
             let old_effective =
@@ -220,8 +211,7 @@ fn collect_restart_candidates(
             // restart for a process that already exited between the pre-filter
             // scan and Phase 2.  NotReady→Ready bypasses the alive check
             // because Phase 2 will stop-then-start unconditionally.
-            let env_changed =
-                old_ready && process_is_running(pid) && old_effective.env != new_effective.env;
+            let env_changed = old_ready && old_effective.env != new_effective.env;
 
             should_restart_on_config_change(old_ready, new_ready, env_changed)
         })
@@ -257,7 +247,6 @@ fn collect_restart_candidates(
 async fn restart_local_agent_on_config_change(
     app: &AppHandle,
     pubkey: &str,
-    owner_hex: &str,
     old_global: &GlobalAgentConfig,
     new_global: &GlobalAgentConfig,
     personas_snapshot: &[crate::managed_agents::AgentDefinition],
@@ -303,14 +292,11 @@ async fn restart_local_agent_on_config_change(
         if record.backend != BackendKind::Local {
             return Err(format!("agent {pubkey_owned} is no longer a local agent"));
         }
-        let Some(pid) = record.runtime_pid else {
+        let runtime_keys =
+            crate::managed_agents::managed_agent_runtime_keys(&runtimes, &pubkey_owned);
+        if runtime_keys.is_empty() {
             return Err(format!(
-                "agent {pubkey_owned} no longer has a live process after sync"
-            ));
-        };
-        if !process_is_running(pid) {
-            return Err(format!(
-                "agent {pubkey_owned} process {pid} is no longer running"
+                "agent {pubkey_owned} no longer has a live pair runtime after sync"
             ));
         }
 
@@ -341,58 +327,46 @@ async fn restart_local_agent_on_config_change(
         stop_managed_agent_process(&app_for_stop, record_mut, &mut runtimes)?;
         save_managed_agents(&app_for_stop, &records)?;
 
-        Ok(())
+        Ok(runtime_keys)
     })
     .await;
 
-    let stopped = match stop_result {
-        Ok(Ok(())) => true,
+    let runtime_keys = match stop_result {
+        Ok(Ok(runtime_keys)) => runtime_keys,
         Ok(Err(e)) => {
             eprintln!("buzz-desktop: set_global_agent_config: skipping restart of {pubkey}: {e}");
-            false
+            return RestartOutcome::Skipped;
         }
         Err(e) => {
             eprintln!(
                 "buzz-desktop: set_global_agent_config: spawn_blocking failed for stop of {pubkey}: {e}"
             );
-            false
+            return RestartOutcome::Skipped;
         }
     };
 
-    if !stopped {
-        return RestartOutcome::Skipped;
-    }
-
-    // ── Step 2: start via the normal preflight path ────────────────────────
-    //
-    // start_local_agent_with_preflight handles: re-acquiring the store lock,
-    // persona re-snapshot (agent starts with current persona config), passing
-    // owner_hex (NIP-OA auth_tag fallback for legacy records), saving the
-    // updated record, and retaining the event for relay sync.
+    let relay_urls: Vec<_> = runtime_keys.into_iter().map(|key| key.relay_url).collect();
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    match super::agents::start_local_agent_pairs_with_preflight(app, &state, pubkey, &relay_urls)
+        .await
     {
-        use tauri::Manager;
-        let state = app.state::<AppState>();
-        match super::agents::start_local_agent_with_preflight(app, &state, pubkey, owner_hex, false)
-            .await
-        {
-            Ok(_) => {
+        Ok(_) => {
+            eprintln!(
+                "buzz-desktop: set_global_agent_config: restarted agent {pubkey} with updated config"
+            );
+            RestartOutcome::Restarted
+        }
+        Err(e) => {
+            eprintln!(
+                "buzz-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
+            );
+            if let Err(save_err) = persist_last_error(app, pubkey, &e) {
                 eprintln!(
-                    "buzz-desktop: set_global_agent_config: restarted agent {pubkey} with updated config"
+                    "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
                 );
-                RestartOutcome::Restarted
             }
-            Err(e) => {
-                eprintln!(
-                    "buzz-desktop: set_global_agent_config: failed to start {pubkey} after restart: {e}"
-                );
-                // Persist last_error so the UI surfaces a diagnosable stopped state.
-                if let Err(save_err) = persist_last_error(app, pubkey, &e) {
-                    eprintln!(
-                        "buzz-desktop: set_global_agent_config: failed to persist last_error for {pubkey}: {save_err}"
-                    );
-                }
-                RestartOutcome::FailedAfterStop
-            }
+            RestartOutcome::FailedAfterStop
         }
     }
 }

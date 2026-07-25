@@ -7,17 +7,36 @@
  * recent local change.
  *
  * Lifecycle: call cancel() on unmount so in-flight saves do not invoke
- * the onSaving / onSaved callbacks after the owning component is gone.
+ * callbacks after the owning component is gone. Call flush() before leaving
+ * a surface that must guarantee its latest optimistic value was persisted.
  */
 export function createSaveCoalescer<T>(
   save: (value: T) => Promise<T>,
   onSaving: (isSaving: boolean) => void,
   onSaved: (value: T) => void,
-): { enqueue: (value: T) => void; cancel: () => void } {
+): {
+  enqueue: (value: T) => void;
+  flush: () => Promise<void>;
+  cancel: () => void;
+} {
   let pending: T | undefined;
   let hasPending = false;
   let running = false;
   let cancelled = false;
+  let finalError: unknown;
+  let flushWaiters: Array<{
+    resolve: () => void;
+    reject: (error: unknown) => void;
+  }> = [];
+
+  function settleFlushWaiters() {
+    const waiters = flushWaiters;
+    flushWaiters = [];
+    for (const waiter of waiters) {
+      if (finalError === undefined) waiter.resolve();
+      else waiter.reject(finalError);
+    }
+  }
 
   async function drain() {
     while (hasPending) {
@@ -26,17 +45,21 @@ export function createSaveCoalescer<T>(
       pending = undefined;
       try {
         const saved = await save(toSave);
+        finalError = undefined;
         // Apply backend response only when no newer local edit is pending —
         // a stale response must never overwrite fresher optimistic state.
         if (!cancelled && !hasPending) {
           onSaved(saved);
         }
-      } catch {
-        // Non-fatal — optimistic local state is retained; user can retry.
+      } catch (error) {
+        finalError = error;
       }
     }
     running = false;
-    if (!cancelled) onSaving(false);
+    if (!cancelled) {
+      onSaving(false);
+      settleFlushWaiters();
+    }
   }
 
   return {
@@ -45,13 +68,29 @@ export function createSaveCoalescer<T>(
       hasPending = true;
       if (running) return;
       running = true;
+      finalError = undefined;
       onSaving(true);
       void drain();
+    },
+    flush() {
+      if (!running) {
+        return finalError === undefined
+          ? Promise.resolve()
+          : Promise.reject(finalError);
+      }
+      return new Promise<void>((resolve, reject) => {
+        flushWaiters.push({ resolve, reject });
+      });
     },
     cancel() {
       cancelled = true;
       hasPending = false;
       pending = undefined;
+      const waiters = flushWaiters;
+      flushWaiters = [];
+      for (const waiter of waiters) {
+        waiter.reject(new Error("Save cancelled"));
+      }
     },
   };
 }

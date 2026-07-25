@@ -26,26 +26,62 @@ export function formatAiDefaultsSummary({
 }
 
 export function AgentAiDefaultsNotice({
+  isConfigured = true,
   onEditDefaults,
   triggerRef,
   explicitModel,
   explicitProvider,
+  harness,
   inheritedModel,
   inheritedProvider,
 }: {
+  isConfigured?: boolean;
   onEditDefaults: () => void;
   triggerRef?: React.Ref<HTMLButtonElement>;
   explicitModel: string;
   explicitProvider: string;
+  harness?: string;
   inheritedModel: InheritedDefault;
   inheritedProvider: InheritedDefault;
 }) {
   const provider = explicitProvider.trim() || inheritedProvider.value;
   const model = explicitModel.trim() || inheritedModel.value;
 
+  if (!isConfigured) {
+    return (
+      <div
+        className="flex items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/30 px-3 py-2.5"
+        data-testid="agent-ai-defaults-notice"
+      >
+        <p className="text-sm font-medium text-foreground">
+          Global defaults not set
+        </p>
+        <Button
+          className="shrink-0"
+          data-testid="set-ai-defaults"
+          onClick={onEditDefaults}
+          ref={triggerRef}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          Set
+        </Button>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-1" data-testid="agent-ai-defaults-notice">
       <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 text-sm">
+        {harness !== undefined ? (
+          <>
+            <dt className="text-muted-foreground">Harness</dt>
+            <dd className="truncate text-foreground">
+              {harness || "Not configured"}
+            </dd>
+          </>
+        ) : null}
         <dt className="text-muted-foreground">Provider</dt>
         <dd className="truncate text-foreground">
           {provider ? providerLabel(provider) : "Not configured"}

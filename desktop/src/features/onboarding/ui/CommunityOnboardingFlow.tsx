@@ -13,13 +13,15 @@ import {
   takePendingWelcomeChannelForDirectEntry,
   WELCOME_SURFACE_READY_EVENT,
 } from "@/features/onboarding/welcome";
+import { useAvatarPresentation } from "@/features/profile/avatarPresentationStore";
+import { registerAvatarWhenReady } from "@/features/profile/avatarProfileSync";
 import { profileQueryKey } from "@/features/profile/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
 import {
   parseEmojiAvatarDataUrl,
   ProfileAvatarEditor,
 } from "@/features/profile/ui/ProfileAvatarEditor";
-import { updateProfile } from "@/shared/api/tauriProfiles";
+import { getProfile, updateProfile } from "@/shared/api/tauriProfiles";
 import { getIdentity, importIdentity } from "@/shared/api/tauriIdentity";
 import { listPersonas } from "@/shared/api/tauriPersonas";
 import { relayClient } from "@/shared/api/relayClient";
@@ -80,7 +82,9 @@ function AvatarCircle({
   triggerRef?: React.Ref<HTMLButtonElement>;
 }) {
   const emojiAvatar = parseEmojiAvatarDataUrl(avatarUrl);
-  const hasAvatar = avatarUrl.trim().length > 0;
+  const presentation = useAvatarPresentation(avatarUrl);
+  const hasAvatar =
+    avatarUrl.trim().length > 0 && presentation?.state !== "failed";
 
   return (
     <button
@@ -103,9 +107,13 @@ function AvatarCircle({
           avatarUrl={avatarUrl}
           className="h-36 w-36 rounded-full text-4xl"
           label={previewName}
+          testId="community-avatar-circle"
         />
       ) : (
-        <span className="flex h-36 w-36 items-center justify-center rounded-full bg-white/30 text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/40">
+        <span
+          className="flex h-36 w-36 items-center justify-center rounded-full bg-white/30 text-[var(--buzz-onboarding-backup-ink)] transition-colors group-hover:bg-white/40"
+          data-testid="community-avatar-empty"
+        >
           <Plus className="h-7 w-7" aria-hidden="true" />
         </span>
       )}
@@ -145,6 +153,7 @@ export function CommunityOnboardingFlow({
   const systemColorScheme = useSystemColorScheme();
   const [displayName, setDisplayName] = React.useState("");
   const [avatarUrl, setAvatarUrl] = React.useState("");
+  const avatarPresentation = useAvatarPresentation(avatarUrl);
   const [isUploadingAvatar, setIsUploadingAvatar] = React.useState(false);
   const [isAvatarEditorOpen, setIsAvatarEditorOpen] = React.useState(false);
   const [starterPersonas, setStarterPersonas] = React.useState<AgentPersona[]>(
@@ -279,6 +288,30 @@ export function CommunityOnboardingFlow({
     transaction?.stage === "finalizing" ||
     transaction?.stage === "entering";
 
+  // Seed display name and avatar from the relay profile when the profile step
+  // is shown. This covers the case where the skip raced or was bypassed (e.g.,
+  // the user navigated Back). Only seeds fields that are still empty so that
+  // any user edits are preserved.
+  React.useEffect(() => {
+    if (!isProfileStage) return;
+    void getProfile()
+      .then((profile) => {
+        if (profile.displayName) {
+          setDisplayName((prev) =>
+            prev === "" ? (profile.displayName ?? "") : prev,
+          );
+        }
+        if (profile.avatarUrl) {
+          setAvatarUrl((prev) =>
+            prev === "" ? (profile.avatarUrl ?? "") : prev,
+          );
+        }
+      })
+      .catch(() => {
+        // Seeding is best-effort; silently ignore failures.
+      });
+  }, [isProfileStage]);
+
   React.useLayoutEffect(() => {
     if (isProfileStage && !isAvatarEditorOpen) {
       nameInputRef.current?.focus();
@@ -349,10 +382,34 @@ export function CommunityOnboardingFlow({
     if (!displayName.trim()) return;
     setIsPending(true);
     try {
-      await updateProfile({
-        displayName: displayName.trim(),
-        avatarUrl: avatarUrl.trim() || undefined,
-      });
+      const candidateAvatarUrl = avatarUrl.trim();
+      const presentationState = avatarPresentation?.state;
+      const shouldSaveCandidate =
+        candidateAvatarUrl.length > 0 &&
+        presentationState !== "failed" &&
+        presentationState !== "pending";
+
+      const deferredAvatar =
+        candidateAvatarUrl && presentationState && presentationState !== "ready"
+          ? registerAvatarWhenReady({
+              avatarUrl: candidateAvatarUrl,
+              relayUrl: transaction.relayUrl,
+            })
+          : null;
+
+      try {
+        const profile = await updateProfile({
+          displayName: displayName.trim(),
+          avatarUrl: shouldSaveCandidate ? candidateAvatarUrl : undefined,
+        });
+        deferredAvatar?.release({
+          expectedPubkey: profile.pubkey,
+          expectedAvatarUrl: profile.avatarUrl,
+        });
+      } catch (error) {
+        deferredAvatar?.cancel();
+        throw error;
+      }
       update({ stage: "team-intro", error: undefined });
     } catch (error) {
       if (isRelayMembershipDeniedError(error)) {

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,8 @@ import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:gpt_markdown/gpt_markdown.dart';
 import 'package:gpt_markdown/custom_widgets/markdown_config.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../shared/clipboard_utils.dart';
@@ -21,6 +24,47 @@ import 'message_media.dart';
 const _messageMediaMaxInlineWidth = 320.0;
 const _messageMediaMaxImageHeight = 240.0;
 
+typedef OpenDownloadedFile =
+    Future<void> Function(
+      String url,
+      Map<String, String> headers,
+      String filename,
+    );
+
+final openDownloadedFileProvider = Provider<OpenDownloadedFile>((ref) {
+  final client = ref.watch(mediaHttpClientProvider);
+  return (url, headers, filename) async {
+    final response = await client.get(Uri.parse(url), headers: headers);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw HttpException(
+        'Attachment download failed (${response.statusCode})',
+        uri: Uri.parse(url),
+      );
+    }
+
+    final directory = await getTemporaryDirectory();
+    final safeName = _safeDownloadedFilename(filename);
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}'
+      '${DateTime.now().microsecondsSinceEpoch}-$safeName',
+    );
+    await file.writeAsBytes(response.bodyBytes, flush: true);
+    final result = await OpenFilex.open(file.path);
+    if (result.type != ResultType.done) {
+      throw FileSystemException(result.message, file.path);
+    }
+  };
+});
+
+String _safeDownloadedFilename(String filename) {
+  final safe = filename
+      .split(RegExp(r'[/\\]'))
+      .last
+      .replaceAll(RegExp(r'[\x00-\x1F\x7F]'), '')
+      .trim();
+  return safe.isEmpty ? 'attachment' : safe;
+}
+
 /// Renders message content with markdown formatting, @mentions, #channel links,
 /// and media-aware markdown images/videos.
 class MessageContent extends HookConsumerWidget {
@@ -29,6 +73,10 @@ class MessageContent extends HookConsumerWidget {
   /// Display names for mentioned pubkeys, extracted from event p-tags.
   /// Keys are lowercase pubkeys, values are display names.
   final Map<String, String> mentionNames;
+
+  /// Mentioned pubkeys that resolve to agents. Agent chips use the desktop
+  /// robot treatment instead of an `@` prefix.
+  final Set<String> agentMentionPubkeys;
 
   /// Known channel names for #channel links. Keys are lowercase channel
   /// names, values are channel IDs.
@@ -52,6 +100,7 @@ class MessageContent extends HookConsumerWidget {
     super.key,
     required this.content,
     this.mentionNames = const {},
+    this.agentMentionPubkeys = const {},
     this.channelNames = const {},
     this.tags = const [],
     this.onChannelTap,
@@ -146,12 +195,16 @@ class MessageContent extends HookConsumerWidget {
       codeBuilder: (context, name, code, closed) =>
           _MessageCodeBlock(name: name, code: code),
       linkBuilder: (context, linkText, url, linkStyle) =>
-          _buildLink(context, linkText, url, linkStyle, style),
+          _buildLink(context, ref, linkText, url, linkStyle, style),
       imageBuilder: (context, imageUrl) =>
           _buildMedia(context, imageUrl, imetaByUrl[imageUrl]),
       maxLines: maxLines,
       inlineComponents: [
-        _MentionMd(mentionNames: mentionNames, onMentionTap: onMentionTap),
+        _MentionMd(
+          mentionNames: mentionNames,
+          agentMentionPubkeys: agentMentionPubkeys,
+          onMentionTap: onMentionTap,
+        ),
         CustomEmojiMd(customEmoji),
         _ChannelLinkMd(channelNames: channelNames, onChannelTap: onChannelTap),
         ...MarkdownComponent.inlineComponents,
@@ -173,6 +226,7 @@ class MessageContent extends HookConsumerWidget {
 
   Widget _buildLink(
     BuildContext context,
+    WidgetRef ref,
     InlineSpan linkText,
     String url,
     TextStyle linkStyle,
@@ -189,10 +243,29 @@ class MessageContent extends HookConsumerWidget {
     final baseStyle = fallbackStyle ?? linkStyle;
 
     return GestureDetector(
-      onTap: () {
+      onTap: () async {
         final uri = Uri.tryParse(url);
-        if (uri != null && (uri.scheme == 'http' || uri.scheme == 'https')) {
-          launchUrl(uri, mode: LaunchMode.externalApplication);
+        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+          return;
+        }
+
+        final auth = ref.read(mediaGetAuthServiceProvider);
+        if (!auth.isRelayMediaUrl(url)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          return;
+        }
+
+        try {
+          await ref.read(openDownloadedFileProvider)(
+            url,
+            auth.headersFor(url),
+            text,
+          );
+        } catch (_) {
+          if (!context.mounted) return;
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text('Could not open attachment')),
+          );
         }
       },
       child: Text(
@@ -578,6 +651,7 @@ class _MessageCodeBlock extends HookWidget {
 
 class _MentionMd extends InlineMd {
   final Map<String, String> mentionNames;
+  final Set<String> agentMentionPubkeys;
   final void Function(String pubkey)? onMentionTap;
   late final RegExp _exp = _buildPrefixPattern(
     prefix: '@',
@@ -585,7 +659,11 @@ class _MentionMd extends InlineMd {
     genericTokenPattern: r'[A-Za-z0-9_][A-Za-z0-9_\u00A0-]*',
   );
 
-  _MentionMd({required this.mentionNames, this.onMentionTap});
+  _MentionMd({
+    required this.mentionNames,
+    required this.agentMentionPubkeys,
+    this.onMentionTap,
+  });
 
   @override
   RegExp get exp => _exp;
@@ -614,8 +692,11 @@ class _MentionMd extends InlineMd {
       }
     }
 
-    final pill = _TokenPill(
-      text: '@${displayName ?? raw.substring(1)}',
+    final isAgent =
+        pubkey != null && agentMentionPubkeys.contains(pubkey.toLowerCase());
+    final pill = _MentionPill(
+      label: displayName ?? raw.substring(1),
+      isAgent: isAgent,
       textStyle: config.style,
     );
 
@@ -625,6 +706,66 @@ class _MentionMd extends InlineMd {
       child: pubkey != null && onMentionTap != null
           ? GestureDetector(onTap: () => onMentionTap!(pubkey!), child: pill)
           : pill,
+    );
+  }
+}
+
+class _MentionPill extends StatelessWidget {
+  final String label;
+  final bool isAgent;
+  final TextStyle? textStyle;
+
+  const _MentionPill({
+    required this.label,
+    required this.isAgent,
+    this.textStyle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final style =
+        (textStyle ?? context.textTheme.bodyMedium)?.copyWith(
+          color: context.colors.primary,
+          fontWeight: FontWeight.w500,
+          height: 1,
+        ) ??
+        TextStyle(
+          color: context.colors.primary,
+          fontWeight: FontWeight.w500,
+          height: 1,
+        );
+    final fontSize = style.fontSize ?? 16;
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(
+        Grid.half,
+        Grid.quarter + 1,
+        Grid.half,
+        Grid.quarter,
+      ),
+      decoration: BoxDecoration(
+        color: context.colors.primary.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(Radii.sm),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          if (isAgent) ...[
+            Icon(
+              LucideIcons.bot,
+              size: fontSize * 0.95,
+              color: context.colors.primary,
+            ),
+            const SizedBox(width: Grid.quarter),
+          ] else
+            Transform.translate(
+              offset: const Offset(0, -Grid.quarter),
+              child: Text('@', style: style),
+            ),
+          Text(label, style: style),
+        ],
+      ),
     );
   }
 }

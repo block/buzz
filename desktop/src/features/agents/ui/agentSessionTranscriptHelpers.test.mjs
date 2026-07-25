@@ -681,3 +681,114 @@ test("parseSystemPromptSections splits on the LAST occurrence of the canonical d
     },
   ]);
 });
+
+// ── Modern [Team Instructions] bracket-header extraction ─────────────────────
+
+test("parseSystemPromptSections (modern) extracts bracket Team Instructions after Base+System", () => {
+  // with_team() emits "\n\n[Team Instructions]\n{instructions}" as a top-level
+  // bracket section — the same framing used by with_core() and with_canvas().
+  const framed = [
+    "[Base]",
+    "You are a helpful assistant.",
+    "",
+    "[System]",
+    "You are Agent X.",
+    "",
+    "[Team Instructions]",
+    "Always respond in markdown.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are a helpful assistant." },
+    { title: "System", body: "You are Agent X." },
+    { title: "Team Instructions", body: "Always respond in markdown." },
+  ]);
+});
+
+test("parseSystemPromptSections (modern) extracts bracket Team Instructions after System-only", () => {
+  // [Base] absent; [Team Instructions] is a direct top-level bracket section.
+  const framed = [
+    "[System]",
+    "You are Agent Y.",
+    "",
+    "[Team Instructions]",
+    "Keep responses concise.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "System", body: "You are Agent Y." },
+    { title: "Team Instructions", body: "Keep responses concise." },
+  ]);
+});
+
+test("parseSystemPromptSections (modern) handles bracket Team Instructions as start-of-string", () => {
+  // with_team() also handles prompt=None → "[Team Instructions]\n{instructions}".
+  const framed = ["[Team Instructions]", "Instructions only."].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Team Instructions", body: "Instructions only." },
+  ]);
+});
+
+test("parseSystemPromptSections (modern) pins full 5-section shape: Base+System+Team+Core+Canvas", () => {
+  // Production shape from with_team() + with_core() + with_canvas(): all five sections present.
+  const framed = [
+    "[Base]",
+    "You are a helpful AI assistant running in Buzz.",
+    "",
+    "[System]",
+    "You are Observer Agent. You coordinate multi-agent workflows.",
+    "",
+    "[Team Instructions]",
+    "Always tag on handoff.",
+    "Never expand scope without approval.",
+    "",
+    "[Agent Memory — core]",
+    "I am Observer Agent.",
+    "## Lessons Learned",
+    "Always tag on handoff.",
+    "",
+    "[Channel Canvas]",
+    "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "Last modified: 2026-07-11T10:00:00Z",
+    "Fetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    { title: "Base", body: "You are a helpful AI assistant running in Buzz." },
+    {
+      title: "System",
+      body: "You are Observer Agent. You coordinate multi-agent workflows.",
+    },
+    {
+      title: "Team Instructions",
+      body: "Always tag on handoff.\nNever expand scope without approval.",
+    },
+    {
+      title: "Core Memory",
+      body: "I am Observer Agent.\n## Lessons Learned\nAlways tag on handoff.",
+    },
+    {
+      title: "Channel Canvas",
+      body: "Canvas revision (event ID): a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2\nLast modified: 2026-07-11T10:00:00Z\nFetch current content with: buzz canvas get --channel 94a444a4-c0a3-5966-ab05-530c6ddc2301",
+    },
+  ]);
+});
+
+test("parseSystemPromptSections (modern) does NOT split on bracket [Team Instructions] preceded by only a single newline", () => {
+  // The inline marker is "\n\n[Team Instructions]\n" — a single preceding newline
+  // must be kept literal inside System, same guard as canvas/core.
+  const framed = [
+    "[System]",
+    "Persona preamble.",
+    "[Team Instructions]",
+    "This is persona text, not a real team block.",
+  ].join("\n");
+  const sections = parseSystemPromptSections(framed);
+  assert.deepEqual(sections, [
+    {
+      title: "System",
+      body: "Persona preamble.\n[Team Instructions]\nThis is persona text, not a real team block.",
+    },
+  ]);
+});

@@ -136,6 +136,7 @@ export function AgentsView() {
                 ) : null}
               </div>
             }
+            className="mx-auto w-full max-w-[996px]"
             description="Set up and manage your agents."
             title="Agents"
           />

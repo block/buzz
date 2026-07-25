@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 import { relayClient } from "@/shared/api/relayClient";
 import { resetRateLimitGate } from "@/shared/api/relayRateLimitGate";
-import { applyCommunity, getDefaultRelayUrl } from "@/shared/api/tauri";
+import {
+  applyCommunity,
+  autoConnectDefaultRelayEnabled,
+  getDefaultRelayUrl,
+} from "@/shared/api/tauri";
 import { getIdentity } from "@/shared/api/tauriIdentity";
 import { getOverrides } from "@/shared/features";
 import { resetMediaCaches } from "@/shared/lib/mediaUrl";
@@ -19,11 +23,16 @@ import {
 } from "@/features/agents/activeAgentTurnsStore";
 import { resetAgentWorkingSignal } from "@/features/agents/agentWorkingSignal";
 import { resetAgentObserverStore } from "@/features/agents/observerRelayStore";
+import { resetAvatarPresentations } from "@/features/profile/avatarPresentationStore";
+import { resetAvatarProfileSync } from "@/features/profile/avatarProfileSync";
 import { resetSidebarRelayConnectionCardState } from "@/features/sidebar/ui/useSidebarRelayConnectionCard";
 import { clearMarkdownNodeCache } from "@/shared/ui/markdown/nodeCache";
 import { resetVideoPlayerState } from "@/shared/ui/videoPlayerState";
 
-import { initFirstCommunity } from "./communityStorage";
+import {
+  initFirstCommunity,
+  shouldAutoConnectDefaultRelay,
+} from "./communityStorage";
 import type { Community } from "./types";
 
 /**
@@ -33,13 +42,21 @@ import type { Community } from "./types";
  * destroyed via effect cleanup and do not need entries here.
  * See AGENTS.md "Community Switching" for the full contract.
  */
-function resetCommunityState(): void {
+function resetCommunityState({
+  resetAvatarState,
+}: {
+  resetAvatarState: boolean;
+}): void {
   relayClient.disconnect();
   resetRateLimitGate();
   clearAllDrafts();
   resetAgentObserverStore();
   resetActiveAgentTurnsStore();
   resetAgentWorkingSignal();
+  if (resetAvatarState) {
+    resetAvatarProfileSync();
+    resetAvatarPresentations();
+  }
   resetSidebarRelayConnectionCardState();
   resetMediaCaches();
   resetVideoPlayerState();
@@ -84,6 +101,10 @@ export function useCommunityInit(
   // Track the previously-applied community ID so we can save its turn state
   // before resetting when the user switches to a different community.
   const prevCommunityIdRef = useRef<string | null>(null);
+  // Deferred avatar work owns the relay captured when it was queued. A
+  // same-relay reconnect during onboarding must not cancel that work, while an
+  // actual relay boundary must clear both the queue and its presentation probe.
+  const appliedRelayUrlRef = useRef<string | null>(null);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: we intentionally depend on specific properties (id/relayUrl/token/reposDir) — depending on the whole object would trigger resets on name-only changes
   useEffect(() => {
@@ -93,13 +114,33 @@ export function useCommunityInit(
       if (!activeCommunity) {
         try {
           const defaultRelayUrl = await getDefaultRelayUrl();
+          const autoConnectDefaultRelay =
+            await autoConnectDefaultRelayEnabled();
 
-          if (isSharedIdentity) {
+          // Internal builds explicitly opt into treating their reviewed default
+          // relay as the first community. Public builds retain community
+          // selection even when BUZZ_RELAY_URL is overridden at runtime.
+          if (
+            isSharedIdentity ||
+            (autoConnectDefaultRelay &&
+              shouldAutoConnectDefaultRelay(defaultRelayUrl))
+          ) {
             const identity = await getIdentity();
             if (cancelled) return;
-            initFirstCommunity(defaultRelayUrl, identity.pubkey);
-            if (!cancelled) {
+            const community = initFirstCommunity(
+              defaultRelayUrl,
+              identity.pubkey,
+            );
+            if (community && !cancelled) {
               window.location.reload();
+              return;
+            }
+            if (!cancelled) {
+              setResult({
+                isReady: false,
+                needsSetup: true,
+                defaultRelayUrl,
+              });
             }
             return;
           }
@@ -145,9 +186,13 @@ export function useCommunityInit(
           // store under the outgoing community ID and delete its snapshot.
           prevCommunityIdRef.current = null;
         }
-        resetCommunityState();
+        resetCommunityState({
+          resetAvatarState:
+            appliedRelayUrlRef.current !== activeCommunity.relayUrl,
+        });
       }
       hasInitializedRef.current = true;
+      appliedRelayUrlRef.current = activeCommunity.relayUrl;
 
       // Apply community config to the Tauri backend.
       //
