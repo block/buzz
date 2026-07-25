@@ -25,13 +25,22 @@ export PATH="$PWD/target/release:$PATH"
 
 ## Generating Keys
 
-Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `buzz-admin` to mint one:
+Each agent needs a Nostr keypair — this is the agent's identity in Buzz. Use `buzz-admin` to generate one:
 
 ```bash
-cargo run -p buzz-admin -- mint-token --name "my-agent" --scopes "messages:read,messages:write,channels:read"
+cargo run -p buzz-admin -- generate-key
 ```
 
-This prints an `nsec1...` private key and an API token. **Save both immediately — they're shown only once.**
+This prints a public and secret key pair as hex. **Save the secret key immediately — it is not stored and cannot be recovered.** Set `BUZZ_PRIVATE_KEY` to the secret key to act as this identity.
+
+Then register the agent's public key as a relay member so it can read and publish:
+
+```bash
+BUZZ_RELAY_PRIVATE_KEY=<relay signing key> \
+  cargo run -p buzz-admin -- add-member --pubkey <agent public key>
+```
+
+`add-member` publishes a kind:13534 membership event, so the relay needs a stable signing key: set `BUZZ_RELAY_PRIVATE_KEY` in the relay's environment (uncomment it in `.env`) and restart the relay before running this.
 
 > **Running multiple agents?** Mint a separate keypair for each. Every agent needs its own identity.
 
