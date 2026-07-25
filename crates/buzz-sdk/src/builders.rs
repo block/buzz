@@ -543,6 +543,14 @@ pub fn build_set_canvas(channel_id: Uuid, content: &str) -> Result<EventBuilder,
 /// kind:0 is replaceable: relays keep only the newest event per author, so a
 /// rebuilt content object *is* the whole profile. Building from anything less
 /// than the current content silently deletes fields.
+///
+/// Known limitation: this merge can add and overwrite keys but never remove
+/// one. `None` means "leave as published", so once a field exists in an
+/// author's kind:0 there is no way to clear it through this path — callers
+/// needing deletion must build the content object themselves. Preferring this
+/// over treating `None` as "delete" is deliberate: every caller passes `None`
+/// for fields it does not model, and the alternative would make each partial
+/// update erase everything outside its own parameter list.
 pub fn merge_profile_content(
     current_content: Option<&str>,
     display_name: Option<&str>,
