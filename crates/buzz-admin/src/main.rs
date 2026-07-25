@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use buzz_core::kind::KIND_NIP43_MEMBERSHIP_LIST;
 use buzz_core::tenant::{relay_url_authority, TenantContext};
 use buzz_db::{Db, DbConfig};
@@ -418,8 +418,9 @@ async fn connect_member_services() -> Result<(Db, Arc<PubSubManager>, Keys)> {
 }
 
 async fn connect_db() -> Result<Db> {
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://buzz:buzz_dev@localhost:5432/buzz".to_string());
+    let db_url = std::env::var("DATABASE_URL").context(
+        "DATABASE_URL is not set. Set it in your environment or source .env before running buzz-admin.",
+    )?;
     let db = Db::new(&DbConfig {
         database_url: db_url,
         ..DbConfig::default()
