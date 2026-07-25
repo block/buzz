@@ -12,9 +12,10 @@ function runtime(id, availability, status) {
   return { id, availability, authStatus: { status } };
 }
 
-test("only Claude Code and Codex are visible in onboarding", () => {
+test("Claude Code, Codex, and Kiro CLI are visible in onboarding", () => {
   assert.equal(runtimeIsVisibleInOnboarding("claude"), true);
   assert.equal(runtimeIsVisibleInOnboarding("codex"), true);
+  assert.equal(runtimeIsVisibleInOnboarding("kiro"), true);
   assert.equal(runtimeIsVisibleInOnboarding("goose"), false);
   assert.equal(runtimeIsVisibleInOnboarding("buzz-agent"), false);
   assert.equal(runtimeIsVisibleInOnboarding("custom"), false);
@@ -26,11 +27,12 @@ test("visible onboarding runtimes use the product order", () => {
     runtime("codex", "available", "logged_in"),
     runtime("goose", "available", "not_applicable"),
     runtime("claude", "available", "logged_in"),
+    runtime("kiro", "available", "logged_in"),
   ];
 
   assert.deepEqual(
     getVisibleOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude", "codex"],
+    ["claude", "codex", "kiro"],
   );
 });
 
@@ -50,6 +52,10 @@ test("readiness requires an available and authenticated runtime", () => {
     false,
   );
   assert.equal(
+    runtimeIsReadyForOnboarding(runtime("kiro", "available", "logged_in")),
+    true,
+  );
+  assert.equal(
     runtimeIsReadyForOnboarding(runtime("codex", "not_installed", "logged_in")),
     false,
   );
@@ -61,10 +67,11 @@ test("ready onboarding runtimes exclude hidden ready harnesses", () => {
     runtime("codex", "available", "logged_out"),
     runtime("buzz-agent", "available", "not_applicable"),
     runtime("claude", "available", "logged_in"),
+    runtime("kiro", "available", "logged_in"),
   ];
 
   assert.deepEqual(
     getReadyOnboardingRuntimes(runtimes).map(({ id }) => id),
-    ["claude"],
+    ["claude", "kiro"],
   );
 });

@@ -62,6 +62,10 @@ pub(crate) struct KnownAcpRuntime {
     /// CLI args for probing authentication status. `args[0]` is the binary name;
     /// the remainder are the subcommand. `None` for runtimes with no login step.
     pub auth_probe_args: Option<&'static [&'static str]>,
+    /// Visible terminal command used when the ACP endpoint does not advertise
+    /// an authentication method. `None` when auth is handled through ACP or is
+    /// not required.
+    pub login_command_args: Option<&'static [&'static str]>,
 }
 
 impl KnownAcpRuntime {
@@ -120,5 +124,15 @@ mod tests {
         );
         assert!(codex.adapter_install_instructions_url.contains("codex-acp"));
         assert!(codex.cli_install_hint.contains("desktop app alone"));
+
+        let kiro = known_acp_runtime_exact("kiro").unwrap();
+        assert_eq!(kiro.commands, &["kiro-cli"]);
+        assert_eq!(
+            kiro.auth_probe_args,
+            Some(&["kiro-cli", "whoami", "--format", "json"][..])
+        );
+        assert_eq!(kiro.login_command_args, Some(&["kiro-cli", "login"][..]));
+        assert!(kiro.adapter_install_commands.is_empty());
+        assert!(kiro.cli_install_instructions_url.contains("kiro.dev"));
     }
 }

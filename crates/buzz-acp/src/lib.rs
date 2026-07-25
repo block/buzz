@@ -3138,7 +3138,7 @@ fn handle_prompt_result(
                     "dead-lettering batch immediately — non-retryable auth error"
                 );
                 let content = "⚠️ I couldn't process the last request: authentication failed. \
-                    Please re-authenticate the CLI (e.g. run `claude /login` or `codex login`) \
+                    Please re-authenticate the CLI (e.g. run `claude /login`, `codex login`, or `kiro-cli login`) \
                     and then re-send."
                     .to_string();
                 spawn_failure_notice(rest_client, &batch, content);

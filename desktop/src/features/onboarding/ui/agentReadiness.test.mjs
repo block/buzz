@@ -52,6 +52,19 @@ test("resolveAgentReadiness_cli_returns_ready_when_preferred_cli_runtime_is_logg
   });
 });
 
+test("resolveAgentReadiness_kiro_returns_ready_when_preferred_runtime_is_logged_in", () => {
+  const runtimes = [makeRuntime({ id: "kiro", label: "Kiro CLI" })];
+  const result = resolveAgentReadiness(
+    runtimes,
+    makeConfig({ preferred_runtime: "kiro" }),
+  );
+  assert.deepEqual(result, {
+    ready: true,
+    reason: "cli",
+    runtimeLabel: "Kiro CLI",
+  });
+});
+
 test("resolveAgentReadiness_uses_only_the_preferred_runtime", () => {
   const runtimes = [
     makeRuntime({ id: "claude", label: "Claude" }),

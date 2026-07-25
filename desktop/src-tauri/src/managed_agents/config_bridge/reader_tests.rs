@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, path::Path, sync::Mutex};
 
 use super::*;
 use crate::managed_agents::discovery::KnownAcpRuntime;
+use crate::managed_agents::known_acp_runtime;
 use crate::managed_agents::types::ManagedAgentRecord;
 
 static GOOSE_PATH_ROOT_LOCK: Mutex<()> = Mutex::new(());
@@ -59,6 +60,7 @@ fn test_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        login_command_args: None,
     }
 }
 
@@ -218,6 +220,34 @@ fn provider_locked_shows_locked() {
     let provider = surface.normalized.provider.unwrap();
     assert_eq!(provider.value.as_deref(), Some("Anthropic (locked)"));
     assert_eq!(provider.origin, ConfigOrigin::HarnessConstraint);
+}
+
+#[test]
+fn kiro_live_config_uses_native_acp_model_switching_without_a_provider_field() {
+    let record = test_record();
+    let runtime = known_acp_runtime("kiro-cli").expect("Kiro runtime");
+    let cache = SessionConfigCache {
+        config_options: vec![],
+        available_modes: vec![],
+        available_models: vec![AcpModelEntry {
+            model_id: "kiro-model".to_string(),
+            name: Some("Kiro model".to_string()),
+            description: None,
+        }],
+        current_model: Some("kiro-model".to_string()),
+        model_overridden: false,
+        goose_native_config: None,
+        captured_at: String::new(),
+    };
+
+    let surface = read_config_surface(&record, Some(runtime), Some(&cache), None);
+    let model = surface.normalized.model.expect("model field");
+    assert_eq!(model.value.as_deref(), Some("kiro-model"));
+    assert!(matches!(
+        model.write_via,
+        ConfigWriteMechanism::AcpSetSessionModel
+    ));
+    assert!(surface.normalized.provider.is_none());
 }
 
 #[test]
@@ -635,6 +665,7 @@ fn buzz_agent_runtime() -> &'static KnownAcpRuntime {
         required_normalized_fields: &["model", "provider"],
         login_hint: None,
         auth_probe_args: None,
+        login_command_args: None,
     }
 }
 

@@ -175,7 +175,7 @@ impl std::fmt::Display for PermissionMode {
     about = "Query available models from the configured agent"
 )]
 pub struct ModelsArgs {
-    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
+    /// Agent binary to spawn (e.g. "goose", "kiro-cli", "claude-agent-acp", "codex-acp").
     #[command(flatten)]
     pub agent: AuthAgentArgs,
 
@@ -187,7 +187,7 @@ pub struct ModelsArgs {
 /// Shared agent-spawn flags for lightweight local ACP helper subcommands.
 #[derive(Debug, Parser)]
 pub struct AuthAgentArgs {
-    /// Agent binary to spawn (e.g. "goose", "claude-agent-acp", "codex-acp").
+    /// Agent binary to spawn (e.g. "goose", "kiro-cli", "claude-agent-acp", "codex-acp").
     #[arg(long, env = "BUZZ_ACP_AGENT_COMMAND", default_value = "goose")]
     pub agent_command: String,
 
@@ -616,7 +616,7 @@ pub(crate) fn normalize_agent_command_identity(command: &str) -> String {
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_agent_command_identity(command).as_str() {
-        "goose" => Some(vec!["acp".to_string()]),
+        "goose" | "kiro-cli" => Some(vec!["acp".to_string()]),
         "codex" | "codex-acp" | "claude-agent-acp" | "claude-code-acp" | "claude-code"
         | "claudecode" | "buzz-agent" => Some(Vec::new()),
         _ => None,
@@ -1441,6 +1441,19 @@ mod tests {
     }
 
     #[test]
+    fn normalizes_kiro_cli_args_to_acp() {
+        assert_eq!(normalize_agent_args("kiro-cli", Vec::new()), vec!["acp"]);
+        assert_eq!(
+            normalize_agent_args("/usr/local/bin/kiro-cli", vec!["".into()]),
+            vec!["acp"]
+        );
+        assert_eq!(
+            normalize_agent_args("Kiro_CLI.EXE", Vec::new()),
+            vec!["acp"]
+        );
+    }
+
+    #[test]
     fn normalizes_codex_and_claude_args_to_empty() {
         assert_eq!(
             normalize_agent_args("codex-acp", Vec::new()),
@@ -1511,6 +1524,10 @@ mod tests {
         assert_eq!(
             normalize_agent_command_identity("Claude Code"),
             "claude-code"
+        );
+        assert_eq!(
+            normalize_agent_command_identity("/opt/kiro/Kiro_CLI.exe"),
+            "kiro-cli"
         );
         assert_eq!(normalize_agent_command_identity("Goose.EXE"), "goose");
         // Non-ASCII must not panic.

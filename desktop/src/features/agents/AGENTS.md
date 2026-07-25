@@ -72,10 +72,11 @@ with a TypeScript lookup table or an id comparison in a component.
    touching this flow or the shared renderer.
 8. **Omit the Model control only after a confirmed successful empty
    discovery on an optional-model harness.** When the field model marks model
-   as `acpNative` (Claude Code / Codex), `shouldRenderModelControl` hides the
-   picker while discovery is in flight and after IPC resolves with no usable
-   options (`modelDiscoverySuccessfulEmpty` / `isSuccessfulEmptyDiscovery`).
-   A thrown or unavailable discovery keeps the control so #2246 failure UI can
+   as `acpNative` (Claude Code / Codex / Kiro CLI),
+   `shouldRenderModelControl` hides the picker while discovery is in flight and
+   after IPC resolves with no usable options (`modelDiscoverySuccessfulEmpty` /
+   `isSuccessfulEmptyDiscovery`). A thrown or unavailable discovery keeps the
+   control so #2246 failure UI can
    render, and must not heal/clear persisted model or effort. Full disclosure
    still shows the control when Custom model is available. Required-model
    harnesses always keep the field. Gate: `defaults hides model when optional
@@ -120,6 +121,8 @@ with a TypeScript lookup table or an id comparison in a component.
   acceptance coverage for readiness, failure states, defaults, navigation,
   successful-empty vs failed optional-model discovery, and persistence races.
 - Rust: `runtime_metadata_env_vars` tests pin spawn-time key application.
+- Native ACP runtime catalog tests pin Kiro CLI discovery, `acp` argument
+  normalization, CLI-login readiness, and model/MCP capability metadata.
 
 ## Keep this file true
 

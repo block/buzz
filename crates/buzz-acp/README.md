@@ -9,7 +9,11 @@ Buzz Relay ──WS──→ buzz-acp ──stdio──→ Your Agent
                                        (send_message, etc.)
 ```
 
-Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over stdio: **goose**, **codex** (via [codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude code** (via [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
+Supports any agent that speaks [ACP](https://agentclientprotocol.com/) over
+stdio: **goose**, **Kiro CLI** (native ACP), **codex** (via
+[codex-acp](https://github.com/agentclientprotocol/codex-acp)), and **claude
+code** (via
+[claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)).
 
 ## Prerequisites
 
@@ -97,6 +101,30 @@ buzz-acp
 
 Older installs that still expose `claude-code-acp` are also supported. `buzz-acp`
 treats both Claude ACP command names as the same zero-arg runtime.
+
+## Running with Kiro CLI
+
+Kiro CLI includes a native ACP endpoint, so no separate adapter package is
+required.
+
+```bash
+# Install and authenticate Kiro CLI first.
+curl -fsSL https://cli.kiro.dev/install | bash
+kiro-cli login
+kiro-cli whoami
+
+# Run Kiro as the ACP worker.
+export BUZZ_ACP_AGENT_COMMAND="kiro-cli"
+export BUZZ_ACP_AGENT_ARGS="acp"
+
+buzz-acp
+```
+
+Buzz Desktop discovers `kiro-cli`, verifies the existing login with
+`kiro-cli whoami --format json`, and supplies the `acp` subcommand
+automatically. Kiro currently negotiates ACP protocol version 1 with Buzz's
+version-2 initialization request; Buzz uses its existing legacy prompt framing
+for that negotiated version.
 
 ## Configuration
 

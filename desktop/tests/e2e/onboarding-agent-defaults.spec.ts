@@ -3,7 +3,7 @@ import { installMockBridge } from "../helpers/bridge";
 import { passThroughBackupStep } from "../helpers/onboarding";
 
 function runtime(
-  id: "buzz-agent" | "claude" | "codex" | "goose",
+  id: "buzz-agent" | "claude" | "codex" | "goose" | "kiro",
   availability: string,
   authStatus: Record<string, unknown>,
   overrides: Record<string, unknown> = {},
@@ -17,7 +17,9 @@ function runtime(
           ? "Claude Code"
           : id === "codex"
             ? "Codex"
-            : "Goose",
+            : id === "kiro"
+              ? "Kiro CLI"
+              : "Goose",
     avatar_url: "",
     availability,
     command: availability === "available" ? id : null,
@@ -57,7 +59,7 @@ async function readSavedRuntime(page: Parameters<typeof installMockBridge>[0]) {
   });
 }
 
-test("setup shows only Claude Code and Codex as detected harnesses", async ({
+test("setup shows Claude Code, Codex, and Kiro CLI as detected harnesses", async ({
   page,
 }) => {
   await installMockBridge(
@@ -68,6 +70,7 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
         runtime("goose", "available", { status: "not_applicable" }),
         runtime("codex", "available", { status: "logged_in" }),
         runtime("claude", "available", { status: "logged_in" }),
+        runtime("kiro", "available", { status: "logged_in" }),
       ],
     },
     { skipCommunitySeed: true, skipOnboardingSeed: true },
@@ -77,6 +80,7 @@ test("setup shows only Claude Code and Codex as detected harnesses", async ({
 
   await expect(page.getByTestId("onboarding-runtime-claude")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-codex")).toBeVisible();
+  await expect(page.getByTestId("onboarding-runtime-kiro")).toBeVisible();
   await expect(page.getByTestId("onboarding-runtime-goose")).toHaveCount(0);
   await expect(page.getByTestId("onboarding-runtime-buzz-agent")).toHaveCount(
     0,

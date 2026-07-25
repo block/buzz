@@ -10,7 +10,7 @@ use crate::managed_agents::{
 
 use super::{cli_probe, Requirement};
 
-/// Requirements for CLI-login runtimes (claude, codex).
+/// Requirements for catalog-declared CLI-login runtimes.
 pub(super) fn requirements(
     probe_args: &[&str],
     setup_copy: &str,

@@ -99,6 +99,16 @@ fn codex_has_mcp_command() {
 }
 
 #[test]
+fn kiro_uses_native_acp_with_buzz_mcp() {
+    let runtime = known_acp_runtime("kiro-cli").expect("should resolve");
+    assert_eq!(runtime.id, "kiro");
+    assert_eq!(runtime.mcp_command, Some("buzz-dev-mcp"));
+    assert!(!runtime.mcp_hooks);
+    assert!(runtime.supports_acp_model_switching);
+    assert!(!runtime.provider_locked);
+}
+
+#[test]
 fn goose_has_no_mcp_hooks() {
     let p = known_acp_runtime("goose").expect("should resolve");
     assert!(!p.mcp_hooks);

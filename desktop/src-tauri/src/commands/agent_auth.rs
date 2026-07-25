@@ -69,12 +69,67 @@ pub async fn connect_acp_runtime(
 
 fn discover_acp_auth_methods_blocking(runtime_id: &str) -> Result<AcpAuthMethodsResult, String> {
     let output = run_buzz_acp_auth_command(runtime_id, ["auth-methods", "--json"])?;
-    if !output.status.success() {
-        return Err(command_error("buzz-acp auth-methods", &output));
+    resolve_acp_auth_methods(
+        runtime_id,
+        output.status.success(),
+        &output.stdout,
+        command_error("buzz-acp auth-methods", &output),
+    )
+}
+
+fn resolve_acp_auth_methods(
+    runtime_id: &str,
+    command_succeeded: bool,
+    stdout: &[u8],
+    command_failure: String,
+) -> Result<AcpAuthMethodsResult, String> {
+    if !command_succeeded {
+        let mut fallback = AcpAuthMethodsResult {
+            methods: Vec::new(),
+        };
+        add_catalog_login_fallback(runtime_id, &mut fallback)?;
+        if !fallback.methods.is_empty() {
+            return Ok(fallback);
+        }
+        return Err(command_failure);
     }
 
-    serde_json::from_slice::<AcpAuthMethodsResult>(&output.stdout)
-        .map_err(|error| format!("failed to parse auth methods JSON: {error}"))
+    let mut result = serde_json::from_slice::<AcpAuthMethodsResult>(stdout)
+        .map_err(|error| format!("failed to parse auth methods JSON: {error}"))?;
+    add_catalog_login_fallback(runtime_id, &mut result)?;
+    Ok(result)
+}
+
+/// Add a catalog-declared terminal login method when an otherwise compatible
+/// ACP runtime does not advertise authentication through ACP itself.
+///
+/// Kiro's native ACP endpoint returns an empty `authMethods` list for an
+/// existing-auth session and exits during initialization when logged out, while
+/// `kiro-cli login` is the documented interactive sign-in path. Keeping that
+/// command in the runtime catalog lets onboarding offer a working sign-in
+/// action in both states without inventing vendor commands in React.
+fn add_catalog_login_fallback(
+    runtime_id: &str,
+    result: &mut AcpAuthMethodsResult,
+) -> Result<(), String> {
+    if !result.methods.is_empty() {
+        return Ok(());
+    }
+    let runtime = known_acp_runtime_exact(runtime_id)
+        .ok_or_else(|| format!("unknown ACP runtime: {runtime_id}"))?;
+    let Some(command) = runtime.login_command_args else {
+        return Ok(());
+    };
+    result.methods.push(AcpAuthMethod {
+        id: "cli-login".to_string(),
+        name: format!("Sign in with {}", runtime.label),
+        description: runtime.login_hint.map(str::to_string),
+        method_type: Some("terminal".to_string()),
+        args: Vec::new(),
+        command: command.iter().map(|value| value.to_string()).collect(),
+        meta: None,
+    });
+    Ok(())
 }
 
 fn connect_acp_runtime_blocking(
@@ -461,9 +516,10 @@ fn shell_escape(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_terminal_argv, append_inherited_path, is_claude_subscription_login,
+        adapter_terminal_argv, add_catalog_login_fallback, append_inherited_path,
+        is_claude_subscription_login, resolve_acp_auth_methods,
         run_buzz_acp_auth_command_with_paths, shell_escape, shell_join, uses_terminal_auth,
-        windows_terminal_args, AcpAuthMethod,
+        windows_terminal_args, AcpAuthMethod, AcpAuthMethodsResult,
     };
 
     /// Windows regression: the augmented PATH there holds only Buzz-managed
@@ -595,6 +651,55 @@ mod tests {
         let method: AcpAuthMethod = serde_json::from_str(raw).unwrap();
         assert_eq!(method.method_type.as_deref(), Some("terminal"));
         assert_eq!(method.command[0], "claude");
+    }
+
+    #[test]
+    fn kiro_empty_acp_auth_methods_gain_catalog_terminal_login() {
+        let mut result = AcpAuthMethodsResult {
+            methods: Vec::new(),
+        };
+        add_catalog_login_fallback("kiro", &mut result).expect("Kiro runtime");
+        assert_eq!(result.methods.len(), 1);
+        let method = &result.methods[0];
+        assert_eq!(method.id, "cli-login");
+        assert_eq!(method.method_type.as_deref(), Some("terminal"));
+        assert_eq!(method.command, ["kiro-cli", "login"]);
+        assert!(method
+            .description
+            .as_deref()
+            .is_some_and(|description| description.contains("kiro-cli login")));
+    }
+
+    #[test]
+    fn kiro_failed_acp_initialization_still_offers_terminal_login() {
+        let result = resolve_acp_auth_methods(
+            "kiro",
+            false,
+            &[],
+            "agent process exited unexpectedly".into(),
+        )
+        .expect("catalog fallback");
+
+        assert_eq!(result.methods.len(), 1);
+        assert_eq!(result.methods[0].command, ["kiro-cli", "login"]);
+    }
+
+    #[test]
+    fn catalog_login_fallback_preserves_adapter_methods() {
+        let original = AcpAuthMethod {
+            id: "native".into(),
+            name: "Native".into(),
+            description: None,
+            method_type: None,
+            args: Vec::new(),
+            command: Vec::new(),
+            meta: None,
+        };
+        let mut result = AcpAuthMethodsResult {
+            methods: vec![original.clone()],
+        };
+        add_catalog_login_fallback("kiro", &mut result).expect("Kiro runtime");
+        assert_eq!(result.methods, [original]);
     }
 
     #[test]

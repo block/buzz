@@ -244,9 +244,9 @@ impl AgentReadiness {
 ///   - `openai` → `OPENAI_COMPAT_API_KEY`
 ///   - `databricks` / `databricks_v2` → `DATABRICKS_HOST` (token optional —
 ///     OAuth PKCE is the fallback)
-/// * **claude**: a successful `claude auth status` probe.
-/// * **codex**: a successful `codex login status` probe (checks the codex
-///   credential store — NOT `OPENAI_API_KEY`).
+/// * **CLI-login runtimes**: a successful catalog-declared auth probe (for
+///   example `claude auth status`, `codex login status`, or
+///   `kiro-cli whoami --format json`).
 /// * **unknown / custom command**: always `Ready` (no requirements known).
 ///
 /// Databricks note: `DATABRICKS_TOKEN` is `.unwrap_or_default()` in
@@ -283,13 +283,15 @@ fn collect_missing_requirements(
             let file_cfg = read_goose_file_config();
             goose_requirements(effective, file_cfg.as_ref())
         }
-        "claude" => cli_login::requirements(
-            &["claude", "auth", "status"],
-            "complete Claude Code authentication by running the Claude CLI",
-            rt,
-        ),
-        "codex" => cli_login::requirements(&["codex", "login", "status"], "run `codex login`", rt),
-        _ => vec![],
+        _ => match rt.auth_probe_args {
+            Some(probe_args) => cli_login::requirements(
+                probe_args,
+                rt.login_hint
+                    .unwrap_or("complete authentication using the runtime CLI"),
+                rt,
+            ),
+            None => vec![],
+        },
     }
 }
 
@@ -888,6 +890,7 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            login_command_args: None,
         }
     }
 
@@ -1083,6 +1086,7 @@ mod tests {
             required_normalized_fields: &[],
             login_hint: None,
             auth_probe_args: None,
+            login_command_args: None,
         }
     }
 

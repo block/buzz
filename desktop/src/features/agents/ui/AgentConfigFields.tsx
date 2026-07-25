@@ -159,7 +159,7 @@ export function shouldShowModelStatusMessage(
 /**
  * Whether the Model control should render given discovery state.
  *
- * Optional-model harnesses (Claude Code / Codex, `acpNative`) omit the control
+ * Optional-model harnesses (Claude Code / Codex / Kiro CLI, `acpNative`) omit the control
  * while discovery is in flight and after a **confirmed successful empty**
  * catalog (IPC resolved, no usable options) — there is nothing useful to pick.
  * Discovery failures / unavailable runtimes keep the control so #2246 failure
