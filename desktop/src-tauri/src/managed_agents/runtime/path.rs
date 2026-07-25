@@ -86,10 +86,14 @@ pub(crate) fn compose_path_entries(
 ///   4. `nvm_bin` — nvm's default Node.js bin dir (if the user uses nvm)
 ///   5. exe parent dir — DMG sidecars under `Contents/MacOS/`
 ///   6. user's login-shell `PATH` — runtimes like node/python from other managers
-///   7. Windows only: the current process `PATH` (appended when no login-shell
-///      PATH exists, because callers use `Command::env("PATH", …)` which
-///      *replaces* the child's PATH — without this, the child loses node/npm/git
-///      and every npm `.cmd` shim fails with `'node' is not recognized`)
+///   7. the current process `PATH` — appended on every platform when no
+///      login-shell PATH exists, because callers use `Command::env("PATH", …)`
+///      which *replaces* the child's PATH. This is the steady state on Windows,
+///      where `login_shell_path()` always returns `None` and without it the
+///      child loses node/npm/git and every npm `.cmd` shim fails with
+///      `'node' is not recognized`; on Unix it is the login-shell-probe failure
+///      fallback, which keeps `curl`/`sh`/`tar` reachable. See
+///      [`should_use_inherited`] for the suppression rules.
 ///
 /// `shell_path` is the raw colon-delimited string from a login shell, so it is
 /// split into individual entries before joining. Pushing it as a single segment
@@ -386,8 +390,8 @@ mod tests {
 // ── Pure policy and composition tests — run on every host ────────────────────
 //
 // These test `should_use_inherited` and `compose_path_entries` with explicit
-// inputs, so they run on macOS/Linux CI and validate the Windows policy
-// behavior without touching process state or requiring a Windows target.
+// inputs, so they run on macOS/Linux CI and validate the cross-platform
+// fallback policy without touching process state or requiring a Windows target.
 #[cfg(test)]
 mod compose_tests {
     use super::{compose_path_entries, is_batch_shim, should_use_inherited};
