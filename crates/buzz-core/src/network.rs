@@ -171,9 +171,20 @@ mod tests {
         assert!(is_private_ip(
             &"::169.254.169.254".parse::<IpAddr>().unwrap()
         ));
+        assert!(!is_private_ip(&"::8.8.8.8".parse::<IpAddr>().unwrap()));
     }
     #[test]
     fn test_nat64_well_known_prefix() {
+        let first = "64:ff9b::".parse().unwrap();
+        let last = "64:ff9b::ffff:ffff".parse().unwrap();
+        assert_eq!(
+            nat64_well_known_ipv4(&first),
+            Some("0.0.0.0".parse().unwrap())
+        );
+        assert_eq!(
+            nat64_well_known_ipv4(&last),
+            Some("255.255.255.255".parse().unwrap())
+        );
         let embedded = "64:ff9b::172.16.1.2".parse().unwrap();
         assert_eq!(
             nat64_well_known_ipv4(&embedded),
@@ -192,20 +203,55 @@ mod tests {
             &"64:ff9b::8.8.8.8".parse::<IpAddr>().unwrap()
         ));
         assert!(!is_private_ip(
-            &"64:ff9b::1:10.0.0.1".parse::<IpAddr>().unwrap()
+            &"64:ff9a:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
         ));
+        assert!(!is_private_ip(&"64:ff9b::1:0:0".parse::<IpAddr>().unwrap()));
     }
     #[test]
-    fn test_ipv6_transition_ranges() {
-        assert!(is_private_ip(&"64:ff9b:1::1".parse::<IpAddr>().unwrap()));
-        assert!(is_private_ip(&"2001::1".parse::<IpAddr>().unwrap()));
+    fn test_nat64_local_use_prefix_boundaries() {
+        assert!(is_private_ip(&"64:ff9b:1::".parse::<IpAddr>().unwrap()));
         assert!(is_private_ip(
-            &"2002:0a00:0001::".parse::<IpAddr>().unwrap()
+            &"64:ff9b:1:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
         ));
+        assert!(!is_private_ip(
+            &"64:ff9b::ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
+        assert!(!is_private_ip(&"64:ff9b:2::".parse::<IpAddr>().unwrap()));
+    }
+    #[test]
+    fn test_teredo_prefix_boundaries() {
+        assert!(is_private_ip(&"2001::".parse::<IpAddr>().unwrap()));
         assert!(is_private_ip(
-            &"2002:a9fe:a9fe::".parse::<IpAddr>().unwrap()
+            &"2001:0:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
+        assert!(!is_private_ip(
+            &"2000:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
         ));
         assert!(!is_private_ip(&"2001:1::1".parse::<IpAddr>().unwrap()));
+    }
+    #[test]
+    fn test_6to4_prefix_boundaries() {
+        assert!(is_private_ip(&"2002::".parse::<IpAddr>().unwrap()));
+        assert!(is_private_ip(
+            &"2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
+        assert!(!is_private_ip(
+            &"2001:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
+                .parse::<IpAddr>()
+                .unwrap()
+        ));
         assert!(!is_private_ip(&"2003::1".parse::<IpAddr>().unwrap()));
     }
 
