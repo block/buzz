@@ -28,6 +28,7 @@ mod reset;
 mod secret_store;
 mod shutdown;
 mod templates;
+mod tray;
 mod util;
 #[cfg(target_os = "linux")]
 pub mod webkit_rendering;
@@ -345,6 +346,7 @@ pub fn run() {
     let builder = builder;
 
     let app = builder
+        .on_window_event(tray::handle_window_event)
         .register_asynchronous_uri_scheme_protocol("buzz-media", |ctx, request, responder| {
             let app = ctx.app_handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -389,6 +391,10 @@ pub fn run() {
                     .store(true, std::sync::atomic::Ordering::Release);
                 return Ok(());
             }
+
+            // On Windows and Linux, the background-mode tray icon is created
+            // lazily when the frontend pushes the persisted preference. macOS
+            // uses its standard Dock icon to reopen the hidden window.
 
             // Run all pre-identity data migrations before state loads from disk.
             if reset_outcome.completed {
@@ -878,6 +884,7 @@ pub fn run() {
             fetch_workspace_icon,
             fetch_join_policy,
             set_prevent_sleep_active,
+            set_close_to_tray,
             get_agent_memory,
             relay_reconnect_hook,
             relay_reconnect_hook_configured,
@@ -908,6 +915,9 @@ pub fn run() {
     let restart_requested = Arc::new(AtomicBool::new(false));
     app.run(move |app_handle, event| match event {
         RunEvent::ExitRequested { code, .. } => {
+            // Mark a genuine quit so the close-to-tray window handler lets the
+            // window close instead of hiding it during teardown.
+            tray::mark_quitting();
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);
             }
@@ -929,6 +939,12 @@ pub fn run() {
             // deliberately skipping those native global destructors.
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             hard_exit_after_mesh_shutdown();
+        }
+        // macOS: clicking the dock icon while the window is hidden to the tray
+        // re-shows it (the standard re-open affordance).
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => {
+            tray::show_main_window(app_handle);
         }
         _ => {}
     });
