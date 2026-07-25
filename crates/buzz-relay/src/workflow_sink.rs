@@ -104,7 +104,11 @@ fn resolve_mention_pubkeys(text: &str, members: &[(String, String)]) -> Vec<Stri
     let is_left_boundary = |i: usize| {
         i == 0 || chars[i - 1].is_whitespace() || matches!(chars[i - 1], '(' | '*' | '_' | '|')
     };
-    let extends_name = |c: char| c.is_alphanumeric() || c == '_';
+    // Underscore is a left/right emphasis delimiter (`_@Name_`), not a name
+    // continuation — otherwise `_@Robby_` fails the right-boundary check after
+    // matching `Robby`. Underscore display names (e.g. `will_smith`) still bind
+    // fully because longer member names match first.
+    let extends_name = |c: char| c.is_alphanumeric();
 
     let mut out: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -399,8 +403,23 @@ mod tests {
             "left-boundary must accept markdown emphasis so workflow text wakes agents"
         );
         assert_eq!(
-            resolve_mention_pubkeys("also _@Robby_ and *@Robby*", &members),
+            resolve_mention_pubkeys("_@Robby_ take a look", &members),
+            vec![pk('a')],
+            "italic underscores must not extend the name past Robby"
+        );
+        assert_eq!(
+            resolve_mention_pubkeys("also *@Robby*", &members),
             vec![pk('a')]
+        );
+    }
+
+    #[test]
+    fn underscore_display_names_still_bind_fully() {
+        let members = vec![m("will_smith", &pk('a')), m("will", &pk('b'))];
+        assert_eq!(
+            resolve_mention_pubkeys("ping @will_smith please", &members),
+            vec![pk('a')],
+            "longer underscore names must win over the shorter prefix"
         );
     }
 
