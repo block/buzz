@@ -232,20 +232,6 @@ const overrides = new Map([
   // (+3) — the new team-id spawn link and the runtime-layered instructions
   // field.
   ["src/shared/api/types.ts", 1047],
-  // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
-  // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
-  // shows required markers and credential amber rows (parity with
-  // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
-  // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
-  // ~16 lines. Queued to split.
-  // baked-env-required-badge: useBakedBuildEnvKeysQuery + bakedEnvKeys wiring
-  // + correct exclusion-semantics for requiredEnvKeys adds ~14 lines.
-  // +2 lines: filter managed provider key from requiredEnvKeys (suppress dead-input locked row).
-  // global-agent-config parity: wire useGlobalAgentConfig into PersonaDialog
-  // (Gap A: global-aware computeLocalModeGate + drop bare requiredCredentialEnvKeys;
-  // Gap B: hasAutoOpenedAdvancedRef auto-expand effect) + effective-provider
-  // save gate + Inherit/Select-a-provider label. Queued to split.
-  ["src/features/agents/ui/PersonaDialog.tsx", 1080],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
