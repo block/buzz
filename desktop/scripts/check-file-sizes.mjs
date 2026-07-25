@@ -494,7 +494,13 @@ const overrides = new Map([
   // +53: pass 2 — three cfg(windows) install shell tests (resolve succeeds with
   // Git, error hint content, install_shell_command succeeds).
   // +8: install_shell_from pure seam extracted for deterministic testing.
-  ["src-tauri/src/commands/agent_discovery.rs", 1523],
+  // +287: is_powershell_command + install_powershell_command + build_install_command
+  // route PowerShell CLI installs natively on Windows (bypasses Git Bash PATH
+  // poisoning that resolved GNU tar instead of bsdtar → Codex install failure).
+  // Includes unit tests for detection, routing, and -Command body preservation.
+  // +16: test_powershell_command_goose_catalog_dequoted proves the \$→$ escape
+  // fix for the Goose Windows installer (PR #2680 interaction with #2750).
+  ["src-tauri/src/commands/agent_discovery.rs", 1826],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

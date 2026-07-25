@@ -1272,12 +1272,20 @@ void main() {
   });
 
   group('Compose bar', () {
-    testWidgets('shows text field and send button', (tester) async {
+    testWidgets('expands from the channel hint into the composer controls', (
+      tester,
+    ) async {
       await tester.pumpWidget(_buildTestable(messages: []));
       await tester.pumpAndSettle();
 
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsNothing);
+
+      await tester.tap(find.text('Message #general'));
+      await tester.pumpAndSettle();
+
       expect(find.byType(TextField), findsOneWidget);
-      expect(find.byIcon(LucideIcons.sendHorizontal), findsOneWidget);
+      expect(find.byIcon(LucideIcons.arrowUp).hitTestable(), findsOneWidget);
     });
 
     testWidgets('shows hint text', (tester) async {
