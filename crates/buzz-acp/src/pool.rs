@@ -3854,8 +3854,8 @@ fn pct_encode(s: &str) -> String {
 /// Returns immediately on timeout or any error — reactions are cosmetic.
 ///
 /// `target_author` is the pubkey of the event being reacted to; it becomes the
-/// NIP-25 `p` tag. The agent's 👀/💬 indicators are reactions like any other,
-/// so they carry it too rather than emitting a non-conformant kind:7.
+/// NIP-25 `p` tag (a SHOULD). The agent's 👀/💬 indicators are reactions like
+/// any other, so they carry it too rather than dropping the recommended tag.
 pub(crate) async fn reaction_add(
     rest: &crate::relay::RestClient,
     event_id: &str,

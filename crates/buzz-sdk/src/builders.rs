@@ -472,11 +472,12 @@ pub fn build_vote(
 
 /// Build a NIP-25 reaction event (kind 7). Emoji max 64 chars.
 ///
-/// `target_author` is the pubkey of the event being reacted to. NIP-25 requires
-/// the reaction to carry the target's `p` tag; it is what lets the author (and
-/// any NIP-01 client) find the reaction with a `{"kinds":[7],"#p":[<self>]}`
-/// notification filter. Omitting it makes the reaction invisible to every
-/// notification surface, so it is a required argument rather than an option.
+/// `target_author` is the pubkey of the event being reacted to. NIP-25
+/// recommends the reaction carry the target's `p` tag (a SHOULD); it is what
+/// lets the author (and any NIP-01 client) find the reaction with a
+/// `{"kinds":[7],"#p":[<self>]}` notification filter. Omitting it hides the
+/// reaction from every notification surface, so it is a required argument
+/// rather than an option.
 ///
 /// `.allow_self_tagging()` is required: reacting to your own message makes the
 /// `p` tag match the signer, and nostr 0.44 strips matching `p` tags by

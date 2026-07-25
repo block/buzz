@@ -9349,17 +9349,35 @@ async function handleAddReaction(
     throw new Error(`mock add_reaction: unknown target event ${args.eventId}`);
   }
 
-  // The real command is handed the target author by its caller; the mock can
-  // also read it back out of its own event store, so specs that drive
-  // `add_reaction` directly need not thread a pubkey through.
-  const targetPubkey =
-    args.targetPubkey ?? findMockEventAuthor(args.eventId) ?? "";
+  // The real command's `p` tag is the *signer* of the target event. The mock
+  // store holds that event, so its recorded author is the ground truth — use
+  // it rather than the caller-supplied `targetPubkey`, which lets the direct
+  // `invoke("add_reaction", …)` specs assert the tag without threading a
+  // pubkey through, and guarantees the tag is never an empty string. When the
+  // caller does supply one (the UI path passes `signerPubkey`), verify it
+  // agrees, so the specs pin that the UI sends the signer and not the display
+  // author.
+  const targetPubkey = findMockEventAuthor(args.eventId);
+  if (!targetPubkey) {
+    throw new Error(
+      `mock add_reaction: no recorded author for target event ${args.eventId}`,
+    );
+  }
+  if (
+    args.targetPubkey &&
+    args.targetPubkey.toLowerCase() !== targetPubkey.toLowerCase()
+  ) {
+    throw new Error(
+      `mock add_reaction: targetPubkey ${args.targetPubkey} does not match ` +
+        `the target event's signer ${targetPubkey} — pass the signer's pubkey`,
+    );
+  }
 
   const emoji = args.emoji.trim();
   // Real add_reaction events carry the target `e` tag plus the NIP-25 `p` tag
-  // naming the reacted-to author. Channel live subscriptions already know which
-  // channel matched and restore that context before merging the event into the
-  // timeline cache.
+  // naming the reacted-to event's signer. Channel live subscriptions already
+  // know which channel matched and restore that context before merging the
+  // event into the timeline cache.
   const tags: string[][] = [
     ["e", args.eventId],
     ["p", targetPubkey],

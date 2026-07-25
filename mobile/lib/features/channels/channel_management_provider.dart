@@ -778,10 +778,10 @@ class ChannelActions {
     _ref.invalidate(channelBotPubkeysProvider(channelId));
   }
 
-  /// Add a NIP-25 reaction to [eventId], authored by [targetPubkey].
+  /// Add a NIP-25 reaction to [eventId], whose signer is [targetPubkey].
   ///
-  /// [targetPubkey] becomes the `p` tag. NIP-25 requires it, and it is what
-  /// lets the reacted-to author find the reaction with a
+  /// [targetPubkey] becomes the `p` tag. NIP-25 recommends it (a SHOULD), and
+  /// it is what lets the reacted-to author find the reaction with a
   /// `{"kinds":[7],"#p":[<self>]}` notification filter — without it a reaction
   /// is invisible to every notification surface.
   Future<void> addReaction(

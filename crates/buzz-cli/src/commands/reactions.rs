@@ -8,7 +8,7 @@ use crate::validate::validate_hex64;
 
 /// Look up the author of a reaction's target event.
 ///
-/// NIP-25 requires the reaction to carry the target author's `p` tag, and the
+/// NIP-25 recommends the reaction carry the target author's `p` tag, and the
 /// CLI is only given an event id — so resolve the author from the relay. The
 /// relay rejects reactions whose target it cannot find, so a target that does
 /// not resolve here would have been rejected on submit anyway; failing at this
