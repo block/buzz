@@ -22,7 +22,6 @@ use acp::{AcpClient, EnvVar, McpServer};
 use anyhow::Result;
 use buzz_core::kind::{
     KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION, KIND_STREAM_MESSAGE,
-    KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
 };
 use buzz_core::observer::{
     decrypt_observer_payload, encrypt_observer_payload, OBSERVER_FRAME_TELEMETRY,
@@ -1441,13 +1440,10 @@ async fn tokio_main() -> Result<()> {
             vec![SubscriptionRule {
                 name: "mentions".into(),
                 channels: filter::ChannelScope::All("all".into()),
-                kinds: config.kinds_override.clone().unwrap_or_else(|| {
-                    vec![
-                        KIND_STREAM_MESSAGE,
-                        KIND_WORKFLOW_APPROVAL_REQUESTED,
-                        KIND_STREAM_REMINDER,
-                    ]
-                }),
+                kinds: config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(config::default_mentions_kinds),
                 require_mention: !config.no_mention_filter,
                 filter: None,
                 compiled_filter: None,

@@ -1130,16 +1130,32 @@ pub fn load_rules(path: &std::path::Path) -> Result<Vec<SubscriptionRule>, Confi
     Ok(config.rules)
 }
 
+/// Default NIP-01 kinds for Mentions mode.
+///
+/// Includes stream chat, workflow approvals, reminders, and forum post/comment
+/// kinds so `@`-mentions on forum roots/comments wake agents the same way chat
+/// mentions do (#2850). Votes (`KIND_FORUM_VOTE`) are omitted — they are not
+/// a summon surface.
+pub fn default_mentions_kinds() -> Vec<u32> {
+    use buzz_core::kind::{
+        KIND_FORUM_COMMENT, KIND_FORUM_POST, KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+    };
+    vec![
+        KIND_STREAM_MESSAGE,
+        KIND_WORKFLOW_APPROVAL_REQUESTED,
+        KIND_STREAM_REMINDER,
+        KIND_FORUM_POST,
+        KIND_FORUM_COMMENT,
+    ]
+}
+
 /// Resolve per-channel NIP-01 filters from config + discovered channels.
 pub fn resolve_channel_filters(
     config: &Config,
     discovered_channels: &[Uuid],
     rules: &[SubscriptionRule],
 ) -> HashMap<Uuid, ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     let target_channels: Vec<Uuid> = if let Some(ref overrides) = config.channels_override {
         overrides
             .iter()
@@ -1154,13 +1170,10 @@ pub fn resolve_channel_filters(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => {
-            let kinds = config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            });
+            let kinds = config
+                .kinds_override
+                .clone()
+                .unwrap_or_else(default_mentions_kinds);
             let require_mention = !config.no_mention_filter;
             for ch in &target_channels {
                 result.insert(
@@ -1238,10 +1251,6 @@ pub fn resolve_dynamic_channel_filter(
     channel_id: Uuid,
     rules: &[crate::filter::SubscriptionRule],
 ) -> Option<ChannelFilter> {
-    use buzz_core::kind::{
-        KIND_STREAM_MESSAGE, KIND_STREAM_REMINDER, KIND_WORKFLOW_APPROVAL_REQUESTED,
-    };
-
     // In Mentions/All mode, if the operator explicitly constrained channels
     // with --channels, only allow dynamic subscription to channels in that
     // allowlist. Config mode ignores --channels (per CLI contract) and uses
@@ -1259,13 +1268,12 @@ pub fn resolve_dynamic_channel_filter(
 
     match config.subscribe_mode {
         SubscribeMode::Mentions => Some(ChannelFilter {
-            kinds: Some(config.kinds_override.clone().unwrap_or_else(|| {
-                vec![
-                    KIND_STREAM_MESSAGE,
-                    KIND_WORKFLOW_APPROVAL_REQUESTED,
-                    KIND_STREAM_REMINDER,
-                ]
-            })),
+            kinds: Some(
+                config
+                    .kinds_override
+                    .clone()
+                    .unwrap_or_else(default_mentions_kinds),
+            ),
             require_mention: !config.no_mention_filter,
         }),
         SubscribeMode::All => Some(ChannelFilter {
@@ -1409,6 +1417,18 @@ mod tests {
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_MESSAGE));
             assert!(kinds.contains(&buzz_core::kind::KIND_WORKFLOW_APPROVAL_REQUESTED));
             assert!(kinds.contains(&buzz_core::kind::KIND_STREAM_REMINDER));
+            assert!(
+                kinds.contains(&buzz_core::kind::KIND_FORUM_POST),
+                "forum posts must wake agents on @mention"
+            );
+            assert!(
+                kinds.contains(&buzz_core::kind::KIND_FORUM_COMMENT),
+                "forum comments must wake agents on @mention"
+            );
+            assert!(
+                !kinds.contains(&buzz_core::kind::KIND_FORUM_VOTE),
+                "forum votes are not a summon surface"
+            );
         }
     }
 
