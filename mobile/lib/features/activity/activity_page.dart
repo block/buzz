@@ -27,11 +27,6 @@ import 'inbox_local_state_provider.dart';
 import 'inbox_read_state.dart';
 import 'reminders_provider.dart';
 
-part 'activity_page/header_actions.dart';
-part 'activity_page/inbox_row.dart';
-part 'activity_page/lists.dart';
-part 'activity_page/status_views.dart';
-
 /// Conversation-oriented Activity inbox.
 ///
 /// Matches desktop's Home inbox item design and semantics (see
@@ -149,7 +144,7 @@ class ActivityPage extends HookConsumerWidget {
       final thread = threadReferenceOf(target.tags);
       final threadRootId = isBroadcastReply(target.tags)
           ? null
-          : thread.parentId;
+          : (thread.rootId ?? thread.parentId);
 
       Navigator.of(context).push(
         MaterialPageRoute<void>(
@@ -305,11 +300,767 @@ class ActivityPage extends HookConsumerWidget {
       body: SafeArea(
         top: false,
         child: Padding(
-          padding: EdgeInsets.only(
-            top: frostedAppBarHeight(context, titleStyle: headerTitleStyle),
-          ),
+          padding: EdgeInsets.only(top: frostedAppBarHeight(context)),
           child: body,
         ),
+      ),
+    );
+  }
+}
+
+const _filterLabels = <InboxFilter, String>{
+  InboxFilter.all: 'All',
+  InboxFilter.mention: 'Mentions',
+  InboxFilter.thread: 'Threads',
+  InboxFilter.needsAction: 'Needs Action',
+  InboxFilter.activity: 'Activity',
+  InboxFilter.agentActivity: 'Agents',
+  InboxFilter.reminders: 'Reminders',
+  InboxFilter.drafts: 'Drafts',
+};
+
+/// Compact filter dropdown replacing the old chip rail — mirrors desktop's
+/// inbox filter menu (`FILTER_OPTIONS`).
+class _FilterMenuButton extends StatelessWidget {
+  final InboxFilter filter;
+  final int dueReminderCount;
+  final int draftCount;
+  final ValueChanged<InboxFilter> onChanged;
+
+  const _FilterMenuButton({
+    required this.filter,
+    required this.dueReminderCount,
+    required this.draftCount,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<InboxFilter>(
+      key: const ValueKey('activity-filter-menu'),
+      onSelected: onChanged,
+      itemBuilder: (context) => [
+        for (final entry in _filterLabels.entries)
+          PopupMenuItem(
+            value: entry.key,
+            child: Row(
+              children: [
+                SizedBox(
+                  width: Grid.sm,
+                  child: entry.key == filter
+                      ? Icon(
+                          LucideIcons.check,
+                          size: 16,
+                          color: context.colors.primary,
+                        )
+                      : null,
+                ),
+                Text(entry.value),
+                const Spacer(),
+                if (entry.key == InboxFilter.reminders && dueReminderCount > 0)
+                  _CountBadge(count: dueReminderCount)
+                else if (entry.key == InboxFilter.drafts && draftCount > 0)
+                  _CountBadge(count: draftCount),
+              ],
+            ),
+          ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              _filterLabels[filter]!,
+              style: context.textTheme.labelLarge?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: Grid.quarter),
+            Icon(
+              LucideIcons.chevronDown,
+              size: 16,
+              color: context.colors.onSurfaceVariant,
+            ),
+            if (dueReminderCount > 0 || draftCount > 0) ...[
+              const SizedBox(width: Grid.quarter),
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: context.colors.primary,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CountBadge extends StatelessWidget {
+  final int count;
+
+  const _CountBadge({required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Grid.half + Grid.quarter,
+        vertical: Grid.quarter,
+      ),
+      decoration: BoxDecoration(
+        color: context.colors.primary,
+        borderRadius: BorderRadius.circular(Grid.xxs),
+      ),
+      child: Text(
+        '$count',
+        style: context.textTheme.labelSmall?.copyWith(
+          color: context.colors.onPrimary,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+}
+
+/// Overflow menu with the unread-only toggle and mark-all-read, mirroring
+/// desktop's inbox options popover.
+class _InboxOptionsButton extends StatelessWidget {
+  final bool unreadOnly;
+  final int unreadCount;
+  final ValueChanged<bool> onUnreadOnlyChanged;
+  final VoidCallback onMarkAllRead;
+
+  const _InboxOptionsButton({
+    required this.unreadOnly,
+    required this.unreadCount,
+    required this.onUnreadOnlyChanged,
+    required this.onMarkAllRead,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      key: const ValueKey('activity-options-menu'),
+      icon: const Icon(LucideIcons.ellipsis, size: 20),
+      onSelected: (value) {
+        if (value == 'unread-only') onUnreadOnlyChanged(!unreadOnly);
+        if (value == 'mark-all-read') onMarkAllRead();
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem(
+          value: 'unread-only',
+          child: Row(
+            children: [
+              Expanded(child: Text(unreadOnly ? 'Show all' : 'Show unread')),
+              if (unreadOnly)
+                Icon(
+                  LucideIcons.check,
+                  size: 16,
+                  color: context.colors.primary,
+                ),
+            ],
+          ),
+        ),
+        PopupMenuItem(
+          value: 'mark-all-read',
+          enabled: unreadCount > 0,
+          child: Row(
+            children: [
+              const Expanded(child: Text('Mark all as read')),
+              if (unreadCount > 0)
+                Text(
+                  '$unreadCount',
+                  style: context.textTheme.labelSmall?.copyWith(
+                    color: context.colors.onSurfaceVariant,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// "New" boundary between unread and previously read rows.
+class _NewBoundaryDivider extends StatelessWidget {
+  const _NewBoundaryDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: Grid.gutter,
+        vertical: Grid.half,
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: Grid.xxs),
+            child: Text(
+              'New',
+              style: context.textTheme.labelSmall?.copyWith(
+                color: context.colors.error,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Divider(color: context.colors.error.withValues(alpha: 0.5)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// One conversation row, matching desktop's inbox item hierarchy:
+/// avatar | sender + unread dot + time | contextual label | preview.
+class _InboxRow extends ConsumerWidget {
+  final InboxItem item;
+  final Channel? channel;
+  final String? currentPubkey;
+  final bool isDone;
+  final VoidCallback onTap;
+  final VoidCallback onMarkRead;
+  final VoidCallback onMarkUnread;
+
+  const _InboxRow({
+    required this.item,
+    required this.channel,
+    required this.currentPubkey,
+    required this.isDone,
+    required this.onTap,
+    required this.onMarkRead,
+    required this.onMarkUnread,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final userCache = ref.watch(userCacheProvider);
+    final profile = userCache[item.item.pubkey.toLowerCase()];
+    final senderLabel = profile?.displayName ?? shortPubkey(item.item.pubkey);
+
+    final isDm = channel?.isDm ?? false;
+    final channelName = channel != null && !isDm
+        ? (channel!.name.isNotEmpty ? channel!.name : null)
+        : null;
+    final label = inboxTypeLabel(
+      item,
+      channelName: channelName,
+      isDm: isDm,
+      senderLabel: senderLabel,
+    );
+
+    final mutedColor = context.colors.onSurfaceVariant;
+    final labelColor = item.isActionRequired && !isDone
+        ? context.colors.tertiary
+        : mutedColor;
+
+    return InkWell(
+      key: ValueKey('inbox-row-${item.id}'),
+      onTap: onTap,
+      onLongPress: () => _showRowActions(context),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(
+          horizontal: Grid.gutter,
+          vertical: Grid.twelve,
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _RowAvatar(pubkey: item.item.pubkey, profile: profile),
+            const SizedBox(width: Grid.twelve),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Sender + unread dot + timestamp.
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          senderLabel,
+                          style: context.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: Grid.xxs),
+                      if (!isDone) ...[
+                        Container(
+                          key: ValueKey('inbox-unread-dot-${item.id}'),
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: context.colors.primary,
+                          ),
+                        ),
+                        const SizedBox(width: Grid.half),
+                      ],
+                      Text(
+                        _inboxTimestamp(item.latestActivityAt),
+                        style: context.textTheme.labelSmall?.copyWith(
+                          color: mutedColor,
+                          fontWeight: isDone
+                              ? FontWeight.w400
+                              : FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: Grid.quarter),
+                  // Contextual label: "Mentioned in #channel" etc.
+                  Row(
+                    children: [
+                      Flexible(
+                        child: Text(
+                          label.text,
+                          style: context.textTheme.labelSmall?.copyWith(
+                            color: labelColor,
+                            fontWeight: FontWeight.w500,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (label.channelLabel != null) ...[
+                        const SizedBox(width: Grid.half),
+                        Flexible(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: Grid.half + Grid.quarter,
+                              vertical: Grid.quarter / 2,
+                            ),
+                            decoration: BoxDecoration(
+                              color: context.colors.surfaceContainerHighest,
+                              borderRadius: BorderRadius.circular(Grid.half),
+                            ),
+                            child: Text(
+                              '#${label.channelLabel}',
+                              style: context.textTheme.labelSmall?.copyWith(
+                                color: mutedColor,
+                              ),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  const SizedBox(height: Grid.half),
+                  // Preview (bold while unread — desktop parity).
+                  MessageContent(
+                    content: item.item.displayContent,
+                    tags: item.item.tags,
+                    maxLines: 2,
+                    baseStyle: context.textTheme.bodySmall?.copyWith(
+                      color: isDone ? mutedColor : context.colors.onSurface,
+                      fontWeight: isDone ? FontWeight.w400 : FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showRowActions(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(
+                isDone ? LucideIcons.mail : LucideIcons.mailOpen,
+                size: 20,
+              ),
+              title: Text(isDone ? 'Mark unread' : 'Mark as read'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                isDone ? onMarkUnread() : onMarkRead();
+              },
+            ),
+            ListTile(
+              leading: const Icon(LucideIcons.externalLink, size: 20),
+              title: const Text('Open conversation'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                onTap();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RowAvatar extends StatelessWidget {
+  final String pubkey;
+  final UserProfile? profile;
+
+  const _RowAvatar({required this.pubkey, required this.profile});
+
+  @override
+  Widget build(BuildContext context) {
+    final initial =
+        profile?.initial ?? (pubkey.isNotEmpty ? pubkey[0].toUpperCase() : '?');
+    return AvatarImage(
+      imageUrl: profile?.avatarUrl,
+      radius: 18,
+      backgroundColor: context.colors.primaryContainer,
+      fallback: Text(
+        initial,
+        style: TextStyle(
+          fontSize: 14,
+          fontWeight: FontWeight.w600,
+          color: context.colors.onPrimaryContainer,
+        ),
+      ),
+    );
+  }
+}
+
+/// Reminders surface for the Reminders filter — due/pending NIP-ER
+/// reminders that deep-link to their target message.
+class _RemindersList extends ConsumerWidget {
+  final void Function(Reminder reminder) onOpen;
+  final Future<void> Function() onRefresh;
+
+  const _RemindersList({required this.onOpen, required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final remindersAsync = ref.watch(remindersProvider);
+    final reminders = [
+      for (final r in remindersAsync.value ?? const <Reminder>[])
+        if (r.status == 'pending') r,
+    ];
+
+    if (remindersAsync.isLoading && reminders.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (reminders.isEmpty) {
+      return const _EmptySurface(
+        icon: LucideIcons.clock,
+        message: 'No reminders',
+        detail: 'Reminders you set will show up here.',
+      );
+    }
+
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    return RefreshIndicator(
+      onRefresh: onRefresh,
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+        itemCount: reminders.length,
+        itemBuilder: (context, index) {
+          final reminder = reminders[index];
+          final due = reminder.isDue(now);
+          final title = reminder.note?.trim().isNotEmpty == true
+              ? reminder.note!.trim()
+              : reminder.target?.preview ?? 'Reminder';
+          return ListTile(
+            key: ValueKey('reminder-row-${reminder.id}'),
+            leading: Icon(
+              due ? LucideIcons.bellRing : LucideIcons.clock,
+              size: 20,
+              color: due
+                  ? context.colors.primary
+                  : context.colors.onSurfaceVariant,
+            ),
+            title: Text(title, maxLines: 2, overflow: TextOverflow.ellipsis),
+            subtitle: reminder.notBefore != null
+                ? Text(
+                    due
+                        ? 'Due now'
+                        : 'Due ${_inboxTimestamp(reminder.notBefore!)}',
+                  )
+                : null,
+            onTap: () => onOpen(reminder),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Drafts surface for the Drafts filter — locally saved unsent composer
+/// text that reopens the target composer.
+class _DraftsList extends StatelessWidget {
+  final List<ComposeDraft> drafts;
+  final Map<String, Channel> channelById;
+  final String? myPubkey;
+  final void Function(ComposeDraft draft) onOpen;
+  final void Function(ComposeDraft draft) onDelete;
+
+  const _DraftsList({
+    required this.drafts,
+    required this.channelById,
+    required this.myPubkey,
+    required this.onOpen,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (drafts.isEmpty) {
+      return const _EmptySurface(
+        icon: LucideIcons.filePen,
+        message: 'No drafts',
+        detail: 'Unsent messages you start composing will show up here.',
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: Grid.xxs),
+      itemCount: drafts.length,
+      itemBuilder: (context, index) {
+        final draft = drafts[index];
+        final channel = channelById[draft.channelId];
+        final destination = channel == null
+            ? 'Unavailable channel'
+            : channel.isDm
+            ? resolveDmChannelDisplayLabel(channel, currentPubkey: myPubkey)
+            : '#${channel.name}';
+        return ListTile(
+          key: ValueKey('draft-row-${draft.key}'),
+          leading: Icon(
+            LucideIcons.filePen,
+            size: 20,
+            color: context.colors.onSurfaceVariant,
+          ),
+          title: Text(draft.text, maxLines: 2, overflow: TextOverflow.ellipsis),
+          subtitle: Text(
+            draft.threadHeadId != null ? 'Thread in $destination' : destination,
+          ),
+          trailing: IconButton(
+            icon: const Icon(LucideIcons.trash2, size: 18),
+            tooltip: 'Delete draft',
+            onPressed: () => onDelete(draft),
+          ),
+          onTap: () => onOpen(draft),
+        );
+      },
+    );
+  }
+}
+
+/// Inbox list timestamp — desktop's `formatInboxTimestamp`:
+/// time today, "Yesterday", short date this year, dated otherwise.
+String _inboxTimestamp(int unixSeconds, {DateTime? now}) {
+  final current = now ?? DateTime.now();
+  final date = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000);
+  final today = DateTime(current.year, current.month, current.day);
+  final day = DateTime(date.year, date.month, date.day);
+  final dayDiff = today.difference(day).inDays;
+
+  if (dayDiff == 0) {
+    final hour = date.hour % 12 == 0 ? 12 : date.hour % 12;
+    final minute = date.minute.toString().padLeft(2, '0');
+    return '$hour:$minute ${date.hour < 12 ? 'AM' : 'PM'}';
+  }
+  if (dayDiff == 1) return 'Yesterday';
+
+  const months = [
+    'Jan',
+    'Feb',
+    'Mar',
+    'Apr',
+    'May',
+    'Jun',
+    'Jul',
+    'Aug',
+    'Sep',
+    'Oct',
+    'Nov',
+    'Dec',
+  ];
+  final label = '${months[date.month - 1]} ${date.day}';
+  return date.year == current.year ? label : '$label, ${date.year}';
+}
+
+class _LoadingSkeleton extends StatelessWidget {
+  const _LoadingSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ListView.separated(
+      padding: const EdgeInsets.all(Grid.gutter),
+      itemCount: 8,
+      separatorBuilder: (_, _) => const SizedBox(height: Grid.xs),
+      itemBuilder: (context, _) => Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: context.colors.outlineVariant.withValues(alpha: 0.4),
+            ),
+          ),
+          const SizedBox(width: Grid.twelve),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 140,
+                  height: 12,
+                  decoration: BoxDecoration(
+                    color: context.colors.outlineVariant.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                const SizedBox(height: Grid.xxs),
+                Container(
+                  width: double.infinity,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    color: context.colors.outlineVariant.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                const SizedBox(height: Grid.half),
+                Container(
+                  width: 220,
+                  height: 10,
+                  decoration: BoxDecoration(
+                    color: context.colors.outlineVariant.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _EmptySurface extends StatelessWidget {
+  final IconData icon;
+  final String message;
+  final String? detail;
+
+  const _EmptySurface({required this.icon, required this.message, this.detail});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: Grid.lg, color: context.colors.onSurfaceVariant),
+            const SizedBox(height: Grid.xxs),
+            Text(
+              message,
+              style: context.textTheme.bodyMedium?.copyWith(
+                color: context.colors.onSurfaceVariant,
+              ),
+            ),
+            if (detail != null) ...[
+              const SizedBox(height: Grid.half),
+              Text(
+                detail!,
+                style: context.textTheme.bodySmall?.copyWith(
+                  color: context.colors.onSurfaceVariant,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EmptyFilterState extends StatelessWidget {
+  final InboxFilter filter;
+  final bool unreadOnly;
+
+  const _EmptyFilterState({required this.filter, required this.unreadOnly});
+
+  @override
+  Widget build(BuildContext context) {
+    if (unreadOnly) {
+      return const _EmptySurface(
+        icon: LucideIcons.mailOpen,
+        message: 'No unread messages',
+        detail: 'Turn off the unread filter to see read messages.',
+      );
+    }
+    final (icon, message) = switch (filter) {
+      InboxFilter.mention => (LucideIcons.atSign, 'No mentions yet'),
+      InboxFilter.thread => (
+        LucideIcons.messageSquare,
+        'No thread replies yet',
+      ),
+      InboxFilter.needsAction => (
+        LucideIcons.circleAlert,
+        'Nothing needs your action',
+      ),
+      InboxFilter.activity => (
+        LucideIcons.activity,
+        'No recent channel activity',
+      ),
+      InboxFilter.agentActivity => (LucideIcons.bot, 'No agent updates'),
+      _ => (LucideIcons.bell, 'No activity yet'),
+    };
+    return _EmptySurface(icon: icon, message: message);
+  }
+}
+
+class _ErrorView extends StatelessWidget {
+  final Future<void> Function() onRetry;
+
+  const _ErrorView({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            LucideIcons.triangleAlert,
+            size: Grid.lg,
+            color: context.colors.error,
+          ),
+          const SizedBox(height: Grid.xxs),
+          Text(
+            'Failed to load activity',
+            style: context.textTheme.bodyMedium?.copyWith(
+              color: context.colors.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: Grid.xs),
+          FilledButton.icon(
+            onPressed: () => unawaited(onRetry()),
+            icon: const Icon(LucideIcons.refreshCcw, size: 16),
+            label: const Text('Retry'),
+          ),
+        ],
       ),
     );
   }

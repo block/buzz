@@ -53,9 +53,8 @@ class ActivityNotifier extends AsyncNotifier<HomeFeedResponse> {
 
     final session = ref.read(relaySessionProvider.notifier);
 
-    // DM channels come from the channel list; while it is still loading the
-    // DM source is skipped, and build() rebuilds when it resolves (see the
-    // channelsProvider watch above).
+    // DM channels come from the already-cached channel list when available;
+    // a missing list only skips the DM source for this refresh.
     final dmChannelIds = [
       for (final channel
           in ref.read(channelsProvider).asData?.value ?? const <Channel>[])
@@ -171,15 +170,9 @@ final activityProvider =
       ActivityNotifier.new,
     );
 
-/// Conversation-grouped inbox rows derived from the raw feed. DM messages
-/// group by DM channel so one conversation renders as one row.
+/// Conversation-grouped inbox rows derived from the raw feed.
 final inboxItemsProvider = Provider<List<InboxItem>>((ref) {
   final feed = ref.watch(activityProvider).value;
   if (feed == null) return const [];
-  final dmChannelIds = {
-    for (final channel
-        in ref.watch(channelsProvider).asData?.value ?? const <Channel>[])
-      if (channel.isDm) channel.id,
-  };
-  return buildInboxItems(feed.all, isDmChannel: dmChannelIds.contains);
+  return buildInboxItems(feed.all);
 });

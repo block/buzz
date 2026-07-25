@@ -101,7 +101,6 @@ void main() {
     ActivityNotifier Function()? activityNotifier,
     Map<String, UserProfile>? users,
     Map<String, int> readContexts = const {},
-    List<Channel>? channels,
   }) async {
     SharedPreferences.setMockInitialValues({});
     final prefs = await SharedPreferences.getInstance();
@@ -112,7 +111,7 @@ void main() {
           activityNotifier ?? () => _FakeActivityNotifier(feed ?? testFeed),
         ),
         channelsProvider.overrideWith(
-          () => _FakeChannelsNotifier(channels ?? testChannels),
+          () => _FakeChannelsNotifier(testChannels),
         ),
         userCacheProvider.overrideWith(
           () => _FakeUserCacheNotifier(users ?? testUsers),
@@ -183,63 +182,6 @@ void main() {
     // Message previews.
     expect(find.textContaining('Hey check this out'), findsOneWidget);
     expect(find.textContaining('Deployed the fix'), findsOneWidget);
-
-    // Sender uses the compact label scale (labelMedium), not a
-    // headline-like title scale.
-    final senderText = tester.widget<Text>(find.text('Alice'));
-    final textTheme = Theme.of(tester.element(find.text('Alice'))).textTheme;
-    expect(senderText.style?.fontSize, textTheme.labelMedium?.fontSize);
-    expect(
-      senderText.style!.fontSize!,
-      lessThan(textTheme.titleSmall!.fontSize!),
-    );
-  });
-
-  testWidgets('multiple top-level messages in one DM render one row', (
-    tester,
-  ) async {
-    final dmChannel = Channel(
-      id: 'dm1',
-      name: 'dm',
-      channelType: 'dm',
-      visibility: 'private',
-      description: '',
-      createdBy: 'x',
-      createdAt: DateTime(2025),
-      memberCount: 2,
-      isMember: true,
-      participants: const ['Alice'],
-    );
-    FeedItem dmMessage(String id, int age) => FeedItem(
-      id: id,
-      kind: 9,
-      pubkey: 'alice_pk',
-      content: 'dm body $id',
-      createdAt: now - age,
-      channelId: 'dm1',
-      channelName: '',
-      tags: const [],
-      category: 'activity',
-    );
-
-    await tester.pumpWidget(
-      await buildTestable(
-        feed: HomeFeedResponse(
-          mentions: const [],
-          needsAction: const [],
-          activity: [dmMessage('dm-a', 300), dmMessage('dm-b', 200)],
-          agentActivity: const [],
-        ),
-        channels: [...testChannels, dmChannel],
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    // One conversation row for the DM, represented by the latest message.
-    expect(find.byKey(const ValueKey('inbox-row-dm-b')), findsOneWidget);
-    expect(find.byKey(const ValueKey('inbox-row-dm-a')), findsNothing);
-    expect(find.textContaining('dm body dm-b'), findsOneWidget);
-    expect(find.textContaining('dm body dm-a'), findsNothing);
   });
 
   testWidgets('unread rows show a dot; read rows do not', (tester) async {
@@ -291,44 +233,6 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Nothing needs your action'), findsOneWidget);
-  });
-
-  testWidgets('opens a thread mention at the referenced message', (
-    tester,
-  ) async {
-    final threadMention = FeedItem(
-      id: 'reply-event',
-      kind: 9,
-      pubkey: 'alice_pk',
-      content: 'Reply in a thread',
-      createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
-      channelId: 'ch1',
-      channelName: 'general',
-      tags: const [
-        ['e', 'thread-root', '', 'root'],
-        ['e', 'parent-reply', '', 'reply'],
-      ],
-      category: 'mention',
-    );
-    final feed = HomeFeedResponse(
-      mentions: [threadMention],
-      needsAction: const [],
-      activity: const [],
-      agentActivity: const [],
-    );
-
-    await tester.pumpWidget(await buildTestable(feed: feed));
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byKey(const ValueKey('inbox-row-reply-event')));
-    await tester.pumpAndSettle();
-
-    final page = tester.widget<ChannelDetailPage>(
-      find.byType(ChannelDetailPage),
-    );
-    expect(page.channel.id, 'ch1');
-    expect(page.initialThreadRootId, 'parent-reply');
-    expect(page.initialMessageId, 'reply-event');
   });
 
   testWidgets('thread filter matches grouped thread replies', (tester) async {
@@ -462,11 +366,7 @@ class _FakeReadStateNotifier extends ReadStateNotifier {
   );
 
   @override
-  void markContextRead(
-    String contextId,
-    int unixTimestamp, {
-    bool clearForcedMessages = false,
-  }) {
+  void markContextRead(String contextId, int unixTimestamp) {
     state = state.copyWithContext(contextId, unixTimestamp);
   }
 }

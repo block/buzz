@@ -56,20 +56,11 @@ bool isThreadReply(List<List<String>> tags) {
   return threadReferenceOf(tags).parentId != null && !isBroadcastReply(tags);
 }
 
-/// Stable conversation identity: `rootId ?? parentId ?? event.id`, except
-/// ordinary (non-thread) DM messages, which group by DM channel identity so
-/// one DM conversation renders as one row. Mirrors desktop's
-/// `getInboxConversationId`.
-String inboxConversationId(
-  List<List<String>> tags,
-  String eventId, {
-  String? dmChannelId,
-}) {
+/// Stable conversation identity: `rootId ?? parentId ?? event.id`.
+/// Mirrors desktop's `getInboxConversationId`.
+String inboxConversationId(List<List<String>> tags, String eventId) {
   final thread = threadReferenceOf(tags);
-  final threadId = thread.rootId ?? thread.parentId;
-  if (threadId != null) return threadId;
-  if (dmChannelId != null) return 'dm:$dmChannelId';
-  return eventId;
+  return thread.rootId ?? thread.parentId ?? eventId;
 }
 
 /// One conversation-grouped inbox row. Mirrors desktop's `InboxItem`.
@@ -191,25 +182,11 @@ bool matchesInboxFilter(InboxItem item, InboxFilter filter) {
 }
 
 /// Group raw feed items into conversation rows sorted by latest activity.
-/// [isDmChannel] identifies DM channels so their ordinary top-level messages
-/// collapse into one row per DM conversation. Mirrors desktop's
-/// `buildInboxItems`.
-List<InboxItem> buildInboxItems(
-  Iterable<FeedItem> feedItems, {
-  bool Function(String channelId)? isDmChannel,
-}) {
+/// Mirrors desktop's `buildInboxItems`.
+List<InboxItem> buildInboxItems(Iterable<FeedItem> feedItems) {
   final groups = <String, List<FeedItem>>{};
   for (final item in feedItems) {
-    final channelId = item.channelId;
-    final dmChannelId =
-        channelId != null && (isDmChannel?.call(channelId) ?? false)
-        ? channelId
-        : null;
-    final key = inboxConversationId(
-      item.tags,
-      item.id,
-      dmChannelId: dmChannelId,
-    );
+    final key = inboxConversationId(item.tags, item.id);
     groups.putIfAbsent(key, () => []).add(item);
   }
 

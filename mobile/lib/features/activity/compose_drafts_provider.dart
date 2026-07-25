@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 
-import '../../shared/relay/relay.dart';
 import '../../shared/theme/theme_provider.dart';
 
 const _draftsPrefsKey = 'compose_drafts_v1';
@@ -62,24 +61,11 @@ String composeDraftKey(String channelId, {String? threadHeadId}) =>
     threadHeadId == null ? channelId : '$channelId:$threadHeadId';
 
 /// SharedPreferences-backed store of unsent composer drafts, newest first.
-///
-/// Drafts are plaintext, so persistence is namespaced by community (relay)
-/// and account pubkey: switching community or account rebuilds this provider
-/// against that identity's own store and can never surface another
-/// identity's draft text.
 class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
-  late String _prefsKey;
-
   @override
   List<ComposeDraft> build() {
-    // Rebuild (and re-read the identity-scoped store) whenever the active
-    // community or the derived account pubkey changes.
-    final config = ref.watch(relayConfigProvider);
-    final pubkey = ref.watch(myPubkeyProvider) ?? 'anon';
-    _prefsKey = '$_draftsPrefsKey:${config.baseUrl}:$pubkey';
-
     final prefs = ref.read(savedPrefsProvider);
-    final raw = prefs.getString(_prefsKey);
+    final raw = prefs.getString(_draftsPrefsKey);
     if (raw == null) return const [];
     try {
       final decoded = jsonDecode(raw);
@@ -132,7 +118,7 @@ class ComposeDraftsNotifier extends Notifier<List<ComposeDraft>> {
     state = List.unmodifiable(drafts);
     final prefs = ref.read(savedPrefsProvider);
     prefs.setString(
-      _prefsKey,
+      _draftsPrefsKey,
       jsonEncode([for (final d in drafts) d.toJson()]),
     );
   }

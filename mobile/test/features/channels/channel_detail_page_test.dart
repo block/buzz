@@ -25,7 +25,7 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
-import 'package:buzz/shared/widgets/skeleton.dart';
+import 'package:buzz/shared/widgets/frosted_app_bar.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'test-channel';
@@ -149,11 +149,7 @@ Widget _buildTestable({
   ReadStateNotifier? readStateNotifier,
   _FakeMessagesNotifier? messagesNotifier,
   String? canvasContent,
-  String? initialMessageId,
-  String? initialThreadRootId,
-  Map<String, List<NostrEvent>> threadReplies = const {},
-  TextScaler textScaler = TextScaler.noScaling,
-  RelaySessionNotifier? relaySessionNotifier,
+  List<NostrEvent>? threadReplies,
 }) {
   final resolvedChannel = channel ?? _testChannel;
   final fakeChannelsNotifier =
@@ -196,24 +192,13 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
-      if (relaySessionNotifier != null)
-        relaySessionProvider.overrideWith(() => relaySessionNotifier),
       // Compose bar drafts persist through SharedPreferences.
       savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
       navigatorObservers: navigatorObservers,
-      home: Builder(
-        builder: (context) => MediaQuery(
-          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
-          child: ChannelDetailPage(
-            channel: resolvedChannel,
-            initialMessageId: initialMessageId,
-            initialThreadRootId: initialThreadRootId,
-          ),
-        ),
-      ),
+      home: ChannelDetailPage(channel: resolvedChannel),
     ),
   );
 }

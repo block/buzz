@@ -164,9 +164,7 @@ Widget _buildComposeBar({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
-      relayConfigProvider.overrideWith(
-        relayConfig ?? _FakeRelayConfigNotifier.new,
-      ),
+      relayConfigProvider.overrideWith(() => _FakeRelayConfigNotifier()),
       savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
     ],
