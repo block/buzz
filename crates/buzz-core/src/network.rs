@@ -3,6 +3,19 @@
 //! Provides shared helpers used across crates for SSRF protection and
 //! IP address classification.
 
+/// Extract an IPv4 address embedded in the RFC 6052 well-known NAT64 prefix.
+///
+/// The `/96` format stores the IPv4 address in the final four octets. Using
+/// network-order octets directly avoids error-prone segment shifting.
+fn nat64_well_known_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
+    const PREFIX: [u8; 12] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    let octets = v6.octets();
+    octets
+        .starts_with(&PREFIX)
+        .then(|| std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
+}
+
 /// Returns `true` if the IP address is in a private, reserved, or
 /// loopback range. Used for SSRF protection — webhook targets must
 /// not resolve to these addresses.
@@ -51,13 +64,7 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
 
             // NAT64 well-known prefix (RFC 6052). Preserve access to public IPv4
             // destinations while rejecting embedded private/reserved addresses.
-            if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
-                let v4 = std::net::Ipv4Addr::new(
-                    (segments[6] >> 8) as u8,
-                    segments[6] as u8,
-                    (segments[7] >> 8) as u8,
-                    segments[7] as u8,
-                );
+            if let Some(v4) = nat64_well_known_ipv4(v6) {
                 return is_private_ip(&std::net::IpAddr::V4(v4));
             }
 
@@ -167,6 +174,11 @@ mod tests {
     }
     #[test]
     fn test_nat64_well_known_prefix() {
+        let embedded = "64:ff9b::172.16.1.2".parse().unwrap();
+        assert_eq!(
+            nat64_well_known_ipv4(&embedded),
+            Some("172.16.1.2".parse().unwrap())
+        );
         assert!(is_private_ip(
             &"64:ff9b::10.0.0.1".parse::<IpAddr>().unwrap()
         ));
@@ -179,6 +191,9 @@ mod tests {
         assert!(!is_private_ip(
             &"64:ff9b::8.8.8.8".parse::<IpAddr>().unwrap()
         ));
+        assert!(!is_private_ip(
+            &"64:ff9b::1:10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
     }
     #[test]
     fn test_ipv6_transition_ranges() {
@@ -190,6 +205,8 @@ mod tests {
         assert!(is_private_ip(
             &"2002:a9fe:a9fe::".parse::<IpAddr>().unwrap()
         ));
+        assert!(!is_private_ip(&"2001:1::1".parse::<IpAddr>().unwrap()));
+        assert!(!is_private_ip(&"2003::1".parse::<IpAddr>().unwrap()));
     }
 
     // CGNAT (RFC 6598) — 100.64.0.0/10
