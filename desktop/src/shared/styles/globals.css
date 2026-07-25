@@ -17,3 +17,9 @@
 @import "./globals/progress.css";
 
 @config "../../../tailwind.config.js";
+
+/* Bind the `dark:` variant to the theme class the ThemeProvider sets on
+   <html>, instead of Tailwind v4's default `prefers-color-scheme` media
+   query — otherwise `dark:` utilities follow the OS appearance even when
+   the user picks an explicit light/dark theme in Settings → Appearance. */
+@custom-variant dark (&:where(.dark, .dark *));
