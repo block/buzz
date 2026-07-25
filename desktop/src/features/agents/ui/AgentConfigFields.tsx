@@ -43,6 +43,7 @@ import {
   AgentModelField,
 } from "@/features/agents/ui/agentConfigControls";
 import { PersonaProviderApiKeyField } from "@/features/agents/ui/PersonaProviderApiKeyField";
+import { PersonaProviderBaseUrlField } from "@/features/agents/ui/PersonaProviderBaseUrlField";
 import { usePersonaModelDiscovery } from "@/features/agents/ui/usePersonaModelDiscovery";
 import {
   BUZZ_AGENT_THINKING_EFFORT,
@@ -62,6 +63,8 @@ export const EMPTY_GLOBAL_CONFIG: GlobalAgentConfig = {
   model: null,
   preferred_runtime: null,
 };
+
+const OPENAI_COMPAT_BASE_URL_ENV_KEY = "OPENAI_COMPAT_BASE_URL";
 
 /** Baked env keys that route to structured controls, not the generic env editor. */
 const BAKED_STRUCTURED_KEYS = new Set([
@@ -293,6 +296,28 @@ export function AgentConfigFields({
   // CLI-login harnesses apply this setting through ACP rather than an env var
   // and provide their own default when no model override is persisted.
   const modelIsOptional = modelField?.targetApplication.kind === "acpNative";
+  const bakedEnvKeys = React.useMemo(
+    () => bakedEnv.map((entry) => entry.key),
+    [bakedEnv],
+  );
+  const baseUrlValue =
+    effectiveProvider === "openai-compat"
+      ? (config.env_vars[OPENAI_COMPAT_BASE_URL_ENV_KEY] ?? "")
+      : "";
+  const isBaseUrlRequired =
+    effectiveProvider === "openai-compat" &&
+    !bakedEnvKeys.includes(OPENAI_COMPAT_BASE_URL_ENV_KEY);
+  const isBaseUrlValid = (() => {
+    const trimmed = baseUrlValue.trim();
+    if (trimmed.length === 0) return !isBaseUrlRequired;
+    try {
+      // eslint-disable-next-line no-new
+      new URL(trimmed);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
   const modelIsValid =
     modelIsOptional ||
     (config.model?.trim().length ?? 0) > 0 ||
@@ -331,10 +356,6 @@ export function AgentConfigFields({
   )
     ? selectedRuntimeId
     : "buzz-agent";
-  const bakedEnvKeys = React.useMemo(
-    () => bakedEnv.map((entry) => entry.key),
-    [bakedEnv],
-  );
   const {
     advancedCredentialMissing,
     advancedFileSatisfiedEnvKeys,
@@ -352,7 +373,10 @@ export function AgentConfigFields({
     runtimeId: credentialRuntimeId,
   });
   const configIsValid =
-    selectedRuntimeId.length > 0 && modelIsValid && credentialsValid;
+    selectedRuntimeId.length > 0 &&
+    modelIsValid &&
+    credentialsValid &&
+    isBaseUrlValid;
   React.useEffect(() => {
     onValidityChange?.(configIsValid);
   }, [configIsValid, onValidityChange]);
@@ -770,6 +794,26 @@ export function AgentConfigFields({
         </div>
       ) : null}
 
+      {providerFieldVisible && effectiveProvider === "openai-compat" ? (
+        <div className={blockClassName}>
+          <PersonaProviderBaseUrlField
+            disabled={false}
+            isRequired={isBaseUrlRequired}
+            label="OpenAI-compatible base URL"
+            onValueChange={(value) =>
+              onConfigChange({
+                ...config,
+                env_vars: {
+                  ...config.env_vars,
+                  [OPENAI_COMPAT_BASE_URL_ENV_KEY]: value,
+                },
+              })
+            }
+            value={baseUrlValue}
+          />
+        </div>
+      ) : null}
+
       {/* Model field — omitted only after confirmed successful empty discovery */}
       {modelControlVisible ? (
         <div className={showDescriptions ? fieldClassName : undefined}>
@@ -909,7 +953,11 @@ export function AgentConfigFields({
                 >
                   <EnvVarsEditor
                     fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
-                    hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
+                    hiddenKeys={
+                      apiKeyEnvVar
+                        ? [apiKeyEnvVar, OPENAI_COMPAT_BASE_URL_ENV_KEY]
+                        : [OPENAI_COMPAT_BASE_URL_ENV_KEY]
+                    }
                     inheritedRows={bakedGenericRows}
                     inheritedRowsLabel="build"
                     label="Environment variables"
@@ -927,7 +975,11 @@ export function AgentConfigFields({
           ) : advancedOpen ? (
             <EnvVarsEditor
               fileSatisfiedKeys={advancedFileSatisfiedEnvKeys}
-              hiddenKeys={apiKeyEnvVar ? [apiKeyEnvVar] : []}
+              hiddenKeys={
+                apiKeyEnvVar
+                  ? [apiKeyEnvVar, OPENAI_COMPAT_BASE_URL_ENV_KEY]
+                  : [OPENAI_COMPAT_BASE_URL_ENV_KEY]
+              }
               inheritedRows={bakedGenericRows}
               inheritedRowsLabel="build"
               label="Environment variables"

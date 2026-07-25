@@ -25,6 +25,7 @@ import {
   shouldRenderModelControl,
   shouldShowModelStatusMessage,
 } from "./AgentConfigFields.tsx";
+import { isValidUrl } from "./PersonaProviderBaseUrlField.tsx";
 
 test("canonical behaviors: onboarding's values are the only behavior", () => {
   assert.deepEqual(CANONICAL_CONFIG_BEHAVIORS, {
@@ -217,4 +218,20 @@ test("required-model harnesses always keep the control", () => {
     true,
     "required-model harnesses always keep the control",
   );
+});
+
+// ── Base URL validation ───────────────────────────────────────────────────────
+// The OpenAI-compatible provider exposes a structured base URL field that
+// writes OPENAI_COMPAT_BASE_URL. The same validation runs on input.
+
+test("isValidUrl_accepts_https_urls", () => {
+  assert.equal(isValidUrl("https://api.venice.ai/v1"), true);
+  assert.equal(isValidUrl("https://api.openai.com/v1"), true);
+});
+
+test("isValidUrl_rejects_empty_or_malformed_urls", () => {
+  assert.equal(isValidUrl(""), false);
+  assert.equal(isValidUrl("   "), false);
+  assert.equal(isValidUrl("not-a-url"), false);
+  assert.equal(isValidUrl("api.venice.ai/v1"), false);
 });
