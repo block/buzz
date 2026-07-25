@@ -2,6 +2,29 @@ use super::{AgentDefinition, ManagedAgentRecord};
 use std::path::PathBuf;
 
 #[test]
+fn managed_agent_parallelism_defaults_to_one() {
+    let record: ManagedAgentRecord = serde_json::from_str(
+        r#"{
+            "pubkey": "abcd1234",
+            "name": "test-agent",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "wss://localhost:3000",
+            "acp_command": "buzz-acp",
+            "agent_command": "codex-acp",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        }"#,
+    )
+    .expect("agent record should deserialize");
+
+    assert_eq!(record.parallelism, 1);
+}
+
+#[test]
 fn persona_record_defaults_active_when_field_is_missing() {
     let record: AgentDefinition = serde_json::from_str(
         r#"{

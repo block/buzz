@@ -2127,7 +2127,13 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
+    let mut process = spawn_agent_child(
+        app,
+        record,
+        &key.relay_url,
+        manual_start_uses_lazy_pool(),
+        owner_hex,
+    )?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -2150,6 +2156,10 @@ pub fn start_managed_agent_process(
 
     runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())
+}
+
+fn manual_start_uses_lazy_pool() -> bool {
+    true
 }
 
 /// Returns the (key, value) env var pairs that should be forwarded to the
