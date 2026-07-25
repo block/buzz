@@ -561,7 +561,16 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     let shell: std::path::PathBuf = resolve_install_shell()?;
 
     let mut cmd = std::process::Command::new(&shell);
-    cmd.args(["-l", "-c", command]);
+    // Run under `pipefail`: every CLI install command is a `curl … | bash` /
+    // `| sh` pipe, and without it the pipeline's status is the right-hand
+    // side's — `bash`/`sh` fed an empty stdin exits 0. A `curl` that fails (or
+    // isn't on PATH at all) was therefore recorded as a successful `cli` step,
+    // leaving the user an unactionable post-install `verify` error instead of
+    // curl's own stderr. Every install shell supports it (`/bin/zsh`,
+    // `/bin/bash`, Git Bash); the Windows PowerShell path bypasses this shell.
+    // `SHELLOPTS` is not exported, so the piped-to vendor script still runs
+    // with its own default options.
+    cmd.args(["-l", "-c", &format!("set -o pipefail; {command}")]);
 
     // Strip hermit vars and set managed npm paths (see apply_npm_env).
     apply_npm_env(&mut cmd);
@@ -569,10 +578,12 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     // Compose the PATH for the install shell using the same kernel as the
     // runtime/probe path so the two can never drift.  managed entries first
     // (Node/npm bins keep precedence); login-shell entries next; inherited
-    // process PATH appended last on Windows when no login-shell PATH exists
-    // (login_shell_path() always returns None on Windows — Git Bash paths are
-    // POSIX-shaped and poison native children; cmd.env("PATH", …) replaces
-    // rather than extends, so without inherited the install shell loses npm).
+    // process PATH appended last when no login-shell PATH exists — the case
+    // where the composed PATH would otherwise be Buzz's managed Node dirs
+    // alone, with no `curl`/`sh`/`tar` for the vendor install pipes
+    // (cmd.env("PATH", …) replaces rather than extends). On Windows that case
+    // is the steady state: login_shell_path() always returns None there
+    // because Git Bash paths are POSIX-shaped and poison native children.
     let login_path = crate::managed_agents::login_shell_path();
     let had_login = login_path.is_some();
     let managed: Vec<std::path::PathBuf> = [
@@ -589,7 +600,7 @@ fn install_shell_command(command: &str) -> Result<std::process::Command, String>
     let inherited: Vec<std::path::PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
-    let use_inherited = crate::managed_agents::should_use_inherited(had_login, true, cfg!(windows));
+    let use_inherited = crate::managed_agents::should_use_inherited(had_login, true);
     let path_parts =
         crate::managed_agents::compose_path_entries(managed, login, inherited, use_inherited);
     if !path_parts.is_empty() {
@@ -1406,6 +1417,54 @@ mod tests {
     fn test_install_shell_command_returns_ok_on_unix() {
         let result = super::install_shell_command("echo test");
         assert!(result.is_ok(), "install_shell_command must succeed on Unix");
+    }
+
+    // ── pipefail: install pipes must not mask a failing left-hand side ────────
+
+    /// The command handed to the install shell must be prefixed with
+    /// `set -o pipefail;`, so `curl … | bash` fails when `curl` does.
+    #[test]
+    fn test_install_shell_command_enables_pipefail() {
+        let cmd = super::install_shell_command("curl -fsSL https://example.test/i.sh | bash")
+            .expect("install shell must resolve on a test host");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let body = args
+            .last()
+            .expect("install_shell_command must pass a command body");
+        assert!(
+            body.starts_with("set -o pipefail; "),
+            "install command must run under pipefail; got: {body}"
+        );
+        assert!(
+            body.ends_with("curl -fsSL https://example.test/i.sh | bash"),
+            "the vendor command must be preserved verbatim; got: {body}"
+        );
+    }
+
+    /// End-to-end on the real resolved install shell (no network): a pipeline
+    /// whose left-hand side fails must exit non-zero, while a fully successful
+    /// pipeline must still succeed. Without `pipefail` the status is the
+    /// right-hand side's and the left-hand failure is invisible.
+    #[cfg(unix)]
+    #[test]
+    fn test_install_shell_pipeline_status_follows_left_side() {
+        for (command, expect_success) in [("false | true", false), ("echo ok | cat", true)] {
+            let status = super::install_shell_command(command)
+                .expect("Unix must always resolve an install shell")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .expect("install shell must spawn");
+            assert_eq!(
+                status.success(),
+                expect_success,
+                "`{command}` must report success={expect_success}; got {status:?}"
+            );
+        }
     }
 
     // ── Phase A: Windows install shell selection ───────────────────────────────

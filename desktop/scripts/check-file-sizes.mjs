@@ -505,7 +505,10 @@ const overrides = new Map([
   // fix for the Goose Windows installer (PR #2680 interaction with #2750).
   // +10: pass an explicit PATH through Codex adapter install planning so unit
   // tests avoid the process-global login-shell PATH cache.
-  ["src-tauri/src/commands/agent_discovery.rs", 1836],
+  // +59: run install commands under `pipefail` so a failing `curl` in a
+  // `curl … | bash` install fails the `cli` step instead of being masked by
+  // `bash`'s exit 0, plus tests for the arg shape and the real pipeline status.
+  ["src-tauri/src/commands/agent_discovery.rs", 1895],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
