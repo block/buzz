@@ -396,12 +396,15 @@ pub struct ManagedAgentRecord {
     /// inference through Buzz's relay-mesh local endpoint; the `model_ref` is
     /// the served model id to route to. `None` is a normal agent.
     ///
-    /// This is the source of truth for "is this a mesh agent + which model" —
-    /// replacing the old practice of sniffing it back out of `env_vars`
-    /// (`relay_mesh_config`). Spawn-time env vars are *derived from* this, not
-    /// the other way around. `#[serde(default)]` so pre-existing saved records
-    /// deserialize as `None` and are resolved via the env-var fallback until
-    /// they are rewritten with this field.
+    /// Not the source of truth. `provider == "relay-mesh"` is, resolved through
+    /// `effective_config::resolve_effective_config`; spawn-time env vars are
+    /// derived from that resolution. This field is retained solely as a
+    /// backward-compatibility signal for records written before the record had
+    /// a `provider` field, and is consulted only for definition-less records
+    /// that carry no provider — after which the env-var preset is the last
+    /// fallback. A linked instance's marker is never read: its definition is
+    /// authoritative. `#[serde(default)]` so records predating the field
+    /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_mesh: Option<RelayMeshConfig>,
 }

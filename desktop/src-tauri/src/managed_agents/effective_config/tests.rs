@@ -565,3 +565,308 @@ fn whitespace_provider_in_global_triggers_mesh_decision() {
         "padded global provider must be treated as relay-mesh by the shared helper"
     );
 }
+
+// ── Legacy relay-mesh record compatibility (Wes review 3 on #1968) ──
+//
+// Two record generations shipped before `provider: "relay-mesh"` existed and
+// are never rewritten on load, so they are still on disk:
+//
+//   Class A (#798) — the four mesh preset env vars in `env_vars`, no typed
+//     field, no `provider` (the record had no `provider` field yet).
+//   Class B (#879) — the typed `relay_mesh` marker, still no `provider` field.
+//
+// Without the fallback both classes resolve to a non-mesh provider while their
+// own stale env bytes still reach the child: a silent misroute, not a clean
+// failure. The fallback lives in `resolve_definition_less` only — a linked
+// instance's definition stays authoritative.
+
+/// Class A: env-only legacy record resolves mesh via the four-env preset.
+#[test]
+fn legacy_record_falls_back_to_env_sniff() {
+    let mut rec = record(None, None, None, None);
+    rec.env_vars = BTreeMap::from([
+        ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1/".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)).as_deref(),
+        Some("Qwen3"),
+        "env-only legacy mesh record must still resolve to its served model"
+    );
+}
+
+/// Class A, oldest shipped record: both renamed sentinels in their original
+/// spelling. The preset first wrote `SPROUT_AGENT_PROVIDER` (#798) and the
+/// api-key value `sprout-mesh-local`; #971 and #960 renamed each in the same
+/// Jun-11 window without migrating persisted `env_vars`, so this exact shape is
+/// still on disk and must resolve mesh.
+#[test]
+fn legacy_record_falls_back_to_env_sniff_with_pre_rename_sentinels() {
+    let mut rec = record(None, None, None, None);
+    rec.env_vars = BTreeMap::from([
+        ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            "sprout-mesh-local".to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)).as_deref(),
+        Some("Qwen3"),
+        "the oldest shipped mesh record carries both pre-rename sentinels and was never migrated"
+    );
+}
+
+/// Class A straddling the rename window: old provider key with the new api-key
+/// value. Proves the two either/ors are independent rather than one either/or on
+/// a bundled old/new pair.
+#[test]
+fn legacy_record_falls_back_to_env_sniff_with_mixed_rename_sentinels() {
+    let mut rec = record(None, None, None, None);
+    rec.env_vars = BTreeMap::from([
+        ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)).as_deref(),
+        Some("Qwen3"),
+        "old provider key with new api key must resolve — the sentinels renamed independently"
+    );
+}
+
+/// The mirrored straddle: new provider key with the old api-key value.
+#[test]
+fn legacy_record_falls_back_to_env_sniff_with_new_provider_and_old_api_key() {
+    let mut rec = record(None, None, None, None);
+    rec.env_vars = BTreeMap::from([
+        ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            "sprout-mesh-local".to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)).as_deref(),
+        Some("Qwen3"),
+        "new provider key with old api key must resolve too"
+    );
+}
+
+/// Both spellings present and disagreeing: the renamed key is authoritative,
+/// so a record whose current provider env is non-mesh is not resurrected as
+/// mesh by the stale `SPROUT_` leftover.
+#[test]
+fn legacy_env_sniff_prefers_renamed_provider_key_over_stale_old_key() {
+    let mut rec = record(None, None, None, None);
+    rec.env_vars = BTreeMap::from([
+        ("BUZZ_AGENT_PROVIDER".to_string(), "anthropic".to_string()),
+        ("SPROUT_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
+        ),
+    ]);
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)),
+        None,
+        "the renamed key states current intent — a stale SPROUT_ key must not override it"
+    );
+}
+
+/// Class A negative: a user's own OpenAI-compatible provider on the same local
+/// port is not Buzz's preset — the placeholder API key is the discriminator.
+#[test]
+fn legacy_env_sniff_ignores_user_openai_on_same_local_port() {
+    let mut rec = record(None, None, None, None);
+    rec.env_vars = BTreeMap::from([
+        ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        ("OPENAI_COMPAT_API_KEY".to_string(), "real-key".to_string()),
+    ]);
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)),
+        None,
+        "a real user key on the mesh port must not be mistaken for Buzz's preset"
+    );
+}
+
+/// Class B: typed marker with no `provider` resolves mesh, and its `model_ref`
+/// wins over an unrelated global model so preflight and spawn agree.
+#[test]
+fn legacy_record_falls_back_to_typed_marker_without_provider() {
+    let mut rec = record(None, None, None, None);
+    rec.relay_mesh = Some(crate::managed_agents::RelayMeshConfig {
+        model_ref: "Qwen3".to_string(),
+    });
+
+    let cfg = match resolve_effective_config(&rec, &[], &global(Some("gpt-5"), Some("openai"))) {
+        EffectiveConfigResult::Resolved(cfg) => cfg,
+        EffectiveConfigResult::OrphanedInstance { .. } => {
+            panic!("definition-less is never orphaned")
+        }
+    };
+
+    assert_eq!(cfg.provider.value.as_deref(), Some(RELAY_MESH_PROVIDER_ID));
+    assert_eq!(
+        cfg.relay_mesh_model_id().as_deref(),
+        Some("Qwen3"),
+        "typed marker must resolve mesh even with no provider on the record"
+    );
+}
+
+/// Class B with a blank `model_ref`: the marker is still the mesh signal, and
+/// the model resolves to auto — same rule `apply_relay_mesh_env` applies.
+#[test]
+fn legacy_typed_marker_with_blank_model_resolves_auto() {
+    let mut rec = record(None, None, None, None);
+    rec.relay_mesh = Some(crate::managed_agents::RelayMeshConfig {
+        model_ref: "  ".to_string(),
+    });
+
+    assert_eq!(
+        resolve_effective_relay_mesh_model_id(&rec, &[], &global(None, None)).as_deref(),
+        Some(RELAY_MESH_AUTO_MODEL_ID)
+    );
+}
+
+/// A definition-less record that was switched AWAY from mesh keeps its stale
+/// marker and env bytes on disk. Its explicit `provider` states current intent,
+/// so the legacy fallback must not resurrect mesh.
+#[test]
+fn definition_less_explicit_provider_wins_over_stale_legacy_mesh_bytes() {
+    let mut rec = record(None, Some("claude-opus-4-6"), Some("anthropic"), None);
+    rec.relay_mesh = Some(crate::managed_agents::RelayMeshConfig {
+        model_ref: "Qwen3".to_string(),
+    });
+    rec.env_vars = BTreeMap::from([
+        ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
+        ),
+    ]);
+
+    let cfg = match resolve_effective_config(&rec, &[], &global(None, None)) {
+        EffectiveConfigResult::Resolved(cfg) => cfg,
+        EffectiveConfigResult::OrphanedInstance { .. } => {
+            panic!("definition-less is never orphaned")
+        }
+    };
+
+    assert_eq!(cfg.provider.value.as_deref(), Some("anthropic"));
+    assert_eq!(cfg.model.value.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(
+        cfg.relay_mesh_model_id(),
+        None,
+        "a switched-away legacy record must not be dragged back onto mesh"
+    );
+}
+
+/// The test that proves the fallback did not reintroduce the bug this PR
+/// deletes: a LINKED record carrying both legacy mesh signals resolves purely
+/// from its definition and never trips mesh.
+#[test]
+fn linked_record_ignores_legacy_mesh_marker_and_env() {
+    let mut rec = record(Some("d1"), Some("auto"), None, None);
+    rec.relay_mesh = Some(crate::managed_agents::RelayMeshConfig {
+        model_ref: "Qwen3".to_string(),
+    });
+    rec.env_vars = BTreeMap::from([
+        ("BUZZ_AGENT_PROVIDER".to_string(), "openai".to_string()),
+        (
+            "OPENAI_COMPAT_BASE_URL".to_string(),
+            "http://127.0.0.1:9337/v1".to_string(),
+        ),
+        ("OPENAI_COMPAT_MODEL".to_string(), "Qwen3".to_string()),
+        (
+            "OPENAI_COMPAT_API_KEY".to_string(),
+            RELAY_MESH_API_KEY_PLACEHOLDER.to_string(),
+        ),
+    ]);
+    let defs = vec![definition(
+        "d1",
+        Some("claude-opus-4-6"),
+        Some("anthropic"),
+        "",
+    )];
+
+    let cfg = match resolve_effective_config(&rec, &defs, &global(None, None)) {
+        EffectiveConfigResult::Resolved(cfg) => cfg,
+        EffectiveConfigResult::OrphanedInstance { .. } => panic!("definition exists"),
+    };
+
+    assert_eq!(cfg.provider.value.as_deref(), Some("anthropic"));
+    assert_eq!(cfg.model.value.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(
+        cfg.relay_mesh_model_id(),
+        None,
+        "legacy record bytes must never influence a linked instance"
+    );
+}
+
+/// A linked instance whose definition inherits a blank provider from a blank
+/// global must NOT pick up the record's legacy mesh bytes either — the linked
+/// path has no legacy fallback at all, by construction.
+#[test]
+fn linked_record_with_legacy_bytes_inherits_global_not_mesh() {
+    let mut rec = record(Some("d1"), None, None, None);
+    rec.relay_mesh = Some(crate::managed_agents::RelayMeshConfig {
+        model_ref: "Qwen3".to_string(),
+    });
+    let defs = vec![definition("d1", None, None, "")];
+
+    let cfg = match resolve_effective_config(&rec, &defs, &global(Some("gpt-5"), Some("openai"))) {
+        EffectiveConfigResult::Resolved(cfg) => cfg,
+        EffectiveConfigResult::OrphanedInstance { .. } => panic!("definition exists"),
+    };
+
+    assert_eq!(cfg.provider.value.as_deref(), Some("openai"));
+    assert_eq!(cfg.model.value.as_deref(), Some("gpt-5"));
+    assert_eq!(cfg.relay_mesh_model_id(), None);
+}
