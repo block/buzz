@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     io::Write,
     sync::{
-        atomic::{AtomicBool, AtomicU16},
+        atomic::{AtomicBool, AtomicU16, AtomicU64},
         Arc, Mutex,
     },
 };
@@ -18,18 +18,10 @@ use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
-    #[allow(
-        dead_code,
-        reason = "Task 8 installs and exposes the production orchestrator"
-    )]
-    pub command_brief_scheduler:
-        std::sync::RwLock<crate::command_brief::scheduler::LocalModelScheduler>,
-    #[allow(
-        dead_code,
-        reason = "Task 8 installs and exposes the production orchestrator"
-    )]
-    pub command_brief_orchestrator:
-        tokio::sync::RwLock<Option<crate::command_brief::orchestrator::CommandBriefOrchestrator>>,
+    pub command_brief_runtimes: tokio::sync::RwLock<crate::startup::CommandBriefRuntimeSet>,
+    pub command_brief_runtime_generation: AtomicU64,
+    pub command_brief_wake_subscription:
+        Mutex<Option<Box<dyn crate::command_brief::wake::WakeSubscription>>>,
     /// A no-redirect client for authenticated relay media fetches (download,
     /// clipboard copy, snapshot, editor). Every caller pre-validates the URL
     /// origin, but the app-wide `http_client` follows redirects by default, so
@@ -201,10 +193,11 @@ pub fn build_app_state() -> AppState {
 
     AppState {
         keys: Mutex::new(keys),
-        command_brief_scheduler: std::sync::RwLock::new(
-            crate::command_brief::scheduler::LocalModelScheduler::sequential(),
+        command_brief_runtimes: tokio::sync::RwLock::new(
+            crate::startup::CommandBriefRuntimeSet::default(),
         ),
-        command_brief_orchestrator: tokio::sync::RwLock::new(None),
+        command_brief_runtime_generation: AtomicU64::new(0),
+        command_brief_wake_subscription: Mutex::new(None),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))
             .pool_idle_timeout(std::time::Duration::from_secs(10))

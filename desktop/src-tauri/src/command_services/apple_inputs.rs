@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -315,6 +316,24 @@ impl AppleBriefSelection {
         Self::parse_protected(value)
     }
 
+    pub(crate) fn configuration_identity(&self) -> String {
+        let mut basis = Vec::new();
+        for values in [
+            &self.calendar_ids,
+            &self.reminder_list_ids,
+            &self.note_folder_ids,
+            &self.file_paths,
+        ] {
+            for value in values {
+                basis.extend_from_slice(value.as_bytes());
+                basis.push(0);
+            }
+            basis.push(0xff);
+        }
+        basis.extend_from_slice(&self.maximum_records_per_source.to_be_bytes());
+        format!("sha256:{}", hex::encode(Sha256::digest(&basis)))
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(value: Value) -> Result<Self, &'static str> {
         Self::parse_protected(value)
@@ -376,6 +395,33 @@ impl AppleBriefSelection {
             _ => false,
         }
     }
+}
+
+/// Verify the packaged signed-helper boundary and return its content identity.
+pub(crate) fn bundled_helper_identity() -> Result<String, &'static str> {
+    let path = bundled_helper_path().map_err(|_| "apple_helper_unavailable")?;
+    let metadata = std::fs::metadata(&path).map_err(|_| "apple_helper_unavailable")?;
+    if metadata.len() == 0 || metadata.len() > 64 * 1024 * 1024 {
+        return Err("apple_helper_unavailable");
+    }
+    let mut file = std::fs::File::open(path).map_err(|_| "apple_helper_unavailable")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| "apple_helper_unavailable")?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+/// Return the validated sibling helper path for native long-lived modes.
+pub(crate) fn verified_bundled_helper_path() -> Result<PathBuf, &'static str> {
+    bundled_helper_path().map_err(|_| "apple_helper_unavailable")
 }
 
 #[derive(Debug, PartialEq, Eq)]

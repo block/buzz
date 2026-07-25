@@ -79,6 +79,7 @@ chmod +x "$test_tmp/bin/git"
 cat >"$test_tmp/bin/pgrep" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+printf 'pgrep %s\n' "$*" >>"$MOCK_LOG"
 if [[ "${MOCK_HOST_WRITER_PID:-}" != "" ]]; then
   printf '%s\n' "$MOCK_HOST_WRITER_PID"
   exit 0
@@ -86,6 +87,17 @@ fi
 exit 1
 MOCK
 chmod +x "$test_tmp/bin/pgrep"
+
+cat >"$test_tmp/bin/lsof" <<'MOCK'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${MOCK_SQLITE_OPEN:-}" != "" ]]; then
+  printf 'Buzz 4242 user txt REG 1,1 1 %s\n' "$1"
+  exit 0
+fi
+exit 1
+MOCK
+chmod +x "$test_tmp/bin/lsof"
 
 cat >"$test_tmp/bin/docker" <<'MOCK'
 #!/usr/bin/env bash
@@ -225,33 +237,48 @@ export BUZZ_COMMAND_BRIEF_STORE_PATH="$test_tmp/command-brief.db"
 sqlite3 "$BUZZ_COMMAND_BRIEF_STORE_PATH" <<'SQL'
 CREATE TABLE command_brief_schedule (
   schedule_id TEXT PRIMARY KEY,
-  classification TEXT NOT NULL,
-  enabled INTEGER NOT NULL,
+  classification TEXT NOT NULL CHECK (classification = 'OFFICIAL'),
+  enabled INTEGER NOT NULL CHECK (enabled IN (0,1)),
   local_time TEXT NOT NULL,
   timezone TEXT NOT NULL,
-  catch_up_same_day INTEGER NOT NULL,
-  concurrency INTEGER NOT NULL,
+  catch_up_same_day INTEGER NOT NULL CHECK (catch_up_same_day IN (0,1)),
+  concurrency INTEGER NOT NULL CHECK (concurrency IN (1,2)),
   updated_at INTEGER NOT NULL
 );
 CREATE TABLE command_brief_schedule_claims (
   idempotency_key TEXT PRIMARY KEY,
-  schedule_id TEXT NOT NULL,
-  local_date TEXT NOT NULL,
-  timezone TEXT NOT NULL,
-  state TEXT NOT NULL,
+  schedule_id TEXT NOT NULL CHECK (schedule_id = 'daily-command-brief'),
+  local_date TEXT NOT NULL CHECK (length(local_date) = 10),
+  timezone TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
+  state TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
   deferred_reason TEXT,
-  retry_count INTEGER NOT NULL,
+  retry_count INTEGER NOT NULL CHECK (retry_count BETWEEN 0 AND 8),
   transition_token TEXT,
   claimed_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  run_id TEXT
+  run_id TEXT NOT NULL CHECK (
+    length(run_id) = 74 AND substr(run_id,1,10) = 'scheduled-'
+  ),
+  CHECK (idempotency_key = schedule_id || ':' || local_date),
+  CHECK (
+    (state = 'deferred'
+      AND deferred_reason IN
+        ('identity_locked','model_unavailable','local_state_unavailable')
+      AND transition_token IS NOT NULL)
+    OR
+    (state <> 'deferred' AND deferred_reason IS NULL)
+  )
 );
+CREATE INDEX command_brief_schedule_deferred
+ON command_brief_schedule_claims(state, retry_count, updated_at);
 CREATE TABLE command_brief_spool (event_id TEXT PRIMARY KEY);
 INSERT INTO command_brief_schedule
 VALUES ('daily-command-brief','OFFICIAL',1,'06:00','Australia/Sydney',1,1,1);
 INSERT INTO command_brief_schedule_claims
 VALUES ('daily-command-brief:2026-07-25','daily-command-brief','2026-07-25',
-        'Australia/Sydney','started',NULL,0,NULL,1,1,'run-one');
+        'Australia/Sydney','started',NULL,0,NULL,1,1,
+        'scheduled-7df2f1c8a188345d60cb98a3aad7e88c0a572dc8ae29f10c084c0ebddbd42ed8');
+PRAGMA user_version=4;
 SQL
 chmod 600 "$BUZZ_COMMAND_BRIEF_STORE_PATH"
 
@@ -401,6 +428,18 @@ if grep -Eq 'stop|pg_restore .*--clean|migrate' "$MOCK_LOG"; then
   fail "known host writer refusal must precede mutation"
 fi
 printf 'ok - known host writer refuses before mutation\n'
+assert_contains "$MOCK_LOG" "/Buzz[.]app/Contents/MacOS/[B]uzz" \
+  "restore checks the packaged Buzz.app writer"
+
+: >"$MOCK_LOG"
+export MOCK_SQLITE_OPEN=1
+assert_fails "restore refuses an open command brief SQLite store" \
+  "$restore_script" "$backup_dir" --confirm
+unset MOCK_SQLITE_OPEN
+if grep -Eq 'stop|pg_restore .*--clean|migrate' "$MOCK_LOG"; then
+  fail "SQLite lock refusal must precede mutation"
+fi
+printf 'ok - command brief SQLite lock refuses before mutation\n'
 
 : >"$MOCK_LOG"
 "$restore_script" "$backup_dir" --confirm
@@ -518,6 +557,16 @@ assert_contains "$MOCK_LOG" "ready" "restore verifies readiness"
   "SELECT COUNT(*) FROM command_brief_schedule_claims
    WHERE idempotency_key='daily-command-brief:2026-07-25';")" == "1" ]] ||
   fail "restore reinstates protected schedule claim state"
+
+original_command_brief_store="$BUZZ_COMMAND_BRIEF_STORE_PATH"
+export BUZZ_COMMAND_BRIEF_STORE_PATH="$test_tmp/clean-profile/.buzz/command-brief/audit.db"
+[[ ! -e "$BUZZ_COMMAND_BRIEF_STORE_PATH" ]] ||
+  fail "clean-profile destination fixture must start absent"
+"$restore_script" "$backup_dir" --confirm
+[[ -f "$BUZZ_COMMAND_BRIEF_STORE_PATH" ]] ||
+  fail "restore creates the canonical store in a clean profile"
+printf 'ok - restore creates an absent clean-profile command brief store\n'
+export BUZZ_COMMAND_BRIEF_STORE_PATH="$original_command_brief_store"
 
 printf 'old-memory' >"$MOCK_MEMORY_VOLUME_DIR/current/revisions.jsonl"
 : >"$MOCK_LOG"

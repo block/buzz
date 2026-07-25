@@ -51,6 +51,17 @@ migrations and readiness checks succeed. Every Docker, validation, restore,
 migration, and readiness stage has a deadline; a timeout sends TERM and then
 KILL to the entire stage process group and aborts subsequent work.
 
+The command-brief store defaults to the production nest path
+`~/.buzz/command-brief/audit.db`; `BUZZ_COMMAND_BRIEF_STORE_PATH` remains an
+explicit absolute-path override. Restore may create that directory and file for
+a clean macOS profile. Before any destructive work and again immediately before
+replacement, it rejects a running packaged `Buzz.app`, any open DB/WAL/SHM
+handle, or a failed SQLite exclusive-lock probe. The staged store must be exact
+schema version 4 with the current columns, constraints, indexes, bounded states,
+retry counts, IANA timezones, deferred invariants, and deterministic scheduled
+run IDs. Existing DB/WAL/SHM files are moved together into a private rollback
+location; they are never deleted from underneath a live SQLite process.
+
 The common `BUZZ_LOCAL_WORKSPACE_TIMEOUT_SECONDS` environment variable changes
 the default 300-second deadline. Individual stages can be tuned with
 `BUZZ_LOCAL_WORKSPACE_VALIDATION_TIMEOUT_SECONDS`,

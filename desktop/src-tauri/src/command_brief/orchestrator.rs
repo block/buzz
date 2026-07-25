@@ -32,6 +32,7 @@ use super::types::{
 use crate::command_services::apple_inputs::AppleBriefSelection;
 
 mod lifecycle;
+mod runtime;
 
 const MAX_CO_REQUEST_BYTES: usize = 1024;
 const MAX_SCHEDULE_ID_BYTES: usize = 256;
@@ -541,51 +542,6 @@ impl CommandBriefOrchestrator {
         ))
     }
 
-    /// Starts a unique trusted run and returns immediately with its UUID.
-    pub fn start(&self, request: CommandBriefRequest) -> Result<String, OrchestratorStartError> {
-        let run_id = uuid::Uuid::new_v4().to_string();
-        let cancellation = CancellationToken::new();
-        let queued = status_value(
-            &run_id,
-            &request.schedule_id,
-            BriefRunState::Queued,
-            &[],
-            None,
-        )
-        .map_err(|_| OrchestratorStartError)?;
-        {
-            let mut runs = self.inner.runs.lock().map_err(|_| OrchestratorStartError)?;
-            if runs.len() >= MAX_TRACKED_RUNS {
-                let removable = runs
-                    .iter()
-                    .find(|(_, record)| is_terminal(record.state))
-                    .map(|(id, _)| id.clone());
-                if let Some(removable) = removable {
-                    runs.remove(&removable);
-                } else {
-                    return Err(OrchestratorStartError);
-                }
-            }
-            runs.insert(
-                run_id.clone(),
-                RunRecord {
-                    cancellation: cancellation.clone(),
-                    state: BriefRunState::Queued,
-                    history: VecDeque::from([queued]),
-                    result: None,
-                },
-            );
-        }
-        let orchestrator = self.clone();
-        let spawned_run_id = run_id.clone();
-        tokio::spawn(async move {
-            orchestrator
-                .run(spawned_run_id, request, cancellation)
-                .await;
-        });
-        Ok(run_id)
-    }
-
     /// Returns the latest bounded status for a run.
     pub fn status(&self, run_id: &str) -> Option<BriefRunStatus> {
         self.inner
@@ -624,6 +580,15 @@ impl CommandBriefOrchestrator {
         let runs = self.inner.runs.lock().ok()?;
         let record = runs.get(run_id)?;
         Some((record.history.back()?.clone(), record.result.clone()))
+    }
+
+    /// Return whether this runtime still owns any queued or running run.
+    pub fn has_nonterminal_runs(&self) -> bool {
+        self.inner
+            .runs
+            .lock()
+            .map(|runs| runs.values().any(|record| !is_terminal(record.state)))
+            .unwrap_or(true)
     }
 
     /// Cancels collection, queued/running model work, or persistence.

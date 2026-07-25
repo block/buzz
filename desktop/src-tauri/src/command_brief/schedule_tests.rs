@@ -5,11 +5,12 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 
 use super::schedule::{
-    acquire_due_claim, due_local_date, idempotency_key, load_or_create_schedule,
-    mark_claim_started, next_due_after, process_due_schedule, record_deferred,
-    retry_deferred_on_transition, save_schedule_update, ClaimDecision, DeferredReason,
-    ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger, ScheduleUpdate, ScheduledRunStarter,
-    ScheduledStartError, DEFAULT_LOCAL_TIME, DEFAULT_SCHEDULE_ID, MAX_DEFERRED_RETRIES,
+    acquire_due_claim, deterministic_run_id, due_local_date, idempotency_key,
+    load_or_create_schedule, mark_claim_started, next_due_after, process_due_schedule,
+    record_deferred, retry_deferred_on_transition, save_schedule_update, ClaimDecision,
+    DeferredReason, ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger, ScheduleUpdate,
+    ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError, DEFAULT_LOCAL_TIME,
+    DEFAULT_SCHEDULE_ID, MAX_DEFERRED_RETRIES,
 };
 use super::store::migrate_command_brief_store;
 
@@ -72,7 +73,7 @@ fn before_at_after_0600_and_trigger_policy_are_deterministic() {
         due_local_date(
             &schedule,
             utc("2026-07-25T01:00:00Z"),
-            ScheduleTrigger::Resume
+            ScheduleTrigger::Wake
         ),
         Some(date)
     );
@@ -122,12 +123,22 @@ fn disabled_and_no_catch_up_never_backfill_on_start_or_resume() {
         ),
         None
     );
-    assert!(due_local_date(
-        &schedule,
-        utc("2026-07-25T01:00:00Z"),
-        ScheduleTrigger::Timer
-    )
-    .is_some());
+    assert_eq!(
+        due_local_date(
+            &schedule,
+            utc("2026-07-25T01:00:00Z"),
+            ScheduleTrigger::Timer
+        ),
+        None
+    );
+    assert_eq!(
+        due_local_date(
+            &schedule,
+            utc("2026-07-25T01:00:00Z"),
+            ScheduleTrigger::Wake
+        ),
+        None
+    );
 }
 
 #[test]
@@ -252,6 +263,28 @@ fn claim_is_exact_and_survives_restart_duplicate_timer_and_overlap() {
 }
 
 #[test]
+fn claim_persists_the_deterministic_run_identity_before_any_start_side_effect() {
+    let conn = migrated_store();
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let date = NaiveDate::from_ymd_opt(2026, 7, 25).expect("date");
+    let ClaimDecision::Acquired(claim) =
+        acquire_due_claim(&conn, &schedule, date, 100).expect("claim")
+    else {
+        panic!("fresh claim");
+    };
+    let expected = deterministic_run_id(claim.idempotency_key());
+    let stored: String = conn
+        .query_row(
+            "SELECT run_id FROM command_brief_schedule_claims
+             WHERE idempotency_key=?1",
+            [claim.idempotency_key()],
+            |row| row.get(0),
+        )
+        .expect("stored run identity");
+    assert_eq!(stored, expected);
+}
+
+#[test]
 fn concurrent_overlap_acquires_exactly_one_claim() {
     let dir = tempfile::tempdir().expect("temp");
     let path = dir.path().join("brief.db");
@@ -339,7 +372,8 @@ fn next_day_has_a_new_claim_but_prior_days_are_never_enumerated() {
     else {
         panic!("claim");
     };
-    mark_claim_started(&conn, &first_claim, "run-one", 2).expect("started");
+    let first_run = first_claim.run_id().to_string();
+    mark_claim_started(&conn, &first_claim, &first_run, 2).expect("started");
     assert!(matches!(
         acquire_due_claim(&conn, &schedule, second, 3).expect("second"),
         ClaimDecision::Acquired(_)
@@ -348,32 +382,62 @@ fn next_day_has_a_new_claim_but_prior_days_are_never_enumerated() {
         due_local_date(
             &schedule,
             utc("2026-07-26T01:00:00Z"),
-            ScheduleTrigger::Resume
+            ScheduleTrigger::Wake
         ),
         Some(second)
     );
 }
 
-#[derive(Default)]
 struct FakeStarter {
     starts: std::sync::Mutex<Vec<String>>,
+    active: std::sync::Mutex<std::collections::BTreeSet<String>>,
+    terminal: std::sync::Mutex<std::collections::BTreeSet<String>>,
     fail: bool,
+}
+
+impl Default for FakeStarter {
+    fn default() -> Self {
+        Self {
+            starts: std::sync::Mutex::new(Vec::new()),
+            active: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            terminal: std::sync::Mutex::new(std::collections::BTreeSet::new()),
+            fail: false,
+        }
+    }
 }
 
 impl ScheduledRunStarter for FakeStarter {
     fn start_scheduled(
         &self,
+        run_id: &str,
+        idempotency_key: &str,
         schedule_id: &str,
         _observed_at: &str,
     ) -> Result<String, ScheduledStartError> {
-        self.starts
-            .lock()
-            .expect("starts")
-            .push(schedule_id.to_string());
         if self.fail {
             Err(ScheduledStartError)
         } else {
-            Ok("run-1".into())
+            assert_eq!(run_id, deterministic_run_id(idempotency_key));
+            assert_eq!(schedule_id, DEFAULT_SCHEDULE_ID);
+            if self
+                .active
+                .lock()
+                .expect("active")
+                .insert(run_id.to_string())
+            {
+                self.starts.lock().expect("starts").push(run_id.to_string());
+            }
+            Ok(run_id.to_string())
+        }
+    }
+
+    fn presence(&self, run_id: &str) -> ScheduledRunPresence {
+        if self.terminal.lock().expect("terminal").contains(run_id) {
+            ScheduledRunPresence::Terminal
+        } else if self.active.lock().expect("active").contains(run_id) {
+            ScheduledRunPresence::Active
+        } else {
+            ScheduledRunPresence::Absent
         }
     }
 }
@@ -396,7 +460,7 @@ fn process_claims_before_start_and_duplicate_timer_never_starts_twice() {
         )
         .expect("started"),
         ScheduleRunOutcome::Started {
-            run_id: "run-1".into()
+            run_id: deterministic_run_id("daily-command-brief:2026-07-25")
         }
     );
     assert_eq!(
@@ -412,6 +476,127 @@ fn process_claims_before_start_and_duplicate_timer_never_starts_twice() {
         ScheduleRunOutcome::AlreadyClaimed
     );
     assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+}
+
+#[test]
+fn crash_boundaries_reconcile_one_deterministic_run_without_loss_or_duplicate_effect() {
+    let schedule_time = utc("2026-07-25T01:00:00Z");
+    let ready = ReadinessSnapshot::ready("ready-v1");
+    let expected_run = deterministic_run_id("daily-command-brief:2026-07-25");
+
+    // Crash after the claim insert but before the starter call.
+    let before_start = migrated_store();
+    let schedule = load_or_create_schedule(&before_start, "Australia/Sydney", 1).expect("schedule");
+    let date = NaiveDate::from_ymd_opt(2026, 7, 25).expect("date");
+    assert!(matches!(
+        acquire_due_claim(&before_start, &schedule, date, 1).expect("claim"),
+        ClaimDecision::Acquired(_)
+    ));
+    let starter = FakeStarter::default();
+    assert_eq!(
+        process_due_schedule(
+            &before_start,
+            &schedule,
+            schedule_time,
+            ScheduleTrigger::Startup,
+            &ready,
+            &starter,
+        )
+        .expect("reconcile"),
+        ScheduleRunOutcome::Started {
+            run_id: expected_run.clone()
+        }
+    );
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+
+    // Crash after the starter side effect/return but before started is stored.
+    let after_start = migrated_store();
+    let schedule = load_or_create_schedule(&after_start, "Australia/Sydney", 1).expect("schedule");
+    let ClaimDecision::Acquired(claim) =
+        acquire_due_claim(&after_start, &schedule, date, 1).expect("claim")
+    else {
+        panic!("claim");
+    };
+    let starter = FakeStarter::default();
+    starter
+        .start_scheduled(
+            &expected_run,
+            claim.idempotency_key(),
+            DEFAULT_SCHEDULE_ID,
+            &schedule_time.to_rfc3339(),
+        )
+        .expect("first start side effect");
+    assert!(matches!(
+        process_due_schedule(
+            &after_start,
+            &schedule,
+            schedule_time,
+            ScheduleTrigger::Timer,
+            &ready,
+            &starter,
+        )
+        .expect("reconcile"),
+        ScheduleRunOutcome::Started { .. }
+    ));
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+
+    // Crash after the starter returned and the exact started state was stored.
+    // A new process has no in-memory run, but resumes the same logical ID.
+    let after_mark = migrated_store();
+    let schedule = load_or_create_schedule(&after_mark, "Australia/Sydney", 1).expect("schedule");
+    let ClaimDecision::Acquired(claim) =
+        acquire_due_claim(&after_mark, &schedule, date, 1).expect("claim")
+    else {
+        panic!("claim");
+    };
+    mark_claim_started(&after_mark, &claim, &expected_run, 2).expect("mark started");
+    let restarted = FakeStarter::default();
+    assert_eq!(
+        process_due_schedule(
+            &after_mark,
+            &schedule,
+            schedule_time,
+            ScheduleTrigger::Startup,
+            &ready,
+            &restarted,
+        )
+        .expect("restart exact run"),
+        ScheduleRunOutcome::Started {
+            run_id: expected_run.clone()
+        }
+    );
+    assert_eq!(
+        restarted.starts.lock().expect("starts").as_slice(),
+        std::slice::from_ref(&expected_run)
+    );
+
+    // A durable terminal wins on restart and never invokes generation again.
+    let terminal = migrated_store();
+    let schedule = load_or_create_schedule(&terminal, "Australia/Sydney", 1).expect("schedule");
+    let ClaimDecision::Acquired(_) =
+        acquire_due_claim(&terminal, &schedule, date, 1).expect("claim")
+    else {
+        panic!("claim");
+    };
+    let starter = FakeStarter::default();
+    starter
+        .terminal
+        .lock()
+        .expect("terminal")
+        .insert(expected_run);
+    assert_eq!(
+        process_due_schedule(
+            &terminal,
+            &schedule,
+            schedule_time,
+            ScheduleTrigger::Startup,
+            &ready,
+            &starter,
+        )
+        .expect("terminal reconcile"),
+        ScheduleRunOutcome::AlreadyClaimed
+    );
+    assert!(starter.starts.lock().expect("starts").is_empty());
 }
 
 #[test]
@@ -498,7 +683,7 @@ fn failed_start_is_deferred_and_retries_only_after_transition() {
             &conn,
             &schedule,
             now,
-            ScheduleTrigger::Resume,
+            ScheduleTrigger::Wake,
             &ready,
             &failing
         )

@@ -911,6 +911,8 @@ pub fn run() {
     let shutdown_done = Arc::new(AtomicBool::new(false));
     let memory_sync_scheduler =
         command_services::memory::start_memory_sync_scheduler(app.handle().clone());
+    #[cfg(target_os = "macos")]
+    let _ = startup::install_system_wake_source(app.handle().clone());
     let schedule_startup_app = app.handle().clone();
     tauri::async_runtime::spawn(async move {
         let _ = startup::run_command_brief_schedule(
@@ -971,16 +973,6 @@ pub fn run() {
             // deliberately skipping those native global destructors.
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             hard_exit_after_mesh_shutdown();
-        }
-        RunEvent::Resumed => {
-            let resume_app = app_handle.clone();
-            tauri::async_runtime::spawn(async move {
-                let _ = startup::run_command_brief_schedule(
-                    resume_app,
-                    command_brief::schedule::ScheduleTrigger::Resume,
-                )
-                .await;
-            });
         }
         _ => {}
     });

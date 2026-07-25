@@ -205,14 +205,22 @@ local_workspace_memory_key_file() {
 }
 
 local_workspace_command_brief_store_file() {
-  local store_file="${BUZZ_COMMAND_BRIEF_STORE_PATH:-}"
+  local purpose="${1:-backup}"
+  local store_file="${BUZZ_COMMAND_BRIEF_STORE_PATH:-${HOME}/.buzz/command-brief/audit.db}"
   local mode
 
   [[ "${store_file}" == /* ]] ||
     local_workspace_die \
       "BUZZ_COMMAND_BRIEF_STORE_PATH must name an absolute protected file" ||
     return
-  [[ -f "${store_file}" && ! -L "${store_file}" ]] ||
+  [[ ! -L "${store_file}" ]] ||
+    local_workspace_die \
+      "command brief store must not be a symbolic link" || return
+  if [[ ! -e "${store_file}" && "${purpose}" == "restore" ]]; then
+    printf '%s\n' "${store_file}"
+    return
+  fi
+  [[ -f "${store_file}" ]] ||
     local_workspace_die \
       "command brief store must be a regular non-symlink file" || return
   if stat -f '%Lp' "${store_file}" >/dev/null 2>&1; then

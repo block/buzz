@@ -9,8 +9,86 @@ use buzz_core_pkg::command_brief::{
 
 use super::store::{
     insert_spool_event, list_due_spool_events, mark_publish_failed, mark_published,
-    open_command_brief_store, rearm_queued_spool_events, SpoolInsert,
+    open_command_brief_store, rearm_queued_spool_events, validate_command_brief_store_schema,
+    SpoolInsert,
 };
+
+#[test]
+fn current_store_schema_is_exact_and_rejects_weakened_claim_invariants() {
+    let conn = Connection::open_in_memory().expect("memory");
+    super::store::migrate_command_brief_store(&conn).expect("migrate");
+    validate_command_brief_store_schema(&conn).expect("exact schema");
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 4);
+    assert!(conn
+        .execute(
+            "INSERT INTO command_brief_schedule_claims(
+                idempotency_key,schedule_id,local_date,timezone,state,deferred_reason,
+                retry_count,transition_token,claimed_at,updated_at,run_id
+             ) VALUES('wrong','daily-command-brief','2026-07-25','Australia/Sydney',
+                      'deferred',NULL,0,NULL,1,1,'scheduled-bad')",
+            [],
+        )
+        .is_err());
+    conn.execute_batch(
+        "DROP INDEX command_brief_schedule_deferred;
+         CREATE INDEX command_brief_schedule_deferred
+         ON command_brief_schedule_claims(updated_at);",
+    )
+    .expect("weaken index");
+    assert!(validate_command_brief_store_schema(&conn).is_err());
+}
+
+#[test]
+fn version_three_store_is_migrated_and_accepted_as_exact_version_four() {
+    let conn = Connection::open_in_memory().expect("memory");
+    super::store::migrate_command_brief_store(&conn).expect("initial schema");
+    conn.execute_batch(
+        "DROP INDEX command_brief_schedule_deferred;
+         DROP TABLE command_brief_schedule_claims;
+         CREATE TABLE command_brief_schedule_claims (
+             idempotency_key TEXT PRIMARY KEY,
+             schedule_id TEXT NOT NULL,
+             local_date TEXT NOT NULL,
+             timezone TEXT NOT NULL,
+             state TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
+             deferred_reason TEXT,
+             retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
+             transition_token TEXT,
+             claimed_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             run_id TEXT,
+             UNIQUE (schedule_id,local_date)
+         );
+         CREATE INDEX command_brief_schedule_deferred
+         ON command_brief_schedule_claims(state,retry_count,updated_at);
+         INSERT INTO command_brief_schedule_claims VALUES(
+             'daily-command-brief:2026-07-25','daily-command-brief','2026-07-25',
+             'Australia/Sydney','started',NULL,0,NULL,1,2,'old-random-run');",
+    )
+    .expect("version three claims");
+    conn.pragma_update(None, "user_version", 3)
+        .expect("simulate prior version");
+    super::store::migrate_command_brief_store(&conn).expect("v3 to v4");
+    validate_command_brief_store_schema(&conn).expect("accepted current schema");
+    let run_id: String = conn
+        .query_row(
+            "SELECT run_id FROM command_brief_schedule_claims",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migrated run");
+    assert_eq!(
+        run_id,
+        "scheduled-7df2f1c8a188345d60cb98a3aad7e88c0a572dc8ae29f10c084c0ebddbd42ed8"
+    );
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, 4);
+}
 
 fn event_at(owner: &Keys, run_id: &str, previous: Option<String>, created_at: u64) -> nostr::Event {
     let event = build_command_brief_event(

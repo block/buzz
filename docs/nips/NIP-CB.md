@@ -101,16 +101,29 @@ claims.
 ## Local schedule
 
 The built-in schedule defaults to `06:00` in the current macOS IANA timezone.
-It claims the exact key `<schedule_id>:<YYYY-MM-DD>` before generation, so app
-restart, duplicate timers, and overlapping wake events cannot produce a second
-scheduled brief for the same local date. Startup and wake may perform at most
-one current-day catch-up and never replay earlier dates.
+Before any generation side effect it atomically stores both the exact key
+`<schedule_id>:<YYYY-MM-DD>` and the deterministic run ID derived from that
+key. Restart reconciliation reuses that run ID and checks both the live
+orchestrator and durable terminal spool, so crashes before start, after start
+returns, or after the started marker cannot create a second logical run.
+Startup and wake may perform at most one current-day catch-up and never replay
+earlier dates. If `catch_up_same_day` is false, startup, native wake, and timer
+checks all remain disabled.
 
-macOS may delay application execution while the Mac is asleep. The product
-therefore promises same-day catch-up after wake when all local authorization
+macOS may delay application execution while the Mac is asleep. The signed
+Apple helper listens to `NSWorkspace.didWakeNotification` and emits a bounded
+local wake signal; Tauri foreground/resume events are not treated as system
+wake. A periodic timer remains a resilience check. The product therefore
+promises same-day catch-up after a verified wake when all local authorization
 and readiness gates pass; it does not promise exact execution while asleep.
-Locked identity, unavailable LM Studio, or missing mandatory local state stays
-visibly deferred and retries only after a bounded readiness transition.
+
+Every due production attempt re-attests the unlocked signing identity, selected
+LM Studio model, exact RAG snapshot, Apple allowlist and helper identity, local
+SQLite schema, and configured scheduler capacity before the claim may start.
+The readiness transition token binds the resulting configuration, runtime
+generation, and current capacity availability. Locked identity, unavailable
+LM Studio/RAG, or missing mandatory local state stays visibly deferred and
+retries only after a distinct bounded readiness transition.
 
 ## Forward compatibility
 

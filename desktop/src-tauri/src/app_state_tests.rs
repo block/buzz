@@ -1,16 +1,13 @@
 use super::*;
 
 #[test]
-fn app_state_owns_one_sequential_command_brief_scheduler() {
+fn app_state_owns_an_empty_command_brief_runtime_set() {
     let state = build_app_state();
-    let scheduler_result = state.command_brief_scheduler.read();
-    let scheduler = scheduler_result.as_ref().expect("scheduler slot");
-    assert_eq!((scheduler.capacity(), scheduler.active_job_count()), (1, 0));
     assert!(state
-        .command_brief_orchestrator
+        .command_brief_runtimes
         .try_read()
-        .expect("orchestrator slot")
-        .is_none());
+        .expect("runtime set")
+        .is_empty());
 }
 fn assert_key_eq(a: &Keys, b: &Keys) {
     assert_eq!(a.public_key().to_hex(), b.public_key().to_hex());

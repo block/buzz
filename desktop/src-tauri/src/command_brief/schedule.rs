@@ -6,6 +6,7 @@ use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, NaiveTim
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::types::BriefSchedule;
 
@@ -40,8 +41,8 @@ pub enum ScheduleTrigger {
     Timer,
     /// Application startup.
     Startup,
-    /// macOS wake/application resume.
-    Resume,
+    /// Verified macOS workspace wake notification.
+    Wake,
 }
 
 /// Closed reason a claimed run is visible but deferred.
@@ -70,6 +71,7 @@ impl DeferredReason {
 pub struct ScheduleClaim {
     idempotency_key: String,
     local_date: NaiveDate,
+    run_id: String,
 }
 
 impl ScheduleClaim {
@@ -81,6 +83,11 @@ impl ScheduleClaim {
     /// Return the claimed local date.
     pub const fn local_date(&self) -> NaiveDate {
         self.local_date
+    }
+
+    /// Return the deterministic run identity stored by the claim transaction.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
     }
 }
 
@@ -118,14 +125,30 @@ impl ReadinessSnapshot {
     }
 }
 
+/// Durable/in-process reconciliation state for one exact scheduled run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScheduledRunPresence {
+    /// No current process or durable terminal knows the run.
+    Absent,
+    /// The current orchestrator has already accepted the exact run ID.
+    Active,
+    /// The encrypted audit spool contains a terminal for the exact run ID.
+    Terminal,
+}
+
 /// Native-only boundary that starts one Task 5 orchestrator run.
 pub trait ScheduledRunStarter {
-    /// Start a scheduled run and return its native run ID.
+    /// Idempotently start the exact deterministic run identity.
     fn start_scheduled(
         &self,
+        run_id: &str,
+        idempotency_key: &str,
         schedule_id: &str,
         observed_at: &str,
     ) -> Result<String, ScheduledStartError>;
+
+    /// Reconcile the exact run against in-process and durable state.
+    fn presence(&self, run_id: &str) -> ScheduledRunPresence;
 }
 
 /// Redacted native orchestrator start failure.
@@ -234,12 +257,9 @@ pub fn save_schedule_update(
 pub fn due_local_date(
     schedule: &BriefSchedule,
     now: DateTime<Utc>,
-    trigger: ScheduleTrigger,
+    _trigger: ScheduleTrigger,
 ) -> Option<NaiveDate> {
-    if !schedule.enabled()
-        || matches!(trigger, ScheduleTrigger::Startup | ScheduleTrigger::Resume)
-            && !schedule.catch_up_same_day()
-    {
+    if !schedule.enabled() || !schedule.catch_up_same_day() {
         return None;
     }
     let timezone = Tz::from_str(schedule.timezone()).ok()?;
@@ -272,6 +292,14 @@ pub fn idempotency_key(schedule: &BriefSchedule, date: NaiveDate) -> String {
     format!("{}:{}", schedule.schedule_id(), date.format("%Y-%m-%d"))
 }
 
+/// Derive the stable native run identity persisted before orchestration.
+pub fn deterministic_run_id(idempotency_key: &str) -> String {
+    format!(
+        "scheduled-{}",
+        hex::encode(Sha256::digest(idempotency_key.as_bytes()))
+    )
+}
+
 /// Atomically acquire the one permitted claim for a schedule-local date.
 pub fn acquire_due_claim(
     conn: &Connection,
@@ -280,20 +308,22 @@ pub fn acquire_due_claim(
     now: i64,
 ) -> Result<ClaimDecision, String> {
     let key = idempotency_key(schedule, date);
+    let run_id = deterministic_run_id(&key);
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
         .map_err(|_| "command brief schedule unavailable")?;
     let inserted = tx
         .execute(
             "INSERT OR IGNORE INTO command_brief_schedule_claims(
                  idempotency_key,schedule_id,local_date,timezone,state,
-                 retry_count,claimed_at,updated_at
-             ) VALUES(?1,?2,?3,?4,'claimed',0,?5,?5)",
+                 retry_count,claimed_at,updated_at,run_id
+             ) VALUES(?1,?2,?3,?4,'claimed',0,?5,?5,?6)",
             params![
                 key,
                 schedule.schedule_id(),
                 date.format("%Y-%m-%d").to_string(),
                 schedule.timezone(),
-                now
+                now,
+                run_id,
             ],
         )
         .map_err(|_| "command brief schedule unavailable")?;
@@ -303,6 +333,7 @@ pub fn acquire_due_claim(
         Ok(ClaimDecision::Acquired(ScheduleClaim {
             idempotency_key: key,
             local_date: date,
+            run_id,
         }))
     } else {
         Ok(ClaimDecision::AlreadyClaimed)
@@ -324,7 +355,7 @@ pub fn record_deferred(
         .execute(
             "UPDATE command_brief_schedule_claims
              SET state='deferred',deferred_reason=?2,transition_token=?3,updated_at=?4
-             WHERE idempotency_key=?1 AND state IN ('claimed','deferred')",
+             WHERE idempotency_key=?1 AND state IN ('claimed','deferred','started')",
             params![
                 claim.idempotency_key,
                 reason.as_str(),
@@ -384,7 +415,9 @@ pub fn mark_claim_started(
         .execute(
             "UPDATE command_brief_schedule_claims
              SET state='started',run_id=?2,deferred_reason=NULL,updated_at=?3
-             WHERE idempotency_key=?1 AND state='claimed'",
+             WHERE idempotency_key=?1
+               AND run_id=?2
+               AND state IN ('claimed','started')",
             params![claim.idempotency_key, run_id, now],
         )
         .map_err(|_| "command brief schedule unavailable")?;
@@ -410,23 +443,49 @@ pub fn process_due_schedule(
     let Some(date) = due_local_date(schedule, now, trigger) else {
         return Ok(ScheduleRunOutcome::NotDue);
     };
-    let claim = match acquire_due_claim(conn, schedule, date, now.timestamp())? {
-        ClaimDecision::Acquired(claim) => claim,
+    let (claim, prior_state) = match acquire_due_claim(conn, schedule, date, now.timestamp())? {
+        ClaimDecision::Acquired(claim) => (claim, ClaimState::Claimed),
         ClaimDecision::AlreadyClaimed => {
-            let Some(existing) = deferred_claim(conn, schedule, date)? else {
+            let Some((existing, state)) = existing_claim(conn, schedule, date)? else {
                 return Ok(ScheduleRunOutcome::AlreadyClaimed);
             };
-            if !retry_deferred_on_transition(
-                conn,
-                &existing,
-                &readiness.transition_token,
-                now.timestamp(),
-            )? {
+            if state == ClaimState::Completed {
                 return Ok(ScheduleRunOutcome::AlreadyClaimed);
             }
-            existing
+            if state == ClaimState::Deferred
+                && !retry_deferred_on_transition(
+                    conn,
+                    &existing,
+                    &readiness.transition_token,
+                    now.timestamp(),
+                )?
+            {
+                return Ok(ScheduleRunOutcome::AlreadyClaimed);
+            }
+            let state = if state == ClaimState::Deferred {
+                ClaimState::Claimed
+            } else {
+                state
+            };
+            (existing, state)
         }
     };
+    match starter.presence(claim.run_id()) {
+        ScheduledRunPresence::Terminal => {
+            mark_claim_completed(conn, &claim, now.timestamp())?;
+            return Ok(ScheduleRunOutcome::AlreadyClaimed);
+        }
+        ScheduledRunPresence::Active => {
+            mark_claim_started(conn, &claim, claim.run_id(), now.timestamp())?;
+            if prior_state == ClaimState::Started {
+                return Ok(ScheduleRunOutcome::AlreadyClaimed);
+            }
+            return Ok(ScheduleRunOutcome::Started {
+                run_id: claim.run_id().to_string(),
+            });
+        }
+        ScheduledRunPresence::Absent => {}
+    }
     if let Some(reason) = readiness.deferred_reason {
         record_deferred(
             conn,
@@ -438,12 +497,17 @@ pub fn process_due_schedule(
         return Ok(ScheduleRunOutcome::Deferred { reason });
     }
     let observed_at = now.to_rfc3339();
-    match starter.start_scheduled(schedule.schedule_id(), &observed_at) {
-        Ok(run_id) => {
-            mark_claim_started(conn, &claim, &run_id, now.timestamp())?;
+    match starter.start_scheduled(
+        claim.run_id(),
+        claim.idempotency_key(),
+        schedule.schedule_id(),
+        &observed_at,
+    ) {
+        Ok(run_id) if run_id == claim.run_id() => {
+            mark_claim_started(conn, &claim, claim.run_id(), now.timestamp())?;
             Ok(ScheduleRunOutcome::Started { run_id })
         }
-        Err(ScheduledStartError) => {
+        Ok(_) | Err(ScheduledStartError) => {
             let reason = DeferredReason::LocalStateUnavailable;
             record_deferred(
                 conn,
@@ -454,6 +518,23 @@ pub fn process_due_schedule(
             )?;
             Ok(ScheduleRunOutcome::Deferred { reason })
         }
+    }
+}
+
+fn mark_claim_completed(conn: &Connection, claim: &ScheduleClaim, now: i64) -> Result<(), String> {
+    let changed = conn
+        .execute(
+            "UPDATE command_brief_schedule_claims
+             SET state='completed',deferred_reason=NULL,updated_at=?3
+             WHERE idempotency_key=?1 AND run_id=?2
+               AND state IN ('claimed','deferred','started','completed')",
+            params![claim.idempotency_key, claim.run_id, now],
+        )
+        .map_err(|_| "command brief schedule unavailable")?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err("command brief schedule unavailable".to_string())
     }
 }
 
@@ -536,27 +617,55 @@ fn valid_token(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
-fn deferred_claim(
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClaimState {
+    Claimed,
+    Deferred,
+    Started,
+    Completed,
+}
+
+fn existing_claim(
     conn: &Connection,
     schedule: &BriefSchedule,
     date: NaiveDate,
-) -> Result<Option<ScheduleClaim>, String> {
+) -> Result<Option<(ScheduleClaim, ClaimState)>, String> {
     let key = idempotency_key(schedule, date);
     conn.query_row(
-        "SELECT local_date FROM command_brief_schedule_claims
-         WHERE idempotency_key=?1 AND state='deferred'",
+        "SELECT local_date,run_id,state FROM command_brief_schedule_claims
+         WHERE idempotency_key=?1",
         [&key],
-        |row| row.get::<_, String>(0),
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
     )
     .optional()
     .map_err(|_| "command brief schedule unavailable".to_string())?
-    .map(|stored_date| {
-        NaiveDate::parse_from_str(&stored_date, "%Y-%m-%d")
-            .map(|local_date| ScheduleClaim {
+    .map(|(stored_date, run_id, state)| {
+        let local_date = NaiveDate::parse_from_str(&stored_date, "%Y-%m-%d")
+            .map_err(|_| "command brief schedule unavailable".to_string())?;
+        let state = match state.as_str() {
+            "claimed" => ClaimState::Claimed,
+            "deferred" => ClaimState::Deferred,
+            "started" => ClaimState::Started,
+            "completed" => ClaimState::Completed,
+            _ => return Err("command brief schedule unavailable".to_string()),
+        };
+        if run_id != deterministic_run_id(&key) {
+            return Err("command brief schedule unavailable".to_string());
+        }
+        Ok((
+            ScheduleClaim {
                 idempotency_key: key,
                 local_date,
-            })
-            .map_err(|_| "command brief schedule unavailable".to_string())
+                run_id,
+            },
+            state,
+        ))
     })
     .transpose()
 }

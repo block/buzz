@@ -1,8 +1,29 @@
 import Foundation
+import AppKit
+
+func watchWorkspaceWake() {
+    let center = NSWorkspace.shared.notificationCenter
+    let observer = center.addObserver(
+        forName: NSWorkspace.didWakeNotification,
+        object: nil,
+        queue: .main
+    ) { _ in
+        FileHandle.standardOutput.write(Data("workspace_did_wake\n".utf8))
+    }
+    withExtendedLifetime(observer) {
+        RunLoop.main.run()
+    }
+    center.removeObserver(observer)
+}
+
+if CommandLine.arguments == [CommandLine.arguments[0], "--watch-workspace-wake"] {
+    watchWorkspaceWake()
+    exit(EXIT_SUCCESS)
+}
 
 let eventKit = EventKitReader()
 let notes = NotesReader()
-let files = FileReader(allowlistedRoots: [URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")])
+let fileAllowlist = [URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Documents")]
 
 @MainActor
 func response(for request: AppleInputRequest) async -> AppleInputResponse {
@@ -34,6 +55,9 @@ func response(for request: AppleInputRequest) async -> AppleInputResponse {
             let page = try notes.read(folderIdentifiers: payload.folderIdentifiers, maximum: payload.maximum)
             return .init(source: "notes", permission: .authorized, records: page.records.map { $0.output() }, truncated: page.truncated)
         case .readFiles(let payload):
+            // Opening a protected user directory may invoke TCC. Keep it off
+            // permission, protocol, and wake-monitor paths until files are read.
+            let files = FileReader(allowlistedRoots: fileAllowlist)
             let page = try files.read(paths: payload.paths)
             return .init(source: "files", permission: .authorized, records: page.records.map { $0.output() }, truncated: page.truncated)
         }

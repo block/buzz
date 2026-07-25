@@ -1,4 +1,5 @@
 pub mod types;
+pub mod wake;
 
 pub mod audit;
 pub mod lmstudio;
