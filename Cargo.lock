@@ -1150,6 +1150,7 @@ name = "buzz-relay"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "async-compression",
  "async-trait",
  "axum",
  "base64",
@@ -1168,6 +1169,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "deadpool-redis",
+ "flate2",
  "futures",
  "futures-util",
  "hex",

@@ -463,7 +463,7 @@ pub fn run() {
             }
 
             // Start the localhost media streaming proxy. Uses the shared HTTP
-            // client so WARP tunnelling applies. The port is stored in AppState
+            // client so VPN tunnelling applies. The port is stored in AppState
             // and exposed to the frontend via the `get_media_proxy_port` command.
             let proxy_client = state.http_client.clone();
             let proxy_handle = app_handle.clone();
@@ -687,6 +687,7 @@ pub fn run() {
             delete_project_remote_branch,
             push_project_local_repository,
             pull_project_local_repository,
+            sign_project_pull_request_status,
             sign_project_pull_request_review_request,
             publish_project_pull_request_merged_status,
             merge_project_pull_request,
@@ -803,6 +804,7 @@ pub fn run() {
             mesh_start_node,
             mesh_stop_node,
             mesh_node_status,
+            mesh_serving_usage,
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,

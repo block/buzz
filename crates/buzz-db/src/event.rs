@@ -71,6 +71,21 @@ pub struct EventQuery {
     /// which needs to fetch all matching events for post-filter counting.
     /// When None, the default clamp of 1000 applies.
     pub max_limit: Option<i64>,
+    /// Persona visibility reader: when set, append an SQL visibility clause
+    /// for kind 30175 before ORDER/LIMIT so private personas are excluded from
+    /// the candidate page rather than discarded after it.
+    ///
+    /// The clause is: `AND (kind != 30175 OR pubkey = $reader OR tags @> ?)`,
+    /// where `?` is the JSONB literal `[["shared","true"]]`.  The GIN index on
+    /// `tags` (migration 0004, jsonb_path_ops) makes the containment check fast.
+    ///
+    /// NOTE: `tags @> '[["shared","true"]]'` uses JSONB containment, which
+    /// matches any tag array that is a superset of `[["shared","true"]]` — it
+    /// would match `["shared","true","extra"]` too.  The ingest `parts.len() ==
+    /// 2` exact-shape check ensures such malformed tags are never stored, so the
+    /// SQL pushdown is sound.  Keeping `event_visible_to_reader` as post-filter
+    /// defense-in-depth catches any residual mismatch.
+    pub persona_reader: Option<Vec<u8>>,
 }
 
 impl EventQuery {
@@ -99,6 +114,7 @@ impl EventQuery {
             e_tags: None,
             channel_ids: None,
             max_limit: None,
+            persona_reader: None,
         }
     }
 }
@@ -483,6 +499,31 @@ pub async fn query_events(pool: &PgPool, q: &EventQuery) -> Result<Vec<StoredEve
             }
             qb.push(")");
         }
+    }
+
+    // Persona visibility pushdown: exclude kind 30175 events that are neither
+    // authored by the reader nor explicitly shared.  Applied BEFORE ORDER/LIMIT
+    // so that a page of newer private personas does not push visible shared ones
+    // off the end of the result set (the catalog query pattern).
+    //
+    // Clause: AND (kind != 30175 OR pubkey = $reader OR tags @> '[["shared","true"]]')
+    //
+    // The JSONB containment check is served by idx_events_tags_gin (migration
+    // 0004, jsonb_path_ops).  `tags @> '[["shared","true"]]'` matches any array
+    // that contains exactly the sub-array — a two-element `["shared","true"]`
+    // tag passes; a tag-absent event does not.  Because ingest now requires
+    // exactly two elements for the shared tag (parts.len() == 2), no stored
+    // event can carry a three-element superset.
+    if let Some(ref reader_bytes) = q.persona_reader {
+        let kind_30175: i32 = 30175;
+        let shared_containment = serde_json::json!([["shared", "true"]]);
+        qb.push(format!(" AND ({col_prefix}kind != "));
+        qb.push_bind(kind_30175);
+        qb.push(format!(" OR {col_prefix}pubkey = "));
+        qb.push_bind(reader_bytes.clone());
+        qb.push(format!(" OR {col_prefix}tags @> "));
+        qb.push_bind(shared_containment);
+        qb.push(")");
     }
 
     // Composite ordering for deterministic pagination across ALL callers of

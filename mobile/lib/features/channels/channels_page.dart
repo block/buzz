@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' show pi;
+import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
@@ -44,6 +46,7 @@ part 'channels_page/channel_tile.dart';
 part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
 part 'channels_page/community.dart';
+part 'channels_page/quick_actions.dart';
 
 enum _QuickAction { createChannel, newDm }
 
@@ -57,8 +60,6 @@ const double _kChannelLabelGap = Grid.xxs;
 const double _kChannelRowVerticalPadding = Grid.xxs + Grid.quarter;
 const double _kChannelLabelInset =
     _kChannelSectionInset + _kChannelLeadingWidth + _kChannelLabelGap;
-const double _kCommunityAvatarInset =
-    _kChannelSectionInset - Grid.quarter; // FrostedAppBar adds Grid.quarter.
 const Duration _kSectionExpandDuration = Duration(milliseconds: 220);
 const Duration _kSectionCollapseDuration = Duration(milliseconds: 170);
 const Curve _kSectionExpandCurve = Cubic(0.23, 1, 0.32, 1);
@@ -155,6 +156,7 @@ class ChannelsPage extends HookConsumerWidget {
       cachedChannels.value = data;
     }
     final channels = cachedChannels.value;
+    final quickActionsOpen = useState(false);
 
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
@@ -165,16 +167,13 @@ class ChannelsPage extends HookConsumerWidget {
       );
     }
 
-    Future<void> openQuickActions() async {
-      final action = await showModalBottomSheet<_QuickAction>(
-        context: context,
-        showDragHandle: true,
-        builder: (_) => const _QuickActionsSheet(),
-      );
-
-      if (!context.mounted || action == null) {
-        return;
+    Future<void> selectQuickAction(_QuickAction action) async {
+      final reducedMotion = MediaQuery.of(context).disableAnimations;
+      quickActionsOpen.value = false;
+      if (!reducedMotion) {
+        await Future<void>.delayed(_kMorphCloseDuration);
       }
+      if (!context.mounted) return;
 
       switch (action) {
         case _QuickAction.createChannel:
@@ -242,6 +241,7 @@ class ChannelsPage extends HookConsumerWidget {
 
     return FrostedScaffold(
       appBar: FrostedAppBar(
+        horizontalInset: _kChannelSectionInset,
         leading: _CommunityIndicator(
           onTap: () => showModalBottomSheet<void>(
             context: context,
@@ -256,27 +256,37 @@ class ChannelsPage extends HookConsumerWidget {
               MaterialPageRoute<void>(builder: (_) => const SettingsPage()),
             ),
           ),
-          const SizedBox(width: Grid.twelve + Grid.quarter),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        heroTag: 'channels-fab',
-        onPressed: openQuickActions,
-        tooltip: 'Create or start conversation',
-        backgroundColor: context.colors.primary,
-        foregroundColor: context.colors.onPrimary,
-        shape: const CircleBorder(),
-        child: const Icon(LucideIcons.plus),
+      floatingActionButton: _MorphingQuickActionsButton(
+        open: quickActionsOpen.value,
+        onToggle: () => quickActionsOpen.value = !quickActionsOpen.value,
+        onSelected: (action) => unawaited(selectQuickAction(action)),
       ),
-      body: _ChannelsBody(
-        channels: channels,
-        channelsAsync: channelsAsync,
-        showError: showError.value,
-        sessionStatus: sessionState.status,
-        showConnectionBanner: showConnectionBanner.value,
-        currentPubkey: currentPubkey,
-        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
-        onSelectChannel: openChannel,
+      body: Stack(
+        children: [
+          _ChannelsBody(
+            channels: channels,
+            channelsAsync: channelsAsync,
+            showError: showError.value,
+            sessionStatus: sessionState.status,
+            showConnectionBanner: showConnectionBanner.value,
+            currentPubkey: currentPubkey,
+            onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+            onSelectChannel: openChannel,
+          ),
+          if (quickActionsOpen.value)
+            Positioned.fill(
+              child: Semantics(
+                button: true,
+                label: 'Close quick actions',
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => quickActionsOpen.value = false,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }

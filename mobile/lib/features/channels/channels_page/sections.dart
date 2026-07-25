@@ -154,7 +154,7 @@ class _CustomSectionHeader extends ConsumerWidget {
             const SizedBox(width: _kChannelLabelGap),
             Text(
               section.name,
-              style: context.textTheme.bodyMedium?.copyWith(
+              style: context.textTheme.bodyLarge?.copyWith(
                 color: sectionColor,
                 fontWeight: FontWeight.w600,
               ),
@@ -430,7 +430,7 @@ class _SectionHeader extends StatelessWidget {
             const SizedBox(width: _kChannelLabelGap),
             Text(
               label,
-              style: context.textTheme.bodyMedium?.copyWith(
+              style: context.textTheme.bodyLarge?.copyWith(
                 color: sectionColor,
                 fontWeight: FontWeight.w600,
               ),

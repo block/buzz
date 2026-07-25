@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { QRCodeSVG } from "qrcode.react";
 import {
   Check,
   Copy,
@@ -19,6 +18,7 @@ import {
   startPairing,
 } from "@/shared/api/tauri";
 import { Button } from "@/shared/ui/button";
+import { StyledQrCode } from "@/shared/ui/styled-qr-code";
 import {
   Dialog,
   DialogContent,
@@ -176,11 +176,11 @@ function PairingDialog({
   return (
     <Dialog onOpenChange={handleOpenChange} open={open}>
       <DialogContent
-        className="max-w-md overflow-hidden p-0"
+        className="max-w-md gap-0 overflow-hidden border-0 px-6 pb-6 pt-6"
         data-testid="mobile-pairing-dialog"
       >
         <div className="flex max-h-[85vh] flex-col">
-          <DialogHeader className="border-b border-border/60 px-6 py-5 pr-14">
+          <DialogHeader className="shrink-0 pb-5 pr-8">
             <DialogTitle>Pair Mobile Device</DialogTitle>
             <DialogDescription>
               {step === "sas"
@@ -191,7 +191,7 @@ function PairingDialog({
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto px-6 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto pt-4">
             {step === "error" && error ? (
               <div className="flex items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -205,35 +205,30 @@ function PairingDialog({
                 </p>
               </div>
             ) : step === "qr" && qrUri ? (
-              <div className="space-y-4">
-                <div className="flex justify-center rounded-lg border border-border/70 bg-white p-4">
-                  <QRCodeSVG
+              <div className="mx-auto grid w-fit gap-4">
+                <div
+                  className="rounded-lg border border-border/70 bg-white p-3"
+                  data-testid="mobile-pairing-qr-container"
+                >
+                  <StyledQrCode
+                    centerImageSrc="/app-icon@2x.png"
                     data-testid="mobile-pairing-qr"
-                    level="M"
                     size={240}
+                    title="Mobile pairing QR code"
                     value={qrUri}
                   />
                 </div>
 
-                <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Pairing code
-                  </p>
-                  <button
-                    className="flex w-full min-w-0 items-center gap-2 break-all rounded-lg border border-border bg-muted/50 px-3 py-2 text-left text-xs transition-colors hover:bg-muted/70"
-                    data-testid="copy-pairing-code"
-                    onClick={handleCopy}
-                    title="Copy pairing code"
-                    type="button"
-                  >
-                    <code className="min-w-0 flex-1 break-all">{qrUri}</code>
-                    <Copy className="h-4 w-4 shrink-0" />
-                  </button>
-                </div>
-
-                <p className="text-center text-xs text-muted-foreground">
-                  Waiting for mobile device to scan...
-                </p>
+                <Button
+                  className="w-full"
+                  data-testid="copy-pairing-code"
+                  onClick={handleCopy}
+                  type="button"
+                  variant="outline"
+                >
+                  <Copy className="mr-1.5 h-4 w-4" />
+                  Copy pairing code
+                </Button>
               </div>
             ) : step === "sas" && sasCode ? (
               <div className="space-y-4">
@@ -296,17 +291,6 @@ function PairingDialog({
                 </p>
               </div>
             ) : null}
-          </div>
-
-          <div className="flex justify-end border-t border-border/60 bg-background/95 px-6 py-4">
-            <Button
-              data-testid="mobile-pairing-done"
-              onClick={() => handleOpenChange(false)}
-              size="sm"
-              variant="outline"
-            >
-              {step === "done" ? "Done" : "Close"}
-            </Button>
           </div>
         </div>
       </DialogContent>

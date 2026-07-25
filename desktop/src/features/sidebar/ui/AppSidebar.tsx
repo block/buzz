@@ -21,6 +21,7 @@ import {
 } from "@/features/sidebar/lib/channelSortPreference";
 import { useChannelSortPreference } from "@/features/sidebar/lib/useChannelSortPreference";
 import { useSidebarScrollLock } from "@/features/sidebar/lib/useSidebarScrollLock";
+import { isSidebarBackgroundTarget } from "@/features/sidebar/lib/sidebarBackgroundTarget";
 import { useUnreadOverflow } from "@/features/sidebar/lib/useUnreadOverflow";
 import {
   CreateSectionDialog,
@@ -54,6 +55,7 @@ import { useDeferredModalOpen } from "@/shared/ui/deferredModalOpen";
 import { SidebarUpdateCard } from "@/features/settings/SidebarUpdateCard";
 import { useUpdaterContext } from "@/features/settings/hooks/UpdaterProvider";
 import { shouldShowSidebarUpdateCard } from "@/features/settings/sidebarUpdateCardVisibility";
+import type { SettingsSection } from "@/features/settings/ui/SettingsPanels";
 import type {
   Channel,
   ChannelVisibility,
@@ -154,7 +156,7 @@ type AppSidebarProps = {
    */
   searchChannels: Channel[];
   searchFocusRequest: number;
-  onSelectSettings: (section?: "profile" | "appearance") => void;
+  onSelectSettings: (section?: SettingsSection) => void;
   onSetPresenceStatus?: (status: "online" | "away" | "offline") => void;
   onSetUserStatus: (text: string, emoji: string) => void;
   onClearUserStatus: () => void;
@@ -162,6 +164,7 @@ type AppSidebarProps = {
   selfUserStatus?: UserStatus;
   isPresencePending?: boolean;
   onNewMessage: () => void;
+  onBackgroundClick?: () => void;
   isCreateChannelOpen?: boolean;
   onCreateChannelOpenChange?: (open: boolean) => void;
   mutedChannelIds?: ReadonlySet<string>;
@@ -179,6 +182,7 @@ export function AppSidebar({
   currentPubkey,
   fallbackDisplayName,
   homeBadgeCount,
+  onBackgroundClick,
   isAddCommunityOpen,
   isLoading,
   isCreatingChannel,
@@ -550,10 +554,16 @@ export function AppSidebar({
       className="!border-r-0"
       collapsible="offcanvas"
       data-testid="app-sidebar"
+      onClick={(event) => {
+        if (isSidebarBackgroundTarget(event.target)) {
+          onBackgroundClick?.();
+        }
+      }}
       variant="sidebar"
     >
       <div
         className="relative flex min-h-0 flex-1 flex-col overflow-hidden"
+        data-sidebar-background
         data-testid="app-sidebar-scroll-anchor"
       >
         <AppSidebarPinnedHeader
@@ -572,6 +582,7 @@ export function AppSidebar({
 
         <div
           className="relative flex min-h-0 flex-1 flex-col"
+          data-sidebar-background
           data-testid="sidebar-channel-content"
         >
           {unreadAboveCount > 0 ? (
@@ -585,10 +596,12 @@ export function AppSidebar({
 
           <SidebarContent
             className="buzz-sidebar-scrollbar overscroll-none"
+            data-sidebar-background
             ref={scrollRef}
           >
             <div
               className="flex w-full flex-col gap-2 px-[3px]"
+              data-sidebar-background
               data-testid="sidebar-scroll-content"
             >
               <AppSidebarPrimaryMenu

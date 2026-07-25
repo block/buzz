@@ -597,3 +597,69 @@ fn owner_roster_without_membership_list_fails_closed() {
 
     assert!(super::owner_ids_from_events(&events).is_empty());
 }
+
+#[test]
+fn serving_usage_extracts_local_and_remote_attempts() {
+    // Captured shape from a live serving node's status payload. The local vs
+    // remote/endpoint split is what tells "my own agent" apart from "a peer
+    // consuming my compute".
+    let payload = json!({
+        "inflight_requests": 0,
+        "peers": [],
+        "routing_metrics": {
+            "request_count": 5,
+            "completion_tokens_observed": 764,
+            "avg_tokens_per_second": 29.651,
+            "local_node": {
+                "current_inflight_requests": 1,
+                "peak_inflight_requests": 2,
+                "local_attempt_count": 4,
+                "remote_attempt_count": 0,
+                "endpoint_attempt_count": 0
+            }
+        }
+    });
+    let usage = super::serving_usage_from_payload(&payload);
+    assert_eq!(usage.inflight, 1);
+    assert_eq!(usage.peak_inflight, 2);
+    assert_eq!(usage.requests_served, 5);
+    assert_eq!(usage.tokens_served, 764);
+    assert_eq!(usage.local_attempts, 4);
+    assert_eq!(usage.remote_attempts, 0);
+    assert_eq!(usage.endpoint_attempts, 0);
+    assert!(
+        !usage.has_remote_consumers(),
+        "all-local traffic is not a remote consumer"
+    );
+}
+
+#[test]
+fn serving_usage_flags_remote_consumer() {
+    let payload = json!({
+        "peers": [{"id": "a"}, {"id": "b"}],
+        "routing_metrics": {
+            "request_count": 10,
+            "local_node": {
+                "local_attempt_count": 3,
+                "remote_attempt_count": 6,
+                "endpoint_attempt_count": 1
+            }
+        }
+    });
+    let usage = super::serving_usage_from_payload(&payload);
+    assert_eq!(usage.remote_attempts, 6);
+    assert_eq!(usage.endpoint_attempts, 1);
+    assert_eq!(usage.peers, 2);
+    assert!(
+        usage.has_remote_consumers(),
+        "remote/endpoint attempts mean someone else is using my compute"
+    );
+}
+
+#[test]
+fn serving_usage_defaults_to_zero_on_missing_fields() {
+    // SDK shape drift must degrade to "no usage" not panic.
+    let usage = super::serving_usage_from_payload(&json!({}));
+    assert_eq!(usage, super::MeshServingUsage::default());
+    assert!(!usage.has_remote_consumers());
+}

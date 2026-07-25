@@ -32,11 +32,19 @@ class _MessageBubble extends ConsumerWidget {
 
     // Build mention names map from event p-tags.
     final userCache = ref.watch(userCacheProvider);
+    final knownAgentPubkeys = ref.watch(
+      mentionAgentPubkeysProvider(currentChannelId),
+    );
     final mentionNames = <String, String>{};
+    final agentMentionPubkeys = <String>{};
     for (final mpk in message.mentionPubkeys) {
-      final p = userCache[mpk.toLowerCase()];
+      final normalizedPubkey = mpk.toLowerCase();
+      final p = userCache[normalizedPubkey];
       if (p?.displayName != null) {
-        mentionNames[mpk.toLowerCase()] = p!.displayName!;
+        mentionNames[normalizedPubkey] = p!.displayName!;
+      }
+      if (knownAgentPubkeys.contains(normalizedPubkey)) {
+        agentMentionPubkeys.add(normalizedPubkey);
       }
     }
 
@@ -67,70 +75,74 @@ class _MessageBubble extends ConsumerWidget {
                 child: _UserAvatar(profile: profile, pubkey: message.pubkey),
               )
             else
-              const SizedBox(width: 28),
+              const SizedBox(width: 36),
             const SizedBox(width: Grid.xxs),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (showAuthor)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: Grid.quarter),
-                      child: Row(
-                        children: [
-                          GestureDetector(
-                            onTap: () =>
-                                showUserProfileSheet(context, message.pubkey),
-                            child: Text(
-                              displayName,
-                              style: context.textTheme.labelMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: context.colors.onSurface,
+              child: Transform.translate(
+                offset: Offset(0, showAuthor ? -Grid.quarter : 0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (showAuthor)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: Grid.quarter),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            GestureDetector(
+                              onTap: () =>
+                                  showUserProfileSheet(context, message.pubkey),
+                              child: Text(
+                                displayName,
+                                style: context.textTheme.titleSmall?.copyWith(
+                                  fontWeight: FontWeight.w600,
+                                  color: context.colors.onSurface,
+                                ),
                               ),
                             ),
-                          ),
-                          const SizedBox(width: Grid.xxs),
-                          Text(
-                            formatMessageTime(message.createdAt),
-                            style: context.textTheme.labelSmall?.copyWith(
-                              color: context.colors.onSurfaceVariant,
-                            ),
-                          ),
-                          if (message.edited) ...[
-                            const SizedBox(width: Grid.half),
-                            Text(
-                              '(edited)',
-                              style: context.textTheme.labelSmall?.copyWith(
-                                color: context.colors.onSurfaceVariant,
-                                fontStyle: FontStyle.italic,
+                            const SizedBox(width: Grid.xxs),
+                            _messageTimestamp(context, message.createdAt),
+                            if (message.edited) ...[
+                              const SizedBox(width: Grid.half),
+                              Text(
+                                '(edited)',
+                                style: context.textTheme.labelSmall?.copyWith(
+                                  color: context.colors.onSurfaceVariant,
+                                  fontStyle: FontStyle.italic,
+                                ),
                               ),
-                            ),
+                            ],
                           ],
-                        ],
+                        ),
                       ),
+                    MessageContent(
+                      content: message.content,
+                      mentionNames: mentionNames,
+                      agentMentionPubkeys: agentMentionPubkeys,
+                      channelNames: channelNames,
+                      tags: message.tags,
+                      baseStyle: context.textTheme.bodyLarge?.copyWith(
+                        color: context.colors.onSurface,
+                      ),
+                      onChannelTap: (channelId) {
+                        openChannelLink(
+                          context: context,
+                          ref: ref,
+                          channelId: channelId,
+                          currentChannelId: currentChannelId,
+                        );
+                      },
+                      onMentionTap: (pubkey) =>
+                          showUserProfileSheet(context, pubkey),
                     ),
-                  MessageContent(
-                    content: message.content,
-                    mentionNames: mentionNames,
-                    channelNames: channelNames,
-                    tags: message.tags,
-                    onChannelTap: (channelId) {
-                      openChannelLink(
-                        context: context,
-                        ref: ref,
-                        channelId: channelId,
-                        currentChannelId: currentChannelId,
-                      );
-                    },
-                    onMentionTap: (pubkey) =>
-                        showUserProfileSheet(context, pubkey),
-                  ),
-                  if (message.reactions.isNotEmpty)
-                    ReactionRow(
-                      reactions: message.reactions,
-                      onToggle: (emoji) => toggleReaction(ref, message, emoji),
-                    ),
-                ],
+                    if (message.reactions.isNotEmpty)
+                      ReactionRow(
+                        reactions: message.reactions,
+                        onToggle: (emoji) =>
+                            toggleReaction(ref, message, emoji),
+                      ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -140,11 +152,28 @@ class _MessageBubble extends ConsumerWidget {
   }
 }
 
+Widget _messageTimestamp(BuildContext context, int createdAt) {
+  return Text(
+    formatMessageTime(createdAt),
+    style: context.textTheme.labelSmall?.copyWith(
+      fontSize: 14,
+      height: 22 / 14,
+      letterSpacing: context.textTheme.titleSmall?.letterSpacing,
+      color: context.colors.onSurfaceVariant,
+    ),
+  );
+}
+
 class _UserAvatar extends StatelessWidget {
   final UserProfile? profile;
   final String pubkey;
+  final double size;
 
-  const _UserAvatar({required this.profile, required this.pubkey});
+  const _UserAvatar({
+    required this.profile,
+    required this.pubkey,
+    this.size = 36,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -154,14 +183,18 @@ class _UserAvatar extends StatelessWidget {
 
     return AvatarImage(
       imageUrl: avatarUrl,
-      radius: 14,
+      radius: size / 2,
       backgroundColor: context.colors.primaryContainer,
       fallback: Text(
         initial,
-        style: context.textTheme.labelSmall?.copyWith(
-          color: context.colors.onPrimaryContainer,
-          fontWeight: FontWeight.w600,
-        ),
+        style:
+            (size > 28
+                    ? context.textTheme.labelMedium
+                    : context.textTheme.labelSmall)
+                ?.copyWith(
+                  color: context.colors.onPrimaryContainer,
+                  fontWeight: FontWeight.w600,
+                ),
       ),
     );
   }

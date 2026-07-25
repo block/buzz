@@ -41,6 +41,14 @@ test("reads source and target branches from the pull request", () => {
   assert.equal(pullRequest.targetBranch, "release");
 });
 
+test("preserves an optional source channel from the pull request", () => {
+  const event = pullRequestEvent();
+  event.tags.push(["h", "source-channel-id"]);
+
+  assert.equal(eventToProjectPullRequest(event).channelId, "source-channel-id");
+  assert.equal(eventToProjectPullRequest(pullRequestEvent()).channelId, null);
+});
+
 function updateEvent({ pubkey, createdAt, commit, cloneUrl }) {
   return {
     id: `update-${pubkey.slice(0, 8)}-${createdAt}`,
@@ -232,6 +240,37 @@ test("parses commit-scoped inline comment anchors", () => {
   });
   assert.equal(pullRequest.comments[0].inlineCommentStatus, "current");
   assert.equal(pullRequest.comments[0].isInlineComment, true);
+});
+
+test("keeps anchors on comment-backed change requests", () => {
+  const commit = "1111111111111111111111111111111111111111";
+  const comment = commentEvent({
+    pubkey: OWNER,
+    createdAt: 150,
+    content: "Please handle the empty state before merging.",
+    labels: ["changes-requested"],
+    commit,
+    anchor: { path: "src/example.ts", side: "new", line: 12 },
+  });
+
+  const pullRequest = eventToProjectPullRequest(
+    pullRequestEvent(),
+    [],
+    [comment],
+  );
+  const parsedComment = pullRequest.comments[0];
+
+  assert.deepEqual(parsedComment.anchor, {
+    path: "src/example.ts",
+    side: "new",
+    line: 12,
+  });
+  assert.equal(parsedComment.isTrustedReviewDecision, true);
+  assert.equal(
+    projectPullRequestCommentTimelineKind(parsedComment),
+    "changes-requested",
+  );
+  assert.equal(pullRequest.changeRequests.length, 1);
 });
 
 test("marks inline comments on earlier commits as outdated", () => {
