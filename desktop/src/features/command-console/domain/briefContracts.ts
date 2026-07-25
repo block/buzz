@@ -103,6 +103,12 @@ export type AdviserContribution = {
   }[];
 };
 
+export type SourceFreshness = {
+  readonly classification: "OFFICIAL";
+  readonly asOf: string;
+  readonly staleSourceIds: readonly string[];
+};
+
 export type CommandBrief = {
   readonly version: 1;
   readonly classification: "OFFICIAL";
@@ -115,11 +121,7 @@ export type CommandBrief = {
   readonly missingInformation: readonly string[];
   readonly dissent: readonly string[];
   readonly sourceLedger: readonly SourceLedgerEntry[];
-  readonly sourceFreshness: {
-    readonly classification: "OFFICIAL";
-    readonly asOf: string;
-    readonly staleSourceIds: readonly string[];
-  };
+  readonly sourceFreshness: SourceFreshness;
   readonly contributions: readonly AdviserContribution[];
   readonly advisoryLimitation: typeof ADVISORY_LIMITATION;
 };

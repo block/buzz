@@ -6,15 +6,6 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { CommandConsoleScreen } from "./CommandConsoleScreen.tsx";
 
-const ADVISERS = [
-  "Chief of Staff",
-  "Operations",
-  "Navigation",
-  "Daily Routine",
-  "Reporting",
-  "Plans",
-];
-
 test("CommandConsoleScreen renders an unmistakable OFFICIAL classification", () => {
   const html = renderToStaticMarkup(React.createElement(CommandConsoleScreen));
 
@@ -23,12 +14,11 @@ test("CommandConsoleScreen renders an unmistakable OFFICIAL classification", () 
   assert.match(html, />OFFICIAL</);
 });
 
-test("CommandConsoleScreen marks all six adviser placeholders as not yet operational", () => {
+test("CommandConsoleScreen installs the real advisory Daily Command Brief without placeholder claims", () => {
   const html = renderToStaticMarkup(React.createElement(CommandConsoleScreen));
 
-  for (const adviser of ADVISERS) {
-    assert.match(html, new RegExp(`>${adviser}<`));
-  }
-
-  assert.equal(html.match(/>Not yet operational</g)?.length, ADVISERS.length);
+  assert.match(html, /data-testid="daily-command-brief"/);
+  assert.match(html, />Daily Command Brief</);
+  assert.match(html, /Advisory, non-accredited decision support/);
+  assert.doesNotMatch(html, /placeholder|not yet operational/i);
 });

@@ -1,0 +1,249 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+
+import { DailyCommandBrief } from "./DailyCommandBrief.tsx";
+
+const finding = {
+  classification: "OFFICIAL",
+  text: "Review the verified priority.",
+  sourceIds: ["ledger-1"],
+};
+const advisers = [
+  ["operations", "operations"],
+  ["navigation", "navigation"],
+  ["daily_routine", "daily_routine"],
+  ["reporting", "reports"],
+  ["plans", "planning_30_60_90"],
+].map(([adviser, section], index) => ({
+  classification: "OFFICIAL",
+  adviser,
+  section,
+  findings: [finding],
+  confidence: 0.8 - index * 0.05,
+  limitations:
+    adviser === "navigation" ? ["Chart update age requires review."] : [],
+  dissent: adviser === "plans" ? ["Plans retains a dissenting view."] : [],
+  proposedActions: [
+    {
+      classification: "OFFICIAL",
+      actionId: `action-${index}`,
+      text: "Prepare a workspace checklist proposal.",
+      approvalState: "pending",
+    },
+  ],
+}));
+
+const sectionKeys = [
+  "today",
+  "operations",
+  "navigation",
+  "daily_routine",
+  "reports",
+  "planning_30_60_90",
+  "decisions",
+  "conflicts_and_gaps",
+  "sources",
+];
+const sections = Object.fromEntries(sectionKeys.map((key) => [key, [finding]]));
+const published = {
+  classification: "OFFICIAL",
+  lifecycleAuditEventId: "event-1",
+  publicationState: "queued",
+  brief: {
+    version: 1,
+    classification: "OFFICIAL",
+    generatedAt: "2026-07-25T06:00:00Z",
+    runId: "run-1",
+    scheduleId: "daily-command-brief",
+    snapshotId: "snapshot-verified",
+    sections,
+    degradedSections: ["navigation"],
+    missingInformation: ["Reminders permission is denied."],
+    dissent: ["Plans retains a dissenting view."],
+    sourceLedger: [
+      {
+        classification: "OFFICIAL",
+        ledgerId: "ledger-1",
+        sourceId: "source-1",
+        sourceKind: "rag",
+        collection: "navigation",
+        documentId: "doc-1",
+        chunkId: "chunk-4",
+        timestamp: "2026-07-25T05:30:00Z",
+        snapshotId: "snapshot-verified",
+        quotedLocation: { quote: "hidden evidence", location: "page 7" },
+        retrievedAt: "2026-07-25T05:55:00Z",
+        observedAt: "2026-07-25T05:56:00Z",
+      },
+    ],
+    sourceFreshness: {
+      classification: "OFFICIAL",
+      asOf: "2026-07-25T05:56:00Z",
+      staleSourceIds: ["ledger-1"],
+    },
+    contributions: advisers,
+    advisoryLimitation:
+      "This Daily Command Brief is advisory only. Navigation content identifies considerations and source limitations; it does not generate executable navigation orders or make navigational decisions.",
+  },
+};
+
+const schedule = {
+  classification: "OFFICIAL",
+  scheduleId: "daily-command-brief",
+  enabled: true,
+  localTime: "06:00",
+  timezone: "Australia/Sydney",
+  catchUpSameDay: true,
+  concurrency: 1,
+};
+
+function render(overrides = {}) {
+  return renderToStaticMarkup(
+    React.createElement(DailyCommandBrief, {
+      status: null,
+      history: [],
+      latest: null,
+      schedule,
+      loading: false,
+      busy: false,
+      error: null,
+      onGenerate: () => {},
+      onCancel: () => {},
+      onScheduleChange: () => {},
+      ...overrides,
+    }),
+  );
+}
+
+test("renders no-brief and queued/running/failed lifecycle states with truthful controls", () => {
+  assert.match(render(), /No Daily Command Brief has been generated/);
+
+  const running = render({
+    status: {
+      classification: "OFFICIAL",
+      runId: "run-1",
+      scheduleId: "daily-command-brief",
+      state: "running_specialists",
+      updatedAt: "2026-07-25T06:00:00Z",
+      degradedSections: [],
+      error: null,
+    },
+  });
+  assert.match(running, />Running specialists</);
+  assert.match(running, />Cancel generation</);
+  assert.match(running, /aria-live="polite"/);
+
+  const failed = render({
+    status: {
+      classification: "OFFICIAL",
+      runId: "run-1",
+      scheduleId: "daily-command-brief",
+      state: "failed",
+      updatedAt: "2026-07-25T06:00:00Z",
+      degradedSections: ["navigation"],
+      error: "source_unavailable",
+    },
+  });
+  assert.match(failed, />Failed</);
+  assert.match(failed, /source_unavailable/);
+});
+
+test("renders the bounded native lifecycle history as metadata only", () => {
+  const html = render({
+    status: {
+      classification: "OFFICIAL",
+      runId: "run-1",
+      scheduleId: "daily-command-brief",
+      state: "running_specialists",
+      updatedAt: "2026-07-25T06:02:00Z",
+      degradedSections: [],
+      error: null,
+    },
+    history: [
+      {
+        classification: "OFFICIAL",
+        runId: "run-1",
+        scheduleId: "daily-command-brief",
+        state: "queued",
+        updatedAt: "2026-07-25T06:00:00Z",
+        degradedSections: [],
+        error: null,
+      },
+      {
+        classification: "OFFICIAL",
+        runId: "run-1",
+        scheduleId: "daily-command-brief",
+        state: "running_specialists",
+        updatedAt: "2026-07-25T06:02:00Z",
+        degradedSections: [],
+        error: null,
+      },
+    ],
+  });
+  assert.match(html, />Lifecycle history</);
+  assert.match(html, />Queued</);
+  assert.match(html, />Running specialists</);
+  assert.doesNotMatch(html, /prompt|reasoning|provider body/i);
+});
+
+test("renders complete degraded queued-offline brief with all nine sections and adviser evidence", () => {
+  const html = render({
+    latest: published,
+    status: {
+      classification: "OFFICIAL",
+      runId: "run-1",
+      scheduleId: "daily-command-brief",
+      state: "degraded",
+      updatedAt: "2026-07-25T06:10:00Z",
+      degradedSections: ["navigation"],
+      error: null,
+    },
+  });
+
+  for (const heading of [
+    "Today at a glance",
+    "Operational priorities and risks",
+    "Navigation considerations",
+    "Daily routine and calendar",
+    "Reports and returns due",
+    "30, 60 and 90 day planning horizon",
+    "Decisions required",
+    "Conflicts and gaps",
+    "Sources",
+  ]) {
+    assert.match(html, new RegExp(`>${heading}<`));
+  }
+  for (const adviser of [
+    "Operations",
+    "Navigation",
+    "Daily Routine",
+    "Reporting",
+    "Plans",
+  ]) {
+    assert.match(html, new RegExp(`>${adviser}<`));
+  }
+  assert.match(html, /80% confidence/);
+  assert.match(html, /Chart update age requires review/);
+  assert.match(html, /Plans retains a dissenting view/);
+  assert.match(html, />Pending proposal</);
+  assert.match(html, /href="#command-brief-source-ledger-1"/);
+  assert.match(html, /Relay publication queued — offline capable/);
+  assert.match(html, /Reminders permission is denied/);
+  assert.match(html, /snapshot-verified/);
+  assert.match(html, /Stale source/);
+  assert.doesNotMatch(html, /hidden evidence/);
+  assert.doesNotMatch(html, /approve|execute action/i);
+});
+
+test("renders accessible schedule enable, time, and capacity controls with timezone context", () => {
+  const html = render();
+  assert.match(html, /aria-label="Enable scheduled Daily Command Brief"/);
+  assert.match(html, /aria-label="Daily Command Brief local time"/);
+  assert.match(html, /aria-label="Local model concurrency"/);
+  assert.match(html, /Australia\/Sydney/);
+  assert.match(html, />1 adviser at a time</);
+  assert.match(html, />2 advisers at a time</);
+});

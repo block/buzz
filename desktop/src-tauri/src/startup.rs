@@ -19,7 +19,7 @@ use crate::command_brief::orchestrator::{
 use crate::command_brief::schedule::{
     current_macos_timezone, due_local_date, idempotency_key, load_or_create_schedule,
     process_due_schedule, DeferredReason, ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger,
-    ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError,
+    ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError, DEFAULT_SCHEDULE_ID,
 };
 use crate::command_brief::scheduler::LocalModelScheduler;
 use crate::command_brief::sources::{ProductionSourceBackend, SourceBackend};
@@ -464,12 +464,46 @@ impl CommandBriefRuntimeSet {
         }
     }
 
-    fn all(&self) -> Vec<Arc<InstalledCommandBriefRuntime>> {
+    pub(crate) fn all(&self) -> Vec<Arc<InstalledCommandBriefRuntime>> {
         self.current
             .iter()
             .chain(self.retired.iter())
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn latest_status_and_history(
+        &self,
+    ) -> Option<(
+        crate::command_brief::types::BriefRunStatus,
+        Vec<crate::command_brief::types::BriefRunStatus>,
+    )> {
+        self.all()
+            .into_iter()
+            .filter_map(|runtime| runtime.orchestrator.latest_status_history_result())
+            .max_by(|left, right| {
+                left.0
+                    .updated_at()
+                    .cmp(right.0.updated_at())
+                    .then_with(|| left.0.run_id().cmp(right.0.run_id()))
+            })
+            .map(|(status, history, _)| (status, history))
+    }
+
+    pub(crate) fn status(
+        &self,
+        run_id: &str,
+    ) -> Option<crate::command_brief::types::BriefRunStatus> {
+        self.all()
+            .into_iter()
+            .find_map(|runtime| runtime.orchestrator.status(run_id))
+    }
+
+    pub(crate) fn cancel(&self, run_id: &str) -> bool {
+        self.all()
+            .into_iter()
+            .find(|runtime| runtime.orchestrator.status(run_id).is_some())
+            .is_some_and(|runtime| runtime.orchestrator.cancel(run_id))
     }
 }
 
@@ -513,6 +547,7 @@ impl RuntimeReadiness {
 }
 
 struct OrchestratorStarter<'a> {
+    app: AppHandle,
     current: &'a CommandBriefOrchestrator,
     runtimes: &'a [Arc<InstalledCommandBriefRuntime>],
     store_path: &'a std::path::Path,
@@ -529,7 +564,8 @@ impl ScheduledRunStarter for OrchestratorStarter<'_> {
     ) -> Result<String, ScheduledStartError> {
         let request = CommandBriefRequest::new(schedule_id, SCHEDULED_CO_REQUEST, observed_at)
             .map_err(|_| ScheduledStartError::Unavailable)?;
-        self.current
+        let started = self
+            .current
             .start_exact(run_id, request)
             .map_err(|error| match error {
                 crate::command_brief::orchestrator::OrchestratorStartError::AdmissionUnavailable => {
@@ -538,7 +574,9 @@ impl ScheduledRunStarter for OrchestratorStarter<'_> {
                 crate::command_brief::orchestrator::OrchestratorStartError::Rejected => {
                     ScheduledStartError::Unavailable
                 }
-            })
+            })?;
+        crate::commands::watch_command_brief_status(self.app.clone(), started.clone(), None);
+        Ok(started)
     }
 
     fn presence(&self, run_id: &str) -> ScheduledRunPresence {
@@ -683,6 +721,7 @@ async fn run_command_brief_schedule_with_model_observation(
         trigger,
         &readiness,
         &OrchestratorStarter {
+            app: app.clone(),
             current: &runtime.orchestrator,
             runtimes: &runtimes,
             store_path: &store_path,
@@ -839,10 +878,52 @@ async fn ensure_production_runtime(
     Ok(runtime)
 }
 
-fn command_brief_store_path() -> Result<std::path::PathBuf, String> {
+pub(crate) fn command_brief_store_path() -> Result<std::path::PathBuf, String> {
     crate::managed_agents::nest_dir()
         .map(|nest| nest.join("command-brief").join("audit.db"))
         .ok_or_else(|| "command brief store unavailable".to_string())
+}
+
+const MANUAL_CO_REQUEST: &str =
+    "Produce the current Daily Command Brief using only admitted local OFFICIAL sources.";
+
+/// Start one fixed-policy manual brief without accepting renderer prompt,
+/// persona, tool, model, endpoint, or classification input.
+pub(crate) async fn start_manual_command_brief(
+    app: AppHandle,
+) -> Result<crate::command_brief::types::BriefRunStatus, String> {
+    let store_path = command_brief_store_path()?;
+    let conn = open_command_brief_store(&store_path)?;
+    let timezone = current_macos_timezone()?;
+    let schedule = load_or_create_schedule(&conn, &timezone, Utc::now().timestamp())?;
+    let readiness = crate::commands::read_lmstudio_readiness(app.clone())
+        .await
+        .map_err(|_| "command brief model unavailable".to_string())?;
+    if readiness.status != LmStudioReadinessState::Ready {
+        return Err("command brief model unavailable".to_string());
+    }
+    let model = readiness
+        .configured_model
+        .clone()
+        .or_else(|| readiness.loaded_models.first().cloned())
+        .ok_or_else(|| "command brief model unavailable".to_string())?;
+    let preflight = production_preflight(&app, &schedule, &model)
+        .await
+        .map_err(|_| "command brief runtime unavailable".to_string())?;
+    let runtime = ensure_production_runtime(&app, &preflight, store_path)
+        .await
+        .map_err(|_| "command brief runtime unavailable".to_string())?;
+    let observed_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let request = CommandBriefRequest::new(DEFAULT_SCHEDULE_ID, MANUAL_CO_REQUEST, &observed_at)
+        .map_err(|_| "command brief runtime unavailable".to_string())?;
+    let run_id = runtime
+        .orchestrator
+        .start(request)
+        .map_err(|_| "command brief runtime unavailable".to_string())?;
+    runtime
+        .orchestrator
+        .status(&run_id)
+        .ok_or_else(|| "command brief runtime unavailable".to_string())
 }
 
 struct NoStarter;

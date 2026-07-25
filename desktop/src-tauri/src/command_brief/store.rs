@@ -115,6 +115,16 @@ pub struct DueSpoolEvent {
     pub next_retry_at: i64,
 }
 
+/// One owner-scoped immutable terminal used by the validated reader view.
+pub struct StoredBriefEvent {
+    /// Exact signed event identity.
+    pub event_id: String,
+    /// Exact signed event JSON.
+    pub raw_event: String,
+    /// Current relay publication state.
+    pub publish_state: PublishState,
+}
+
 /// Open the protected spool with WAL and apply any required atomic migration.
 ///
 /// Full integrity and exact-schema validation belongs to startup, migration,
@@ -148,6 +158,44 @@ pub fn has_spooled_terminal(
         |row| row.get(0),
     )
     .map_err(|_| "command brief spool unavailable".to_string())
+}
+
+/// Return the newest completed/degraded terminal for exactly one owner.
+pub fn latest_brief_event_for_owner(
+    conn: &Connection,
+    owner_pubkey: &str,
+) -> Result<Option<StoredBriefEvent>, String> {
+    let row = conn
+        .query_row(
+            "SELECT event_id,raw_event,publish_state
+             FROM command_brief_spool
+             WHERE owner_pubkey=?1 AND status IN ('completed','degraded')
+             ORDER BY created_at DESC,rowid DESC
+             LIMIT 1",
+            [owner_pubkey],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|_| "command brief history unavailable")?;
+    row.map(|(event_id, raw_event, state)| {
+        let publish_state = match state.as_str() {
+            "queued" => PublishState::Queued,
+            "published" => PublishState::Published,
+            _ => return Err("command brief history unavailable".to_string()),
+        };
+        Ok(StoredBriefEvent {
+            event_id,
+            raw_event,
+            publish_state,
+        })
+    })
+    .transpose()
 }
 
 /// Apply the schema as one exclusive transaction.

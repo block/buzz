@@ -32,6 +32,29 @@ pub(crate) enum OrchestratorAdmissionState {
 }
 
 impl CommandBriefOrchestrator {
+    /// Return the newest run status, its bounded history, and immutable result.
+    pub fn latest_status_history_result(
+        &self,
+    ) -> Option<(
+        BriefRunStatus,
+        Vec<BriefRunStatus>,
+        Option<PublishedCommandBrief>,
+    )> {
+        let runs = self.inner.runs.lock().ok()?;
+        let (_, record) = runs.iter().max_by(|(left_id, left), (right_id, right)| {
+            left.history
+                .back()
+                .map(BriefRunStatus::updated_at)
+                .cmp(&right.history.back().map(BriefRunStatus::updated_at))
+                .then_with(|| left_id.cmp(right_id))
+        })?;
+        Some((
+            record.history.back()?.clone(),
+            record.history.iter().cloned().collect(),
+            record.result.clone(),
+        ))
+    }
+
     /// Return the trusted, metadata-only top-level run admission state.
     pub(crate) fn admission_state(&self) -> OrchestratorAdmissionState {
         self.inner

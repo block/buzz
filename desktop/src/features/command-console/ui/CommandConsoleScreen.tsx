@@ -1,59 +1,13 @@
-import {
-  CalendarClock,
-  ClipboardList,
-  Compass,
-  FileChartColumn,
-  ListTodo,
-  ShieldCheck,
-  Users,
-} from "lucide-react";
+import { AlertTriangle, ShieldCheck } from "lucide-react";
 
-import { Badge } from "@/shared/ui/badge";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/shared/ui/card";
 import { useCommandConsoleStatus } from "../hooks/useCommandConsoleStatus";
+import { useDailyCommandBrief } from "../hooks/useDailyCommandBrief";
 import { CommandSystemStatus } from "./CommandSystemStatus";
-
-const ADVISERS = [
-  {
-    description: "Command coordination and priority synthesis placeholder.",
-    icon: Users,
-    name: "Chief of Staff",
-  },
-  {
-    description: "Operational readiness and activity review placeholder.",
-    icon: ClipboardList,
-    name: "Operations",
-  },
-  {
-    description: "Passage and situational planning placeholder.",
-    icon: Compass,
-    name: "Navigation",
-  },
-  {
-    description: "Recurring schedule and routine review placeholder.",
-    icon: CalendarClock,
-    name: "Daily Routine",
-  },
-  {
-    description: "Briefing and report preparation placeholder.",
-    icon: FileChartColumn,
-    name: "Reporting",
-  },
-  {
-    description: "Forward planning and decision support placeholder.",
-    icon: ListTodo,
-    name: "Plans",
-  },
-] as const;
+import { DailyCommandBrief } from "./DailyCommandBrief";
 
 export function CommandConsoleScreen() {
   const systemStatus = useCommandConsoleStatus();
+  const commandBrief = useDailyCommandBrief();
 
   return (
     <div
@@ -76,56 +30,54 @@ export function CommandConsoleScreen() {
 
         <header className="space-y-2">
           <p className="text-sm font-medium text-muted-foreground">
-            Phase 1 foundation
+            HMAS Supply virtual command team
           </p>
           <h1 className="text-3xl font-semibold tracking-tight">
             Command Console
           </h1>
           <p className="max-w-3xl text-base text-muted-foreground">
-            Adviser execution is not connected. These roles are visible now so
-            the future command workspace remains explicit without presenting
-            simulated advice or readiness.
+            A local-first, evidence-cited advisory workspace for daily command
+            awareness and forward planning.
           </p>
         </header>
 
-        <CommandSystemStatus status={systemStatus} />
-
-        <section aria-labelledby="adviser-placeholders-heading">
-          <div className="mb-4">
-            <h2
-              className="text-lg font-semibold"
-              id="adviser-placeholders-heading"
-            >
-              Adviser placeholders
+        <section className="flex gap-3 rounded-xl border border-warning/30 bg-warning/10 p-4">
+          <AlertTriangle
+            className="mt-0.5 h-5 w-5 shrink-0 text-warning"
+            aria-hidden="true"
+          />
+          <div>
+            <h2 className="text-sm font-semibold">
+              Advisory, non-accredited decision support
             </h2>
-            <p className="text-sm text-muted-foreground">
-              No adviser can run, retrieve data, or propose actions in this
-              phase.
+            <p className="mt-1 text-sm text-muted-foreground">
+              The Command Console supports human judgement. It does not make
+              navigational decisions, issue executable orders, or control ship
+              systems.
             </p>
           </div>
-
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-            {ADVISERS.map((adviser) => {
-              const Icon = adviser.icon;
-              return (
-                <Card key={adviser.name}>
-                  <CardHeader className="gap-3 pb-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="rounded-lg bg-muted p-2 text-muted-foreground">
-                        <Icon className="h-5 w-5" aria-hidden="true" />
-                      </div>
-                      <Badge variant="warning">Not yet operational</Badge>
-                    </div>
-                    <CardTitle className="text-base">{adviser.name}</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <CardDescription>{adviser.description}</CardDescription>
-                  </CardContent>
-                </Card>
-              );
-            })}
-          </div>
         </section>
+
+        <CommandSystemStatus status={systemStatus} />
+
+        <DailyCommandBrief
+          busy={commandBrief.busy}
+          error={commandBrief.error}
+          history={commandBrief.history}
+          latest={commandBrief.latest}
+          loading={commandBrief.loading}
+          onCancel={() => {
+            void commandBrief.cancel();
+          }}
+          onGenerate={() => {
+            void commandBrief.start();
+          }}
+          onScheduleChange={(update) => {
+            void commandBrief.updateSchedule(update);
+          }}
+          schedule={commandBrief.schedule}
+          status={commandBrief.status}
+        />
       </main>
     </div>
   );

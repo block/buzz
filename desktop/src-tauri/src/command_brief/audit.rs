@@ -19,9 +19,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::orchestrator::{BriefFuture, BriefPersistence, BriefPersistenceError};
 use super::store::{
-    insert_spool_event, latest_event_id, list_due_spool_events, mark_publish_failed,
-    mark_publish_permanent, mark_published, open_command_brief_store, rearm_queued_spool_events,
-    validate_due_spool_event, SpoolInsert,
+    insert_spool_event, latest_brief_event_for_owner, latest_event_id, list_due_spool_events,
+    mark_publish_failed, mark_publish_permanent, mark_published, open_command_brief_store,
+    rearm_queued_spool_events, validate_due_spool_event, PublishState, SpoolInsert,
 };
 use super::types::{CommandBrief, PublicationState, PublishedCommandBrief};
 
@@ -486,6 +486,42 @@ impl EncryptedBriefAudit {
         let value = payload.final_brief.ok_or(BriefAuditError::Failed)?;
         CommandBrief::try_from(value.into_value()).map_err(|_| BriefAuditError::Failed)
     }
+}
+
+/// Load the newest owner-scoped completed brief through the same decryption and
+/// authoritative contract validation used at persistence time.
+pub fn load_latest_published_brief(
+    path: &std::path::Path,
+    owner_keys: &Keys,
+) -> Result<Option<PublishedCommandBrief>, BriefAuditError> {
+    let conn = open_command_brief_store(path).map_err(|_| BriefAuditError::Failed)?;
+    let owner = owner_keys.public_key().to_hex();
+    let Some(stored) =
+        latest_brief_event_for_owner(&conn, &owner).map_err(|_| BriefAuditError::Failed)?
+    else {
+        return Ok(None);
+    };
+    let event = Event::from_json(&stored.raw_event).map_err(|_| BriefAuditError::Failed)?;
+    if event.id.to_hex() != stored.event_id
+        || event.pubkey.to_hex() != owner
+        || !event.verify_id()
+        || !event.verify_signature()
+    {
+        return Err(BriefAuditError::Failed);
+    }
+    let payload =
+        decrypt_command_brief_event(owner_keys, &event).map_err(|_| BriefAuditError::Failed)?;
+    let value = payload.final_brief.ok_or(BriefAuditError::Failed)?;
+    let brief = CommandBrief::try_from(value.into_value()).map_err(|_| BriefAuditError::Failed)?;
+    let publication_state = match stored.publish_state {
+        PublishState::Queued => PublicationState::Queued,
+        PublishState::Published => PublicationState::Published,
+    };
+    Ok(Some(PublishedCommandBrief::new(
+        brief,
+        stored.event_id,
+        publication_state,
+    )))
 }
 
 fn lifecycle_label(state: CommandBriefLifecycleState) -> &'static str {

@@ -882,6 +882,23 @@ impl TryFrom<Value> for BriefRunStatus {
     }
 }
 
+impl BriefRunStatus {
+    /// Return the native-owned run identity.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
+    /// Return the closed lifecycle state.
+    pub const fn state(&self) -> BriefRunState {
+        self.state
+    }
+
+    /// Return the trusted status timestamp used for bounded ordering.
+    pub fn updated_at(&self) -> &str {
+        &self.updated_at
+    }
+}
+
 impl TryFrom<Value> for BriefSchedule {
     type Error = ContractError;
 
