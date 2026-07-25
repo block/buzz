@@ -23,8 +23,12 @@ const REMOVE_AFTER_MS = LIVENESS_INTERVAL_MS * 2.5;
 const FRAME_GAP_PAUSE_MS = LIVENESS_INTERVAL_MS * 2;
 /** A silent agent is treated as dead after this bounded prune pause. */
 const PRUNE_PAUSE_MAX_MS = 3 * 60_000;
-/** Maximum concurrent active turns tracked per agent (matches pool size). */
-const MAX_TURNS_PER_AGENT = 4;
+/** Maximum concurrent active turns tracked per agent. Purely an unbounded-growth
+ * guard, so it sits at the harness's hard upper bound for parallel agent
+ * subprocesses (`--agents` / `BUZZ_ACP_AGENTS` accepts `1..=32`) rather than the
+ * Desktop default of 24 — any lower value silently evicts a live turn, dropping
+ * its working badge. */
+const MAX_TURNS_PER_AGENT = 32;
 /** Cap on per-agent terminal tombstones (A's resurrection guard). Only the
  * most recently completed turns can be raced by a late liveness frame; older
  * ones are already below the watermark, so a small multiple of the live cap is
