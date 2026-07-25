@@ -185,6 +185,14 @@ Extract `channel` and `id` from the URL query parameters. The optional
 `thread` parameter (root event ID) can be ignored — `messages thread` resolves
 the full thread from the event ID alone.
 
+`buzz://install-agent?relay=<wss://…>[&npub=…&name=…&system_prompt=…&channel=<uuid>]`
+opens Desktop with the create-agent form **prefilled** so an external service
+(e.g. Figura) can offer a one-click "install this agent into your community"
+flow. `relay` is required (validated as ws/wss, like `connect`/`join`); the
+agent fields mirror `buzz agents draft-create` (channel / display-name /
+system-prompt) and are optional. This only prefills — the owner still reviews
+and saves the form; nothing auto-admits an agent or bypasses owner review.
+
 All reads return sig-stripped JSON arrays; all writes return
 `{event_id, accepted, message}`; creates add the entity ID. Exit codes:
 0=ok, 1=input error, 2=network/relay, 3=auth, 4=other, 5=write conflict (NIP-33 LWW).

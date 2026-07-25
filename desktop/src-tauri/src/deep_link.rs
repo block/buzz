@@ -69,6 +69,96 @@ pub(crate) fn acknowledge_pending_community_deep_link(
     pending.acknowledge(&id)
 }
 
+/// Queued `buzz://install-agent?…` intent, mirroring the community queue so an
+/// agent-install link opened on a cold launch survives until the create-agent
+/// form is mounted and can drain it. The community queue's fixed field set
+/// (`relay_url`/`code`/`policy_receipt`/`name`) can't carry an agent's
+/// `npub`/`system_prompt`/`channel`, so agent installs get a dedicated queue.
+///
+/// Security: this only PREFILLS the owner's create-agent form — it never
+/// auto-admits an agent or bypasses owner review. The owner still reviews and
+/// saves the form in Desktop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingAgentInstallDeepLink {
+    id: String,
+    relay_url: String,
+    npub: Option<String>,
+    name: Option<String>,
+    system_prompt: Option<String>,
+    channel: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingAgentInstallDeepLinks(Mutex<VecDeque<PendingAgentInstallDeepLink>>);
+
+impl PendingAgentInstallDeepLinks {
+    fn enqueue(&self, pending: PendingAgentInstallDeepLink) {
+        let mut queue = self
+            .0
+            .lock()
+            .expect("pending agent-install deep-link queue poisoned");
+        if queue.iter().any(|item| {
+            item.relay_url == pending.relay_url
+                && item.npub == pending.npub
+                && item.name == pending.name
+                && item.system_prompt == pending.system_prompt
+                && item.channel == pending.channel
+        }) {
+            return;
+        }
+        queue.push_back(pending);
+    }
+
+    fn first(&self) -> Option<PendingAgentInstallDeepLink> {
+        self.0
+            .lock()
+            .expect("pending agent-install deep-link queue poisoned")
+            .front()
+            .cloned()
+    }
+
+    fn acknowledge(&self, id: &str) -> bool {
+        let mut queue = self
+            .0
+            .lock()
+            .expect("pending agent-install deep-link queue poisoned");
+        if queue.front().is_some_and(|item| item.id == id) {
+            queue.pop_front();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_agent_install_deep_link(
+    pending: State<'_, PendingAgentInstallDeepLinks>,
+) -> Option<PendingAgentInstallDeepLink> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_agent_install_deep_link(
+    id: String,
+    pending: State<'_, PendingAgentInstallDeepLinks>,
+) -> bool {
+    pending.acknowledge(&id)
+}
+
+fn queue_agent_install_deep_link(app: &tauri::AppHandle, payload: &AgentInstallDeepLinkPayload) {
+    app.state::<PendingAgentInstallDeepLinks>()
+        .enqueue(PendingAgentInstallDeepLink {
+            id: uuid::Uuid::new_v4().to_string(),
+            relay_url: payload.relay_url.clone(),
+            npub: payload.npub.clone(),
+            name: payload.name.clone(),
+            system_prompt: payload.system_prompt.clone(),
+            channel: payload.channel.clone(),
+        });
+}
+
 fn queue_community_deep_link(
     app: &tauri::AppHandle,
     kind: &str,
@@ -187,6 +277,34 @@ fn parse_add_community_deep_link(url: &Url) -> Option<AddCommunityDeepLinkPayloa
     Some(AddCommunityDeepLinkPayload {
         relay_url: parse_websocket_relay_param(url)?,
         name: optional_non_empty_param(url, "name"),
+    })
+}
+
+/// Payload emitted on `deep-link-install-agent` for `buzz://install-agent?…`.
+/// The `relay` param is required and validated as a ws(s) URL exactly like the
+/// `connect`/`join`/`add-community` arms; the agent fields are all optional so
+/// a caller can hand over as little as the target relay (matching
+/// `buzz agents draft-create`, which carries channel/display-name/system-prompt).
+///
+/// The frontend routes this into the owner's create-agent form PREFILLED — it
+/// never auto-admits the agent or bypasses owner review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentInstallDeepLinkPayload {
+    relay_url: String,
+    npub: Option<String>,
+    name: Option<String>,
+    system_prompt: Option<String>,
+    channel: Option<String>,
+}
+
+fn parse_install_agent_deep_link(url: &Url) -> Option<AgentInstallDeepLinkPayload> {
+    Some(AgentInstallDeepLinkPayload {
+        relay_url: parse_websocket_relay_param(url)?,
+        npub: optional_non_empty_param(url, "npub"),
+        name: optional_non_empty_param(url, "name"),
+        system_prompt: optional_non_empty_param(url, "system_prompt"),
+        channel: optional_non_empty_param(url, "channel"),
     })
 }
 
@@ -350,6 +468,27 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             );
             let _ = app.emit("deep-link-add-community", payload);
         }
+        Some("install-agent") => {
+            // `buzz://install-agent?relay=<ws(s)://...>[&npub=][&name=]
+            //   [&system_prompt=][&channel=<uuid>]` — lets an external service
+            // (e.g. Figura) offer a one-click "install this agent into your
+            // community" flow. The params mirror `buzz agents draft-create`
+            // (channel / display-name / system-prompt) so the opened form
+            // matches what a draft-create would submit.
+            //
+            // Security: this ONLY prefills the owner's create-agent form. It
+            // never auto-admits an agent or bypasses owner review — the owner
+            // still reviews and saves the form in Desktop.
+            let Some(payload) = parse_install_agent_deep_link(&url) else {
+                eprintln!(
+                    "buzz-desktop: install-agent deep link missing/invalid relay: {url_str}"
+                );
+                return;
+            };
+            activate_main_window(app);
+            queue_agent_install_deep_link(app, &payload);
+            let _ = app.emit("deep-link-install-agent", payload);
+        }
         Some("message") => {
             // `buzz://message?channel=<uuid>&id=<eventId>[&thread=<rootId>]`
             //
@@ -389,8 +528,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        parse_add_community_deep_link, parse_install_agent_deep_link, parse_join_deep_link,
+        parse_message_deep_link, parse_nostr_bind_deep_link, PendingAgentInstallDeepLink,
+        PendingAgentInstallDeepLinks, PendingCommunityDeepLink, PendingCommunityDeepLinks,
     };
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
@@ -707,5 +847,91 @@ mod tests {
         let url = Url::parse("buzz://nostr-bind?challenge_id=550e8400-e29b-41d4-a716-446655440000&nonce=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi01234567&verification_code=123456&audience=buzz%3Anostr-identity&action=bind_nostr_identity&protocol=buzz-nostr-identity&version=1&origin=https%3A%2F%2Fexample.com&expires_at=2000-01-01T00%3A00%3A00Z&return=clipboard").unwrap();
         let payload = parse_nostr_bind_deep_link(&url).unwrap();
         assert_eq!(payload.expires_at, "2000-01-01T00:00:00Z");
+    }
+
+    fn pending_agent_install(id: &str, relay_url: &str) -> PendingAgentInstallDeepLink {
+        PendingAgentInstallDeepLink {
+            id: id.to_owned(),
+            relay_url: relay_url.to_owned(),
+            npub: None,
+            name: None,
+            system_prompt: None,
+            channel: None,
+        }
+    }
+
+    #[test]
+    fn parse_install_agent_deep_link_extracts_all_params() {
+        let url = Url::parse(
+            "buzz://install-agent?relay=wss%3A%2F%2Facme.communities.buzz.xyz&npub=npub1abc&name=Support%20Bot&system_prompt=You%20are%20helpful&channel=550e8400-e29b-41d4-a716-446655440000&ignored=value",
+        )
+        .unwrap();
+        let payload = parse_install_agent_deep_link(&url).unwrap();
+        assert_eq!(payload.relay_url, "wss://acme.communities.buzz.xyz");
+        assert_eq!(payload.npub.as_deref(), Some("npub1abc"));
+        assert_eq!(payload.name.as_deref(), Some("Support Bot"));
+        assert_eq!(payload.system_prompt.as_deref(), Some("You are helpful"));
+        assert_eq!(
+            payload.channel.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn parse_install_agent_deep_link_accepts_relay_only() {
+        let url = Url::parse("buzz://install-agent?relay=wss%3A%2F%2Facme.example").unwrap();
+        let payload = parse_install_agent_deep_link(&url).unwrap();
+        assert_eq!(payload.relay_url, "wss://acme.example");
+        assert!(payload.npub.is_none());
+        assert!(payload.name.is_none());
+        assert!(payload.system_prompt.is_none());
+        assert!(payload.channel.is_none());
+    }
+
+    #[test]
+    fn parse_install_agent_deep_link_treats_empty_optionals_as_absent() {
+        let url = Url::parse(
+            "buzz://install-agent?relay=wss%3A%2F%2Facme.example&npub=&name=&system_prompt=&channel=",
+        )
+        .unwrap();
+        let payload = parse_install_agent_deep_link(&url).unwrap();
+        assert!(payload.npub.is_none());
+        assert!(payload.name.is_none());
+        assert!(payload.system_prompt.is_none());
+        assert!(payload.channel.is_none());
+    }
+
+    #[test]
+    fn parse_install_agent_deep_link_rejects_invalid_relays() {
+        for raw in [
+            "buzz://install-agent",
+            "buzz://install-agent?relay=",
+            "buzz://install-agent?relay=not-a-url",
+            "buzz://install-agent?relay=https%3A%2F%2Facme.example",
+            "buzz://install-agent?relay=wss%3A%2F%2F",
+            "buzz://install-agent?name=Support%20Bot&channel=abc",
+        ] {
+            assert!(parse_install_agent_deep_link(&Url::parse(raw).unwrap()).is_none());
+        }
+    }
+
+    #[test]
+    fn pending_agent_install_links_are_fifo_and_acknowledged_in_order() {
+        let queue = PendingAgentInstallDeepLinks::default();
+        queue.enqueue(pending_agent_install("first", "wss://one.example"));
+        queue.enqueue(pending_agent_install("second", "wss://two.example"));
+        assert_eq!(queue.first().unwrap().id, "first");
+        assert!(!queue.acknowledge("second"));
+        assert!(queue.acknowledge("first"));
+        assert_eq!(queue.first().unwrap().id, "second");
+    }
+
+    #[test]
+    fn pending_agent_install_links_dedupe_exact_intents() {
+        let queue = PendingAgentInstallDeepLinks::default();
+        queue.enqueue(pending_agent_install("first", "wss://one.example"));
+        queue.enqueue(pending_agent_install("duplicate", "wss://one.example"));
+        assert!(queue.acknowledge("first"));
+        assert!(queue.first().is_none());
     }
 }

@@ -16,6 +16,30 @@ export interface DeepLinkDeps {
 }
 
 /**
+ * Payload emitted by the Rust deep-link handler for `buzz://install-agent?…`.
+ * Field names match the JSON shape produced in
+ * `desktop/src-tauri/src/deep_link.rs`. The relay is required; the agent fields
+ * mirror `buzz agents draft-create` (channel / display-name / system-prompt).
+ *
+ * This only PREFILLS the owner's create-agent form — it never auto-admits an
+ * agent or bypasses owner review.
+ */
+export type AgentInstallDeepLinkPayload = {
+  relayUrl: string;
+  npub?: string;
+  name?: string;
+  systemPrompt?: string;
+  channel?: string;
+};
+
+export interface AgentInstallDeepLinkDeps {
+  openInstallAgent: (
+    payload: AgentInstallDeepLinkPayload & { requestId: string },
+  ) => boolean;
+  onInstallAgentAvailable: (listener: () => void) => () => void;
+}
+
+/**
  * Payload emitted by the Rust deep-link handler for `buzz://message?…`.
  * Field names match the JSON shape produced in `desktop/src-tauri/src/lib.rs`.
  */
@@ -171,4 +195,82 @@ export function listenForNostrBindDeepLinks(
   return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
     onOpen(event.payload);
   });
+}
+
+/** Rust-side queued shape for a `buzz://install-agent?…` intent. */
+type PendingAgentInstallDeepLink = {
+  id: string;
+  relayUrl: string;
+  npub: string | null;
+  name: string | null;
+  systemPrompt: string | null;
+  channel: string | null;
+};
+
+async function drainPendingAgentInstallDeepLinks(
+  deps: AgentInstallDeepLinkDeps,
+) {
+  const pending = await invoke<PendingAgentInstallDeepLink | null>(
+    "take_pending_agent_install_deep_link",
+  );
+  if (!pending) return;
+  const accepted = deps.openInstallAgent({
+    requestId: pending.id,
+    relayUrl: pending.relayUrl,
+    npub: pending.npub ?? undefined,
+    name: pending.name ?? undefined,
+    systemPrompt: pending.systemPrompt ?? undefined,
+    channel: pending.channel ?? undefined,
+  });
+  // Acknowledge (drop from the Rust queue) only once the form owns the intent.
+  // If the create surface isn't ready yet, leave it queued; the availability
+  // listener re-drains when the prefill slot frees up. A single create form is
+  // shown at a time, so we never drain more than one intent per pass.
+  if (accepted) {
+    await invoke<boolean>("acknowledge_pending_agent_install_deep_link", {
+      id: pending.id,
+    });
+  }
+}
+
+/**
+ * Register listeners for `buzz://install-agent?…` deep links. Mirrors
+ * `listenForDeepLinks`: the Rust side queues the intent (surviving a cold
+ * launch), and this coalescing drain routes it into the create-agent form
+ * PREFILLED once that surface can accept it. Owner review is preserved — the
+ * link never auto-admits an agent. Returns an unlisten function.
+ */
+export async function listenForAgentInstallDeepLinks(
+  deps: AgentInstallDeepLinkDeps,
+): Promise<UnlistenFn> {
+  let drainRunning = false;
+  let drainRequested = false;
+  const drain = () => {
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          await drainPendingAgentInstallDeepLinks(deps);
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to drain pending agent-install deep links", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
+  };
+  const stopAvailabilityListener = deps.onInstallAgentAvailable(drain);
+  const unlisten = await listen<AgentInstallDeepLinkPayload>(
+    "deep-link-install-agent",
+    drain,
+  );
+  drain();
+  return () => {
+    stopAvailabilityListener();
+    unlisten();
+  };
 }

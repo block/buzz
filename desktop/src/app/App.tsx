@@ -60,8 +60,13 @@ import { isSharedIdentity as isSharedIdentityCmd } from "@/shared/api/tauri";
 import { getProfile } from "@/shared/api/tauriProfiles";
 import {
   type AddCommunityDeepLinkPayload,
+  listenForAgentInstallDeepLinks,
   listenForDeepLinks,
 } from "@/shared/deep-link";
+import {
+  onAgentInstallPrefillAvailable,
+  requestAgentInstallPrefill,
+} from "@/features/agents/agentInstallPrefill";
 import { cn } from "@/shared/lib/cn";
 import { BuzzMark } from "@/shared/ui/buzz-logo/BuzzMark";
 import { FlappingBee } from "@/shared/ui/buzz-logo/FlappingBee";
@@ -633,6 +638,20 @@ function MachineBootstrap({ sharedIdentity }: { sharedIdentity: boolean }) {
       void unlisten.then((fn) => fn());
     };
   }, [communityOnboarding.start, openAddCommunity]);
+
+  // `buzz://install-agent?…` prefills the owner's create-agent form. It only
+  // prefills — the owner still reviews and saves; nothing auto-admits an agent.
+  // The intent is queued Rust-side and drained into the create surface once it
+  // mounts, so a link opened on a cold launch survives until it can be shown.
+  useEffect(() => {
+    const unlisten = listenForAgentInstallDeepLinks({
+      openInstallAgent: requestAgentInstallPrefill,
+      onInstallAgentAvailable: onAgentInstallPrefillAvailable,
+    });
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
 
   if (machine.stage === "reset-failed") return <ResetFailedScreen />;
   if (machine.stage === "keyring-locked") return <KeyringLockedScreen />;

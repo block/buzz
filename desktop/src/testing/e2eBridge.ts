@@ -9998,6 +9998,12 @@ export function maybeInstallE2eTauriMocks() {
         mockPendingCommunityDeepLinks.splice(index, 1);
         return true;
       }
+      case "take_pending_agent_install_deep_link":
+        // No e2e fixture seeds agent-install deep links yet; the drain runs at
+        // app boot, so return an empty queue head rather than throwing.
+        return null;
+      case "acknowledge_pending_agent_install_deep_link":
+        return false;
       case "get_relay_http_url":
         return getRelayHttpUrl(activeConfig);
       case "relay_requires_membership":
