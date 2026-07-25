@@ -1,6 +1,6 @@
 # Portable Relay Identity v0.1
 
-Status: proposed
+Status: experimental; implemented by the laptop reference adapter
 
 ## Decision
 

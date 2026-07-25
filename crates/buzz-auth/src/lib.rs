@@ -32,8 +32,8 @@ pub mod scope;
 
 pub use access::{check_read_access, check_write_access, require_scope, ChannelAccessChecker};
 pub use error::AuthError;
-pub use nip42::{generate_challenge, verify_nip42_event};
-pub use nip98::verify_nip98_event;
+pub use nip42::{generate_challenge, verify_nip42_event, verify_nip42_event_at};
+pub use nip98::{verify_nip98_event, verify_nip98_event_at};
 pub use nip98_replay::{
     nip98_replay_key, nip98_replay_key_for_scope, Nip98ReplayGuard, DEFAULT_REPLAY_TTL_SECS,
     MAX_REPLAY_TTL_SECS,

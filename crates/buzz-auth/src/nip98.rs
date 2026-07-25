@@ -58,6 +58,26 @@ pub fn verify_nip98_event(
     expected_method: &str,
     body: Option<&[u8]>,
 ) -> Result<nostr::PublicKey, AuthError> {
+    verify_nip98_event_at(
+        event_json,
+        expected_url,
+        expected_method,
+        body,
+        Timestamp::now(),
+    )
+}
+
+/// Verify a NIP-98 HTTP Auth event at an explicit evaluation time.
+///
+/// This is equivalent to [`verify_nip98_event`] but makes freshness
+/// deterministic for portable conformance vectors and adapter tests.
+pub fn verify_nip98_event_at(
+    event_json: &str,
+    expected_url: &str,
+    expected_method: &str,
+    body: Option<&[u8]>,
+    evaluation_time: Timestamp,
+) -> Result<nostr::PublicKey, AuthError> {
     // 1. Parse JSON.
     let event: Event = serde_json::from_str(event_json)
         .map_err(|e| AuthError::Nip98Invalid(format!("event JSON parse error: {e}")))?;
@@ -75,7 +95,7 @@ pub fn verify_nip98_event(
         .map_err(|_| AuthError::Nip98Invalid("invalid Schnorr signature".to_string()))?;
 
     // 4. Verify created_at within ±60 seconds of now.
-    let now = Timestamp::now().as_secs();
+    let now = evaluation_time.as_secs();
     let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
     if delta > TIMESTAMP_TOLERANCE_SECS {

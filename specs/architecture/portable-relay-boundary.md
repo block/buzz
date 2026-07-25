@@ -288,8 +288,8 @@ Optional:
 | Journal | append-only NDJSON | per-node durable SQLite | Postgres |
 | Effective query | in-memory replay | local SQL projection | Postgres queries |
 | Live subscriptions | Tokio broadcast | stateful coordination object | connection registry + Redis |
-| Identity | not yet implemented | node/DID proof + edge authentication | NIP-42/NIP-98 + `buzz-auth` |
-| Policy | trusted loopback | explicit edge policy | `buzz-auth` + membership |
+| Identity | opt-in NIP-42/NIP-98 + configured node binding | node/DID proof + edge authentication | NIP-42/NIP-98 + `buzz-auth` |
+| Policy | caller-author + result disclosure policy | explicit edge policy | `buzz-auth` + membership |
 | Effects | in-process or absent | queue/workflow consumers | audit/search/workflow subsystems |
 | Replication | NDJSON cursor + source allowlist | durable-state cursor + edge policy | not yet implemented |
 | Portable archive | NDJSON copy | object-storage snapshot | event export |
@@ -316,10 +316,14 @@ The reference replication adapter is deliberately transport-neutral. It proves
 cursor resume and policy-gated destination ingest without exposing a public peer
 endpoint or implying automatic federation.
 
-The identity profile is specified but not yet implemented by the laptop
-adapter. Hosted Buzz provides relevant NIP-42, NIP-98, NIP-OA, scope, membership,
-and result-level read mechanisms, but has not yet been measured against the
-portable identity conformance vector.
+The laptop adapter implements the identity profile as an opt-in secured mode.
+It uses NIP-42 for WebSocket sessions, payload-bound NIP-98 for HTTP requests,
+in-memory replay protection, caller-author binding, result-level read policy,
+and destination-configured relay peer bindings. Delegation, persistent replay
+state, dynamic DID resolution, and NIP-29 membership remain promotion
+boundaries. Hosted Buzz provides relevant NIP-42, NIP-98, NIP-OA, scope,
+membership, and result-level read mechanisms, but has not yet been measured
+against the portable identity conformance vector.
 
 The OpenAPI paths and NIP-01 frames are normative. Listener addresses, host
 names, TLS termination, authentication headers, storage schemas, and operational

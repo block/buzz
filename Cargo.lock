@@ -994,6 +994,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
+ "buzz-auth",
  "buzz-core",
  "chrono",
  "futures-util",

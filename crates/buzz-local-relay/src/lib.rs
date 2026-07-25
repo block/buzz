@@ -2,8 +2,12 @@
 //!
 //! The local relay implements a deliberately narrow NIP-01 and Buzz HTTP
 //! bridge subset. It verifies real Nostr signatures and persists durable events
-//! to an append-only NDJSON log, but does not emulate production authorization,
+//! to an append-only NDJSON log. Its optional identity adapter provides a
+//! portable authorization boundary without emulating production membership,
 //! media, search indexing, workflows, or multi-node fan-out.
+
+/// Laptop NIP-42/NIP-98 authentication and authorization adapter.
+pub mod identity;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -11,14 +15,21 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
-use axum::http::StatusCode;
+use axum::http::{header::HOST, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use buzz_core::event::StoredEvent;
 use buzz_core::filter::filters_match;
+use buzz_core::identity::{
+    AuthenticatedPrincipal, AuthorizationDecision, IdentityAuthenticator, IdentityDenialCode,
+    ReadOperation, ReplicationPeerAuthenticator,
+};
 use buzz_core::relay::{apply_effective_event, decide_event, is_ephemeral_kind, EventDecision};
 use buzz_core::replication::{
     ReplicationBatch, ReplicationCursor, ReplicationIngestOutcome, ReplicationReceipt,
@@ -27,6 +38,9 @@ use buzz_core::replication::{
 use buzz_core::verification::verify_event;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use identity::{
+    LocalAuthenticationEvidence, LocalIdentityAdapter, LocalIdentityError, LocalPeerEvidence,
+};
 use nostr::{Alphabet, Event, Filter, SingleLetterTag, TagKind};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -146,6 +160,9 @@ pub enum ReplicationSourceError {
 /// Errors that prevent a replication destination from completing ingest.
 #[derive(Debug, Error)]
 pub enum ReplicationSinkError {
+    /// Cryptographic peer identity could not be established or admitted.
+    #[error(transparent)]
+    Identity(#[from] LocalIdentityError),
     /// Normal relay ingest failed operationally.
     #[error(transparent)]
     Store(#[from] StoreError),
@@ -426,12 +443,13 @@ pub struct LocalRelay {
     store: Arc<EventStore>,
     live_events: broadcast::Sender<Event>,
     replication_policy: Arc<dyn ReplicationPolicy>,
+    identity: Option<Arc<LocalIdentityAdapter>>,
 }
 
 impl LocalRelay {
     /// Opens a relay using the selected storage mode with replication disabled.
     pub async fn open(mode: StorageMode) -> Result<Arc<Self>, StoreError> {
-        Self::open_with_replication_policy(mode, Arc::new(ReplicationDisabled)).await
+        Self::open_with_adapters(mode, Arc::new(ReplicationDisabled), None).await
     }
 
     /// Opens a relay with an explicit source admission policy for replication.
@@ -439,12 +457,30 @@ impl LocalRelay {
         mode: StorageMode,
         replication_policy: Arc<dyn ReplicationPolicy>,
     ) -> Result<Arc<Self>, StoreError> {
+        Self::open_with_adapters(mode, replication_policy, None).await
+    }
+
+    /// Opens a relay requiring portable NIP-42/NIP-98 identity.
+    pub async fn open_with_identity(
+        mode: StorageMode,
+        identity: Arc<LocalIdentityAdapter>,
+    ) -> Result<Arc<Self>, StoreError> {
+        Self::open_with_adapters(mode, Arc::new(ReplicationDisabled), Some(identity)).await
+    }
+
+    /// Opens a relay with explicit replication and identity adapters.
+    pub async fn open_with_adapters(
+        mode: StorageMode,
+        replication_policy: Arc<dyn ReplicationPolicy>,
+        identity: Option<Arc<LocalIdentityAdapter>>,
+    ) -> Result<Arc<Self>, StoreError> {
         let store = Arc::new(EventStore::open(mode).await?);
         let (live_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         Ok(Arc::new(Self {
             store,
             live_events,
             replication_policy,
+            identity,
         }))
     }
 
@@ -459,6 +495,107 @@ impl LocalRelay {
             let _ = self.live_events.send(event);
         }
         Ok(result)
+    }
+
+    fn authorize_direct(
+        &self,
+        principal: Option<&AuthenticatedPrincipal>,
+        event: &Event,
+    ) -> Result<(), LocalIdentityError> {
+        let Some(identity) = self.identity.as_ref() else {
+            return Ok(());
+        };
+        let principal = principal.ok_or_else(|| {
+            LocalIdentityError::denied(IdentityDenialCode::AuthenticationRequired)
+        })?;
+        decision_result(identity.authorize_direct(principal, event))
+    }
+
+    fn authorize_query(
+        &self,
+        principal: Option<&AuthenticatedPrincipal>,
+        operation: ReadOperation,
+        filters: &[Filter],
+    ) -> Result<(), LocalIdentityError> {
+        let Some(identity) = self.identity.as_ref() else {
+            return Ok(());
+        };
+        let principal = principal.ok_or_else(|| {
+            LocalIdentityError::denied(IdentityDenialCode::AuthenticationRequired)
+        })?;
+        decision_result(identity.authorize_local_query(principal, operation, filters))
+    }
+
+    fn event_is_visible(
+        &self,
+        principal: Option<&AuthenticatedPrincipal>,
+        operation: ReadOperation,
+        event: &Event,
+    ) -> bool {
+        match (&self.identity, principal) {
+            (None, _) => true,
+            (Some(identity), Some(principal)) => identity
+                .authorize_local_event(principal, operation, event)
+                .is_allowed(),
+            (Some(_), None) => false,
+        }
+    }
+
+    async fn query_for(
+        &self,
+        principal: Option<&AuthenticatedPrincipal>,
+        operation: ReadOperation,
+        filters: &[Filter],
+    ) -> Result<Vec<Event>, ApiError> {
+        self.authorize_query(principal, operation, filters)?;
+        let mut events = self.store.query(filters).await?;
+        events.retain(|event| self.event_is_visible(principal, operation, event));
+        Ok(events)
+    }
+
+    async fn count_for(
+        &self,
+        principal: Option<&AuthenticatedPrincipal>,
+        filters: &[Filter],
+    ) -> Result<usize, ApiError> {
+        self.authorize_query(principal, ReadOperation::Count, filters)?;
+        validate_filters(filters)?;
+        if filters.is_empty() {
+            return Ok(0);
+        }
+        let inner = self.store.inner.lock().await;
+        Ok(inner
+            .events
+            .iter()
+            .filter(|stored| filters_match(filters, stored))
+            .filter(|stored| self.event_is_visible(principal, ReadOperation::Count, &stored.event))
+            .count())
+    }
+
+    /// Authenticates a configured peer before invoking the replication sink.
+    pub async fn ingest_replication_from_peer(
+        &self,
+        evidence: LocalPeerEvidence,
+        audience: &str,
+        record: ReplicationRecord,
+    ) -> Result<ReplicationReceipt, ReplicationSinkError> {
+        let identity = self.identity.as_ref().ok_or_else(|| {
+            LocalIdentityError::denied(IdentityDenialCode::AuthenticationRequired)
+        })?;
+        let binding = identity
+            .authenticate_peer(evidence, audience, &record.source)
+            .await?;
+        if binding.source != record.source {
+            return Err(LocalIdentityError::denied(IdentityDenialCode::SourceMismatch).into());
+        }
+        self.ingest_replication(record).await
+    }
+}
+
+fn decision_result(decision: AuthorizationDecision) -> Result<(), LocalIdentityError> {
+    match decision {
+        AuthorizationDecision::Allowed => Ok(()),
+        AuthorizationDecision::Denied { code } => Err(LocalIdentityError::denied(code)),
     }
 }
 
@@ -534,36 +671,119 @@ async fn health() -> Json<Value> {
 
 async fn submit_event(
     State(relay): State<Arc<LocalRelay>>,
-    Json(event): Json<Event>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<WriteResult>, ApiError> {
+    let principal = authenticate_http(&relay, &headers, "/events", &body).await?;
+    let event: Event = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::BadRequest(format!("invalid event JSON: {error}")))?;
+    relay.authorize_direct(principal.as_ref(), &event)?;
     Ok(Json(relay.submit(event).await?))
 }
 
 async fn query_events(
     State(relay): State<Arc<LocalRelay>>,
-    Json(filters): Json<Vec<Filter>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<Vec<Event>>, ApiError> {
-    Ok(Json(relay.store.query(&filters).await?))
+    let principal = authenticate_http(&relay, &headers, "/query", &body).await?;
+    let filters: Vec<Filter> = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+    Ok(Json(
+        relay
+            .query_for(principal.as_ref(), ReadOperation::Query, &filters)
+            .await?,
+    ))
 }
 
 async fn count_events(
     State(relay): State<Arc<LocalRelay>>,
-    Json(filters): Json<Vec<Filter>>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
-    Ok(Json(json!({ "count": relay.store.count(&filters).await? })))
+    let principal = authenticate_http(&relay, &headers, "/count", &body).await?;
+    let filters: Vec<Filter> = serde_json::from_slice(&body)
+        .map_err(|error| ApiError::BadRequest(format!("invalid filter JSON: {error}")))?;
+    let count = relay.count_for(principal.as_ref(), &filters).await?;
+    Ok(Json(json!({ "count": count })))
+}
+
+async fn authenticate_http(
+    relay: &LocalRelay,
+    headers: &HeaderMap,
+    path: &str,
+    body: &[u8],
+) -> Result<Option<AuthenticatedPrincipal>, ApiError> {
+    let Some(identity) = relay.identity.as_ref() else {
+        return Ok(None);
+    };
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::AudienceMismatch))?;
+    let audience = format!("http://{host}{path}");
+    let encoded = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Nostr "))
+        .ok_or_else(|| LocalIdentityError::denied(IdentityDenialCode::AuthenticationRequired))?;
+    let decoded = BASE64
+        .decode(encoded)
+        .map_err(|_| LocalIdentityError::denied(IdentityDenialCode::InvalidEvidence))?;
+    let event_json = String::from_utf8(decoded)
+        .map_err(|_| LocalIdentityError::denied(IdentityDenialCode::InvalidEvidence))?;
+    let principal = identity
+        .authenticate(
+            LocalAuthenticationEvidence::Nip98 {
+                event_json,
+                method: "POST".to_string(),
+                body: body.to_vec(),
+            },
+            &audience,
+        )
+        .await?;
+    Ok(Some(principal))
 }
 
 async fn websocket_upgrade(
     ws: WebSocketUpgrade,
     State(relay): State<Arc<LocalRelay>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| websocket_session(socket, relay))
+    headers: HeaderMap,
+) -> Response {
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty());
+    if relay.identity.is_some() && host.is_none() {
+        return ApiError::Identity(LocalIdentityError::denied(
+            IdentityDenialCode::AudienceMismatch,
+        ))
+        .into_response();
+    }
+    let audience = host.map(|host| format!("ws://{host}/"));
+    ws.on_upgrade(move |socket| websocket_session(socket, relay, audience))
+        .into_response()
 }
 
-async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>) {
+async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>, audience: Option<String>) {
     let (mut sender, mut receiver) = socket.split();
     let mut live_events = relay.live_events.subscribe();
     let mut subscriptions: HashMap<String, Vec<Filter>> = HashMap::new();
+    let challenge = relay
+        .identity
+        .as_ref()
+        .map(|_| buzz_auth::generate_challenge());
+    let mut principal = None;
+
+    if let Some(challenge) = challenge.as_ref() {
+        if send_json(&mut sender, json!(["AUTH", challenge]))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
 
     loop {
         tokio::select! {
@@ -578,6 +798,9 @@ async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>) {
                     message,
                     &relay,
                     &mut subscriptions,
+                    &mut principal,
+                    challenge.as_deref(),
+                    audience.as_deref(),
                     &mut sender,
                 ).await;
                 if !should_continue {
@@ -590,6 +813,11 @@ async fn websocket_session(socket: WebSocket, relay: Arc<LocalRelay>) {
                         for (subscription_id, filters) in &subscriptions {
                             let stored = stored_event(event.clone());
                             if filters_match(filters, &stored)
+                                && relay.event_is_visible(
+                                    principal.as_ref(),
+                                    ReadOperation::LiveDelivery,
+                                    &event,
+                                )
                                 && send_json(
                                     &mut sender,
                                     json!(["EVENT", subscription_id, event]),
@@ -623,6 +851,9 @@ async fn handle_client_message<S>(
     message: Message,
     relay: &LocalRelay,
     subscriptions: &mut HashMap<String, Vec<Filter>>,
+    principal: &mut Option<AuthenticatedPrincipal>,
+    challenge: Option<&str>,
+    audience: Option<&str>,
     sender: &mut S,
 ) -> bool
 where
@@ -645,8 +876,13 @@ where
             };
 
             match verb {
-                "EVENT" => handle_ws_event(&parsed, relay, sender).await,
-                "REQ" => handle_ws_req(&parsed, relay, subscriptions, sender).await,
+                "AUTH" => {
+                    handle_ws_auth(&parsed, relay, principal, challenge, audience, sender).await
+                }
+                "EVENT" => handle_ws_event(&parsed, relay, principal.as_ref(), sender).await,
+                "REQ" => {
+                    handle_ws_req(&parsed, relay, subscriptions, principal.as_ref(), sender).await
+                }
                 "CLOSE" => {
                     if let Some(subscription_id) = parsed.get(1).and_then(Value::as_str) {
                         subscriptions.remove(subscription_id);
@@ -665,7 +901,75 @@ where
     }
 }
 
-async fn handle_ws_event<S>(parts: &[Value], relay: &LocalRelay, sender: &mut S) -> bool
+async fn handle_ws_auth<S>(
+    parts: &[Value],
+    relay: &LocalRelay,
+    principal: &mut Option<AuthenticatedPrincipal>,
+    challenge: Option<&str>,
+    audience: Option<&str>,
+    sender: &mut S,
+) -> bool
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    let event = match parts.get(1).cloned().map(serde_json::from_value::<Event>) {
+        Some(Ok(event)) => event,
+        _ => {
+            return send_json(sender, json!(["OK", "", false, "invalid_evidence"]))
+                .await
+                .is_ok();
+        }
+    };
+    let event_id = event.id.to_hex();
+    let Some(identity) = relay.identity.as_ref() else {
+        return send_json(
+            sender,
+            json!(["OK", event_id, false, "authentication_not_enabled"]),
+        )
+        .await
+        .is_ok();
+    };
+    let (Some(challenge), Some(audience)) = (challenge, audience) else {
+        return send_json(sender, json!(["OK", event_id, false, "audience_mismatch"]))
+            .await
+            .is_ok();
+    };
+    if principal.is_some() {
+        return send_json(sender, json!(["OK", event_id, false, "replay_detected"]))
+            .await
+            .is_ok();
+    }
+    match identity
+        .authenticate(
+            LocalAuthenticationEvidence::Nip42 {
+                event,
+                challenge: challenge.to_string(),
+            },
+            audience,
+        )
+        .await
+    {
+        Ok(authenticated) => {
+            *principal = Some(authenticated);
+            send_json(sender, json!(["OK", event_id, true, "authenticated"]))
+                .await
+                .is_ok()
+        }
+        Err(error) => {
+            let message = identity_error_token(&error);
+            send_json(sender, json!(["OK", event_id, false, message]))
+                .await
+                .is_ok()
+        }
+    }
+}
+
+async fn handle_ws_event<S>(
+    parts: &[Value],
+    relay: &LocalRelay,
+    principal: Option<&AuthenticatedPrincipal>,
+    sender: &mut S,
+) -> bool
 where
     S: futures_util::Sink<Message> + Unpin,
 {
@@ -678,6 +982,14 @@ where
         }
     };
     let event_id = event.id.to_hex();
+    if let Err(error) = relay.authorize_direct(principal, &event) {
+        return send_json(
+            sender,
+            json!(["OK", event_id, false, identity_error_token(&error)]),
+        )
+        .await
+        .is_ok();
+    }
     let result = match relay.submit(event).await {
         Ok(result) => result,
         Err(error) => {
@@ -702,6 +1014,7 @@ async fn handle_ws_req<S>(
     parts: &[Value],
     relay: &LocalRelay,
     subscriptions: &mut HashMap<String, Vec<Filter>>,
+    principal: Option<&AuthenticatedPrincipal>,
     sender: &mut S,
 ) -> bool
 where
@@ -758,7 +1071,10 @@ where
         .is_ok();
     }
 
-    let historical = match relay.store.query(&filters).await {
+    let historical = match relay
+        .query_for(principal, ReadOperation::HistoricalSubscription, &filters)
+        .await
+    {
         Ok(historical) => historical,
         Err(error) => {
             return send_json(
@@ -793,6 +1109,10 @@ where
 #[derive(Debug, Error)]
 enum ApiError {
     #[error(transparent)]
+    Identity(#[from] LocalIdentityError),
+    #[error("{0}")]
+    BadRequest(String),
+    #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
     Query(#[from] QueryError),
@@ -801,11 +1121,41 @@ enum ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let status = match &self {
+            Self::Identity(LocalIdentityError::Denied { code }) => match code {
+                IdentityDenialCode::AuthenticationRequired
+                | IdentityDenialCode::InvalidEvidence
+                | IdentityDenialCode::EvidenceExpired
+                | IdentityDenialCode::AudienceMismatch
+                | IdentityDenialCode::ReplayDetected => StatusCode::UNAUTHORIZED,
+                IdentityDenialCode::AuthorMismatch
+                | IdentityDenialCode::DelegationInvalid
+                | IdentityDenialCode::PeerUnbound
+                | IdentityDenialCode::SourceMismatch
+                | IdentityDenialCode::ScopeDenied
+                | IdentityDenialCode::EventDisclosureDenied => StatusCode::FORBIDDEN,
+            },
+            Self::Identity(LocalIdentityError::Internal(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Query(_) => StatusCode::BAD_REQUEST,
         };
-        (status, Json(json!({ "error": self.to_string() }))).into_response()
+        let code = match &self {
+            Self::Identity(error) => error.denial_code().map(IdentityDenialCode::as_str),
+            Self::BadRequest(_) | Self::Store(_) | Self::Query(_) => None,
+        };
+        (
+            status,
+            Json(json!({ "error": self.to_string(), "code": code })),
+        )
+            .into_response()
     }
+}
+
+fn identity_error_token(error: &LocalIdentityError) -> &'static str {
+    error
+        .denial_code()
+        .map(IdentityDenialCode::as_str)
+        .unwrap_or("identity_internal_error")
 }
 
 #[derive(Default)]

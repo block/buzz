@@ -18,6 +18,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+base64 = "0.22"
+buzz-auth = { workspace = true }
 buzz-core = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }

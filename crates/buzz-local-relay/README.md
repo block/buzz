@@ -29,11 +29,12 @@ Options:
 just local-relay --bind 127.0.0.1:3100
 just local-relay --data /absolute/path/events.ndjson
 just local-relay --ephemeral
+just local-relay --require-auth
 ```
 
 The listener is loopback-only by default. Binding another address exposes an
-unauthenticated relay and should be an intentional local-network experiment,
-not an internet deployment.
+unauthenticated relay unless `--require-auth` is set and should be an
+intentional local-network experiment, not an internet deployment.
 
 ## Implemented surface
 
@@ -46,13 +47,25 @@ not an internet deployment.
 - Strict verified replay on restart
 - Live in-process subscription fan-out
 - Portable durable-history replication source and policy-gated sink ports
+- Optional laptop identity adapter (`--require-auth`):
+  - NIP-42 challenge authentication for WebSocket connections
+  - payload-bound NIP-98 authentication for HTTP writes, queries, and counts
+  - one-use, in-memory proof replay protection
+  - direct writes bound to the authenticated event author, with the narrow
+    NIP-59 gift-wrap exception
+  - equivalent result-level disclosure policy for query, count, historical
+    subscription, and live delivery
+  - configured replication-source bindings to stable node identifiers and
+    active Nostr verification keys
 
-HTTP auth headers sent by existing Buzz clients are tolerated but not enforced.
-The local relay represents one trusted local community.
+Without `--require-auth`, the relay represents one trusted local community and
+preserves the original lightweight iteration path. The secured mode introduces
+no Postgres, Redis, MinIO, external identity provider, or DID resolver.
 
 ## Not implemented
 
-- NIP-42/NIP-98 authorization and NIP-29 membership policy
+- NIP-29 membership policy, delegated append authority, or public-read grants
+- persistent authentication replay state or dynamic DID resolution
 - Postgres FTS or indexed search filters
 - Redis or multi-node fan-out
 - automatic peer discovery or a continuous relay-to-relay transport
@@ -82,6 +95,7 @@ Ephemeral kinds (`20000..29999`) are delivered live and never written.
 cargo test -p buzz-local-relay
 cargo test -p buzz-local-relay --test portable_conformance
 cargo test -p buzz-local-relay --test replication_port
+cargo test -p buzz-local-relay --test identity_adapter
 cargo clippy -p buzz-local-relay --all-targets -- -D warnings
 ```
 

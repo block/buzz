@@ -49,6 +49,19 @@ pub fn verify_nip42_event(
     expected_challenge: &str,
     relay_url: &str,
 ) -> Result<(), AuthError> {
+    verify_nip42_event_at(event, expected_challenge, relay_url, Timestamp::now())
+}
+
+/// Verify a NIP-42 AUTH event at an explicit evaluation time.
+///
+/// This is equivalent to [`verify_nip42_event`] but makes the freshness clock
+/// injectable for portable conformance vectors and deterministic tests.
+pub fn verify_nip42_event_at(
+    event: &Event,
+    expected_challenge: &str,
+    relay_url: &str,
+    evaluation_time: Timestamp,
+) -> Result<(), AuthError> {
     if event.kind != Kind::Authentication {
         return Err(AuthError::InvalidSignature);
     }
@@ -75,7 +88,7 @@ pub fn verify_nip42_event(
         return Err(AuthError::RelayUrlMismatch);
     }
 
-    let now = Timestamp::now().as_secs();
+    let now = evaluation_time.as_secs();
     let event_ts = event.created_at.as_secs();
     let delta = now.abs_diff(event_ts);
     if delta > TIMESTAMP_TOLERANCE_SECS {
