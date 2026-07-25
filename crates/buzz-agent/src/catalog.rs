@@ -233,7 +233,7 @@ async fn fetch_v2_models(
     host: &str,
     bearer: &str,
 ) -> Result<Vec<ModelEntry>, AgentError> {
-    let mut all_models: Vec<ModelEntry> = Vec::new();
+    let mut all_endpoints: Vec<V2Endpoint> = Vec::new();
     let mut page_token: Option<String> = None;
     let base_url = format!("{host}/api/ai-gateway/v2/endpoints");
 
@@ -271,8 +271,8 @@ async fn fetch_v2_models(
             ))
         })?;
 
-        let (page_models, next) = parse_v2_endpoints_page(&json)?;
-        all_models.extend(page_models);
+        let (page_endpoints, next) = parse_v2_endpoints_page(&json)?;
+        all_endpoints.extend(page_endpoints);
 
         match next {
             Some(tok) if Some(&tok) != page_token.as_ref() => page_token = Some(tok),
@@ -281,28 +281,74 @@ async fn fetch_v2_models(
     }
 
     // Fall back to known-model list if the API returned nothing.
-    if all_models.is_empty() {
-        all_models = DATABRICKS_V2_KNOWN_MODELS
+    if all_endpoints.is_empty() {
+        return Ok(DATABRICKS_V2_KNOWN_MODELS
             .iter()
             .map(|id| ModelEntry {
                 id: id.to_string(),
                 name: id.to_string(),
             })
-            .collect();
+            .collect());
     }
 
-    Ok(all_models)
+    sort_v2_endpoints_newest_first(&mut all_endpoints);
+
+    Ok(all_endpoints
+        .into_iter()
+        .map(|endpoint| endpoint.entry)
+        .collect())
+}
+
+/// A v2 gateway endpoint plus the key discovery orders the catalog by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct V2Endpoint {
+    pub(crate) entry: ModelEntry,
+    /// `created_timestamp` as epoch milliseconds. `None` when the field is
+    /// absent or unparseable — those sort last rather than jumping the queue.
+    pub(crate) created_ms: Option<i64>,
+}
+
+/// Read `created_timestamp` from one endpoint object.
+///
+/// The gateway sends epoch milliseconds as a JSON *string*
+/// (`"created_timestamp": "1699610000000"`); accept a bare number too, so a
+/// wire-shape change doesn't silently drop every endpoint to the bottom.
+fn endpoint_created_ms(endpoint: &serde_json::Value) -> Option<i64> {
+    let value = endpoint.get("created_timestamp")?;
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+}
+
+/// Order the catalog newest-first, breaking ties by name.
+///
+/// The gateway returns endpoints in two phases — Databricks-managed first, then
+/// workspace-created — each alphabetical by name, which buries a brand-new
+/// frontier model deep in the list. Newest-first puts the models people are
+/// reaching for at the top of the picker.
+///
+/// Endpoints with no usable timestamp sort last, and the name tiebreak keeps the
+/// result stable: several managed endpoints share one placeholder timestamp, so
+/// without it their relative order would be arbitrary.
+pub(crate) fn sort_v2_endpoints_newest_first(endpoints: &mut [V2Endpoint]) {
+    endpoints.sort_by(|a, b| {
+        // `None` < `Some(_)`, so reversing puts timestamped endpoints first.
+        b.created_ms
+            .cmp(&a.created_ms)
+            .then_with(|| a.entry.name.cmp(&b.entry.name))
+    });
 }
 
 /// Parse one page of a `GET api/ai-gateway/v2/endpoints` response.
 ///
-/// Returns `(models, next_page_token)`. An empty or absent `next_page_token`
+/// Returns `(endpoints, next_page_token)`. An empty or absent `next_page_token`
 /// signals the last page. Endpoints that cannot serve chat traffic are dropped
 /// (see [`is_chat_capable_endpoint`]) so the model picker only offers models the
-/// agent can actually run.
+/// agent can actually run. Page order is preserved here; the caller sorts once
+/// every page is in (see [`sort_v2_endpoints_newest_first`]).
 pub(crate) fn parse_v2_endpoints_page(
     json: &serde_json::Value,
-) -> Result<(Vec<ModelEntry>, Option<String>), AgentError> {
+) -> Result<(Vec<V2Endpoint>, Option<String>), AgentError> {
     let endpoints = json
         .get("endpoints")
         .and_then(|v| v.as_array())
@@ -320,9 +366,12 @@ pub(crate) fn parse_v2_endpoints_page(
             if !is_chat_capable_endpoint(&name) {
                 return None;
             }
-            Some(ModelEntry {
-                id: name.clone(),
-                name,
+            Some(V2Endpoint {
+                entry: ModelEntry {
+                    id: name.clone(),
+                    name,
+                },
+                created_ms: endpoint_created_ms(endpoint),
             })
         })
         .collect();
@@ -397,7 +446,7 @@ mod tests {
         });
 
         let (models, next) = parse_v2_endpoints_page(&json).unwrap();
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = models.iter().map(|m| m.entry.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
@@ -457,11 +506,67 @@ mod tests {
         });
 
         let (models, _) = parse_v2_endpoints_page(&json).unwrap();
-        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = models.iter().map(|m| m.entry.id.as_str()).collect();
         // Image endpoints DO answer chat requests, so they are retained.
         assert_eq!(
             ids,
             vec!["databricks-claude-opus-5", "databricks-gemini-3-pro-image"]
+        );
+    }
+
+    #[test]
+    fn v2_parse_reads_created_timestamp_in_either_wire_shape() {
+        // The gateway sends epoch ms as a string; a bare number must work too.
+        let json = serde_json::json!({
+            "endpoints": [
+                {"name": "string-ts", "created_timestamp": "1784932442251"},
+                {"name": "number-ts", "created_timestamp": 1784932442251i64},
+                {"name": "junk-ts", "created_timestamp": "not-a-number"},
+                {"name": "no-ts"},
+            ]
+        });
+
+        let (models, _) = parse_v2_endpoints_page(&json).unwrap();
+        let stamps: Vec<Option<i64>> = models.iter().map(|m| m.created_ms).collect();
+        assert_eq!(
+            stamps,
+            vec![Some(1784932442251), Some(1784932442251), None, None,]
+        );
+    }
+
+    #[test]
+    fn v2_endpoints_sort_newest_first_then_by_name() {
+        // Mirrors the real catalog: the gateway pages Databricks-managed
+        // endpoints first, then workspace-created ones, each alphabetical — so
+        // the newest model is buried mid-list until this sort runs.
+        let json = serde_json::json!({
+            "endpoints": [
+                {"name": "databricks-claude-opus-5", "created_timestamp": "1784851200000"},
+                {"name": "databricks-gpt-5-6-sol", "created_timestamp": "1784073600000"},
+                {"name": "databricks-gpt-5-6-luna", "created_timestamp": "1784073600000"},
+                {"name": "databricks-llama-4-maverick", "created_timestamp": "1699610000000"},
+                {"name": "goose-claude-opus-5", "created_timestamp": "1784932442251"},
+                {"name": "endpoint-without-timestamp"},
+            ]
+        });
+
+        let (mut models, _) = parse_v2_endpoints_page(&json).unwrap();
+        sort_v2_endpoints_newest_first(&mut models);
+
+        let ids: Vec<&str> = models.iter().map(|m| m.entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                // Newest first, across both pagination phases.
+                "goose-claude-opus-5",
+                "databricks-claude-opus-5",
+                // Same timestamp — the name tiebreak keeps this deterministic.
+                "databricks-gpt-5-6-luna",
+                "databricks-gpt-5-6-sol",
+                "databricks-llama-4-maverick",
+                // No usable timestamp sorts last, never first.
+                "endpoint-without-timestamp",
+            ]
         );
     }
 
