@@ -1,5 +1,7 @@
 import React, { type CSSProperties, useEffect, useRef, useState } from "react";
 
+import { createPoofAudioPlayer } from "./poofAudioLifecycle";
+
 export const POOF_TRIGGER_CLASS = "buzz-poof-trigger";
 export const POOF_ORIGIN_CLASS = "buzz-poof-origin";
 export const POOF_POINTER_ORIGIN_CLASS = "buzz-poof-pointer-origin";
@@ -21,6 +23,7 @@ let poofAudioContext: AudioContext | null = null;
 let poofAudioBuffer: AudioBuffer | null = null;
 let poofAudioBufferPromise: Promise<AudioBuffer | null> | null = null;
 let lastPointerDownTrigger: Element | null = null;
+const poofAudioPlayer = createPoofAudioPlayer();
 
 type PoofBurst = {
   id: number;
@@ -115,24 +118,7 @@ function playPoofSound() {
     return;
   }
 
-  try {
-    const source = audioContext.createBufferSource();
-    const gain = audioContext.createGain();
-    source.buffer = poofAudioBuffer;
-    gain.gain.value = 0.34;
-    source.connect(gain);
-    gain.connect(audioContext.destination);
-    if (audioContext.state === "suspended") {
-      void audioContext.resume().then(
-        () => source.start(),
-        () => playFallbackPoofSound(),
-      );
-    } else {
-      source.start();
-    }
-  } catch {
-    playFallbackPoofSound();
-  }
+  poofAudioPlayer.play(audioContext, poofAudioBuffer, playFallbackPoofSound);
 }
 
 export function PoofBurstProvider({ children }: { children: React.ReactNode }) {
