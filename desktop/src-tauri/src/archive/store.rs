@@ -1036,5 +1036,8 @@ pub fn gc_orphaned_events(
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[path = "store_migration_tests.rs"]
+mod store_migration_tests;
+#[cfg(test)]
 #[path = "store_tests.rs"]
 mod store_tests;

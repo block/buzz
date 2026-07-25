@@ -224,7 +224,9 @@ export function sortAgentsByKnownTotal(
 /** Model rows use the same ranking rule as agents, tiebroken by harness name
  * (null harness sorts last), then by model name (null model sorts last).
  * Ordinal (`<`/`>`) comparators are used so ordering is locale-independent
- * and matches the Rust backend's `String::cmp` byte order. */
+ * and matches the Rust backend's `String::cmp` byte order.
+ * Note: harness/model identifiers are ASCII in practice; UTF-16 vs UTF-8
+ * scalar divergence for astral code points is accepted and not a use case. */
 export function sortModelsByKnownTotal(
   models: readonly AgentUsageModel[],
 ): AgentUsageModel[] {
