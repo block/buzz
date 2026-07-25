@@ -353,7 +353,8 @@ semantics.
 The first deployed preview uses:
 
 - a dedicated non-production Worker;
-- one SQLite-backed Durable Object class and explicit migration tag;
+- one SQLite-backed Durable Object class declared through Wrangler's
+  declarative `exports` lifecycle configuration;
 - generated binding types from the checked-in Wrangler configuration;
 - a current pinned compatibility date;
 - no production custom domain requirement;
@@ -413,6 +414,7 @@ portable contracts.
 
 - [Rules of Durable Objects](https://developers.cloudflare.com/durable-objects/best-practices/rules-of-durable-objects/)
 - [SQLite-backed Durable Object storage](https://developers.cloudflare.com/durable-objects/best-practices/access-durable-objects-storage/)
+- [Durable Object class exports](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/)
 - [WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 - [Testing Durable Objects](https://developers.cloudflare.com/durable-objects/examples/testing-with-durable-objects/)
 - [Workers Vitest Durable Object helpers](https://developers.cloudflare.com/workers/testing/vitest-integration/test-apis/#durable-objects)
