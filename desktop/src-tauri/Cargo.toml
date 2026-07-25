@@ -40,6 +40,14 @@ keyring = { version = "3.6.3", default-features = false, features = ["sync-secre
 # connection is dropped, which the plugin does immediately. Default features
 # keep the pure-Rust zbus backend, matching the plugin (no libdbus needed).
 notify-rust = "4"
+# Wayland clipboard support. Without this feature arboard has only the X11
+# backend, so on a Wayland session it writes through XWayland — where the
+# selection is owned by a client the compositor never surfaces to Wayland
+# clients. `set_text` returns Ok against a clipboard nothing can read (and
+# clears the real one), which surfaces as a copy button that reports success
+# and leaves the clipboard empty. Feature-unifies with the [dependencies]
+# entry; other platforms are unaffected.
+arboard = { version = "3", features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSHapticFeedback"] }
