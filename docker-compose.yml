@@ -58,7 +58,8 @@ services:
     image: adminer:latest
     container_name: buzz-adminer
     ports:
-      - "8082:8080"
+      # Host port follows BUZZ_ADMINER_HOST_PORT so a local :8082 can be freed (#2479).
+      - "${BUZZ_ADMINER_HOST_PORT:-8082}:8080"
     networks:
       - buzz-net
     depends_on:
@@ -110,8 +111,10 @@ services:
       MINIO_ROOT_USER: buzz_dev
       MINIO_ROOT_PASSWORD: buzz_dev_secret
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      # Host ports follow BUZZ_MINIO_HOST_PORT / BUZZ_MINIO_CONSOLE_HOST_PORT so a
+      # local MinIO/S3 can keep :9000/:9001. Keep BUZZ_S3_ENDPOINT in sync (#2479).
+      - "${BUZZ_MINIO_HOST_PORT:-9000}:9000"
+      - "${BUZZ_MINIO_CONSOLE_HOST_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
     networks:
