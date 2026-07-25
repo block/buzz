@@ -11,6 +11,11 @@
 use buzz_core_pkg::kind::{KIND_IA_ARCHIVE_REQUEST, KIND_IA_UNARCHIVE_REQUEST};
 use nostr::{EventBuilder, EventId, Kind, Tag};
 use uuid::Uuid;
+
+mod reactions;
+
+pub use reactions::{build_reaction, build_remove_reaction};
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 /// Maximum content size — matches buzz-sdk (64 KiB).
@@ -20,11 +25,11 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024;
 const MAX_MENTIONS: usize = 50;
 
 /// Maximum emoji length in characters — matches buzz-sdk.
-const MAX_EMOJI_CHARS: usize = 64;
+pub(super) const MAX_EMOJI_CHARS: usize = 64;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-fn tag(parts: Vec<&str>) -> Result<Tag, String> {
+pub(super) fn tag(parts: Vec<&str>) -> Result<Tag, String> {
     Tag::parse(parts).map_err(|e| format!("invalid tag: {e}"))
 }
 
@@ -436,42 +441,6 @@ pub fn build_delete_compat(
         tag(vec!["h", &channel_id.to_string()])?,
         tag(vec!["e", &target_event_id.to_hex()])?,
     ];
-    Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
-}
-
-// ── Reactions ────────────────────────────────────────────────────────────────
-
-/// Kind 7 — NIP-25 reaction.
-///
-/// `target_author` is the pubkey of the reacted-to event. NIP-25 requires the
-/// `p` tag: it is what makes the reaction visible to a
-/// `{"kinds":[7],"#p":[<self>]}` notification filter (the shape the relay's
-/// push-lease surface advertises for kind 7).
-///
-/// `.allow_self_tagging()` is required: reacting to your own message makes the
-/// `p` tag match the signer, and nostr strips matching `p` tags by default.
-pub fn build_reaction(
-    target_event_id: EventId,
-    target_author: nostr::PublicKey,
-    emoji: &str,
-) -> Result<EventBuilder, String> {
-    if emoji.chars().count() > MAX_EMOJI_CHARS {
-        return Err(format!(
-            "emoji exceeds maximum length of {MAX_EMOJI_CHARS} characters"
-        ));
-    }
-    let tags = vec![
-        tag(vec!["e", &target_event_id.to_hex()])?,
-        tag(vec!["p", &target_author.to_hex()])?,
-    ];
-    Ok(EventBuilder::new(Kind::Custom(7), emoji)
-        .tags(tags)
-        .allow_self_tagging())
-}
-
-/// Kind 5 — delete a reaction event.
-pub fn build_remove_reaction(reaction_event_id: EventId) -> Result<EventBuilder, String> {
-    let tags = vec![tag(vec!["e", &reaction_event_id.to_hex()])?];
     Ok(EventBuilder::new(Kind::Custom(5), "").tags(tags))
 }
 
