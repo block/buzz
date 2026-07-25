@@ -22,6 +22,7 @@ import 'package:buzz/shared/custom_emoji/custom_emoji.dart';
 import 'package:buzz/shared/custom_emoji/custom_emoji_provider.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 final _pngBytes = Uint8List.fromList([
   0x89,
@@ -134,6 +135,10 @@ void _setMockMediaUploadPlatformHandler(
       .setMockMethodCallHandler(_mediaUploadPlatformChannel, handler);
 }
 
+/// Shared mock prefs for the compose bar's draft store. Initialized in
+/// [main].
+late SharedPreferences _testPrefs;
+
 Widget _buildComposeBar({
   required MediaUploadService uploadService,
   required ComposeBarOnSend onSend,
@@ -159,6 +164,7 @@ Widget _buildComposeBar({
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
       relayConfigProvider.overrideWith(() => _FakeRelayConfigNotifier()),
+      savedPrefsProvider.overrideWithValue(_testPrefs),
       channelsProvider.overrideWith(() => _FakeChannelsNotifier(channels)),
     ],
     child: MaterialApp(
@@ -240,6 +246,11 @@ class _FakeChannelsNotifier extends ChannelsNotifier {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
 
   setUpAll(() {
     _setMockMediaUploadPlatformHandler((call) async {
