@@ -5,7 +5,7 @@ use chrono_tz::Tz;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
 pub(super) const SPOOL_TABLE_SQL: &str = "
 CREATE TABLE command_brief_spool (
@@ -70,41 +70,19 @@ CREATE TABLE command_brief_schedule_claims (
     ),
     CHECK (idempotency_key = schedule_id || ':' || local_date),
     CHECK (
+        transition_token IS NULL
+        OR (
+            length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
+            AND transition_token NOT GLOB '*[^!-~]*'
+        )
+    ),
+    CHECK (
         (state = 'deferred'
          AND deferred_reason IN ('identity_locked','model_unavailable','local_state_unavailable')
-         AND transition_token IS NOT NULL
-         AND length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
-         AND instr(transition_token,char(0)) = 0
-         AND transition_token NOT GLOB (
-             '*[' ||
-             char(1) || char(2) || char(3) || char(4) || char(5) ||
-             char(6) || char(7) || char(8) || char(9) || char(10) ||
-             char(11) || char(12) || char(13) || char(14) || char(15) ||
-             char(16) || char(17) || char(18) || char(19) || char(20) ||
-             char(21) || char(22) || char(23) || char(24) || char(25) ||
-             char(26) || char(27) || char(28) || char(29) || char(30) ||
-             char(31) || char(127) || ']*'
-        ))
+         AND transition_token IS NOT NULL)
         OR
         (state <> 'deferred'
-         AND deferred_reason IS NULL
-         AND (
-             transition_token IS NULL
-             OR (
-                 length(CAST(transition_token AS BLOB)) BETWEEN 1 AND 256
-                 AND instr(transition_token,char(0)) = 0
-                 AND transition_token NOT GLOB (
-                     '*[' ||
-                     char(1) || char(2) || char(3) || char(4) || char(5) ||
-                     char(6) || char(7) || char(8) || char(9) || char(10) ||
-                     char(11) || char(12) || char(13) || char(14) || char(15) ||
-                     char(16) || char(17) || char(18) || char(19) || char(20) ||
-                     char(21) || char(22) || char(23) || char(24) || char(25) ||
-                     char(26) || char(27) || char(28) || char(29) || char(30) ||
-                     char(31) || char(127) || ']*'
-                 )
-             )
-         ))
+         AND deferred_reason IS NULL)
     ),
     UNIQUE (schedule_id, local_date)
 );";
@@ -478,10 +456,7 @@ fn canonical_sql(sql: &str) -> String {
 }
 
 fn valid_transition_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
+    !value.is_empty() && value.len() <= 256 && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 fn rejected() -> String {

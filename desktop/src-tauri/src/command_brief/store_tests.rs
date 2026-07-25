@@ -21,7 +21,7 @@ fn current_store_schema_is_exact_and_rejects_weakened_claim_invariants() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert!(conn
         .execute(
             "INSERT INTO command_brief_schedule_claims(
@@ -74,10 +74,23 @@ fn exact_schema_rejects_malformed_spool_missing_heads_and_weakened_schedule_or_i
 }
 
 #[test]
-fn transition_token_constraint_is_bounded_nonempty_and_control_free() {
+fn transition_token_constraint_is_ascii_graphic_and_bounded() {
     let conn = Connection::open_in_memory().expect("memory");
     super::store::migrate_command_brief_store(&conn).expect("migrate");
-    for token in ["", &"x".repeat(257), "line\nbreak"] {
+    let invalid_tokens = [
+        String::new(),
+        "x".repeat(257),
+        "line\nbreak".to_string(),
+        "\u{0085}".to_string(),
+        "\u{00a0}".to_string(),
+        " leading".to_string(),
+        "trailing ".to_string(),
+        "internal space".to_string(),
+        "non-ascii-é".to_string(),
+    ];
+    for (index, token) in invalid_tokens.iter().enumerate() {
+        let date = format!("2026-08-{:02}", index + 1);
+        let key = format!("daily-command-brief:{date}");
         assert!(
             conn.execute(
                 "INSERT INTO command_brief_schedule_claims(
@@ -86,38 +99,14 @@ fn transition_token_constraint_is_bounded_nonempty_and_control_free() {
                  ) VALUES(?1,'daily-command-brief',?2,'UTC','deferred',
                           'local_state_unavailable',0,?3,1,1,?4)",
                 (
-                    format!(
-                        "daily-command-brief:{}",
-                        if token.is_empty() {
-                            "2026-07-25"
-                        } else if token.len() > 256 {
-                            "2026-07-26"
-                        } else {
-                            "2026-07-27"
-                        }
-                    ),
-                    if token.is_empty() {
-                        "2026-07-25"
-                    } else if token.len() > 256 {
-                        "2026-07-26"
-                    } else {
-                        "2026-07-27"
-                    },
+                    &key,
+                    &date,
                     token,
-                    super::schedule::deterministic_run_id(&format!(
-                        "daily-command-brief:{}",
-                        if token.is_empty() {
-                            "2026-07-25"
-                        } else if token.len() > 256 {
-                            "2026-07-26"
-                        } else {
-                            "2026-07-27"
-                        }
-                    )),
+                    super::schedule::deterministic_run_id(&key),
                 ),
             )
             .is_err(),
-            "invalid transition token reached durable state"
+            "invalid transition token reached durable state: {token:?}"
         );
     }
 }
@@ -136,7 +125,7 @@ fn operational_reopen_is_cheap_while_explicit_validation_remains_fail_closed() {
 }
 
 #[test]
-fn version_three_store_is_migrated_and_accepted_as_exact_version_four() {
+fn version_three_store_is_migrated_and_accepted_as_exact_version_five() {
     let conn = Connection::open_in_memory().expect("memory");
     super::store::migrate_command_brief_store(&conn).expect("initial schema");
     conn.execute_batch(
@@ -165,7 +154,7 @@ fn version_three_store_is_migrated_and_accepted_as_exact_version_four() {
     .expect("version three claims");
     conn.pragma_update(None, "user_version", 3)
         .expect("simulate prior version");
-    super::store::migrate_command_brief_store(&conn).expect("v3 to v4");
+    super::store::migrate_command_brief_store(&conn).expect("v3 to v5");
     validate_command_brief_store_schema(&conn).expect("accepted current schema");
     let run_id: String = conn
         .query_row(
@@ -181,7 +170,69 @@ fn version_three_store_is_migrated_and_accepted_as_exact_version_four() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("version");
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
+}
+
+#[test]
+fn version_four_store_is_rebuilt_with_ascii_graphic_token_constraints() {
+    let conn = Connection::open_in_memory().expect("memory");
+    super::store::migrate_command_brief_store(&conn).expect("initial schema");
+    conn.execute_batch(
+        "DROP INDEX command_brief_schedule_deferred;
+         DROP TABLE command_brief_schedule_claims;
+         CREATE TABLE command_brief_schedule_claims (
+             idempotency_key TEXT PRIMARY KEY,
+             schedule_id TEXT NOT NULL CHECK (schedule_id = 'daily-command-brief'),
+             local_date TEXT NOT NULL CHECK (length(local_date) = 10),
+             timezone TEXT NOT NULL CHECK (length(timezone) BETWEEN 1 AND 128),
+             state TEXT NOT NULL CHECK (state IN ('claimed','deferred','started','completed')),
+             deferred_reason TEXT,
+             retry_count INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
+             transition_token TEXT,
+             claimed_at INTEGER NOT NULL,
+             updated_at INTEGER NOT NULL,
+             run_id TEXT NOT NULL,
+             CHECK (idempotency_key = schedule_id || ':' || local_date),
+             CHECK (
+                 (state = 'deferred'
+                  AND deferred_reason IN
+                    ('identity_locked','model_unavailable','local_state_unavailable')
+                  AND transition_token IS NOT NULL)
+                 OR
+                 (state <> 'deferred' AND deferred_reason IS NULL)
+             ),
+             UNIQUE (schedule_id,local_date)
+         );
+         CREATE INDEX command_brief_schedule_deferred
+         ON command_brief_schedule_claims(state,retry_count,updated_at);
+         INSERT INTO command_brief_schedule_claims VALUES(
+             'daily-command-brief:2026-07-25','daily-command-brief','2026-07-25',
+             'UTC','deferred','local_state_unavailable',0,'local:abc',1,2,
+             'scheduled-7df2f1c8a188345d60cb98a3aad7e88c0a572dc8ae29f10c084c0ebddbd42ed8');
+         PRAGMA user_version=4;",
+    )
+    .expect("version four claims");
+
+    super::store::migrate_command_brief_store(&conn).expect("v4 to v5");
+    validate_command_brief_store_schema(&conn).expect("exact v5");
+    let (version, token): (i64, String) = (
+        conn.pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("version"),
+        conn.query_row(
+            "SELECT transition_token FROM command_brief_schedule_claims",
+            [],
+            |row| row.get(0),
+        )
+        .expect("token"),
+    );
+    assert_eq!(version, 5);
+    assert_eq!(token, "local:abc");
+    assert!(conn
+        .execute(
+            "UPDATE command_brief_schedule_claims SET transition_token=char(133)",
+            [],
+        )
+        .is_err());
 }
 
 fn event_at(owner: &Keys, run_id: &str, previous: Option<String>, created_at: u64) -> nostr::Event {

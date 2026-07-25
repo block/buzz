@@ -169,12 +169,12 @@ pub fn migrate_command_brief_store(conn: &Connection) -> Result<(), String> {
     } else if version == 1 {
         migrate_v1_to_v2(conn)?;
         migrate_v2_to_v3(conn)?;
-        migrate_v3_to_v4(conn)?;
+        migrate_claims_to_v5(conn)?;
     } else if version == 2 {
         migrate_v2_to_v3(conn)?;
-        migrate_v3_to_v4(conn)?;
-    } else if version == 3 {
-        migrate_v3_to_v4(conn)?;
+        migrate_claims_to_v5(conn)?;
+    } else if matches!(version, 3 | 4) {
+        migrate_claims_to_v5(conn)?;
     }
     if version != SCHEMA_VERSION {
         validate_command_brief_store_schema(conn)
@@ -253,12 +253,12 @@ fn migrate_v2_to_v3(conn: &Connection) -> Result<(), String> {
         .map_err(|_| "command brief store migration failed".to_string())
 }
 
-fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
+fn migrate_claims_to_v5(conn: &Connection) -> Result<(), String> {
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Exclusive)
         .map_err(|_| "command brief store migration failed")?;
     tx.execute_batch(&CLAIMS_TABLE_SQL.replace(
         "command_brief_schedule_claims",
-        "command_brief_schedule_claims_v4",
+        "command_brief_schedule_claims_v5",
     ))
     .map_err(|_| "command brief store migration failed")?;
     let rows = {
@@ -295,7 +295,7 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
         let _previous_run_id = run;
         let run_id = format!("scheduled-{}", hex::encode(Sha256::digest(key.as_bytes())));
         tx.execute(
-            "INSERT INTO command_brief_schedule_claims_v4(
+            "INSERT INTO command_brief_schedule_claims_v5(
                 idempotency_key,schedule_id,local_date,timezone,state,deferred_reason,
                 retry_count,transition_token,claimed_at,updated_at,run_id
              ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
@@ -309,7 +309,7 @@ fn migrate_v3_to_v4(conn: &Connection) -> Result<(), String> {
     tx.execute_batch(
         "DROP INDEX command_brief_schedule_deferred;
          DROP TABLE command_brief_schedule_claims;
-         ALTER TABLE command_brief_schedule_claims_v4
+         ALTER TABLE command_brief_schedule_claims_v5
              RENAME TO command_brief_schedule_claims;
          ",
     )

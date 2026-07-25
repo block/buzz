@@ -615,8 +615,7 @@ fn parse_schedule_row(
 fn valid_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_TRANSITION_TOKEN_BYTES
-        && value.trim() == value
-        && !value.chars().any(char::is_control)
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-COMMAND_BRIEF_SCHEMA_V4_SHA256="6f111e78cf9da58d0041e8c2909955ba7cacd7e343487efb6e253e7cf5314088"
+COMMAND_BRIEF_SCHEMA_V5_SHA256="c2b6113e18724ca14e530d844dc6315b07eeba24fdc17ed0f2412dde78f97513"
 
 command_brief_store_schema_digest() {
   local store_file="$1"
@@ -42,23 +42,23 @@ validate_command_brief_store() {
     local_workspace_die "command brief store must be a regular file" || return
   [[ "$(sqlite3 "$store_file" 'PRAGMA integrity_check;')" == "ok" ]] ||
     local_workspace_die "command brief store failed integrity validation" || return
-  [[ "$(sqlite3 "$store_file" 'PRAGMA user_version;')" == "4" ]] ||
+  [[ "$(sqlite3 "$store_file" 'PRAGMA user_version;')" == "5" ]] ||
     local_workspace_die "command brief store schema version is not current" || return
   [[ "$(command_brief_store_schema_digest "$store_file")" == \
-    "$COMMAND_BRIEF_SCHEMA_V4_SHA256" ]] ||
-    local_workspace_die "command brief store schema is not exact v4" || return
+    "$COMMAND_BRIEF_SCHEMA_V5_SHA256" ]] ||
+    local_workspace_die "command brief store schema is not exact v5" || return
   [[ "$(command_brief_table_signature "$store_file" command_brief_spool)" == \
     "$expected_spool" ]] ||
-    local_workspace_die "command brief spool columns are not exact v4" || return
+    local_workspace_die "command brief spool columns are not exact v5" || return
   [[ "$(command_brief_table_signature "$store_file" command_brief_heads)" == \
     "$expected_heads" ]] ||
-    local_workspace_die "command brief heads columns are not exact v4" || return
+    local_workspace_die "command brief heads columns are not exact v5" || return
   [[ "$(command_brief_table_signature "$store_file" command_brief_schedule)" == \
     "$expected_schedule" ]] ||
-    local_workspace_die "command brief schedule columns are not exact v4" || return
+    local_workspace_die "command brief schedule columns are not exact v5" || return
   [[ "$(command_brief_table_signature \
     "$store_file" command_brief_schedule_claims)" == "$expected_claims" ]] ||
-    local_workspace_die "command brief claim columns are not exact v4" || return
+    local_workspace_die "command brief claim columns are not exact v5" || return
 
   [[ "$(sqlite3 "$store_file" \
     "SELECT COUNT(*) FROM command_brief_schedule
@@ -83,32 +83,12 @@ validate_command_brief_store() {
                ('identity_locked','model_unavailable','local_state_unavailable')
              OR transition_token IS NULL
              OR length(CAST(transition_token AS BLOB)) NOT BETWEEN 1 AND 256
-             OR instr(transition_token,char(0)) <> 0
-             OR transition_token GLOB (
-               '*[' ||
-               char(1) || char(2) || char(3) || char(4) || char(5) ||
-               char(6) || char(7) || char(8) || char(9) || char(10) ||
-               char(11) || char(12) || char(13) || char(14) || char(15) ||
-               char(16) || char(17) || char(18) || char(19) || char(20) ||
-               char(21) || char(22) || char(23) || char(24) || char(25) ||
-               char(26) || char(27) || char(28) || char(29) || char(30) ||
-               char(31) || char(127) || ']*'
-             )))
+             OR transition_token GLOB '*[^!-~]*'))
         OR (state <> 'deferred' AND
             (deferred_reason IS NOT NULL
              OR (transition_token IS NOT NULL AND
                  (length(CAST(transition_token AS BLOB)) NOT BETWEEN 1 AND 256
-                  OR instr(transition_token,char(0)) <> 0
-                  OR transition_token GLOB (
-                    '*[' ||
-                    char(1) || char(2) || char(3) || char(4) || char(5) ||
-                    char(6) || char(7) || char(8) || char(9) || char(10) ||
-                    char(11) || char(12) || char(13) || char(14) || char(15) ||
-                    char(16) || char(17) || char(18) || char(19) || char(20) ||
-                    char(21) || char(22) || char(23) || char(24) || char(25) ||
-                    char(26) || char(27) || char(28) || char(29) || char(30) ||
-                    char(31) || char(127) || ']*'
-                  )))));")" == "0" ]] ||
+                  OR transition_token GLOB '*[^!-~]*'))));")" == "0" ]] ||
     local_workspace_die "command brief claim validation failed" || return
 
   while IFS='|' read -r idempotency_key run_id; do

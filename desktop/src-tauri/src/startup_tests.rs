@@ -1,11 +1,12 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    timer_claim_fast_path, CommandBriefRuntimeSet, InstalledCommandBriefRuntime,
+    observe_readiness_transition, timer_claim_fast_path, CommandBriefReadinessTransitions,
+    CommandBriefRuntimeSet, InstalledCommandBriefRuntime, ReadinessSignalSource,
     RuntimeConfigIdentity, RuntimeReadiness,
 };
 use crate::command_brief::audit::{PersistedTerminal, TerminalAuditInput};
@@ -15,14 +16,37 @@ use crate::command_brief::orchestrator::{
 };
 use crate::command_brief::provenance::ValidatedSource;
 use crate::command_brief::schedule::{
-    acquire_due_claim, load_or_create_schedule, mark_claim_started, ClaimDecision,
-    ScheduleRunOutcome, ScheduleTrigger,
+    acquire_due_claim, load_or_create_schedule, mark_claim_started, process_due_schedule,
+    ClaimDecision, DeferredReason, ReadinessSnapshot, ScheduleRunOutcome, ScheduleTrigger,
+    ScheduledRunPresence, ScheduledRunStarter, ScheduledStartError,
 };
 use crate::command_brief::scheduler::LocalModelScheduler;
 use crate::command_brief::sources::{FrozenSourceContext, SourceCollectionError};
 use crate::command_brief::types::{AdviserContribution, AdviserId};
 
 struct UnusedProvider;
+
+#[derive(Default)]
+struct RecordingStarter {
+    starts: Mutex<Vec<String>>,
+}
+
+impl ScheduledRunStarter for RecordingStarter {
+    fn start_scheduled(
+        &self,
+        run_id: &str,
+        _idempotency_key: &str,
+        _schedule_id: &str,
+        _observed_at: &str,
+    ) -> Result<String, ScheduledStartError> {
+        self.starts.lock().expect("starts").push(run_id.to_string());
+        Ok(run_id.to_string())
+    }
+
+    fn presence(&self, _run_id: &str) -> ScheduledRunPresence {
+        ScheduledRunPresence::Absent
+    }
+}
 
 impl BriefSourceProvider for UnusedProvider {
     fn freeze<'a>(
@@ -122,8 +146,10 @@ fn completed_or_started_timer_ticks_take_the_zero_probe_fast_path() {
 
         let mut expensive_probe_counts = [0_u8; 5];
         for _ in 0..10 {
-            let fast = timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer)
-                .expect("fast path");
+            let fast = timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || {
+                panic!("started/completed must not inspect admission")
+            })
+            .expect("fast path");
             if fast.is_none() {
                 for counter in &mut expensive_probe_counts {
                     *counter += 1;
@@ -137,12 +163,92 @@ fn completed_or_started_timer_ticks_take_the_zero_probe_fast_path() {
             "LM discovery, RAG, Apple config, helper identity, and integrity stay untouched"
         );
         assert_eq!(
-            timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Startup)
+            timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Startup, || None)
                 .expect("startup"),
             None,
             "startup retains durable crash reconciliation"
         );
     }
+}
+
+#[test]
+fn actual_knowledge_and_model_observers_recover_once_without_unchanged_dispatch() {
+    let conn = Connection::open_in_memory().expect("memory");
+    crate::command_brief::store::migrate_command_brief_store(&conn).expect("migrate");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    let starter = RecordingStarter::default();
+    let mut transitions = CommandBriefReadinessTransitions::default();
+
+    assert!(observe_readiness_transition(
+        &mut transitions,
+        ReadinessSignalSource::Knowledge,
+        "knowledge:rag-unavailable",
+    ));
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Startup,
+            &ReadinessSnapshot::deferred(
+                DeferredReason::LocalStateUnavailable,
+                "knowledge:rag-unavailable",
+            ),
+            &starter,
+        )
+        .expect("defer RAG"),
+        ScheduleRunOutcome::Deferred {
+            reason: DeferredReason::LocalStateUnavailable,
+        }
+    );
+    assert!(!observe_readiness_transition(
+        &mut transitions,
+        ReadinessSignalSource::Knowledge,
+        "knowledge:rag-unavailable",
+    ));
+    assert!(starter.starts.lock().expect("starts").is_empty());
+
+    assert!(observe_readiness_transition(
+        &mut transitions,
+        ReadinessSignalSource::Knowledge,
+        "knowledge:rag-ready",
+    ));
+    assert!(matches!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Readiness,
+            &ReadinessSnapshot::ready("knowledge:rag-ready"),
+            &starter,
+        )
+        .expect("RAG transition retry"),
+        ScheduleRunOutcome::Started { .. }
+    ));
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+
+    let mut model_transitions = CommandBriefReadinessTransitions::default();
+    assert!(observe_readiness_transition(
+        &mut model_transitions,
+        ReadinessSignalSource::Model,
+        "model:no-loaded-model",
+    ));
+    assert!(!observe_readiness_transition(
+        &mut model_transitions,
+        ReadinessSignalSource::Model,
+        "model:no-loaded-model",
+    ));
+    assert!(observe_readiness_transition(
+        &mut model_transitions,
+        ReadinessSignalSource::Model,
+        "model:qwen-ready",
+    ));
+    assert!(!observe_readiness_transition(
+        &mut model_transitions,
+        ReadinessSignalSource::Model,
+        "model:qwen-ready",
+    ));
 }
 
 #[test]
@@ -267,6 +373,109 @@ async fn orchestrator_admission_transition_is_exact_and_scheduler_churn_is_irrel
         full_token,
         "64 to 63 is one distinct admission transition"
     );
+}
+
+#[tokio::test]
+async fn deferred_full_admission_settlement_causes_one_real_timer_retry() {
+    let conn = Connection::open_in_memory().expect("memory");
+    crate::command_brief::store::migrate_command_brief_store(&conn).expect("migrate");
+    let schedule = load_or_create_schedule(&conn, "Australia/Sydney", 1).expect("schedule");
+    let now = utc("2026-07-25T01:00:00Z");
+    let scheduler = LocalModelScheduler::new(2).expect("scheduler");
+    let orchestrator = CommandBriefOrchestrator::new(
+        scheduler,
+        Arc::new(UnusedProvider),
+        Arc::new(UnusedProvider),
+        Arc::new(UnusedProvider),
+    );
+    let request = || {
+        CommandBriefRequest::new("daily-command-brief", "prepare", "2026-07-25T06:00:00Z")
+            .expect("request")
+    };
+    for index in 0..64 {
+        orchestrator
+            .start_exact(&format!("admission-{index}"), request())
+            .expect("admitted");
+    }
+    let runtime_identity = identity("qwen", "snapshot-a", "apple-a", 2);
+    let full_token = RuntimeReadiness::ready(&runtime_identity, 11, orchestrator.admission_state())
+        .transition_token;
+    let starter = RecordingStarter::default();
+    assert_eq!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Startup,
+            &ReadinessSnapshot::deferred(DeferredReason::LocalStateUnavailable, &full_token,),
+            &starter,
+        )
+        .expect("full deferred"),
+        ScheduleRunOutcome::Deferred {
+            reason: DeferredReason::LocalStateUnavailable,
+        }
+    );
+    assert_eq!(
+        timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || Some(
+            full_token.clone()
+        ),)
+        .expect("unchanged full admission"),
+        Some(ScheduleRunOutcome::AlreadyClaimed)
+    );
+
+    assert!(orchestrator.cancel("admission-0"));
+    for _ in 0..100 {
+        if orchestrator.admission_state()
+            == (OrchestratorAdmissionState::Available {
+                tracked_nonterminal: 63,
+                capacity: 64,
+            })
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    let one_free_token =
+        RuntimeReadiness::ready(&runtime_identity, 11, orchestrator.admission_state())
+            .transition_token;
+    assert_eq!(
+        timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || Some(
+            one_free_token.clone()
+        ),)
+        .expect("admission transition"),
+        None
+    );
+    assert!(matches!(
+        process_due_schedule(
+            &conn,
+            &schedule,
+            now,
+            ScheduleTrigger::Timer,
+            &ReadinessSnapshot::ready(&one_free_token),
+            &starter,
+        )
+        .expect("one real retry"),
+        ScheduleRunOutcome::Started { .. }
+    ));
+    let retry_count: i64 = conn
+        .query_row(
+            "SELECT retry_count FROM command_brief_schedule_claims",
+            [],
+            |row| row.get(0),
+        )
+        .expect("retry count");
+    assert_eq!(retry_count, 1);
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
+    for _ in 0..10 {
+        assert_eq!(
+            timer_claim_fast_path(&conn, &schedule, now, ScheduleTrigger::Timer, || panic!(
+                "started claim must not inspect admission"
+            ),)
+            .expect("started fast path"),
+            Some(ScheduleRunOutcome::AlreadyClaimed)
+        );
+    }
+    assert_eq!(starter.starts.lock().expect("starts").len(), 1);
 }
 
 #[test]

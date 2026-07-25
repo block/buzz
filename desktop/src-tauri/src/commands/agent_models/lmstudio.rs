@@ -481,9 +481,7 @@ async fn probe_lmstudio_readiness(
     )
 }
 
-/// Read-only health probe for the Command Console's distinct LM Studio source.
-#[tauri::command]
-pub async fn get_lmstudio_readiness(app: AppHandle) -> Result<LmStudioReadiness, String> {
+pub(crate) async fn read_lmstudio_readiness(app: AppHandle) -> Result<LmStudioReadiness, String> {
     let runtime = known_acp_runtime("buzz-lmstudio-agent")
         .ok_or_else(|| "LM Studio runtime is missing from the catalog".to_string())?;
     let configured_model = crate::managed_agents::load_global_agent_config(&app)
@@ -506,6 +504,32 @@ pub async fn get_lmstudio_readiness(app: AppHandle) -> Result<LmStudioReadiness,
         })
         .await,
     )
+}
+
+/// Read-only health probe for the Command Console's distinct LM Studio source.
+#[tauri::command]
+pub async fn get_lmstudio_readiness(app: AppHandle) -> Result<LmStudioReadiness, String> {
+    let readiness = read_lmstudio_readiness(app.clone()).await;
+    let basis = readiness
+        .as_ref()
+        .ok()
+        .and_then(|value| {
+            serde_json::to_vec(&(
+                value.status,
+                &value.configured_model,
+                &value.loaded_models,
+                &value.security_warnings,
+                value.bind_exposure,
+            ))
+            .ok()
+        })
+        .unwrap_or_else(|| b"model:probe-unavailable".to_vec());
+    crate::startup::notify_command_brief_readiness(
+        &app,
+        crate::startup::ReadinessSignalSource::Model,
+        &basis,
+    );
+    readiness
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 //! Startup, wake, and readiness-transition wiring for the Daily Command Brief.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -111,6 +112,52 @@ impl RuntimeConfigIdentity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RuntimeReadiness {
     transition_token: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ReadinessSignalSource {
+    Knowledge,
+    Model,
+}
+
+#[derive(Default)]
+pub(crate) struct CommandBriefReadinessTransitions {
+    observed: BTreeMap<ReadinessSignalSource, String>,
+}
+
+pub(crate) fn observe_readiness_transition(
+    transitions: &mut CommandBriefReadinessTransitions,
+    source: ReadinessSignalSource,
+    token: &str,
+) -> bool {
+    if !valid_readiness_token(token)
+        || transitions
+            .observed
+            .get(&source)
+            .is_some_and(|observed| observed == token)
+    {
+        return false;
+    }
+    transitions.observed.insert(source, token.to_string());
+    true
+}
+
+pub(crate) fn notify_command_brief_readiness(
+    app: &AppHandle,
+    source: ReadinessSignalSource,
+    basis: &[u8],
+) {
+    let token = format!("signal:{}", hex::encode(Sha256::digest(basis)));
+    let transitions = app.state::<Mutex<CommandBriefReadinessTransitions>>();
+    let changed = transitions.lock().is_ok_and(|mut transitions| {
+        observe_readiness_transition(&mut transitions, source, &token)
+    });
+    if changed {
+        let transition_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let _ = run_command_brief_schedule(transition_app, ScheduleTrigger::Readiness).await;
+        });
+    }
 }
 
 pub(crate) struct InstalledCommandBriefRuntime {
@@ -252,11 +299,13 @@ pub(crate) async fn run_command_brief_schedule(
     let timezone = current_macos_timezone()?;
     let schedule = load_or_create_schedule(&conn, &timezone, Utc::now().timestamp())?;
     let now = Utc::now();
-    if let Some(outcome) = timer_claim_fast_path(&conn, &schedule, now, trigger)? {
+    let state = app.state::<AppState>();
+    if let Some(outcome) = timer_claim_fast_path(&conn, &schedule, now, trigger, || {
+        current_runtime_admission_token(&state)
+    })? {
         return Ok(outcome);
     }
 
-    let state = app.state::<AppState>();
     if state.keyring_locked.load(Ordering::Acquire)
         || state.identity_lost.load(Ordering::Acquire)
         || state.reset_failed.load(Ordering::Acquire)
@@ -268,7 +317,7 @@ pub(crate) async fn run_command_brief_schedule(
         return process_due_schedule(&conn, &schedule, now, trigger, &readiness, &NoStarter);
     }
 
-    let model_readiness = match crate::commands::get_lmstudio_readiness(app.clone()).await {
+    let model_readiness = match crate::commands::read_lmstudio_readiness(app.clone()).await {
         Ok(readiness) => readiness,
         Err(_) => {
             let readiness = ReadinessSnapshot::deferred(
@@ -363,6 +412,7 @@ fn timer_claim_fast_path(
     schedule: &crate::command_brief::types::BriefSchedule,
     now: chrono::DateTime<Utc>,
     trigger: ScheduleTrigger,
+    current_admission_token: impl FnOnce() -> Option<String>,
 ) -> Result<Option<ScheduleRunOutcome>, String> {
     let Some(date) = due_local_date(schedule, now, trigger) else {
         return Ok(Some(ScheduleRunOutcome::NotDue));
@@ -371,15 +421,46 @@ fn timer_claim_fast_path(
         return Ok(None);
     }
     let key = idempotency_key(schedule, date);
-    let state = conn
+    let claim = conn
         .query_row(
-            "SELECT state FROM command_brief_schedule_claims WHERE idempotency_key=?1",
+            "SELECT state,transition_token
+             FROM command_brief_schedule_claims WHERE idempotency_key=?1",
             [key],
-            |row| row.get::<_, String>(0),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()
         .map_err(|_| "command brief schedule unavailable".to_string())?;
-    Ok(state.map(|_| ScheduleRunOutcome::AlreadyClaimed))
+    let Some((state, stored_token)) = claim else {
+        return Ok(None);
+    };
+    if state == "deferred" {
+        let stored_token =
+            stored_token.ok_or_else(|| "command brief schedule unavailable".to_string())?;
+        if current_admission_token()
+            .as_deref()
+            .is_some_and(|current| current != stored_token)
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some(ScheduleRunOutcome::AlreadyClaimed))
+}
+
+fn current_runtime_admission_token(state: &AppState) -> Option<String> {
+    let runtimes = state.command_brief_runtimes.try_read().ok()?;
+    let runtime = runtimes.current.as_ref()?;
+    Some(
+        RuntimeReadiness::ready(
+            &runtime.config,
+            runtime.generation,
+            runtime.orchestrator.admission_state(),
+        )
+        .transition_token,
+    )
+}
+
+fn valid_readiness_token(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 async fn production_preflight(

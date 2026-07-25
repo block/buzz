@@ -222,10 +222,11 @@ async fn rag_knowledge_status(app: tauri::AppHandle) -> (RagKnowledgeStatus, Vec
 }
 
 pub(crate) async fn refresh_knowledge_admissions(app: tauri::AppHandle) {
-    let _ = tokio::join!(
+    let (memory, rag) = tokio::join!(
         memory_knowledge_status(app.clone()),
-        rag_knowledge_status(app),
+        rag_knowledge_status(app.clone()),
     );
+    notify_knowledge_readiness(&app, &memory.0, &rag.0);
 }
 
 async fn apple_knowledge_status() -> (Vec<AppleKnowledgeStatus>, Vec<String>) {
@@ -277,9 +278,10 @@ async fn apple_knowledge_status() -> (Vec<AppleKnowledgeStatus>, Vec<String>) {
 pub(crate) async fn get_command_knowledge_status(app: tauri::AppHandle) -> CommandKnowledgeStatus {
     let (memory, rag, apple) = tokio::join!(
         memory_knowledge_status(app.clone()),
-        rag_knowledge_status(app),
+        rag_knowledge_status(app.clone()),
         apple_knowledge_status(),
     );
+    notify_knowledge_readiness(&app, &memory.0, &rag.0);
     let mut degraded_sections = memory.1;
     degraded_sections.extend(rag.1);
     degraded_sections.extend(apple.1);
@@ -295,4 +297,18 @@ pub(crate) async fn get_command_knowledge_status(app: tauri::AppHandle) -> Comma
         apple_inputs: apple.0,
         degraded_sections,
     }
+}
+
+fn notify_knowledge_readiness(
+    app: &tauri::AppHandle,
+    memory: &MemoryKnowledgeStatus,
+    rag: &RagKnowledgeStatus,
+) {
+    let basis = serde_json::to_vec(&(memory, rag))
+        .unwrap_or_else(|_| b"knowledge:status-unavailable".to_vec());
+    crate::startup::notify_command_brief_readiness(
+        app,
+        crate::startup::ReadinessSignalSource::Knowledge,
+        &basis,
+    );
 }
