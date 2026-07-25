@@ -49,6 +49,12 @@ export type JoinDeepLinkPayload = {
   policyReceipt: string | null;
 };
 
+export type PendingAgentSnapshotImport = {
+  id: string;
+  fileBytes: number[];
+  fileName: string;
+};
+
 type PendingCommunityDeepLink = {
   id: string;
   kind: "connect" | "join" | "add-community";
@@ -171,4 +177,47 @@ export function listenForNostrBindDeepLinks(
   return listen<NostrBindDeepLinkPayload>("deep-link-nostr-bind", (event) => {
     onOpen(event.payload);
   });
+}
+
+/**
+ * Route a local `buzz://agent-import` request into the existing agent snapshot
+ * preview. The Rust queue covers cold starts; acknowledging happens only after
+ * the frontend has accepted the bytes into its one-shot import queue.
+ */
+export async function listenForAgentSnapshotDeepLinks(
+  onOpen: (payload: PendingAgentSnapshotImport) => boolean,
+): Promise<UnlistenFn> {
+  let drainRunning = false;
+  let drainRequested = false;
+
+  const drain = () => {
+    drainRequested = true;
+    if (drainRunning) return;
+    drainRunning = true;
+    void (async () => {
+      try {
+        while (drainRequested) {
+          drainRequested = false;
+          const pending = await invoke<PendingAgentSnapshotImport | null>(
+            "take_pending_agent_snapshot_import",
+          );
+          if (!pending || !onOpen(pending)) return;
+          await invoke<boolean>("acknowledge_pending_agent_snapshot_import", {
+            id: pending.id,
+          });
+        }
+      } catch (error: unknown) {
+        console.warn("Failed to open pending agent snapshot import", error);
+      } finally {
+        drainRunning = false;
+        if (drainRequested) drain();
+      }
+    })();
+  };
+
+  const unlisten = await listen<void>("deep-link-agent-import", drain);
+  drain();
+  return () => {
+    unlisten();
+  };
 }

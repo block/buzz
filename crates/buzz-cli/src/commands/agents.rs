@@ -2,6 +2,8 @@ use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
 use buzz_sdk::builders::{build_archive_identity_request, build_unarchive_identity_request};
 use nostr::PublicKey;
 use serde_json::json;
+use std::path::{Path, PathBuf};
+use url::Url;
 
 use crate::agent_management::{build_create, build_update, CreateAgentDraft, UpdateAgentDraft};
 use crate::client::BuzzClient;
@@ -11,6 +13,9 @@ use crate::{AgentsCmd, RespondToArg};
 
 pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), CliError> {
     match command {
+        AgentsCmd::Import { .. } => Err(CliError::Other(
+            "agent import was not handled as a local command".into(),
+        )),
         AgentsCmd::DraftCreate {
             channel,
             display_name,
@@ -149,6 +154,76 @@ pub async fn dispatch(command: AgentsCmd, client: &BuzzClient) -> Result<(), Cli
 
         AgentsCmd::Archived => cmd_archived(client).await,
     }
+}
+
+const MAX_AGENT_JSON_BYTES: u64 = 5 * 1024 * 1024;
+const MAX_AGENT_PNG_BYTES: u64 = 10 * 1024 * 1024;
+const AGENT_IMPORT_DEEP_LINK_VERSION: &str = "1";
+
+fn snapshot_size_cap(path: &Path) -> Result<u64, CliError> {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| CliError::Usage("snapshot filename is not valid UTF-8".into()))?
+        .to_ascii_lowercase();
+    if name.ends_with(".agent.json") {
+        Ok(MAX_AGENT_JSON_BYTES)
+    } else if name.ends_with(".agent.png") {
+        Ok(MAX_AGENT_PNG_BYTES)
+    } else {
+        Err(CliError::Usage(
+            "snapshot filename must end with .agent.json or .agent.png".into(),
+        ))
+    }
+}
+
+pub(crate) fn build_agent_import_deep_link(file: &Path) -> Result<(PathBuf, Url), CliError> {
+    let canonical = file
+        .canonicalize()
+        .map_err(|error| CliError::Usage(format!("cannot read snapshot file: {error}")))?;
+    let metadata = canonical
+        .metadata()
+        .map_err(|error| CliError::Usage(format!("cannot inspect snapshot file: {error}")))?;
+    if !metadata.is_file() {
+        return Err(CliError::Usage(
+            "snapshot path must point to a regular file".into(),
+        ));
+    }
+    let cap = snapshot_size_cap(&canonical)?;
+    if metadata.len() > cap {
+        return Err(CliError::Usage(format!(
+            "snapshot file is too large (maximum {} MiB)",
+            cap / (1024 * 1024)
+        )));
+    }
+
+    let file_url = Url::from_file_path(&canonical)
+        .map_err(|()| CliError::Usage("could not convert snapshot path to a file URL".into()))?;
+    let mut deep_link = Url::parse("buzz://agent-import")
+        .map_err(|error| CliError::Other(format!("invalid import deep-link base: {error}")))?;
+    deep_link
+        .query_pairs_mut()
+        .append_pair("v", AGENT_IMPORT_DEEP_LINK_VERSION)
+        .append_pair("file", file_url.as_str());
+    Ok((canonical, deep_link))
+}
+
+pub fn cmd_import(file: &Path) -> Result<(), CliError> {
+    let (canonical, deep_link) = build_agent_import_deep_link(file)?;
+    webbrowser::open(deep_link.as_str())
+        .map_err(|error| CliError::Other(format!("failed to open Buzz Desktop: {error}")))?;
+    println!(
+        "{}",
+        json!({
+            "ok": true,
+            "action": "agent-import",
+            "opened": true,
+            "confirmed": false,
+            "file": canonical,
+            "message": "Snapshot sent to Buzz Desktop. Review the preview and confirm Import in the app."
+        })
+    );
+    Ok(())
 }
 
 /// Require `BUZZ_AUTH_TAG` and parse the owner pubkey from it. Used only by
@@ -386,6 +461,7 @@ mod tests {
     use buzz_core::kind::KIND_IA_ARCHIVED_LIST;
     use nostr::{EventBuilder, Keys, Kind, Tag};
     use serde_json::json;
+    use std::io::Write;
 
     fn hex64(c: char) -> String {
         std::iter::repeat_n(c, 64).collect()
@@ -393,6 +469,61 @@ mod tests {
 
     fn hex128(c: char) -> String {
         std::iter::repeat_n(c, 128).collect()
+    }
+
+    #[test]
+    fn agent_import_deep_link_contains_canonical_file_url() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let snapshot_path = directory.path().join("name with spaces.agent.json");
+        std::fs::write(&snapshot_path, b"{}").expect("write snapshot");
+
+        let (canonical, deep_link) =
+            build_agent_import_deep_link(&snapshot_path).expect("valid deep link");
+        assert_eq!(
+            canonical,
+            snapshot_path.canonicalize().expect("canonical path")
+        );
+        assert_eq!(deep_link.scheme(), "buzz");
+        assert_eq!(deep_link.host_str(), Some("agent-import"));
+        assert_eq!(
+            deep_link
+                .query_pairs()
+                .find(|(key, _)| key == "v")
+                .map(|(_, value)| value.into_owned())
+                .as_deref(),
+            Some(AGENT_IMPORT_DEEP_LINK_VERSION)
+        );
+        let file = deep_link
+            .query_pairs()
+            .find(|(key, _)| key == "file")
+            .map(|(_, value)| value.into_owned())
+            .expect("file query parameter");
+        assert!(file.starts_with("file://"));
+        assert!(file.contains("name%20with%20spaces.agent.json"));
+    }
+
+    #[test]
+    fn agent_import_rejects_unknown_extension() {
+        let mut snapshot = tempfile::NamedTempFile::new().expect("temp file");
+        snapshot.write_all(b"{}").expect("write snapshot");
+
+        let error =
+            build_agent_import_deep_link(snapshot.path()).expect_err("extension must be rejected");
+        assert!(error.to_string().contains(".agent.json or .agent.png"));
+    }
+
+    #[test]
+    fn agent_import_rejects_oversize_json_before_opening_desktop() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let snapshot_path = directory.path().join("large.agent.json");
+        let snapshot = std::fs::File::create(&snapshot_path).expect("create snapshot");
+        snapshot
+            .set_len(MAX_AGENT_JSON_BYTES + 1)
+            .expect("extend snapshot");
+
+        let error =
+            build_agent_import_deep_link(&snapshot_path).expect_err("size must be rejected");
+        assert!(error.to_string().contains("maximum 5 MiB"));
     }
 
     // --- (b) auth-selection matrix: extract_owner_auth_tag ---

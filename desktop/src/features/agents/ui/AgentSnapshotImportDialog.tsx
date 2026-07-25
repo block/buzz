@@ -19,6 +19,8 @@ import { Separator } from "@/shared/ui/separator";
 
 type ImportPhase = "preview" | "confirming" | "result";
 
+const SYSTEM_PROMPT_PREVIEW_CHARS = 180;
+
 type AgentSnapshotImportDialogProps = {
   open: boolean;
   /** Preview data loaded by the caller before opening. */
@@ -47,11 +49,13 @@ export function AgentSnapshotImportDialog({
 }: AgentSnapshotImportDialogProps) {
   // Default: clear the source allowlist (safe default per spec).
   const [keepAllowlist, setKeepAllowlist] = React.useState(false);
+  const [showFullPrompt, setShowFullPrompt] = React.useState(false);
 
-  // Reset choice whenever the dialog opens with new data.
+  // Reset preview choices whenever the dialog opens.
   React.useEffect(() => {
     if (open) {
       setKeepAllowlist(false);
+      setShowFullPrompt(false);
     }
   }, [open]);
 
@@ -124,6 +128,8 @@ export function AgentSnapshotImportDialog({
             memoryLevelLabel={memoryLevelLabel}
             keepAllowlist={keepAllowlist}
             onKeepAllowlistChange={setKeepAllowlist}
+            onShowFullPromptChange={setShowFullPrompt}
+            showFullPrompt={showFullPrompt}
           />
         ) : phase === "confirming" ? (
           <div className="py-4 text-center text-sm text-muted-foreground">
@@ -145,12 +151,16 @@ function PreviewBody({
   memoryLevelLabel,
   keepAllowlist,
   onKeepAllowlistChange,
+  onShowFullPromptChange,
+  showFullPrompt,
 }: {
   preview: AgentSnapshotImportPreview;
   hasMemory: boolean;
   memoryLevelLabel: string;
   keepAllowlist: boolean;
   onKeepAllowlistChange: (v: boolean) => void;
+  onShowFullPromptChange: (show: boolean) => void;
+  showFullPrompt: boolean;
 }) {
   return (
     <div className="space-y-4 py-1">
@@ -158,9 +168,11 @@ function PreviewBody({
       <div className="space-y-1">
         <p className="text-sm font-medium">{preview.displayName}</p>
         {preview.systemPrompt ? (
-          <p className="line-clamp-3 text-xs text-muted-foreground">
-            {preview.systemPrompt}
-          </p>
+          <SystemPromptReview
+            onExpandedChange={onShowFullPromptChange}
+            prompt={preview.systemPrompt}
+            expanded={showFullPrompt}
+          />
         ) : null}
       </div>
 
@@ -233,6 +245,59 @@ function PreviewBody({
             </label>
           </div>
         </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SystemPromptReview({
+  prompt,
+  expanded,
+  onExpandedChange,
+}: {
+  prompt: string;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+}) {
+  const hasMore = prompt.length > SYSTEM_PROMPT_PREVIEW_CHARS;
+  const preview = hasMore
+    ? `${prompt.slice(0, SYSTEM_PROMPT_PREVIEW_CHARS).trimEnd()}…`
+    : prompt;
+
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">
+        Instructions · {prompt.length.toLocaleString()} characters
+      </p>
+      {expanded ? (
+        <div
+          className="max-h-64 overflow-y-auto rounded-md border border-border bg-muted/30 p-3"
+          data-testid="agent-snapshot-import-full-prompt"
+        >
+          <p className="whitespace-pre-wrap wrap-break-word text-xs text-muted-foreground">
+            {prompt}
+          </p>
+        </div>
+      ) : (
+        <p
+          className="line-clamp-3 whitespace-pre-wrap wrap-break-word text-xs text-muted-foreground"
+          data-testid="agent-snapshot-import-prompt-excerpt"
+        >
+          {preview}
+        </p>
+      )}
+      {hasMore ? (
+        <Button
+          aria-expanded={expanded}
+          className="-ml-2 h-auto px-2 py-1"
+          data-testid="agent-snapshot-import-prompt-toggle"
+          onClick={() => onExpandedChange(!expanded)}
+          size="sm"
+          type="button"
+          variant="ghost"
+        >
+          {expanded ? "Hide full instructions" : "Review full instructions"}
+        </Button>
       ) : null}
     </div>
   );

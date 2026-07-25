@@ -1,4 +1,9 @@
-use std::{collections::VecDeque, sync::Mutex};
+use std::{
+    collections::VecDeque,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use serde::Serialize;
 use tauri::{Emitter, Manager, State};
@@ -19,6 +24,58 @@ pub(crate) struct PendingCommunityDeepLink {
 
 #[derive(Default)]
 pub(crate) struct PendingCommunityDeepLinks(Mutex<VecDeque<PendingCommunityDeepLink>>);
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingAgentSnapshotImport {
+    id: String,
+    file_bytes: Vec<u8>,
+    file_name: String,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingAgentSnapshotImports(Mutex<VecDeque<PendingAgentSnapshotImport>>);
+
+const AGENT_IMPORT_DEEP_LINK_VERSION: &str = "1";
+
+impl PendingAgentSnapshotImports {
+    fn enqueue(&self, pending: PendingAgentSnapshotImport) -> Result<(), String> {
+        let mut queue = self
+            .0
+            .lock()
+            .map_err(|error| format!("pending agent-import queue poisoned: {error}"))?;
+        if queue.iter().any(|item| {
+            item.file_name == pending.file_name && item.file_bytes == pending.file_bytes
+        }) {
+            return Ok(());
+        }
+        if !queue.is_empty() {
+            return Err("another agent snapshot import is already pending".into());
+        }
+        queue.push_back(pending);
+        Ok(())
+    }
+
+    fn first(&self) -> Result<Option<PendingAgentSnapshotImport>, String> {
+        self.0
+            .lock()
+            .map_err(|error| format!("pending agent-import queue poisoned: {error}"))
+            .map(|queue| queue.front().cloned())
+    }
+
+    fn acknowledge(&self, id: &str) -> Result<bool, String> {
+        let mut queue = self
+            .0
+            .lock()
+            .map_err(|error| format!("pending agent-import queue poisoned: {error}"))?;
+        if queue.front().is_some_and(|item| item.id == id) {
+            queue.pop_front();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
 
 impl PendingCommunityDeepLinks {
     fn enqueue(&self, pending: PendingCommunityDeepLink) {
@@ -66,6 +123,21 @@ pub(crate) fn acknowledge_pending_community_deep_link(
     id: String,
     pending: State<'_, PendingCommunityDeepLinks>,
 ) -> bool {
+    pending.acknowledge(&id)
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_agent_snapshot_import(
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> Result<Option<PendingAgentSnapshotImport>, String> {
+    pending.first()
+}
+
+#[tauri::command]
+pub(crate) fn acknowledge_pending_agent_snapshot_import(
+    id: String,
+    pending: State<'_, PendingAgentSnapshotImports>,
+) -> Result<bool, String> {
     pending.acknowledge(&id)
 }
 
@@ -190,6 +262,79 @@ fn parse_add_community_deep_link(url: &Url) -> Option<AddCommunityDeepLinkPayloa
     })
 }
 
+fn parse_agent_import_deep_link(url: &Url) -> Result<PathBuf, String> {
+    let version = non_empty_param(url, "v")?;
+    if version != AGENT_IMPORT_DEEP_LINK_VERSION {
+        return Err(format!("unsupported agent-import version: {version}"));
+    }
+    let file_url = non_empty_param(url, "file")?;
+    let parsed = Url::parse(&file_url).map_err(|error| format!("invalid file URL: {error}"))?;
+    if parsed.scheme() != "file" {
+        return Err("agent-import file must use the file scheme".into());
+    }
+    let path = parsed
+        .to_file_path()
+        .map_err(|()| "agent-import file URL is not a local path".to_string())?;
+    let lower_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "agent-import filename is not valid UTF-8".to_string())?
+        .to_ascii_lowercase();
+    if !lower_name.ends_with(".agent.json") && !lower_name.ends_with(".agent.png") {
+        return Err("agent-import file must end with .agent.json or .agent.png".into());
+    }
+    Ok(path)
+}
+
+fn load_agent_snapshot_import(path: &Path) -> Result<PendingAgentSnapshotImport, String> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| format!("cannot read agent snapshot: {error}"))?;
+    let metadata = canonical
+        .metadata()
+        .map_err(|error| format!("cannot inspect agent snapshot: {error}"))?;
+    if !metadata.is_file() {
+        return Err("agent snapshot path must point to a regular file".into());
+    }
+    let file_name = canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "agent snapshot filename is not valid UTF-8".to_string())?
+        .to_string();
+    let is_png = file_name.to_ascii_lowercase().ends_with(".agent.png");
+    let cap = if is_png {
+        crate::commands::MAX_SNAPSHOT_PNG_BYTES
+    } else {
+        crate::commands::MAX_SNAPSHOT_JSON_BYTES
+    };
+    if metadata.len() > cap as u64 {
+        return Err(format!(
+            "agent snapshot is too large (maximum {} MiB)",
+            cap / (1024 * 1024)
+        ));
+    }
+    let file = std::fs::File::open(&canonical)
+        .map_err(|error| format!("cannot read agent snapshot: {error}"))?;
+    let mut file_bytes = Vec::with_capacity((metadata.len() as usize).min(cap));
+    file.take((cap + 1) as u64)
+        .read_to_end(&mut file_bytes)
+        .map_err(|error| format!("cannot read agent snapshot: {error}"))?;
+    if file_bytes.len() > cap {
+        return Err(format!(
+            "agent snapshot is too large (maximum {} MiB)",
+            cap / (1024 * 1024)
+        ));
+    }
+    crate::commands::decode_snapshot_from_bytes(&file_bytes)
+        .map_err(|error| format!("invalid agent snapshot: {error}"))?;
+
+    Ok(PendingAgentSnapshotImport {
+        id: uuid::Uuid::new_v4().to_string(),
+        file_bytes,
+        file_name,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct NostrBindDeepLinkPayload {
@@ -295,6 +440,7 @@ fn parse_nostr_bind_deep_link(url: &Url) -> Result<NostrBindDeepLinkPayload, Str
 ///
 /// Currently supports:
 /// - `buzz://connect?relay=<ws(s)://...>` — emits `deep-link-connect` to the frontend
+/// - `buzz://agent-import?v=1&file=<file://...>` — opens the existing agent import preview
 pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
     let url = match Url::parse(url_str) {
         Ok(u) => u,
@@ -366,6 +512,24 @@ pub(crate) fn handle_deep_link_url(app: &tauri::AppHandle, url_str: &str) {
             activate_main_window(app);
             let _ = app.emit("deep-link-message", payload);
         }
+        Some("agent-import") => {
+            let pending = parse_agent_import_deep_link(&url)
+                .and_then(|path| load_agent_snapshot_import(&path));
+            match pending {
+                Ok(pending) => {
+                    let queue = app.state::<PendingAgentSnapshotImports>();
+                    if let Err(error) = queue.enqueue(pending) {
+                        eprintln!("buzz-desktop: could not queue agent import: {error}");
+                        return;
+                    }
+                    activate_main_window(app);
+                    let _ = app.emit("deep-link-agent-import", ());
+                }
+                Err(error) => {
+                    eprintln!("buzz-desktop: rejecting agent-import deep link: {error}: {url_str}");
+                }
+            }
+        }
         Some("nostr-bind") => match parse_nostr_bind_deep_link(&url) {
             Ok(payload) => {
                 activate_main_window(app);
@@ -389,8 +553,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        parse_add_community_deep_link, parse_join_deep_link, parse_message_deep_link,
-        parse_nostr_bind_deep_link, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        parse_add_community_deep_link, parse_agent_import_deep_link, parse_join_deep_link,
+        parse_message_deep_link, parse_nostr_bind_deep_link, PendingAgentSnapshotImport,
+        PendingAgentSnapshotImports, PendingCommunityDeepLink, PendingCommunityDeepLinks,
+        AGENT_IMPORT_DEEP_LINK_VERSION,
     };
 
     fn pending(id: &str, relay_url: &str, code: Option<&str>) -> PendingCommunityDeepLink {
@@ -402,6 +568,69 @@ mod tests {
             policy_receipt: None,
             name: None,
         }
+    }
+
+    fn pending_agent_import(id: &str, name: &str) -> PendingAgentSnapshotImport {
+        PendingAgentSnapshotImport {
+            id: id.to_owned(),
+            file_bytes: vec![1, 2, 3],
+            file_name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn pending_agent_import_queue_deduplicates_and_rejects_overlap() {
+        let queue = PendingAgentSnapshotImports::default();
+        queue
+            .enqueue(pending_agent_import("first", "one.agent.json"))
+            .unwrap();
+        queue
+            .enqueue(pending_agent_import("duplicate", "one.agent.json"))
+            .expect("identical snapshot should be idempotent");
+        assert!(
+            queue
+                .enqueue(pending_agent_import("second", "two.agent.json"))
+                .is_err(),
+            "a second preview must not replace the pending import"
+        );
+        assert_eq!(queue.first().unwrap().unwrap().id, "first");
+        assert!(!queue.acknowledge("second").unwrap());
+        assert!(queue.acknowledge("first").unwrap());
+        assert!(queue.first().unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_agent_import_deep_link_accepts_local_agent_snapshot() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let snapshot_path = directory.path().join("test agent.agent.json");
+        let file_url = Url::from_file_path(&snapshot_path).unwrap();
+        let mut url = Url::parse("buzz://agent-import").unwrap();
+        url.query_pairs_mut()
+            .append_pair("v", AGENT_IMPORT_DEEP_LINK_VERSION)
+            .append_pair("file", file_url.as_str());
+        let parsed = parse_agent_import_deep_link(&url).unwrap();
+        assert_eq!(parsed, snapshot_path);
+    }
+
+    #[test]
+    fn parse_agent_import_deep_link_rejects_remote_wrong_extension_or_version() {
+        for (version, file) in [
+            ("1", "https://example.com/test.agent.json"),
+            ("1", "file:///tmp/test.json"),
+            ("2", "file:///tmp/test.agent.json"),
+        ] {
+            let mut url = Url::parse("buzz://agent-import").unwrap();
+            url.query_pairs_mut()
+                .append_pair("v", version)
+                .append_pair("file", file);
+            assert!(parse_agent_import_deep_link(&url).is_err());
+        }
+
+        let mut missing_version = Url::parse("buzz://agent-import").unwrap();
+        missing_version
+            .query_pairs_mut()
+            .append_pair("file", "file:///tmp/test.agent.json");
+        assert!(parse_agent_import_deep_link(&missing_version).is_err());
     }
 
     #[test]

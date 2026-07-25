@@ -82,6 +82,9 @@ buzz mem set <slug> "my-value"
 buzz mem patch <slug> --base-hash <hex> < diff.patch  # or --no-base-hash
 buzz mem rm <slug>
 
+# Local agent snapshot import
+buzz agents import --file ./my-agent.agent.json
+
 # Repository protection
 buzz repos protect list --id my-repo
 buzz repos protect set --id my-repo --ref refs/heads/main --push admin --no-force-push --no-delete
@@ -94,6 +97,12 @@ buzz channels list | jq '.[].name'
 `protect set` replaces every existing rule for the exact ref pattern. Any
 constraint omitted from the command is removed. `protect list` reports malformed
 stored rules in `validation_error` so an owner can remove and repair them.
+
+`agents import` is local-only and does not require relay credentials. It opens
+Buzz Desktop's existing import preview; the user must confirm **Import** before
+the agent is created. Native apps may also use the documented
+[`buzz://agent-import` v1 deep link](../../docs/agent-import-deep-link.md)
+directly.
 
 ## Commands
 
@@ -154,6 +163,7 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `protect set` | Create or replace a protection rule |
 | | `protect remove` | Remove a protection rule |
 | `upload` | `file` | Upload a file to the Blossom store |
+| `agents` | `import` | Open a local snapshot in Buzz Desktop's import preview |
 | `pack` | `validate` | Validate a persona pack (local, no relay) |
 | | `inspect` | Inspect a persona pack (local, no relay) |
 | `mem` | `ls` | List non-tombstoned memories |

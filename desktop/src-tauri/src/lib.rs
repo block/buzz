@@ -33,8 +33,9 @@ use app_state::{build_app_state, resolve_persisted_identity, AppState};
 use builderlab::*;
 use commands::*;
 use deep_link::{
-    acknowledge_pending_community_deep_link, handle_deep_link_url,
-    take_pending_community_deep_link, PendingCommunityDeepLinks,
+    acknowledge_pending_agent_snapshot_import, acknowledge_pending_community_deep_link,
+    handle_deep_link_url, take_pending_agent_snapshot_import, take_pending_community_deep_link,
+    PendingAgentSnapshotImports, PendingCommunityDeepLinks,
 };
 use huddle::audio_output::{
     get_audio_output_device, list_audio_output_devices, set_audio_output_device,
@@ -353,6 +354,7 @@ pub fn run() {
         .manage(build_app_state())
         .manage(ClipboardState::new())
         .manage(PendingCommunityDeepLinks::default())
+        .manage(PendingAgentSnapshotImports::default())
         .manage(BuilderlabSession::default())
         .manage(BuilderlabLogin::default())
         .manage(commands::pairing::PairingHandle::new())
@@ -645,6 +647,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            take_pending_agent_snapshot_import,
+            acknowledge_pending_agent_snapshot_import,
             take_pending_community_deep_link,
             acknowledge_pending_community_deep_link,
             start_builderlab_login,
