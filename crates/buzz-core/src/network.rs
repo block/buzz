@@ -3,16 +3,19 @@
 //! Provides shared helpers used across crates for SSRF protection and
 //! IP address classification.
 
-/// Extract an IPv4 address embedded in the RFC 6052 well-known NAT64 prefix.
-///
-/// The `/96` format stores the IPv4 address in the final four octets. Using
-/// network-order octets directly avoids error-prone segment shifting.
-fn nat64_well_known_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> {
-    const PREFIX: [u8; 12] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
+// RFC 6052 well-known NAT64 prefix (64:ff9b::/96).
+const NAT64_WELL_KNOWN_PREFIX: [u8; 12] = [0x00, 0x64, 0xff, 0x9b, 0, 0, 0, 0, 0, 0, 0, 0];
 
+// Legacy SIIT IPv4-translated prefix (::ffff:0:0:0/96).
+const IPV4_TRANSLATED_PREFIX: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0];
+
+/// Extract an IPv4 address stored in the final four octets under a `/96` prefix.
+///
+/// Using network-order octets directly avoids error-prone segment shifting.
+fn embedded_ipv4(v6: &std::net::Ipv6Addr, prefix: &[u8; 12]) -> Option<std::net::Ipv4Addr> {
     let octets = v6.octets();
     octets
-        .starts_with(&PREFIX)
+        .starts_with(prefix)
         .then(|| std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]))
 }
 
@@ -35,6 +38,7 @@ fn nat64_well_known_ipv4(v6: &std::net::Ipv6Addr) -> Option<std::net::Ipv4Addr> 
 /// - IPv6 multicast      ff00::/8
 /// - IPv6 documentation  2001:db8::/32 (RFC 3849) — should never appear in production
 /// - IPv4-compatible and mapped IPv6 (checked recursively against IPv4 rules)
+/// - IPv4-translated     ::ffff:0:0:0/96 (embedded IPv4 checked recursively)
 /// - NAT64 well-known    64:ff9b::/96 (embedded IPv4 checked recursively)
 /// - NAT64 local-use     64:ff9b:1::/48 (RFC 8215)
 /// - Teredo              2001::/32 (RFC 4380)
@@ -64,7 +68,13 @@ pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
 
             // NAT64 well-known prefix (RFC 6052). Preserve access to public IPv4
             // destinations while rejecting embedded private/reserved addresses.
-            if let Some(v4) = nat64_well_known_ipv4(v6) {
+            if let Some(v4) = embedded_ipv4(v6, &NAT64_WELL_KNOWN_PREFIX) {
+                return is_private_ip(&std::net::IpAddr::V4(v4));
+            }
+
+            // Legacy SIIT IPv4-translated addresses can route to the IPv4 value
+            // in their final four octets but are not recognized by `to_ipv4()`.
+            if let Some(v4) = embedded_ipv4(v6, &IPV4_TRANSLATED_PREFIX) {
                 return is_private_ip(&std::net::IpAddr::V4(v4));
             }
 
@@ -178,16 +188,16 @@ mod tests {
         let first = "64:ff9b::".parse().unwrap();
         let last = "64:ff9b::ffff:ffff".parse().unwrap();
         assert_eq!(
-            nat64_well_known_ipv4(&first),
+            embedded_ipv4(&first, &NAT64_WELL_KNOWN_PREFIX),
             Some("0.0.0.0".parse().unwrap())
         );
         assert_eq!(
-            nat64_well_known_ipv4(&last),
+            embedded_ipv4(&last, &NAT64_WELL_KNOWN_PREFIX),
             Some("255.255.255.255".parse().unwrap())
         );
         let embedded = "64:ff9b::172.16.1.2".parse().unwrap();
         assert_eq!(
-            nat64_well_known_ipv4(&embedded),
+            embedded_ipv4(&embedded, &NAT64_WELL_KNOWN_PREFIX),
             Some("172.16.1.2".parse().unwrap())
         );
         assert!(is_private_ip(
@@ -208,6 +218,37 @@ mod tests {
                 .unwrap()
         ));
         assert!(!is_private_ip(&"64:ff9b::1:0:0".parse::<IpAddr>().unwrap()));
+    }
+    #[test]
+    fn test_ipv4_translated_prefix() {
+        let first = "0:0:0:0:ffff:0:0:0".parse().unwrap();
+        let last = "0:0:0:0:ffff:0:ffff:ffff".parse().unwrap();
+        assert_eq!(
+            embedded_ipv4(&first, &IPV4_TRANSLATED_PREFIX),
+            Some("0.0.0.0".parse().unwrap())
+        );
+        assert_eq!(
+            embedded_ipv4(&last, &IPV4_TRANSLATED_PREFIX),
+            Some("255.255.255.255".parse().unwrap())
+        );
+        assert!(is_private_ip(
+            &"::ffff:0:10.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"::ffff:0:127.0.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(is_private_ip(
+            &"::ffff:0:169.254.169.254".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_private_ip(
+            &"::ffff:0:8.8.8.8".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_private_ip(
+            &"0:0:0:0:fffe:ffff:ffff:ffff".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!is_private_ip(
+            &"0:0:0:0:ffff:1:0:0".parse::<IpAddr>().unwrap()
+        ));
     }
     #[test]
     fn test_nat64_local_use_prefix_boundaries() {
