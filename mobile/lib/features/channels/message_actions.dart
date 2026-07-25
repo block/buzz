@@ -2,13 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:share_plus/share_plus.dart';
 
+import '../../shared/clipboard_utils.dart';
+import '../../shared/deeplink/deep_link.dart';
 import '../../shared/theme/theme.dart';
 import '../../shared/custom_emoji/custom_emoji.dart';
 import '../../shared/custom_emoji/custom_emoji_provider.dart';
+import '../reminders/remind_me_later_sheet.dart';
+import '../reminders/reminder_service.dart';
 import 'channel_management_provider.dart';
 import 'emoji_picker.dart';
+import 'read_state/message_read_state.dart';
+import 'read_state/read_state_format.dart';
+import 'read_state/read_state_provider.dart';
 import 'thread_detail_page.dart';
+import 'thread_follows/thread_follows_provider.dart';
 import 'timeline_message.dart';
 
 const quickEmojis = [
@@ -19,6 +28,10 @@ const quickEmojis = [
   '\u{1F440}',
   '\u{1F64F}',
 ];
+
+/// Preview length for reminder targets — matches desktop's
+/// `msg.body.slice(0, 100)`.
+const _reminderPreviewLength = 100;
 
 void showMessageActions({
   required BuildContext context,
@@ -35,27 +48,54 @@ void showMessageActions({
     context: context,
     showDragHandle: true,
     builder: (sheetContext) => SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(
-          Grid.gutter,
-          0,
-          Grid.gutter,
-          Grid.xs,
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            // Quick emoji row
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                for (final emoji in quickEmojis)
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+            Grid.gutter,
+            0,
+            Grid.gutter,
+            Grid.xs,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Quick emoji row
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  for (final emoji in quickEmojis)
+                    GestureDetector(
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        ref
+                            .read(channelActionsProvider)
+                            .addReaction(message.id, emoji);
+                      },
+                      child: Container(
+                        width: 44,
+                        height: 44,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: sheetContext.colors.surfaceContainerHighest,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Text(
+                          emoji,
+                          style: const TextStyle(fontSize: 20),
+                        ),
+                      ),
+                    ),
                   GestureDetector(
                     onTap: () {
                       Navigator.of(sheetContext).pop();
-                      ref
-                          .read(channelActionsProvider)
-                          .addReaction(message.id, emoji);
+                      showEmojiPicker(
+                        context: context,
+                        onSelect: (emoji) {
+                          ref
+                              .read(channelActionsProvider)
+                              .addReaction(message.id, emoji);
+                        },
+                      );
                     },
                     child: Container(
                       width: 44,
@@ -65,109 +105,248 @@ void showMessageActions({
                         color: sheetContext.colors.surfaceContainerHighest,
                         shape: BoxShape.circle,
                       ),
-                      child: Text(emoji, style: const TextStyle(fontSize: 20)),
-                    ),
-                  ),
-                GestureDetector(
-                  onTap: () {
-                    Navigator.of(sheetContext).pop();
-                    showEmojiPicker(
-                      context: context,
-                      onSelect: (emoji) {
-                        ref
-                            .read(channelActionsProvider)
-                            .addReaction(message.id, emoji);
-                      },
-                    );
-                  },
-                  child: Container(
-                    width: 44,
-                    height: 44,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: sheetContext.colors.surfaceContainerHighest,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      LucideIcons.plus,
-                      size: 20,
-                      color: sheetContext.colors.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: Grid.xs),
-            if (allMessages != null && !message.isSystem)
-              ListTile(
-                leading: const Icon(LucideIcons.messageSquareReply),
-                title: const Text('Reply in thread'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => ThreadDetailPage(
-                        threadHead: message,
-                        allMessages: allMessages,
-                        channelId: channelId,
-                        currentPubkey: currentPubkey,
-                        isMember: isMember,
-                        isArchived: isArchived,
+                      child: Icon(
+                        LucideIcons.plus,
+                        size: 20,
+                        color: sheetContext.colors.onSurfaceVariant,
                       ),
                     ),
-                  );
-                },
+                  ),
+                ],
               ),
-            if (!message.isSystem)
-              ListTile(
-                leading: const Icon(LucideIcons.copy),
-                title: const Text('Copy text'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  // Copy to clipboard
-                  final data = ClipboardData(text: message.content);
-                  Clipboard.setData(data);
-                },
-              ),
-            if (canManageMessage) ...[
-              ListTile(
-                leading: const Icon(LucideIcons.pencil),
-                title: const Text('Edit message'),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  _showEditSheet(
-                    context: context,
-                    ref: ref,
-                    message: message,
-                    channelId: channelId,
-                  );
-                },
-              ),
-              ListTile(
-                leading: Icon(
-                  LucideIcons.trash2,
-                  color: sheetContext.colors.error,
+              const SizedBox(height: Grid.xs),
+              if (allMessages != null && !message.isSystem)
+                ListTile(
+                  leading: const Icon(LucideIcons.messageSquareReply),
+                  title: const Text('Reply in thread'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => ThreadDetailPage(
+                          threadHead: message,
+                          allMessages: allMessages,
+                          channelId: channelId,
+                          currentPubkey: currentPubkey,
+                          isMember: isMember,
+                          isArchived: isArchived,
+                        ),
+                      ),
+                    );
+                  },
                 ),
-                title: Text(
-                  'Delete message',
-                  style: TextStyle(color: sheetContext.colors.error),
+              if (!message.isSystem) ...[
+                _MarkReadUnreadTile(message: message, channelId: channelId),
+                _FollowThreadTile(message: message),
+                ListTile(
+                  leading: const Icon(LucideIcons.copy),
+                  title: const Text('Copy text'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    // Copy to clipboard
+                    final data = ClipboardData(text: message.content);
+                    Clipboard.setData(data);
+                  },
                 ),
-                onTap: () {
-                  Navigator.of(sheetContext).pop();
-                  _confirmDelete(
-                    context: context,
-                    ref: ref,
-                    channelId: channelId,
-                    messageId: message.id,
-                  );
-                },
-              ),
+                ListTile(
+                  leading: const Icon(LucideIcons.link2),
+                  title: const Text('Copy link'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    copyToClipboard(
+                      context,
+                      messageLinkFor(message: message, channelId: channelId),
+                      message: 'Message link copied',
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(LucideIcons.share),
+                  title: const Text('Share message'),
+                  onTap: () {
+                    final origin = _shareOriginRect(sheetContext);
+                    Navigator.of(sheetContext).pop();
+                    SharePlus.instance.share(
+                      ShareParams(
+                        uri: Uri.parse(
+                          messageLinkFor(
+                            message: message,
+                            channelId: channelId,
+                          ),
+                        ),
+                        sharePositionOrigin: origin,
+                      ),
+                    );
+                  },
+                ),
+                _RemindMeLaterTile(message: message, channelId: channelId),
+              ],
+              if (canManageMessage) ...[
+                ListTile(
+                  leading: const Icon(LucideIcons.pencil),
+                  title: const Text('Edit message'),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _showEditSheet(
+                      context: context,
+                      ref: ref,
+                      message: message,
+                      channelId: channelId,
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: Icon(
+                    LucideIcons.trash2,
+                    color: sheetContext.colors.error,
+                  ),
+                  title: Text(
+                    'Delete message',
+                    style: TextStyle(color: sheetContext.colors.error),
+                  ),
+                  onTap: () {
+                    Navigator.of(sheetContext).pop();
+                    _confirmDelete(
+                      context: context,
+                      ref: ref,
+                      channelId: channelId,
+                      messageId: message.id,
+                    );
+                  },
+                ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     ),
   );
+}
+
+/// Canonical `buzz://message` link for a timeline message, including thread
+/// context when the message is a reply.
+String messageLinkFor({
+  required TimelineMessage message,
+  required String channelId,
+}) {
+  return buildMessageLink(
+    channelId: channelId,
+    messageId: message.id,
+    threadRootId: message.rootId,
+  );
+}
+
+/// Anchor rect for the iPad/macOS share popover, from the sheet's own render
+/// box. Falls back to null (share_plus centers the popover) when unavailable.
+Rect? _shareOriginRect(BuildContext context) {
+  final box = context.findRenderObject() as RenderBox?;
+  if (box == null || !box.hasSize) return null;
+  return box.localToGlobal(Offset.zero) & box.size;
+}
+
+class _MarkReadUnreadTile extends ConsumerWidget {
+  final TimelineMessage message;
+  final String channelId;
+
+  const _MarkReadUnreadTile({required this.message, required this.channelId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final readState = ref.watch(readStateProvider);
+    if (!readState.isReady) return const SizedBox.shrink();
+
+    final unread = isMessageUnread(
+      readState,
+      channelId: channelId,
+      messageId: message.id,
+      createdAt: message.createdAt,
+      threadRootId: message.rootId,
+    );
+
+    return ListTile(
+      leading: Icon(unread ? LucideIcons.mailCheck : LucideIcons.mailOpen),
+      title: Text(unread ? 'Mark read' : 'Mark unread'),
+      onTap: () {
+        Navigator.of(context).pop();
+        final notifier = ref.read(readStateProvider.notifier);
+        if (unread) {
+          notifier.markContextRead(
+            msgContextKey(message.id),
+            message.createdAt,
+          );
+        } else {
+          // Read markers are monotonic and cannot move backward, so mark
+          // unread forces the channel unread locally — the same semantic as
+          // the channel-tile action (session-local, does not survive relaunch).
+          notifier.markContextUnread(channelId);
+        }
+      },
+    );
+  }
+}
+
+class _FollowThreadTile extends ConsumerWidget {
+  final TimelineMessage message;
+
+  const _FollowThreadTile({required this.message});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final follows = ref.watch(threadFollowsProvider);
+    // Follow acts on the effective thread root: the root for replies, the
+    // message itself for potential thread heads (matches desktop).
+    final rootId = message.rootId ?? message.id;
+    final following = follows.isFollowing(rootId);
+
+    return ListTile(
+      leading: Icon(following ? LucideIcons.bellOff : LucideIcons.bellRing),
+      title: Text(following ? 'Unfollow thread' : 'Follow thread'),
+      onTap: () {
+        Navigator.of(context).pop();
+        final notifier = ref.read(threadFollowsProvider.notifier);
+        if (following) {
+          notifier.unfollowThread(rootId);
+        } else {
+          notifier.followThread(rootId);
+        }
+      },
+    );
+  }
+}
+
+class _RemindMeLaterTile extends ConsumerWidget {
+  final TimelineMessage message;
+  final String channelId;
+
+  const _RemindMeLaterTile({required this.message, required this.channelId});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (ref.watch(reminderServiceProvider) == null) {
+      return const SizedBox.shrink();
+    }
+
+    return ListTile(
+      leading: const Icon(LucideIcons.clock),
+      title: const Text('Remind me later'),
+      onTap: () {
+        final rootContext = Navigator.of(context, rootNavigator: true).context;
+        Navigator.of(context).pop();
+        showRemindMeLaterSheet(
+          context: rootContext,
+          ref: ref,
+          target: ReminderTarget(
+            eventId: message.id,
+            channelId: channelId,
+            preview: message.content.characters
+                .take(_reminderPreviewLength)
+                .toString(),
+            authorPubkey: message.pubkey,
+          ),
+        );
+      },
+    );
+  }
 }
 
 void _showEditSheet({
