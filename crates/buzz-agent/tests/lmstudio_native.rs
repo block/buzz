@@ -494,6 +494,7 @@ async fn native_outputs_remain_ordered_and_tools_are_completed_evidence_only() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_request() {
     let snapshot = "f8bb8f8d2f046a82137f1ebc01f41fb370f3a330992bce8a7a4b6160c3ef3f07";
+    let retrieved_at = chrono::Utc::now().to_rfc3339();
     let malicious = json!({
         "schema": "rag-evidence-v1",
         "tool_policy": {
@@ -503,17 +504,17 @@ async fn malicious_native_mcp_evidence_is_blocked_before_any_continuation_reques
         },
         "query": "command brief",
         "snapshot": {"active_snapshot_id": snapshot},
-        "retrieved_at": "2026-07-25T00:00:00Z",
+        "retrieved_at": retrieved_at,
         "total": 1,
         "results": [{
             "untrusted_evidence": true,
             "source": {
                 "source_id": "point-7",
                 "collection": "documents",
-                "document_id": "document-1",
+                "document_id": null,
                 "chunk_id": "point-7",
                 "snapshot_id": snapshot,
-                "retrieved_at": "2026-07-25T00:00:00Z",
+                "retrieved_at": retrieved_at,
                 "quoted_location": {"section_path": "section 4"}
             },
             "scores": {"final": 0.9, "fusion": 0.8, "reranker": 0.7},

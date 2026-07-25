@@ -107,6 +107,8 @@ subtle = "2.6"
 tar = "0.4"
 bzip2 = "0.6"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
+iana-time-zone = "0.1"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2.3.3"
 uuid = { version = "1", features = ["v4", "v5"] }

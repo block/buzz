@@ -6,6 +6,7 @@ pub mod orchestrator;
 pub mod personas;
 pub mod provenance;
 pub mod recovery;
+pub mod schedule;
 pub mod scheduler;
 pub mod sources;
 pub mod store;
@@ -30,6 +31,9 @@ mod personas_tests;
 
 #[cfg(test)]
 mod provenance_tests;
+
+#[cfg(test)]
+mod schedule_tests;
 
 #[cfg(test)]
 mod scheduler_tests;

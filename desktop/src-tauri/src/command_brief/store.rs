@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 use buzz_core_pkg::command_brief::MAX_EVENT_CONTENT_BYTES;
 use buzz_core_pkg::kind::KIND_COMMAND_BRIEF;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 const MAX_RETRIES: i64 = 8;
 const MAX_RETRY_DELAY_SECONDS: i64 = 3_600;
 const MAX_DUE_ROWS: usize = 64;
@@ -43,6 +43,32 @@ CREATE TABLE command_brief_heads (
 );
 CREATE INDEX command_brief_spool_due
 ON command_brief_spool(owner_pubkey, publish_state, next_retry_at, append_sequence);
+CREATE TABLE command_brief_schedule (
+    schedule_id       TEXT PRIMARY KEY,
+    classification    TEXT NOT NULL CHECK (classification = 'OFFICIAL'),
+    enabled           INTEGER NOT NULL CHECK (enabled IN (0,1)),
+    local_time        TEXT NOT NULL,
+    timezone          TEXT NOT NULL,
+    catch_up_same_day INTEGER NOT NULL CHECK (catch_up_same_day IN (0,1)),
+    concurrency       INTEGER NOT NULL CHECK (concurrency IN (1,2)),
+    updated_at        INTEGER NOT NULL
+);
+CREATE TABLE command_brief_schedule_claims (
+    idempotency_key   TEXT PRIMARY KEY,
+    schedule_id       TEXT NOT NULL,
+    local_date        TEXT NOT NULL,
+    timezone          TEXT NOT NULL,
+    state             TEXT NOT NULL CHECK (state IN ('claimed','deferred','started')),
+    deferred_reason   TEXT,
+    retry_count       INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
+    transition_token  TEXT,
+    claimed_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    run_id            TEXT,
+    UNIQUE (schedule_id, local_date)
+);
+CREATE INDEX command_brief_schedule_deferred
+ON command_brief_schedule_claims(state, retry_count, updated_at);
 ";
 
 const MIGRATE_V1_TO_V2: &str = "
@@ -56,6 +82,35 @@ CREATE TABLE command_brief_heads (
     head_sequence      INTEGER NOT NULL,
     PRIMARY KEY (owner_pubkey, run_id)
 );
+";
+
+const MIGRATE_V2_TO_V3: &str = "
+CREATE TABLE command_brief_schedule (
+    schedule_id       TEXT PRIMARY KEY,
+    classification    TEXT NOT NULL CHECK (classification = 'OFFICIAL'),
+    enabled           INTEGER NOT NULL CHECK (enabled IN (0,1)),
+    local_time        TEXT NOT NULL,
+    timezone          TEXT NOT NULL,
+    catch_up_same_day INTEGER NOT NULL CHECK (catch_up_same_day IN (0,1)),
+    concurrency       INTEGER NOT NULL CHECK (concurrency IN (1,2)),
+    updated_at        INTEGER NOT NULL
+);
+CREATE TABLE command_brief_schedule_claims (
+    idempotency_key   TEXT PRIMARY KEY,
+    schedule_id       TEXT NOT NULL,
+    local_date        TEXT NOT NULL,
+    timezone          TEXT NOT NULL,
+    state             TEXT NOT NULL CHECK (state IN ('claimed','deferred','started')),
+    deferred_reason   TEXT,
+    retry_count       INTEGER NOT NULL DEFAULT 0 CHECK (retry_count BETWEEN 0 AND 8),
+    transition_token  TEXT,
+    claimed_at        INTEGER NOT NULL,
+    updated_at        INTEGER NOT NULL,
+    run_id            TEXT,
+    UNIQUE (schedule_id, local_date)
+);
+CREATE INDEX command_brief_schedule_deferred
+ON command_brief_schedule_claims(state, retry_count, updated_at);
 ";
 
 /// Closed local relay-publication state.
@@ -147,6 +202,9 @@ pub fn migrate_command_brief_store(conn: &Connection) -> Result<(), String> {
             .map_err(|_| "command brief store migration failed")?;
     } else if version == 1 {
         migrate_v1_to_v2(conn)?;
+        migrate_v2_to_v3(conn)?;
+    } else if version == 2 {
+        migrate_v2_to_v3(conn)?;
     }
     Ok(())
 }
@@ -204,6 +262,17 @@ fn migrate_v1_to_v2(conn: &Connection) -> Result<(), String> {
          );",
     )
     .map_err(|_| "command brief store migration failed")?;
+    tx.pragma_update(None, "user_version", 2)
+        .map_err(|_| "command brief store migration failed")?;
+    tx.commit()
+        .map_err(|_| "command brief store migration failed".to_string())
+}
+
+fn migrate_v2_to_v3(conn: &Connection) -> Result<(), String> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Exclusive)
+        .map_err(|_| "command brief store migration failed")?;
+    tx.execute_batch(MIGRATE_V2_TO_V3)
+        .map_err(|_| "command brief store migration failed")?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)
         .map_err(|_| "command brief store migration failed")?;
     tx.commit()

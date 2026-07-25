@@ -18,14 +18,12 @@ use crate::managed_agents::{ManagedAgentPairRuntime, ManagedAgentRuntimeKey};
 pub struct AppState {
     pub keys: Mutex<Keys>,
     pub http_client: reqwest::Client,
-    /// One app-owned scheduler for all Daily Command Brief local-model work.
     #[allow(
         dead_code,
         reason = "Task 8 installs and exposes the production orchestrator"
     )]
-    pub command_brief_scheduler: crate::command_brief::scheduler::LocalModelScheduler,
-    /// Native Daily Command Brief runtime installed after protected local
-    /// source admission and replaced only at the Tauri command boundary.
+    pub command_brief_scheduler:
+        std::sync::RwLock<crate::command_brief::scheduler::LocalModelScheduler>,
     #[allow(
         dead_code,
         reason = "Task 8 installs and exposes the production orchestrator"
@@ -203,7 +201,9 @@ pub fn build_app_state() -> AppState {
 
     AppState {
         keys: Mutex::new(keys),
-        command_brief_scheduler: crate::command_brief::scheduler::LocalModelScheduler::sequential(),
+        command_brief_scheduler: std::sync::RwLock::new(
+            crate::command_brief::scheduler::LocalModelScheduler::sequential(),
+        ),
         command_brief_orchestrator: tokio::sync::RwLock::new(None),
         http_client: reqwest::Client::builder()
             .resolve("localhost", std::net::SocketAddr::from(([127, 0, 0, 1], 0)))

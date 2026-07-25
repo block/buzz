@@ -29,6 +29,7 @@ mod relay_admission;
 mod reset;
 mod secret_store;
 mod shutdown;
+mod startup;
 mod templates;
 mod util;
 use app_state::{build_app_state, resolve_persisted_identity, AppState};
@@ -910,11 +911,24 @@ pub fn run() {
     let shutdown_done = Arc::new(AtomicBool::new(false));
     let memory_sync_scheduler =
         command_services::memory::start_memory_sync_scheduler(app.handle().clone());
+    let schedule_startup_app = app.handle().clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = startup::run_command_brief_schedule(
+            schedule_startup_app,
+            command_brief::schedule::ScheduleTrigger::Startup,
+        )
+        .await;
+    });
     let knowledge_status_app = app.handle().clone();
     tauri::async_runtime::spawn(async move {
         loop {
             command_services::policy::status::refresh_knowledge_admissions(
                 knowledge_status_app.clone(),
+            )
+            .await;
+            let _ = startup::run_command_brief_schedule(
+                knowledge_status_app.clone(),
+                command_brief::schedule::ScheduleTrigger::Timer,
             )
             .await;
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
@@ -957,6 +971,16 @@ pub fn run() {
             // deliberately skipping those native global destructors.
             #[cfg(all(feature = "mesh-llm", target_os = "macos"))]
             hard_exit_after_mesh_shutdown();
+        }
+        RunEvent::Resumed => {
+            let resume_app = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = startup::run_command_brief_schedule(
+                    resume_app,
+                    command_brief::schedule::ScheduleTrigger::Resume,
+                )
+                .await;
+            });
         }
         _ => {}
     });

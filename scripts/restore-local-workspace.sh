@@ -33,6 +33,7 @@ for timeout_pair in \
     "${timeout_pair%%:*}" "${timeout_pair#*:} timeout"
 done
 memory_key_file="$(local_workspace_memory_key_file)"
+command_brief_store_file="$(local_workspace_command_brief_store_file)"
 
 repo_root="$(local_workspace_repo_root)"
 staging_dir="$(mktemp -d)"
@@ -84,6 +85,7 @@ local_workspace_run_bounded \
 # source replacement or partial/mixed copy before confirmation or mutation.
 backup_dir="$(local_workspace_validate_backup "${staging_dir}")"
 memory_plaintext_archive="${runtime_tmp}/memory-vault.tar.gz"
+command_brief_plaintext_store="${runtime_tmp}/command-brief.db"
 local_workspace_run_bounded \
   "Memory vault decryption" \
   "${memory_timeout_seconds}" \
@@ -109,6 +111,34 @@ local_workspace_run_bounded \
   bash -c \
   'tar -tvzf "$1" | awk '\''$1 !~ /^[-d]/ { exit 1 }'\''' \
   _ "${memory_plaintext_archive}"
+local_workspace_run_bounded \
+  "command brief store decryption" \
+  "${validation_timeout_seconds}" \
+  openssl enc -d -aes-256-cbc -pbkdf2 -md sha256 \
+    -pass "file:${memory_key_file}" \
+    -in "${backup_dir}/command-brief.db.enc" \
+    -out "${command_brief_plaintext_store}"
+[[ "$(sqlite3 "${command_brief_plaintext_store}" \
+  'PRAGMA integrity_check;')" == "ok" ]] ||
+  local_workspace_die "command brief store failed integrity validation"
+for required_table in \
+  command_brief_spool command_brief_schedule command_brief_schedule_claims; do
+  [[ "$(sqlite3 "${command_brief_plaintext_store}" \
+    "SELECT COUNT(*) FROM sqlite_master
+     WHERE type='table' AND name='${required_table}';")" == "1" ]] ||
+    local_workspace_die \
+      "command brief store is missing ${required_table}"
+done
+[[ "$(sqlite3 "${command_brief_plaintext_store}" \
+  "SELECT COUNT(*) FROM command_brief_schedule
+   WHERE classification <> 'OFFICIAL'
+      OR schedule_id <> 'daily-command-brief'
+      OR concurrency NOT IN (1,2);")" == "0" ]] ||
+  local_workspace_die "command brief schedule validation failed"
+[[ "$(sqlite3 "${command_brief_plaintext_store}" \
+  "SELECT COUNT(*) FROM command_brief_schedule_claims
+   WHERE idempotency_key <> schedule_id || ':' || local_date;")" == "0" ]] ||
+  local_workspace_die "command brief claim validation failed"
 (
   cd "${repo_root}"
   local_workspace_run_bounded \
@@ -119,7 +149,7 @@ local_workspace_run_bounded \
 )
 
 if [[ "${2:-}" != "--confirm" ]]; then
-  printf '[local-workspace] restore replaces local PostgreSQL, MinIO, and Memory data.\n' >&2
+  printf '[local-workspace] restore replaces local PostgreSQL, MinIO, Memory, and command brief data.\n' >&2
   if ! read -r -p 'Type RESTORE to continue: ' confirmation ||
     [[ "${confirmation}" != "RESTORE" ]]; then
     local_workspace_die "restore was not explicitly confirmed"
@@ -307,6 +337,13 @@ local_workspace_run_bounded \
   "workspace readiness check" \
   "${readiness_timeout_seconds}" \
   just _local-workspace-ready
+
+command_brief_restore_tmp="${command_brief_store_file}.restore.$$"
+install -m 600 "${command_brief_plaintext_store}" "${command_brief_restore_tmp}"
+mv -f "${command_brief_restore_tmp}" "${command_brief_store_file}"
+rm -f "${command_brief_store_file}-wal" "${command_brief_store_file}-shm"
+[[ "$(sqlite3 "${command_brief_store_file}" 'PRAGMA integrity_check;')" == "ok" ]] ||
+  local_workspace_die "restored command brief store failed validation"
 
 if ((${#writer_services[@]} > 0)); then
   local_workspace_run_bounded \

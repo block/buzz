@@ -95,7 +95,22 @@ JSON or ciphertext masquerading as a brief.
 The encrypted signed event is suitable for normal relay retention. The local
 spool is owner-scoped, permission-protected, backup-compatible SQLite. Backup
 and restore preserve exact signed event bytes, publish state, predecessor
-links, and bounded retry state.
+links, bounded retry state, the protected schedule, and daily idempotency
+claims.
+
+## Local schedule
+
+The built-in schedule defaults to `06:00` in the current macOS IANA timezone.
+It claims the exact key `<schedule_id>:<YYYY-MM-DD>` before generation, so app
+restart, duplicate timers, and overlapping wake events cannot produce a second
+scheduled brief for the same local date. Startup and wake may perform at most
+one current-day catch-up and never replay earlier dates.
+
+macOS may delay application execution while the Mac is asleep. The product
+therefore promises same-day catch-up after wake when all local authorization
+and readiness gates pass; it does not promise exact execution while asleep.
+Locked identity, unavailable LM Studio, or missing mandatory local state stays
+visibly deferred and retries only after a bounded readiness transition.
 
 ## Forward compatibility
 

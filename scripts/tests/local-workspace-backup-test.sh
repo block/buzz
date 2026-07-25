@@ -221,6 +221,39 @@ export BUZZ_MEMORY_BACKUP_KEY_FILE="$test_tmp/memory-backup.key"
 printf 'test-only-memory-backup-passphrase-32-bytes\n' \
   >"$BUZZ_MEMORY_BACKUP_KEY_FILE"
 chmod 600 "$BUZZ_MEMORY_BACKUP_KEY_FILE"
+export BUZZ_COMMAND_BRIEF_STORE_PATH="$test_tmp/command-brief.db"
+sqlite3 "$BUZZ_COMMAND_BRIEF_STORE_PATH" <<'SQL'
+CREATE TABLE command_brief_schedule (
+  schedule_id TEXT PRIMARY KEY,
+  classification TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  local_time TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  catch_up_same_day INTEGER NOT NULL,
+  concurrency INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE command_brief_schedule_claims (
+  idempotency_key TEXT PRIMARY KEY,
+  schedule_id TEXT NOT NULL,
+  local_date TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  state TEXT NOT NULL,
+  deferred_reason TEXT,
+  retry_count INTEGER NOT NULL,
+  transition_token TEXT,
+  claimed_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  run_id TEXT
+);
+CREATE TABLE command_brief_spool (event_id TEXT PRIMARY KEY);
+INSERT INTO command_brief_schedule
+VALUES ('daily-command-brief','OFFICIAL',1,'06:00','Australia/Sydney',1,1,1);
+INSERT INTO command_brief_schedule_claims
+VALUES ('daily-command-brief:2026-07-25','daily-command-brief','2026-07-25',
+        'Australia/Sydney','started',NULL,0,NULL,1,1,'run-one');
+SQL
+chmod 600 "$BUZZ_COMMAND_BRIEF_STORE_PATH"
 
 [[ -x "$backup_script" ]] || fail "backup script exists and is executable"
 [[ -x "$restore_script" ]] || fail "restore script exists and is executable"
@@ -244,7 +277,7 @@ backup_dir="$(find "$backup_parent" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 [[ -f "$backup_dir/minio/object.bin" ]] || fail "MinIO objects are mirrored"
 [[ -f "$backup_dir/minio-inventory.tsv" ]] || fail "MinIO inventory is recorded"
 [[ -f "$backup_dir/manifest.sha256" ]] || fail "checksummed manifest is recorded"
-assert_contains "$backup_dir/manifest" "format_version=2" \
+assert_contains "$backup_dir/manifest" "format_version=3" \
   "manifest has an explicit format version"
 [[ -f "$backup_dir/memory-vault.tar.gz.enc" ]] ||
   fail "canonical Memory vault is included as encrypted ciphertext"
@@ -252,6 +285,14 @@ assert_contains "$backup_dir/manifest" "format_version=2" \
   fail "plaintext Memory archive must never enter the backup"
 if grep -aFq 'canonical-memory-marker' "$backup_dir/memory-vault.tar.gz.enc"; then
   fail "encrypted Memory archive must not expose canonical plaintext"
+fi
+[[ -f "$backup_dir/command-brief.db.enc" ]] ||
+  fail "protected brief schedule and spool database is encrypted into backup"
+[[ ! -e "$backup_dir/command-brief.db" ]] ||
+  fail "plaintext brief database must never enter the backup"
+if grep -aFq 'daily-command-brief:2026-07-25' \
+  "$backup_dir/command-brief.db.enc"; then
+  fail "encrypted brief database must not expose claim plaintext"
 fi
 (
   cd "$backup_dir"
@@ -267,6 +308,9 @@ assert_contains "$MOCK_LOG" "stop memory" \
   "backup quiesces the Memory writer before snapshot"
 assert_contains "$MOCK_LOG" "up -d --wait" \
   "backup proves readiness after restarting a previously running Memory writer"
+
+sqlite3 "$BUZZ_COMMAND_BRIEF_STORE_PATH" \
+  "DELETE FROM command_brief_schedule_claims;"
 
 : >"$MOCK_LOG"
 assert_fails "restore requires explicit confirmation" "$restore_script" "$backup_dir"
@@ -470,6 +514,10 @@ assert_fails "Memory restore rejects archive symlinks before extraction" \
   fail "old Memory vault must survive malicious archive rejection"
 assert_contains "$MOCK_LOG" "migrate" "restore runs migrations"
 assert_contains "$MOCK_LOG" "ready" "restore verifies readiness"
+[[ "$(sqlite3 "$BUZZ_COMMAND_BRIEF_STORE_PATH" \
+  "SELECT COUNT(*) FROM command_brief_schedule_claims
+   WHERE idempotency_key='daily-command-brief:2026-07-25';")" == "1" ]] ||
+  fail "restore reinstates protected schedule claim state"
 
 printf 'old-memory' >"$MOCK_MEMORY_VOLUME_DIR/current/revisions.jsonl"
 : >"$MOCK_LOG"

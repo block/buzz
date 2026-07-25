@@ -915,6 +915,38 @@ impl TryFrom<Value> for BriefSchedule {
     }
 }
 
+impl BriefSchedule {
+    /// Return the fixed trusted schedule identity.
+    pub fn schedule_id(&self) -> &str {
+        &self.schedule_id
+    }
+
+    /// Return whether scheduled generation is enabled.
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Return the configured local wall time as `HH:MM`.
+    pub fn local_time(&self) -> &str {
+        &self.local_time
+    }
+
+    /// Return the configured IANA timezone name.
+    pub fn timezone(&self) -> &str {
+        &self.timezone
+    }
+
+    /// Return whether startup and wake may perform a same-day catch-up.
+    pub const fn catch_up_same_day(&self) -> bool {
+        self.catch_up_same_day
+    }
+
+    /// Return the bounded local-model concurrency.
+    pub const fn concurrency(&self) -> u8 {
+        self.concurrency
+    }
+}
+
 impl TryFrom<Value> for BriefLifecycleRecord {
     type Error = ContractError;
 

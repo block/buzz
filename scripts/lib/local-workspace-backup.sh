@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION=2
+LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION=3
 
 local_workspace_die() {
   printf '[local-workspace] error: %s\n' "$*" >&2
@@ -173,7 +173,8 @@ local_workspace_write_checksums() {
     ) >>"${output_file}"
   done < <(
     cd "${backup_dir}"
-    find manifest postgres.dump minio-inventory.tsv memory-vault.tar.gz.enc minio \
+    find manifest postgres.dump minio-inventory.tsv memory-vault.tar.gz.enc \
+      command-brief.db.enc minio \
       -type f -print |
       LC_ALL=C sort
   )
@@ -203,6 +204,28 @@ local_workspace_memory_key_file() {
   printf '%s\n' "${key_file}"
 }
 
+local_workspace_command_brief_store_file() {
+  local store_file="${BUZZ_COMMAND_BRIEF_STORE_PATH:-}"
+  local mode
+
+  [[ "${store_file}" == /* ]] ||
+    local_workspace_die \
+      "BUZZ_COMMAND_BRIEF_STORE_PATH must name an absolute protected file" ||
+    return
+  [[ -f "${store_file}" && ! -L "${store_file}" ]] ||
+    local_workspace_die \
+      "command brief store must be a regular non-symlink file" || return
+  if stat -f '%Lp' "${store_file}" >/dev/null 2>&1; then
+    mode="$(stat -f '%Lp' "${store_file}")"
+  else
+    mode="$(stat -c '%a' "${store_file}")"
+  fi
+  [[ "${mode}" == "600" || "${mode}" == "400" ]] ||
+    local_workspace_die \
+      "command brief store permissions must be 0600 or 0400" || return
+  printf '%s\n' "${store_file}"
+}
+
 local_workspace_validate_backup() {
   local backup_dir="$1"
   local resolved
@@ -224,7 +247,7 @@ local_workspace_validate_backup() {
 
   for required in \
     manifest manifest.sha256 postgres.dump minio-inventory.tsv \
-    memory-vault.tar.gz.enc minio; do
+    memory-vault.tar.gz.enc command-brief.db.enc minio; do
     [[ -e "${resolved}/${required}" ]] ||
       local_workspace_die "backup is missing ${required}" || return
   done
@@ -243,12 +266,16 @@ local_workspace_validate_backup() {
     ! -L "${resolved}/memory-vault.tar.gz.enc" ]] ||
     local_workspace_die "Memory vault ciphertext must be a regular file" ||
     return
+  [[ -f "${resolved}/command-brief.db.enc" &&
+    ! -L "${resolved}/command-brief.db.enc" ]] ||
+    local_workspace_die "command brief store ciphertext must be a regular file" ||
+    return
   if find "${resolved}/minio" ! -type d ! -type f -print -quit | grep -q .; then
     local_workspace_die "MinIO mirror contains a non-regular file"
     return
   fi
 
-  [[ "$(wc -l <"${resolved}/manifest" | tr -d ' ')" == "6" ]] ||
+  [[ "$(wc -l <"${resolved}/manifest" | tr -d ' ')" == "7" ]] ||
     local_workspace_die "manifest has an unexpected shape" || return
   grep -Fxq "format_version=${LOCAL_WORKSPACE_BACKUP_FORMAT_VERSION}" \
     "${resolved}/manifest" ||
@@ -264,6 +291,10 @@ local_workspace_validate_backup() {
   grep -Fxq 'memory_vault_archive=memory-vault.tar.gz.enc' \
     "${resolved}/manifest" ||
     local_workspace_die "manifest has an invalid Memory vault archive path" ||
+    return
+  grep -Fxq 'command_brief_store=command-brief.db.enc' \
+    "${resolved}/manifest" ||
+    local_workspace_die "manifest has an invalid command brief store path" ||
     return
 
   expected_checksums="$(mktemp)"

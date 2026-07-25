@@ -22,6 +22,7 @@ local_workspace_require_positive_timeout \
 local_workspace_require_positive_timeout \
   "${memory_timeout_seconds}" "Memory backup timeout"
 memory_key_file="$(local_workspace_memory_key_file)"
+command_brief_store_file="$(local_workspace_command_brief_store_file)"
 
 backup_parent="$(local_workspace_require_absolute_outside_repo "$1")"
 created_utc="$(date -u '+%Y%m%dT%H%M%SZ')"
@@ -33,6 +34,7 @@ mkdir -m 700 "${backup_dir}"
 mkdir -m 700 "${backup_dir}/minio"
 credentials_file="$(mktemp)"
 memory_tmp="$(mktemp -d)"
+command_brief_tmp="$(mktemp -d)"
 memory_was_running=false
 restart_memory_if_needed() {
   if [[ "${memory_was_running}" == "true" ]]; then
@@ -52,6 +54,7 @@ cleanup_backup() {
   restart_memory_if_needed || true
   rm -f "${credentials_file}"
   rm -rf "${memory_tmp}"
+  rm -rf "${command_brief_tmp}"
   return "${status}"
 }
 trap cleanup_backup EXIT
@@ -116,8 +119,24 @@ local_workspace_run_bounded \
     -pass "file:${memory_key_file}" \
     -in "${memory_tmp}/memory-vault.tar.gz" \
     -out "${backup_dir}/memory-vault.tar.gz.enc"
+local_workspace_run_bounded \
+  "command brief SQLite snapshot" \
+  "${database_timeout_seconds}" \
+  sqlite3 "${command_brief_store_file}" \
+    ".timeout 5000" ".backup ${command_brief_tmp}/command-brief.db"
+[[ "$(sqlite3 "${command_brief_tmp}/command-brief.db" \
+  'PRAGMA integrity_check;')" == "ok" ]] ||
+  local_workspace_die "command brief SQLite snapshot failed validation"
+local_workspace_run_bounded \
+  "command brief store encryption" \
+  "${database_timeout_seconds}" \
+  openssl enc -aes-256-cbc -pbkdf2 -salt -md sha256 \
+    -pass "file:${memory_key_file}" \
+    -in "${command_brief_tmp}/command-brief.db" \
+    -out "${backup_dir}/command-brief.db.enc"
 rm -f "${credentials_file}"
 rm -rf "${memory_tmp}"
+rm -rf "${command_brief_tmp}"
 restart_memory_if_needed
 trap - EXIT
 
@@ -130,6 +149,7 @@ postgres_archive=postgres.dump
 minio_directory=minio
 minio_inventory=minio-inventory.tsv
 memory_vault_archive=memory-vault.tar.gz.enc
+command_brief_store=command-brief.db.enc
 EOF
 local_workspace_write_checksums \
   "${backup_dir}" "${backup_dir}/manifest.sha256"
