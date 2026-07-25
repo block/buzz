@@ -6,7 +6,6 @@ import {
   agentCommunityStatusDetail,
   canonicalRelayUrl,
   findManagedAgentRuntime,
-  managedAgentRuntimeActionRelayUrl,
   managedAgentRuntimeKey,
 } from "./managedAgentRuntimeStatus.ts";
 
@@ -79,9 +78,9 @@ test("selects one relay without collapsing same-pubkey pairs", () => {
 });
 
 test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
-  // Loopback folding + default-port and trailing-slash stripping — the
-  // standard dev setup that previously broke pair matching.
-  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://127.0.0.1:3000");
+  // Host authority selects the Buzz community, so loopback spellings stay
+  // distinct while syntax-only equivalences are normalized.
+  assert.equal(canonicalRelayUrl("ws://localhost:3000"), "ws://localhost:3000");
   assert.equal(
     canonicalRelayUrl("WSS://Relay.Example:443/"),
     "wss://relay.example",
@@ -94,39 +93,23 @@ test("canonicalRelayUrl mirrors the backend pair-key normalization", () => {
     canonicalRelayUrl("wss://relay.example/path/"),
     "wss://relay.example/path",
   );
-  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://127.0.0.1:3000");
+  assert.equal(canonicalRelayUrl("ws://[::1]:3000"), "ws://[::1]:3000");
   assert.equal(canonicalRelayUrl("https://relay.example"), null);
   assert.equal(canonicalRelayUrl("not a url"), null);
 });
 
-test("matches a stored community URL against canonical backend rows", () => {
+test("matches syntax-equivalent URLs without collapsing host authorities", () => {
   const runtimes = [
-    runtime({ relayUrl: "ws://127.0.0.1:3000", lifecycle: "ready" }),
+    runtime({ relayUrl: "wss://relay.example", lifecycle: "ready" }),
+    runtime({ relayUrl: "ws://127.0.0.1:3000", lifecycle: "failed" }),
   ];
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000")?.lifecycle,
+    findManagedAgentRuntime(runtimes, "aa", "WSS://Relay.Example:443/")
+      ?.lifecycle,
     "ready",
   );
   assert.equal(
-    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3001"),
+    findManagedAgentRuntime(runtimes, "aa", "ws://localhost:3000"),
     undefined,
-  );
-});
-
-test("lifecycle actions dial the configured authority after status refresh", () => {
-  assert.equal(
-    managedAgentRuntimeActionRelayUrl(
-      runtime({
-        relayUrl: "ws://127.0.0.1:3000",
-        requestedRelayUrl: "ws://localhost:3000",
-      }),
-    ),
-    "ws://localhost:3000",
-  );
-  assert.equal(
-    managedAgentRuntimeActionRelayUrl(
-      runtime({ relayUrl: "wss://relay.example" }),
-    ),
-    "wss://relay.example",
   );
 });

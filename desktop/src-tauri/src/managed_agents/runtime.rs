@@ -9,7 +9,7 @@ use crate::{
         append_log_marker, known_acp_runtime, login_shell_path, managed_agent_log_path,
         missing_command_message, normalize_agent_args, open_log_file, resolve_command,
         spawn_key_refusal, KnownAcpRuntime, ManagedAgentPairRuntime, ManagedAgentRecord,
-        ManagedAgentRuntimeKey, ManagedAgentRuntimeTarget, ManagedAgentSummary,
+        ManagedAgentRuntimeKey, ManagedAgentSummary,
     },
     util::now_iso,
 };
@@ -21,7 +21,7 @@ pub(crate) use path::should_skip_claude_executable;
 pub(crate) use path::should_use_inherited;
 
 mod stop;
-pub(crate) use stop::{managed_agent_runtime_keys, managed_agent_runtime_requested_relay_urls};
+pub(crate) use stop::managed_agent_runtime_keys;
 pub use stop::{stop_managed_agent_process, stop_managed_agent_workspace_pair};
 
 mod sweep;
@@ -1449,11 +1449,15 @@ pub fn build_managed_agent_summary(
     // own community (hashing them against this workspace's relay would flag
     // a spurious restart on every community switch).
     //
-    // Adapter availability drift also requires restart; this reads the cache only.
+    // Additionally, for runtimes with an adapter version gate (codex only),
+    // check whether the cached adapter availability has drifted from the value
+    // stamped at spawn.  This catches out-of-band adapter changes (manual
+    // npm install/downgrade) that Phase-1 auto-restart doesn't cover.  The
+    // cache is read-only here — no subprocess is spawned.
     let needs_restart = pair_key
         .as_ref()
         .and_then(|key| runtimes.get(key).map(|runtime| (key, runtime)))
-        .is_some_and(|(_, runtime)| {
+        .is_some_and(|(key, runtime)| {
             let global_for_hash =
                 crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
             let teams_for_hash = crate::managed_agents::load_teams(app).unwrap_or_default();
@@ -1462,7 +1466,7 @@ pub fn build_managed_agent_summary(
                     record,
                     personas,
                     &teams_for_hash,
-                    &runtime.requested_relay_url,
+                    &key.relay_url,
                     &global_for_hash,
                 );
             let availability_drift = super::availability_drift(
@@ -1630,8 +1634,7 @@ pub fn spawn_agent_child(
     if let Some(error) = spawn_key_refusal(record) {
         return Err(error);
     }
-    let target = ManagedAgentRuntimeTarget::new(record.pubkey.clone(), relay_url)?;
-    let runtime_key = target.key;
+    let runtime_key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), relay_url)?;
     let log_path = super::managed_agent_runtime_log_path(app, &runtime_key)?;
     append_log_marker(
         &log_path,
@@ -1682,8 +1685,9 @@ pub fn spawn_agent_child(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| effective_command.clone());
 
-    // Dial the configured authority; the canonical runtime key is identity-only.
-    let effective_relay_url = target.requested_relay_url;
+    // The caller supplies the explicit canonical pair relay. This is the only
+    // relay this child may connect to, regardless of the record/workspace default.
+    let effective_relay_url = runtime_key.relay_url.clone();
 
     // Augment PATH for DMG launches so child processes can find:
     //   - bundled CLI via ~/.local/bin symlink
@@ -2105,8 +2109,7 @@ pub fn start_managed_agent_process(
             &crate::relay::relay_ws_url_with_override(&state),
         )
     };
-    let target = ManagedAgentRuntimeTarget::new(record.pubkey.clone(), &relay_url)?;
-    let key = target.key.clone();
+    let key = ManagedAgentRuntimeKey::new(record.pubkey.clone(), &relay_url)?;
     if let Some(runtime) = runtimes.get_mut(&key) {
         if runtime
             .child
@@ -2124,8 +2127,7 @@ pub fn start_managed_agent_process(
     // Scalar PIDs are migration-only and never establish pair liveness.
     record.runtime_pid = None;
 
-    let mut process =
-        spawn_agent_child(app, record, &target.requested_relay_url, false, owner_hex)?;
+    let mut process = spawn_agent_child(app, record, &key.relay_url, false, owner_hex)?;
     let now = now_iso();
     let receipt = super::ManagedAgentRuntimeReceipt {
         key: key.clone(),
@@ -2146,10 +2148,7 @@ pub fn start_managed_agent_process(
     record.last_error = None;
     record.last_error_code = None;
 
-    runtimes.insert(
-        key,
-        ManagedAgentPairRuntime::starting(process, target.requested_relay_url),
-    );
+    runtimes.insert(key, ManagedAgentPairRuntime::starting(process));
     Ok(())
 }
 
