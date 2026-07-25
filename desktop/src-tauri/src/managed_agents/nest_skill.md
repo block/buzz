@@ -69,6 +69,7 @@ Output varies by command group — `--help` shows flags but not response shapes.
 | `mem ls` | tab-delimited (`slug\tcreated_at\tevent_id`) by default; `--json` for JSON array |
 | `reactions get` | `{"reactions": [{emoji, count, pubkeys}]}` — aggregated, not raw events |
 | `pack validate/inspect` | human-readable text, not JSON |
+| `completions <shell>` | raw shell script text to stdout |
 
 **Errors** go to stderr as `{"error": "<category>", "message": "<detail>"}`. Exit codes: 0 = success, 1 = input/not-found, 2 = relay/network, 3 = auth, 4 = other, 5 = write conflict (value superseded).
 

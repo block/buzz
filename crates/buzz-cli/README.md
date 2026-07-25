@@ -162,6 +162,17 @@ stored rules in `validation_error` so an owner can remove and repair them.
 | | `set` | Write a memory value (use `-` for stdin) |
 | | `patch` | Apply unified diff to memory value |
 | | `rm` | Publish a tombstone to delete memory |
+| `completions` | | Generate shell completion scripts (bash, zsh, fish, powershell, elvish) |
+
+## Shell Completions
+
+```bash
+# Load directly in current session
+source <(buzz completions zsh)
+
+# Or load via Zinit (~/.zshrc)
+zinit snippet https://raw.githubusercontent.com/block/buzz/main/buzz.plugin.zsh
+```
 
 ## Architecture
 
