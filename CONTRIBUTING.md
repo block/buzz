@@ -19,9 +19,8 @@ reach out in the community channels.
 6. [Architecture Overview](#architecture-overview)
 7. [Ecosystem](#ecosystem)
 8. [How to Add a New Event Kind](#how-to-add-a-new-event-kind)
-9. [How to Add a New MCP Tool](#how-to-add-a-new-mcp-tool)
-10. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
-11. [License and CLA](#license-and-cla)
+9. [How to Add a New API Endpoint](#how-to-add-a-new-api-endpoint)
+10. [License and CLA](#license-and-cla)
 
 ---
 
@@ -167,7 +166,8 @@ Before opening a PR, run the full CI gate locally:
 
 ```bash
 just ci
-# Runs: check + unit tests + desktop build + Tauri check + mobile tests
+# Runs: check (fmt + lints across Rust, desktop, Tauri, web, and mobile),
+# unit tests (Rust, desktop, Tauri, mobile), and the desktop and web builds
 ```
 
 This is the same check that runs in CI. PRs that fail `just ci` will not be
@@ -278,7 +278,7 @@ required. The scope (in parentheses) is optional but encouraged.
 ### PR Checklist
 
 ```
-- [ ] `just ci` passes (fmt + clippy + unit tests + mobile)
+- [ ] `just ci` passes (fmt + lints, unit tests, and desktop/web builds)
 - [ ] Integration tests pass (`just test`)
 - [ ] New public APIs / tools / endpoints are documented
 - [ ] No new `unwrap()` in production code paths
