@@ -7972,6 +7972,10 @@ async function handleSearchMessages(
   args: {
     q: string;
     limit?: number;
+    channelId?: string;
+    authors?: string[];
+    since?: number;
+    until?: number;
   },
   config: E2eConfig | undefined,
 ): Promise<RawSearchResponse> {

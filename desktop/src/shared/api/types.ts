@@ -272,6 +272,12 @@ export type SearchMessagesInput = {
   q: string;
   limit?: number;
   channelId?: string;
+  /** Hex pubkeys for `from:` operator. */
+  authors?: string[];
+  /** Unix seconds (`after:YYYY-MM-DD`). */
+  since?: number;
+  /** Unix seconds (`before:YYYY-MM-DD`). */
+  until?: number;
 };
 
 export type SearchHit = {

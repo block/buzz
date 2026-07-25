@@ -11,6 +11,13 @@ import {
 } from "@/features/profile/hooks";
 import { rankUserCandidatesBySearch } from "@/features/profile/lib/userCandidateSearch";
 import { useSearchMessagesQuery } from "@/features/search/hooks";
+import {
+  isChannelUuid,
+  isHexPubkey,
+  normalizeFromHandle,
+  normalizeInChannel,
+  parseSearchOperators,
+} from "@/features/search/lib/parseSearchOperators";
 import type { SearchResult } from "@/features/search/ui/SearchResultItem";
 import type { Channel, SearchHit, UserSearchResult } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
@@ -34,6 +41,49 @@ function dedupeSearchHits(hits: SearchHit[]) {
   });
 }
 
+function resolveChannelIdFromOperator(
+  raw: string | null,
+  channels: Channel[],
+  channelLabels?: Record<string, string>,
+): string | null {
+  if (!raw) {
+    return null;
+  }
+  const value = normalizeInChannel(raw);
+  if (isChannelUuid(value)) {
+    return value;
+  }
+  const needle = value.toLowerCase();
+  const match = channels.find((channel) => {
+    const label = channelLabels?.[channel.id]?.trim() || channel.name;
+    return (
+      channel.name.toLowerCase() === needle || label.toLowerCase() === needle
+    );
+  });
+  return match?.id ?? null;
+}
+
+function resolveAuthorFromOperator(
+  raw: string | null,
+  candidates: Array<{ pubkey: string; displayName?: string | null }>,
+): string | null {
+  if (!raw) {
+    return null;
+  }
+  if (isHexPubkey(raw)) {
+    return normalizePubkey(raw);
+  }
+  const handle = normalizeFromHandle(raw).toLowerCase();
+  if (!handle) {
+    return null;
+  }
+  const match = candidates.find((candidate) => {
+    const name = candidate.displayName?.trim().toLowerCase();
+    return name === handle || normalizePubkey(candidate.pubkey) === handle;
+  });
+  return match ? normalizePubkey(match.pubkey) : null;
+}
+
 export function useSearchResults({
   channelLabels,
   channels,
@@ -55,9 +105,61 @@ export function useSearchResults({
     [channels],
   );
 
-  const searchQuery = useSearchMessagesQuery(debouncedQuery, {
-    enabled,
+  const parsedQuery = React.useMemo(
+    () => parseSearchOperators(debouncedQuery),
+    [debouncedQuery],
+  );
+
+  const operatorChannelId = React.useMemo(
+    () =>
+      resolveChannelIdFromOperator(parsedQuery.in, channels, channelLabels),
+    [parsedQuery.in, channels, channelLabels],
+  );
+
+  const ftsQuery = parsedQuery.text;
+
+  const hasSearchQuery =
+    debouncedQuery.trim().length >= MIN_SEARCH_QUERY_LENGTH ||
+    parsedQuery.since !== null ||
+    parsedQuery.until !== null ||
+    parsedQuery.from !== null ||
+    parsedQuery.in !== null;
+
+  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
+
+  const managedAgentsQuery = useManagedAgentsQuery({
+    enabled: searchBackedQueriesEnabled,
+  });
+  const relayAgentsQuery = useRelayAgentsQuery({
+    enabled: searchBackedQueriesEnabled,
+  });
+
+  const authorCandidateSeed = React.useMemo(() => {
+    const candidates: Array<{ pubkey: string; displayName?: string | null }> =
+      [];
+    for (const agent of managedAgentsQuery.data ?? []) {
+      candidates.push({ pubkey: agent.pubkey, displayName: agent.name });
+    }
+    for (const agent of relayAgentsQuery.data ?? []) {
+      candidates.push({ pubkey: agent.pubkey, displayName: agent.name });
+    }
+    return candidates;
+  }, [managedAgentsQuery.data, relayAgentsQuery.data]);
+
+  const resolvedAuthor = React.useMemo(
+    () => resolveAuthorFromOperator(parsedQuery.from, authorCandidateSeed),
+    [parsedQuery.from, authorCandidateSeed],
+  );
+
+  const searchQuery = useSearchMessagesQuery(ftsQuery, {
+    // Operators refine an FTS query. Empty FTS short-circuits on the relay
+    // search path, so require real search text (same floor as before).
+    enabled: enabled && ftsQuery.length >= MIN_SEARCH_QUERY_LENGTH,
     limit,
+    channelId: operatorChannelId ?? undefined,
+    authors: resolvedAuthor ? [resolvedAuthor] : undefined,
+    since: parsedQuery.since,
+    until: parsedQuery.until,
   });
 
   const messageResults = React.useMemo(
@@ -65,11 +167,11 @@ export function useSearchResults({
     [searchQuery.data?.hits],
   );
   const channelResults = React.useMemo(() => {
-    if (debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
     }
 
-    const normalizedQuery = debouncedQuery.toLowerCase();
+    const normalizedQuery = ftsQuery.toLowerCase();
 
     return channels
       .filter(
@@ -100,20 +202,11 @@ export function useSearchResults({
         return aDisplayName.localeCompare(bDisplayName);
       })
       .slice(0, 5);
-  }, [channelLabels, channels, debouncedQuery]);
+  }, [channelLabels, channels, ftsQuery]);
 
-  const hasSearchQuery = debouncedQuery.length >= MIN_SEARCH_QUERY_LENGTH;
-  const searchBackedQueriesEnabled = enabled && hasSearchQuery;
-
-  const userSearchQuery = useUserSearchQuery(debouncedQuery, {
+  const userSearchQuery = useUserSearchQuery(ftsQuery, {
     enabled: searchBackedQueriesEnabled,
     limit,
-  });
-  const managedAgentsQuery = useManagedAgentsQuery({
-    enabled: searchBackedQueriesEnabled,
-  });
-  const relayAgentsQuery = useRelayAgentsQuery({
-    enabled: searchBackedQueriesEnabled,
   });
   const managedAgentPubkeys = React.useMemo(
     () =>
@@ -145,11 +238,11 @@ export function useSearchResults({
     return pubkeys;
   }, [managedAgentPubkeys, relayAgentsQuery.data]);
   const userResults = React.useMemo<UserSearchResult[]>(() => {
-    if (debouncedQuery.length < MIN_SEARCH_QUERY_LENGTH) {
+    if (ftsQuery.length < MIN_SEARCH_QUERY_LENGTH) {
       return [];
     }
 
-    const normalizedQuery = debouncedQuery.toLowerCase();
+    const normalizedQuery = ftsQuery.toLowerCase();
     const candidatesByPubkey = new Map<string, UserSearchResult>();
 
     const matchesQuery = (candidate: UserSearchResult) =>
@@ -241,11 +334,11 @@ export function useSearchResults({
       candidates: [...candidatesByPubkey.values()],
       getLabel: formatUserResultName,
       limit,
-      query: debouncedQuery,
+      query: ftsQuery,
     });
   }, [
-    debouncedQuery,
     eligibleAgentPubkeys,
+    ftsQuery,
     isArchivedDiscovery,
     limit,
     managedAgentPubkeys,
