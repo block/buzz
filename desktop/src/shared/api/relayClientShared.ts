@@ -8,7 +8,7 @@ import type { RelayEvent } from "@/shared/api/types";
  * - `connected`    — socket open and AUTH'd.
  * - `reconnecting` — socket dropped, waiting for the backoff timer.
  * - `stalled`      — socket is *open* per the WS layer but no inbound frames
- *                    for a long time (half-open / Warp split-brain). We
+ *                    for a long time (half-open socket / VPN split-brain). We
  *                    surface this so the UI can warn even though tungstenite
  *                    hasn't reported anything wrong yet.
  * - `disconnected` — final/terminal disconnect (auth rejected, community

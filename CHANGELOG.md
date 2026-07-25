@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.26
+
+- Style mobile pairing QR codes ([#2775](https://github.com/block/buzz/pull/2775)) ([`50655ac09`](https://github.com/block/buzz/commit/50655ac097fbf1a7db1a5284dccc7e2a0b0f1bfc))
+- Refine community management flows ([#2738](https://github.com/block/buzz/pull/2738)) ([`384c72dee`](https://github.com/block/buzz/commit/384c72dee6336234beae3c1a0fec305044815245))
+- docs: replace VPN-vendor references with generic wording ([#2805](https://github.com/block/buzz/pull/2805)) ([`bcca885ba`](https://github.com/block/buzz/commit/bcca885ba92b74df77e36b8e6c45a54dafc291f9))
+- fix(desktop): explain macOS local network access ([#2263](https://github.com/block/buzz/pull/2263)) ([`e527d74f0`](https://github.com/block/buzz/commit/e527d74f069de5d706714d63d99a494389e824af))
+- fix(desktop): clarify CLI runtime setup ([#2680](https://github.com/block/buzz/pull/2680)) ([`b8510ede1`](https://github.com/block/buzz/commit/b8510ede1b52ebe87ed3cf18cf0b2590a86b2245))
+
+
 ## v0.4.25
 
 - fix(discovery): spawn PowerShell install commands natively on Windows ([#2750](https://github.com/block/buzz/pull/2750)) ([`f3981dbfe`](https://github.com/block/buzz/commit/f3981dbfefc09e6a888ada489badb7dafdf122cf))

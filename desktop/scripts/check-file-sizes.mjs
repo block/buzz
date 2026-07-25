@@ -498,7 +498,11 @@ const overrides = new Map([
   // route PowerShell CLI installs natively on Windows (bypasses Git Bash PATH
   // poisoning that resolved GNU tar instead of bsdtar → Codex install failure).
   // Includes unit tests for detection, routing, and -Command body preservation.
-  ["src-tauri/src/commands/agent_discovery.rs", 1810],
+  // +16: test_powershell_command_goose_catalog_dequoted proves the \$→$ escape
+  // fix for the Goose Windows installer (PR #2680 interaction with #2750).
+  // +10: pass an explicit PATH through Codex adapter install planning so unit
+  // tests avoid the process-global login-shell PATH cache.
+  ["src-tauri/src/commands/agent_discovery.rs", 1836],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
