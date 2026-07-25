@@ -125,9 +125,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// `buzz-agent auth <provider>` — run the interactive auth flow for a
 /// provider and persist the result, then exit. Today this supports Databricks
 /// OAuth 2.0 PKCE. Reads `DATABRICKS_HOST` from env; needs a browser on the
-/// machine.
+/// machine. Pass `--select-account` to force the provider's account chooser
+/// rather than reusing whatever session the browser already holds.
 async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let provider = args.first().map(String::as_str);
+    // `--select-account` forces the provider's account chooser instead of
+    // silently reusing the browser's current session — the only way to
+    // authenticate as an account other than the one already signed in.
+    let force_account_selection = args.iter().any(|arg| arg == "--select-account");
     match provider {
         Some("databricks" | "databricks_v2" | "databricks-v2") => {
             let host = std::env::var("DATABRICKS_HOST")
@@ -143,12 +148,14 @@ async fn auth_subcommand(args: &[String]) -> Result<(), Box<dyn std::error::Erro
                 cache_dir_override: None,
             };
             let src = auth::PkceOAuthTokenSource::new(pkce)?;
-            src.interactive_login().await?;
+            src.interactive_login(force_account_selection).await?;
             eprintln!("Authenticated. Token cached under ~/.config/buzz-agent/oauth/databricks/.");
             Ok(())
         }
         Some(other) => Err(format!("auth: unknown provider {other:?}").into()),
-        None => Err("auth: provider required (try: buzz-agent auth databricks)".into()),
+        None => Err(
+            "auth: provider required (try: buzz-agent auth databricks [--select-account])".into(),
+        ),
     }
 }
 

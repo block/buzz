@@ -232,9 +232,18 @@ impl PkceOAuthTokenSource {
 
     /// Run the full browser-mediated Authorization Code + PKCE flow.
     /// Caller must hold a TTY/browser: this opens a window and blocks.
-    pub async fn interactive_login(&self) -> Result<(), AgentError> {
+    ///
+    /// `force_account_selection` adds `prompt=select_account` to the
+    /// authorization request. Without it the provider silently reuses whatever
+    /// session the default browser already holds, so a user signed into the
+    /// wrong account has no way to reach a different one. Pass `true` for
+    /// explicitly user-initiated logins ("use a different account"); leave it
+    /// `false` on implicit first-run auth, where an unnecessary account chooser
+    /// is friction and some providers reject the parameter.
+    pub async fn interactive_login(&self, force_account_selection: bool) -> Result<(), AgentError> {
         let endpoints = self.endpoints().await?;
-        let token = browser_pkce_flow(&self.http, &self.cfg, &endpoints).await?;
+        let token =
+            browser_pkce_flow(&self.http, &self.cfg, &endpoints, force_account_selection).await?;
         let mut state = self.state.lock().await;
         self.save(&mut state, token)?;
         Ok(())
@@ -289,8 +298,10 @@ impl TokenSource for PkceOAuthTokenSource {
             }
         }
 
-        // 5. No usable cache: full browser dance.
-        let fresh = browser_pkce_flow(&self.http, &self.cfg, &endpoints).await?;
+        // 5. No usable cache: full browser dance. No forced account chooser —
+        //    this path is reached implicitly mid-request, not by a user who
+        //    asked to switch accounts (see `interactive_login`).
+        let fresh = browser_pkce_flow(&self.http, &self.cfg, &endpoints, false).await?;
         let bearer = fresh.access_token.clone();
         self.save(&mut state, fresh)?;
         Ok(bearer)
@@ -521,6 +532,34 @@ fn random_state() -> Result<String, AgentError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Build the authorization-endpoint URL for one PKCE attempt.
+///
+/// When `force_account_selection` is set the request carries
+/// `prompt=select_account`, which tells the provider to show its account
+/// chooser instead of silently reusing the browser's current session.
+fn authorize_url(
+    endpoints: &OidcEndpoints,
+    cfg: &PkceOAuthConfig,
+    redirect_uri: &str,
+    state: &str,
+    challenge: &str,
+    force_account_selection: bool,
+) -> String {
+    let mut url = format!(
+        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
+        endpoints.authorization_endpoint,
+        urlencoding::encode(&cfg.client_id),
+        urlencoding::encode(redirect_uri),
+        urlencoding::encode(&cfg.scopes.join(" ")),
+        urlencoding::encode(state),
+        urlencoding::encode(challenge),
+    );
+    if force_account_selection {
+        url.push_str("&prompt=select_account");
+    }
+    url
+}
+
 /// Spin up a localhost callback server, open the authorize URL in a
 /// browser, wait up to [`BROWSER_AUTH_TIMEOUT`] for the redirect, then
 /// exchange the code for a token.
@@ -528,6 +567,7 @@ async fn browser_pkce_flow(
     http: &Client,
     cfg: &PkceOAuthConfig,
     endpoints: &OidcEndpoints,
+    force_account_selection: bool,
 ) -> Result<CachedToken, AgentError> {
     use axum::{extract::Query, response::Html, routing::get, Router};
     use std::collections::HashMap;
@@ -585,14 +625,13 @@ async fn browser_pkce_flow(
         let _ = axum::serve(listener, app).await;
     }));
 
-    let auth_url = format!(
-        "{}?response_type=code&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method=S256",
-        endpoints.authorization_endpoint,
-        urlencoding::encode(&cfg.client_id),
-        urlencoding::encode(&redirect_uri),
-        urlencoding::encode(&cfg.scopes.join(" ")),
-        urlencoding::encode(&state),
-        urlencoding::encode(&challenge),
+    let auth_url = authorize_url(
+        endpoints,
+        cfg,
+        &redirect_uri,
+        &state,
+        &challenge,
+        force_account_selection,
     );
 
     eprintln!("Opening browser for authentication. If it doesn't open, visit:\n  {auth_url}");
@@ -640,6 +679,52 @@ mod tests {
         let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(sha2::Sha256::digest(verifier.as_bytes()));
         assert_eq!(expected, challenge);
+    }
+
+    fn test_authorize_url(force_account_selection: bool) -> String {
+        let endpoints = OidcEndpoints {
+            authorization_endpoint: "https://accounts.example.com/authorize".into(),
+            token_endpoint: "https://accounts.example.com/token".into(),
+        };
+        let cfg = PkceOAuthConfig {
+            discovery_url: "https://accounts.example.com/.well-known/openid-configuration".into(),
+            client_id: "client-123".into(),
+            scopes: vec!["openid".into(), "email".into()],
+            cache_namespace: "example".into(),
+            cache_dir_override: None,
+        };
+        authorize_url(
+            &endpoints,
+            &cfg,
+            "http://localhost:1234",
+            "state-abc",
+            "challenge-xyz",
+            force_account_selection,
+        )
+    }
+
+    #[test]
+    fn authorize_url_omits_prompt_by_default() {
+        let url = test_authorize_url(false);
+        assert!(url.starts_with("https://accounts.example.com/authorize?"));
+        assert!(url.contains("client_id=client-123"));
+        assert!(url.contains("scope=openid%20email"));
+        assert!(
+            !url.contains("prompt="),
+            "implicit auth must not force an account chooser: {url}"
+        );
+    }
+
+    #[test]
+    fn authorize_url_requests_account_chooser_when_forced() {
+        let url = test_authorize_url(true);
+        assert!(
+            url.contains("&prompt=select_account"),
+            "explicit re-auth must let the user pick an account: {url}"
+        );
+        // The rest of the request is unchanged by the added parameter.
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("state=state-abc"));
     }
 
     #[test]
