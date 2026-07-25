@@ -126,13 +126,18 @@ fn build_updated_repo_announcement(
         ))
     })?;
 
-    // Advance only the observed head. Using wall-clock time here would let a
-    // delayed writer leapfrog an intervening update and silently erase metadata.
-    let next_created_at = existing
+    // Advance beyond the observed head while matching wall-clock time when possible.
+    // Setting timestamp strictly to existing.created_at + 1 causes updates on older repo
+    // announcements to fail the relay's server-time drift check (MAX_TIMESTAMP_DRIFT_SECS = 900s).
+    // Using max(now, existing.created_at + 1) ensures the replacement timestamp strictly advances
+    // existing.created_at (NIP-33 requirement) while staying within current wall-clock bounds.
+    let now = Timestamp::now().as_secs();
+    let min_created_at = existing
         .created_at
         .as_secs()
         .checked_add(1)
         .ok_or_else(|| CliError::Other("repository timestamp cannot be advanced".into()))?;
+    let next_created_at = now.max(min_created_at);
     buzz_sdk::build_repo_announcement_with_tags(repo_id, &existing.content, tags)
         .map_err(|error| CliError::Other(format!("failed to build repository update: {error}")))
         .map(|builder| builder.custom_created_at(Timestamp::from(next_created_at)))
@@ -446,7 +451,7 @@ mod tests {
         .expect("sign update");
 
         assert_eq!(updated.content, "repository content");
-        assert_eq!(updated.created_at.as_secs(), 101);
+        assert!(updated.created_at.as_secs() > existing.created_at.as_secs());
         assert!(!updated
             .tags
             .iter()
@@ -485,6 +490,34 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn protection_update_uses_wall_clock_time_for_stale_repo_announcements() {
+        let old_timestamp = Timestamp::now().as_secs().saturating_sub(3600); // 1 hour ago
+        let existing = signed_repo(
+            vec![
+                tag(&["d", "stale-demo"]),
+                tag(&["buzz-protect", "refs/heads/main", "no-delete"]),
+            ],
+            "",
+            old_timestamp,
+        );
+        let replacement =
+            build_protection_tag("refs/heads/main", Some("admin"), false, false, false)
+                .expect("valid replacement");
+
+        let updated = build_updated_repo_announcement(
+            &existing,
+            ProtectionChange::Set(Box::new(replacement)),
+        )
+        .expect("build update for stale repo announcement")
+        .sign_with_keys(&Keys::generate())
+        .expect("sign update");
+
+        let now = Timestamp::now().as_secs();
+        assert!(updated.created_at.as_secs() > old_timestamp);
+        assert!((updated.created_at.as_secs() as i64 - now as i64).abs() <= 5);
     }
 
     #[test]
