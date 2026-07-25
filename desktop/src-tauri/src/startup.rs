@@ -384,11 +384,20 @@ fn lmstudio_readiness_transition_token(readiness: &Result<LmStudioReadiness, Str
 
 pub(crate) struct CommandBriefModelReadinessObserver {
     cancellation: CancellationToken,
+    _task: Option<tauri::async_runtime::JoinHandle<()>>,
 }
 
 impl CommandBriefModelReadinessObserver {
     pub(crate) fn stop(&self) {
         self.cancellation.cancel();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn stop_and_wait(mut self) {
+        self.stop();
+        if let Some(task) = self._task.take() {
+            let _ = task.await;
+        }
     }
 }
 
@@ -408,7 +417,7 @@ where
 {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();
-    tauri::async_runtime::spawn(async move {
+    let task = tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
                 () = task_cancellation.cancelled() => break,
@@ -420,7 +429,10 @@ where
             }
         }
     });
-    CommandBriefModelReadinessObserver { cancellation }
+    CommandBriefModelReadinessObserver {
+        cancellation,
+        _task: Some(task),
+    }
 }
 
 pub(crate) fn start_model_readiness_observer(app: AppHandle) -> CommandBriefModelReadinessObserver {

@@ -65,9 +65,10 @@ GREEN evidence:
 - The messaging and welcome-modal animation-race corrections each passed 5/5
   repetitions.
 - Aggregate `just ci` and a fresh E2E build pass.
-- The uninterrupted full smoke run was not green: 697 passed, 1 skipped, and 2
-  failed in 17.5 minutes. The corrected Daily Brief, video, messaging-avatar,
-  and welcome-modal scenarios passed in that aggregate run.
+- The first uninterrupted full smoke run was not green: 697 passed, 1 skipped,
+  and 2 failed in 17.5 minutes. After deterministic diagnosis and narrow
+  synchronization corrections, the replacement full smoke run passed with
+  700 passed, 1 skipped, and 0 failed in 17.9 minutes.
 
 The inherited video-review scenario had three unrelated responsibilities in
 one 543-line test. Its live-message assertion expected an offscreen virtualized
@@ -87,23 +88,40 @@ and requires the real `Profile saved` toast. The welcome-modal screenshot test
 waits for menu animation before clicking the current custom-model option.
 `ProfileAvatarEditor.tsx` has no correction diff.
 
-The two late aggregate failures are not presented as Task 9 acceptance:
+The two late failures in the first corrected aggregate were resolved without
+weakening their assertions:
 
 - `supported link previews keep the message link visible` observed a detached
-  optimistic card during a one-shot computed-style measurement. It passed
-  10/10 focused repeats; the exact test, CSS helper, and production link-preview
-  component are unchanged from base `7cbab960`. It needs a tracked baseline
-  issue and independent waiver-or-fix disposition.
+  optimistic card during a one-shot computed-style measurement. A deterministic
+  regression replaced the located card during style lookup and reproduced the
+  exact 16px-versus-0px failure. The shared helper now polls and re-resolves the
+  locator. The real scenario plus regression passed 40/40 under parallel
+  repetition, and all 57 helper consumers passed before the aggregate.
 - `failed initial relay dial retries automatically` failed 5/10 focused repeats
-  because its poll threw before the E2E relay-state seam was installed. The
-  test was unchanged from base. A narrow wait-for-seam correction passed 20/20
-  focused repeats.
+  because its poll threw before the E2E relay-state seam was installed. A
+  narrow wait-for-seam correction passed 20/20 focused repeats.
 
-No second 17-minute full run was started after that narrow correction. Phase 4
-approval therefore remains open even though all Task 9-specific gates and the
-aggregate CI gate are green.
+The first replacement aggregate exposed two further readiness races while the
+original link-preview scenario passed: Enter was sent before the channel
+browser's deferred result reflected its query, and a prior create dialog's exit
+node satisfied the next open helper. The tests now gate on the visible create
+row containing the live query and on the old dialog detaching before reopening.
+Those scenarios passed 100/100 under parallel repetition. The final full smoke
+run passed with 700 passed, 1 skipped, and 0 failed in 17.9 minutes.
 
-## Baseline debt `PHASE4-SMOKE-001`
+The first final `just ci` run then reproduced a rare model-observer lifecycle
+test race: 1866 Tauri tests passed and one failed because the test sampled its
+poll counter immediately after synchronous cancellation but before the spawned
+observer task had exited. Focused repetition reproduced the old failure at run
+43. The observer now retains its task handle and exposes a test-only
+cancel-and-join boundary; synchronous application shutdown behavior is
+unchanged. The corrected test passed 100/100 repetitions, and the replacement
+`just ci` run passed, including all 541 mobile tests with one skip.
+
+Phase 4 approval still remains open on the controlled live/offline exercise and
+independent-review acceptance.
+
+## Closed baseline debt `PHASE4-SMOKE-001`
 
 Tracking surface: draft PR #4. GitHub issue creation is unavailable, so this
 named committed runbook/report entry is authoritative until it can be moved to
@@ -111,7 +129,7 @@ an issue.
 
 Title: `Desktop smoke: link-preview style assertion races optimistic row replacement`
 
-Evidence:
+Closure evidence:
 
 - Base comparison: the scenario at `messaging.spec.ts:262`, the
   `expectCornerRadiusPx` helper, and `link-preview-attachment.tsx` are unchanged
@@ -119,28 +137,33 @@ Evidence:
 - Aggregate symptom: the card was visible, but `getComputedStyle` returned an
   empty radius from a detached element that retained the expected
   `rounded-2xl` class; the run recorded 697 passed, 1 skipped, and 2 failed.
-- Focused reproduction after the aggregate run: 10/10 passed, so the failure
-  is aggregate-only and not yet deterministically reproduced.
-- Safety disposition: do not weaken the 16px or smooth-corner assertions and
-  do not call the full smoke gate green. Investigate optimistic message-row
-  replacement or make the shared style measurement poll the current locator,
-  then require RED/GREEN repetition and a fresh aggregate run.
+- Focused reproduction after the first aggregate run passed, confirming the
+  trigger required a node replacement during the measurement window.
+- A deterministic regression replaced the located element during
+  `getComputedStyle`. It failed before the correction with an expected 16px
+  radius and measured 0px, then passed after the helper polled the current
+  locator.
+- The real link-preview scenario and deterministic regression passed 40/40
+  under parallel repetition. All 57 current helper consumers then passed.
+- The first replacement aggregate passed the link-preview case but exposed two
+  unrelated readiness races. After their narrow readiness gates passed 100/100
+  focused repeats, the final aggregate passed: 700 passed, 1 skipped, and 0
+  failed in 17.9 minutes.
+- The 16px radius and smooth-corner assertions remain unchanged.
 
 The relay seam race does not need the same waiver: it reproduced 5/10, had a
 specific test synchronization defect, and passed 20/20 after waiting for the
 seam before polling connection state.
 
-Closure criteria:
+Closure criteria and disposition:
 
-1. deterministically reproduce the optimistic-card detachment or establish its
-   exact aggregate trigger;
-2. correct the row-replacement or current-locator style-measurement boundary
-   without weakening the visual assertions;
-3. demonstrate focused RED/GREEN repetition;
-4. complete a fresh green full desktop smoke run; and
-5. obtain independent-review acceptance.
+1. Deterministic reproduction: complete.
+2. Current-locator correction without weakening assertions: complete.
+3. Focused RED/GREEN repetition: complete.
+4. Fresh green full desktop smoke run: complete.
+5. Independent-review acceptance: pending as a Phase 4 gate.
 
-No acceptance waiver has been granted.
+No acceptance waiver was used.
 
 ## Controlled live/offline limitation
 

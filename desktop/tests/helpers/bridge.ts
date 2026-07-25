@@ -901,6 +901,13 @@ async function openSectionMenu(page: Page, actionsTestId: string) {
 // keyboard shortcut (the "New channel" menu item was removed as redundant).
 export async function openCreateChannelDialog(page: Page) {
   await page.getByTestId("app-sidebar").waitFor({ state: "visible" });
+  // A closed Radix dialog remains mounted during its exit animation. Require
+  // that previous instance to detach before dispatching the shortcut, or the
+  // visibility gate below can resolve against stale content while the new
+  // dialog is still mounting.
+  await page
+    .getByTestId("create-channel-dialog")
+    .waitFor({ state: "detached" });
   const isMacBrowser = await page.evaluate(() =>
     /mac|iphone|ipad|ipod/i.test(navigator.platform),
   );
@@ -916,7 +923,7 @@ export async function openCreateChannelDialog(page: Page) {
       }),
     );
   }, isMacBrowser);
-  await page.getByTestId("create-channel-dialog").waitFor();
+  await page.getByTestId("create-channel-dialog").waitFor({ state: "visible" });
 }
 
 export async function openNewMessagePage(page: Page) {

@@ -428,7 +428,7 @@ async fn app_owned_model_observer_recovers_without_ui_and_dedupes_unchanged_poll
     while polls.load(Ordering::SeqCst) < 6 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    observer.stop();
+    observer.stop_and_wait().await;
     let stopped_at = polls.load(Ordering::SeqCst);
     tokio::time::sleep(Duration::from_millis(20)).await;
 

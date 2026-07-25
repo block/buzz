@@ -154,14 +154,23 @@ suites omitted by the original gate. It also passed 3544 desktop tests and the
 with assertions for the visible advisory limitation, pending proposal, and
 citation-to-ledger focus, retrieval timestamp, and page location.
 
-The fresh full desktop smoke run remains non-green and therefore does not
-approve Phase 4: 697 passed, 1 skipped, and 2 failed in 17.5 minutes. The
-supported-link-preview failure measured a detached optimistic card once; the
-exact test passed 10/10 on focused repeat, and its test, CSS helper, and
-production component are unchanged from base `7cbab960`. The failed-initial-
-relay-dial scenario failed 5/10 focused repeats because its state poll threw
-before the E2E seam was installed. That test was also unchanged from base; a
-narrow wait for the seam then passed 20/20 repeats.
+The first corrected full desktop smoke run remained non-green: 697 passed, 1
+skipped, and 2 failed in 17.5 minutes. The supported-link-preview failure
+measured a detached optimistic card once. A deterministic replacement-during-
+measurement regression then reproduced the exact 16px-versus-0px failure. The
+shared radius helper now polls the current locator without weakening its 16px
+or smooth-corner assertions. The real scenario plus regression passed 40/40,
+and all 57 helper consumers passed. The failed-initial-relay-dial scenario
+failed 5/10 because its state poll ran before the E2E seam was installed; a
+narrow wait for that seam passed 20/20.
+
+The next aggregate passed those corrected cases but exposed two separate
+readiness races. The channel browser Enter scenario now waits until the visible
+create row reflects the live query, and the create-dialog helper requires a
+prior Radix exit-animation node to detach before dispatching a new open
+shortcut. Those two scenarios passed 100/100 under parallel repetition. The
+final full desktop smoke run passed with 700 passed, 1 skipped, and 0 failed in
+17.9 minutes.
 
 The inherited video-review test now asserts its durable `1 new message`
 affordance when the virtualized row is intentionally offscreen. Playback-rate
@@ -169,15 +178,10 @@ and thread-comment responsibilities were retained in focused scenarios instead
 of being hidden inside the 543-line review path. The original and two extracted
 scenarios passed 15/15 across five repetitions and passed in the aggregate run.
 
-`PHASE4-SMOKE-001` tracks the remaining baseline debt on draft PR #4 because
-GitHub issue creation is unavailable. Evidence: the link-preview aggregate
-failure occurred in the 697-passed, 1-skipped, 2-failed run; its exact scenario
-then passed 10/10 and its test, CSS helper, and production component are
-unchanged from base. Closure requires a deterministic reproduction or
-root-cause fix, RED/GREEN focused repetitions, and a fresh green full smoke run.
-The relay seam race is included in the audit trail as 5/10 failing before its
-narrow synchronization fix and 20/20 passing afterward. There is no acceptance
-waiver yet.
+`PHASE4-SMOKE-001` is closed on draft PR #4 by deterministic RED/GREEN evidence,
+focused repetition, and the green 700-pass aggregate. No acceptance waiver was
+used. Phase 4 itself remains open pending the controlled live/offline exercise
+and independent review.
 
 ## Controlled live offline exercise
 

@@ -281,6 +281,37 @@ test("supported link previews keep the message link visible", async ({
   await expectSmoothCorners(previewCard);
 });
 
+test("corner radius measurement re-resolves a locator replaced during style lookup", async ({
+  page,
+}) => {
+  await page.setContent(`
+    <style>.replaceable-card { border-radius: 16px; }</style>
+    <div class="replaceable-card" data-testid="replaceable-card"></div>
+  `);
+  await page.evaluate(() => {
+    const originalGetComputedStyle = window.getComputedStyle.bind(window);
+    let replaceOnNextMeasurement = true;
+
+    window.getComputedStyle = ((
+      element: Element,
+      pseudoElement?: string | null,
+    ) => {
+      if (
+        replaceOnNextMeasurement &&
+        element instanceof HTMLElement &&
+        element.dataset.testid === "replaceable-card"
+      ) {
+        replaceOnNextMeasurement = false;
+        element.replaceWith(element.cloneNode(true));
+        element.removeAttribute("class");
+      }
+      return originalGetComputedStyle(element, pseudoElement);
+    }) as typeof window.getComputedStyle;
+  });
+
+  await expectCornerRadiusPx(page.getByTestId("replaceable-card"), 16);
+});
+
 test("send multiple messages in sequence", async ({ page }) => {
   const ts = Date.now();
   const messages = [
