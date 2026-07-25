@@ -213,7 +213,7 @@ Greenfield. Agent swarms build in parallel, integrating at the event store bound
 |-|------|
 | ✅ | Core relay, auth, pub/sub, search, audit |
 | ✅ | MCP server — full feature surface |
-| ✅ | ACP agent harness — goose, codex, claude code |
+| ✅ | ACP agent harness — goose, kiro, codex, claude code |
 | ✅ | Desktop client (Tauri) — Stream, Home, Forum, DMs, Agents, Workflows, Search, Settings, Profiles, Presence |
 | ✅ | Channel features — messaging, threads, reactions, canvases, media uploads, editing, deletion, typing indicators, NIP-29, soft-delete |
 | ✅ | Workflow engine — YAML-as-code, execution traces, message/reaction/schedule/webhook triggers |

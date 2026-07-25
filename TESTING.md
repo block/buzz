@@ -179,8 +179,8 @@ header fallback. There is no REST API for fetching message threads — use
 
 ## ACP Harness (optional, end-to-end with a real agent)
 
-`buzz-acp` connects an ACP-speaking agent (goose, codex, claude code,
-buzz-agent) to the relay. The harness listens for events, drives the
+`buzz-acp` connects an ACP-speaking agent (goose, kiro, codex, claude
+code, buzz-agent) to the relay. The harness listens for events, drives the
 agent over stdio, and the agent replies through MCP tools.
 
 Minimum recipe — assumes the relay from step 3 is running and the channel
@@ -221,10 +221,10 @@ buzz-acp                                    # foreground; logs to stdout (run in
 ```
 
 > **Using a different ACP agent?** The default recipe assumes `goose` is on
-> `$PATH` and configured (`goose --version` should print). For codex / claude
-> code / buzz-agent, set `BUZZ_ACP_AGENT_COMMAND` and `BUZZ_ACP_AGENT_ARGS`
-> accordingly — see `crates/buzz-acp/README.md`. Without these, buzz-acp
-> will fail to spawn the agent subprocess on startup.
+> `$PATH` and configured (`goose --version` should print). For kiro /
+> codex / claude code / buzz-agent, set `BUZZ_ACP_AGENT_COMMAND` and
+> `BUZZ_ACP_AGENT_ARGS` accordingly — see `crates/buzz-acp/README.md`.
+> Without these, buzz-acp will fail to spawn the agent subprocess on startup.
 
 If you started the agent before adding it to the channel, just run the
 `add-member` afterwards — it picks up the membership notification live and
