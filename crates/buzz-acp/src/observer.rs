@@ -31,8 +31,10 @@ pub struct ObserverContext {
     /// Authors whose triggering events started this turn.
     ///
     /// Internal routing metadata only. It is never serialized into the
-    /// encrypted observer payload.
-    pub requester_pubkeys: Vec<String>,
+    /// encrypted observer payload. Cloned contexts share this recipient set
+    /// so a requester accepted through a native mid-turn steer is visible to
+    /// liveness and terminal observers for the same turn.
+    requester_pubkeys: Arc<Mutex<Vec<String>>>,
 }
 
 /// Handle used by the harness to publish local observer events.
@@ -125,7 +127,7 @@ impl ObserverHandle {
             session_id: context.session_id.clone(),
             turn_id: context.turn_id.clone(),
             started_at: context.started_at.clone(),
-            requester_pubkeys: context.requester_pubkeys.clone(),
+            requester_pubkeys: context.requester_pubkeys(),
             payload,
         };
 
@@ -156,7 +158,7 @@ pub fn context_for(
         session_id,
         turn_id,
         started_at: None,
-        requester_pubkeys: Vec::new(),
+        requester_pubkeys: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -172,7 +174,7 @@ pub fn context_for_turn(
         session_id,
         turn_id: Some(turn_id),
         started_at: Some(started_at),
-        requester_pubkeys: Vec::new(),
+        requester_pubkeys: Arc::new(Mutex::new(Vec::new())),
     }
 }
 
@@ -181,13 +183,34 @@ impl ObserverContext {
     /// this turn. The list remains process-local and is used only to select
     /// NIP-44 recipients.
     pub fn with_requester_pubkeys(mut self, requester_pubkeys: Vec<String>) -> Self {
-        self.requester_pubkeys = requester_pubkeys
+        let mut requester_pubkeys = requester_pubkeys
             .into_iter()
             .map(|pubkey| pubkey.to_ascii_lowercase())
-            .collect();
-        self.requester_pubkeys.sort();
-        self.requester_pubkeys.dedup();
+            .collect::<Vec<_>>();
+        requester_pubkeys.sort();
+        requester_pubkeys.dedup();
+        self.requester_pubkeys = Arc::new(Mutex::new(requester_pubkeys));
         self
+    }
+
+    /// Add a requester to this turn's shared recipient set.
+    pub fn add_requester_pubkey(&self, requester_pubkey: impl Into<String>) {
+        let requester_pubkey = requester_pubkey.into().to_ascii_lowercase();
+        let mut requester_pubkeys = match self.requester_pubkeys.lock() {
+            Ok(requester_pubkeys) => requester_pubkeys,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !requester_pubkeys.contains(&requester_pubkey) {
+            requester_pubkeys.push(requester_pubkey);
+            requester_pubkeys.sort();
+        }
+    }
+
+    fn requester_pubkeys(&self) -> Vec<String> {
+        match self.requester_pubkeys.lock() {
+            Ok(requester_pubkeys) => requester_pubkeys.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }
 
@@ -199,11 +222,13 @@ mod tests {
     fn requester_routing_metadata_is_normalized_but_not_serialized() {
         let context = context_for_turn(None, None, "turn-1".into(), "2026-07-24T10:00:00Z".into())
             .with_requester_pubkeys(vec!["BBBB".into(), "aaaa".into(), "AAAA".into()]);
+        let cloned_context = context.clone();
+        cloned_context.add_requester_pubkey("CCCC");
         let observer = ObserverHandle::in_process();
         observer.emit("turn_started", Some(0), &context, serde_json::json!({}));
         let event = observer.snapshot().pop().expect("observer event");
 
-        assert_eq!(event.requester_pubkeys, ["aaaa", "bbbb"]);
+        assert_eq!(event.requester_pubkeys, ["aaaa", "bbbb", "cccc"]);
         let serialized = serde_json::to_value(&event).expect("serialize observer event");
         assert!(
             serialized.get("requesterPubkeys").is_none(),

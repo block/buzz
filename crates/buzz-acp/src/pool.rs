@@ -324,6 +324,9 @@ pub struct SteerRequest {
     /// `queue::native_steer_framing()` + `queue::format_event_block` so
     /// the wording cannot drift from the cancel+merge fallback path.
     pub prompt_blocks: Vec<String>,
+    /// Author of the event carried by this steer. Added to the active turn's
+    /// observer recipients only after the agent accepts the native steer.
+    pub requester_pubkey: String,
     /// Oneshot for the read loop to report the outcome.
     pub ack_tx: tokio::sync::oneshot::Sender<SteerAck>,
 }
@@ -661,6 +664,24 @@ impl AgentPool {
             .ok_or_else(|| SteerError::Transport("steer_tx not installed".into()))?;
         tx.try_send(request)
             .map_err(|e| SteerError::Transport(e.to_string()))
+    }
+
+    /// Add a successful native-steer author to the in-flight turn's panic
+    /// recovery recipients.
+    pub fn add_task_requester_pubkey(&mut self, channel_id: Uuid, requester_pubkey: &str) -> bool {
+        let Some(meta) = self
+            .task_map
+            .values_mut()
+            .find(|meta| meta.channel_id == Some(channel_id))
+        else {
+            return false;
+        };
+        let requester_pubkey = requester_pubkey.to_ascii_lowercase();
+        if !meta.requester_pubkeys.contains(&requester_pubkey) {
+            meta.requester_pubkeys.push(requester_pubkey);
+            meta.requester_pubkeys.sort();
+        }
+        true
     }
 
     pub fn result_tx(&self) -> mpsc::UnboundedSender<PromptResult> {
@@ -1298,14 +1319,13 @@ pub async fn run_prompt_task(
         PromptSource::Heartbeat => None,
     };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
-    let requester_pubkeys = batch_requester_pubkeys(batch.as_ref());
     let initial_observer_context = observer::context_for_turn(
         observer_channel_id,
         None,
         turn_id.clone(),
         turn_started_at.clone(),
     )
-    .with_requester_pubkeys(requester_pubkeys.clone());
+    .with_requester_pubkeys(batch_requester_pubkeys(batch.as_ref()));
     agent
         .acp
         .set_observer_context(initial_observer_context.clone());
@@ -1576,15 +1596,9 @@ pub async fn run_prompt_task(
             }
         }
     };
-    agent.acp.set_observer_context(
-        observer::context_for_turn(
-            observer_channel_id,
-            Some(session_id.clone()),
-            turn_id.clone(),
-            turn_started_at,
-        )
-        .with_requester_pubkeys(requester_pubkeys),
-    );
+    let mut resolved_observer_context = agent.acp.observer_context().clone();
+    resolved_observer_context.session_id = Some(session_id.clone());
+    agent.acp.set_observer_context(resolved_observer_context);
     // Backfill liveness's shared session ID so ticks after this point carry
     // it too, matching every other observer frame for this turn.
     liveness_guard.set_session_id(session_id.clone());

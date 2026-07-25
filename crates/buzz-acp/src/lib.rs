@@ -847,11 +847,28 @@ async fn publish_relay_observer_event(
 }
 
 fn requester_visible_observer_event(event: &observer::ObserverEvent) -> bool {
-    event.turn_id.is_some()
-        && !matches!(
-            event.kind.as_str(),
-            "control_result" | "session_config_captured" | "managed_agent_runtime_lifecycle"
-        )
+    if event.turn_id.is_none() {
+        return false;
+    }
+
+    match event.kind.as_str() {
+        "turn_started" | "turn_liveness" | "turn_completed" => true,
+        "acp_read" => requester_visible_session_update(&event.payload),
+        _ => false,
+    }
+}
+
+fn requester_visible_session_update(payload: &serde_json::Value) -> bool {
+    if payload.get("method").and_then(serde_json::Value::as_str) != Some("session/update") {
+        return false;
+    }
+
+    matches!(
+        payload
+            .pointer("/params/update/sessionUpdate")
+            .and_then(serde_json::Value::as_str),
+        Some("agent_message_chunk" | "tool_call" | "tool_call_update" | "plan")
+    )
 }
 
 /// Maximum age (seconds) for an observer control frame to be considered fresh.
@@ -935,13 +952,7 @@ fn handle_cancel_turn_control(
         observer.emit(
             "control_result",
             None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-                started_at: None,
-                requester_pubkeys: Vec::new(),
-            },
+            &observer::context_for(Some(channel_id), None, None),
             serde_json::json!({
                 "type": "cancel_turn",
                 "status": status,
@@ -1013,13 +1024,7 @@ fn handle_switch_model_control(
         observer.emit(
             "control_result",
             None,
-            &observer::ObserverContext {
-                channel_id: Some(channel_id.to_string()),
-                session_id: None,
-                turn_id: None,
-                started_at: None,
-                requester_pubkeys: Vec::new(),
-            },
+            &observer::context_for(Some(channel_id), None, None),
             serde_json::json!({
                 "type": "switch_model",
                 "status": status,
@@ -1183,6 +1188,7 @@ struct RespawnResult {
 struct SteerAckEvent {
     channel_id: Uuid,
     event_id: String,
+    requester_pubkey: String,
     /// `Ok` if the read loop sent any of the locked `SteerAck` variants.
     /// `Err` if the oneshot was dropped without a send — should not happen
     /// under the current read-loop drains, but if it ever does the main
@@ -2446,6 +2452,7 @@ async fn tokio_main() -> Result<()> {
             Some(PoolEvent::SteerAck(SteerAckEvent {
                 channel_id,
                 event_id,
+                requester_pubkey,
                 ack,
             })) => {
                 // Goose-native steer attempt resolved. Locked semantics
@@ -2536,6 +2543,13 @@ async fn tokio_main() -> Result<()> {
                     "non-cancelling steer ack received"
                 );
                 if matches!(ack, Ok(pool::SteerAck::Success)) {
+                    if !pool.add_task_requester_pubkey(channel_id, &requester_pubkey) {
+                        tracing::debug!(
+                            channel = %channel_id,
+                            requester = %requester_pubkey,
+                            "native steer succeeded after task metadata was already removed"
+                        );
+                    }
                     queue.extend_in_flight_deadline(channel_id, config.max_turn_duration_secs);
                 }
                 if drop_withheld {
@@ -2853,6 +2867,7 @@ fn try_native_steer(
     // steering (which is to inject only what's new).
     let (header, closing) = queue::native_steer_framing();
     let event_id_hex = event.id.to_hex();
+    let requester_pubkey = event.pubkey.to_hex();
     let be = queue::BatchEvent {
         event,
         prompt_tag: prompt_tag.clone(),
@@ -2864,6 +2879,7 @@ fn try_native_steer(
     let (ack_tx, ack_rx) = tokio::sync::oneshot::channel::<pool::SteerAck>();
     let request = pool::SteerRequest {
         prompt_blocks: vec![body],
+        requester_pubkey: requester_pubkey.clone(),
         ack_tx,
     };
 
@@ -2897,6 +2913,7 @@ fn try_native_steer(
                 let _ = ack_tx_clone.send(SteerAckEvent {
                     channel_id,
                     event_id: event_id_for_watcher,
+                    requester_pubkey,
                     ack,
                 });
             });
@@ -4906,8 +4923,163 @@ mod observer_visibility_publisher_tests {
         assert_eq!(requester_b_frames, 1);
     }
 
+    fn observer_event(kind: &str, payload: serde_json::Value) -> observer::ObserverEvent {
+        observer::ObserverEvent {
+            seq: 1,
+            timestamp: "2026-07-24T10:00:00Z".into(),
+            kind: kind.into(),
+            agent_index: Some(0),
+            channel_id: Some(Uuid::new_v4().to_string()),
+            session_id: Some("session-1".into()),
+            turn_id: Some("turn-1".into()),
+            started_at: Some("2026-07-24T10:00:00Z".into()),
+            requester_pubkeys: vec![Keys::generate().public_key().to_hex()],
+            payload,
+        }
+    }
+
     #[test]
-    fn owner_only_frame_kinds_never_fan_out_to_requesters() {
+    fn requester_visibility_is_a_fail_closed_allowlist() {
+        for kind in ["turn_started", "turn_liveness", "turn_completed"] {
+            assert!(
+                requester_visible_observer_event(&observer_event(kind, serde_json::json!({}))),
+                "{kind}"
+            );
+        }
+
+        for update_type in [
+            "agent_message_chunk",
+            "tool_call",
+            "tool_call_update",
+            "plan",
+        ] {
+            let event = observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": update_type}},
+                }),
+            );
+            assert!(requester_visible_observer_event(&event), "{update_type}");
+        }
+
+        let private_events = [
+            observer_event(
+                "acp_write",
+                serde_json::json!({
+                    "method": "session/new",
+                    "params": {"systemPrompt": "owner-private instructions"},
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "id": 1,
+                    "result": {"configOptions": [{"id": "system-prompt"}]},
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "method": "session/request_permission",
+                    "params": {"options": []},
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_thought_chunk",
+                            "content": {"text": "private reasoning"},
+                        },
+                    },
+                }),
+            ),
+            observer_event(
+                "acp_read",
+                serde_json::json!({
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "config_option_update",
+                            "configOptions": [{"id": "system-prompt"}],
+                        },
+                    },
+                }),
+            ),
+            observer_event("turn_error", serde_json::json!({"error": "private path"})),
+            observer_event("unknown_future_kind", serde_json::json!({})),
+        ];
+        for event in private_events {
+            assert!(!requester_visible_observer_event(&event), "{}", event.kind);
+        }
+
+        let mut no_turn = observer_event("turn_started", serde_json::json!({}));
+        no_turn.turn_id = None;
+        assert!(!requester_visible_observer_event(&no_turn));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn requester_visibility_keeps_session_setup_owner_only() {
+        let observer = observer::ObserverHandle::in_process();
+        let agent_keys = Keys::generate();
+        let owner_keys = Keys::generate();
+        let requester = Keys::generate();
+        let context = observer::context_for_turn(
+            Some(Uuid::new_v4()),
+            None,
+            "turn-1".into(),
+            "2026-07-24T10:00:00Z".into(),
+        )
+        .with_requester_pubkeys(vec![requester.public_key().to_hex()]);
+        observer.emit(
+            "acp_write",
+            Some(0),
+            &context,
+            serde_json::json!({
+                "method": "session/new",
+                "params": {"systemPrompt": "owner-private instructions"},
+            }),
+        );
+        let rx = observer.subscribe();
+        let snapshot = observer.snapshot();
+        drop(observer);
+        let (publisher, mut published_rx) = RelayEventPublisher::test_pair();
+
+        run_relay_observer_publisher(
+            snapshot,
+            rx,
+            publisher,
+            agent_keys.clone(),
+            ObserverPublishTarget {
+                agent_pubkey_hex: agent_keys.public_key().to_hex(),
+                owner_pubkey_hex: owner_keys.public_key().to_hex(),
+                owner_pubkey: owner_keys.public_key(),
+                visibility: ObserverVisibility::Requester,
+            },
+        )
+        .await;
+
+        let mut owner_frames = 0;
+        let mut requester_frames = 0;
+        while let Some(event) = published_rx.recv().await {
+            if decrypt_observer_payload::<serde_json::Value>(&owner_keys, &event).is_ok() {
+                owner_frames += 1;
+            }
+            if decrypt_observer_payload::<serde_json::Value>(&requester, &event).is_ok() {
+                requester_frames += 1;
+            }
+        }
+
+        assert_eq!(owner_frames, 1);
+        assert_eq!(requester_frames, 0);
+    }
+
+    #[test]
+    fn legacy_owner_only_frame_kinds_never_fan_out_to_requesters() {
         for kind in [
             "control_result",
             "session_config_captured",
