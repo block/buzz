@@ -63,7 +63,9 @@ pub async fn cmd_get_users(
         crate::OutputFormat::Compact => {
             serde_json::to_string(&compact_profiles(&profiles)).unwrap_or_default()
         }
-        crate::OutputFormat::Table => crate::output::render_rows(&compact_profiles(&profiles)),
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["pubkey", "display_name"], &compact_profiles(&profiles))
+        }
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
     };
     println!("{output}");
@@ -145,7 +147,9 @@ async fn search_by_name(
         crate::OutputFormat::Compact => {
             serde_json::to_string(&compact_profiles(&profiles)).unwrap_or_default()
         }
-        crate::OutputFormat::Table => crate::output::render_rows(&compact_profiles(&profiles)),
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["pubkey", "display_name"], &compact_profiles(&profiles))
+        }
         crate::OutputFormat::Json => serde_json::to_string(&profiles).unwrap_or_default(),
     };
     println!("{output}");

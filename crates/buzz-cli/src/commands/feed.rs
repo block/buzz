@@ -46,7 +46,9 @@ pub async fn cmd_get_feed(
         crate::OutputFormat::Compact => {
             serde_json::to_string(&compact_feed(&normalized)).unwrap_or_default()
         }
-        crate::OutputFormat::Table => crate::output::render_rows(&compact_feed(&normalized)),
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["id", "content", "created_at"], &compact_feed(&normalized))
+        }
         crate::OutputFormat::Json => normalized,
     };
     println!("{output}");

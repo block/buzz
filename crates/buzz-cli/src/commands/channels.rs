@@ -96,7 +96,9 @@ pub async fn cmd_list_channels(
         crate::OutputFormat::Compact => {
             serde_json::to_string(&compact_channels(&channels)).unwrap_or_default()
         }
-        crate::OutputFormat::Table => crate::output::render_rows(&compact_channels(&channels)),
+        crate::OutputFormat::Table => {
+            crate::output::render_rows(&["channel_id", "name"], &compact_channels(&channels))
+        }
         crate::OutputFormat::Json => serde_json::to_string(&channels).unwrap_or_default(),
     };
     println!("{output}");

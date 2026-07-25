@@ -244,7 +244,10 @@ fn format_events(normalized: &str, format: &crate::OutputFormat) -> String {
         crate::OutputFormat::Compact => {
             serde_json::to_string(&compact_events(normalized)).unwrap_or_default()
         }
-        crate::OutputFormat::Table => crate::output::render_rows(&compact_events(normalized)),
+        crate::OutputFormat::Table => crate::output::render_rows(
+            &["id", "content", "created_at"],
+            &compact_events(normalized),
+        ),
         crate::OutputFormat::Json => normalized.to_string(),
     }
 }
