@@ -769,9 +769,10 @@ async fn discover_databricks_models(
 
 /// Update mutable fields on an existing managed agent record.
 ///
-/// Does NOT auto-restart the agent. Runtime config changes (system prompt,
-/// parallelism, commands, toolsets) take effect on the next agent spawn.
-/// Name changes are synced to the relay immediately via a kind:0 re-publish.
+/// Provider-backed agents are re-deployed after an explicit save through the
+/// provider protocol's native idempotent deploy operation. Local-agent runtime
+/// config changes take effect on the next spawn. Name changes are synced to the
+/// relay immediately via a kind:0 re-publish.
 #[tauri::command]
 pub async fn update_managed_agent(
     input: UpdateManagedAgentRequest,
@@ -969,6 +970,34 @@ pub async fn update_managed_agent(
             ));
         }
     }
+
+    // Provider processes are owned outside Desktop, so saving their config
+    // must explicitly hand the new canonical record back to the provider.
+    // `deploy` is the provider protocol's idempotent create-or-update operation.
+    let provider_redeployed =
+        super::agents::redeploy_provider_agent(&app, &state, &summary.pubkey).await?;
+
+    // Provider deploy persists runtime metadata (backend_agent_id, timestamps,
+    // errors). Return a fresh summary so the UI cache reflects that state.
+    let summary = if provider_redeployed {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(&app)?;
+        let runtimes = state
+            .managed_agent_processes
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == summary.pubkey)
+            .ok_or_else(|| format!("agent {} not found", summary.pubkey))?;
+        let personas = load_personas(&app).unwrap_or_default();
+        build_managed_agent_summary(&app, record, &runtimes, &personas)?
+    } else {
+        summary
+    };
 
     Ok(UpdateManagedAgentResponse {
         agent: summary,

@@ -234,6 +234,24 @@ fn normalize_relay_mesh_trims_and_preserves_valid_config() {
 }
 
 #[test]
+fn explicit_save_redeploy_target_is_provider_backed_only() {
+    let mut record = bare_agent_record(None, Some("model-b"), None);
+    assert!(provider_redeploy_config(&record).is_none());
+
+    record.backend = BackendKind::Provider {
+        id: "fixture".to_string(),
+        config: serde_json::json!({"model": "model-b"}),
+    };
+    record.provider_binary_path = Some("/tmp/buzz-backend-fixture".to_string());
+
+    let (provider_id, config, binary_path) =
+        provider_redeploy_config(&record).expect("provider redeploy target");
+    assert_eq!(provider_id, "fixture");
+    assert_eq!(config, serde_json::json!({"model": "model-b"}));
+    assert_eq!(binary_path.as_deref(), Some("/tmp/buzz-backend-fixture"));
+}
+
+#[test]
 fn created_avatar_prefers_explicit_input() {
     let resolved = resolve_created_avatar_url(
         Some(" https://x/input.png "),

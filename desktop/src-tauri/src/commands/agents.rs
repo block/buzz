@@ -515,6 +515,69 @@ async fn deploy_to_provider(
     Ok(())
 }
 
+/// Extract the provider-specific fields required for an idempotent redeploy.
+fn provider_redeploy_config(
+    record: &ManagedAgentRecord,
+) -> Option<(String, serde_json::Value, Option<String>)> {
+    match &record.backend {
+        BackendKind::Local => None,
+        BackendKind::Provider { id, config } => Some((
+            id.clone(),
+            config.clone(),
+            record.provider_binary_path.clone(),
+        )),
+    }
+}
+
+/// Re-deploy a provider-backed agent from its current saved record.
+///
+/// Provider deploy is deliberately idempotent, so this is also the update
+/// path used after an explicit configuration save. Local agents return
+/// `Ok(false)` because their runtime settings still take effect on next spawn.
+pub(super) async fn redeploy_provider_agent(
+    app: &AppHandle,
+    state: &AppState,
+    pubkey: &str,
+) -> Result<bool, String> {
+    let target = {
+        let _store_guard = state
+            .managed_agents_store_lock
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let records = load_managed_agents(app)?;
+        let record = records
+            .iter()
+            .find(|record| record.pubkey == pubkey)
+            .ok_or_else(|| format!("agent {pubkey} not found"))?;
+
+        match provider_redeploy_config(record) {
+            Some((provider_id, config, cached_binary_path)) => Some((
+                provider_id,
+                config,
+                build_deploy_payload(app, state, record)?,
+                cached_binary_path,
+            )),
+            None => None,
+        }
+    };
+
+    let Some((provider_id, config, agent_json, cached_binary_path)) = target else {
+        return Ok(false);
+    };
+
+    deploy_to_provider(
+        app,
+        state,
+        pubkey,
+        &provider_id,
+        &config,
+        agent_json,
+        cached_binary_path.as_deref(),
+    )
+    .await?;
+    Ok(true)
+}
+
 // Async so the blocking body (disk reads of agent/persona records, per-agent
 // process-liveness syscalls, and a possible save) runs on Tauri's worker pool
 // via spawn_blocking instead of the main UI thread — it was a beachball on the
