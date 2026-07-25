@@ -708,4 +708,87 @@ mod integration_tests {
             "mentioned member {agent_hex} must be p-tagged so it wakes; got {p_tag_targets:?}"
         );
     }
+
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn workflow_send_message_enforces_private_destination_membership() {
+        let state = test_state().await;
+
+        let owner = nostr::Keys::generate();
+        let owner_hex = owner.public_key().to_hex();
+        let outsider = nostr::Keys::generate();
+        let outsider_hex = outsider.public_key().to_hex();
+        let outsider_bytes = outsider.public_key().to_bytes().to_vec();
+
+        let host = format!(
+            "wf-private-destination-{}.example",
+            uuid::Uuid::new_v4().simple()
+        );
+        let community = match state
+            .db
+            .create_community_with_owner(&host, &owner_hex)
+            .await
+            .expect("create community")
+        {
+            CreateCommunityWithOwnerResult::Created(rec) => rec.id,
+            other => panic!("expected fresh community, got {other:?}"),
+        };
+
+        let destination = state
+            .db
+            .create_channel(
+                community,
+                "wf-private-destination",
+                ChannelType::Stream,
+                ChannelVisibility::Private,
+                None,
+                &owner.public_key().to_bytes(),
+                None,
+            )
+            .await
+            .expect("create private destination");
+
+        let sink = RelayActionSink::new(&state);
+        let err = sink
+            .send_message(
+                community,
+                &destination.id.to_string(),
+                "not authorized",
+                &outsider_hex,
+            )
+            .await
+            .expect_err("private destination must reject a nonmember");
+        assert!(matches!(
+            err,
+            ActionSinkError::InvalidInput(ref message)
+                if message == "workflow owner does not have access to destination channel"
+        ));
+
+        state
+            .db
+            .ensure_user(community, &outsider_bytes)
+            .await
+            .expect("ensure outsider user row");
+        state
+            .db
+            .add_member(
+                community,
+                destination.id,
+                &outsider_bytes,
+                MemberRole::Bot,
+                Some(&owner.public_key().to_bytes()),
+            )
+            .await
+            .expect("add workflow owner to destination");
+        state.invalidate_membership_local(community, destination.id, &outsider_bytes);
+
+        sink.send_message(
+            community,
+            &destination.id.to_string(),
+            "authorized",
+            &outsider_hex,
+        )
+        .await
+        .expect("destination member should be allowed");
+    }
 }

@@ -474,29 +474,19 @@ fn resolve_send_message_channel(
         .map(str::trim)
         .filter(|value| !value.is_empty());
 
-    if let Some(workflow_channel_id) = workflow_channel_id {
-        if let Some(explicit_channel) = explicit_channel {
-            let override_channel_id = explicit_channel.parse::<Uuid>().map_err(|e| {
-                WorkflowError::InvalidDefinition(format!(
-                    "SendMessage: invalid channel override UUID: {e}"
-                ))
-            })?;
-            if override_channel_id != workflow_channel_id {
-                return Err(WorkflowError::InvalidDefinition(format!(
-                    "SendMessage: channel override must match the workflow channel ({workflow_channel_id})"
-                )));
-            }
-        }
-        return Ok(workflow_channel_id.to_string());
-    }
-
     if let Some(explicit_channel) = explicit_channel {
+        // Destination authorization belongs to the action sink, which has
+        // access to channel visibility and membership state.
         let override_channel_id = explicit_channel.parse::<Uuid>().map_err(|e| {
             WorkflowError::InvalidDefinition(format!(
                 "SendMessage: invalid channel override UUID: {e}"
             ))
         })?;
         return Ok(override_channel_id.to_string());
+    }
+
+    if let Some(workflow_channel_id) = workflow_channel_id {
+        return Ok(workflow_channel_id.to_string());
     }
 
     if trigger_channel.trim().is_empty() {
@@ -1810,20 +1800,16 @@ mod tests {
     }
 
     #[test]
-    fn send_message_rejects_cross_channel_override_for_bound_workflow() {
+    fn send_message_accepts_cross_channel_override_for_bound_workflow() {
         let workflow_channel_id = Uuid::new_v4();
         let other_channel_id = Uuid::new_v4();
-        let err = resolve_send_message_channel(
+        let resolved = resolve_send_message_channel(
             Some(&other_channel_id.to_string()),
             "",
             Some(workflow_channel_id),
         )
-        .unwrap_err();
-        assert!(matches!(err, WorkflowError::InvalidDefinition(_)));
-        assert!(
-            err.to_string().contains("channel override must match"),
-            "unexpected error: {err}"
-        );
+        .expect("explicit destination should be accepted");
+        assert_eq!(resolved, other_channel_id.to_string());
     }
 
     #[test]
