@@ -30,6 +30,13 @@ pub(crate) const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 900;
 /// Override via `--max-turn-duration` / `BUZZ_ACP_MAX_TURN_DURATION`.
 pub(crate) const DEFAULT_MAX_TURN_DURATION_SECS: u64 = 7200;
 
+/// Default offline-mention catch-up window (6 hours). At startup the harness
+/// replays @mentions newer than its own last message, capped to this window,
+/// so mentions sent while it was down are not silently lost (block/buzz#1743).
+/// Override via `--mention-catchup-secs` / `BUZZ_ACP_MENTION_CATCHUP_SECS`;
+/// 0 disables catch-up.
+pub(crate) const DEFAULT_MENTION_CATCHUP_SECS: u64 = 21_600;
+
 /// Upper bound for `max_turn_duration` (7 days). Any higher is operationally
 /// meaningless and risks arithmetic overflow when deriving the in-flight
 /// deadline (`max_turn_duration + IN_FLIGHT_DEADLINE_BUFFER_SECS`).
@@ -274,6 +281,12 @@ pub struct CliArgs {
     #[arg(long, env = "BUZZ_ACP_TURN_TIMEOUT", hide = true)]
     pub turn_timeout: Option<u64>,
 
+    /// Offline-mention catch-up window in seconds. At startup, @mentions newer
+    /// than the agent's own last message (capped to this window) are replayed
+    /// through the normal event pipeline. 0 = disabled.
+    #[arg(long, env = "BUZZ_ACP_MENTION_CATCHUP_SECS", default_value_t = DEFAULT_MENTION_CATCHUP_SECS)]
+    pub mention_catchup_secs: u64,
+
     #[arg(
         long,
         env = "BUZZ_ACP_SYSTEM_PROMPT",
@@ -491,6 +504,8 @@ pub struct Config {
     pub mcp_command: String,
     pub idle_timeout_secs: u64,
     pub max_turn_duration_secs: u64,
+    /// Offline-mention catch-up window in seconds. 0 = disabled.
+    pub mention_catchup_secs: u64,
     pub agents: u32,
     pub heartbeat_interval_secs: u64,
     /// Seconds between per-turn liveness pings. 0 = disabled. Distinct from
@@ -966,6 +981,7 @@ impl Config {
             mcp_command: args.mcp_command,
             idle_timeout_secs,
             max_turn_duration_secs,
+            mention_catchup_secs: args.mention_catchup_secs,
             agents: args.agents,
             heartbeat_interval_secs: heartbeat_interval,
             turn_liveness_secs,
@@ -1340,6 +1356,7 @@ mod tests {
             mcp_command: "".into(),
             idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: DEFAULT_MAX_TURN_DURATION_SECS,
+            mention_catchup_secs: DEFAULT_MENTION_CATCHUP_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,

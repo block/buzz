@@ -115,7 +115,7 @@ use std::time::Instant;
 
 use buzz_core::kind::{
     KIND_AGENT_OBSERVER_FRAME, KIND_MEMBER_ADDED_NOTIFICATION, KIND_MEMBER_REMOVED_NOTIFICATION,
-    KIND_TYPING_INDICATOR,
+    KIND_STREAM_MESSAGE, KIND_TYPING_INDICATOR,
 };
 use futures_util::{SinkExt, StreamExt};
 use nostr::{Event, EventBuilder, Keys, Kind, RelayUrl, Tag};
@@ -534,6 +534,9 @@ type WsStream = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 pub struct HarnessRelay {
     /// Receiver for events forwarded by the background task.
     event_rx: mpsc::Receiver<Option<BuzzEvent>>,
+    /// Offline-mention catch-up events (#1743), drained by `next_event()`
+    /// ahead of live traffic. Filled once at startup by `backfill_mentions`.
+    backfill_buf: VecDeque<BuzzEvent>,
     /// Receiver for encrypted observer control events addressed to this agent.
     observer_control_rx: Option<mpsc::Receiver<Event>>,
     /// Sender for commands to the background task.
@@ -634,6 +637,7 @@ impl HarnessRelay {
 
         Ok(Self {
             event_rx,
+            backfill_buf: VecDeque::new(),
             observer_control_rx: Some(observer_control_rx),
             cmd_tx,
             http: reqwest::Client::builder()
@@ -809,8 +813,92 @@ impl HarnessRelay {
     /// Reads from the background task's event channel. Returns `None` on
     /// connection loss — the caller should call [`reconnect`](Self::reconnect).
     pub async fn next_event(&mut self) -> Option<BuzzEvent> {
+        // Drain offline-mention catch-up first so replayed mentions flow
+        // through the same downstream gates as live traffic (#1743).
+        if let Some(buffered) = self.backfill_buf.pop_front() {
+            return Some(buffered);
+        }
         // The background task sends `None` to signal connection loss.
         self.event_rx.recv().await.flatten()
+    }
+
+    /// Fetch @mentions that arrived while the harness was offline and queue
+    /// them for [`next_event`](Self::next_event) ahead of live traffic
+    /// (block/buzz#1743).
+    ///
+    /// The replay range is `(since, until)` from [`compute_backfill_bounds`]:
+    /// the floor is the newer of one second after the agent's own most recent
+    /// channel message — anything older may already have been answered — and
+    /// `startup_watermark - window_secs` as a hard cap; the ceiling is
+    /// `startup_watermark - 1`, disjoint from the live subscription's
+    /// `since = watermark` REQ so no event is delivered by both paths. The
+    /// query is additionally scoped to the subscribed channels' `#h` tags so
+    /// the result limit cannot be exhausted by mentions from channels the
+    /// harness does not serve.
+    ///
+    /// Replayed events are not special-cased downstream: the author gate,
+    /// mention gate, and queue dedup apply exactly as they do to live events,
+    /// so a mention from a non-allowed author is still dropped.
+    /// `window_secs == 0` disables catch-up entirely.
+    ///
+    /// Returns the number of events queued.
+    pub async fn backfill_mentions(
+        &mut self,
+        agent_pubkey_hex: &str,
+        subscribed: &HashSet<Uuid>,
+        window_secs: u64,
+        startup_watermark: u64,
+    ) -> Result<usize, RelayError> {
+        if subscribed.is_empty() {
+            return Ok(0);
+        }
+        let agent_pk = nostr::PublicKey::parse(agent_pubkey_hex)
+            .map_err(|e| RelayError::Http(format!("invalid agent pubkey: {e}")))?;
+        let stream_kind = Kind::Custom(KIND_STREAM_MESSAGE as u16);
+
+        // Newest own channel message — the "already handled up to here" marker.
+        let own_filter = nostr::Filter::new()
+            .kinds([stream_kind])
+            .authors([agent_pk])
+            .limit(1);
+        let rest = self.rest_client();
+        let newest_own_ts: Option<u64> =
+            rest.query(&[own_filter]).await?.as_array().and_then(|arr| {
+                arr.iter()
+                    .filter_map(|ev| ev.get("created_at").and_then(Value::as_u64))
+                    .max()
+            });
+
+        let Some((floor, until)) =
+            compute_backfill_bounds(startup_watermark, newest_own_ts, window_secs)
+        else {
+            return Ok(0);
+        };
+
+        let mention_filter = nostr::Filter::new()
+            .kinds([stream_kind])
+            .pubkey(agent_pk)
+            .custom_tags(
+                nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
+                subscribed.iter().map(Uuid::to_string),
+            )
+            .since(nostr::Timestamp::from(floor))
+            .until(nostr::Timestamp::from(until))
+            .limit(100);
+        let raw = rest.query(&[mention_filter]).await?;
+        let events: Vec<Event> = raw
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|ev| serde_json::from_value(ev.clone()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let picked = select_backfill_events(events, agent_pubkey_hex, subscribed);
+        let count = picked.len();
+        self.backfill_buf.extend(picked);
+        Ok(count)
     }
 
     /// Publish a signed event to the relay via the background WebSocket task.
@@ -3414,6 +3502,64 @@ async fn dns_flat_sleep(
     }
 }
 
+/// Compute the inclusive `(since, until)` bounds for offline-mention
+/// catch-up (block/buzz#1743).
+///
+/// `None` disables catch-up (window of 0, or an empty range). The floor is
+/// the newer of the hard window cap (`watermark - window_secs`) and one
+/// second after the agent's own most recent message — mentions older than
+/// the agent's last sign of life may already have been answered and are
+/// never replayed. The ceiling is one second *before* the startup
+/// watermark: the live subscription REQ uses `since = watermark`
+/// (inclusive), so capping catch-up at `watermark - 1` keeps the two ranges
+/// disjoint — no event can be delivered by both paths.
+fn compute_backfill_bounds(
+    startup_watermark: u64,
+    newest_own_ts: Option<u64>,
+    window_secs: u64,
+) -> Option<(u64, u64)> {
+    if window_secs == 0 {
+        return None;
+    }
+    let cap = startup_watermark.saturating_sub(window_secs);
+    let floor = match newest_own_ts {
+        Some(own) => cap.max(own.saturating_add(1)),
+        None => cap,
+    };
+    let until = startup_watermark.saturating_sub(1);
+    (floor <= until).then_some((floor, until))
+}
+
+/// Filter raw catch-up query results down to replayable mention events:
+/// authored by someone else, carrying a subscribed channel `h` tag, and
+/// actually p-tagging this agent. Returned oldest-first so replay preserves
+/// conversational order.
+fn select_backfill_events(
+    events: Vec<Event>,
+    agent_pubkey_hex: &str,
+    subscribed: &HashSet<Uuid>,
+) -> Vec<BuzzEvent> {
+    let mut picked: Vec<BuzzEvent> = events
+        .into_iter()
+        .filter(|ev| ev.pubkey.to_hex() != agent_pubkey_hex)
+        .filter(|ev| {
+            ev.tags.iter().any(|t| {
+                let parts = t.as_slice();
+                parts.len() >= 2 && parts[0] == "p" && parts[1] == agent_pubkey_hex
+            })
+        })
+        .filter_map(|ev| {
+            let channel_id = extract_h_tag_uuid(&ev)?;
+            subscribed.contains(&channel_id).then_some(BuzzEvent {
+                channel_id,
+                event: ev,
+            })
+        })
+        .collect();
+    picked.sort_by_key(|be| be.event.created_at);
+    picked
+}
+
 /// Extract a channel UUID from the h tag of a Nostr event.
 fn extract_h_tag_uuid(event: &nostr::Event) -> Option<Uuid> {
     event.tags.iter().find_map(|tag| {
@@ -4017,6 +4163,106 @@ mod tests {
             relay_ws_to_http("ws://localhost:3000/"),
             "http://localhost:3000"
         );
+    }
+
+    // ── offline-mention catch-up (#1743) ────────────────────────────────
+
+    #[test]
+    fn backfill_bounds_disabled_when_window_zero() {
+        assert_eq!(compute_backfill_bounds(1_000_000, Some(999_000), 0), None);
+    }
+
+    #[test]
+    fn backfill_bounds_cap_at_window_and_stop_before_live_subscription() {
+        // Own activity far in the past: the window cap wins. The upper bound
+        // stops one second before the startup watermark — events at or after
+        // the watermark are delivered by the live subscription (REQ uses
+        // `since = watermark`, inclusive), so the two ranges are disjoint.
+        assert_eq!(
+            compute_backfill_bounds(1_000_000, Some(1_000), 3_600),
+            Some((996_400, 999_999))
+        );
+        // No own activity at all: still capped to the window.
+        assert_eq!(
+            compute_backfill_bounds(1_000_000, None, 3_600),
+            Some((996_400, 999_999))
+        );
+    }
+
+    #[test]
+    fn backfill_bounds_start_after_own_last_message() {
+        // Own activity inside the window: floor starts just after it, so
+        // mentions the agent may already have answered are not replayed.
+        assert_eq!(
+            compute_backfill_bounds(1_000_000, Some(999_000), 3_600),
+            Some((999_001, 999_999))
+        );
+    }
+
+    #[test]
+    fn backfill_bounds_empty_when_own_activity_reaches_watermark() {
+        // The agent spoke within the last second before the watermark:
+        // nothing left to catch up on.
+        assert_eq!(
+            compute_backfill_bounds(1_000_000, Some(999_999), 3_600),
+            None
+        );
+        assert_eq!(
+            compute_backfill_bounds(1_000_000, Some(1_000_500), 3_600),
+            None
+        );
+    }
+
+    fn make_backfill_event(
+        author: &nostr::Keys,
+        channel: Uuid,
+        mention_hex: &str,
+        created_at_secs: u64,
+    ) -> Event {
+        EventBuilder::new(
+            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+            "hello",
+        )
+        .tags([
+            Tag::parse(["h", &channel.to_string()]).unwrap(),
+            Tag::parse(["p", mention_hex]).unwrap(),
+        ])
+        .custom_created_at(nostr::Timestamp::from(created_at_secs))
+        .allow_self_tagging()
+        .sign_with_keys(author)
+        .expect("signing should succeed")
+    }
+
+    #[test]
+    fn select_backfill_events_filters_and_orders() {
+        let agent = nostr::Keys::generate();
+        let other = nostr::Keys::generate();
+        let agent_hex = agent.public_key().to_hex();
+        let chan = Uuid::new_v4();
+        let unsubscribed_chan = Uuid::new_v4();
+        let subscribed: HashSet<Uuid> = [chan].into_iter().collect();
+
+        let newer = make_backfill_event(&other, chan, &agent_hex, 2_000);
+        let older = make_backfill_event(&other, chan, &agent_hex, 1_000);
+        let own = make_backfill_event(&agent, chan, &agent_hex, 1_500);
+        let wrong_channel = make_backfill_event(&other, unsubscribed_chan, &agent_hex, 1_600);
+        let not_me = make_backfill_event(&other, chan, &other.public_key().to_hex(), 1_700);
+
+        let picked = select_backfill_events(
+            vec![newer.clone(), older.clone(), own, wrong_channel, not_me],
+            &agent_hex,
+            &subscribed,
+        );
+
+        assert_eq!(
+            picked.len(),
+            2,
+            "only foreign mentions on subscribed channels survive"
+        );
+        // Oldest first so replay preserves conversational order.
+        assert_eq!(picked[0].event.id, older.id);
+        assert_eq!(picked[1].event.id, newer.id);
+        assert_eq!(picked[0].channel_id, chan);
     }
 
     #[test]

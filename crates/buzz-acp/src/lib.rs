@@ -1487,6 +1487,25 @@ async fn tokio_main() -> Result<()> {
         }
     }
 
+    // Offline-mention catch-up (block/buzz#1743): replay @mentions that
+    // arrived while the harness was down through the normal event pipeline.
+    // The author gate, mention gate, and queue dedup apply to replayed
+    // events exactly as they do to live ones. Bounded at `watermark - 1` so
+    // the range is disjoint from the live subscription's `since = watermark`.
+    match relay
+        .backfill_mentions(
+            &pubkey_hex,
+            &subscribed_channel_ids,
+            config.mention_catchup_secs,
+            startup_watermark,
+        )
+        .await
+    {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(count = n, "offline-mention catch-up queued"),
+        Err(e) => tracing::warn!("offline-mention catch-up failed: {e}"),
+    }
+
     if let Some((observer, publisher, keys, agent_pubkey, owner_pubkey, owner)) =
         relay_observer_publisher.take()
     {
@@ -4952,6 +4971,7 @@ mod build_mcp_servers_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            mention_catchup_secs: config::DEFAULT_MENTION_CATCHUP_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
@@ -5118,6 +5138,7 @@ mod error_outcome_emission_tests {
             mcp_command: "test-mcp-server".into(),
             idle_timeout_secs: config::DEFAULT_IDLE_TIMEOUT_SECS,
             max_turn_duration_secs: config::DEFAULT_MAX_TURN_DURATION_SECS,
+            mention_catchup_secs: config::DEFAULT_MENTION_CATCHUP_SECS,
             agents: 1,
             heartbeat_interval_secs: 0,
             turn_liveness_secs: 10,
