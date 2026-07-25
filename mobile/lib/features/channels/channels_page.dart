@@ -5,6 +5,7 @@ import 'dart:ui';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_hooks/flutter_hooks.dart';
+import 'package:flutter/physics.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -47,6 +48,7 @@ part 'channels_page/sheets.dart';
 part 'channels_page/badges.dart';
 part 'channels_page/community.dart';
 part 'channels_page/quick_actions.dart';
+part 'channels_page/quick_actions_launcher.dart';
 
 enum _QuickAction { createChannel, newDm }
 
@@ -156,8 +158,6 @@ class ChannelsPage extends HookConsumerWidget {
       cachedChannels.value = data;
     }
     final channels = cachedChannels.value;
-    final quickActionsOpen = useState(false);
-
     Future<void> openChannel(Channel channel) async {
       if (!context.mounted) return;
       await Navigator.of(context).push(
@@ -165,39 +165,6 @@ class ChannelsPage extends HookConsumerWidget {
           builder: (_) => ChannelDetailPage(channel: channel),
         ),
       );
-    }
-
-    Future<void> selectQuickAction(_QuickAction action) async {
-      final reducedMotion = MediaQuery.of(context).disableAnimations;
-      quickActionsOpen.value = false;
-      if (!reducedMotion) {
-        await Future<void>.delayed(_kMorphCloseDuration);
-      }
-      if (!context.mounted) return;
-
-      switch (action) {
-        case _QuickAction.createChannel:
-          final created = await showModalBottomSheet<Channel>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) => const _CreateChannelSheet(channelType: 'stream'),
-          );
-          if (created != null && context.mounted) {
-            await openChannel(created);
-          }
-        case _QuickAction.newDm:
-          final opened = await showModalBottomSheet<Channel>(
-            context: context,
-            isScrollControlled: true,
-            showDragHandle: true,
-            builder: (_) =>
-                _NewDirectMessageSheet(currentPubkey: currentPubkey),
-          );
-          if (opened != null && context.mounted) {
-            await openChannel(opened);
-          }
-      }
     }
 
     // Only surface fetch errors while the relay is stably connected. During a
@@ -258,35 +225,15 @@ class ChannelsPage extends HookConsumerWidget {
           ),
         ],
       ),
-      floatingActionButton: _MorphingQuickActionsButton(
-        open: quickActionsOpen.value,
-        onToggle: () => quickActionsOpen.value = !quickActionsOpen.value,
-        onSelected: (action) => unawaited(selectQuickAction(action)),
-      ),
-      body: Stack(
-        children: [
-          _ChannelsBody(
-            channels: channels,
-            channelsAsync: channelsAsync,
-            showError: showError.value,
-            sessionStatus: sessionState.status,
-            showConnectionBanner: showConnectionBanner.value,
-            currentPubkey: currentPubkey,
-            onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
-            onSelectChannel: openChannel,
-          ),
-          if (quickActionsOpen.value)
-            Positioned.fill(
-              child: Semantics(
-                button: true,
-                label: 'Close quick actions',
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => quickActionsOpen.value = false,
-                ),
-              ),
-            ),
-        ],
+      body: _ChannelsBody(
+        channels: channels,
+        channelsAsync: channelsAsync,
+        showError: showError.value,
+        sessionStatus: sessionState.status,
+        showConnectionBanner: showConnectionBanner.value,
+        currentPubkey: currentPubkey,
+        onRefresh: () => ref.read(channelsProvider.notifier).refresh(),
+        onSelectChannel: openChannel,
       ),
     );
   }
