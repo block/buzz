@@ -12,12 +12,13 @@
 //!
 //! | Module | Contents |
 //! |--------|----------|
-//! | [`crypto`] | Pure HKDF derivation functions |
-//! | [`types`]  | Serde-serializable pairing message types |
+//! | [`crypto`](crate::pairing::crypto) | Pure HKDF derivation functions |
+//! | [`types`](crate::pairing::types) | Serde-serializable pairing message types |
 //!
 //! # Error handling
 //!
-//! All fallible operations in the pairing flow return [`PairingError`].
+//! All fallible operations in the pairing flow return
+//! [`PairingError`](crate::pairing::PairingError).
 
 pub mod crypto;
 pub mod qr;

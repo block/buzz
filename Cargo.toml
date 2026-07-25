@@ -13,11 +13,13 @@ members = [
     "crates/buzz-agent",
     "crates/sprig",
     "crates/buzz-test-client",
+    "crates/buzz-client",
     "crates/buzz-ws-client",
     "crates/buzz-admin",
     "crates/buzz-workflow",
     "crates/buzz-media",
     "crates/buzz-cli",
+    "crates/buzz-pairing-client",
     "crates/buzz-pairing-cli",
     "crates/buzz-sdk",
     "crates/buzz-persona",
@@ -36,7 +38,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.88.0"
 license = "Apache-2.0"
-repository = "https://github.com/block/sprout"
+repository = "https://github.com/block/buzz"
 
 [workspace.dependencies]
 # Runtime
@@ -121,7 +123,7 @@ rmcp = { version = "1.1.0", features = ["server", "transport-io", "macros"] }
 schemars = { version = "1", default-features = false }
 
 # Internal crates
-buzz-core = { path = "crates/buzz-core" }
+buzz-core = { version = "0.1.0", path = "crates/buzz-core" }
 buzz-conformance = { path = "crates/buzz-conformance" }
 buzz-db = { path = "crates/buzz-db" }
 buzz-auth = { path = "crates/buzz-auth" }
@@ -130,8 +132,10 @@ buzz-search = { path = "crates/buzz-search" }
 buzz-audit = { path = "crates/buzz-audit" }
 buzz-workflow = { path = "crates/buzz-workflow" }
 buzz-media = { path = "crates/buzz-media" }
-buzz-sdk = { path = "crates/buzz-sdk" }
-buzz-ws-client = { path = "crates/buzz-ws-client" }
+buzz-client = { version = "0.1.0", path = "crates/buzz-client" }
+buzz-pairing-client = { version = "0.1.0", path = "crates/buzz-pairing-client" }
+buzz-sdk = { version = "0.1.0", path = "crates/buzz-sdk" }
+buzz-ws-client = { version = "0.1.0", path = "crates/buzz-ws-client" }
 buzz-relay-mesh = { path = "crates/buzz-relay-mesh" }
 
 # CI profile — builds the relay for desktop e2e. Dependencies keep full

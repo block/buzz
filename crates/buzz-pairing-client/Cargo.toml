@@ -1,0 +1,23 @@
+[package]
+name = "buzz-pairing-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UI-independent NIP-AB source pairing client for Buzz"
+
+[dependencies]
+buzz-core = { workspace = true }
+futures-util = { workspace = true }
+nostr = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+url = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+buzz-pair-relay = { path = "../buzz-pair-relay" }

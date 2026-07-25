@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Authenticated Nostr WebSocket transport for Buzz clients"
 
 [dependencies]
 nostr = { workspace = true }

@@ -1,0 +1,34 @@
+[package]
+name = "buzz-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared authenticated transport client for Buzz relays"
+documentation = "https://docs.rs/buzz-client"
+readme = "README.md"
+keywords = ["nostr", "client", "relay", "websocket"]
+categories = ["api-bindings", "network-programming"]
+
+[dependencies]
+base64 = "0.22"
+buzz-core = { workspace = true }
+buzz-sdk = { workspace = true }
+buzz-ws-client = { workspace = true }
+bytes = "1"
+hex = { workspace = true }
+nostr = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+futures-util = { workspace = true }

@@ -324,7 +324,7 @@ impl PairingSession {
     ///
     /// Verifies the transcript hash and returns the SAS code for the user
     /// to visually confirm. The session moves to [`SessionState::AwaitingConfirmation`]
-    /// — the caller **must** call [`confirm_target_sas`] after the user approves
+    /// — the caller **must** call [`Self::confirm_target_sas`] after the user approves
     /// before any payload can be received.
     pub fn handle_sas_confirm(&mut self, event: &Event) -> Result<String, PairingError> {
         self.check_expired()?;

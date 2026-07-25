@@ -2,7 +2,8 @@
 //!
 //! One `kind:44200` event is published per completed agent turn. Its content
 //! is a NIP-44 v2 ciphertext (agent key → owner pubkey) that decodes to an
-//! [`AgentTurnMetricPayload`] JSON object.
+//! [`AgentTurnMetricPayload`](crate::agent_turn_metric::AgentTurnMetricPayload)
+//! JSON object.
 //!
 //! See `docs/nips/NIP-AM.md` for the full specification.
 
