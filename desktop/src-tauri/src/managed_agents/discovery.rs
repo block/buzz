@@ -1153,9 +1153,26 @@ pub(crate) fn codex_adapter_availability(path: &Path) -> AcpAvailabilityStatus {
 }
 
 /// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
-/// or cannot be probed. Thin wrapper around [`codex_adapter_availability`].
+/// or cannot be probed using `augmented_path`. Thin wrapper around
+/// [`codex_adapter_is_outdated_with_path`].
+#[cfg(test)]
 pub(crate) fn codex_adapter_is_outdated(path: &Path) -> bool {
-    codex_adapter_availability(path) == AcpAvailabilityStatus::AdapterOutdated
+    codex_adapter_is_outdated_with_path(
+        path,
+        crate::managed_agents::readiness::cli_probe::augmented_path().as_deref(),
+    )
+}
+
+/// Returns `true` when the codex-acp binary at `path` is outdated (major version < 1)
+/// or cannot be probed with the supplied PATH.
+pub(crate) fn codex_adapter_is_outdated_with_path(
+    path: &Path,
+    augmented_path: Option<&str>,
+) -> bool {
+    !matches!(
+        probe_codex_acp_major_version_with_path(path, augmented_path),
+        Some(major) if major >= 1
+    )
 }
 
 /// Intermediate struct built before the (potentially slow) auth probe phase.

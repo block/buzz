@@ -44,11 +44,19 @@ pub(crate) fn plan_adapter_install<'c>(
     runtime_id: &str,
     adapter_path: Option<&std::path::Path>,
     adapter_install_commands: &'c [&'c str],
+    adapter_probe_path: Option<&str>,
 ) -> Option<Vec<&'c str>> {
     match adapter_path {
         // Adapter present and current — no install needed.
         Some(_) if runtime_id != "codex" => None,
-        Some(path) if !crate::managed_agents::codex_adapter_is_outdated(path) => None,
+        Some(path)
+            if !crate::managed_agents::codex_adapter_is_outdated_with_path(
+                path,
+                adapter_probe_path,
+            ) =>
+        {
+            None
+        }
         // Codex adapter is outdated: uninstall the old package first so npm
         // doesn't hit EEXIST on the shared `codex-acp` bin-link, then install.
         Some(_) => Some(vec![
@@ -176,10 +184,12 @@ fn install_acp_runtime_blocking(runtime_id: &str) -> Result<InstallRuntimeResult
         .commands
         .iter()
         .find_map(|cmd| crate::managed_agents::resolve_command(cmd));
+    let adapter_probe_path = crate::managed_agents::readiness::cli_probe::augmented_path();
     if let Some(cmds) = plan_adapter_install(
         runtime_id,
         adapter_path.as_deref(),
         runtime.adapter_install_commands,
+        adapter_probe_path.as_deref(),
     ) {
         let use_managed_npm =
             cmds.iter().any(|cmd| is_npm_global_install(cmd)) && managed_node_runtime_supported();
@@ -1180,7 +1190,7 @@ mod tests {
             .expect("chmod script");
 
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
 
         assert!(
             plan.is_some(),
@@ -1215,7 +1225,7 @@ mod tests {
             .expect("chmod script");
 
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", Some(&bin), install_cmds);
+        let plan = plan_adapter_install("codex", Some(&bin), install_cmds, Some("/usr/bin:/bin"));
 
         assert!(
             plan.is_none(),
@@ -1226,7 +1236,7 @@ mod tests {
     #[test]
     fn test_plan_adapter_install_returns_catalog_cmds_when_no_adapter_path() {
         let install_cmds = &["npm install -g @agentclientprotocol/codex-acp"];
-        let plan = plan_adapter_install("codex", None, install_cmds);
+        let plan = plan_adapter_install("codex", None, install_cmds, None);
         assert!(plan.is_some(), "missing adapter must trigger install plan");
         // Missing arm: use the catalog's install commands directly (no prior
         // package to uninstall — fresh install, not a reinstall).
@@ -1250,7 +1260,7 @@ mod tests {
             .expect("chmod script");
 
         let install_cmds = &["npm install -g @block/goose-acp"];
-        let plan = plan_adapter_install("goose", Some(&bin), install_cmds);
+        let plan = plan_adapter_install("goose", Some(&bin), install_cmds, None);
         assert!(
             plan.is_none(),
             "non-codex runtime with resolved binary must not trigger reinstall"

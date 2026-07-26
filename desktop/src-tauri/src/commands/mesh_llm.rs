@@ -157,7 +157,7 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
-        .map_err(|error| format!("failed to restore Share Compute: {error}"))?;
+        .map_err(|error| format!("failed to restore Share Compute: {error:#}"))?;
     *runtime = Some(started);
     drop(runtime);
     mesh_llm::publish_current_status_once(app, "restore").await;
@@ -183,11 +183,11 @@ pub async fn mesh_start_node(
     let saved_request = request.clone();
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| format!("{error:#}"))?;
     let status = started
         .status()
         .await
-        .map_err(|error| format!("mesh node started but status probe failed: {error}"))?;
+        .map_err(|error| format!("mesh node started but status probe failed: {error:#}"))?;
     *runtime = Some(started);
     drop(runtime);
     if saved_request.mode == mesh_llm::MeshNodeMode::Serve {
@@ -407,11 +407,11 @@ pub(crate) async fn ensure_client_node_for_model(
     }
     let started = mesh_llm::DesktopMeshRuntime::start(start)
         .await
-        .map_err(|error| format!("mesh client failed to start: {error}"))?;
+        .map_err(|error| format!("mesh client failed to start: {error:#}"))?;
     let status = started
         .status()
         .await
-        .map_err(|error| format!("mesh client started but status probe failed: {error}"))?;
+        .map_err(|error| format!("mesh client started but status probe failed: {error:#}"))?;
     *runtime = Some(started);
     Ok(status)
 }
@@ -490,9 +490,47 @@ pub(crate) async fn ensure_relay_mesh_for_record(
     };
     // A local serve/client runtime already owns the OpenAI ingress and its
     // router can resolve both `auto` and explicit remote models. Do not require
-    // a separate relay-advertised target in that case.
+    // a separate relay-advertised target in that case — BUT only trust it when
+    // the ingress is actually alive. A runtime that exited/wedged after launch
+    // leaves `mesh_llm_runtime = Some` pointing at a dead `:9337` ingress, so a
+    // blind `wait_for_mesh_inference` would just time out and the agent would
+    // stay silent (#2062). Probe first; if the ingress is dead, drop the stale
+    // runtime and fall through to re-arm it. The mesh coordinator watchdog also
+    // calls this path after eviction so recovery is not start-only (Brad #2304).
     if state.mesh_llm_runtime.lock().await.is_some() {
-        return wait_for_mesh_inference(&model_id).await;
+        match mesh_llm::recover_stale_mesh_runtime(
+            &state,
+            mesh_llm::MeshRecoveryUrgency::Foreground,
+        )
+        .await
+        {
+            mesh_llm::MeshRuntimeRecovery::Live => {
+                return wait_for_mesh_inference(&model_id).await;
+            }
+            mesh_llm::MeshRuntimeRecovery::Evicted | mesh_llm::MeshRuntimeRecovery::Absent => {}
+            mesh_llm::MeshRuntimeRecovery::Debouncing => {
+                return Err(
+                    "Buzz shared compute ingress is temporarily unresponsive; recovery is already scheduled. Try again shortly."
+                        .to_string(),
+                );
+            }
+            mesh_llm::MeshRuntimeRecovery::ReleasePending => {
+                return Err(
+                    "Buzz shared compute is still shutting down its previous local ingress. Try again shortly."
+                        .to_string(),
+                );
+            }
+            mesh_llm::MeshRuntimeRecovery::Replaced => {
+                return wait_for_mesh_inference(&model_id).await;
+            }
+            mesh_llm::MeshRuntimeRecovery::RestartRequired => {
+                app.request_restart();
+                return Err(
+                    "Buzz shared compute startup lost its local ingress before shutdown control became available. Buzz is restarting to recover it."
+                        .to_string(),
+                );
+            }
+        }
     }
     let target = match resolve_mesh_bootstrap_target(&state, &model_id).await {
         Ok(Some(target)) => target,
@@ -509,6 +547,15 @@ pub(crate) async fn ensure_relay_mesh_for_record(
         }
     };
 
+    // Serve→Client re-arm transition (micspiral review #3, intentional-by-design):
+    // if the dead ingress belonged to a *serve* node with running consumer
+    // agents, this re-arms it as a Client (`MeshNodeMode::Client`). That is the
+    // correct/safe recovery here — config-backed serve restoration is
+    // `restore_mesh_sharing`'s job (`MeshNodeMode::Serve`), and
+    // `ensure_client_node_for_model` reuses any live runtime of *either* mode
+    // (the router resolves per-request), so it only cold-starts a Client when
+    // there is genuinely no runtime. Falling back to Client if a serve node
+    // crashed under local pressure is a desirable fail-safe, not a regression.
     ensure_client_node_for_model(&state, &model_id, Some(target.endpoint_addr)).await?;
     wait_for_mesh_inference(&model_id).await
 }

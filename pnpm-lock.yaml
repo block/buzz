@@ -9,7 +9,7 @@ overrides:
 
 patchedDependencies:
   isomorphic-git: e9b414a60d4cf1d8aa18f7a779483984e821989967c235662566e94ef0238d3f
-  virtua@0.49.3: acef47b2cfcb8bfd36668c30a16f918fe492eb07a1ddeafc8cc3a22a3efbf71b
+  virtua@0.49.3: 30a7a92b94800ec37be8d36546ea98c04a05dcd0637f9fac27a06f016ba2eff4
 
 importers:
 
@@ -232,7 +232,7 @@ importers:
         version: 2.1.0
       virtua:
         specifier: 0.49.3
-        version: 0.49.3(patch_hash=acef47b2cfcb8bfd36668c30a16f918fe492eb07a1ddeafc8cc3a22a3efbf71b)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+        version: 0.49.3(patch_hash=30a7a92b94800ec37be8d36546ea98c04a05dcd0637f9fac27a06f016ba2eff4)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       yaml:
         specifier: ^2.8.3
         version: 2.9.0
@@ -6926,7 +6926,7 @@ snapshots:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
 
-  virtua@0.49.3(patch_hash=acef47b2cfcb8bfd36668c30a16f918fe492eb07a1ddeafc8cc3a22a3efbf71b)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+  virtua@0.49.3(patch_hash=30a7a92b94800ec37be8d36546ea98c04a05dcd0637f9fac27a06f016ba2eff4)(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     optionalDependencies:
       react: 19.2.7
       react-dom: 19.2.7(react@19.2.7)

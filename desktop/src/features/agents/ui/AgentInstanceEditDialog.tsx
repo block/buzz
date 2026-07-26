@@ -1,7 +1,6 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-
 import { toast } from "sonner";
 
 import {
@@ -83,6 +82,7 @@ import { AgentDefaultsDialog } from "./AgentDefaultsDialog";
 import { useProviderApiKeyFieldState } from "./providerApiKeyFieldState";
 import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
+import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 
 const ADVANCED_FIELDS_MOTION_TRANSITION = {
   duration: 0.18,
@@ -101,8 +101,7 @@ export function AgentInstanceEditDialog({
   /** Optional field to scroll/focus when the dialog opens from a card deep-link. */
   initialFocus?: EditAgentFocusTarget;
   open: boolean;
-  /** Present only when the linked definition is editable (non-built-in,
-   * resolved). Caller closes this dialog and enters definition-edit. */
+  /** Present only when the linked definition is editable (non-built-in, resolved). Caller closes this dialog and enters definition-edit. */
   onEditLinkedPersona?: () => void;
   onOpenChange: (open: boolean) => void;
   onUpdated?: (agent: ManagedAgent) => void;
@@ -706,6 +705,7 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
+      showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
