@@ -252,6 +252,41 @@ fn spawn_allowed_when_private_key_present() {
 }
 
 #[test]
+fn spawn_refused_when_relocated_to_a_spawner() {
+    // After a relocation hand-off the spawner holds this identity's key.
+    // Starting it here too would run one identity in two places: duplicate
+    // replies, two turns billed per message. Every spawn path must refuse.
+    let mut record = record_with_key("nsec1realkey");
+    record.relocated_to_spawner = Some("a".repeat(64));
+    assert!(
+        super::spawn_relocation_refusal(&record).is_some(),
+        "a relocated agent must never be started locally"
+    );
+}
+
+#[test]
+fn spawn_allowed_when_not_relocated() {
+    let record = record_with_key("nsec1realkey");
+    assert!(super::spawn_relocation_refusal(&record).is_none());
+}
+
+#[test]
+fn relocation_field_defaults_to_none_and_stays_out_of_json_when_unset() {
+    // Pre-relocation stores must keep parsing (serde default), and an
+    // unset field must not appear in serialized JSON.
+    let record = record_with_key("nsec1realkey");
+    assert_eq!(record.relocated_to_spawner, None);
+    let json = serde_json::to_string(&record).expect("serialize");
+    assert!(!json.contains("relocated_to_spawner"));
+
+    let mut relocated = record_with_key("nsec1realkey");
+    relocated.relocated_to_spawner = Some("b".repeat(64));
+    let json = serde_json::to_string(&relocated).expect("serialize");
+    let back: ManagedAgentRecord = serde_json::from_str(&json).expect("round-trip");
+    assert_eq!(back.relocated_to_spawner, Some("b".repeat(64)));
+}
+
+#[test]
 fn persist_agent_keys_issues_zero_writes_when_inline_keys_already_cleared() {
     // This is the dominant prompt-storm scenario: after the first successful
     // persist all inline copies are cleared, so subsequent saves (e.g. a

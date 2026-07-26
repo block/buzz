@@ -1,0 +1,72 @@
+# Server-hosted agents. Opt in with BUZZ_COMPOSE_SPAWNER=true ./run.sh start
+#
+# ⚠️  This override mounts the host's Docker socket into the spawner container.
+# That is root-equivalent access to the host: anything able to talk to that
+# socket can start a privileged container and take over the machine. Enable it
+# only on a host where you are comfortable with that, and read the trust-boundary
+# section in README.md first.
+#
+# The spawner needs the socket because its entire job is creating one isolated
+# container per agent — agents execute arbitrary shell and file-edit tools via
+# buzz-dev-mcp, so running them as bare subprocesses of one daemon would let any
+# agent read every other agent's workspace and secret key.
+#
+# To reduce the blast radius, point DOCKER_HOST at a rootless Docker or Podman
+# socket instead of the system one.
+
+services:
+  spawner:
+    image: ${BUZZ_SPAWNER_IMAGE:-ghcr.io/block/buzz-spawner:main}
+    # No `env_file: .env` here, unlike the relay. Everything the spawner needs is
+    # listed explicitly below, so it never holds the database, Redis, or S3
+    # credentials it has no use for.
+    environment:
+      BUZZ_SPAWNER_NSEC: ${BUZZ_SPAWNER_NSEC:?set BUZZ_SPAWNER_NSEC}
+      # Both URLs must use the relay's PUBLIC host, not the internal compose
+      # name. The relay derives which community a connection belongs to from the
+      # HTTP Host header, so `ws://relay:3000` is a different tenant from
+      # `wss://your.domain` — a spawner on the internal name would publish status
+      # into a community the owner is not in, and the owner would never see it
+      # (or, more likely, get a 404: internal names have no community row).
+      BUZZ_SPAWNER_RELAY_URL: ${BUZZ_SPAWNER_RELAY_URL:-${RELAY_URL:?set RELAY_URL}}
+      # Agent containers are deliberately NOT on buzz-net — an agent runs
+      # arbitrary shell tools, and joining that network would put Postgres,
+      # Redis, and MinIO one `nc` away. They dial the same public address, which
+      # also keeps them in the same community as their owner.
+      BUZZ_SPAWNER_AGENT_RELAY_URL: ${BUZZ_SPAWNER_AGENT_RELAY_URL:-${RELAY_URL:?set RELAY_URL}}
+      BUZZ_SPAWNER_STATE_DIR: /var/lib/buzz-spawner
+      BUZZ_SPAWNER_AGENT_IMAGE: ${BUZZ_SPAWNER_AGENT_IMAGE:-ghcr.io/block/buzz-acp:main}
+      # Which ACP agent runs inside each container. Unset keeps the image
+      # default (`buzz-agent`, metered API key). Set `claude-agent-acp` to run
+      # on a Claude subscription — then add CLAUDE_CODE_OAUTH_TOKEN to
+      # BUZZ_SPAWNER_AGENT_ENV below. Operator-only: it selects what executes,
+      # so no agent spec can influence it.
+      BUZZ_SPAWNER_AGENT_COMMAND: ${BUZZ_SPAWNER_AGENT_COMMAND:-}
+      BUZZ_SPAWNER_AGENT_ARGS: ${BUZZ_SPAWNER_AGENT_ARGS:-}
+      BUZZ_SPAWNER_MAX_AGENTS: ${BUZZ_SPAWNER_MAX_AGENTS:-16}
+      BUZZ_SPAWNER_MAX_CPU_MILLIS: ${BUZZ_SPAWNER_MAX_CPU_MILLIS:-4000}
+      BUZZ_SPAWNER_MAX_MEMORY_MIB: ${BUZZ_SPAWNER_MAX_MEMORY_MIB:-8192}
+      # Names of variables to forward into agent containers — not KEY=VALUE
+      # pairs. The value is read from this service's own environment, so a
+      # rotated credential is picked up by restarting the spawner.
+      BUZZ_SPAWNER_AGENT_ENV: ${BUZZ_SPAWNER_AGENT_ENV:-ANTHROPIC_API_KEY}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Long-lived Claude subscription token from `claude setup-token`, run once
+      # on a machine with a browser. Only used when BUZZ_SPAWNER_AGENT_COMMAND
+      # is claude-agent-acp.
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      RUST_LOG: ${BUZZ_SPAWNER_LOG:-buzz_spawner=info}
+    volumes:
+      - buzz-spawner-data:/var/lib/buzz-spawner
+      - ${BUZZ_SPAWNER_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+    depends_on:
+      relay:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - buzz-net
+
+volumes:
+  buzz-spawner-data:
+    labels:
+      com.buzz.volume: spawner
