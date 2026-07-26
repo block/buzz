@@ -574,9 +574,12 @@ pub(crate) async fn get_verified_sticker(
     Path((author, identifier, shortcode, sha256)): Path<(String, String, String, String)>,
     req_headers: HeaderMap,
 ) -> Result<Response, StickerAssetError> {
-    let tenant = bind_media_read_tenant(&state, &req_headers)
+    // Enforce the same optional Blossom auth + relay-membership gate as every
+    // other /media/* read before resolving or fetching the asset.
+    let media_auth = authenticate_media_read(&state, &req_headers, &sha256)
         .await
         .map_err(|_| StickerAssetError::NotFound)?;
+    let tenant = media_auth.tenant;
     let pack = sonar_stickers::PackAddress::new(author, identifier)
         .map_err(|_| StickerAssetError::NotFound)?;
     let sticker_ref = sonar_stickers::StickerRef::new(pack, shortcode, sha256)

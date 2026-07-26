@@ -361,7 +361,22 @@ export async function fetchStickerCatalog(): Promise<StickerPack[]> {
   return entries.flatMap((entry) => {
     const event = byId.get(entry.approvedEventId);
     const pack = event ? parseStickerPack(event) : null;
-    return pack?.coordinate === entry.coordinate ? [pack] : [];
+    if (pack?.coordinate === entry.coordinate) return [pack];
+    // Superseded pack revision: a newer replaceable kind-30031 soft-deleted
+    // the approved event, so the exact-ID fetch resolves nothing. Keep a
+    // placeholder so admins can still see and remove the stale approval.
+    const address = parsePackCoordinate(entry.coordinate);
+    if (!address) return [];
+    return [
+      {
+        coordinate: entry.coordinate,
+        author: address.author,
+        identifier: address.identifier,
+        title: `${address.identifier} (superseded)`,
+        stickers: [],
+        eventId: entry.approvedEventId,
+      },
+    ];
   });
 }
 

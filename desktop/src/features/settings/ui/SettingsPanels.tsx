@@ -99,6 +99,7 @@ export type SettingsSection =
   | "community-members"
   | "moderation"
   | "custom-emoji"
+  | "stickers"
   | "local-archive"
   | "mobile"
   | "updates";
@@ -836,6 +837,8 @@ export function renderSettingsSection(
       );
     case "moderation":
       return <ModerationQueueCard />;
+    case "stickers":
+      return <StickerSettingsCard />;
     case "custom-emoji":
       return <CustomEmojiSettingsCard />;
     case "local-archive":

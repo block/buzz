@@ -131,7 +131,12 @@ const overrides = new Map([
   // record_provider param + applies persona_field_with_record_fallback. +5 lines.
   // global-agent-config: spawn_agent_child loads global config and merges as
   // lowest env layer (+8 lines). Queued to split.
-  ["src-tauri/src/managed_agents/runtime.rs", 2216],
+  ["src-tauri/src/managed_agents/runtime.rs", 2220],
+  // sonar-stickers: threads sticker_ref_tags through the message builders
+  // (+7 lines). events.rs sits at 999 on main, so any builder param tips it
+  // over; the sticker validation itself already lives in sticker_events.rs.
+  // Queued to split with the rest of this list.
+  ["src-tauri/src/events.rs", 1007],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
