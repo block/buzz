@@ -74,21 +74,13 @@ class _PairingWelcomeView extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: Grid.md),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.all(Grid.xs),
-                  decoration: BoxDecoration(
-                    color: Colors.white.withValues(alpha: 0.58),
-                    borderRadius: BorderRadius.circular(Radii.dialog),
-                    border: Border.all(
-                      color: _onboardingInk.withValues(alpha: 0.08),
-                    ),
-                  ),
-                  child: Column(
-                    children: [
-                      SizedBox(
-                        width: double.infinity,
-                        child: FilledButton(
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 440),
+                  child: SizedBox(
+                    width: double.infinity,
+                    child: Column(
+                      children: [
+                        FilledButton(
                           style: _onboardingButtonStyle,
                           onPressed: isBusy ? null : onScan,
                           child: isBusy && !pairingCodeExpanded
@@ -100,20 +92,10 @@ class _PairingWelcomeView extends StatelessWidget {
                                     color: _onboardingCtaLabel,
                                   ),
                                 )
-                              : const Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(LucideIcons.scanLine),
-                                    SizedBox(width: Grid.xxs),
-                                    Text('Scan a QR code'),
-                                  ],
-                                ),
+                              : const Text('Scan a QR code'),
                         ),
-                      ),
-                      const SizedBox(height: Grid.twelve),
-                      SizedBox(
-                        width: double.infinity,
-                        child: OutlinedButton(
+                        const SizedBox(height: Grid.twelve),
+                        TextButton(
                           style: _onboardingSecondaryButtonStyle,
                           onPressed: isBusy ? null : onTogglePairingCode,
                           child: Text(
@@ -122,118 +104,123 @@ class _PairingWelcomeView extends StatelessWidget {
                                 : 'Use pairing code',
                           ),
                         ),
-                      ),
-                      AnimatedSwitcher(
-                        duration: revealDuration,
-                        switchInCurve: Curves.easeOutCubic,
-                        switchOutCurve: Curves.easeInCubic,
-                        transitionBuilder: (child, animation) {
-                          return SizeTransition(
-                            sizeFactor: animation,
-                            axisAlignment: -1,
-                            child: FadeTransition(
-                              opacity: animation,
-                              child: child,
-                            ),
-                          );
-                        },
-                        child: pairingCodeExpanded
-                            ? Column(
-                                key: const ValueKey('pairing-code-fields'),
-                                children: [
-                                  const SizedBox(height: Grid.twelve),
-                                  TextField(
-                                    controller: codeController,
-                                    style: context.textTheme.bodyMedium
-                                        ?.copyWith(color: _onboardingInk),
-                                    cursorColor: _onboardingInk,
-                                    decoration: InputDecoration(
-                                      filled: true,
-                                      fillColor: Colors.white.withValues(
-                                        alpha: 0.7,
-                                      ),
-                                      hintText: 'nostrpair://... or buzz://...',
-                                      hintStyle: context.textTheme.bodyMedium
-                                          ?.copyWith(
-                                            color: _onboardingMutedInk,
-                                          ),
-                                      prefixIcon: const Icon(
-                                        LucideIcons.link,
-                                        color: _onboardingInk,
-                                      ),
-                                      enabledBorder: _inputBorder,
-                                      disabledBorder: _inputBorder,
-                                      focusedBorder: _inputBorder.copyWith(
-                                        borderSide: const BorderSide(
+                        AnimatedSwitcher(
+                          duration: revealDuration,
+                          switchInCurve: Curves.easeOutCubic,
+                          switchOutCurve: Curves.easeInCubic,
+                          transitionBuilder: (child, animation) {
+                            return SizeTransition(
+                              sizeFactor: animation,
+                              axisAlignment: -1,
+                              child: FadeTransition(
+                                opacity: animation,
+                                child: child,
+                              ),
+                            );
+                          },
+                          child: pairingCodeExpanded
+                              ? Column(
+                                  key: const ValueKey('pairing-code-fields'),
+                                  children: [
+                                    const SizedBox(height: Grid.twelve),
+                                    TextField(
+                                      controller: codeController,
+                                      style: context.textTheme.bodyMedium
+                                          ?.copyWith(color: _onboardingInk),
+                                      cursorColor: _onboardingInk,
+                                      decoration: InputDecoration(
+                                        filled: true,
+                                        fillColor: Colors.white.withValues(
+                                          alpha: 0.7,
+                                        ),
+                                        hintText:
+                                            'nostrpair://... or buzz://...',
+                                        hintStyle: context.textTheme.bodyMedium
+                                            ?.copyWith(
+                                              color: _onboardingMutedInk,
+                                            ),
+                                        prefixIcon: const Icon(
+                                          LucideIcons.link,
                                           color: _onboardingInk,
                                         ),
+                                        enabledBorder: _inputBorder,
+                                        disabledBorder: _inputBorder,
+                                        focusedBorder: _inputBorder.copyWith(
+                                          borderSide: const BorderSide(
+                                            color: _onboardingInk,
+                                          ),
+                                        ),
+                                        isDense: true,
                                       ),
-                                      isDense: true,
+                                      autocorrect: false,
+                                      enableSuggestions: false,
+                                      enabled: !isBusy,
+                                      contextMenuBuilder:
+                                          (context, editableTextState) {
+                                            return AdaptiveTextSelectionToolbar.editableText(
+                                              editableTextState:
+                                                  editableTextState,
+                                            );
+                                          },
                                     ),
-                                    autocorrect: false,
-                                    enableSuggestions: false,
-                                    enabled: !isBusy,
-                                    contextMenuBuilder:
-                                        (context, editableTextState) {
-                                          return AdaptiveTextSelectionToolbar.editableText(
-                                            editableTextState:
-                                                editableTextState,
-                                          );
-                                        },
-                                  ),
-                                  const SizedBox(height: Grid.twelve),
-                                  SizedBox(
-                                    width: double.infinity,
-                                    child: FilledButton(
-                                      style: _onboardingButtonStyle,
-                                      onPressed: isBusy ? null : onConnect,
-                                      child: isBusy
-                                          ? const SizedBox(
-                                              width: 20,
-                                              height: 20,
-                                              child: CircularProgressIndicator(
-                                                strokeWidth: 2,
-                                                color: _onboardingCtaLabel,
-                                              ),
-                                            )
-                                          : const Text('Connect'),
+                                    const SizedBox(height: Grid.twelve),
+                                    SizedBox(
+                                      width: double.infinity,
+                                      child: FilledButton(
+                                        style: _onboardingButtonStyle,
+                                        onPressed: isBusy ? null : onConnect,
+                                        child: isBusy
+                                            ? const SizedBox(
+                                                width: 20,
+                                                height: 20,
+                                                child:
+                                                    CircularProgressIndicator(
+                                                      strokeWidth: 2,
+                                                      color:
+                                                          _onboardingCtaLabel,
+                                                    ),
+                                              )
+                                            : const Text('Connect'),
+                                      ),
                                     ),
-                                  ),
-                                ],
-                              )
-                            : const SizedBox(
-                                key: ValueKey('pairing-code-fields-hidden'),
-                              ),
-                      ),
-                      if (errorMessage != null) ...[
-                        const SizedBox(height: Grid.twelve),
-                        Container(
-                          padding: const EdgeInsets.all(Grid.twelve),
-                          decoration: BoxDecoration(
-                            color: context.colors.errorContainer,
-                            borderRadius: BorderRadius.circular(Radii.md),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                LucideIcons.triangleAlert,
-                                size: 16,
-                                color: context.colors.onErrorContainer,
-                              ),
-                              const SizedBox(width: Grid.xxs),
-                              Expanded(
-                                child: Text(
-                                  errorMessage!,
-                                  style: context.textTheme.bodySmall?.copyWith(
-                                    color: context.colors.onErrorContainer,
+                                  ],
+                                )
+                              : const SizedBox(
+                                  key: ValueKey('pairing-code-fields-hidden'),
+                                ),
+                        ),
+                        if (errorMessage != null) ...[
+                          const SizedBox(height: Grid.twelve),
+                          Container(
+                            padding: const EdgeInsets.all(Grid.twelve),
+                            decoration: BoxDecoration(
+                              color: context.colors.errorContainer,
+                              borderRadius: BorderRadius.circular(Radii.md),
+                            ),
+                            child: Row(
+                              children: [
+                                Icon(
+                                  LucideIcons.triangleAlert,
+                                  size: 16,
+                                  color: context.colors.onErrorContainer,
+                                ),
+                                const SizedBox(width: Grid.xxs),
+                                Expanded(
+                                  child: Text(
+                                    errorMessage!,
+                                    style: context.textTheme.bodySmall
+                                        ?.copyWith(
+                                          color:
+                                              context.colors.onErrorContainer,
+                                        ),
                                   ),
                                 ),
-                              ),
-                            ],
+                              ],
+                            ),
                           ),
-                        ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
               ],
@@ -251,7 +238,8 @@ final _inputBorder = OutlineInputBorder(
 );
 
 final _onboardingButtonStyle = FilledButton.styleFrom(
-  minimumSize: const Size(0, 48),
+  minimumSize: const Size(0, 38),
+  padding: const EdgeInsets.symmetric(horizontal: Grid.sm),
   backgroundColor: _onboardingInk,
   foregroundColor: _onboardingCtaLabel,
   disabledBackgroundColor: _onboardingInk.withValues(alpha: 0.38),
@@ -259,12 +247,12 @@ final _onboardingButtonStyle = FilledButton.styleFrom(
   shape: const StadiumBorder(),
 );
 
-final _onboardingSecondaryButtonStyle = OutlinedButton.styleFrom(
-  minimumSize: const Size(0, 48),
-  backgroundColor: Colors.white.withValues(alpha: 0.28),
+final _onboardingSecondaryButtonStyle = TextButton.styleFrom(
+  minimumSize: const Size(0, 36),
+  padding: const EdgeInsets.symmetric(horizontal: Grid.gutter),
+  backgroundColor: _onboardingInk.withValues(alpha: 0.1),
   foregroundColor: _onboardingInk,
-  disabledBackgroundColor: Colors.white.withValues(alpha: 0.14),
+  disabledBackgroundColor: _onboardingInk.withValues(alpha: 0.05),
   disabledForegroundColor: _onboardingInk.withValues(alpha: 0.45),
-  side: BorderSide(color: _onboardingInk.withValues(alpha: 0.18)),
   shape: const StadiumBorder(),
 );

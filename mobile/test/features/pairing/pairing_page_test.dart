@@ -25,6 +25,25 @@ void main() {
       expect(find.byType(TextField), findsNothing);
     });
 
+    testWidgets('uses compact desktop-style onboarding actions', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        WidgetHelpers.testable(child: const PairingPage()),
+      );
+
+      final scanButton = tester.getSize(
+        find.widgetWithText(FilledButton, 'Scan a QR code'),
+      );
+      final pairingCodeButton = tester.getSize(
+        find.widgetWithText(TextButton, 'Use pairing code'),
+      );
+
+      expect(scanButton.width, lessThan(440));
+      expect(pairingCodeButton.width, lessThan(440));
+      expect(find.byType(OutlinedButton), findsNothing);
+    });
+
     testWidgets('uses dark status-bar icons on the onboarding surface', (
       tester,
     ) async {
@@ -130,8 +149,8 @@ void main() {
       await tester.pump();
 
       final scanButton = tester.widget<FilledButton>(find.byType(FilledButton));
-      final pairingCodeButton = tester.widget<OutlinedButton>(
-        find.widgetWithText(OutlinedButton, 'Use pairing code'),
+      final pairingCodeButton = tester.widget<TextButton>(
+        find.widgetWithText(TextButton, 'Use pairing code'),
       );
 
       expect(scanButton.onPressed, isNull);
