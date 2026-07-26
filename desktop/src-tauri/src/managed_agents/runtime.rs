@@ -773,7 +773,11 @@ pub fn spawn_agent_child(
             "GIT_CONFIG_KEY_0",
             format!("credential.{relay_http_url}/git.helper"),
         );
-        command.env("GIT_CONFIG_VALUE_0", cred_helper.display().to_string());
+        // Git for Windows invokes helpers via MinGW bash; backslashes are escapes.
+        command.env(
+            "GIT_CONFIG_VALUE_0",
+            cred_helper.to_string_lossy().replace('\\', "/"),
+        );
         command.env(
             "GIT_CONFIG_KEY_1",
             format!("credential.{relay_http_url}/git.useHttpPath"),
