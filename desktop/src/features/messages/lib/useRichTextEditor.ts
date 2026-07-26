@@ -26,6 +26,7 @@ import {
   mentionHighlightKey,
 } from "./mentionHighlightExtension";
 import { CUSTOM_EMOJI_NODE_NAME } from "./customEmojiNode";
+import { restoreMarkdownTrailingWhitespace } from "./markdownTrailingWhitespace";
 import { useComposerCustomEmoji } from "./useComposerCustomEmoji";
 import { buildPlainTextProjection } from "./plainTextProjection";
 import { createLinkInteractionExtension } from "./linkInteractionExtension";
@@ -681,6 +682,7 @@ export function useRichTextEditor({
     (markdown: string) => {
       if (!editor) return;
       editor.commands.setContent(markdown);
+      restoreMarkdownTrailingWhitespace(editor, markdown);
     },
     [editor],
   );
@@ -689,13 +691,12 @@ export function useRichTextEditor({
     (markdown: string) => {
       if (!editor) return;
       // The caller already synchronizes composer state. Keep this programmatic
-      // restoration out of user-edit observers (autocomplete/reconciliation),
-      // then move selection in the same command chain.
-      editor
-        .chain()
-        .setContent(markdown, { emitUpdate: false })
-        .focus("end")
-        .run();
+      // restoration out of user-edit observers (autocomplete/reconciliation).
+      editor.commands.setContent(markdown, { emitUpdate: false });
+      // Repair before focusing: the caret must land *after* any trailing
+      // whitespace the parse dropped, not flush against the last character.
+      restoreMarkdownTrailingWhitespace(editor, markdown);
+      editor.commands.focus("end");
     },
     [editor],
   );
