@@ -1,4 +1,5 @@
 import 'package:buzz/features/channels/message_content.dart';
+import 'package:buzz/shared/relay/media_image.dart';
 import 'package:buzz/shared/relay/relay_provider.dart';
 import 'package:buzz/shared/stickers/sticker_preview.dart';
 import 'package:buzz/shared/theme/theme.dart';
@@ -47,8 +48,8 @@ void main() {
       const ValueKey('message-sticker-image:$_cacheUrl'),
     );
     expect(imageFinder, findsOneWidget);
-    final image = tester.widget<Image>(imageFinder);
-    expect((image.image as NetworkImage).url, _cacheUrl);
+    final image = tester.widget<MediaImage>(imageFinder);
+    expect(image.url, _cacheUrl);
     expect(image.width, stickerPreviewSize);
     expect(image.height, stickerPreviewSize);
     expect(_renderedText(tester), isNot(contains(':Wave_1:')));
@@ -93,7 +94,7 @@ void main() {
       ),
     );
 
-    final image = tester.widget<Image>(
+    final image = tester.widget<MediaImage>(
       find.byKey(const ValueKey('message-sticker-image:$_cacheUrl')),
     );
     expect(image.width, compactStickerPreviewSize);
@@ -114,7 +115,7 @@ void main() {
       ),
     );
 
-    final image = tester.widget<Image>(
+    final image = tester.widget<MediaImage>(
       find.byKey(const ValueKey('message-sticker-image:$_cacheUrl')),
     );
     final errorBuilder = image.errorBuilder;

@@ -312,11 +312,31 @@ async fn fetch_nostr_sticker_pack(
     Err("Could not find that sticker pack on the link's relays.".to_string())
 }
 
+/// Canonical replaceable-event head ordering: newest `created_at` wins, and
+/// on a timestamp tie the lexicographically smallest event ID wins. Mirrors
+/// `canonical_head` in `crates/buzz-cli/src/commands/stickers.rs` so imported
+/// packs resolve the same head regardless of relay arrival order.
+fn replaces_head(candidate: &nostr::Event, current: &nostr::Event) -> bool {
+    candidate.created_at > current.created_at
+        || (candidate.created_at == current.created_at && candidate.id < current.id)
+}
+
 async fn fetch_nostr_sticker_pack_from_relay(
     address: &sonar_stickers::PackAddress,
     relay: &str,
 ) -> Result<Option<sonar_stickers::StickerPack>, String> {
-    let mut conn = tokio::time::timeout(PACK_FETCH_TIMEOUT, NostrWsConnection::connect(relay))
+    // One deadline for the whole per-relay fetch (connect + REQ + query
+    // loop). Without it each hint could burn PACK_FETCH_TIMEOUT twice
+    // (connect, then a fresh query deadline) plus an unbounded send_raw,
+    // stalling the import UI for minutes across several slow hints.
+    let deadline = tokio::time::Instant::now() + PACK_FETCH_TIMEOUT;
+    let budget = || {
+        deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| "relay fetch timed out".to_string())
+    };
+    let mut conn = tokio::time::timeout(budget()?, NostrWsConnection::connect(relay))
         .await
         .map_err(|_| "relay connect timed out".to_string())?
         .map_err(|error| error.to_string())?;
@@ -331,30 +351,31 @@ async fn fetch_nostr_sticker_pack_from_relay(
             "limit": 4,
         }
     ]);
-    conn.send_raw(&request)
+    tokio::time::timeout(budget()?, conn.send_raw(&request))
         .await
+        .map_err(|_| "relay request timed out".to_string())?
         .map_err(|error| error.to_string())?;
     let mut newest: Option<nostr::Event> = None;
-    let deadline = tokio::time::Instant::now() + PACK_FETCH_TIMEOUT;
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            break;
-        }
-        let message = match conn.next_event(deadline - now).await {
+    while let Ok(remaining) = budget() {
+        let message = match conn.next_event(remaining).await {
             Ok(message) => message,
             Err(_) => break,
         };
         match message {
+            // NostrWsConnection only deserializes; a hostile relay hint can
+            // return an event claiming the requested kind+pubkey with a
+            // forged ID/signature, so `event.verify()` must pass before the
+            // event is trusted, and only the canonical head is kept.
             RelayMessage::Event {
                 subscription_id: id,
                 event,
             } if id == subscription_id
                 && event.kind.as_u16() == sonar_stickers::STICKER_PACK_KIND
                 && event.pubkey.to_hex() == address.author_pubkey_hex
+                && event.verify().is_ok()
                 && newest
                     .as_ref()
-                    .is_none_or(|current| event.created_at > current.created_at) =>
+                    .is_none_or(|current| replaces_head(&event, current)) =>
             {
                 newest = Some(*event);
             }
@@ -437,6 +458,49 @@ mod tests {
     use super::*;
 
     const AUTHOR: &str = "7215b2db8754494fd3452b7f2d28b56e23863b95446bf68d79f980a7ad5ec7cd";
+
+    fn signed_pack_event(keys: &nostr::Keys, created_at: u64, content: &str) -> nostr::Event {
+        nostr::EventBuilder::new(
+            nostr::Kind::Custom(sonar_stickers::STICKER_PACK_KIND),
+            content,
+        )
+        .custom_created_at(nostr::Timestamp::from(created_at))
+        .sign_with_keys(keys)
+        .expect("sign event")
+    }
+
+    #[test]
+    fn canonical_head_prefers_newest_timestamp() {
+        let keys = nostr::Keys::generate();
+        let older = signed_pack_event(&keys, 100, "old-pack");
+        let newer = signed_pack_event(&keys, 200, "new-pack");
+        assert!(replaces_head(&newer, &older));
+        assert!(!replaces_head(&older, &newer));
+        assert!(!replaces_head(&older, &older));
+    }
+
+    #[test]
+    fn canonical_head_ties_break_to_smallest_event_id() {
+        let keys = nostr::Keys::generate();
+        let a = signed_pack_event(&keys, 100, "pack-a");
+        let b = signed_pack_event(&keys, 100, "pack-b");
+        // Distinct signatures ⇒ distinct IDs; whichever is smaller must win.
+        assert_ne!(a.id, b.id);
+        let (small, large) = if a.id < b.id { (a, b) } else { (b, a) };
+        assert!(replaces_head(&small, &large));
+        assert!(!replaces_head(&large, &small));
+    }
+
+    #[test]
+    fn tampered_event_fails_verification() {
+        let keys = nostr::Keys::generate();
+        let mut event = signed_pack_event(&keys, 100, "pack");
+        assert!(event.verify().is_ok());
+        // Forging the content (or any field) invalidates the Schnorr
+        // signature over the event ID — the import path must skip it.
+        event.content = "forged pack".into();
+        assert!(event.verify().is_err());
+    }
 
     #[test]
     fn imported_asset_omits_none_fields_so_frontend_undefined_checks_pass() {

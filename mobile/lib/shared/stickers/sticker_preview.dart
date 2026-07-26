@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:hooks_riverpod/hooks_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import '../relay/media_image.dart';
 import '../relay/relay_provider.dart';
 import '../theme/theme.dart';
 import 'sticker_reference.dart';
@@ -25,27 +26,28 @@ class StickerPreview extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final reference = stickerTag.reference;
     if (stickerTag.status != StickerTagStatus.valid || reference == null) {
-      return const StickerUnavailablePlaceholder();
+      return const _StickerUnavailablePlaceholder();
     }
 
     final relayBaseUrl = ref.watch(relayConfigProvider).baseUrl;
     final url = reference.cacheUrl(relayBaseUrl);
-    if (url == null) return const StickerUnavailablePlaceholder();
+    if (url == null) return const _StickerUnavailablePlaceholder();
 
     return Semantics(
       image: true,
       label: 'Sticker :${reference.shortcode}:',
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: size, maxHeight: size),
-        child: Image.network(
-          url,
+        child: MediaImage(
+          url: url,
           key: ValueKey('message-sticker-image:$url'),
           width: size,
           height: size,
+          decodeWidth: size,
           fit: BoxFit.contain,
           filterQuality: FilterQuality.medium,
           semanticLabel: 'Sticker :${reference.shortcode}:',
-          errorBuilder: (_, _, _) => const StickerUnavailablePlaceholder(),
+          errorBuilder: (_, _, _) => const _StickerUnavailablePlaceholder(),
         ),
       ),
     );
@@ -53,8 +55,8 @@ class StickerPreview extends ConsumerWidget {
 }
 
 /// Stable failure state for malformed, unresolvable, or failed sticker loads.
-class StickerUnavailablePlaceholder extends StatelessWidget {
-  const StickerUnavailablePlaceholder({super.key});
+class _StickerUnavailablePlaceholder extends StatelessWidget {
+  const _StickerUnavailablePlaceholder();
 
   @override
   Widget build(BuildContext context) {

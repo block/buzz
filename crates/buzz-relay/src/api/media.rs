@@ -589,43 +589,56 @@ pub(crate) async fn get_verified_sticker(
     let extension = sticker_extension(&resolved.mime).ok_or(StickerAssetError::InvalidAsset)?;
     let object_key = format!("{}.{}", sticker_ref.plaintext_sha256, extension);
 
-    let fetch_lock = STICKER_FETCH_LOCKS
-        .entry(object_key.clone())
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone();
-    let _fetch_guard = fetch_lock.lock().await;
+    // Fast path: serve cached bytes without taking the per-object fetch lock,
+    // so concurrent reads of a popular cached sticker are not serialized.
+    let bytes = match read_cached_sticker(&state, &object_key).await? {
+        Some(bytes) => bytes,
+        None => {
+            // Cache miss: serialize upstream fetches for this object key.
+            let fetch_lock = STICKER_FETCH_LOCKS
+                .entry(object_key.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            let fetch_result: Result<Vec<u8>, StickerAssetError> = async {
+                let _fetch_guard = fetch_lock.lock().await;
+                // Re-check the cache: another request may have materialized
+                // the object while we waited on the lock.
+                if let Some(bytes) = read_cached_sticker(&state, &object_key).await? {
+                    return Ok(bytes);
+                }
+                let _network_permit = STICKER_FETCH_LIMIT
+                    .acquire()
+                    .await
+                    .map_err(|_| StickerAssetError::Internal)?;
+                let bytes = fetch_sticker_bytes(&resolved.url).await?;
+                verify_sticker_bytes(&bytes, &sticker_ref.plaintext_sha256, &resolved)?;
 
-    let bytes = if state
-        .media_storage
-        .head(&object_key)
-        .await
-        .map_err(|_| StickerAssetError::Internal)?
-    {
-        state
-            .media_storage
-            .get(&object_key)
-            .await
-            .map_err(|_| StickerAssetError::Internal)?
-    } else {
-        let _network_permit = STICKER_FETCH_LIMIT
-            .acquire()
-            .await
-            .map_err(|_| StickerAssetError::Internal)?;
-        let bytes = fetch_sticker_bytes(&resolved.url).await?;
-        verify_sticker_bytes(&bytes, &sticker_ref.plaintext_sha256, &resolved)?;
-
-        // Approval or the current pack head may have changed while the network
-        // request was in flight. Re-resolve before publishing cache bytes.
-        let current = resolve_approved_sticker(&state, &tenant, &sticker_ref).await?;
-        if current.approved_event_id != resolved.approved_event_id || current.url != resolved.url {
-            return Err(StickerAssetError::NotFound);
+                // Approval or the current pack head may have changed while the network
+                // request was in flight. Re-resolve before publishing cache bytes.
+                let current = resolve_approved_sticker(&state, &tenant, &sticker_ref).await?;
+                if current.approved_event_id != resolved.approved_event_id
+                    || current.url != resolved.url
+                {
+                    return Err(StickerAssetError::NotFound);
+                }
+                state
+                    .media_storage
+                    .put(&object_key, &bytes, &resolved.mime)
+                    .await
+                    .map_err(|_| StickerAssetError::Internal)?;
+                Ok(bytes)
+            }
+            .await;
+            // Drop our clone, then evict the lock entry when no other waiter
+            // holds a reference, so the map does not grow unbounded with the
+            // sticker catalog. Count == 1 means only the map itself references
+            // the Arc: a concurrent `entry()` either bumps the count (removal
+            // is skipped) or inserts a fresh mutex after removal (safe — the
+            // cache re-check above still deduplicates the upstream fetch).
+            drop(fetch_lock);
+            STICKER_FETCH_LOCKS.remove_if(&object_key, |_, m| Arc::strong_count(m) == 1);
+            fetch_result?
         }
-        state
-            .media_storage
-            .put(&object_key, &bytes, &resolved.mime)
-            .await
-            .map_err(|_| StickerAssetError::Internal)?;
-        bytes
     };
 
     // A CAS hit is still checked: object-store corruption or an incorrect key
@@ -661,6 +674,29 @@ pub(crate) async fn get_verified_sticker(
         header::HeaderValue::from_static("nosniff"),
     );
     Ok(response)
+}
+
+/// Return the cached bytes for `object_key`, or `None` on a cache miss.
+async fn read_cached_sticker(
+    state: &AppState,
+    object_key: &str,
+) -> Result<Option<Vec<u8>>, StickerAssetError> {
+    if state
+        .media_storage
+        .head(object_key)
+        .await
+        .map_err(|_| StickerAssetError::Internal)?
+    {
+        Ok(Some(
+            state
+                .media_storage
+                .get(object_key)
+                .await
+                .map_err(|_| StickerAssetError::Internal)?,
+        ))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn resolve_approved_sticker(

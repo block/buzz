@@ -64,6 +64,7 @@ pub fn build_imeta_tag(d: &BlobDescriptor) -> Vec<String> {
 const ALLOWED_MIMES: &[&str] = &[
     "image/jpeg",
     "image/png",
+    "image/apng",
     "image/gif",
     "image/webp",
     "video/mp4",

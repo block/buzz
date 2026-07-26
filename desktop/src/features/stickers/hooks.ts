@@ -69,7 +69,10 @@ export function useInstalledStickerPacks(): StickerPack[] {
     () =>
       installed.flatMap((coordinate) => {
         const pack = packsByCoordinate.get(coordinate);
-        return pack ? [pack] : [];
+        // Superseded placeholders carry no stickers — exclude them from
+        // member-facing install/picker flows (admins still see them in
+        // settings for catalog removal).
+        return pack && !pack.superseded ? [pack] : [];
       }),
     [installed, packsByCoordinate],
   );

@@ -484,29 +484,35 @@ export function StickerSettingsCard() {
                 key={pack.coordinate}
               >
                 <PackPreview pack={pack} />
-                <Button
-                  disabled={setInstalled.isPending}
-                  onClick={() =>
-                    void setInstalled
-                      .mutateAsync({
-                        coordinate: pack.coordinate,
-                        installed: !isInstalled,
-                      })
-                      .catch((error) => toast.error(error.message))
-                  }
-                  size="sm"
-                  type="button"
-                  variant={isInstalled ? "secondary" : "default"}
-                >
-                  {isInstalled ? (
-                    <>
-                      <Check className="mr-1 h-4 w-4" />
-                      Installed
-                    </>
-                  ) : (
-                    "Install"
-                  )}
-                </Button>
+                {pack.superseded ? (
+                  <span className="text-xs text-muted-foreground">
+                    Superseded
+                  </span>
+                ) : (
+                  <Button
+                    disabled={setInstalled.isPending}
+                    onClick={() =>
+                      void setInstalled
+                        .mutateAsync({
+                          coordinate: pack.coordinate,
+                          installed: !isInstalled,
+                        })
+                        .catch((error) => toast.error(error.message))
+                    }
+                    size="sm"
+                    type="button"
+                    variant={isInstalled ? "secondary" : "default"}
+                  >
+                    {isInstalled ? (
+                      <>
+                        <Check className="mr-1 h-4 w-4" />
+                        Installed
+                      </>
+                    ) : (
+                      "Install"
+                    )}
+                  </Button>
+                )}
                 {canCurate ? (
                   <Button
                     aria-label={`Remove ${pack.title} from catalog`}

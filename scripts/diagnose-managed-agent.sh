@@ -27,7 +27,7 @@ if [[ -f "${RECORD_FILE}" ]]; then
            relay_url, model, provider}' "${RECORD_FILE}" 2>/dev/null       || echo "  (pubkey not found in ${RECORD_FILE})"
   else
     echo "  jq not installed; grep'ing for the pubkey:"
-    grep -o ""pubkey":"[^"]*"\|"respond_to":"[^"]*"" "${RECORD_FILE}" | head
+    grep -oE '"pubkey":"[^"]*"|"respond_to":"[^"]*"' "${RECORD_FILE}" | head || true
   fi
 else
   echo "  no managed-agents.json at ${RECORD_FILE} (wrong bundle id? not macOS?)"
@@ -40,7 +40,7 @@ TELLTALES='respond-to=owner-only but no owner|BUZZ_AUTH_TAG verification failed|
 found=0
 while IFS= read -r -d '' f; do
   if grep -qE "${PUBKEY}" "${f}" 2>/dev/null      || grep -qiE 'buzz-acp|managed.agent' "${f}" 2>/dev/null; then
-    hits=$(grep -hE "${TELLTALES}" "${f}" 2>/dev/null | tail -n 8)
+    hits=$(grep -hE "${TELLTALES}" "${f}" 2>/dev/null | tail -n 8 || true)
     if [[ -n "${hits}" ]]; then
       found=1
       echo "  >> ${f}"
@@ -57,9 +57,9 @@ if [[ -z "${RELAY}" ]]; then
   echo "  (skip: pass RELAY-BASE-URL as 2nd arg, e.g. https://flint.communities.buzz.xyz)"
 else
   echo "  >> is the agent a MEMBER of the channel? (kinds 39002 = membership roster)"
-  echo "     curl -s ${RELAY}/query -d '{"kinds":[39002],"#p":["${PUBKEY}"]}' | jq '.[].tags'"
+  printf '     curl -s %s/query -d '\''{"kinds":[39002],"#p":["%s"]}'\'' | jq '\''.[].tags'\''\n' "${RELAY}" "${PUBKEY}"
   echo "  >> does your @mention carry the agent's exact hex p-tag? (kinds 9=stream msg, 40002=v2)"
-  echo "     curl -s ${RELAY}/query -d '{"kinds":[9,40002],"#p":["${PUBKEY}"],"limit":5}' | jq '.[]|{kind,p_tags:[.tags[]|select(.[0]=="p")[1]]}'"
+  printf '     curl -s %s/query -d '\''{"kinds":[9,40002],"#p":["%s"],"limit":5}'\'' | jq '\''.[]|{kind,p_tags:[.tags[]|select(.[0]=="p")[1]]}'\''\n' "${RELAY}" "${PUBKEY}"
 fi
 echo
 echo "================= DECISION KEY ===================="

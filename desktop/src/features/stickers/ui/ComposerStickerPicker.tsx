@@ -29,6 +29,10 @@ export const ComposerStickerPicker = React.memo(function ComposerStickerPicker({
 }) {
   const packs = useInstalledStickerPacks();
   const catalogPacks = useStickerCatalogQuery().data ?? [];
+  // Superseded placeholders are not installable.
+  const installableCatalogPacks = catalogPacks.filter(
+    (pack) => !pack.superseded,
+  );
   const setInstalled = useSetStickerPackInstalledMutation();
   const [installingPack, setInstallingPack] = React.useState<string | null>(
     null,
@@ -83,9 +87,9 @@ export const ComposerStickerPicker = React.memo(function ComposerStickerPicker({
                 Install a curated pack, or create your own.
               </p>
             </div>
-            {catalogPacks.length > 0 ? (
+            {installableCatalogPacks.length > 0 ? (
               <div className="max-h-48 space-y-1 overflow-y-auto">
-                {catalogPacks.map((pack) => {
+                {installableCatalogPacks.map((pack) => {
                   const installing = installingPack === pack.coordinate;
                   return (
                     <div

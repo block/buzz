@@ -615,7 +615,10 @@ function MessageComposerImpl({
           drafts.loadDraft,
         ),
         spoileredAttachmentUrls,
-        trimmed: trimmed || sticker.fallback,
+        // Sticker send: use the shortcode fallback as content, never the
+        // typed text — renderers take the sticker branch and would silently
+        // drop any typed content attached to a sticker message.
+        trimmed: hasSticker ? sticker.fallback : trimmed,
         audienceGeneration: persistentAudience.generation,
         audienceRevision: audienceScope ? persistentAudience.revision : null,
         stickerTags: sticker.tags,

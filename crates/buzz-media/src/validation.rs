@@ -680,7 +680,7 @@ fn check_moov_before_mdat(path: &Path) -> Result<(), MediaError> {
 fn validate_image_metadata_free(bytes: &[u8], mime: &str) -> Result<(), MediaError> {
     match mime {
         "image/jpeg" => validate_jpeg_metadata_free(bytes),
-        "image/png" => validate_png_metadata_free(bytes),
+        "image/png" | "image/apng" => validate_png_metadata_free(bytes),
         "image/webp" => validate_webp_metadata_free(bytes),
         "image/gif" => validate_gif_metadata_free(bytes),
         _ => Ok(()),
@@ -1780,7 +1780,9 @@ mod tests {
             bytes.extend_from_slice(&[0; 4]);
         }
 
-        let mut apng = TINY_PNG.to_vec();
+        // Strip TINY_PNG's trailing IEND (12 bytes: length + type + CRC) so the
+        // appended animation chunks land before the image ends.
+        let mut apng = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
         let mut animation_control = Vec::new();
         animation_control.extend_from_slice(&1u32.to_be_bytes());
         animation_control.extend_from_slice(&0u32.to_be_bytes());
@@ -1796,7 +1798,7 @@ mod tests {
             Err(MediaError::DisallowedContentType(_))
         ));
 
-        let mut false_positive = TINY_PNG.to_vec();
+        let mut false_positive = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
         append_chunk(&mut false_positive, b"tEXt", b"contains acTL bytes");
         append_chunk(&mut false_positive, b"IDAT", &[]);
         append_chunk(&mut false_positive, b"IEND", &[]);
@@ -1812,7 +1814,7 @@ mod tests {
             bytes.extend_from_slice(&[0; 4]);
         }
 
-        let mut apng = TINY_PNG.to_vec();
+        let mut apng = TINY_PNG[..TINY_PNG.len() - 12].to_vec();
         let mut animation_control = Vec::new();
         animation_control.extend_from_slice(&201u32.to_be_bytes());
         animation_control.extend_from_slice(&0u32.to_be_bytes());

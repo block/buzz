@@ -47,6 +47,12 @@ export type StickerPack = {
   cover?: StickerCover;
   stickers: StickerAsset[];
   eventId: string;
+  /**
+   * Placeholder for a catalog entry whose approved event was soft-deleted
+   * (superseded by a newer replaceable revision). Kept visible for admin
+   * removal, but excluded from member-facing install flows.
+   */
+  superseded?: true;
 };
 
 export type StickerReference = {
@@ -112,7 +118,7 @@ function isHttpsHashUrl(url: string, sha256: string): boolean {
       parsed.username === "" &&
       parsed.password === "" &&
       parsed.port === "" &&
-      parsed.pathname.includes(sha256)
+      parsed.pathname.toLowerCase().includes(sha256)
     );
   } catch {
     return false;
@@ -377,6 +383,7 @@ export async function fetchStickerCatalog(): Promise<StickerPack[]> {
         title: `${address.identifier} (superseded)`,
         stickers: [],
         eventId: entry.approvedEventId,
+        superseded: true,
       },
     ];
   });
